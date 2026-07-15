@@ -17,6 +17,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@hocuspocus/extension-redis": "^4.4.0",
     "@hocuspocus/server": "^4.4.0",
     "@hono/node-server": "^1.19.9",
     "@node-rs/argon2": "^2.0.2",

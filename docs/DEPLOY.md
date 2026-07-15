@@ -150,5 +150,42 @@ clicks instead of one.
 | `COMPACTION_THRESHOLD` | no | `50` | Number of pending CRDT updates before the server compacts into a snapshot. |
 | `CORS_ORIGINS` | no | unset | Comma-separated list of allowed origins, if you serve a web client from a different origin. |
 | `OPENAI_API_KEY` | no | unset | Optional upgrade path for semantic search embeddings; the server works fully offline without it. |
+| `REDIS_URL` | no | unset | **Multi-instance only.** Unset ⇒ single-instance (in-memory fanout), which is the default and covers hundreds of concurrent users. Set ⇒ the vault replication channel and the Hocuspocus editing path both fan out via Redis so N instances stay consistent (spec 05 §5). |
+| `BACKFILL_CONCURRENCY` | no | `6` | Max docs streamed concurrently to a freshly-connected vault subscriber. |
+| `VAULT_SYNC_PATH` | no | `/vault-sync` | WebSocket path for the background vault replication channel (served on `PORT`). |
 
 See `app/apps/server/.env.example` for the same list with inline comments.
+
+## Scaling & high availability (spec 05)
+
+The default single-instance deploy scales to hundreds of concurrent users:
+the cost of one edit is proportional to the number of people live in *that
+vault* (a team), not your total user count, and the vault channel is a
+stateless relay so server memory is bounded by docs being *edited*, not docs
+that exist.
+
+To go beyond one instance — for thousands of concurrent users, redundancy, or
+zero-downtime **rolling deploys** — run several instances behind a load
+balancer and set **`REDIS_URL`** on all of them:
+
+- The **vault replication channel** fans out via Redis pub/sub, so a client can
+  connect to any instance and still receive every authorized doc's updates.
+- The **Hocuspocus editing path** uses the Redis extension, so the *same* doc
+  edited live on two instances stays consistent.
+
+No sticky sessions are required for the vault channel (it's a stateless relay);
+the editing path is made instance-agnostic by the Redis extension. Clients
+reconnect with jittered backoff, so a rolling deploy doesn't stampede.
+
+A managed Redis (Railway Redis, Upstash, ElastiCache, …) works; point every
+instance at the same `REDIS_URL`. For local multi-instance testing, the server
+compose file ships an optional Redis under the `ha` profile:
+
+```bash
+cd app/apps/server
+docker compose --profile ha up -d redis   # host port 6389
+REDIS_URL=redis://localhost:6389 npm run dev
+```
+
+Self-hosters who run a single instance need none of this — leave `REDIS_URL`
+unset and the server behaves exactly as before (Postgres only).
