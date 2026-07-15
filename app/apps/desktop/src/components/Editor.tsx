@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import "./editor.css";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { keymap, EditorView } from "@codemirror/view";
@@ -10,11 +10,11 @@ import { bridgeManager } from "../lib/bridge";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
 import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
-import { colorForUser } from "../lib/presence/color";
+import { colorForUser, PRESENCE_OFFLINE } from "../lib/presence/color";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
 import { HtmlView } from "./HtmlView";
-import { relativeAgo } from "./Identity";
+import { relativeAgo, characterSvg } from "./Identity";
 
 interface Peer {
   id: string;
@@ -112,25 +112,30 @@ function editableExtensions(readOnly: boolean) {
 /** Max slots in the stacked avatar row before the rest collapse into "+N". */
 const MAX_AVATARS = 4;
 
-/** Initials shown inside an avatar (first letter of the display name). */
-function initial(name: string): string {
-  return name.trim().slice(0, 1).toUpperCase() || "?";
-}
-
 /**
- * A single presence avatar: a glowing ring in the peer's unique colour with a
- * contrasting (surface) centre. The colour is passed as `--user-color` so the
- * CSS owns the ring/glow/initial treatment.
+ * A single presence avatar: the peer's illustrated character (the same DiceBear
+ * "notionists" art used for profile avatars, seeded by their name so it matches
+ * their account avatar) framed by a ring in their unique presence colour. The
+ * colour arrives as `--user-color` so the CSS owns the ring/glow treatment.
  */
-function PresenceAvatar({ peer, className }: { peer: Peer; className?: string }) {
+function PresenceAvatar({
+  peer,
+  className,
+  online = true,
+}: {
+  peer: Peer;
+  className?: string;
+  /** When false the ring goes neutral gray — the peer isn't live. */
+  online?: boolean;
+}) {
+  const svg = useMemo(() => characterSvg(peer.name || peer.id || "?"), [peer.name, peer.id]);
   return (
     <span
-      className={`presence-avatar${className ? ` ${className}` : ""}`}
-      style={{ "--user-color": peer.color } as CSSProperties}
+      className={`presence-avatar${online ? "" : " offline"}${className ? ` ${className}` : ""}`}
+      style={{ "--user-color": online ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
       aria-hidden="true"
-    >
-      {initial(peer.name)}
-    </span>
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
   );
 }
 
@@ -143,10 +148,13 @@ function PresenceBar({
   peers,
   open,
   onToggle,
+  online = true,
 }: {
   peers: Peer[];
   open: boolean;
   onToggle: () => void;
+  /** Live sync state — when false, avatar rings show neutral gray. */
+  online?: boolean;
 }) {
   if (peers.length === 0) return null;
   // Keep the row to at most MAX_AVATARS slots: when there are more, show a few
@@ -166,7 +174,7 @@ function PresenceBar({
       aria-expanded={open}
     >
       {shown.map((p) => (
-        <PresenceAvatar key={p.id} peer={p} />
+        <PresenceAvatar key={p.id} peer={p} online={online} />
       ))}
       {overflow > 0 && <span className="presence-avatar presence-overflow">+{overflow}</span>}
     </button>
@@ -476,12 +484,46 @@ export function Editor() {
 
   return (
     <div className="editor-column">
+      {readOnly && (
+        <div
+          className={`editor-lockbanner${lockScope ? " locked" : " viewonly"}`}
+          role="status"
+        >
+          <span className="editor-lockbanner-icon" aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="4" y="11" width="16" height="10" rx="2" />
+              <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+            </svg>
+          </span>
+          <span className="editor-lockbanner-text">
+            <strong>{lockScope ? "This note is locked" : "View-only access"}</strong>
+            <span className="editor-lockbanner-sub">
+              {lockScope
+                ? "You can read it, but your changes won’t be saved or synced."
+                : "You can read this note, but you can’t edit it."}
+            </span>
+          </span>
+        </div>
+      )}
       {showToolbar && (
         <div className="editor-toolbar">
           <PresenceBar
             peers={peers}
             open={rosterOpen}
             onToggle={() => setRosterOpen((o) => !o)}
+            online={
+              syncEnabled &&
+              (syncStatus === "synced" ||
+                syncStatus === "read-only" ||
+                syncStatus === "connecting")
+            }
           />
           {rosterOpen && (
             <PeerRoster
@@ -496,18 +538,6 @@ export function Editor() {
               🔔 {pingFrom} pinged you
             </span>
           )}
-        </div>
-      )}
-      {readOnly && (
-        <div className="editor-lockbanner" role="status">
-          <span className="editor-lockbanner-icon" aria-hidden="true">
-            🔒
-          </span>
-          <span className="editor-lockbanner-text">
-            {lockScope
-              ? "This note is locked. You can read it, but your changes won’t be saved or synced."
-              : "You have view-only access. You can read this note, but you can’t edit it."}
-          </span>
         </div>
       )}
       <div className="editor-host" ref={hostRef} />

@@ -8,6 +8,7 @@ mod error;
 pub mod index;
 pub mod keychain;
 pub mod notefile;
+pub mod oauth;
 pub mod parse;
 mod state;
 pub mod tree;
@@ -65,6 +66,8 @@ pub fn run() {
             keychain::keychain_set,
             keychain::keychain_get,
             keychain::keychain_delete,
+            oauth::google_oauth_listen,
+            oauth::google_oauth_await,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

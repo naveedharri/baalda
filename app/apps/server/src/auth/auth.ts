@@ -26,6 +26,19 @@ const argonOpts = { algorithm: Algorithm.Argon2id } as const;
 
 export const authPool = new pg.Pool({ connectionString: config.databaseUrl });
 
+// Google social sign-in is opt-in: only wired when both creds are present, so a
+// self-hosted server without them just omits the provider (the desktop hides
+// the button and email+password keeps working).
+export const googleEnabled = Boolean(config.googleClientId && config.googleClientSecret);
+const socialProviders = googleEnabled
+  ? {
+      google: {
+        clientId: config.googleClientId!,
+        clientSecret: config.googleClientSecret!,
+      },
+    }
+  : undefined;
+
 export const auth = betterAuth({
   appName: BRAND_NAME,
   database: authPool,
@@ -51,6 +64,25 @@ export const auth = betterAuth({
       verify: ({ hash, password }: { hash: string; password: string }) =>
         argonVerify(hash, password),
     },
+  },
+  ...(socialProviders ? { socialProviders } : {}),
+  account: {
+    // Identity is the email: signing in with Google links to an existing
+    // email+password account with the same address (and vice-versa) instead of
+    // forking a second account. Google is trusted because it returns a verified
+    // email, so the auto-link is safe.
+    accountLinking: {
+      enabled: true,
+      trustedProviders: ["google"],
+    },
+    // Desktop OAuth runs the Google consent in the system browser while the app
+    // (a Tauri webview) initiated /sign-in/social from a *different* cookie jar,
+    // so the signed `state` cookie set at sign-in is absent at the callback.
+    // State + PKCE still live server-side in the verification table (default
+    // storeStateStrategy "database"), single-use and short-lived, so we skip
+    // only the redundant cookie check — the same thing Better Auth's own
+    // oauth-proxy plugin does for cross-origin flows.
+    skipStateCookieCheck: true,
   },
   plugins: [
     bearer(),

@@ -123,7 +123,7 @@ export function AccountMenu() {
         title={`${userLabel} · ${presenceLabel}${activeOrg ? ` · ${activeOrg.name}` : ""}`}
       >
         <span className="identity-avatar-wrap">
-          <Avatar label={userLabel} />
+          <Avatar label={userLabel} image={session.user.image} />
           <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
         </span>
         <span className="identity-meta">
@@ -213,7 +213,7 @@ function AccountPopover({
   return (
     <div className="account-popover" role="menu">
       <div className="menu-account">
-        <Avatar label={userLabel} />
+        <Avatar label={userLabel} image={session.user.image} />
         <span className="identity-meta">
           <span className="identity-line1">{session.user.name || "—"}</span>
           <span className="identity-line2">{session.user.email}</span>
@@ -416,6 +416,30 @@ function AccountPopover({
   );
 }
 
+/** Google's four-color "G" mark for the OAuth button. */
+function GoogleGlyph() {
+  return (
+    <svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
+      <path
+        fill="#4285F4"
+        d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.71-1.57 2.68-3.89 2.68-6.62z"
+      />
+      <path
+        fill="#34A853"
+        d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.02-3.7H.96v2.33A9 9 0 0 0 9 18z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M3.98 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.02-2.33z"
+      />
+      <path
+        fill="#EA4335"
+        d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.47.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.02 2.33C4.68 5.16 6.66 3.58 9 3.58z"
+      />
+    </svg>
+  );
+}
+
 function MenuIcon({ children }: { children: React.ReactNode }) {
   return (
     <svg
@@ -446,10 +470,26 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
   const [password, setPassword] = useState(import.meta.env.DEV ? "Context-Test-2026!" : "");
   const [urlDraft, setUrlDraft] = useState(serverUrl);
   const [busy, setBusy] = useState(false);
+  // Google is only offered when the server is configured for it; ask on open
+  // (and whenever the server changes) so a self-host without creds hides it.
+  const [googleAvailable, setGoogleAvailable] = useState(false);
 
   useEffect(() => {
     if (authStatus === "signed-in") onClose();
   }, [authStatus, onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    authManager.api
+      .getAuthMethods()
+      .then((m) => {
+        if (!cancelled) setGoogleAvailable(m.google);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [serverUrl]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -486,6 +526,17 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const googleSignIn = async () => {
+    setBusy(true);
+    try {
+      await useStore.getState().signInWithGoogle();
+    } catch {
+      /* error surfaced via authError */
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal auth-dialog" onClick={(e) => e.stopPropagation()}>
@@ -512,6 +563,23 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
             Sign up
           </button>
         </div>
+
+        {googleAvailable && (
+          <>
+            <button
+              type="button"
+              className="oauth-btn google"
+              onClick={() => void googleSignIn()}
+              disabled={busy}
+            >
+              <GoogleGlyph />
+              <span>Continue with Google</span>
+            </button>
+            <div className="auth-divider">
+              <span>or</span>
+            </div>
+          </>
+        )}
 
         <form onSubmit={submit} className="auth-form">
           {mode === "sign-up" && (
@@ -758,10 +826,15 @@ function WorkspacesTab() {
   if (!session) return null;
   const activeOrgId = session.activeOrganizationId;
   // We only know the caller's role for the ACTIVE workspace (members are loaded
-  // for it alone), so permanent delete is offered on the current workspace when
-  // the caller owns it. The server enforces owner-only regardless (403).
+  // for it alone). On the active row we can therefore hide Delete from
+  // non-owners; on other rows we can't tell, so we show it and let the server
+  // enforce owner-only (403, surfaced via actionError). `deleteWorkspace` takes
+  // an explicit org id, so deleting a non-active workspace works without first
+  // switching to it.
   const isActiveOwner =
     members.find((m) => m.userId === session.user.id)?.role === "owner";
+  const canDelete = (orgId: string) =>
+    orgId === activeOrgId ? isActiveOwner : true;
 
   const folderName = (orgId: string): string | null => {
     const p = bound[orgId];
@@ -912,7 +985,7 @@ function WorkspacesTab() {
                   >
                     Remove from device
                   </button>
-                  {isActive && isActiveOwner && (
+                  {canDelete(o.id) && (
                     <button
                       className="link-btn danger"
                       disabled={busy}
@@ -1512,26 +1585,61 @@ function UpdatesTab() {
     update.phase === "downloading" ||
     update.phase === "installing";
 
+  // A single status line that stays mounted across phases so the card never
+  // reflows (and the button never jumps) as the check progresses. The button
+  // keeps one fixed label + width; the spinner and this line carry the state.
+  let statusText: string | null = null;
+  let statusError = false;
+  switch (update.phase) {
+    case "checking":
+      statusText = "Checking for updates…";
+      break;
+    case "uptodate":
+      statusText = "You're on the latest version.";
+      break;
+    case "available":
+      statusText = "An update is available.";
+      break;
+    case "downloading":
+      statusText = update.total > 0
+        ? `Downloading ${update.version} — ${Math.round((update.downloaded / update.total) * 100)}%`
+        : `Downloading ${update.version}…`;
+      break;
+    case "installing":
+      statusText = `Installing ${update.version} — the app will restart…`;
+      break;
+    case "error":
+      statusText = `Couldn't check for updates: ${update.message}`;
+      statusError = true;
+      break;
+  }
+
   return (
-    <>
+    <div className="updates-tab">
       <div className="menu-row">
         <span className="menu-row-label">Current version</span>
         <span className="mono">{version ?? "…"}</span>
       </div>
 
-      <div className="menu-row">
+      <div className="update-actions">
         <button
-          className="primary sm"
+          className="primary sm update-check-btn"
           disabled={busy}
+          aria-busy={busy}
           onClick={() => void checkForUpdate()}
         >
-          {update.phase === "checking" ? "Checking…" : "Check for updates"}
+          {busy && <span className="btn-spinner" aria-hidden="true" />}
+          <span>Check for updates</span>
         </button>
-      </div>
 
-      {update.phase === "uptodate" && (
-        <div className="muted">You're on the latest version.</div>
-      )}
+        <span
+          className={`update-status${statusError ? " error" : ""}`}
+          role="status"
+          aria-live="polite"
+        >
+          {statusText}
+        </span>
+      </div>
 
       {update.phase === "available" && (
         <div className="update-detail">
@@ -1542,24 +1650,7 @@ function UpdatesTab() {
           </button>
         </div>
       )}
-
-      {update.phase === "downloading" && (
-        <div className="muted">
-          Downloading {update.version}
-          {update.total > 0
-            ? ` — ${Math.round((update.downloaded / update.total) * 100)}%`
-            : "…"}
-        </div>
-      )}
-
-      {update.phase === "installing" && (
-        <div className="muted">Installing {update.version} — the app will restart…</div>
-      )}
-
-      {update.phase === "error" && (
-        <div className="error">Couldn't check for updates: {update.message}</div>
-      )}
-    </>
+    </div>
   );
 }
 

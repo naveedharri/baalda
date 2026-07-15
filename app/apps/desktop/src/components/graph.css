@@ -153,29 +153,45 @@
 }
 
 .graph-state-card {
-  max-width: 360px;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-6) var(--sp-7);
   text-align: center;
-  color: var(--text-secondary);
+  /* The backdrop is a dark void in every theme, so these states use fixed
+     light-on-dark colors instead of theme text vars (which would be dark, and
+     thus invisible, in light mode). A faint glass panel lifts the copy off the
+     void so it reads at any zoom. */
+  color: rgba(233, 236, 245, 0.78);
   font-size: var(--fs-md);
   line-height: var(--lh-body);
+  background: rgba(20, 23, 34, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
 }
 
 .graph-state-card strong {
   display: block;
-  margin-bottom: var(--sp-2);
-  color: var(--text-primary);
+  color: #f4f6fb;
   font-family: var(--font-display);
   font-size: var(--fs-xl);
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .graph-state-card code {
   font-family: var(--font-mono);
   font-size: 0.9em;
-  color: var(--accent);
-  background: var(--accent-soft);
-  padding: 1px 5px;
+  color: #bcb2ff;
+  background: rgba(127, 115, 255, 0.18);
+  border: 1px solid rgba(127, 115, 255, 0.32);
+  padding: 1px 6px;
   border-radius: var(--radius-sm);
+  white-space: nowrap;
 }
 
 /* ============================================================
@@ -186,9 +202,7 @@
   left: var(--sp-4);
   bottom: var(--sp-4);
   z-index: 2;
-  width: 250px;
-  max-height: calc(100% - var(--sp-4) * 2 - 64px);
-  overflow-y: auto;
+  width: 300px;
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
@@ -217,7 +231,7 @@
 
 .graph-control-row {
   display: grid;
-  grid-template-columns: 72px 1fr auto;
+  grid-template-columns: 96px 1fr auto;
   align-items: center;
   gap: var(--sp-2);
 }
@@ -294,9 +308,13 @@
   border-color: var(--accent);
 }
 
-/* Segmented control (color mode). */
+/* Segmented control (color mode). Spans the value + trailing columns and fills
+   the row so all three options fit without clipping. */
 .graph-seg {
-  display: inline-flex;
+  grid-column: 2 / -1;
+  display: flex;
+  width: 100%;
+  min-width: 0;
   gap: 2px;
   padding: 2px;
   background: var(--bg-app);
@@ -305,12 +323,14 @@
 }
 .graph-seg-btn {
   flex: 1;
-  padding: 3px 6px;
+  min-width: 0;
+  padding: 3px 4px;
   border: none;
   border-radius: calc(var(--radius-sm) - 1px);
   background: transparent;
   color: var(--text-secondary);
   font-size: var(--fs-sm);
+  white-space: nowrap;
   cursor: pointer;
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }

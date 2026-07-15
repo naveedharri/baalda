@@ -3,24 +3,28 @@
 // session — no server round-trip, no per-connection randomness.
 
 /**
- * A curated palette harmonized with the violet accent: jewel tones at a
- * consistent depth so white initials/cursor labels stay legible, and no single
- * hue clashes with the UI. Reads on both light and dark surfaces.
+ * A curated palette of bright, cheerful hues harmonized with the violet accent.
+ * Deliberately excludes red/orange tones — a red ring reads as an error, not a
+ * person, so presence stays in happy blues/greens/purples/pinks. Every color is
+ * saturated enough to read on both light and dark surfaces.
  */
 export const PRESENCE_PALETTE = [
   "#6366f1", // indigo
-  "#2563eb", // blue
-  "#0284c7", // sky
-  "#0d9488", // teal
-  "#059669", // emerald
-  "#16a34a", // green
-  "#d97706", // amber
-  "#ea580c", // orange
-  "#e11d48", // rose
-  "#db2777", // pink
-  "#c026d3", // fuchsia
-  "#9333ea", // purple
+  "#3b82f6", // blue
+  "#0ea5e9", // sky
+  "#06b6d4", // cyan
+  "#14b8a6", // teal
+  "#10b981", // emerald
+  "#22c55e", // green
+  "#84cc16", // lime
+  "#a855f7", // purple
+  "#8b5cf6", // violet
+  "#d946ef", // fuchsia
+  "#ec4899", // pink
 ] as const;
+
+/** Neutral gray used for a peer's ring when they're offline / not live. */
+export const PRESENCE_OFFLINE = "#94a3b8";
 
 /** Stable 32-bit FNV-1a hash of a string. */
 export function hashString(input: string): number {

@@ -188,18 +188,24 @@ pub fn get_server_url(app: AppHandle) -> AppResult<Option<String>> {
 // workspace before the root existed keep their original location — the root is
 // only where *new* workspace folders are created.
 
-/// Name of the default managed-root folder under the user's home directory.
-/// Layer-1 brand surface (spec: rebrand policy) — this is the one place the
-/// user-visible root folder name is set; everything else derives from it.
+/// Legacy managed-root folder name under the user's home directory. Kept only
+/// for the one-time `OpenContext -> Baalda` rebrand migration below; new installs
+/// use `DEFAULT_ROOT_DIR_NAME` under Documents instead.
 const MANAGED_ROOT_DIR_NAME: &str = "Baalda";
 
-/// Default managed root: `<home>/Baalda`.
+/// User-visible name of the default managed-root folder. Layer-1 brand surface
+/// (spec: rebrand policy) — the one place the default root folder name is set.
+const DEFAULT_ROOT_DIR_NAME: &str = "Baalda Vaults";
+
+/// Default managed root: `<home>/Documents/Baalda Vaults`. Lives under Documents
+/// so it's easy to find in the OS file browser (Finder/Explorer both surface
+/// Documents in their sidebar) instead of being buried at the top of home.
 fn default_workspace_root(app: &AppHandle) -> AppResult<PathBuf> {
     let home = app
         .path()
         .home_dir()
         .map_err(|e| AppError::new(format!("no home dir: {e}")))?;
-    Ok(home.join(MANAGED_ROOT_DIR_NAME))
+    Ok(home.join("Documents").join(DEFAULT_ROOT_DIR_NAME))
 }
 
 /// One-time migration for the rebrand: earlier builds managed `<home>/OpenContext`.

@@ -3,6 +3,7 @@ import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { Editor } from "./components/Editor";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
 import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
@@ -384,7 +385,15 @@ export default function App() {
         <BacklinksPanel />
       </main>
 
-      {graphOpen && <GraphView onClose={() => setGraphOpen(false)} />}
+      {graphOpen && (
+        <ErrorBoundary
+          label="Graph view"
+          resetKeys={[graphOpen]}
+          onError={() => setGraphOpen(false)}
+        >
+          <GraphView onClose={() => setGraphOpen(false)} />
+        </ErrorBoundary>
+      )}
       <WorkspaceFolderPrompt />
     </div>
   );

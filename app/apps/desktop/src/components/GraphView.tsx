@@ -33,17 +33,132 @@ import "./graph.css";
 const MIN_SCALE = 0.08;
 const MAX_SCALE = 6;
 const CLICK_DRAG_THRESHOLD = 4; // px moved before a pointerdown counts as a drag
-const LABEL_FADE_START = 0.55; // camera.k at which labels begin to appear (labelScale 1)
-const LABEL_FADE_END = 1.1; // camera.k at which labels are fully opaque (labelScale 1)
+const LABEL_FADE_START = 1.5; // camera.k at which labels begin to appear (labelScale 1)
+const LABEL_FADE_END = 2.4; // camera.k at which labels are fully opaque (labelScale 1)
 const DEFAULT_FONT_FAMILY = "sans-serif";
 const FALLBACK_ACCENT = "#7f73ff";
 
 // Startup "come to life" burst.
 const INTRO_MS = 1200; // duration of the light flare + settle
 const INTRO_KICK = 28; // initial random velocity magnitude — the quick shake
-// Cool light edges are drawn with additive blending so dense regions bloom into
-// a galaxy core on the dark field.
-const EDGE_GLOW = "rgba(150,172,225,1)";
+
+// Matte-sphere lighting. A single soft key light from the upper-left, tilted
+// toward the viewer, is baked once into grayscale alpha sprites (makeShadeSprites)
+// and stamped over each flat-colored disc. That gives real diffuse volume — no
+// glossy specular hotspot, no per-node gradient cost — so nodes read as lit
+// objects with depth instead of flat stickers.
+const LIGHT = (() => {
+  const x = -0.5;
+  const y = -0.62;
+  const z = 0.6;
+  const len = Math.hypot(x, y, z);
+  return { x: x / len, y: y / len, z: z / len };
+})();
+const SPRITE_SIZE = 256; // resolution of the baked shading / shadow / glow sprites
+
+// Edges are quiet connective threads (source-over), not the old additive bloom
+// that washed the whole field into a purple haze.
+const EDGE_REST = "rgba(128,146,196,1)";
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** Parse "#rgb"/"#rrggbb" or "rgb()/rgba()" into [r,g,b] 0–255; grey on failure. */
+function parseColor(c: string): [number, number, number] {
+  const s = c.trim();
+  if (s.startsWith("#")) {
+    let h = s.slice(1);
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    if (h.length >= 6) {
+      return [
+        parseInt(h.slice(0, 2), 16),
+        parseInt(h.slice(2, 4), 16),
+        parseInt(h.slice(4, 6), 16),
+      ];
+    }
+  }
+  const m = s.match(/rgba?\(([^)]+)\)/);
+  if (m) {
+    const p = m[1].split(",").map((v) => parseFloat(v));
+    return [p[0] || 0, p[1] || 0, p[2] || 0];
+  }
+  return [150, 150, 160];
+}
+
+/**
+ * Bake diffuse sphere lighting into two grayscale alpha sprites: `light` (white,
+ * the lit cap) and `shadow` (black, the shadowed side plus a rim of ambient
+ * occlusion). Stamping a flat disc → shadow → light turns any color into a matte
+ * 3D sphere, independent of the node's own hue, for one drawImage each.
+ */
+function makeShadeSprites(size: number): {
+  light: HTMLCanvasElement;
+  shadow: HTMLCanvasElement;
+} {
+  const light = document.createElement("canvas");
+  const shadow = document.createElement("canvas");
+  light.width = light.height = shadow.width = shadow.height = size;
+  const lg = light.getContext("2d")!;
+  const sg = shadow.getContext("2d")!;
+  const li = lg.createImageData(size, size);
+  const si = sg.createImageData(size, size);
+  const R = size / 2;
+  const mid = 0.12; // diffuse level treated as neutral (neither lit nor shadowed)
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const idx = (y * size + x) * 4;
+      const nx = (x + 0.5 - R) / R;
+      const ny = (y + 0.5 - R) / R;
+      const r2 = nx * nx + ny * ny;
+      if (r2 >= 1) continue; // outside the sphere → transparent (buffer is zeroed)
+      const nz = Math.sqrt(1 - r2);
+      const diff = nx * LIGHT.x + ny * LIGHT.y + nz * LIGHT.z; // Lambert term
+      const rn = Math.sqrt(r2);
+      const edgeAA = clamp((1 - rn) * R, 0, 1); // ~1px feather at the circumference
+      // Lit cap: matte, so modest and capped, and eased off at the very rim so
+      // there is no bright specular edge.
+      const la =
+        clamp(diff - mid, 0, 1) * 0.5 * (1 - smoothstep(0.6, 1, rn) * 0.7) * edgeAA;
+      // Shadow side + a ring of ambient occlusion that seats the sphere.
+      const occ = smoothstep(0.66, 1, rn) * 0.5;
+      const sa = clamp(clamp(mid - diff, 0, 1) * 0.9 + occ, 0, 0.92) * edgeAA;
+      li.data[idx] = 255;
+      li.data[idx + 1] = 255;
+      li.data[idx + 2] = 255;
+      li.data[idx + 3] = Math.round(la * 255);
+      si.data[idx + 3] = Math.round(sa * 255); // RGB already 0 → pure black
+    }
+  }
+  lg.putImageData(li, 0, 0);
+  sg.putImageData(si, 0, 0);
+  return { light, shadow };
+}
+
+/** A soft radial sprite (used for contact shadows and ambient glow). */
+function makeRadialSprite(
+  size: number,
+  rgb: [number, number, number],
+  stops: [number, number][],
+): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const g = c.getContext("2d")!;
+  const grd = g.createRadialGradient(
+    size / 2,
+    size / 2,
+    0,
+    size / 2,
+    size / 2,
+    size / 2,
+  );
+  for (const [o, a] of stops)
+    grd.addColorStop(o, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`);
+  g.fillStyle = grd;
+  g.fillRect(0, 0, size, size);
+  return c;
+}
 
 type Drag =
   | { type: "pan"; lastX: number; lastY: number; moved: boolean }
@@ -83,8 +198,11 @@ function readColors(el: Element): Colors {
     edgeHighlight: get("--accent") || FALLBACK_ACCENT,
     nodeFallback: get("--text-tertiary") || "#9a9aa5",
     accent: get("--accent") || FALLBACK_ACCENT,
-    label: get("--text-secondary") || "#8a8a94",
-    labelActive: get("--text-primary") || "#f0f0f4",
+    // Labels sit on the always-dark void, so they use fixed light-on-dark tones
+    // (not theme text vars, which are dark in light mode → invisible). Resting
+    // labels stay muted; the open/hover label brightens to full.
+    label: "rgba(205, 210, 224, 0.6)",
+    labelActive: "#f2f4fb",
   };
 }
 
@@ -168,6 +286,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // source/target from id strings to SimNode refs IN PLACE, so after the call
     // we can read them as resolved links for drawing.
     visEdges: [] as SimLink[],
+    // visNodes sorted small→large radius, so bigger ("nearer") orbs paint over
+    // smaller ones and depth reads correctly. Order only changes on rebuild.
+    drawOrder: [] as SimNode[],
     colorById: new Map<string, string>(),
     camera: { x: 0, y: 0, k: 1 } as Camera,
     hoveredId: null as string | null,
@@ -183,8 +304,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       edgeHighlight: FALLBACK_ACCENT,
       nodeFallback: "#9a9aa5",
       accent: FALLBACK_ACCENT,
-      label: "#8a8a94",
-      labelActive: "#f0f0f4",
+      label: "rgba(205, 210, 224, 0.6)",
+      labelActive: "#f2f4fb",
     } as Colors,
     fontFamily: DEFAULT_FONT_FAMILY,
   }).current;
@@ -240,6 +361,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
     S.visNodes = visNodes;
     S.visEdges = links; // now resolved in place by forceLink
+    S.drawOrder = [...visNodes].sort((a, b) => a.radius - b.radius);
 
     const accent = S.colors.accent || FALLBACK_ACCENT;
     const { colorById, legend: lg } = assignColors(visNodes, s.colorMode, accent);
@@ -321,6 +443,37 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const sim = simRef.current!;
+
+    // Baked lighting sprites (color-independent) + a tiny color-parse cache so
+    // the per-frame draw stays allocation-free even with continuous animation.
+    const shade = makeShadeSprites(SPRITE_SIZE);
+    const shadowSprite = makeRadialSprite(
+      SPRITE_SIZE,
+      [4, 5, 11],
+      [
+        [0, 0.55],
+        [0.42, 0.24],
+        [1, 0],
+      ],
+    );
+    const glowSprite = makeRadialSprite(
+      SPRITE_SIZE,
+      [150, 170, 228],
+      [
+        [0, 0.5],
+        [0.5, 0.12],
+        [1, 0],
+      ],
+    );
+    const rgbCache = new Map<string, [number, number, number]>();
+    const getRgb = (c: string): [number, number, number] => {
+      let v = rgbCache.get(c);
+      if (!v) {
+        v = parseColor(c);
+        rgbCache.set(c, v);
+      }
+      return v;
+    };
 
     let width = 0;
     let height = 0;
@@ -443,47 +596,71 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const glowBoost = 1 + (1 - introEase) * 2.4; // nodes are brightest at birth
 
       const nodeScale = s.nodeSize;
+      const time = nowT / 1000;
+      const drawNodes = S.drawOrder;
+      const stamp = (
+        sprite: CanvasImageSource,
+        wx: number,
+        wy: number,
+        dd: number,
+      ) => ctx!.drawImage(sprite, wx - dd / 2, wy - dd / 2, dd, dd);
 
-      // ---- Edges (additive → dense regions bloom into a galaxy core) ----
-      ctx!.globalCompositeOperation = "lighter";
+      // ---- Edges: quiet connective threads (source-over, batched) ----
+      ctx!.globalCompositeOperation = "source-over";
       const edgeWidth = s.edgeThickness / k;
+      ctx!.strokeStyle = EDGE_REST;
+      ctx!.globalAlpha = hovered ? 0.03 : 0.1 * (0.5 + 0.5 * introEase);
+      ctx!.lineWidth = edgeWidth;
+      ctx!.beginPath();
       for (const e of S.visEdges) {
         const src = e.source as SimNode;
         const tgt = e.target as SimNode;
-        const incident =
-          !hovered || src.id === hovered.id || tgt.id === hovered.id;
-        ctx!.beginPath();
+        if (hovered && (src.id === hovered.id || tgt.id === hovered.id)) continue;
         ctx!.moveTo(src.x, src.y);
         ctx!.lineTo(tgt.x, tgt.y);
-        ctx!.strokeStyle = incident ? colors.edgeHighlight : EDGE_GLOW;
-        ctx!.globalAlpha = hovered
-          ? incident
-            ? 0.85
-            : 0.02
-          : 0.075 * (0.4 + 0.6 * introEase);
-        ctx!.lineWidth = (incident && hovered ? 1.6 : 1) * edgeWidth;
+      }
+      ctx!.stroke();
+      if (hovered) {
+        // The hovered node's own links light up with the accent, drawn on top.
+        ctx!.strokeStyle = colors.edgeHighlight;
+        ctx!.globalAlpha = 0.85;
+        ctx!.lineWidth = edgeWidth * 1.8;
+        ctx!.beginPath();
+        for (const e of S.visEdges) {
+          const src = e.source as SimNode;
+          const tgt = e.target as SimNode;
+          if (src.id !== hovered.id && tgt.id !== hovered.id) continue;
+          ctx!.moveTo(src.x, src.y);
+          ctx!.lineTo(tgt.x, tgt.y);
+        }
         ctx!.stroke();
       }
 
-      // ---- Node glow halos (additive) — the "light" each node emits ----
-      for (const node of S.visNodes) {
-        if (hovered != null && !neighbors.has(node.id)) continue;
-        if (!matches(node)) continue; // dimmed/filtered nodes don't emit light
+      // ---- Contact shadows: seat each orb over the void for real depth ----
+      ctx!.globalCompositeOperation = "source-over";
+      for (const node of drawNodes) {
+        if (!matches(node)) continue;
+        const dimmed = hovered != null && !neighbors.has(node.id);
         const base = node.radius * nodeScale;
-        const color =
-          node.path === openNotePathRef.current
-            ? colors.accent
-            : S.colorById.get(node.id) ?? colors.nodeFallback;
-        ctx!.fillStyle = color;
-        ctx!.globalAlpha = clamp(0.18 * glowBoost, 0, 0.85);
-        ctx!.beginPath();
-        ctx!.arc(node.x, node.y, base * 1.7, 0, Math.PI * 2);
-        ctx!.fill();
+        ctx!.globalAlpha = dimmed ? 0.12 : 0.4;
+        stamp(shadowSprite, node.x + base * 0.16, node.y + base * 0.5, base * 2.3);
       }
 
-      // ---- Node cores + labels (opaque, true folder color) ----
+      // ---- Ambient glow: the soft light each orb sheds, gently breathing ----
+      ctx!.globalCompositeOperation = "lighter";
+      for (let i = 0; i < drawNodes.length; i++) {
+        const node = drawNodes[i];
+        if (!matches(node)) continue;
+        if (hovered != null && !neighbors.has(node.id)) continue;
+        const base = node.radius * nodeScale;
+        const breathe = 0.82 + 0.18 * Math.sin(time * 0.8 + i * 0.7);
+        ctx!.globalAlpha = clamp(0.15 * glowBoost * breathe, 0, 0.7);
+        stamp(glowSprite, node.x, node.y, base * 3);
+      }
+
+      // ---- Node bodies: flat color + baked matte 3D shading ----
       ctx!.globalCompositeOperation = "source-over";
-      for (const node of S.visNodes) {
+      for (const node of drawNodes) {
         const isOpen = node.path === openNotePathRef.current;
         const isHovered = hovered?.id === node.id;
         const dimByHover = hovered != null && !neighbors.has(node.id);
@@ -491,17 +668,46 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const dimmed = dimByHover || dimBySearch;
 
         const base = node.radius * nodeScale;
-        const r = isHovered ? base * 1.35 : base;
-
-        ctx!.globalAlpha = dimmed ? 0.22 : 1;
-        ctx!.beginPath();
-        ctx!.arc(node.x, node.y, r, 0, Math.PI * 2);
-        ctx!.fillStyle = isOpen
+        const r = isHovered ? base * 1.32 : base;
+        const color = isOpen
           ? colors.accent
           : S.colorById.get(node.id) ?? colors.nodeFallback;
-        ctx!.fill();
 
-        // The open note gets an accent halo ring so it's findable at a glance.
+        // A colored bloom for the open note / hovered orb — a little extra life.
+        if ((isOpen || isHovered) && !dimBySearch) {
+          const [cr, cg, cb] = getRgb(color);
+          const gg = ctx!.createRadialGradient(
+            node.x,
+            node.y,
+            0,
+            node.x,
+            node.y,
+            r * 3,
+          );
+          gg.addColorStop(0, `rgba(${cr},${cg},${cb},0.55)`);
+          gg.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+          ctx!.globalCompositeOperation = "lighter";
+          ctx!.globalAlpha = 1;
+          ctx!.fillStyle = gg;
+          ctx!.beginPath();
+          ctx!.arc(node.x, node.y, r * 3, 0, Math.PI * 2);
+          ctx!.fill();
+          ctx!.globalCompositeOperation = "source-over";
+        }
+
+        // Flat base disc, then the baked shadow + light sprites stamp matte
+        // volume onto it. globalAlpha carries into the sprites, so a dimmed orb
+        // simply shades fainter — no separate dim path needed.
+        ctx!.globalAlpha = dimmed ? 0.24 : 1;
+        ctx!.fillStyle = color;
+        ctx!.beginPath();
+        ctx!.arc(node.x, node.y, r, 0, Math.PI * 2);
+        ctx!.fill();
+        const d = r * 2;
+        ctx!.drawImage(shade.shadow, node.x - r, node.y - r, d, d);
+        ctx!.drawImage(shade.light, node.x - r, node.y - r, d, d);
+
+        // The open note gets an accent ring so it's findable at a glance.
         if (isOpen) {
           ctx!.lineWidth = 2 / k;
           ctx!.strokeStyle = colors.accent;
@@ -528,6 +734,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         }
       }
       ctx!.globalAlpha = 1;
+      ctx!.globalCompositeOperation = "source-over";
       ctx!.restore();
 
       // ---- Startup light flash (screen space, additive) ----
@@ -553,19 +760,18 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       }
     }
 
-    // Single frame clock: advance physics one tick, paint, and keep looping
-    // while the sim is still warm so the layout keeps settling (and recovers
-    // from disturbances) even when the user isn't touching anything.
+    // Single frame clock. The loop stays alive the whole time the graph is
+    // mounted so the lighting keeps breathing and the scene feels alive at rest.
+    // Physics is the expensive part, so we tick it ONLY while the sim is warm
+    // (or during the intro) — idle frames are a cheap repaint of a still layout.
     function loop() {
       S.rafId = null;
-      sim.tick();
-      draw();
-      S.needsDraw = false;
       const introActive =
         S.introStart > 0 && performance.now() - S.introStart < INTRO_MS;
-      if (sim.alpha() > sim.alphaMin() || introActive) {
-        S.rafId = requestAnimationFrame(loop);
-      }
+      if (sim.alpha() > sim.alphaMin() || introActive) sim.tick();
+      draw();
+      S.needsDraw = false;
+      S.rafId = requestAnimationFrame(loop);
     }
 
     function requestDraw() {
@@ -732,7 +938,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   };
 
   const showEmpty =
-    !loading && !error && graph != null && counts.edges === 0;
+    !loading && !error && graph != null && counts.nodes === 0;
 
   return (
     <div className="graph-view" ref={wrapRef}>
@@ -798,8 +1004,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         {showEmpty && (
           <div className="graph-state">
             <div className="graph-state-card">
-              <strong>No links yet</strong>
-              Connect notes with <code>[[wikilinks]]</code> to see them here.
+              <strong>Your graph is empty</strong>
+              <span>
+                Write a note, then link notes with{" "}
+                <code>[[wikilinks]]</code> to grow a living map of your ideas.
+              </span>
             </div>
           </div>
         )}

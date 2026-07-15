@@ -274,51 +274,27 @@ button.primary.hero:hover:not(:disabled) {
   position: relative;
   z-index: 1;
   text-align: center;
-  padding: var(--sp-10) var(--sp-8);
-  max-width: 480px;
+  padding: var(--sp-10) 0;
+  width: 100%;
   background: transparent;
   border: none;
   border-radius: 0;
   box-shadow: none;
 }
-.vault-brand-mark {
-  width: 64px;
-  height: 64px;
-  margin: 0 auto var(--sp-5);
-  border-radius: var(--radius-lg);
-  background: var(--brand-tile);
-  color: var(--brand-ink);
-  display: grid;
-  place-items: center;
-  box-shadow:
-    var(--shadow-md),
-    0 0 40px color-mix(in srgb, var(--brand-green) 35%, transparent);
+/* Splash hero: the wordmark IS the screen — edge-to-edge width, a small
+   gutter left and right. */
+.vault-picker-card .product-name {
+  margin: 0 0 clamp(48px, 8vh, 96px);
+  line-height: 1;
   cursor: default;
   user-select: none;
 }
-.vault-picker-card .product-name {
-  margin: 0 0 var(--sp-2);
-  font-family: var(--font-display);
-  font-size: var(--fs-2xl);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: var(--lh-tight);
-  color: var(--text-primary);
-}
 /* Baalda wordmark image — ink on light theme, silver on dark. */
 .wordmark { display: inline-flex; justify-content: center; }
-.wordmark-img { height: 28px; width: auto; display: block; }
+.wordmark-img { width: min(42vw, 670px); height: auto; display: block; }
 .wordmark-silver { display: none; }
 [data-theme="dark"] .wordmark-ink { display: none; }
 [data-theme="dark"] .wordmark-silver { display: block; }
-.vault-picker-card .tagline {
-  color: var(--text-secondary);
-  font-size: var(--fs-md);
-  max-width: 300px;
-  margin: 0 auto var(--sp-8);
-  line-height: var(--lh-body);
-  text-wrap: balance;
-}
 .vault-actions {
   display: flex;
   flex-direction: column;
@@ -336,7 +312,7 @@ button.primary.hero:hover:not(:disabled) {
 .vault-picker-card .hint {
   color: var(--text-tertiary);
   font-size: var(--fs-sm);
-  margin-top: var(--sp-5);
+  margin-top: var(--sp-3);
 }
 .vault-picker-card .hint code {
   font-family: var(--font-mono);
@@ -1168,6 +1144,66 @@ button.primary.hero:hover:not(:disabled) {
 .release-notes {
   white-space: pre-wrap;
 }
+
+/* ---- Updates tab (Settings) ---- */
+.updates-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+/* Button + inline status share one baseline row. The status sits beside the
+   button (not below), so appearing/clearing it never changes the row height —
+   the button governs it. That's what kills the "shake" on click. */
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 36px;
+  padding: var(--sp-1) var(--sp-2);
+}
+.update-check-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  /* Fixed width holds the label + spinner so the button never resizes as it
+     toggles between idle and busy. */
+  min-width: 152px;
+  flex: none;
+}
+.update-status {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: 1.3;
+  animation: fade-in var(--t-fast) var(--ease) both;
+}
+.update-status.error {
+  color: var(--danger);
+}
+
+/* Ring spinner shown inside the button while a check/download is in flight. */
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--text-on-accent) 35%, transparent);
+  border-top-color: var(--text-on-accent);
+  animation: btn-spin 0.6s linear infinite;
+}
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn-spinner {
+    animation-duration: 1.4s;
+  }
+  .update-status {
+    animation: none;
+  }
+}
 .mono {
   font-family: var(--font-mono, monospace);
   font-size: var(--fs-sm);
@@ -1424,6 +1460,14 @@ button.primary.hero:hover:not(:disabled) {
 }
 .account-popover {
   bottom: calc(100% + var(--sp-2));
+  /* Break free of the narrow sidebar width so workspace names, the settings
+     row and the server URL read without truncating or feeling crowded. */
+  right: auto;
+  width: 312px;
+  max-width: calc(100vw - var(--sp-4));
+  /* No scroll — the whole menu fits, so let it size to its content. */
+  max-height: none;
+  overflow: visible;
 }
 .sidebar-header {
   position: relative;
@@ -1521,7 +1565,7 @@ button.primary.hero:hover:not(:disabled) {
 .menu-hint {
   color: var(--text-tertiary);
   font-size: var(--fs-xs);
-  max-width: 45%;
+  max-width: 55%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1802,6 +1846,47 @@ button.primary.hero:hover:not(:disabled) {
   flex-direction: column;
   gap: var(--sp-2);
 }
+
+/* Social sign-in (Google) button + "or" divider above the email/password form */
+.oauth-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.oauth-btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong, var(--border));
+}
+.oauth-btn:disabled {
+  opacity: 0.6;
+}
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  margin: var(--sp-1) 0;
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
 .row {
   display: flex;
   gap: var(--sp-2);
@@ -1851,6 +1936,28 @@ button.primary.hero:hover:not(:disabled) {
   background: var(--danger-soft);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-md);
+}
+
+/* Error boundary fallback (e.g. a crashed graph panel) */
+.error-boundary {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg-base, #000) 70%, transparent);
+  z-index: 50;
+}
+.error-boundary-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  max-width: 24rem;
+  padding: var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  box-shadow: var(--shadow-lg, 0 8px 32px rgba(0, 0, 0, 0.3));
 }
 
 .server-config {
@@ -1960,14 +2067,20 @@ button.primary.hero:hover:not(:disabled) {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  color: #fff;
-  font-size: var(--fs-xs);
-  font-weight: 700;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+}
+.avatar svg,
+.avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.avatar img {
+  object-fit: cover;
 }
 
 /* ============================================================

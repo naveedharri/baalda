@@ -80,6 +80,8 @@ interface AppStore {
   refreshTitles: () => Promise<void>;
   /** First-run seeding for a local (not-yet-synced) empty vault. */
   seedLocalVaultIfEmpty: () => Promise<void>;
+  /** Open the root Welcome note if it exists and nothing else is open. */
+  openWelcomeIfPresent: () => Promise<void>;
 
   openNoteByPath: (path: string) => Promise<void>;
   refreshBacklinks: () => Promise<void>;
@@ -298,6 +300,14 @@ export const useStore = create<AppStore>((set, get) => ({
     if (welcomePath) await get().openNoteByPath(welcomePath);
   },
 
+  openWelcomeIfPresent: async () => {
+    // Land a freshly signed-in user on the Welcome note — but never yank them
+    // away from a note they already have open.
+    if (get().openNote) return;
+    const hasWelcome = get().titles.some((t) => t.path === WELCOME_NOTE_PATH);
+    if (hasWelcome) await get().openNoteByPath(WELCOME_NOTE_PATH);
+  },
+
   openNoteByPath: async (path) => {
     const meta = await ipc.getNoteMeta(path);
     const title = meta?.title ?? path.split("/").pop() ?? path;
@@ -364,6 +374,7 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshWorkspace();
         await get().enableSyncForVault();
+        await get().openWelcomeIfPresent();
       }
     } catch (e) {
       set({ authError: errMsg(e) });
@@ -380,6 +391,7 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshWorkspace();
         await get().enableSyncForVault();
+        await get().openWelcomeIfPresent();
       }
     } catch (e) {
       set({ authError: errMsg(e) });

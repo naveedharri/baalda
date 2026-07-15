@@ -285,6 +285,50 @@ export class ApiClient {
     }
   }
 
+  // ---- Google sign-in (social, via desktop loopback) ----------------------
+
+  /** Which sign-in methods the server offers (Google is config-gated). */
+  async getAuthMethods(): Promise<{ emailPassword: boolean; google: boolean }> {
+    try {
+      const { data } = await this.request<{ emailPassword: boolean; google: boolean }>(
+        "GET",
+        "/api/auth-methods",
+      );
+      return { emailPassword: data.emailPassword !== false, google: !!data.google };
+    } catch {
+      // Older server without the endpoint: assume email/password only.
+      return { emailPassword: true, google: false };
+    }
+  }
+
+  /**
+   * Kick off a social sign-in and get the provider's authorization URL to open
+   * in the system browser. `callbackURL` is where the server bounces the browser
+   * after the OAuth callback (our /api/desktop-auth/finish handoff).
+   */
+  async socialSignInUrl(provider: "google", callbackURL: string): Promise<string> {
+    const { data } = await this.request<{ url?: string; redirect?: boolean }>(
+      "POST",
+      "/api/auth/sign-in/social",
+      { body: { provider, callbackURL } },
+    );
+    if (!data?.url) {
+      throw new ApiError(500, "Server did not return an authorization URL");
+    }
+    return data.url;
+  }
+
+  /** Redeem the one-time handoff code for the session token + user. */
+  async exchangeDesktopCode(code: string): Promise<{ user: AuthUser; token: string }> {
+    const { data } = await this.request<{ token: string; user: AuthUser }>(
+      "POST",
+      "/api/desktop-auth/exchange",
+      { body: { code } },
+    );
+    if (data.token) this.token = data.token;
+    return { user: data.user, token: data.token };
+  }
+
   /** Current session, or null if the token is missing/expired/revoked. */
   async getSession(): Promise<SessionInfo | null> {
     if (!this.token) return null;

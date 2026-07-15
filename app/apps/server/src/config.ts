@@ -43,6 +43,12 @@ export const config = {
   backfillConcurrency: int("BACKFILL_CONCURRENCY", 6),
   /** WebSocket path for the vault replication channel. */
   vaultSyncPath: required("VAULT_SYNC_PATH", "/vault-sync"),
+  // ---- Google OAuth (spec 04 §7 — social sign-in) ----
+  /** Google OAuth client id/secret. Both unset ⇒ Google sign-in is simply
+   *  disabled and the desktop hides the button; self-host stays fully usable
+   *  on email+password alone. Set only via env (never committed). */
+  googleClientId: optional("GOOGLE_CLIENT_ID"),
+  googleClientSecret: optional("GOOGLE_CLIENT_SECRET"),
 } as const;
 
 export type AppConfig = typeof config;

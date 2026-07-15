@@ -119,4 +119,43 @@ describe("ApiClient against a mocked fetch", () => {
     const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
     await expect(api.listVaults()).rejects.toBeInstanceOf(ApiError);
   });
+
+  it("requests a Google authorization URL with the loopback callback", async () => {
+    const { impl, calls } = fakeFetch((call) => {
+      expect(call.url).toContain("/api/auth/sign-in/social");
+      return { json: { url: "https://accounts.google.com/o/oauth2/v2/auth?x=1", redirect: true } };
+    });
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    const cb = "http://localhost:3010/api/desktop-auth/finish?redirect=http%3A%2F%2F127.0.0.1%3A5000%2Fcb";
+    const url = await api.socialSignInUrl("google", cb);
+    expect(url).toContain("accounts.google.com");
+    expect(calls[0].body).toEqual({ provider: "google", callbackURL: cb });
+  });
+
+  it("throws when the social sign-in response has no url", async () => {
+    const { impl } = fakeFetch(() => ({ json: { redirect: true } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    await expect(api.socialSignInUrl("google", "http://127.0.0.1:1/cb")).rejects.toBeInstanceOf(
+      ApiError,
+    );
+  });
+
+  it("exchanges a desktop code for the session token and stores it", async () => {
+    const { impl, calls } = fakeFetch((call) => {
+      expect(call.url).toContain("/api/desktop-auth/exchange");
+      return { json: { token: "sess-abc", user: { id: "u2", email: "g@b.co", name: "" } } };
+    });
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    const { user, token } = await api.exchangeDesktopCode("one-time-code");
+    expect(token).toBe("sess-abc");
+    expect(user.id).toBe("u2");
+    expect(api.getToken()).toBe("sess-abc");
+    expect(calls[0].body).toEqual({ code: "one-time-code" });
+  });
+
+  it("getAuthMethods falls back to email-only when the endpoint 404s", async () => {
+    const { impl } = fakeFetch(() => ({ status: 404, json: { error: "not found" } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    expect(await api.getAuthMethods()).toEqual({ emailPassword: true, google: false });
+  });
 });

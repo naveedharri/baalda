@@ -1,28 +1,58 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { createAvatar } from "@dicebear/core";
+import { notionists } from "@dicebear/collection";
+import { PRESENCE_PALETTE } from "../lib/presence/color";
 
-/** Deterministic, theme-stable avatar color + initials from a display name. */
-function avatarProps(label: string): { color: string; initials: string } {
-  let hash = 0;
-  for (let i = 0; i < label.length; i++) {
-    hash = (hash * 31 + label.charCodeAt(i)) | 0;
-  }
-  const hue = Math.abs(hash) % 360;
-  const initials =
-    label
-      .split(/[\s@._-]+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((p) => p[0]?.toUpperCase() ?? "")
-      .join("") || "?";
-  return { color: `hsl(${hue} 58% 55%)`, initials };
+/* ============================================================
+   Character avatars — every user is auto-assigned a unique illustrated
+   character (DiceBear "notionists" — clean, professional Notion-style line
+   art) from a stable seed (their id/email/name), so nobody is stuck with a
+   flat "TU". Generated as pure SVG on-device: no network, no external avatar
+   service (which would break local-first and leak identity), and the same
+   seed renders the same character on every machine. Backgrounds are drawn
+   from our happy palette so the vibe stays coherent.
+   ============================================================ */
+
+// Palette hex values without the leading "#", as DiceBear expects. DiceBear
+// deterministically picks one per seed, so each character gets its own colour.
+const AVATAR_BG = PRESENCE_PALETTE.map((c) => c.slice(1));
+
+/** Build the illustrated-character SVG for a seed. */
+export function characterSvg(seed: string): string {
+  return createAvatar(notionists, {
+    seed,
+    backgroundColor: AVATAR_BG,
+    backgroundType: ["solid"],
+    radius: 50,
+  }).toString();
 }
 
-export function Avatar({ label }: { label: string }) {
-  const { color, initials } = avatarProps(label);
+export function Avatar({ label, image }: { label: string; image?: string | null }) {
+  const svg = useMemo(() => characterSvg(label || "?"), [label]);
+  // Prefer a real profile photo (e.g. from Google) when present; fall back to
+  // the generated character if there's no image or it fails to load.
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => setImgFailed(false), [image]);
+
+  if (image && !imgFailed) {
+    return (
+      <span className="avatar" aria-hidden="true">
+        <img
+          src={image}
+          alt=""
+          // Google's lh3.googleusercontent.com can 403 when a referrer is sent.
+          referrerPolicy="no-referrer"
+          onError={() => setImgFailed(true)}
+        />
+      </span>
+    );
+  }
   return (
-    <span className="avatar" style={{ backgroundColor: color }} aria-hidden="true">
-      {initials}
-    </span>
+    <span
+      className="avatar"
+      aria-hidden="true"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
   );
 }
 

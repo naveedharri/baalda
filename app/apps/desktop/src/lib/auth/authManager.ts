@@ -90,6 +90,26 @@ export class AuthManager {
     return user;
   }
 
+  /**
+   * Google sign-in via the system browser + a loopback handoff (spec 04 §7).
+   * The Rust core owns the 127.0.0.1 listener; we bridge it to the server's
+   * social flow and the one-time-code exchange, then persist the token exactly
+   * like an email/password sign-in.
+   */
+  async signInWithGoogle(): Promise<AuthUser> {
+    const port = await ipc.googleOauthListen();
+    const redirect = `http://127.0.0.1:${port}/cb`;
+    const callbackURL = `${this.serverUrl}/api/desktop-auth/finish?redirect=${encodeURIComponent(
+      redirect,
+    )}`;
+    const authorizeUrl = await this.api.socialSignInUrl("google", callbackURL);
+    await ipc.openExternal(authorizeUrl);
+    const code = await ipc.googleOauthAwait();
+    const { user, token } = await this.api.exchangeDesktopCode(code);
+    if (token) await ipc.keychainSet(this.keychainKey(), token);
+    return user;
+  }
+
   async signOut(): Promise<void> {
     try {
       await this.api.signOut();

@@ -172,6 +172,15 @@ export const keychainGet = (serviceKey: string) =>
 export const keychainDelete = (serviceKey: string) =>
   invoke<void>("keychain_delete", { serviceKey });
 
+// ---- Google OAuth loopback (spec 04 §7) -----------------------------------
+// The Rust core runs a one-shot 127.0.0.1 listener that catches the browser
+// redirect at the end of Google sign-in. `listen` returns the ephemeral port
+// (so the caller can build the callback URL); `await` blocks until the redirect
+// lands and resolves with the one-time handoff code.
+
+export const googleOauthListen = () => invoke<number>("google_oauth_listen");
+export const googleOauthAwait = () => invoke<string>("google_oauth_await");
+
 // ---- Sync server URL (app config, next to last-vault) ----------------------
 
 export const getServerUrl = () => invoke<string | null>("get_server_url");
