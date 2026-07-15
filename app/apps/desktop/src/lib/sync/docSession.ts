@@ -77,14 +77,14 @@ export class SyncManager {
     session: SessionInfo,
     tree: TreeNode,
     vaultName: string,
-  ): Promise<{ ok: boolean; reason?: string }> {
+  ): Promise<{ ok: boolean; reason?: string; seeded?: boolean }> {
     if (!session.activeOrganizationId) {
       this.enabled = false;
       return { ok: false, reason: "no active organization" };
     }
     this.presence = { id: session.user.id, name: session.user.name || session.user.email };
     try {
-      await this.registry.reconcile(
+      const { seeded } = await this.registry.reconcile(
         { organizationId: session.activeOrganizationId, vaultName },
         tree,
       );
@@ -93,7 +93,7 @@ export class SyncManager {
       // Initial attachment reconcile (fire-and-forget; errors are logged).
       void this.attachments?.reconcile();
       this.startVaultEngine();
-      return { ok: true };
+      return { ok: true, seeded };
     } catch (e) {
       this.enabled = false;
       return { ok: false, reason: e instanceof Error ? e.message : String(e) };

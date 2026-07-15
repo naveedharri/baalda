@@ -18,6 +18,7 @@ import {
 } from "../api";
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
+import { seedWelcomeContent } from "../vault/seed";
 
 export interface DocMapping {
   vaultId: string;
@@ -112,8 +113,14 @@ export class VaultRegistry {
   /**
    * Ensure the server knows this vault's folders + notes; adopt existing ids,
    * create missing rows, and persist the mapping. Idempotent.
+   *
+   * Returns `{ seeded }` — true only when this call wrote first-run starter
+   * content into a brand-new, empty workspace (so the caller can open it).
    */
-  async reconcile(input: ReconcileInput, tree: TreeNode): Promise<void> {
+  async reconcile(
+    input: ReconcileInput,
+    tree: TreeNode,
+  ): Promise<{ seeded: boolean }> {
     const cfg = await this.loadConfig();
 
     // 1. Ensure a server vault. Prefer the one recorded in config; verify it
@@ -139,7 +146,27 @@ export class VaultRegistry {
     }
     this.serverVaultId = vaultId;
 
-    const { folders, notes } = flattenTree(tree);
+    // 1b. First-run seeding. A brand-new workspace — nothing on the server AND
+    //     an empty local folder — gets welcome/starter content so the vault
+    //     isn't an empty void. We seed BEFORE flattening so the files register
+    //     as ordinary server docs in steps 2–4. Skipped when the server already
+    //     has notes (joining/rejoining a populated workspace) or the folder
+    //     already has content — those paths adopt/materialize instead.
+    const serverNotes = await this.api.listNotes(vaultId);
+    let workingTree = tree;
+    let seeded = false;
+    const localFlat = flattenTree(tree);
+    if (
+      serverNotes.length === 0 &&
+      localFlat.notes.length === 0 &&
+      localFlat.folders.length === 0
+    ) {
+      await seedWelcomeContent();
+      workingTree = await ipc.listTree();
+      seeded = true;
+    }
+
+    const { folders, notes } = flattenTree(workingTree);
 
     // 2. Folders: adopt by path, create missing (parents first).
     const serverFolders = await this.api.listFolders(vaultId);
@@ -164,8 +191,9 @@ export class VaultRegistry {
     }
     this.folderByPath = folderIdByPath;
 
-    // 3. Notes: adopt by relPath, create missing.
-    const serverNotes = await this.api.listNotes(vaultId);
+    // 3. Notes: adopt by relPath, create missing. (`serverNotes` was listed
+    //    above, before any seeding — still accurate, since seeding only writes
+    //    to disk; the seeded files are created on the server by this loop.)
     const docIdByPath = new Map<string, string>();
     for (const n of serverNotes) {
       const rp = noteRelPath(n);
@@ -222,6 +250,8 @@ export class VaultRegistry {
         console.warn("[registry] materialize failed", rp, e);
       }
     }
+
+    return { seeded };
   }
 
   /**

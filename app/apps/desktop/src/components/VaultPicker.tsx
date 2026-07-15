@@ -3,32 +3,32 @@ import { motion, useReducedMotion } from "motion/react";
 import type { VaultInfo } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
-import { BracketMark, Wordmark } from "./Logo";
+import { Wordmark } from "./Logo";
 
 // Springs tuned for small UI: snappy but soft-landing (no rubber-banding).
 const SPRING = { type: "spring", stiffness: 300, damping: 24 } as const;
-const SPRING_MARK = { type: "spring", stiffness: 320, damping: 15 } as const;
+const EASE_OUT = [0.16, 1, 0.3, 1] as const;
 
-/** Orchestrated entrance: the card rises, then its children cascade in. */
-const cardVariants = {
-  hidden: { opacity: 0, y: 22, scale: 0.985 },
+/** Splash entrance: the wordmark resolves out of a blur, rising and settling
+ *  in ~550ms. Everything else waits, then fades in quietly underneath. */
+const logoVariants = {
+  hidden: { opacity: 0, y: 20, scale: 0.92, filter: "blur(14px)" },
   show: {
     opacity: 1,
     y: 0,
     scale: 1,
-    transition: { ...SPRING, staggerChildren: 0.07, delayChildren: 0.12 },
+    filter: "blur(0px)",
+    transition: { duration: 0.55, ease: EASE_OUT },
   },
 };
 
-const itemVariants = {
-  hidden: { opacity: 0, y: 14 },
-  show: { opacity: 1, y: 0, transition: SPRING },
-};
-
-const markVariants = {
-  hidden: { opacity: 0, scale: 0.4, rotate: -10 },
-  show: { opacity: 1, scale: 1, rotate: 0, transition: SPRING_MARK },
-};
+// Delayed reveal for the actions + hint, after the logo has landed.
+const REVEAL_DELAY = 1.1;
+const revealTransition = (delay: number) => ({
+  delay,
+  duration: 0.7,
+  ease: EASE_OUT,
+});
 
 /** Slow ambient drift for one aurora blob; each gets its own phase. */
 function auroraDrift(dx: number, dy: number, duration: number) {
@@ -67,6 +67,8 @@ export function VaultPicker() {
     useStore.getState().setVault(vault);
     await useStore.getState().refreshTree();
     await useStore.getState().refreshTitles();
+    // A brand-new empty vault gets first-run welcome content.
+    await useStore.getState().seedLocalVaultIfEmpty();
   }
 
   async function pick() {
@@ -107,31 +109,24 @@ export function VaultPicker() {
         </div>
       )}
 
-      <motion.div
-        className="vault-picker-card"
-        variants={cardVariants}
-        initial={reduceMotion ? false : "hidden"}
-        animate="show"
-      >
-        <motion.div
-          className="vault-brand-mark"
-          variants={markVariants}
-          whileHover={reduceMotion ? undefined : { scale: 1.08, rotate: 3 }}
-          whileTap={reduceMotion ? undefined : { scale: 0.94, rotate: -3 }}
-          aria-hidden="true"
+      <div className="vault-picker-card">
+        <motion.h1
+          className="product-name"
+          variants={logoVariants}
+          initial={reduceMotion ? false : "hidden"}
+          animate="show"
+          whileHover={reduceMotion ? undefined : { scale: 1.02 }}
+          transition={SPRING}
         >
-          <BracketMark size={40} />
-        </motion.div>
-
-        <motion.h1 className="product-name" variants={itemVariants}>
           <Wordmark />
         </motion.h1>
-        <motion.p className="tagline" variants={itemVariants}>
-          Your notes are plain Markdown files on disk, synced, linked, and
-          shared with your team.
-        </motion.p>
 
-        <motion.div className="vault-actions" variants={itemVariants}>
+        <motion.div
+          className="vault-actions"
+          initial={reduceMotion ? false : { opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={reduceMotion ? undefined : revealTransition(REVEAL_DELAY)}
+        >
           <motion.button
             className="primary hero"
             disabled={busy}
@@ -161,10 +156,17 @@ export function VaultPicker() {
 
         {error && <p className="error">{error}</p>}
 
-        <motion.p className="hint" variants={itemVariants}>
+        <motion.p
+          className="hint"
+          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={
+            reduceMotion ? undefined : revealTransition(REVEAL_DELAY + 0.15)
+          }
+        >
           Choose any folder of <code>.md</code> files.
         </motion.p>
-      </motion.div>
+      </div>
     </div>
   );
 }
