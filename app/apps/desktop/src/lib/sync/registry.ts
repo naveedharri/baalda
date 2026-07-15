@@ -65,6 +65,8 @@ function parentDir(path: string): string {
 export class VaultRegistry {
   private serverVaultId: string | null = null;
   private byPath = new Map<string, DocMapping>();
+  /** Reverse of byPath: docId → relPath, for the vault sync engine (spec 05). */
+  private byDocId = new Map<string, string>();
   private folderByPath = new Map<string, string>();
 
   constructor(private readonly api: ApiClient) {}
@@ -76,6 +78,16 @@ export class VaultRegistry {
   /** Server doc mapping for a note's vault-relative path, if registered. */
   getMapping(relPath: string): DocMapping | null {
     return this.byPath.get(relPath) ?? null;
+  }
+
+  /** Vault-relative path for a docId, if mapped (reverse of getMapping). */
+  pathForDocId(docId: string): string | null {
+    return this.byDocId.get(docId) ?? null;
+  }
+
+  /** All mapped doc ids (for the vault sync engine's initial doc set). */
+  allDocIds(): string[] {
+    return [...this.byDocId.keys()];
   }
 
   /** Server folder id for a folder's vault-relative path, if registered. */
@@ -182,9 +194,11 @@ export class VaultRegistry {
 
     // 4. Build the in-memory map + persist config.
     this.byPath.clear();
+    this.byDocId.clear();
     const docs: Record<string, string> = {};
     for (const [rp, docId] of docIdByPath) {
       this.byPath.set(rp, { vaultId, docId });
+      this.byDocId.set(docId, rp);
       docs[rp] = docId;
     }
     const folderCfg: Record<string, string> = {};
@@ -228,6 +242,7 @@ export class VaultRegistry {
       });
       const mapping = { vaultId: this.serverVaultId, docId: noteDocId(created) };
       this.byPath.set(relPath, mapping);
+      this.byDocId.set(mapping.docId, relPath);
       const cfg = await this.loadConfig();
       cfg.docs = { ...(cfg.docs ?? {}), [relPath]: mapping.docId };
       cfg.serverVaultId = this.serverVaultId;
