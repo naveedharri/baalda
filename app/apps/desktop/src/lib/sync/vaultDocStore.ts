@@ -52,6 +52,9 @@ export class VaultDocStore implements DocUpdateSink {
   private readonly coldChains = new Map<string, Promise<void>>();
 
   private touchSeq = 0;
+  /** The currently-open note, if any: its own Hocuspocus provider syncs it, so
+   *  the background feed skips it to avoid two writers on one doc (spec 05 §3.4). */
+  private suppressed: string | null = null;
 
   constructor(opts: VaultDocStoreOptions) {
     this.io = opts.io ?? createTauriBridgeIO();
@@ -75,7 +78,14 @@ export class VaultDocStore implements DocUpdateSink {
     return [...this.recent].reverse(); // newest first
   }
 
+  /** Mark the open note (or null). Updates for it are handled by its editor's
+   *  Hocuspocus provider, so the background feed ignores them. */
+  setSuppressedDoc(docId: string | null): void {
+    this.suppressed = docId;
+  }
+
   async applyUpdate(docId: string, update: Uint8Array): Promise<void> {
+    if (docId === this.suppressed) return; // open note: its own provider owns it
     const entry = this.hot.get(docId);
     if (entry) {
       entry.bridge.applyRemote(update);

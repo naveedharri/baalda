@@ -21,6 +21,8 @@ import { AttachmentSync } from "./attachments";
 import { decideSeed } from "./startup";
 import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry } from "./registry";
+import { VaultDocStore } from "./vaultDocStore";
+import { VaultSyncEngine, type VaultSyncStatus } from "./vaultSyncEngine";
 
 /** Basename of a vault-relative path (for the upload's x-file-name hint). */
 function baseName(relPath: string): string {
@@ -44,6 +46,13 @@ export class SyncManager {
   private presence: { id: string; name: string } | null = null;
   private onStatus?: (status: SyncStatus) => void;
   private attachments: AttachmentSync | null = null;
+
+  // Vault-wide background sync (spec 05): the engine (one WS to /vault-sync)
+  // feeds the store, which keeps every authorized doc current on disk without
+  // opening it. Present only while sync is enabled.
+  private docStore: VaultDocStore | null = null;
+  private vaultEngine: VaultSyncEngine | null = null;
+  private onVaultStatus?: (status: VaultSyncStatus) => void;
 
   /** UI subscribes here to render the per-note sync indicator. */
   setStatusListener(cb: ((status: SyncStatus) => void) | undefined): void {
@@ -83,6 +92,7 @@ export class SyncManager {
       this.setupAttachments();
       // Initial attachment reconcile (fire-and-forget; errors are logged).
       void this.attachments?.reconcile();
+      this.startVaultEngine();
       return { ok: true };
     } catch (e) {
       this.enabled = false;
@@ -95,7 +105,38 @@ export class SyncManager {
     this.enabled = false;
     this.presence = null;
     this.attachments = null;
+    this.stopVaultEngine();
     this.closeCurrent();
+  }
+
+  /** UI subscribes here for the vault-wide background-sync indicator. */
+  setVaultStatusListener(cb: ((status: VaultSyncStatus) => void) | undefined): void {
+    this.onVaultStatus = cb;
+  }
+
+  /** Start the always-on background feed for the reconciled vault (spec 05). */
+  private startVaultEngine(): void {
+    const vaultId = this.registry.vaultId;
+    if (!vaultId) return;
+    this.stopVaultEngine();
+    const store = new VaultDocStore({
+      resolvePath: (docId) => this.registry.pathForDocId(docId),
+    });
+    this.docStore = store;
+    this.vaultEngine = new VaultSyncEngine({
+      api,
+      vaultId,
+      sink: store,
+      onStatus: (s) => this.onVaultStatus?.(s),
+    });
+    this.vaultEngine.start();
+  }
+
+  private stopVaultEngine(): void {
+    this.vaultEngine?.stop();
+    this.vaultEngine = null;
+    void this.docStore?.destroyAll();
+    this.docStore = null;
   }
 
   /**
@@ -137,11 +178,16 @@ export class SyncManager {
     const mapping = this.enabled ? this.registry.getMapping(relPath) : null;
     if (!mapping) {
       // Local-only: the bridge already seeded from disk on open.
+      this.docStore?.setSuppressedDoc(null);
       const awareness = new Awareness(bridge.doc);
       this.currentLocalAwareness = awareness;
       this.applyPresence(awareness);
       return { awareness, sync: null, readOnly: false, status: "offline" };
     }
+
+    // This doc's own provider will own its content sync + presence, so the
+    // background vault feed must skip it (no two writers on one Y.Doc).
+    this.docStore?.setSuppressedDoc(mapping.docId);
 
     const sync = new DocSync({
       api,
@@ -152,10 +198,25 @@ export class SyncManager {
     });
     this.current = sync;
 
-    // Pull-before-seed: wait for the initial server sync (resolves early offline
-    // via the whenSynced timeout), then seed only a genuine orphan. The bridge's
-    // `seedFromFileIfEmpty` re-checks emptiness + file content atomically, so the
-    // `decideSeed` call here documents/guards the ordering decision.
+    // INSTANT OPEN (spec 05 §1): we no longer BLOCK the editor on the initial
+    // server sync. Vault-wide background sync has almost always already brought
+    // this doc's CRDT current in local SQLite, so the bridge hydrated with real
+    // content and the editor renders it immediately. The pull-before-seed rule
+    // (spec 03 §5) still holds — we just run it off the critical path: wait for
+    // the provider's first sync, THEN seed only a genuine orphan.
+    void this.seedOrphanAfterSync(sync, bridge);
+
+    this.applyPresence(sync.awareness);
+    return {
+      awareness: sync.awareness,
+      sync,
+      readOnly: sync.readOnly,
+      status: sync.status,
+    };
+  }
+
+  /** Background half of pull-before-seed: never blocks the editor (spec 05 §1). */
+  private async seedOrphanAfterSync(sync: DocSync, bridge: NoteBridge): Promise<void> {
     await sync.whenSynced(5000);
     const decision = decideSeed({
       signedIn: true,
@@ -166,14 +227,6 @@ export class SyncManager {
     if (decision.action === "seed-from-file") {
       await bridge.seedFromFileIfEmpty();
     }
-
-    this.applyPresence(sync.awareness);
-    return {
-      awareness: sync.awareness,
-      sync,
-      readOnly: sync.readOnly,
-      status: sync.status,
-    };
   }
 
   currentSync(): DocSync | null {
@@ -189,6 +242,8 @@ export class SyncManager {
       this.currentLocalAwareness.destroy();
       this.currentLocalAwareness = null;
     }
+    // The note is no longer open — let the background feed resume syncing it.
+    this.docStore?.setSuppressedDoc(null);
   }
 
   private applyPresence(awareness: Awareness): void {
