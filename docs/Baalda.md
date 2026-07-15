@@ -85,6 +85,7 @@ round-trip lossless. Full detail: [[03-sync-engine]].
 | [[02-database-architecture]] | On-disk vault layout, local SQLite index schema, server Postgres + Yjs binary stores |
 | [[03-sync-engine]] | Yjs + Hocuspocus, the Yjs sync protocol, the file↔CRDT bridge algorithm + loop-avoidance |
 | [[04-team-collaboration]] | Better Auth org model, folder ACL, how permissions gate the sync engine, presence |
+| [[05-vault-sync-engine]] | Vault-wide always-on background sync; stateless relay + pluggable PubSub (Redis for HA); bridge tiering |
 
 ---
 

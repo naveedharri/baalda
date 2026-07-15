@@ -16,6 +16,12 @@ function int(name: string, fallback: number): number {
   return n;
 }
 
+/** An env var that may be absent; empty string is treated as unset. */
+function optional(name: string): string | undefined {
+  const v = process.env[name];
+  return v === undefined || v === "" ? undefined : v;
+}
+
 export const config = {
   databaseUrl: required(
     "DATABASE_URL",
@@ -29,6 +35,14 @@ export const config = {
   syncTokenTtlSeconds: int("SYNC_TOKEN_TTL_SECONDS", 600),
   compactionThreshold: int("COMPACTION_THRESHOLD", 50),
   invitationExpiresInSeconds: 48 * 60 * 60, // 48h per spec 04 §2
+  // ---- Vault sync engine (spec 05) ----
+  /** Redis connection string. Unset ⇒ in-memory pub/sub, single instance.
+   *  Set ⇒ Redis fanout so N server instances share the vault feed (HA). */
+  redisUrl: optional("REDIS_URL"),
+  /** Max docs backfilled concurrently to a freshly-connected vault subscriber. */
+  backfillConcurrency: int("BACKFILL_CONCURRENCY", 6),
+  /** WebSocket path for the vault replication channel. */
+  vaultSyncPath: required("VAULT_SYNC_PATH", "/vault-sync"),
 } as const;
 
 export type AppConfig = typeof config;
