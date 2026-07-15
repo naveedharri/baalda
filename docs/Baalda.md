@@ -95,6 +95,9 @@ Self-hosting and production deployment (Docker, Railway, env vars, the single-po
 topology) are covered in [[DEPLOY]]. The managed backend is live at `https://api.baalda.com`;
 the desktop app points at it (or at any self-hosted instance) via the server URL in Settings.
 
+Cutting a desktop release — the `v*` tag flow, updater vs. OS code signing, and the
+macOS notarization setup — is covered in [[RELEASE]].
+
 ---
 
 ## Status

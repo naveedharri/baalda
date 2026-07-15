@@ -70,6 +70,24 @@ jobs:
           # `tauri signer generate`; add both as repo Actions secrets.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple code signing + notarization (macOS only; ignored elsewhere).
+          # Until these secrets exist, macOS builds are ad-hoc signed and will
+          # trip Gatekeeper on download. To enable clean installs, add all six
+          # as repo Actions secrets (see docs/RELEASE.md → "macOS code signing"):
+          #   APPLE_CERTIFICATE            base64 of the exported Developer ID .p12
+          #   APPLE_CERTIFICATE_PASSWORD   password for that .p12
+          #   APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: Name (TEAMID)"
+          #   APPLE_ID                     Apple account email
+          #   APPLE_PASSWORD               app-specific password (not the account password)
+          #   APPLE_TEAM_ID                10-char team id
+          # tauri-action imports the cert into a temp keychain, signs with the
+          # hardened runtime, and notarizes automatically when these are present.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: app/apps/desktop
           tagName: v__VERSION__
