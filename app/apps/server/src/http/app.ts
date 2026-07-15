@@ -5,6 +5,7 @@ import { auth } from "../auth/auth.js";
 import { blobRoutes } from "./routes/blobs.js";
 import { registryRoutes } from "./routes/registry.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
+import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { graphRoutes } from "./routes/graph.js";
@@ -78,6 +79,7 @@ export function createApp(deps: AppDeps): Hono {
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
   app.route("/api", syncTokenRoutes);
+  app.route("/api", vaultTokenRoutes);
   app.route("/api", registryRoutes);
   app.route("/api", blobRoutes);
   app.route("/api", createShareRoutes(deps));
