@@ -18,5 +18,20 @@ services:
       timeout: 3s
       retries: 20
 
+  # Optional: only for multi-instance / HA vault sync (spec 05). Single-instance
+  # dev and self-host need nothing here. Start with: `docker compose --profile ha up`.
+  redis:
+    image: redis:7-alpine
+    container_name: context-redis
+    restart: unless-stopped
+    profiles: ["ha"]
+    ports:
+      - "6389:6379" # Host 6389 -> container 6379 (avoids clashing with a local Redis)
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   context_pgdata:
