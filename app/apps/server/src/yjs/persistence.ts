@@ -47,6 +47,61 @@ export async function loadDocState(
   }
 }
 
+/**
+ * Backfill diff for the vault channel (spec 05 §3.1). Rebuilds the doc, then
+ * returns only the ops the client is missing relative to `clientStateVector`
+ * (via `Y.encodeStateAsUpdate(doc, sv)`) plus the server's current state vector.
+ * When the client's vector already equals the server's, `upToDate` is true and
+ * the caller sends nothing — this is what makes an idle reconnect ~free.
+ *
+ * Returns null when the doc has no state at all (nothing to send).
+ */
+export interface DocDiff {
+  update: Uint8Array;
+  serverStateVector: Uint8Array;
+  upToDate: boolean;
+}
+
+export async function loadDocDiff(
+  docId: string,
+  clientStateVector: Uint8Array | null,
+  db: Queryable = defaultPool,
+): Promise<DocDiff | null> {
+  const snap = await db.query<{ snapshot: Buffer | null }>(
+    "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
+    [docId],
+  );
+  const updates = await db.query<{ update: Buffer }>(
+    "SELECT update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+    [docId],
+  );
+  const snapshotBuf = snap.rows[0]?.snapshot ?? null;
+  if (!snapshotBuf && updates.rows.length === 0) return null;
+
+  const doc = new Y.Doc();
+  try {
+    if (snapshotBuf) Y.applyUpdate(doc, new Uint8Array(snapshotBuf));
+    for (const row of updates.rows) {
+      Y.applyUpdate(doc, new Uint8Array(row.update));
+    }
+    const serverStateVector = Y.encodeStateVector(doc);
+    const upToDate =
+      clientStateVector != null && bytesEqual(clientStateVector, serverStateVector);
+    const update = upToDate
+      ? new Uint8Array(0)
+      : Y.encodeStateAsUpdate(doc, clientStateVector ?? undefined);
+    return { update, serverStateVector, upToDate };
+  } finally {
+    doc.destroy();
+  }
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 /** Append one incremental update to the log, then compact if the log is long. */
 export async function appendUpdate(
   docId: string,

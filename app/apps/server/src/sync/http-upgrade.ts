@@ -20,13 +20,18 @@ import type { SyncContext } from "./hocuspocus.js";
 export function attachSyncUpgrade(
   httpServer: HttpServer,
   sync: HocuspocusServer<SyncContext>,
+  // Paths owned by OTHER upgrade handlers on the same server (e.g. the vault
+  // replication channel at /vault-sync, spec 05). We leave those alone instead
+  // of destroying the socket, so multiple channels can share one http.Server.
+  reservedPaths: string[] = [],
 ): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true });
+  const reserved = new Set(reservedPaths.flatMap((p) => [p, `${p}/`]));
 
   httpServer.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => {
     const { pathname } = new URL(request.url ?? "/", "http://localhost");
     if (pathname !== "/sync" && pathname !== "/sync/") {
-      socket.destroy();
+      if (!reserved.has(pathname)) socket.destroy(); // truly-unknown path
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) => {

@@ -27,8 +27,20 @@ export interface SyncContext {
   readOnly: boolean;
 }
 
+/**
+ * Notified after each persisted doc change so the vault replication channel
+ * (spec 05) can fan the update out to background subscribers. Best-effort: the
+ * open-note (Hocuspocus) path never blocks or fails on it.
+ */
+export type DocChangedHook = (
+  vaultId: string,
+  docId: string,
+  update: Uint8Array,
+) => void;
+
 export function createSyncServer(
   port: number = config.hocuspocusPort,
+  onDocChanged?: DocChangedHook,
 ): Server<SyncContext> {
   return new Server<SyncContext>({
     name: "context-sync",
@@ -86,6 +98,16 @@ export function createSyncServer(
       // Also covers lazy indexing: a doc missing from note_index gets a row on
       // its next store.
       scheduleIndex(parsed.docId);
+      // Fan the incremental update out to vault-channel subscribers (spec 05).
+      // The `update` is the exact delta this connection applied — replay it to
+      // background clients so their disk stays current without opening the note.
+      if (onDocChanged) {
+        try {
+          onDocChanged(parsed.vaultId, parsed.docId, data.update);
+        } catch (err) {
+          console.error("onDocChanged hook failed:", err);
+        }
+      }
     },
   });
 }

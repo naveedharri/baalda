@@ -18,6 +18,9 @@ import { getSession } from "../session.js";
 export interface ShareDeps {
   /** Force-close live sync sockets for a doc (instant revocation). */
   disconnectDoc: (vaultId: string, docId: string) => void;
+  /** Notify the vault channel that shares changed so subscribers re-evaluate
+   *  their readable-doc set (spec 05 §3.1). Optional; no-op if unset. */
+  onAclChanged?: (vaultId: string) => void;
 }
 
 export function createShareRoutes(deps: ShareDeps): Hono {
@@ -27,7 +30,13 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     userId: string,
     resourceType: "folder" | "file",
     resourceId: string,
-  ): Promise<{ ok: boolean; organizationId?: string; status?: number; error?: string }> {
+  ): Promise<{
+    ok: boolean;
+    organizationId?: string;
+    vaultId?: string;
+    status?: number;
+    error?: string;
+  }> {
     const info = await resolveResource(resourceType, resourceId);
     if (!info) return { ok: false, status: 404, error: "Unknown resource" };
     const role = await orgRole(info.organizationId, userId);
@@ -36,7 +45,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     if (!isAdmin && !isCreator) {
       return { ok: false, status: 403, error: "Not allowed to manage shares here" };
     }
-    return { ok: true, organizationId: info.organizationId };
+    return { ok: true, organizationId: info.organizationId, vaultId: info.vaultId };
   }
 
   // Create or update a share (upsert on the unique resource+principal key).
@@ -108,6 +117,9 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         deps.disconnectDoc(d.vaultId, d.docId);
       }
     }
+
+    // A new grant can expand a user's readable set — tell background subscribers.
+    if (gate.vaultId) deps.onAclChanged?.(gate.vaultId);
 
     return c.json(
       { id: rows[0].id, resourceType, resourceId, principalType, principalId, permission },
@@ -191,6 +203,9 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     for (const d of docs) {
       deps.disconnectDoc(d.vaultId, d.docId);
     }
+    // Revoking a grant can shrink a user's readable set — background subscribers
+    // re-evaluate and drop the now-inaccessible docs.
+    if (gate.vaultId) deps.onAclChanged?.(gate.vaultId);
     return c.json({ revoked: shareId, disconnectedDocs: docs.length });
   });
 
