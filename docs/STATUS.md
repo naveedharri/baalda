@@ -15,6 +15,10 @@ tags: [baalda, status, roadmap]
 - **Build:** 🟢 Phases 0–3 complete. Server (auth + ACL + sync + attachment blob store)
   and desktop (bridge + auth + per-doc sync + presence + sharing UI + attachment sync)
   are wired end-to-end and tested.
+- **Deployment:** 🟢 Production-ready (2026-07-15). The sync WebSocket is served on the HTTP
+  port at `/sync` (single-port topology), and the repo ships a Dockerfile, `railway.json`
+  (pre-deploy migrations + healthcheck), and [[DEPLOY]]. The managed backend is live at
+  `https://api.baalda.com`; desktop releases ship via `v*` tags → GitHub Releases → Tauri updater.
 - **Next action:** Phase 4 polish / launch decisions (WYSIWYG, vector search, OAuth, iOS).
 
 > **Requirement coverage:** Phases 0–3 deliver **10 of the 12** core requirements,

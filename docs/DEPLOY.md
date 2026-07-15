@@ -4,8 +4,8 @@ The server (`app/apps/server`) is a self-hostable Node + Postgres service: a Hon
 HTTP API and the Hocuspocus sync WebSocket, both served on a single public port.
 This guide covers running it with plain Docker and deploying it to Railway.
 Everything here is optional. The desktop app works fully offline with no server
-at all, and you can always point it at [baalda.com](https://baalda.com) instead
-of self-hosting.
+at all, and you can always use the managed backend from [baalda.com](https://baalda.com)
+instead of self-hosting: set the server URL in Settings to `https://api.baalda.com`.
 
 ## Ports
 

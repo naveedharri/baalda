@@ -88,6 +88,14 @@ round-trip lossless. Full detail: [[03-sync-engine]].
 
 ---
 
+## Deployment
+
+Self-hosting and production deployment (Docker, Railway, env vars, the single-port `/sync`
+topology) are covered in [[DEPLOY]]. The managed backend is live at `https://api.baalda.com`;
+the desktop app points at it (or at any self-hosted instance) via the server URL in Settings.
+
+---
+
 ## Status
 
 See [[STATUS]] for the live build checklist.

@@ -18,8 +18,9 @@ Three pieces; this open-source repo holds the first two.
   drafts a GitHub Release with `latest.json`; publishing the draft is what makes running apps
   see the update (Tauri updater polls `releases/latest`).
 - **Backend server** (`app/apps/server`) — open source and self-hostable (Node + Postgres).
-  The managed option runs this **same server code**; users choose an instance via the server
-  URL in Settings. There is no separate "managed edition" of the server.
+  The managed option runs this **same server code**, publicly reachable at
+  `https://api.baalda.com`; users choose an instance via the server URL in Settings. There is
+  no separate "managed edition" of the server. Self-host/deploy guide: `docs/DEPLOY.md`.
 - **Website + managed service** — a separate **private** repo (`baalda-web`), the marketing and
   managed-service site at [baalda.com](https://baalda.com). The README links baalda.com as the
   managed option, and that is the only mention this repo gets.

@@ -123,7 +123,7 @@ cd apps/server
 cp .env.example .env      # adjust JWT_SECRET for anything real
 npm run db:up             # start Postgres in Docker (host port 5439)
 npm run migrate           # create the database schema
-npm run dev               # HTTP API :3010 · sync WS :3011
+npm run dev               # HTTP API :3010 · sync WS :3011 (also served at :3010/sync)
 ```
 
 ### 3. Start the desktop app
@@ -141,7 +141,8 @@ Open a folder of Markdown files (or create a new one) and start writing.
 Everything above is self-hosted and free. If you'd rather skip the backend ops,
 [baalda.com](https://baalda.com) offers a managed backend for multi-device sync,
 real-time team collaboration, and hosted AI. The desktop app is identical either
-way: point it at our server or your own via the server URL in Settings.
+way: in Settings, set the server URL to `https://api.baalda.com` (managed) or to
+your own instance.
 
 Want to run the server yourself in Docker or on Railway instead of your laptop?
 See [`docs/DEPLOY.md`](docs/DEPLOY.md).
@@ -165,6 +166,9 @@ For **cloud and autonomous agents** that can't reach your disk, Baalda exposes a
 claude mcp add --transport http context http://localhost:3010/api/mcp \
   --header "Authorization: Bearer mcp_…"
 ```
+
+(On the managed service the endpoint is `https://api.baalda.com/api/mcp`; for a
+self-hosted server, use your server URL plus `/api/mcp`.)
 
 The AI can now `read_note`, `search_notes`, `create_note`, `update_note`, and more. Its writes flow through the same sync engine, so if the note is open you'll watch the AI type in real time.
 
