@@ -127,6 +127,12 @@ export interface SyncTokenResponse {
   permission: Permission;
 }
 
+/** Vault-scoped token for the background replication channel (spec 05 §7). */
+export interface VaultSyncTokenResponse {
+  token: string;
+  vaultId: string;
+}
+
 /** A rejected server response — carries the HTTP status for callers to branch on. */
 export class ApiError extends Error {
   constructor(
@@ -526,6 +532,17 @@ export class ApiClient {
     const { data } = await this.request<SyncTokenResponse>("POST", "/api/sync-token", {
       body: { docId },
     });
+    return data;
+  }
+
+  /** Mint a vault-scoped token for the background replication channel (spec 05).
+   *  Throws ApiError(403) when the user isn't a member of the vault's workspace. */
+  async vaultSyncToken(vaultId: string): Promise<VaultSyncTokenResponse> {
+    const { data } = await this.request<VaultSyncTokenResponse>(
+      "POST",
+      "/api/vault-sync-token",
+      { body: { vaultId } },
+    );
     return data;
   }
 
