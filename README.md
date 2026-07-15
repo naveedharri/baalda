@@ -59,6 +59,21 @@ We scanned **41** open-source Obsidian-like apps against **12 core requirements*
 
 ---
 
+## Built to scale
+
+Baalda is built to grow with you, from a personal vault to a whole company:
+
+| | |
+|---|---|
+| 📚 **Millions of notes** | a workspace keeps growing without slowing down |
+| 👥 **Thousands of teammates online** | connected and kept in sync at the same time |
+| ✍️ **Hundreds editing together** | people writing in the same space, live |
+| ⚡ **Instant open** | notes are already up to date before you click, no waiting |
+
+Need more? It scales out to handle **tens of thousands** of people at once.
+
+---
+
 ## How it works
 
 The core idea in one sentence: **the `.md` file on disk is the durable source of truth, and a live CRDT keeps every open copy in sync.**

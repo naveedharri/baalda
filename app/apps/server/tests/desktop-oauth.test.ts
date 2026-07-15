@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { googleEnabled } from "../src/auth/auth.js";
 import { desktopOauthRoutes } from "../src/http/routes/desktop-oauth.js";
 import {
   __clearDesktopCodes,
@@ -85,12 +86,13 @@ describe("desktop-oauth routes", () => {
     expect(res.status).toBe(400);
   });
 
-  it("reports available auth methods (google off without creds)", async () => {
+  it("reports available auth methods (google gated on server config)", async () => {
     const res = await app.request("/api/auth-methods");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { emailPassword: boolean; google: boolean };
     expect(body.emailPassword).toBe(true);
-    // The test env sets no GOOGLE_CLIENT_ID/SECRET.
-    expect(body.google).toBe(false);
+    // google mirrors the server's config (creds present ⇒ true), not a fixed
+    // value — so this holds whether or not the dev .env sets GOOGLE_CLIENT_ID.
+    expect(body.google).toBe(googleEnabled);
   });
 });
