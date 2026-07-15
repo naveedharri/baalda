@@ -5,6 +5,7 @@ import { verifySyncToken } from "../tokens/sync-token.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
 import { scheduleIndex } from "../index/indexer.js";
 import { formatDocName, parseDocName } from "./doc-name.js";
+import { redisExtensions } from "./redis-extension.js";
 
 /**
  * Hocuspocus sync server (spec 03 §3, 04 §4).
@@ -46,6 +47,9 @@ export function createSyncServer(
     name: "context-sync",
     port,
     quiet: true,
+    // HA: mirror doc updates + awareness across instances when REDIS_URL is set
+    // (spec 05 §5). Empty (single-instance) otherwise — no behaviour change.
+    extensions: redisExtensions(config.redisUrl),
 
     async onAuthenticate(data) {
       const parsed = parseDocName(data.documentName);
