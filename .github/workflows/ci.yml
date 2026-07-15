@@ -1,0 +1,58 @@
+name: ci
+
+# Runs the full test suite on every push and PR so the vault sync engine
+# (spec 05) and the rest of the app stay verified. Desktop TS tests are pure
+# Node; server tests run against a throwaway Postgres service and migrate
+# themselves via the test harness (resetDb → runMigrations).
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: context
+          POSTGRES_PASSWORD: context
+          POSTGRES_DB: context
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U context -d context"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # Point the server + its tests at the CI Postgres service.
+      DATABASE_URL: postgres://context:context@localhost:5432/context
+      JWT_SECRET: ci-only-insecure-secret-not-used-in-prod-32bytes
+      BETTER_AUTH_URL: http://localhost:3010
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Apply migrations
+        run: npm run migrate --workspace=server
+
+      # Runs both workspaces' vitest suites (server + desktop) via the root
+      # `test` script. Server suites run serially against the shared Postgres.
+      - name: Test
+        run: npm test
