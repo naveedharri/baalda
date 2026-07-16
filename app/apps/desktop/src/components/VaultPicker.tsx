@@ -22,6 +22,10 @@ const logoVariants = {
   },
 };
 
+// How many recent vaults to show before the "View more" affordance, and how
+// many more each click reveals.
+const RECENTS_STEP = 2;
+
 // Delayed reveal for the actions + hint, after the logo has landed.
 const REVEAL_DELAY = 1.1;
 const revealTransition = (delay: number) => ({
@@ -66,6 +70,7 @@ export function VaultPicker() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<RecentVault[]>([]);
+  const [recentLimit, setRecentLimit] = useState(RECENTS_STEP);
   // New-vault flow: null = idle; a string = chosen parent, awaiting a name.
   const [newParent, setNewParent] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
@@ -294,7 +299,7 @@ export function VaultPicker() {
             }
           >
             <p className="recent-heading">Recent vaults</p>
-            {recents.map((r) => (
+            {recents.slice(0, recentLimit).map((r) => (
               <div className="recent-card" key={r.path}>
                 <button
                   className="recent-open"
@@ -319,6 +324,15 @@ export function VaultPicker() {
                 </button>
               </div>
             ))}
+            {recents.length > recentLimit && (
+              <button
+                className="recent-more"
+                disabled={busy}
+                onClick={() => setRecentLimit((n) => n + RECENTS_STEP)}
+              >
+                View more ({recents.length - recentLimit})
+              </button>
+            )}
           </motion.div>
         )}
 

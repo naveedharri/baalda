@@ -128,7 +128,10 @@ interface AppStore {
   // Workspace actions
   refreshWorkspace: () => Promise<void>;
   createOrganization: (name: string) => Promise<void>;
-  setActiveOrganization: (organizationId: string) => Promise<void>;
+  setActiveOrganization: (
+    organizationId: string,
+    opts?: { autoCreateFolder?: boolean },
+  ) => Promise<void>;
   inviteMember: (email: string, role: "member" | "admin") => Promise<void>;
   acceptInvitation: (invitationId: string) => Promise<void>;
   joinWorkspace: (code: string) => Promise<void>;
@@ -547,12 +550,15 @@ export const useStore = create<AppStore>((set, get) => ({
     const org = await createWithUniqueSlug(name, (input) =>
       authManager.api.createOrganization(input),
     );
-    // Route through the switch path so a brand-new workspace prompts for its
-    // own folder instead of adopting whatever folder is currently open.
-    await get().setActiveOrganization(org.id);
+    // A brand-new workspace has an obvious home: a fresh folder named after it
+    // under the managed root. Auto-create it (no prompt) rather than asking —
+    // the name and default location are both already known. Switching to or
+    // joining a pre-existing workspace still prompts, since those may want to
+    // point at an existing folder on this device.
+    await get().setActiveOrganization(org.id, { autoCreateFolder: true });
   },
 
-  setActiveOrganization: async (organizationId) => {
+  setActiveOrganization: async (organizationId, opts) => {
     const previousOrgId = get().session?.activeOrganizationId ?? null;
 
     // Re-assert that the workspace we're leaving solely owns its open folder,
@@ -592,11 +598,22 @@ export const useStore = create<AppStore>((set, get) => ({
       return;
     }
     const org = get().organizations.find((o) => o.id === organizationId);
+    const orgName = org?.name ?? "New workspace";
+
+    // Freshly created workspaces skip the prompt: create a folder named after
+    // the workspace under the managed root and open it straight away.
+    if (opts?.autoCreateFolder) {
+      const root = await ipc.getWorkspaceRoot();
+      const slug = uniqueFolderSlug(orgName, readOrgVaults());
+      await get().applyWorkspaceFolder(organizationId, `${root}/${slug}`);
+      return;
+    }
+
     set({
       syncEnabled: false,
       pendingWorkspaceFolder: {
         orgId: organizationId,
-        orgName: org?.name ?? "New workspace",
+        orgName,
         previousOrgId: previousOrgId === organizationId ? null : previousOrgId,
       },
     });

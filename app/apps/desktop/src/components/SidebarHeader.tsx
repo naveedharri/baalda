@@ -2,6 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 
+/** Collapse the home prefix for display, dropping the leading "~":
+ *  /Users/x/Documents/Notes → /Documents/Notes. */
+function tidyPath(path: string): string {
+  const m = path.match(/^(\/Users\/[^/]+|\/home\/[^/]+|C:\\Users\\[^\\]+)(.*)$/);
+  return m ? m[2] : path;
+}
+
 const FOLDER_ICON = (
   <svg
     viewBox="0 0 24 24"
@@ -120,7 +127,7 @@ export function SidebarHeader() {
       <div className="vault-line">
         {FOLDER_ICON}
         <span className="vault-line-name" title={vault.path}>
-          {vault.name}
+          {tidyPath(vault.path)}
         </span>
       </div>
 

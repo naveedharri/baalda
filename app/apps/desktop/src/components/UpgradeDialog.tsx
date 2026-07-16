@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { type BillingPlan } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import * as ipc from "../lib/ipc";
@@ -129,7 +130,12 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
     if (!done) setPhase("timeout");
   };
 
-  return (
+  // Portal to <body>: the settings panel (.settings-content) keeps a persistent
+  // transform (rise-in animation with fill-mode: both), which makes it the
+  // containing block for position:fixed descendants — that would clip our
+  // backdrop to the panel. Rendering at the body level lets the full-viewport
+  // backdrop center the dialog with breathing room on all sides.
+  return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal upgrade-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
@@ -262,6 +268,7 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

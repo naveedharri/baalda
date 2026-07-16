@@ -213,10 +213,19 @@ button.primary.hero:hover:not(:disabled) {
    ============================================================ */
 .vault-picker {
   position: relative;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* Anchor from a fixed offset rather than centering the whole card —
+     otherwise a growing Recent-vaults list re-centers everything and shoves
+     the wordmark around. The offset places the hero + actions near the middle
+     of the window; the list simply flows/scrolls below them without moving
+     them. */
+  justify-content: flex-start;
+  padding-top: clamp(120px, 26vh, 320px);
   height: 100%;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background:
     radial-gradient(900px 460px at 50% -8%, var(--accent-soft) 0%, transparent 62%),
     var(--bg-app);
@@ -274,7 +283,9 @@ button.primary.hero:hover:not(:disabled) {
   position: relative;
   z-index: 1;
   text-align: center;
-  padding: var(--sp-10) 0;
+  /* Top offset is owned by .vault-picker (padding-top) so the hero stays put;
+     keep only bottom breathing room here for when the list scrolls. */
+  padding: 0 0 var(--sp-10);
   width: 100%;
   background: transparent;
   border: none;
@@ -414,7 +425,8 @@ button.primary.hero:hover:not(:disabled) {
   flex-direction: column;
   gap: var(--sp-1);
   width: min(420px, 84vw);
-  margin: var(--sp-6) auto 0;
+  /* Extra top gap pushes the recents clear of the centered hero + actions. */
+  margin: clamp(40px, 7vh, 88px) auto 0;
   text-align: left;
 }
 .recent-heading {
@@ -424,6 +436,26 @@ button.primary.hero:hover:not(:disabled) {
   letter-spacing: 0.06em;
   color: var(--text-tertiary);
   margin: 0 0 var(--sp-1) var(--sp-1);
+}
+/* "View more" — quiet full-width row that reveals additional recents. */
+.recent-more {
+  margin-top: var(--sp-1);
+  padding: var(--sp-2);
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.recent-more:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.recent-more:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 .recent-card {
   display: flex;
@@ -568,11 +600,16 @@ button.primary.hero:hover:not(:disabled) {
   font-size: var(--fs-sm);
 }
 .vault-line svg {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
   flex-shrink: 0;
+  /* The drawn folder sits a touch below its viewBox center; nudge up so it
+     optically lines up with the path text (and the high-sitting "~" glyph). */
+  transform: translateY(-0.5px);
 }
 .vault-line-name {
+  font-size: 10px;
+  line-height: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
