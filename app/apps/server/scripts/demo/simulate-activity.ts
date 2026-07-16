@@ -35,6 +35,34 @@ const SPREAD_ALL = process.env.DEMO_SPREAD_ALL === "1";
 const CROWD = process.env.DEMO_CROWD === "1";
 const CROWD_N = Number(process.env.DEMO_CROWD_N ?? "10");
 const CROWD_FILE = process.env.DEMO_CROWD_FILE ?? "";
+/** DEMO_USERS=N → simulate N users (beyond the real members, synth identities
+ *  fill the rest). Awareness identity is client-supplied, so no DB rows needed. */
+const USERS = Number(process.env.DEMO_USERS ?? "0");
+
+const FIRST_NAMES = [
+  "Alex", "Sam", "Jordan", "Taylor", "Casey", "Riley", "Morgan", "Jamie", "Avery",
+  "Quinn", "Skyler", "Rowan", "Devon", "Harper", "Reese", "Emerson", "Finley", "Sasha",
+  "Noa", "Kai", "Luca", "Mira", "Ravi", "Ines", "Bo", "Zara", "Theo", "Wren", "Ida", "Omar",
+];
+const LAST_INITIALS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+
+/** Deterministic-ish synthetic display name for simulated user #i. */
+function syntheticName(i: number): string {
+  const first = FIRST_NAMES[i % FIRST_NAMES.length];
+  const last = LAST_INITIALS[Math.floor(i / FIRST_NAMES.length) % LAST_INITIALS.length];
+  return `${first} ${last}.`;
+}
+
+/** Grow the member list to `USERS` with awareness-only synthetic identities. */
+function scaleUsers(members: Member[]): Member[] {
+  if (USERS <= members.length) return members;
+  const out = [...members];
+  for (let i = members.length; i < USERS; i++) {
+    const id = `sim-user-${i}`;
+    out.push({ id, name: syntheticName(i), email: `${id}@sim.local` });
+  }
+  return out;
+}
 
 interface Member {
   id: string;
@@ -172,7 +200,10 @@ async function makeClient(
     client.synced = true;
     if (!autoTick) return; // crowd/compose mode drives edits via the conductor
     client.pos = Math.floor(client.rand() * Math.max(1, doc.getText("content").length));
-    client.timer = setInterval(() => tick(client), 1000 + Math.floor(client.rand() * 900));
+    // Slow the per-client chatter as the fleet grows so we don't flood the
+    // server: a periodic cursor set also keeps the peer's presence alive.
+    const base = USERS > 200 ? 6000 : USERS > 60 ? 3000 : 1000;
+    client.timer = setInterval(() => tick(client), base + Math.floor(client.rand() * base));
   });
 }
 
@@ -303,8 +334,12 @@ async function shutdown(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const { vaultId, members, notes } = await loadWorld();
-  if (members.length === 0) throw new Error("No members to simulate (all skipped?).");
+  const { vaultId, members: realMembers, notes } = await loadWorld();
+  if (realMembers.length === 0) throw new Error("No members to simulate (all skipped?).");
+  const members = scaleUsers(realMembers);
+  if (members.length > realMembers.length) {
+    console.log(`\n👥  Scaling to ${members.length} users (${members.length - realMembers.length} synthetic).`);
+  }
 
   // ---- Crowd mode: N teammates collaboratively write one file, in sequence ----
   if (CROWD) {
@@ -364,15 +399,18 @@ async function main(): Promise<void> {
     if (hot.length > 20) console.log(`   … and ${hot.length - 20} more`);
   }
 
-  // Open connections with a small stagger to avoid a thundering herd.
+  // Open connections with a small stagger to avoid a thundering herd (tighter
+  // as the fleet grows so 1000 users don't take forever to connect).
+  const stagger = opens.length > 200 ? 6 : opens.length > 60 ? 20 : 40;
   let seed = 1;
   for (const { member, note } of opens) {
     if (stopping) break;
     await makeClient(vaultId, member, note, seed++);
-    await new Promise((r) => setTimeout(r, 40));
+    if (seed % 100 === 0) console.log(`   … ${seed}/${opens.length} connected`);
+    await new Promise((r) => setTimeout(r, stagger));
   }
 
-  console.log("\n   (Ctrl-C to stop.)\n");
+  console.log(`\n   ${opens.length} teammates live. (Ctrl-C to stop.)\n`);
 }
 
 process.on("SIGINT", () => void shutdown());
