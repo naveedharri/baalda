@@ -265,6 +265,15 @@ pub async fn create_vault(
     open_vault_inner(&app, &state, dir)
 }
 
+/// Report whether a folder already looks like a vault (has our `.context/` index
+/// or contains markdown notes). The vault picker calls this after "New vault"
+/// picks a parent, so it can offer to *open* an existing vault instead of
+/// nesting a new empty one inside it.
+#[tauri::command]
+pub fn is_vault(path: String) -> AppResult<bool> {
+    Ok(crate::vault::is_vault(std::path::Path::new(&path)))
+}
+
 /// The configured sync server base URL, if the user has set one.
 #[tauri::command]
 pub fn get_server_url(app: AppHandle) -> AppResult<Option<String>> {

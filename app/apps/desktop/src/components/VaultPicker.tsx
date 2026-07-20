@@ -69,6 +69,9 @@ export function VaultPicker() {
   // New-vault flow: null = idle; a string = chosen parent, awaiting a name.
   const [newParent, setNewParent] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  // When "New vault" lands on a folder that's already a vault, hold its path so
+  // we can offer to open it instead of nesting a new empty vault inside it.
+  const [alreadyVault, setAlreadyVault] = useState<string | null>(null);
   const reduceMotion = useReducedMotion();
 
   // Surface recently opened vaults as one-tap "reopen" affordances.
@@ -110,17 +113,51 @@ export function VaultPicker() {
     }
   }
 
-  // "New vault" step 1: choose the parent location, then ask for a name.
+  // "New vault" step 1: choose the parent location, then ask for a name. If the
+  // chosen folder is ALREADY a vault, don't nest a new empty vault inside it —
+  // offer to open the existing one instead.
   async function startNewVault() {
     setError(null);
     try {
       const parent = await ipc.pickFolder();
       if (!parent) return;
+      if (await ipc.isVault(parent)) {
+        setAlreadyVault(parent);
+        return;
+      }
       setNewParent(parent);
       setNewName("Untitled Vault");
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  // The picked folder is already a vault → open it directly.
+  async function openDetectedVault() {
+    if (!alreadyVault) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const info = await ipc.openVault(alreadyVault);
+      await openVault(info);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // User insists on creating a fresh vault inside the existing one anyway.
+  function createInsideAnyway() {
+    if (!alreadyVault) return;
+    setNewParent(alreadyVault);
+    setNewName("Untitled Vault");
+    setAlreadyVault(null);
+  }
+
+  function cancelAlreadyVault() {
+    setAlreadyVault(null);
+    setError(null);
   }
 
   // "New vault" step 2: create <parent>/<name> and open it.
@@ -167,6 +204,10 @@ export function VaultPicker() {
   }
 
   const naming = newParent !== null;
+  const deciding = alreadyVault !== null;
+  // Whether either multi-step flow (naming a new vault, or deciding what to do
+  // with an already-a-vault folder) is showing — hides the recents/hint.
+  const inFlow = naming || deciding;
 
   return (
     <div className="vault-picker">
@@ -198,7 +239,49 @@ export function VaultPicker() {
           transition={reduceMotion ? undefined : revealTransition(REVEAL_DELAY)}
         >
           <AnimatePresence mode="wait" initial={false}>
-            {naming ? (
+            {deciding ? (
+              // ---- Picked folder is already a vault: open vs nest ----
+              <motion.div
+                key="already"
+                className="new-vault-form"
+                initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
+                transition={SPRING}
+              >
+                <label className="new-vault-label">This folder is already a vault</label>
+                <p className="new-vault-loc" title={alreadyVault ?? undefined}>
+                  <code>{tidyPath(alreadyVault ?? "")}</code> already contains notes — open
+                  it instead of creating a new vault inside?
+                </p>
+                <div className="new-vault-buttons">
+                  <button
+                    type="button"
+                    className="ghost-pill"
+                    disabled={busy}
+                    onClick={cancelAlreadyVault}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-pill"
+                    disabled={busy}
+                    onClick={createInsideAnyway}
+                  >
+                    Create inside
+                  </button>
+                  <button
+                    type="button"
+                    className="primary sm"
+                    disabled={busy}
+                    onClick={() => void openDetectedVault()}
+                  >
+                    {busy ? "Opening…" : "Open vault"}
+                  </button>
+                </div>
+              </motion.div>
+            ) : naming ? (
               // ---- New-vault naming step ----
               <motion.form
                 key="naming"
@@ -284,7 +367,7 @@ export function VaultPicker() {
 
         {error && <p className="error">{error}</p>}
 
-        {!naming && recents.length > 0 && (
+        {!inFlow && recents.length > 0 && (
           <motion.div
             className="recent-list"
             initial={reduceMotion ? false : { opacity: 0, y: 8 }}
@@ -322,7 +405,7 @@ export function VaultPicker() {
           </motion.div>
         )}
 
-        {!naming && (
+        {!inFlow && (
           <motion.p
             className="hint"
             initial={reduceMotion ? false : { opacity: 0, y: 8 }}

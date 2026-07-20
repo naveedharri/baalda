@@ -43,6 +43,33 @@ pub fn is_allowed_file(name: &str) -> bool {
     }
 }
 
+/// True if `dir` already looks like a vault: it has our `.context/` index, or it
+/// directly contains at least one markdown note. The vault picker uses this to
+/// offer "open it instead" rather than silently creating a nested empty vault
+/// inside a folder the user already uses as a vault.
+pub fn is_vault(dir: &Path) -> bool {
+    if dir.join(".context").is_dir() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    const NOTE_EXTS: &[&str] = &["md", "markdown", "mdx"];
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some((stem, ext)) = name.rsplit_once('.') {
+            if !stem.is_empty() && NOTE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// True if any component of a vault-relative path is an ignored dir/dotfile.
 pub fn rel_path_is_ignored(rel: &str) -> bool {
     rel.split('/').any(|seg| !seg.is_empty() && is_ignored_name(seg))
@@ -168,5 +195,28 @@ mod tests {
     fn rel_from_abs_uses_forward_slashes() {
         let rel = rel_from_abs(&vault(), Path::new("/tmp/vault/a/b.md")).unwrap();
         assert_eq!(rel, "a/b.md");
+    }
+
+    #[test]
+    fn is_vault_detects_context_dir_and_notes() {
+        // Empty folder → not a vault.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(!is_vault(empty.path()));
+
+        // Folder with a .context/ index → a vault.
+        let indexed = tempfile::tempdir().unwrap();
+        std::fs::create_dir(indexed.path().join(".context")).unwrap();
+        assert!(is_vault(indexed.path()));
+
+        // Folder with a markdown note → a vault.
+        let noted = tempfile::tempdir().unwrap();
+        std::fs::write(noted.path().join("Welcome.md"), "# hi").unwrap();
+        assert!(is_vault(noted.path()));
+
+        // Folder with only non-note files (images/pdf/junk) → not a vault.
+        let assets = tempfile::tempdir().unwrap();
+        std::fs::write(assets.path().join("photo.png"), b"x").unwrap();
+        std::fs::write(assets.path().join("report.pdf"), b"x").unwrap();
+        assert!(!is_vault(assets.path()));
     }
 }

@@ -110,6 +110,9 @@ export const removeRecentVault = (path: string) =>
 export const createVault = (parent: string, name: string) =>
   invoke<VaultInfo>("create_vault", { parent, name });
 
+/** True if a folder already looks like a vault (has `.context/` or `.md` notes). */
+export const isVault = (path: string) => invoke<boolean>("is_vault", { path });
+
 // ---- Workspace root + `current` pointer (per-workspace folders) ------------
 // The app manages one root dir; each workspace gets a subfolder, and the active
 // workspace's folder is mirrored to `<root>/current` for external tools.
