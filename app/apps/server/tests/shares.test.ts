@@ -98,4 +98,72 @@ describe("POST /shares — realtime read-only enforcement", () => {
     expect(res.status).toBe(201);
     expect(disconnected).toContainEqual({ vaultId: vault, docId });
   });
+
+  // Issue #5: an Everyone/org lock subsumes per-user locks on the same resource.
+  async function lockRows(type: "org" | "user") {
+    const { rows } = await pool.query<{ n: string }>(
+      `SELECT count(*) AS n FROM shares
+        WHERE resource_type = 'file' AND resource_id = $1
+          AND principal_type = $2 AND permission = 'locked'`,
+      [docId, type],
+    );
+    return Number(rows[0].n);
+  }
+
+  it("a per-user lock is a no-op when an org lock already covers the resource", async () => {
+    // Everyone lock first.
+    expect(
+      (
+        await postShare(owner, {
+          resourceType: "file",
+          resourceId: docId,
+          principalType: "org",
+          permission: "locked",
+        })
+      ).status,
+    ).toBe(201);
+    // Now try to add a redundant per-user lock for the member.
+    const res = await postShare(owner, {
+      resourceType: "file",
+      resourceId: docId,
+      principalType: "user",
+      principalId: memberId,
+      permission: "locked",
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as any).toMatchObject({ principalType: "org", subsumed: true });
+    // No per-user lock row was written; the single org lock remains authoritative.
+    expect(await lockRows("user")).toBe(0);
+    expect(await lockRows("org")).toBe(1);
+  });
+
+  it("creating an Everyone lock removes subsumed per-user locks (single Unlock)", async () => {
+    // A per-user lock exists first …
+    expect(
+      (
+        await postShare(owner, {
+          resourceType: "file",
+          resourceId: docId,
+          principalType: "user",
+          principalId: memberId,
+          permission: "locked",
+        })
+      ).status,
+    ).toBe(201);
+    expect(await lockRows("user")).toBe(1);
+    // … then the whole resource is locked for everyone.
+    expect(
+      (
+        await postShare(owner, {
+          resourceType: "file",
+          resourceId: docId,
+          principalType: "org",
+          permission: "locked",
+        })
+      ).status,
+    ).toBe(201);
+    // The redundant per-user lock is dropped, leaving one authoritative org lock.
+    expect(await lockRows("user")).toBe(0);
+    expect(await lockRows("org")).toBe(1);
+  });
 });

@@ -216,6 +216,11 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const ownOrgLock = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "locked");
   const inheritedOrgLock = !!effLock?.org && !ownOrgLock;
   const generalMode: Mode = ownOrgLock || inheritedOrgLock ? "readonly" : "open";
+  // When an Everyone/org lock (direct or inherited) already makes the resource
+  // read-only for all, a per-member "read-only" lock is redundant and makes
+  // Unlock misleading — so the per-person controls are suppressed in favour of
+  // the single workspace/parent lock.
+  const everyoneReadonly = generalMode === "readonly";
 
   const lockSourcePath = (): string | null => {
     if (!selected) return null;
@@ -473,7 +478,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                           </div>
                           <div className="access-prole">{sourceLabel(m, choice)}</div>
                         </div>
-                        {canManage && m.role !== "owner" ? (
+                        {canManage && m.role !== "owner" && !everyoneReadonly ? (
                           <select
                             className="access-choice"
                             value={choice}

@@ -111,6 +111,37 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       return c.json({ error: "principalId required for user shares" }, 400);
     }
 
+    // Locks are subsumption-aware: an Everyone/org lock on a resource makes any
+    // per-user lock on the SAME resource redundant. Without this, a resource can
+    // carry both an org lock and a user lock, and Unlock becomes misleading —
+    // removing one leaves the resource locked by the other, so unlock appears to
+    // do nothing. We keep a single authoritative lock per resource instead.
+    if (permission === "locked" && principalType === "user") {
+      // An org lock already covers everyone here — the per-user lock adds
+      // nothing. No-op and report the effective (org) lock.
+      const { rows: orgLock } = await pool.query<{ id: string }>(
+        `SELECT id FROM shares
+          WHERE resource_type = $1 AND resource_id = $2
+            AND principal_type = 'org' AND permission = 'locked'
+          LIMIT 1`,
+        [resourceType, resourceId],
+      );
+      if (orgLock[0]) {
+        return c.json(
+          {
+            id: orgLock[0].id,
+            resourceType,
+            resourceId,
+            principalType: "org",
+            principalId: gate.organizationId,
+            permission: "locked",
+            subsumed: true,
+          },
+          200,
+        );
+      }
+    }
+
     const id = randomUUID();
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO shares
@@ -130,6 +161,18 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         session.userId,
       ],
     );
+
+    // An Everyone/org lock subsumes any per-user locks on the same resource —
+    // drop them so a single Unlock actually unlocks. (Those users stay locked by
+    // the org lock, so no access change and no socket kick is needed.)
+    if (permission === "locked" && principalType === "org") {
+      await pool.query(
+        `DELETE FROM shares
+          WHERE resource_type = $1 AND resource_id = $2
+            AND principal_type = 'user' AND permission = 'locked'`,
+        [resourceType, resourceId],
+      );
+    }
 
     // Any downgrade to read-only must reach live editors immediately — force
     // reconnect so open sessions come back with fresh (now read-only) sync
