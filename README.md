@@ -19,7 +19,6 @@
 
 <!-- Inline player: edit this file in GitHub's web editor and drag the product film mp4 onto the line below. GitHub inserts a user-attachments URL that renders as a play-in-place player. -->
 
-[▶ Watch the product film](https://github.com/naveedharri/baalda/raw/main/docs/baalda-product-film.mp4)
 
 </div>
 
