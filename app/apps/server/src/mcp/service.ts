@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole } from "../permissions/lookup.js";
-import { effectivePermission, type Permission } from "../permissions/resolver.js";
+import {
+  ancestorFolderIds,
+  effectivePermission,
+  isLocked,
+  type Permission,
+} from "../permissions/resolver.js";
 import { cosineSimilarity, embed, tokenize } from "../index/embedder.js";
 import type { McpAuth } from "./tokens.js";
 import type { DocWriter } from "./doc-writer.js";
@@ -55,11 +60,21 @@ async function isAdmin(auth: McpAuth): Promise<boolean> {
  * Highest permission the caller has to CREATE/DELETE inside a folder: admins
  * get `edit`; otherwise the max `edit` share on the folder or any ancestor.
  * A null folder is the vault root — only admins may write there.
+ *
+ * A lock on the folder (or any ancestor) makes it read-only for EVERYONE,
+ * owners/admins included — the same deny-overlay `effectivePermission` applies
+ * to note edits. It is checked before the admin short-circuit so create/delete
+ * of notes and subfolders is blocked inside a locked folder, not just edits to
+ * existing notes.
  */
 async function folderWritePermission(
   auth: McpAuth,
   folderId: string | null,
 ): Promise<Permission> {
+  if (folderId) {
+    const chain = await ancestorFolderIds(pool, folderId);
+    if (await isLocked(pool, auth.userId, null, chain)) return "none";
+  }
   if (await isAdmin(auth)) return "edit";
   if (!folderId) return "none";
   const { rows } = await pool.query<{ permission: string }>(

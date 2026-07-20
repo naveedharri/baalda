@@ -70,7 +70,7 @@ async function locateDoc(
 }
 
 /** Walk parent_id up from a folder, collecting all ancestor folder ids (inclusive). */
-async function ancestorFolderIds(
+export async function ancestorFolderIds(
   db: Queryable,
   folderId: string | null,
 ): Promise<string[]> {
@@ -158,7 +158,7 @@ async function sharePermission(
  * True when a lock row covers this resource (a file when `docId` is set, plus
  * any folder in `folderIds`) for this user or the whole workspace.
  */
-async function isLocked(
+export async function isLocked(
   db: Queryable,
   userId: string,
   docId: string | null,

@@ -5,6 +5,7 @@ import { resetDb } from "./helpers/db.js";
 import { memoryDocWriter } from "./helpers/app.js";
 import {
   seedFolder,
+  seedLock,
   seedMember,
   seedOrg,
   seedShare,
@@ -203,6 +204,80 @@ describe("MCP server", () => {
     // Member's list now shows exactly the shared note.
     const list = await call(memberToken, "list_notes", { vaultId: vault });
     expect(list.data.results.map((n: any) => n.docId)).toEqual([sharedDoc]);
+  });
+
+  it("a locked folder blocks create/delete for everyone, incl. admins (MCP)", async () => {
+    const owner = await seedUser("owner@mcp-lock.com");
+    const member = await seedUser("member@mcp-lock.com");
+    const org = await seedOrg("Acme", "acme-mcp-lock");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const folder = await seedFolder(vault, null, "Locked", "Locked");
+    const child = await seedFolder(vault, folder, "Locked/Child", "Child");
+    // Member has an explicit edit grant on the folder …
+    await seedShare(org, "folder", folder, member, "edit");
+    const ownerToken = await tokenFor(owner, org);
+    const memberToken = await tokenFor(member, org);
+
+    // … but an org lock on the folder makes it read-only for all.
+    await seedLock(org, "folder", folder, { type: "org" });
+
+    // create_note inside the locked folder is denied for the edit-member.
+    expect(
+      (
+        await call(memberToken, "create_note", {
+          vaultId: vault,
+          relPath: "Locked/nope.md",
+          folderId: folder,
+        })
+      ).isError,
+    ).toBe(true);
+    // … and for an owner/admin — a lock caps admins too.
+    expect(
+      (
+        await call(ownerToken, "create_note", {
+          vaultId: vault,
+          relPath: "Locked/nope2.md",
+          folderId: folder,
+        })
+      ).isError,
+    ).toBe(true);
+    // create_folder under the locked folder is denied (admin).
+    expect(
+      (await call(ownerToken, "create_folder", { vaultId: vault, parentId: folder, name: "x" }))
+        .isError,
+    ).toBe(true);
+    // delete_folder of the locked folder is denied (admin).
+    expect((await call(ownerToken, "delete_folder", { folderId: folder })).isError).toBe(true);
+    // The lock reaches descendants: create in a child of the locked folder is denied.
+    expect(
+      (
+        await call(ownerToken, "create_note", {
+          vaultId: vault,
+          relPath: "Locked/Child/nope.md",
+          folderId: child,
+        })
+      ).isError,
+    ).toBe(true);
+
+    // A per-user lock (rather than org) also blocks that user's create: the
+    // member has an inherited edit grant on the parent, but a user-scoped lock
+    // on the child caps it. (Grant + lock live on different folders so they
+    // don't collide on the one-row-per-(resource,principal) key.)
+    const grantParent = await seedFolder(vault, null, "Grant", "Grant");
+    const userLocked = await seedFolder(vault, grantParent, "Grant/Locked", "Locked");
+    await seedShare(org, "folder", grantParent, member, "edit");
+    await seedLock(org, "folder", userLocked, { type: "user", id: member });
+    expect(
+      (
+        await call(memberToken, "create_note", {
+          vaultId: vault,
+          relPath: "Grant/Locked/nope.md",
+          folderId: userLocked,
+        })
+      ).isError,
+    ).toBe(true);
   });
 
   it("a token cannot reach a vault in another workspace", async () => {
