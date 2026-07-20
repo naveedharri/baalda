@@ -431,7 +431,12 @@ export class ApiClient {
 
   async listOrganizations(): Promise<Organization[]> {
     const { data } = await this.request<Organization[]>("GET", "/api/auth/organization/list");
-    return data ?? [];
+    // Dedupe by id: a user can transiently hold more than one membership row for
+    // the same org (invite + join code both add a member), which would otherwise
+    // show the same workspace twice in the switcher. See issue #14.
+    const byId = new Map<string, Organization>();
+    for (const org of data ?? []) if (!byId.has(org.id)) byId.set(org.id, org);
+    return [...byId.values()];
   }
 
   async setActiveOrganization(organizationId: string): Promise<void> {
