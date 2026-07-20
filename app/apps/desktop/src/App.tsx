@@ -7,6 +7,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
 import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
+import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { VaultPicker } from "./components/VaultPicker";
 import { bridgeManager } from "./lib/bridge";
@@ -175,6 +176,7 @@ export default function App() {
   const isPreview = openNote != null && previewKind(openNote.path) != null;
   const [booting, setBooting] = useState(true);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
 
   // Auto-reopen the last vault on launch, then restore the session (spec 04 §7)
   // and enable sync. Vault first so `enableSyncForVault` (called inside initAuth)
@@ -312,6 +314,10 @@ export default function App() {
         e.preventDefault();
         setGraphOpen((v) => !v);
       }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
       // ⌘R / Ctrl+R → reload the whole app. On macOS the webview often swallows
       // ⌘R before JS sees it, so the "rr" chord below is the reliable path.
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
@@ -358,6 +364,7 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <SidebarHeader />
+        {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
         <FileTree />
         <div className="sidebar-footer">
           <AccountMenu />
@@ -370,6 +377,25 @@ export default function App() {
           <span className="note-title">{openNote?.title ?? "No note open"}</span>
           {openNote && !isPreview && <SaveIndicator />}
           {openNote && !isPreview && <SyncIndicator />}
+          <button
+            className="icon-btn search-btn"
+            title="Search notes (⌘F)"
+            aria-label="Search notes"
+            onClick={() => setSearchOpen((v) => !v)}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" />
+            </svg>
+          </button>
           <button
             className="icon-btn graph-btn"
             title="Graph view (⌘G)"

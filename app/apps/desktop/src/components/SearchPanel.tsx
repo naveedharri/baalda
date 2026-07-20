@@ -3,10 +3,16 @@ import type { SearchResult } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 
-export function SearchPanel() {
+export function SearchPanel({ onClose }: { onClose?: () => void }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const timer = useRef<number | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Focus the box as soon as the panel opens so ⌘F is type-and-go.
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (timer.current) window.clearTimeout(timer.current);
@@ -26,15 +32,24 @@ export function SearchPanel() {
     };
   }, [query]);
 
+  const open = (path: string) => {
+    void useStore.getState().openNoteByPath(path);
+    onClose?.();
+  };
+
   return (
     <div className="search-panel">
       <div className="search-field">
         <span className="search-icon" aria-hidden="true">⌕</span>
         <input
+          ref={inputRef}
           className="search-box"
           placeholder="Search notes…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") onClose?.();
+          }}
         />
       </div>
       {query.trim() && (
@@ -44,7 +59,7 @@ export function SearchPanel() {
             <li
               key={r.id}
               className="search-result"
-              onClick={() => void useStore.getState().openNoteByPath(r.path)}
+              onClick={() => open(r.path)}
             >
               <div className="search-title">{r.title || r.path}</div>
               <div
