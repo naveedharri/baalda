@@ -83,18 +83,14 @@ The core idea in one sentence: **the `.md` file on disk is the durable source of
 
 Every change funnels through the same CRDT as operations, never whole-file overwrites. Whether it comes from a person typing, an AI rewriting a paragraph, or a teammate across the world, edits **merge** instead of overwriting each other.
 
-```
-   You / AI / Git                       Teammates
-        │                                   │
-   edit .md file                     edit in real time
-        │                                   │
-        ▼                                   ▼
-  ┌───────────────┐   operations    ┌────────────────┐
-  │  Markdown on  │ ◀────────────▶  │   Live CRDT     │
-  │     disk      │   (two-way)     │  (Yjs Y.Text)   │
-  └───────────────┘                 └────────────────┘
-   durable truth                     live sync + merge
-```
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/bridge-dark.svg">
+  <img alt="Markdown on disk and a live CRDT kept in sync by a two-way bridge of operations" src="docs/assets/bridge-light.svg" width="760">
+</picture>
+
+</div>
 
 Everything else (the desktop app, the search index, the sync server) is a rebuildable layer on top of your files.
 
@@ -186,22 +182,6 @@ claude mcp add --transport http context http://localhost:3010/api/mcp \
 self-hosted server, use your server URL plus `/api/mcp`.)
 
 The AI can now `read_note`, `search_notes`, `create_note`, `update_note`, and more. Its writes flow through the same sync engine, so if the note is open you'll watch the AI type in real time.
-
----
-
-## Project status
-
-🟢 **Released.** The core product is built, wired end-to-end, and tested. It delivers **10 of the 12** target requirements, including the two no other open-source tool combined: AI-editable plain files **and** built-in real-time collaboration.
-
-| Phase | Scope | Status |
-|---|---|---|
-| 0 | Single-user local app (open folder, edit, save, search) | ✅ Done |
-| 1 | Local file ↔ CRDT bridge | ✅ Done |
-| 2 | Sync server + accounts (multi-device) | ✅ Done |
-| 3 | Team collaboration (sharing, permissions, live cursors, attachments) | ✅ Done |
-| 4 | Polish & upgrades (WYSIWYG, semantic search, OAuth, iOS) | ⬜ Planned |
-
-See [`docs/STATUS.md`](docs/STATUS.md) for the detailed checklist.
 
 ---
 
