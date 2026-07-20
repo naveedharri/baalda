@@ -494,9 +494,14 @@ impl Index {
         if match_query.is_empty() {
             return Ok(Vec::new());
         }
+        // Delimit the highlight with control-char sentinels (U+0001/U+0002) that
+        // can't occur in note text, so we can HTML-escape the whole snippet and
+        // then swap the sentinels for real <mark> tags — see html_escape. This
+        // makes the snippet safe to render as HTML (only <mark> survives) even
+        // though the body is raw markdown.
         let mut stmt = self.conn.prepare(
             "SELECT n.id, n.path, n.title,
-                    snippet(notes_fts, 1, '<mark>', '</mark>', '…', 12) AS snip
+                    snippet(notes_fts, 1, char(1), char(2), '…', 12) AS snip
              FROM notes_fts
              JOIN notes n ON n.rowid = notes_fts.rowid
              WHERE notes_fts MATCH ?1
@@ -504,11 +509,15 @@ impl Index {
              LIMIT 100",
         )?;
         let rows = stmt.query_map(params![match_query], |r| {
+            let raw: String = r.get(3)?;
+            let snippet = html_escape(&raw)
+                .replace('\u{1}', "<mark>")
+                .replace('\u{2}', "</mark>");
             Ok(SearchResult {
                 id: r.get(0)?,
                 path: r.get(1)?,
                 title: r.get(2)?,
-                snippet: r.get(3)?,
+                snippet,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -766,6 +775,26 @@ fn build_fts_query(input: &str) -> String {
     terms.join(" AND ")
 }
 
+/// HTML-escape text so a note body can never inject markup when a snippet is
+/// rendered. The FTS `body` column stores raw markdown (which may contain
+/// literal `<`, `>`, `&`, quotes, or even `<script>`/`<img onerror=…>`), so the
+/// snippet is escaped before the `<mark>` highlight markers are put back — the
+/// only tags that survive into the rendered snippet are our own `<mark>`s.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,6 +840,34 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Beta");
         assert!(results[0].snippet.contains("<mark>"));
+    }
+
+    #[test]
+    fn fts_snippet_html_escapes_body_to_prevent_xss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        // A note body carrying an HTML/JS payload adjacent to the search terms.
+        write_note(
+            &v,
+            "Evil.md",
+            "# Evil\n\nThe quick <img src=x onerror=\"alert(document.domain)\"> brown fox & <b>bold</b>.",
+        )
+        .unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let results = idx.search_notes("quick brown").unwrap();
+        assert_eq!(results.len(), 1);
+        let snip = &results[0].snippet;
+        // The dangerous markup is escaped — no live tags survive.
+        assert!(snip.contains("&lt;img"), "raw < must be escaped: {snip}");
+        assert!(!snip.contains("<img"), "no live <img> tag may survive: {snip}");
+        assert!(!snip.contains("onerror=\"alert"), "no live handler may survive: {snip}");
+        // The `"` around the handler is entity-escaped (proves the &-based
+        // escaping path runs over the snippet).
+        assert!(snip.contains("&quot;"), "raw \" must be escaped: {snip}");
+        // The highlight markers are still present and are the only surviving tags.
+        assert!(snip.contains("<mark>") && snip.contains("</mark>"), "highlight preserved: {snip}");
     }
 
     #[test]

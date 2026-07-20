@@ -64,7 +64,10 @@ export function SearchPanel({ onClose }: { onClose?: () => void }) {
               <div className="search-title">{r.title || r.path}</div>
               <div
                 className="search-snippet"
-                // Rust returns a sanitized snippet with <mark> tags only.
+                // The snippet is HTML-escaped in Rust (see index.rs::html_escape)
+                // so the ONLY markup it can contain is our own <mark> highlight
+                // tags — note bodies can't inject anything. A CSP (tauri.conf.json)
+                // backstops this by blocking inline script even if that changed.
                 dangerouslySetInnerHTML={{ __html: r.snippet }}
               />
             </li>
