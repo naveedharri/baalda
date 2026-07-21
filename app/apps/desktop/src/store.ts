@@ -419,20 +419,18 @@ export const useStore = create<AppStore>((set, get) => ({
 
   signInWithGoogle: async () => {
     set({ authError: null });
-    try {
-      await authManager.signInWithGoogle();
-      const session = await authManager.currentSession();
-      set({ session, authStatus: session ? "signed-in" : "signed-out" });
-      if (session) {
-        await get().refreshWorkspace();
-        await get().refreshBillingConfig();
-        await get().refreshOrgBilling();
-        await get().enableSyncForVault();
-        await get().openWelcomeIfPresent();
-      }
-    } catch (e) {
-      set({ authError: errMsg(e) });
-      throw e;
+    // Errors (incl. the loopback timeout on an abandoned flow) propagate to the
+    // caller, which decides whether to surface them — a cancelled/superseded flow
+    // must NOT flash a late error. See AuthDialog.googleSignIn.
+    await authManager.signInWithGoogle();
+    const session = await authManager.currentSession();
+    set({ session, authStatus: session ? "signed-in" : "signed-out" });
+    if (session) {
+      await get().refreshWorkspace();
+      await get().refreshBillingConfig();
+      await get().refreshOrgBilling();
+      await get().enableSyncForVault();
+      await get().openWelcomeIfPresent();
     }
   },
 

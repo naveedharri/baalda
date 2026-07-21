@@ -535,15 +535,35 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // Each Google attempt gets a generation number. Cancelling (or starting a new
+  // attempt) bumps it, so when an abandoned flow finally rejects — the loopback
+  // listener waits out its ~3-min timeout — we can drop that stale result instead
+  // of flashing a "timed out" error at someone who already moved on.
+  const googleFlow = useRef(0);
+
   const googleSignIn = async () => {
+    const flow = ++googleFlow.current;
+    useStore.setState({ authError: null });
     setGoogleBusy(true);
     try {
       await useStore.getState().signInWithGoogle();
-    } catch {
-      /* error (incl. timeout / abandoned flow) surfaced via authError */
+    } catch (e) {
+      if (flow === googleFlow.current) {
+        useStore.setState({ authError: e instanceof Error ? e.message : String(e) });
+      }
+      // else: cancelled or superseded — the user isn't waiting on this anymore.
     } finally {
-      setGoogleBusy(false);
+      if (flow === googleFlow.current) setGoogleBusy(false);
     }
+  };
+
+  // Stop waiting on the browser and return to the form so the user can retry or
+  // sign in with email instead. The abandoned loopback listener harmlessly times
+  // out on its own; its late result is ignored via the generation check above.
+  const cancelGoogleSignIn = () => {
+    googleFlow.current++;
+    setGoogleBusy(false);
+    useStore.setState({ authError: null });
   };
 
   return (
@@ -587,8 +607,9 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
             </button>
             {googleBusy && (
               <p className="auth-hint">
-                Finish signing in in the browser tab that just opened. This window updates
-                automatically once you approve.
+                <button type="button" className="link-btn" onClick={cancelGoogleSignIn}>
+                  Cancel
+                </button>
               </p>
             )}
             <div className="auth-divider">
