@@ -134,6 +134,8 @@ interface AppStore {
   createOrganization: (name: string) => Promise<void>;
   setActiveOrganization: (organizationId: string) => Promise<void>;
   inviteMember: (email: string, role: "member" | "admin") => Promise<void>;
+  /** Remove a member from the active workspace (owner/admin), then refresh. */
+  removeMember: (userId: string) => Promise<void>;
   acceptInvitation: (invitationId: string) => Promise<void>;
   joinWorkspace: (code: string) => Promise<void>;
   /** Detach a workspace from THIS device (forget its folder, stop syncing it).
@@ -623,6 +625,13 @@ export const useStore = create<AppStore>((set, get) => ({
   inviteMember: async (email, role) => {
     const activeOrgId = get().session?.activeOrganizationId ?? undefined;
     await authManager.api.inviteMember({ email, role, organizationId: activeOrgId });
+    await get().refreshWorkspace();
+  },
+
+  removeMember: async (userId) => {
+    const activeOrgId = get().session?.activeOrganizationId;
+    if (!activeOrgId) throw new Error("No active workspace");
+    await authManager.api.removeMember(activeOrgId, userId);
     await get().refreshWorkspace();
   },
 

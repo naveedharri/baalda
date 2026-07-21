@@ -227,5 +227,87 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     return c.json({ deleted: true, vaults: vaultIds.length, docs: docIds.length });
   });
 
+  // Remove a member from a workspace (owner/admin). Revokes access on both paths
+  // that would otherwise let a departed member keep reading org data:
+  //   1. delete the `member` row — their org-wide "Open" grant stops applying
+  //      (the resolver gates it on membership) and the next sync-token mint 403s;
+  //   2. purge their per-user shares — those are NOT membership-gated, so a folder
+  //      or file shared directly to them would survive step 1 (see issue #16);
+  //   3. force-close live sockets so access dies now, not at token expiry.
+  // Owner can remove anyone but themselves; an admin can remove only plain members
+  // (not another admin or the owner). Self-removal ("leave") is intentionally not
+  // supported here yet.
+  orgRoutes.delete("/orgs/:orgId/members/:userId", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+
+    const orgId = c.req.param("orgId");
+    const targetUserId = c.req.param("userId");
+
+    const callerRole = await orgRole(orgId, session.userId);
+    if (!callerRole) return c.json({ error: "Unknown workspace" }, 404);
+    if (callerRole !== "owner" && callerRole !== "admin") {
+      return c.json({ error: "Only the workspace owner or an admin can remove members" }, 403);
+    }
+    if (targetUserId === session.userId) {
+      return c.json({ error: "You can't remove yourself from the workspace" }, 400);
+    }
+
+    const targetRole = await orgRole(orgId, targetUserId);
+    if (!targetRole) return c.json({ error: "That person isn't a member of this workspace" }, 404);
+    if (targetRole === "owner") {
+      return c.json({ error: "The workspace owner can't be removed" }, 403);
+    }
+    if (targetRole === "admin" && callerRole !== "owner") {
+      return c.json({ error: "Only the owner can remove an admin" }, 403);
+    }
+
+    // Snapshot the org's docs so we can kill any live sockets the removed member
+    // holds. closeConnections on a doc with no live socket is a cheap no-op, so
+    // covering every doc in the org is fine (member removal is rare).
+    const vaults = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [orgId],
+    );
+    const vaultIds = vaults.rows.map((r) => r.id);
+    const docs = vaultIds.length
+      ? await pool.query<{ id: string; vault_id: string }>(
+          `SELECT id, vault_id FROM notes WHERE vault_id = ANY($1)
+           UNION ALL
+           SELECT id, vault_id FROM files WHERE vault_id = ANY($1)`,
+          [vaultIds],
+        )
+      : { rows: [] as Array<{ id: string; vault_id: string }> };
+
+    // Drop membership + direct grants together. `shares.workspace_id` scopes the
+    // purge to this org; shares the member *created for others* (created_by) are
+    // untouched — only grants TO this user (principal_id) are removed.
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `DELETE FROM member WHERE "organizationId" = $1 AND "userId" = $2`,
+        [orgId, targetUserId],
+      );
+      await client.query(
+        `DELETE FROM shares
+          WHERE workspace_id = $1 AND principal_type = 'user' AND principal_id = $2`,
+        [orgId, targetUserId],
+      );
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // Membership is gone, so a reconnect now fails at token mint (403). Kick the
+    // live sockets AFTER the delete so the auto-reconnect can't re-mint a token.
+    for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
+
+    return c.json({ removed: true });
+  });
+
   return orgRoutes;
 }

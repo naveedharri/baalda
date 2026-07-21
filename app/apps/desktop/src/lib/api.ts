@@ -535,6 +535,19 @@ export class ApiClient {
     return data;
   }
 
+  /**
+   * Remove a member from a workspace (owner/admin). The server deletes the
+   * membership, purges any shares granted directly to that user, and force-closes
+   * their live sync sockets so access is revoked immediately. Throws ApiError 403
+   * if the caller lacks permission (e.g. an admin trying to remove another admin).
+   */
+  async removeMember(organizationId: string, userId: string): Promise<void> {
+    await this.request<{ removed: boolean }>(
+      "DELETE",
+      `/api/orgs/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`,
+    );
+  }
+
   // ---- MCP tokens ---------------------------------------------------------
 
   /** The MCP endpoint URL for this server (what an AI client connects to). */

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type McpToolInfo, type McpTokenRow } from "../lib/api";
+import { type McpToolInfo, type McpTokenRow, type Member } from "../lib/api";
 import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import { classifyLimitError, type LimitKind, limitFromError } from "../lib/billing";
@@ -1167,6 +1167,33 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     null,
   );
   const [upgradeOpen, setUpgradeOpen] = useState(false);
+  // Member removal: an inline "Remove → Confirm" per row so it's never one click.
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  // The caller's own role in this workspace, so we mirror the server's rules and
+  // only show a Remove button where it would actually succeed: owners can remove
+  // anyone but themselves and the (single) owner; admins can remove plain members.
+  const myRole = members.find((m) => m.userId === session?.user.id)?.role;
+  const canRemove = (m: Member): boolean =>
+    canManage &&
+    m.userId !== session?.user.id &&
+    m.role !== "owner" &&
+    (myRole === "owner" || m.role === "member");
+
+  const doRemove = async (userId: string) => {
+    setRemoveBusy(true);
+    setRemoveError(null);
+    try {
+      await useStore.getState().removeMember(userId);
+      setConfirmRemoveId(null);
+    } catch (e) {
+      setRemoveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRemoveBusy(false);
+    }
+  };
 
   // The workspace's shareable join code (owner/admin only; server creates it
   // lazily). Older servers without the endpoint simply hide the section.
@@ -1275,10 +1302,40 @@ function MembersTab({ canManage }: { canManage: boolean }) {
                 {m.userId === session?.user.id && <span className="muted"> (you)</span>}
               </span>
               <span className={`member-role ${m.role}`}>{m.role}</span>
+              {canRemove(m) &&
+                (confirmRemoveId === m.userId ? (
+                  <>
+                    <button
+                      className="link-btn danger"
+                      disabled={removeBusy}
+                      onClick={() => void doRemove(m.userId)}
+                    >
+                      {removeBusy ? "Removing…" : "Confirm"}
+                    </button>
+                    <button
+                      className="link-btn"
+                      disabled={removeBusy}
+                      onClick={() => setConfirmRemoveId(null)}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="link-btn danger"
+                    onClick={() => {
+                      setRemoveError(null);
+                      setConfirmRemoveId(m.userId);
+                    }}
+                  >
+                    Remove
+                  </button>
+                ))}
             </li>
           );
         })}
       </ul>
+      {removeError && <div className="auth-error">{removeError}</div>}
 
       {pendingInvitations.length > 0 && (
         <>
