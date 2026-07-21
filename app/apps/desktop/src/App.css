@@ -2721,6 +2721,14 @@ button.primary.hero:hover:not(:disabled) {
 .oauth-btn:disabled {
   opacity: 0.6;
 }
+/* Guidance shown while the Google flow waits on the system browser. */
+.auth-hint {
+  margin: calc(-1 * var(--sp-1)) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  text-align: center;
+}
 .auth-divider {
   display: flex;
   align-items: center;

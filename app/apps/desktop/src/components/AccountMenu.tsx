@@ -475,6 +475,10 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
   const [password, setPassword] = useState(import.meta.env.DEV ? "Context-Test-2026!" : "");
   const [urlDraft, setUrlDraft] = useState(serverUrl);
   const [busy, setBusy] = useState(false);
+  // Google sign-in runs in the system browser and the app just waits for the
+  // loopback handoff (up to a 3-min timeout). Its own busy flag lets us show a
+  // "waiting for your browser" state instead of a silently disabled button.
+  const [googleBusy, setGoogleBusy] = useState(false);
   // Google is only offered when the server is configured for it; ask on open
   // (and whenever the server changes) so a self-host without creds hides it.
   const [googleAvailable, setGoogleAvailable] = useState(false);
@@ -532,13 +536,13 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
   };
 
   const googleSignIn = async () => {
-    setBusy(true);
+    setGoogleBusy(true);
     try {
       await useStore.getState().signInWithGoogle();
     } catch {
-      /* error surfaced via authError */
+      /* error (incl. timeout / abandoned flow) surfaced via authError */
     } finally {
-      setBusy(false);
+      setGoogleBusy(false);
     }
   };
 
@@ -575,11 +579,18 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
               type="button"
               className="oauth-btn google"
               onClick={() => void googleSignIn()}
-              disabled={busy}
+              disabled={busy || googleBusy}
+              aria-busy={googleBusy}
             >
               <GoogleGlyph />
-              <span>Continue with Google</span>
+              <span>{googleBusy ? "Waiting for your browser…" : "Continue with Google"}</span>
             </button>
+            {googleBusy && (
+              <p className="auth-hint">
+                Finish signing in in the browser tab that just opened. This window updates
+                automatically once you approve.
+              </p>
+            )}
             <div className="auth-divider">
               <span>or</span>
             </div>
@@ -614,7 +625,7 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
             minLength={8}
             required
           />
-          <button className="primary" type="submit" disabled={busy}>
+          <button className="primary" type="submit" disabled={busy || googleBusy}>
             {busy ? "…" : mode === "sign-in" ? "Sign in" : "Create account"}
           </button>
         </form>
