@@ -21,6 +21,7 @@ import {
 import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
 import type { SyncStatus } from "./lib/sync/syncManager";
+import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
 import {
   type ActivityStatus,
@@ -30,6 +31,7 @@ import {
   writeMentionSound,
 } from "./lib/prefs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
+import { playJoinChime } from "./lib/celebrate/celebrate";
 
 export interface OpenNote {
   path: string;
@@ -80,6 +82,9 @@ interface AppStore {
   syncPending: boolean;
   /** Locks (read-only overlays) in the synced vault — drives tree badges. */
   locks: Share[];
+  /** Live "who's viewing what" roster (teammates only) — drives the sidebar
+   *  presence dots on notes/folders. Empty when sync is off or disconnected. */
+  vaultPresence: VaultPeer[];
   /** Per-item accent colors (vault-local preference), path → color id. */
   itemColors: Record<string, string>;
   /** Custom sidebar arrangement (vault-local preference), parent → child order. */
@@ -99,6 +104,9 @@ interface AppStore {
   activityStatus: ActivityStatus;
   /** Whether the mention chime plays when someone pings you. */
   mentionSound: boolean;
+  /** Set briefly when a teammate joins the workspace, to drive the celebration
+   *  banner + confetti. `at` changes each time so a repeat join re-triggers it. */
+  memberJoined: { name: string; at: number } | null;
 
   setVault: (v: ipc.VaultInfo | null) => void;
   setItemColor: (path: string, colorId: string | null) => void;
@@ -128,10 +136,17 @@ interface AppStore {
   updateProfile: (input: { name?: string; image?: string | null }) => Promise<void>;
   setActivityStatus: (status: ActivityStatus) => void;
   setMentionSound: (enabled: boolean) => void;
+  /** A teammate joined — show the celebration (banner + confetti + chime). */
+  celebrateMemberJoined: (name: string) => void;
+  /** Dismiss the join celebration (auto-fires after a few seconds). */
+  dismissMemberJoined: () => void;
 
   // Workspace actions
   refreshWorkspace: () => Promise<void>;
   createOrganization: (name: string) => Promise<void>;
+  /** Promote the currently-open local folder into a synced workspace, adopting
+   *  the files already in it (no new empty folder). This is "Turn on sync". */
+  turnOnSyncForCurrentVault: (name?: string) => Promise<void>;
   setActiveOrganization: (organizationId: string) => Promise<void>;
   inviteMember: (email: string, role: "member" | "admin") => Promise<void>;
   acceptInvitation: (invitationId: string) => Promise<void>;
@@ -141,6 +156,11 @@ interface AppStore {
   removeWorkspaceLocally: (organizationId: string) => Promise<void>;
   /** Permanently delete a workspace everywhere (owner only), then detach it. */
   deleteWorkspace: (organizationId: string) => Promise<void>;
+
+  /** Open a plain local folder as the current (unsynced) workspace — leaving any
+   *  synced workspace's sync context behind. Used by the switcher's local rows
+   *  and "Open a folder…". */
+  openLocalWorkspace: (path: string) => Promise<void>;
 
   // Resolving a workspace's local folder (when none is bound yet)
   /** Bind `path` to `orgId`, open it, and enable sync. */
@@ -240,6 +260,85 @@ function forgetOrgVault(orgId: string): void {
   }
 }
 
+// The workspace the user was last actually working in (folder + org resolved
+// together). The server session carries an `activeOrganizationId`, but it can be
+// null (fresh session, 2+ orgs) and it doesn't know which *folder* to open — so
+// we persist the last opened workspace locally and reopen it on launch instead
+// of dumping the user on the picker every time.
+const LAST_WORKSPACE_KEY = "context.lastWorkspace";
+
+export function readLastWorkspace(): string | null {
+  try {
+    return localStorage.getItem(LAST_WORKSPACE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberLastWorkspace(orgId: string): void {
+  try {
+    localStorage.setItem(LAST_WORKSPACE_KEY, orgId);
+  } catch {
+    /* quota/unavailable — convenience only */
+  }
+}
+
+function forgetLastWorkspace(orgId?: string): void {
+  try {
+    // With no id, clear unconditionally; with one, only clear if it still points
+    // at the workspace being removed (don't clobber a newer pointer).
+    if (orgId && readLastWorkspace() !== orgId) return;
+    localStorage.removeItem(LAST_WORKSPACE_KEY);
+  } catch {
+    /* quota/unavailable — convenience only */
+  }
+}
+
+/**
+ * After a session is (re)established, land the user in the workspace they were
+ * last using — preferring the session's active org, then the last workspace we
+ * opened on this device — instead of leaving them on whatever local folder
+ * happened to be open. Restores only workspaces we're still a member of; falls
+ * back to syncing the open local vault when there's nothing to restore.
+ */
+async function landInLastWorkspace(get: () => AppStore): Promise<void> {
+  const orgs = get().organizations;
+  // The folder that's already open (App.tsx reopens the last one at launch) is
+  // the strongest signal for "the workspace I was last in" — it unifies local
+  // and synced workspaces under one recency signal.
+  const openPath = get().vault?.path ?? null;
+  const boundOrgOfOpen = openPath
+    ? (Object.entries(readOrgVaults()).find(([, p]) => p === openPath)?.[0] ?? null)
+    : null;
+
+  // 1) The open folder belongs to a synced workspace → make it active + sync.
+  if (openPath && boundOrgOfOpen && orgs.some((o) => o.id === boundOrgOfOpen)) {
+    if (get().session?.activeOrganizationId === boundOrgOfOpen) {
+      await get().enableSyncForVault();
+    } else {
+      await get().setActiveOrganization(boundOrgOfOpen);
+    }
+    return;
+  }
+
+  // 2) A local (unsynced) folder is open → keep it local. Don't pull the user
+  //    into a different workspace just because they happen to be signed in.
+  if (openPath && !boundOrgOfOpen) return;
+
+  // 3) Nothing open → restore the session's active org, else the last workspace
+  //    we used on this device (only if we're still a member).
+  const active = get().session?.activeOrganizationId ?? null;
+  const remembered = readLastWorkspace();
+  const target =
+    (active && orgs.some((o) => o.id === active) ? active : null) ??
+    (remembered && orgs.some((o) => o.id === remembered) ? remembered : null);
+  if (target) await get().setActiveOrganization(target);
+}
+
+/** Auto-dismiss timer for the member-joined celebration (module-scoped so a
+ *  repeat join resets it rather than stacking). */
+let memberJoinedTimer: ReturnType<typeof setTimeout> | null = null;
+
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
@@ -261,6 +360,7 @@ export const useStore = create<AppStore>((set, get) => ({
   lastSyncedAt: null,
   syncPending: false,
   locks: [],
+  vaultPresence: [],
   itemColors: {},
   itemOrder: {},
   pendingWorkspaceFolder: null,
@@ -268,6 +368,7 @@ export const useStore = create<AppStore>((set, get) => ({
   orgBilling: null,
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
+  memberJoined: null,
 
   setVault: (v) =>
     set({
@@ -344,6 +445,8 @@ export const useStore = create<AppStore>((set, get) => ({
       openNote: { path, id: meta?.id ?? null, title },
       noteRemoved: false,
     });
+    // Tell teammates which note we're now viewing (drives their sidebar dots).
+    syncManager.setViewing(meta?.id ?? null);
     await get().refreshBacklinks();
   },
 
@@ -363,7 +466,10 @@ export const useStore = create<AppStore>((set, get) => ({
 
   setNoteRemoved: (removed) => set({ noteRemoved: removed }),
 
-  closeNote: () => set({ openNote: null, backlinks: [], noteRemoved: false }),
+  closeNote: () => {
+    syncManager.setViewing(null);
+    set({ openNote: null, backlinks: [], noteRemoved: false });
+  },
 
   // ---- Auth ----
 
@@ -379,6 +485,16 @@ export const useStore = create<AppStore>((set, get) => ({
       void get().refreshTree();
       void get().refreshTitles();
     });
+    // A teammate joined the workspace — refresh the roster live (no reload) and
+    // celebrate. Fires for everyone already connected; the joiner celebrates
+    // locally in joinWorkspace/acceptInvitation (they connect after the push).
+    syncManager.setMemberJoinedListener((name) => {
+      void get().refreshWorkspace();
+      get().celebrateMemberJoined(name);
+    });
+    // Live sidebar presence — the vault channel tells us which teammate is
+    // viewing which note; mirror the roster into the store for FileTree.
+    syncManager.setVaultPresenceListener((peers) => set({ vaultPresence: peers }));
     try {
       const session = await authManager.init();
       set({ serverUrl: authManager.getServerUrl() });
@@ -386,8 +502,8 @@ export const useStore = create<AppStore>((set, get) => ({
         set({ session, authStatus: "signed-in", authError: null });
         await get().refreshWorkspace();
         await get().refreshBillingConfig();
+        await landInLastWorkspace(get);
         await get().refreshOrgBilling();
-        await get().enableSyncForVault();
       } else {
         set({ session: null, authStatus: "signed-out" });
       }
@@ -405,8 +521,9 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshWorkspace();
         await get().refreshBillingConfig();
+        // Open the workspace they last used, rather than making them pick one.
+        await landInLastWorkspace(get);
         await get().refreshOrgBilling();
-        await get().enableSyncForVault();
         await get().openWelcomeIfPresent();
       }
     } catch (e) {
@@ -424,8 +541,9 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshWorkspace();
         await get().refreshBillingConfig();
+        // Open the workspace they last used, rather than making them pick one.
+        await landInLastWorkspace(get);
         await get().refreshOrgBilling();
-        await get().enableSyncForVault();
         await get().openWelcomeIfPresent();
       }
     } catch (e) {
@@ -527,6 +645,26 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ mentionSound: enabled });
   },
 
+  celebrateMemberJoined: (name) => {
+    const who = name?.trim() || "A new teammate";
+    set({ memberJoined: { name: who, at: Date.now() } });
+    // Reuse the app's sound preference so a muted user stays muted.
+    if (get().mentionSound) playJoinChime();
+    if (memberJoinedTimer) clearTimeout(memberJoinedTimer);
+    memberJoinedTimer = setTimeout(() => {
+      memberJoinedTimer = null;
+      set({ memberJoined: null });
+    }, 6000);
+  },
+
+  dismissMemberJoined: () => {
+    if (memberJoinedTimer) {
+      clearTimeout(memberJoinedTimer);
+      memberJoinedTimer = null;
+    }
+    set({ memberJoined: null });
+  },
+
   // ---- Workspace ----
 
   refreshWorkspace: async () => {
@@ -568,6 +706,26 @@ export const useStore = create<AppStore>((set, get) => ({
     // Route through the switch path so a brand-new workspace prompts for its
     // own folder instead of adopting whatever folder is currently open.
     await get().setActiveOrganization(org.id);
+  },
+
+  turnOnSyncForCurrentVault: async (name) => {
+    const vault = get().vault;
+    if (!vault) throw new Error("Open a workspace first.");
+    // Unlike createOrganization (which prompts for a fresh folder), this binds
+    // the folder you're already in and syncs its existing files up. Create the
+    // org directly, bind THIS folder, then let enableSyncForVault reconcile the
+    // current tree into the new server vault.
+    const org = await createWithUniqueSlug(name?.trim() || vault.name, (input) =>
+      authManager.api.createOrganization(input),
+    );
+    await authManager.api.setActiveOrganization(org.id);
+    const session = await authManager.currentSession();
+    set({ session });
+    await get().refreshWorkspace();
+    rememberOrgVault(org.id, vault.path);
+    rememberLastWorkspace(org.id);
+    await get().enableSyncForVault();
+    await get().refreshOrgBilling();
   },
 
   setActiveOrganization: async (organizationId) => {
@@ -638,16 +796,26 @@ export const useStore = create<AppStore>((set, get) => ({
       set({ session });
       await get().refreshWorkspace();
     }
+    // The joiner celebrates locally too (they connect after the server push).
+    const me = get().session?.user;
+    get().celebrateMemberJoined(me?.name || me?.email || "You");
   },
 
   joinWorkspace: async (code) => {
     const joined = await authManager.api.joinWorkspace(code.trim());
     await get().setActiveOrganization(joined.organizationId);
+    // The joiner sees the celebration too (their vault channel connects after
+    // the server broadcast, so they'd otherwise miss the live push).
+    if (!joined.alreadyMember) {
+      const me = get().session?.user;
+      get().celebrateMemberJoined(me?.name || me?.email || "You");
+    }
   },
 
   removeWorkspaceLocally: async (organizationId) => {
     // Forget this workspace's local folder so it won't auto-open here again.
     forgetOrgVault(organizationId);
+    forgetLastWorkspace(organizationId);
     // If we're removing the workspace that's currently open, move off it: swap
     // to another workspace if one exists, otherwise close the vault and stop
     // syncing (the workspace itself stays on the server — this device just
@@ -681,6 +849,29 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // ---- Workspace folder resolution ----
 
+  openLocalWorkspace: async (path) => {
+    // A local workspace is a plain folder that isn't syncing to an org. Opening
+    // one tears down any active workspace sync (we're no longer in that org's
+    // folder) and leaves sync off until the user explicitly turns it on.
+    const info = await ipc.openVault(path);
+    syncManager.disable();
+    get().closeNote();
+    set({
+      vault: info,
+      locks: [],
+      syncEnabled: false,
+      syncStatus: "offline",
+      syncPending: false,
+      itemColors: readItemColors(info.path),
+      itemOrder: readItemOrder(info.path),
+      pendingWorkspaceFolder: null,
+    });
+    await get().refreshTree();
+    await get().refreshTitles();
+    // Give a brand-new empty folder its first-run welcome content.
+    await get().seedLocalVaultIfEmpty();
+  },
+
   applyWorkspaceFolder: async (orgId, path) => {
     const v = await ipc.openWorkspaceFolder(path);
     get().closeNote();
@@ -692,6 +883,7 @@ export const useStore = create<AppStore>((set, get) => ({
       pendingWorkspaceFolder: null,
     });
     rememberOrgVault(orgId, v.path);
+    rememberLastWorkspace(orgId);
     await get().refreshTree();
     await get().refreshTitles();
     await get().enableSyncForVault();
@@ -823,6 +1015,7 @@ export const useStore = create<AppStore>((set, get) => ({
       // This folder is now the one this workspace opens with.
       if (session.activeOrganizationId) {
         rememberOrgVault(session.activeOrganizationId, vault.path);
+        rememberLastWorkspace(session.activeOrganizationId);
       }
       // Reconcile may have materialized server-only notes onto disk; refresh so
       // the sidebar reflects the full workspace, not just what was already local.

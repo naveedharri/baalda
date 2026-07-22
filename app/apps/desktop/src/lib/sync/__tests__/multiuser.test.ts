@@ -137,6 +137,17 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
       folderId: folder.id,
     });
     teamDocId = noteDocId(teamNote);
+
+    // New workspaces are PRIVATE by default (no org-wide grant). These tests
+    // exercise team collaboration, so the owner shares the whole workspace with
+    // the team ("Open" = org-wide edit) — the same action AccessPanel performs
+    // via setWorkspacePosture. Without this, members correctly resolve to "none".
+    await owner.createShare({
+      resourceType: "workspace",
+      resourceId: orgId,
+      principalType: "org",
+      permission: "edit",
+    });
   }, 30_000);
 
   // ── 1. Invite → accept ────────────────────────────────────────────────────
@@ -194,7 +205,8 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     const vaults = await owner.listVaults();
     expect(vaults.filter((v) => (v.organizationId ?? v.organization_id) === orgId)).toHaveLength(1);
 
-    // A plain member has edit access by default (workspace defaults to Open).
+    // The workspace was shared with the team (Open) in setup, so a plain member
+    // inherits edit access.
     const tok = await member.syncToken(welcomeDocId);
     expect(tok.readOnly).toBe(false);
   }, 30_000);
@@ -404,7 +416,7 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     const res = await owner.resolveAccess("file", welcomeDocId);
     const byId = new Map(res.members.map((m) => [m.userId, m]));
     expect(byId.get(ownerId)?.permission).toBe("edit"); // owner/admin
-    expect(byId.get(memberId)?.permission).toBe("edit"); // via workspace Open
+    expect(byId.get(memberId)?.permission).toBe("edit"); // via the workspace-wide team grant
   }, 30_000);
 
   // ── 8. Outsiders stay out ─────────────────────────────────────────────────

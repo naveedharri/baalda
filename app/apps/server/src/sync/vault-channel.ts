@@ -8,12 +8,17 @@ import { listReadableDocsInVault } from "../permissions/vault-docs.js";
 import { loadDocDiff } from "../yjs/persistence.js";
 import {
   parseHello,
+  parsePresence,
   encodeWsUpdate,
   encodePubsubUpdate,
   encodePubsubAclChanged,
   encodePubsubRegistryChanged,
+  encodePubsubMemberJoined,
+  encodePubsubPresence,
+  encodePubsubPresenceQuery,
   decodePubsub,
   type ServerControl,
+  type PresenceFrame,
 } from "./vault-protocol.js";
 
 /**
@@ -68,6 +73,12 @@ export class VaultChannel {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubRegistryChanged());
   }
 
+  /** Announce that a new member joined the workspace this vault belongs to;
+   *  subscribers refresh their roster and show a join celebration. */
+  async publishMemberJoined(vaultId: string, name: string): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubMemberJoined(name));
+  }
+
   /** Wire the channel onto the HTTP server's upgrade at `config.vaultSyncPath`. */
   attachUpgrade(httpServer: HttpServer): WebSocketServer {
     const wss = new WebSocketServer({ noServer: true });
@@ -106,6 +117,11 @@ class VaultConnection {
   private unsubscribe: (() => void) | null = null;
   private helloSeen = false;
   private readonly helloTimer: ReturnType<typeof setTimeout>;
+  // This connection's last-announced presence (which note the user is viewing),
+  // kept so we can re-broadcast it when a newcomer asks, and clear it on close.
+  private myPresence: { docId: string | null; name: string; color: string; status: string } | null =
+    null;
+  private announced = false;
 
   constructor(
     private readonly ws: WebSocket,
@@ -129,7 +145,12 @@ class VaultConnection {
   }
 
   private async onText(text: string): Promise<void> {
-    if (this.helloSeen) return; // hello is the only client->server message
+    if (this.helloSeen) {
+      // Post-hello, the only client message we accept is a presence update.
+      const presence = parsePresence(text);
+      if (presence) this.handlePresence(presence);
+      return;
+    }
     const hello = parseHello(text);
     if (!hello) return this.fail("expected hello");
     this.helloSeen = true;
@@ -160,6 +181,28 @@ class VaultConnection {
 
     await this.backfill(hello.manifest, hello.priority ?? []);
     this.send({ t: "ready" });
+  }
+
+  /** A client announced which note it's now viewing. Stamp the authenticated
+   *  userId (never trust the client's), fan it out to the vault, and — on the
+   *  first announce — ask everyone else to re-announce so this newcomer learns
+   *  the current roster (the channel holds no shared presence state). */
+  private handlePresence(frame: PresenceFrame): void {
+    if (!this.userId || !this.vaultId) return;
+    this.myPresence = {
+      docId: frame.docId,
+      name: frame.name,
+      color: frame.color,
+      status: frame.status,
+    };
+    void this.pubsub.publish(
+      vaultTopic(this.vaultId),
+      encodePubsubPresence({ userId: this.userId, ...this.myPresence }),
+    );
+    if (!this.announced) {
+      this.announced = true;
+      void this.pubsub.publish(vaultTopic(this.vaultId), encodePubsubPresenceQuery());
+    }
   }
 
   /** Stream missing ops for every readable doc, priority docs first. */
@@ -204,6 +247,32 @@ class VaultConnection {
       this.send({ t: "registry" });
       return;
     }
+    if (msg.type === "member-joined") {
+      // Org-wide news, not doc-scoped — forward to every subscriber of this
+      // vault so their roster refreshes and the join celebration fires live.
+      this.send({ t: "member", name: msg.name });
+      return;
+    }
+    if (msg.type === "presence") {
+      // Forward a teammate's viewing state — but only for docs this client may
+      // read (ACL-safe). A null docId ("not viewing"/gone) always passes so the
+      // client can clear that user from wherever it last showed them.
+      const { presence } = msg;
+      if (presence.docId === null || this.readable.has(presence.docId)) {
+        this.send({ t: "presence", ...presence });
+      }
+      return;
+    }
+    if (msg.type === "presence-query") {
+      // A newcomer joined — re-announce our current presence so they see us.
+      if (this.myPresence && this.userId && this.vaultId) {
+        void this.pubsub.publish(
+          vaultTopic(this.vaultId),
+          encodePubsubPresence({ userId: this.userId, ...this.myPresence }),
+        );
+      }
+      return;
+    }
     // acl-changed: re-evaluate; drop revoked docs, backfill newly-granted ones.
     void this.refreshAcl();
   }
@@ -230,6 +299,11 @@ class VaultConnection {
     // unlocks both reach open editors in realtime without a reopen (spec 04 §4).
     this.send({ t: "reauth" });
     const added = [...next].filter((d) => !prev.has(d));
+    if (added.length > 0 && this.vaultId) {
+      // We can now see docs we couldn't before — ask the vault to re-announce
+      // presence so viewers of the newly-readable docs light up for us.
+      void this.pubsub.publish(vaultTopic(this.vaultId), encodePubsubPresenceQuery());
+    }
     // Newly-readable docs: full backfill (client holds no state vector for them).
     await runPool(added, this.deps.concurrency, (docId) => this.sendDocBackfill(docId, undefined));
   }
@@ -250,6 +324,16 @@ class VaultConnection {
 
   private cleanup(): void {
     clearTimeout(this.helloTimer);
+    // Tell the vault this user is gone so teammates clear their presence dot.
+    // Guard on `announced` so we only emit for connections that ever appeared.
+    if (this.announced && this.userId && this.vaultId) {
+      const { name = "", color = "", status = "" } = this.myPresence ?? {};
+      void this.pubsub.publish(
+        vaultTopic(this.vaultId),
+        encodePubsubPresence({ userId: this.userId, docId: null, name, color, status }),
+      );
+      this.announced = false;
+    }
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;

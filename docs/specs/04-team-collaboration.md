@@ -88,9 +88,15 @@ shares (
 
 **Effective permission** for a user on a file:
 1. Workspace `owner`/`admin` → `edit` on everything in the workspace.
-2. Else take the **max** of: any `share` on the file itself, any `share` on a containing folder
-   (walk `parent_id` up), and any team share the user belongs to (later).
-3. `edit > view > none`. No matching grant → **no sync access**.
+2. A note's **creator** → `edit` on their own note.
+3. Else take the **max** of: any `share` on the file itself, any `share` on a containing folder
+   (walk `parent_id` up), and any workspace-wide grant — each either **per-user** or an org-wide
+   **"share with team"** grant.
+4. `edit > view > none`. No matching grant → **no sync access**.
+
+**Private by default:** a new workspace grants nothing org-wide, so members see only what they create
+or what's shared with them / the team. (Owner sets the whole workspace to Shared/Read-only, or shares
+individual folders, in the Access panel; workspaces created before this stay Open.)
 
 Folder grants are **inherited by descendants**; a file-level `share` can only *raise* permission
 (Outline's "read-only collection + writable document" pattern).

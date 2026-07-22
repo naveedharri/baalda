@@ -6,6 +6,7 @@ import pg from "pg";
 import { config } from "../config.js";
 import { BRAND_NAME } from "../brand.js";
 import { canAddMember, canCreateOrganization } from "../billing/entitlements.js";
+import { announceMemberJoined } from "../sync/member-events.js";
 
 /**
  * Better Auth (spec 04 §1/§2).
@@ -57,6 +58,15 @@ export const auth = betterAuth({
     "http://tauri.localhost",
     "http://localhost:1420",
   ],
+  // Desktop clients authenticate with a bearer token kept in the OS keychain,
+  // so the session's sliding refresh only advances when the app actually calls
+  // the server. Better Auth's 7-day default therefore logs people out if they
+  // don't open the app for a week. Give sessions a 30-day life, refreshed
+  // whenever they're a day old, so a returning user stays signed in.
+  session: {
+    expiresIn: 60 * 60 * 24 * 30, // 30 days
+    updateAge: 60 * 60 * 24, // refresh once the session is a day old
+  },
   emailAndPassword: {
     enabled: true,
     // MVP: no email round-trip required to sign in (email verification deferred).
@@ -117,6 +127,15 @@ export const auth = betterAuth({
               limit,
             });
           }
+        },
+        // A teammate accepted an invitation → announce to everyone live in the
+        // workspace so their roster refreshes and the join celebration fires.
+        // (The join-code path bypasses Better Auth and announces itself; org
+        // creation adds the owner via `afterAddMember`, which we deliberately
+        // don't hook — no one should be "welcomed" to their own new workspace.)
+        afterAcceptInvitation: async (data) => {
+          const name = data.user.name?.trim() || data.user.email;
+          await announceMemberJoined(data.organization.id, name);
         },
       },
     }),

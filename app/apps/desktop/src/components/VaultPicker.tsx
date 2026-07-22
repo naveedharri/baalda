@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
@@ -72,6 +72,12 @@ export function VaultPicker() {
   // When "New vault" lands on a folder that's already a vault, hold its path so
   // we can offer to open it instead of nesting a new empty vault inside it.
   const [alreadyVault, setAlreadyVault] = useState<string | null>(null);
+  // Recents are collapsed to the 3 most recent; "Load more" reveals the rest
+  // inside a scroll area locked to the collapsed height so the logo/buttons
+  // above never shift (the vault-picker card is vertically centered).
+  const [showAllRecents, setShowAllRecents] = useState(false);
+  const recentScrollRef = useRef<HTMLDivElement>(null);
+  const [lockedHeight, setLockedHeight] = useState<number | null>(null);
   const reduceMotion = useReducedMotion();
 
   // Surface recently opened vaults as one-tap "reopen" affordances.
@@ -155,7 +161,7 @@ export function VaultPicker() {
   function createInsideAnyway() {
     if (!alreadyVault) return;
     setNewParent(alreadyVault);
-    setNewName("Untitled Vault");
+    setNewName("Untitled Workspace");
     setAlreadyVault(null);
   }
 
@@ -207,11 +213,27 @@ export function VaultPicker() {
     }
   }
 
+  // Freeze the scroll box at the collapsed 3-card height before revealing the
+  // rest, so the list scrolls internally instead of growing the (centered) card.
+  function expandRecents() {
+    setLockedHeight(recentScrollRef.current?.offsetHeight ?? null);
+    setShowAllRecents(true);
+  }
+  function collapseRecents() {
+    setShowAllRecents(false);
+    setLockedHeight(null);
+  }
+
   const naming = newParent !== null;
   const deciding = alreadyVault !== null;
   // Whether either multi-step flow (naming a new vault, or deciding what to do
   // with an already-a-vault folder) is showing — hides the recents/hint.
   const inFlow = naming || deciding;
+
+  // Show the 3 most recent by default; the rest hide behind "Load more".
+  const RECENT_LIMIT = 3;
+  const shownRecents = showAllRecents ? recents : recents.slice(0, RECENT_LIMIT);
+  const hiddenRecents = recents.length - RECENT_LIMIT;
 
   return (
     <div className="vault-picker">
@@ -253,10 +275,10 @@ export function VaultPicker() {
                 exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
                 transition={SPRING}
               >
-                <label className="new-vault-label">This folder is already a vault</label>
+                <label className="new-vault-label">This folder is already a workspace</label>
                 <p className="new-vault-loc" title={alreadyVault ?? undefined}>
                   <code>{tidyPath(alreadyVault ?? "")}</code> already contains notes — open
-                  it instead of creating a new vault inside?
+                  it instead of creating a new workspace inside?
                 </p>
                 <div className="new-vault-buttons">
                   <button
@@ -281,7 +303,7 @@ export function VaultPicker() {
                     disabled={busy}
                     onClick={() => void openDetectedVault()}
                   >
-                    {busy ? "Opening…" : "Open vault"}
+                    {busy ? "Opening…" : "Open workspace"}
                   </button>
                 </div>
               </motion.div>
@@ -302,7 +324,7 @@ export function VaultPicker() {
                   void confirmNewVault();
                 }}
               >
-                <label className="new-vault-label">Name your vault</label>
+                <label className="new-vault-label">Name your workspace</label>
                 {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
                 <input
                   className="new-vault-input"
@@ -313,7 +335,7 @@ export function VaultPicker() {
                   onKeyDown={(e) => {
                     if (e.key === "Escape") cancelNewVault();
                   }}
-                  placeholder="Untitled Vault"
+                  placeholder="Untitled Workspace"
                   spellCheck={false}
                 />
                 <p className="new-vault-loc" title={newParent ?? undefined}>
@@ -333,7 +355,7 @@ export function VaultPicker() {
                     className="primary sm"
                     disabled={busy || !newName.trim()}
                   >
-                    {busy ? "Creating…" : "Create vault"}
+                    {busy ? "Creating…" : "Create workspace"}
                   </button>
                 </div>
               </motion.form>
@@ -355,7 +377,7 @@ export function VaultPicker() {
                   whileTap={reduceMotion ? undefined : { scale: 0.96 }}
                   transition={SPRING}
                 >
-                  New vault
+                  New workspace
                 </motion.button>
                 <motion.button
                   className="ghost-pill lg"
@@ -383,32 +405,49 @@ export function VaultPicker() {
               reduceMotion ? undefined : revealTransition(REVEAL_DELAY + 0.15)
             }
           >
-            <p className="recent-heading">Recent vaults</p>
-            {recents.map((r) => (
-              <div className="recent-card" key={r.path}>
-                <button
-                  className="recent-open"
-                  disabled={busy}
-                  onClick={() => reopen(r)}
-                  title={r.path}
-                >
-                  <span className="recent-name">{r.name}</span>
-                  <span className="recent-path">{tidyPath(r.path)}</span>
-                  {r.openedAt > 0 && (
-                    <span className="recent-time">{relativeTime(r.openedAt)}</span>
-                  )}
-                </button>
-                <button
-                  className="recent-remove"
-                  aria-label={`Remove ${r.name} from recents`}
-                  title="Remove from recents"
-                  disabled={busy}
-                  onClick={() => forget(r.path)}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+            <p className="recent-heading">Recent workspaces</p>
+            <div
+              ref={recentScrollRef}
+              className={`recent-scroll${showAllRecents ? " expanded" : ""}`}
+              style={
+                showAllRecents && lockedHeight ? { height: lockedHeight } : undefined
+              }
+            >
+              {shownRecents.map((r) => (
+                <div className="recent-card" key={r.path}>
+                  <button
+                    className="recent-open"
+                    disabled={busy}
+                    onClick={() => reopen(r)}
+                    title={r.path}
+                  >
+                    <span className="recent-name">{r.name}</span>
+                    <span className="recent-path">{tidyPath(r.path)}</span>
+                    {r.openedAt > 0 && (
+                      <span className="recent-time">{relativeTime(r.openedAt)}</span>
+                    )}
+                  </button>
+                  <button
+                    className="recent-remove"
+                    aria-label={`Remove ${r.name} from recents`}
+                    title="Remove from recents"
+                    disabled={busy}
+                    onClick={() => forget(r.path)}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+            {hiddenRecents > 0 && (
+              <button
+                className="recent-more"
+                disabled={busy}
+                onClick={showAllRecents ? collapseRecents : expandRecents}
+              >
+                {showAllRecents ? "Show less" : `Load more (${hiddenRecents})`}
+              </button>
+            )}
           </motion.div>
         )}
 
@@ -421,7 +460,7 @@ export function VaultPicker() {
               reduceMotion ? undefined : revealTransition(REVEAL_DELAY + 0.3)
             }
           >
-            A vault is any folder of <code>.md</code> files.
+            A workspace is any folder of <code>.md</code> files.
           </motion.p>
         )}
       </div>

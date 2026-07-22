@@ -239,6 +239,18 @@
   background: var(--success);
   box-shadow: 0 0 6px -1px var(--success);
 }
+/* Availability tones mirror the account avatar's presence light and the
+   Settings status dots: away → amber, busy → red, offline/invisible → gray. */
+.peer-dot.tone-away {
+  background: #f59e0b;
+}
+.peer-dot.tone-busy {
+  background: var(--danger);
+  box-shadow: 0 0 6px -1px var(--danger);
+}
+.peer-dot.tone-offline {
+  background: var(--text-tertiary);
+}
 .peer-ping {
   flex: 0 0 auto;
   font-size: var(--fs-xs);

@@ -25,6 +25,13 @@ class FakeWs extends EventEmitter {
   hello(token: string, manifest: Record<string, string> = {}, priority?: string[]): void {
     this.emit("message", Buffer.from(JSON.stringify({ t: "hello", token, manifest, priority })), false);
   }
+  presence(docId: string | null, name = "Ada", color = "#6366f1", status = "online"): void {
+    this.emit(
+      "message",
+      Buffer.from(JSON.stringify({ t: "presence", docId, name, color, status })),
+      false,
+    );
+  }
   controls(): Array<Record<string, unknown>> {
     return this.sent.filter((s) => s.kind === "text").map((s) => (s as { value: Record<string, unknown> }).value);
   }
@@ -123,6 +130,72 @@ describe("VaultChannel relay (spec 05 §3.1)", () => {
     expect(ws.controls().filter((c) => c.t === "registry")).toEqual([{ t: "registry" }]);
     // Newly-readable "B" is backfilled off the same signal.
     await waitFor(() => ws.updates().some((u) => u.docId === "B"));
+  });
+
+  it("forwards a member-joined announcement to every subscriber (not doc-scoped)", async () => {
+    const { channel } = channelWith(() => new Set(["A"]));
+    const ws = new FakeWs();
+    channel.handleConnection(ws as never);
+    ws.hello("good");
+    await waitFor(() => ws.controls().some((c) => c.t === "ready"));
+
+    await channel.publishMemberJoined("v1", "Ada");
+    await waitFor(() => ws.controls().some((c) => c.t === "member"));
+
+    expect(ws.controls().filter((c) => c.t === "member")).toEqual([
+      { t: "member", name: "Ada" },
+    ]);
+  });
+
+  it("forwards a teammate's presence to subscribers that can read the doc (gone always passes)", async () => {
+    const { channel } = channelWith(() => new Set(["A"]));
+    const a = new FakeWs();
+    const b = new FakeWs();
+    channel.handleConnection(a as never);
+    channel.handleConnection(b as never);
+    a.hello("good");
+    b.hello("good");
+    await waitFor(() => a.controls().some((c) => c.t === "ready"));
+    await waitFor(() => b.controls().some((c) => c.t === "ready"));
+
+    // A is viewing note "A" (readable by B) → B sees it.
+    a.presence("A");
+    await waitFor(() => b.controls().some((c) => c.t === "presence" && c.docId === "A"));
+    const seen = b.controls().find((c) => c.t === "presence" && c.docId === "A");
+    expect(seen).toEqual({
+      t: "presence",
+      userId: "u1",
+      docId: "A",
+      name: "Ada",
+      color: "#6366f1",
+      status: "online",
+    });
+
+    // A moves to note "Z" (NOT in B's readable set) → B never sees "Z".
+    a.presence("Z");
+    // A closes the note (docId null = gone) → always forwarded so B can clear.
+    a.presence(null);
+    await waitFor(() => b.controls().some((c) => c.t === "presence" && c.docId === null));
+    expect(b.controls().some((c) => c.t === "presence" && c.docId === "Z")).toBe(false);
+  });
+
+  it("re-announces presence so a newcomer learns who's already viewing what", async () => {
+    const { channel } = channelWith(() => new Set(["A"]));
+    const a = new FakeWs();
+    channel.handleConnection(a as never);
+    a.hello("good");
+    await waitFor(() => a.controls().some((c) => c.t === "ready"));
+    a.presence("A"); // A is already here before B joins
+
+    // B joins afterward and announces itself; its first announce triggers a
+    // presence-query, prompting A to re-announce so B learns A is on "A".
+    const b = new FakeWs();
+    channel.handleConnection(b as never);
+    b.hello("good");
+    await waitFor(() => b.controls().some((c) => c.t === "ready"));
+    b.presence(null);
+
+    await waitFor(() => b.controls().some((c) => c.t === "presence" && c.docId === "A"));
   });
 
   it("drops a doc when an acl change removes it from the readable set", async () => {

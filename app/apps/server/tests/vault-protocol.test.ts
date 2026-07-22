@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   parseHello,
+  parsePresence,
   encodeWsUpdate,
   decodeWsUpdate,
   encodePubsubUpdate,
   encodePubsubAclChanged,
   encodePubsubRegistryChanged,
+  encodePubsubMemberJoined,
+  encodePubsubPresence,
+  encodePubsubPresenceQuery,
   decodePubsub,
 } from "../src/sync/vault-protocol.js";
 
@@ -32,6 +36,43 @@ describe("vault channel framing", () => {
 
   it("decodes the registry-changed control payload", () => {
     expect(decodePubsub(encodePubsubRegistryChanged())).toEqual({ type: "registry-changed" });
+  });
+
+  it("round-trips a member-joined payload with the member's name (incl. unicode)", () => {
+    expect(decodePubsub(encodePubsubMemberJoined("Ada Lovelace"))).toEqual({
+      type: "member-joined",
+      name: "Ada Lovelace",
+    });
+    expect(decodePubsub(encodePubsubMemberJoined("François 🎉"))).toEqual({
+      type: "member-joined",
+      name: "François 🎉",
+    });
+  });
+
+  it("round-trips a presence pubsub payload (incl. a null docId = gone)", () => {
+    const p = { userId: "u1", docId: "note-9", name: "Ada 🎉", color: "#6366f1", status: "online" };
+    expect(decodePubsub(encodePubsubPresence(p))).toEqual({ type: "presence", presence: p });
+    const gone = { userId: "u1", docId: null, name: "", color: "", status: "" };
+    expect(decodePubsub(encodePubsubPresence(gone))).toEqual({ type: "presence", presence: gone });
+  });
+
+  it("decodes the presence-query control payload", () => {
+    expect(decodePubsub(encodePubsubPresenceQuery())).toEqual({ type: "presence-query" });
+  });
+
+  it("parses a valid presence frame and rejects malformed ones", () => {
+    const ok = parsePresence(
+      JSON.stringify({ t: "presence", docId: "d1", name: "Ada", color: "#fff", status: "busy" }),
+    );
+    expect(ok).toEqual({ t: "presence", docId: "d1", name: "Ada", color: "#fff", status: "busy" });
+    // null docId is valid ("not viewing anything")
+    expect(
+      parsePresence(JSON.stringify({ t: "presence", docId: null, name: "A", color: "c", status: "s" }))
+        ?.docId,
+    ).toBeNull();
+    expect(parsePresence(JSON.stringify({ t: "hello", token: "x", manifest: {} }))).toBeNull();
+    expect(parsePresence(JSON.stringify({ t: "presence", name: "A", color: "c" }))).toBeNull(); // no status
+    expect(parsePresence("not json")).toBeNull();
   });
 
   it("returns null for a truncated frame and an unknown pubsub type", () => {

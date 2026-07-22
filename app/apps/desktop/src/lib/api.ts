@@ -409,11 +409,20 @@ export class ApiClient {
         user: AuthUser;
         session: { activeOrganizationId?: string | null };
       } | null>("GET", "/api/auth/get-session");
-      if (!data || !data.user) return null;
-      return {
-        user: data.user,
-        activeOrganizationId: data.session?.activeOrganizationId ?? null,
-      };
+      // Better Auth signals "no active session" with a literal `null` body — the
+      // only response that should drop the stored token. A well-formed session
+      // has a `user`. Anything else (an empty body, a proxy's HTML error page
+      // that happened to return 200, an API contract drift) is NOT a trustworthy
+      // "signed out" signal: throwing keeps the token so the caller can retry,
+      // instead of logging the user out over a transient hiccup.
+      if (data == null) return null;
+      if (typeof data === "object" && (data as { user?: unknown }).user) {
+        return {
+          user: data.user,
+          activeOrganizationId: data.session?.activeOrganizationId ?? null,
+        };
+      }
+      throw new ApiError(0, "Unexpected get-session response shape");
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) return null;
       throw e;
