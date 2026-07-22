@@ -19,8 +19,8 @@ in production.
 ## Option A: plain Docker
 
 The image is built from the repo root because the server is one workspace of
-an npm-workspaces monorepo and needs the root `package.json` / lockfile to
-resolve its dependencies.
+a pnpm monorepo and needs the workspace root's `package.json` /
+`pnpm-lock.yaml` / `pnpm-workspace.yaml` to resolve its dependencies.
 
 ### Build
 
@@ -122,7 +122,7 @@ almost no manual configuration:
    - `BETTER_AUTH_URL`: the server's public HTTPS URL (Railway gives you a
      `*.up.railway.app` domain, or attach your own).
 4. Deploy. `railway.json`'s `deploy.preDeployCommand` runs
-   `npm run migrate:deploy` before every deploy, and `deploy.healthcheckPath`
+   `node dist/db/migrate.js` before every deploy, and `deploy.healthcheckPath`
    is `/health`, so Railway won't cut over traffic until migrations have run
    and the server is answering.
 5. Expose only the one HTTP port (Railway does this automatically from
@@ -195,7 +195,7 @@ compose file ships an optional Redis under the `ha` profile:
 ```bash
 cd app/apps/server
 docker compose --profile ha up -d redis   # host port 6389
-REDIS_URL=redis://localhost:6389 npm run dev
+REDIS_URL=redis://localhost:6389 pnpm run dev
 ```
 
 Self-hosters who run a single instance need none of this — leave `REDIS_URL`

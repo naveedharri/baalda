@@ -124,7 +124,7 @@ Everything else (the desktop app, the search index, the sync server) is a rebuil
 
 ### Prerequisites
 
-- **Node.js** ≥ 22
+- **Node.js** ≥ 22 (with corepack: `corepack enable` activates the pinned pnpm)
 - **Rust** & Cargo ([rustup.rs](https://rustup.rs))
 - **Docker** (for the Postgres database)
 
@@ -132,7 +132,7 @@ Everything else (the desktop app, the search index, the sync server) is a rebuil
 
 ```bash
 cd app
-npm install
+pnpm install
 ```
 
 ### 2. Start the server
@@ -140,9 +140,9 @@ npm install
 ```bash
 cd apps/server
 cp .env.example .env      # adjust JWT_SECRET for anything real
-npm run db:up             # start Postgres in Docker (host port 5439)
-npm run migrate           # create the database schema
-npm run dev               # HTTP API :3010 · sync WS :3011 (also served at :3010/sync)
+pnpm run db:up            # start Postgres in Docker (host port 5439)
+pnpm run migrate          # create the database schema
+pnpm run dev              # HTTP API :3010 · sync WS :3011 (also served at :3010/sync)
 ```
 
 ### 3. Start the desktop app
@@ -150,7 +150,7 @@ npm run dev               # HTTP API :3010 · sync WS :3011 (also served at :301
 From the `app/` directory:
 
 ```bash
-npm run dev:desktop       # launches the Tauri app (Vite on :1420)
+pnpm run dev:desktop      # launches the Tauri app (Vite on :1420)
 ```
 
 Open a folder of Markdown files (or create a new one) and start writing.

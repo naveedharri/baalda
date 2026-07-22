@@ -45,7 +45,8 @@ Two invariants everything depends on:
 
 ## Repo layout
 
-Monorepo at `app/` (npm workspaces); all docs and specs live under `docs/`.
+Monorepo at `app/` (pnpm workspaces + Turborepo; pnpm pinned via `packageManager`, activate with
+`corepack enable`); all docs and specs live under `docs/`.
 
 ```
 app/
@@ -60,30 +61,32 @@ it calls typed Rust commands (`src/lib/ipc.ts`) and hits the server over HTTP (`
 
 ## Build & run
 
-Prereqs: Node ≥ 22, Rust/cargo, Docker (for Postgres). Run `npm install` once from `app/`.
+Prereqs: Node ≥ 22, Rust/cargo, Docker (for Postgres). Run `pnpm install` once from `app/`.
 
 **Server** (from `app/apps/server/`):
 ```bash
 cp .env.example .env      # change JWT_SECRET for anything real
-npm run db:up             # Postgres 16 in Docker, host port 5439
-npm run migrate           # apply migrations/*.sql in order
-npm run dev               # tsx watch; HTTP :3010, Hocuspocus WS :3011, GET /health
+pnpm run db:up            # Postgres 16 in Docker, host port 5439
+pnpm run migrate          # apply migrations/*.sql in order
+pnpm run dev              # tsx watch; HTTP :3010, Hocuspocus WS :3011, GET /health
 ```
 
-**Desktop** (from `app/`): `npm run dev:desktop` (= `npm run tauri dev -w desktop`; Vite on :1420).
-Build: `npm run build:desktop`.
+**Desktop** (from `app/`): `pnpm run dev:desktop` (= `pnpm --filter desktop tauri dev`; Vite on :1420).
+Build: `pnpm run build:desktop`.
 
 ## Test
 
-- Everything: `npm test` from `app/` (runs both workspaces).
-- Server (`app/apps/server`): `npm test` (vitest). **Requires `db:up` + `migrate` first.** Runs serially
+- Everything: `pnpm test` from `app/` (= `turbo run test`, both workspaces; desktop's task is
+  content-hash cached, server's never is — `apps/server/turbo.json` sets `cache: false` because it
+  mutates the shared Postgres).
+- Server (`app/apps/server`): `pnpm test` (vitest). **Requires `db:up` + `migrate` first.** Runs serially
   against a shared Postgres (`fileParallelism: false`).
-- Desktop TS (`app/apps/desktop`): `npm test` (vitest, node env). The bridge suites (`echo`, `concurrent`,
+- Desktop TS (`app/apps/desktop`): `pnpm test` (vitest, node env). The bridge suites (`echo`, `concurrent`,
   `rewrite`, `roundtrip`) are the crown jewels — they gate correctness of the whole product. The sync
   `integration` test is env-gated (`CONTEXT_IT=1`, needs a live server).
 - Desktop Rust: `cargo test` in `src-tauri/` (unit tests inline per module + `tests/index_integration.rs`).
 
-> ⚠️ Running `npm test` in `apps/server` wipes the dev DB (users/orgs/vaults). Re-seed afterward.
+> ⚠️ Running `pnpm test` in `apps/server` wipes the dev DB (users/orgs/vaults). Re-seed afterward.
 
 ## Architecture by layer
 
@@ -143,7 +146,7 @@ script/style/iframe, strip `on*`/`javascript:`).
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
 Hocuspocus instance is also served on the HTTP port at `/sync` (`sync/http-upgrade.ts`) so the whole
 server runs behind a single port/domain — that's what production deploys use (Dockerfile +
-`railway.json` + `docs/DEPLOY.md`; migrations run pre-deploy via `npm run migrate:deploy`). MCP writes
+`railway.json` + `docs/DEPLOY.md`; migrations run pre-deploy via `node dist/db/migrate.js`). MCP writes
 flow through the same sync server via `createDocWriter` so AI edits persist/broadcast like human edits.
 - `auth/auth.ts` — Better Auth; **argon2id** (overrides default scrypt) via `@node-rs/argon2`; `bearer` +
   `organization` plugins (org = **vault**, the user-facing unified entity — Local / Synced / Remote states;
@@ -206,8 +209,9 @@ change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011
   collection), rewrote the org-wide grant value `resource_type = 'workspace'` → `'vault'` (+ CHECK), and
   renamed `mcp_oauth_workspace` → `mcp_oauth_vault`; the 402 tokens are `vault_limit_reached` /
   `member_limit_reached`, the billing JSON fields `vaultsPerUser` / `membersPerVault`, and the env var
-  `FREE_MAX_VAULTS`. The word *workspace* now survives only as npm-tooling `workspaces` plus the Rust
-  `#[serde(alias = "workspace_root")]` that keeps pre-rename desktop config files loadable.
+  `FREE_MAX_VAULTS`. The word *workspace* now survives only as pnpm's `pnpm-workspace.yaml` tooling
+  term plus the Rust `#[serde(alias = "workspace_root")]` that keeps pre-rename desktop config files
+  loadable.
 
 ## Build state (see `docs/STATUS.md`)
 

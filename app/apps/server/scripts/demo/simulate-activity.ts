@@ -10,9 +10,9 @@
 //    • edits     — occasional transient typing on SAFE notes (Team Journal /
 //                  index notes), inserted then removed so content is unchanged
 //
-//  Run:   npm run demo:activity          (after npm run seed:demo)
-//         DEMO_FOCUS="Projects" npm run demo:activity   (crowd one area)
-//         DEMO_SKIP_EMAIL="ava@testorg.demo" npm run demo:activity
+//  Run:   pnpm run demo:activity          (after pnpm run seed:demo)
+//         DEMO_FOCUS="Projects" pnpm run demo:activity   (crowd one area)
+//         DEMO_SKIP_EMAIL="ava@testorg.demo" pnpm run demo:activity
 //
 //  Ctrl-C to stop (disconnects everyone cleanly).
 // ============================================================================
@@ -74,7 +74,7 @@ async function loadWorld(): Promise<{ vaultId: string; members: Member[]; notes:
     demoConfig.orgSlug,
   ]);
   const orgId = org.rows[0]?.id;
-  if (!orgId) throw new Error(`No org "${demoConfig.orgSlug}". Run: npm run seed:demo`);
+  if (!orgId) throw new Error(`No org "${demoConfig.orgSlug}". Run: pnpm run seed:demo`);
 
   const vault = await pool.query<{ id: string }>(
     "SELECT id FROM vaults WHERE organization_id = $1 ORDER BY created_at LIMIT 1",

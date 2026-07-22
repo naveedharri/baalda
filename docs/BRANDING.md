@@ -59,7 +59,7 @@ the brand name. Everywhere it appears:
 - Env vars: `CONTEXT_IT`, `CONTEXT_SERVER`.
 - Sync JWT issuer: `context`. Hocuspocus instance name: `context-sync`.
 - MCP `serverInfo` name: `context` (and the suggested CLI alias, `claude mcp add ... context`).
-- npm root package name: `context`.
+- Root package name (`app/package.json`): `context`.
 - Dev test account: `test@context.local` / `Context-Test-2026!`.
 
 **Rule: never put the brand in anything durable.** That means storage, identifiers, protocol names,

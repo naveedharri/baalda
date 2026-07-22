@@ -9,11 +9,11 @@
 //    • org-wide EDIT grant so every member can open every note
 //    • generated per-folder index notes + a search/graph index over everything
 //
-//  Run:   npm run seed:demo          (reseeds; --reset first if it exists)
-//         DEMO_TARGET_NOTES=8000 npm run seed:demo
-//         DEMO_SOURCE_VAULT="/path/to/vault" npm run seed:demo
+//  Run:   pnpm run seed:demo          (reseeds; --reset first if it exists)
+//         DEMO_TARGET_NOTES=8000 pnpm run seed:demo
+//         DEMO_SOURCE_VAULT="/path/to/vault" pnpm run seed:demo
 //
-//  Requires local Postgres up (npm run db:up) + a .env with JWT_SECRET.
+//  Requires local Postgres up (pnpm run db:up) + a .env with JWT_SECRET.
 //  Prints a credentials table at the end.
 // ============================================================================
 
@@ -284,8 +284,8 @@ function printSummary(team: TeamMember[], vaultId: string, orgId: string): void 
   }
   console.log("═".repeat(64));
   console.log(`\n  ▶ Log into the desktop app as  ${team[0].email}  (server: http://localhost:3010)`);
-  console.log(`  ▶ Then run the live teammates:  npm run demo:activity`);
-  console.log(`  ▶ One shot next time (reseed + teammates):  npm run demo\n`);
+  console.log(`  ▶ Then run the live teammates:  pnpm run demo:activity`);
+  console.log(`  ▶ One shot next time (reseed + teammates):  pnpm run demo\n`);
 }
 
 main()

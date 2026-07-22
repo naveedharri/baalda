@@ -2,7 +2,7 @@
 // presence → locks). Env-gated like integration.test.ts: needs the real server
 // on :3010 (+ Docker Postgres, migrated).
 //
-//   CONTEXT_IT=1 npm test -w desktop -- multiuser
+//   CONTEXT_IT=1 pnpm --filter desktop test -- multiuser
 //
 // This drives the REAL client modules end-to-end against a live server:
 //  - ApiClient      auth, org invitations, registry, shares, tokens
