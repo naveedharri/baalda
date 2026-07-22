@@ -170,7 +170,9 @@ export function AccountMenu() {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        title={`${userLabel} · ${presenceLabel}${activeOrg ? ` · ${activeOrg.name}` : ""}`}
+        title={`${userLabel} · ${presenceLabel}${
+          syncEnabled && activeOrg ? ` · ${activeOrg.name}` : vault ? ` · ${vault.name}` : ""
+        }`}
       >
         <span className="identity-avatar-wrap">
           <Avatar label={userLabel} image={session.user.image} />
@@ -178,10 +180,17 @@ export function AccountMenu() {
         </span>
         <span className="identity-meta">
           <span className="identity-line1">
-            {activeOrg?.name ?? vault?.name ?? userLabel}
+            {/* Name the workspace that's actually OPEN — a local one wins over a
+                still-set activeOrg once sync is off (opening a local folder
+                disables sync but leaves the account's active org untouched). */}
+            {(syncEnabled && activeOrg ? activeOrg.name : vault?.name) ?? userLabel}
           </span>
           <span className="identity-line2">
-            {activeOrg ? userLabel : vault ? "Local · not synced" : "No workspace yet"}
+            {syncEnabled && activeOrg
+              ? userLabel
+              : vault
+                ? "Local · not synced"
+                : "No workspace yet"}
           </span>
         </span>
         {hasInvites && <span className="identity-alert" aria-label="Pending invitation" />}
@@ -230,8 +239,11 @@ const POPOVER_WORKSPACE_LIMIT = 2;
  * user's LOCAL workspaces. A workspace is one concept in two states; these are
  * the ones that just aren't syncing to an org yet.
  */
-function useLocalWorkspaces(): RecentVault[] {
+function useLocalWorkspaces(nonce = 0): RecentVault[] {
   const [recents, setRecents] = useState<RecentVault[]>([]);
+  // Re-fetch when the open folder changes (a switch/open reorders recents) and
+  // when `nonce` is bumped (after a local remove/delete removes a row).
+  const openPath = useStore((s) => s.vault?.path);
   useEffect(() => {
     let alive = true;
     ipc
@@ -243,7 +255,7 @@ function useLocalWorkspaces(): RecentVault[] {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [nonce, openPath]);
   const bound = new Set(Object.values(readOrgVaults()));
   return recents.filter((r) => !bound.has(r.path));
 }
@@ -494,7 +506,7 @@ function AccountPopover({
               {o.name[0]?.toUpperCase() ?? "?"}
             </span>
             <span className="menu-item-label">{o.name}</span>
-            {!isActive && <span className="ws-badge synced">Synced</span>}
+            {!isActive && <span className="ws-badge synced">Remote</span>}
             {isActive && (
               <>
                 <span className="menu-current">Current</span>
@@ -661,8 +673,19 @@ function MenuIcon({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Focused sign-in / sign-up modal; closes itself once a session lands. */
-function AuthDialog({ onClose }: { onClose: () => void }) {
+/**
+ * Focused sign-in / sign-up modal; closes itself once a session lands. When a
+ * caller needs to act on a *successful* sign-in (vs. a cancel), it passes
+ * `onSignedIn` — fired instead of `onClose` when the session arrives, so the
+ * two outcomes stay distinguishable.
+ */
+export function AuthDialog({
+  onClose,
+  onSignedIn,
+}: {
+  onClose: () => void;
+  onSignedIn?: () => void;
+}) {
   const authStatus = useStore((s) => s.authStatus);
   const authError = useStore((s) => s.authError);
   const serverUrl = useStore((s) => s.serverUrl);
@@ -683,8 +706,11 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
   const [googleAvailable, setGoogleAvailable] = useState(false);
 
   useEffect(() => {
-    if (authStatus === "signed-in") onClose();
-  }, [authStatus, onClose]);
+    if (authStatus === "signed-in") {
+      if (onSignedIn) onSignedIn();
+      else onClose();
+    }
+  }, [authStatus, onClose, onSignedIn]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1307,7 +1333,9 @@ function WorkspacesTab() {
   const members = useStore((s) => s.members);
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
-  const locals = useLocalWorkspaces();
+  // Bumped after a local remove/delete so the recents list re-fetches.
+  const [localsNonce, setLocalsNonce] = useState(0);
+  const locals = useLocalWorkspaces(localsNonce);
 
   const [root, setRoot] = useState<string | null>(null);
   const [bound, setBound] = useState<Record<string, string>>(() => readOrgVaults());
@@ -1319,6 +1347,8 @@ function WorkspacesTab() {
   const [busy, setBusy] = useState(false);
   // orgId whose permanent deletion is awaiting a second confirming click.
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // local-workspace path whose file deletion is awaiting a second confirming click.
+  const [confirmDeleteLocal, setConfirmDeleteLocal] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Free-plan workspace-cap hit while creating — shows an upgrade nudge instead.
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
@@ -1407,6 +1437,37 @@ function WorkspacesTab() {
       await useStore.getState().deleteWorkspace(orgId);
       setBound(readOrgVaults());
       setConfirmDelete(null);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Forget a local workspace from this device's list (files on disk are kept).
+  const removeLocalWorkspace = async (path: string) => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await useStore.getState().removeLocalWorkspace(path);
+      setLocalsNonce((n) => n + 1);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Move a local workspace's folder to the OS trash (destructive, two-click confirm).
+  const deleteLocalFiles = async (path: string) => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await useStore.getState().deleteLocalWorkspace(path);
+      setConfirmDeleteLocal(null);
+      setLocalsNonce((n) => n + 1);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1630,19 +1691,58 @@ function WorkspacesTab() {
                       {" · Local"}
                     </span>
                   </span>
-                  <span className="workspace-row-actions">
-                    {isCurrent ? (
-                      <span className="member-role">Current</span>
-                    ) : (
+                  {confirmDeleteLocal === r.path ? (
+                    <span className="workspace-row-actions">
+                      <span className="muted">Delete this workspace?</span>
                       <button
                         className="link-btn"
                         disabled={busy}
-                        onClick={() => void switchToLocal(r.path)}
+                        onClick={() => setConfirmDeleteLocal(null)}
                       >
-                        Switch
+                        Cancel
                       </button>
-                    )}
-                  </span>
+                      <button
+                        className="link-btn danger"
+                        disabled={busy}
+                        onClick={() => void deleteLocalFiles(r.path)}
+                      >
+                        Delete
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="workspace-row-actions">
+                      {isCurrent ? (
+                        <span className="member-role">Current</span>
+                      ) : (
+                        <button
+                          className="link-btn"
+                          disabled={busy}
+                          onClick={() => void switchToLocal(r.path)}
+                        >
+                          Switch
+                        </button>
+                      )}
+                      <button
+                        className="link-btn"
+                        disabled={busy}
+                        title="Remove this folder from the list. Files stay on disk."
+                        onClick={() => void removeLocalWorkspace(r.path)}
+                      >
+                        Remove
+                      </button>
+                      <button
+                        className="link-btn danger"
+                        disabled={busy}
+                        title="Delete this workspace — moves its folder and all its notes to the Trash"
+                        onClick={() => {
+                          setActionError(null);
+                          setConfirmDeleteLocal(r.path);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </span>
+                  )}
                 </li>
               );
             })}

@@ -1,9 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
-import { useStore } from "../store";
+import {
+  readKnownWorkspaces,
+  readOrgVaults,
+  requestOpenWorkspace,
+  useStore,
+} from "../store";
+import { AuthDialog } from "./AccountMenu";
 import { Wordmark } from "./Logo";
+
+/**
+ * A row in the welcome-screen list: either a plain local folder (a recent vault
+ * on disk) or a synced *remote* workspace (an org). Remote rows carry the org id
+ * so a click can reopen + resync them — prompting sign-in first if signed out.
+ */
+type PickerEntry =
+  | { kind: "local"; key: string; name: string; path: string; openedAt: number }
+  | { kind: "remote"; key: string; name: string; path: string | null; orgId: string };
 
 // Springs tuned for small UI: snappy but soft-landing (no rubber-banding).
 const SPRING = { type: "spring", stiffness: 300, damping: 24 } as const;
@@ -63,9 +78,13 @@ function tidyPath(path: string): string {
 }
 
 export function VaultPicker() {
+  const authStatus = useStore((s) => s.authStatus);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<RecentVault[]>([]);
+  // When a signed-out user clicks a remote workspace we open the sign-in modal;
+  // the workspace to land in afterwards is stashed via requestOpenWorkspace().
+  const [signInOpen, setSignInOpen] = useState(false);
   // New-vault flow: null = idle; a string = chosen parent, awaiting a name.
   const [newParent, setNewParent] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
@@ -191,16 +210,41 @@ export function VaultPicker() {
     setError(null);
   }
 
-  async function reopen(r: RecentVault) {
+  async function reopenLocal(path: string) {
     setBusy(true);
     setError(null);
     try {
-      const info = await ipc.openVault(r.path);
+      const info = await ipc.openVault(path);
       await openVault(info);
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Open a workspace row. Local folders open in place. A remote (synced)
+  // workspace needs a session: if we still have one, switch straight to it
+  // (opening its folder + resyncing); if we're signed out, remember it and
+  // prompt sign-in — landInLastWorkspace opens it once the session lands.
+  async function openEntry(e: PickerEntry) {
+    if (e.kind === "local") {
+      await reopenLocal(e.path);
+      return;
+    }
+    if (authStatus === "signed-in") {
+      setBusy(true);
+      setError(null);
+      try {
+        await useStore.getState().setActiveOrganization(e.orgId);
+      } catch (err) {
+        setError(String(err));
+      } finally {
+        setBusy(false);
+      }
+    } else {
+      requestOpenWorkspace(e.orgId);
+      setSignInOpen(true);
     }
   }
 
@@ -230,10 +274,38 @@ export function VaultPicker() {
   // with an already-a-vault folder) is showing — hides the recents/hint.
   const inFlow = naming || deciding;
 
+  // Merge synced (remote) workspaces with local recents into one list. Remote
+  // workspaces come from the locally-cached org list (survives sign-out) and are
+  // shown first; their bound folder — if any — comes from the org→folder map.
+  // Local recents backing a synced workspace are folded into the remote row (by
+  // path) so nothing shows twice.
+  const entries = useMemo<PickerEntry[]>(() => {
+    const known = readKnownWorkspaces();
+    const orgVaults = readOrgVaults();
+    const boundPaths = new Set(Object.values(orgVaults));
+    const remote: PickerEntry[] = known.map((w) => ({
+      kind: "remote",
+      key: `org:${w.id}`,
+      name: w.name,
+      path: orgVaults[w.id] ?? null,
+      orgId: w.id,
+    }));
+    const local: PickerEntry[] = recents
+      .filter((r) => !boundPaths.has(r.path))
+      .map((r) => ({
+        kind: "local",
+        key: r.path,
+        name: r.name,
+        path: r.path,
+        openedAt: r.openedAt,
+      }));
+    return [...remote, ...local];
+  }, [recents]);
+
   // Show the 3 most recent by default; the rest hide behind "Load more".
   const RECENT_LIMIT = 3;
-  const shownRecents = showAllRecents ? recents : recents.slice(0, RECENT_LIMIT);
-  const hiddenRecents = recents.length - RECENT_LIMIT;
+  const shownRecents = showAllRecents ? entries : entries.slice(0, RECENT_LIMIT);
+  const hiddenRecents = entries.length - RECENT_LIMIT;
 
   return (
     <div className="vault-picker">
@@ -396,7 +468,7 @@ export function VaultPicker() {
 
         {error && <p className="error">{error}</p>}
 
-        {!inFlow && recents.length > 0 && (
+        {!inFlow && entries.length > 0 && (
           <motion.div
             className="recent-list"
             initial={reduceMotion ? false : { opacity: 0, y: 8 }}
@@ -413,29 +485,35 @@ export function VaultPicker() {
                 showAllRecents && lockedHeight ? { height: lockedHeight } : undefined
               }
             >
-              {shownRecents.map((r) => (
-                <div className="recent-card" key={r.path}>
+              {shownRecents.map((e) => (
+                <div className="recent-card" key={e.key}>
                   <button
                     className="recent-open"
                     disabled={busy}
-                    onClick={() => reopen(r)}
-                    title={r.path}
+                    onClick={() => void openEntry(e)}
+                    title={e.path ?? e.name}
                   >
-                    <span className="recent-name">{r.name}</span>
-                    <span className="recent-path">{tidyPath(r.path)}</span>
-                    {r.openedAt > 0 && (
-                      <span className="recent-time">{relativeTime(r.openedAt)}</span>
-                    )}
+                    <span className="recent-name">{e.name}</span>
+                    {e.kind === "remote" ? (
+                      <span className="ws-badge synced recent-badge">Remote</span>
+                    ) : e.openedAt > 0 ? (
+                      <span className="recent-time">{relativeTime(e.openedAt)}</span>
+                    ) : null}
+                    <span className="recent-path">
+                      {e.path ? tidyPath(e.path) : "Synced · sign in to open"}
+                    </span>
                   </button>
-                  <button
-                    className="recent-remove"
-                    aria-label={`Remove ${r.name} from recents`}
-                    title="Remove from recents"
-                    disabled={busy}
-                    onClick={() => forget(r.path)}
-                  >
-                    ×
-                  </button>
+                  {e.kind === "local" && (
+                    <button
+                      className="recent-remove"
+                      aria-label={`Remove ${e.name} from recents`}
+                      title="Remove from recents"
+                      disabled={busy}
+                      onClick={() => forget(e.path)}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -464,6 +542,20 @@ export function VaultPicker() {
           </motion.p>
         )}
       </div>
+
+      {signInOpen && (
+        <AuthDialog
+          // Success: keep the pending open target — the store's post-sign-in
+          // landing opens exactly that workspace. Just dismiss the modal.
+          onSignedIn={() => setSignInOpen(false)}
+          // Cancel: drop the pending target so a later sign-in from elsewhere
+          // doesn't surprise-open this workspace.
+          onClose={() => {
+            requestOpenWorkspace(null);
+            setSignInOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }

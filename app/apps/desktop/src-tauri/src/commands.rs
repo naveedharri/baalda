@@ -240,6 +240,32 @@ pub fn remove_recent_vault(app: AppHandle, path: String) -> AppResult<()> {
     write_config(&app, &cfg)
 }
 
+/// Move a local workspace's folder — and all its notes — to the OS trash, then
+/// forget it from the recents list. Used by the local-workspace "Delete files"
+/// action. This is the only copy of a local vault (no server), so we trash
+/// (recoverable) instead of hard-deleting, and the UI gates it behind a
+/// two-click confirm.
+#[tauri::command]
+pub fn delete_vault(app: AppHandle, path: String) -> AppResult<()> {
+    let dir = PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Err(AppError::new("selected path is not a folder"));
+    }
+    // A missing parent means this is a filesystem root — never a real workspace
+    // folder. Refuse rather than trash an entire drive.
+    if dir.parent().is_none() {
+        return Err(AppError::new("refusing to delete a filesystem root"));
+    }
+    trash::delete(&dir).map_err(|e| AppError::new(format!("could not move to trash: {e}")))?;
+    // Also drop it from recents / last_vault so it doesn't linger in the switcher.
+    let mut cfg = read_config(&app);
+    cfg.recent_vaults.retain(|r| r.path != path);
+    if cfg.last_vault.as_deref() == Some(path.as_str()) {
+        cfg.last_vault = None;
+    }
+    write_config(&app, &cfg)
+}
+
 /// Create a brand-new empty vault folder `<parent>/<name>` and open it.
 #[tauri::command]
 pub async fn create_vault(

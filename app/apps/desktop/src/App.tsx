@@ -414,7 +414,15 @@ export default function App() {
   }
 
   if (!vault) {
-    return <VaultPicker />;
+    // The folder-prompt rides along here too: switching to a synced workspace
+    // that has no local folder yet (e.g. clicked from the welcome screen) asks
+    // the user to choose/create one before its vault opens.
+    return (
+      <>
+        <VaultPicker />
+        <WorkspaceFolderPrompt />
+      </>
+    );
   }
 
   return (

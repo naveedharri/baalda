@@ -31,6 +31,9 @@ sha2 = "0.10"
 walkdir = "2"
 regex = "1"
 once_cell = "1"
+# Move a deleted local-workspace folder to the OS trash (recoverable) rather than
+# hard-deleting it — the on-disk `.md` files are the only copy of a local vault.
+trash = "5"
 # OS keychain for session tokens (spec 04 §7). apple-native uses the macOS
 # Security framework; swap/add features for other platforms later.
 keyring = { version = "3", features = ["apple-native"] }
