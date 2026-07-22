@@ -59,6 +59,18 @@ export const editorTheme = EditorView.theme({
     {
       backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
     },
+  // drawSelection() paints in a layer BEHIND the content, so opaque line
+  // backgrounds (the .cm-codeblock well, rendered tables) swallow the wash —
+  // selecting inside a code block showed nothing while the layer's full-width
+  // rectangles bled into the margins around the well. Lift the layer above the
+  // content and blend it so the wash tints every background and text stays
+  // readable (multiply darkens on light; dark theme flips to screen via
+  // --selection-blend in tokens.css).
+  ".cm-selectionLayer": {
+    zIndex: "1",
+    pointerEvents: "none",
+    mixBlendMode: "var(--selection-blend, multiply)",
+  },
 
   // Search / highlight matches in soft warning.
   ".cm-searchMatch": {

@@ -16,7 +16,8 @@
 // HtmlEmbedWidget) unless the cursor is inside them, in which case the source
 // shows for editing.
 
-import { syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
+import { type EditorState, StateField } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -228,24 +229,106 @@ class TableWidget extends WidgetType {
 const bullet = Decoration.replace({ widget: new BulletWidget() });
 const hidden = Decoration.replace({});
 
-function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): DecorationSet {
-  const { state } = view;
+/**
+ * Lines touched by any selection stay "raw" so the writer edits real markdown.
+ * Shared by the inline plugin and the block-widget field so both agree on what
+ * "being edited" means.
+ */
+function activeLineChecker(state: EditorState): (from: number, to: number) => boolean {
   const doc = state.doc;
-  const decos: ReturnType<Decoration["range"]>[] = [];
-
-  // Lines touched by any selection stay "raw" so the writer edits real markdown.
   const activeLines = new Set<number>();
   for (const r of state.selection.ranges) {
     const first = doc.lineAt(r.from).number;
     const last = doc.lineAt(r.to).number;
     for (let n = first; n <= last; n++) activeLines.add(n);
   }
-  const isActive = (from: number, to: number) => {
+  return (from: number, to: number) => {
     const first = doc.lineAt(from).number;
     const last = doc.lineAt(Math.max(from, to)).number;
     for (let n = first; n <= last; n++) if (activeLines.has(n)) return true;
     return false;
   };
+}
+
+/**
+ * Block-level widgets (raw HTML blocks, ```html fences, GFM tables). These use
+ * `Decoration.replace({block: true})` over multiple lines, which CodeMirror
+ * only accepts from a StateField — a view plugin providing them throws
+ * `RangeError: Block decorations may not be specified via plugins`. So they
+ * live here, computed over the whole document, while the inline marker work
+ * stays in the (viewport-scoped) plugin below.
+ */
+function buildBlockDecorations(state: EditorState, resolveAsset: ResolveAsset): DecorationSet {
+  const doc = state.doc;
+  const decos: ReturnType<Decoration["range"]>[] = [];
+  const isActive = activeLineChecker(state);
+
+  // Force-parse the whole doc if the background parse hasn't caught up yet —
+  // notes are small, and a partially-parsed tree would silently drop widgets.
+  const tree = ensureSyntaxTree(state, doc.length, 100) ?? syntaxTree(state);
+  tree.iterate({
+    enter: (node) => {
+      if (node.name === "HTMLBlock") {
+        if (!isActive(node.from, node.to)) {
+          const html = doc.sliceString(node.from, node.to);
+          decos.push(
+            Decoration.replace({
+              widget: new HtmlEmbedWidget(html, resolveAsset),
+              block: true,
+            }).range(node.from, node.to)
+          );
+        }
+        return false;
+      }
+
+      // A ```html fenced block → render its HTML as an inline preview (the
+      // same sanitized render as a bare HTML block). The fence is what a
+      // pasted HTML snippet lands in (see paste.ts): it survives blank lines
+      // inside the markup, and shows raw source for editing when the cursor
+      // is inside it.
+      if (node.name === "FencedCode") {
+        const info = node.node.getChild("CodeInfo");
+        const lang = info ? doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
+        if ((lang === "html" || lang === "htm") && !isActive(node.from, node.to)) {
+          const codeNode = node.node.getChild("CodeText");
+          const html = codeNode ? doc.sliceString(codeNode.from, codeNode.to) : "";
+          if (html.trim()) {
+            decos.push(
+              Decoration.replace({
+                widget: new HtmlEmbedWidget(html, resolveAsset),
+                block: true,
+              }).range(node.from, node.to)
+            );
+          }
+        }
+        return false;
+      }
+
+      // GFM table → render as a real table off the active line.
+      if (node.name === "Table") {
+        if (!isActive(node.from, node.to)) {
+          const src = doc.sliceString(node.from, node.to);
+          decos.push(
+            Decoration.replace({
+              widget: new TableWidget(src),
+              block: true,
+            }).range(node.from, node.to)
+          );
+        }
+        return false;
+      }
+      return undefined;
+    },
+  });
+
+  return Decoration.set(decos, true);
+}
+
+function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): DecorationSet {
+  const { state } = view;
+  const doc = state.doc;
+  const decos: ReturnType<Decoration["range"]>[] = [];
+  const isActive = activeLineChecker(state);
 
   // `[[wiki-links]]` are owned by the wikilinks plugin; never touch their marks.
   const wikiRanges: Array<[number, number]> = [];
@@ -268,58 +351,30 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
       from,
       to,
       enter: (node) => {
-        // Block HTML → render in place (unless being edited); skip its children.
+        // Block HTML is rendered by the block-widget StateField; never style
+        // its children here.
         if (node.name === "HTMLBlock") {
-          if (!isActive(node.from, node.to)) {
-            const html = doc.sliceString(node.from, node.to);
-            decos.push(
-              Decoration.replace({
-                widget: new HtmlEmbedWidget(html, resolveAsset),
-                block: true,
-              }).range(node.from, node.to)
-            );
-          }
           return false;
         }
 
-        // A ```html fenced block → render its HTML as an inline preview (the
-        // same sanitized render as a bare HTML block). The fence is what a
-        // pasted HTML snippet lands in (see paste.ts): it survives blank lines
-        // inside the markup, and shows raw source for editing when the cursor
-        // is inside it.
+        // A non-active ```html fence is replaced by the StateField; skip its
+        // children. Non-HTML fences (and the active HTML fence) keep their raw
+        // source.
         if (node.name === "FencedCode") {
           const info = node.node.getChild("CodeInfo");
           const lang = info
             ? doc.sliceString(info.from, info.to).trim().toLowerCase()
             : "";
           if ((lang === "html" || lang === "htm") && !isActive(node.from, node.to)) {
-            const codeNode = node.node.getChild("CodeText");
-            const html = codeNode ? doc.sliceString(codeNode.from, codeNode.to) : "";
-            if (html.trim()) {
-              decos.push(
-                Decoration.replace({
-                  widget: new HtmlEmbedWidget(html, resolveAsset),
-                  block: true,
-                }).range(node.from, node.to)
-              );
-            }
             return false;
           }
-          // Non-HTML fences (and the active HTML fence) keep their raw source.
           return;
         }
 
-        // GFM table → render as a real table off the active line; show the raw
-        // pipe source (and descend for inline styling) while it's being edited.
+        // A non-active table is replaced by the StateField; skip its children.
+        // While it's being edited, descend so its text keeps inline styling.
         if (node.name === "Table") {
           if (!isActive(node.from, node.to)) {
-            const src = doc.sliceString(node.from, node.to);
-            decos.push(
-              Decoration.replace({
-                widget: new TableWidget(src),
-                block: true,
-              }).range(node.from, node.to)
-            );
             return false;
           }
           return;
@@ -408,10 +463,24 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
   return Decoration.set(decos, true);
 }
 
-/** The live-preview view plugin: rebuild on edits, scroll, and cursor moves. */
+/**
+ * Live preview = two cooperating extensions:
+ *  - a StateField for the block widgets (HTML blocks, ```html fences, tables) —
+ *    the only place CodeMirror accepts block/multi-line replace decorations;
+ *  - a view plugin for the inline marker work, rebuilt on edits, scroll, and
+ *    cursor moves.
+ */
 export function livePreview(opts: { resolveAsset?: ResolveAsset } = {}) {
   const resolveAsset = opts.resolveAsset ?? identityAsset;
-  return ViewPlugin.fromClass(
+
+  const blockWidgets = StateField.define<DecorationSet>({
+    create: (state) => buildBlockDecorations(state, resolveAsset),
+    update: (deco, tr) =>
+      tr.docChanged || tr.selection ? buildBlockDecorations(tr.state, resolveAsset) : deco,
+    provide: (f) => EditorView.decorations.from(f),
+  });
+
+  const inlinePlugin = ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
@@ -437,4 +506,6 @@ export function livePreview(opts: { resolveAsset?: ResolveAsset } = {}) {
       },
     }
   );
+
+  return [blockWidgets, inlinePlugin];
 }
