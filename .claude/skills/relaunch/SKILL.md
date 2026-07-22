@@ -31,7 +31,7 @@ pkill -f "tsx.*src/index.ts"           # the Node/tsx server
 pkill -f "apps/server"                 # server pnpm wrapper
 sleep 1
 # Confirm nothing survived:
-pgrep -fl "tauri dev|node_modules/.bin/vite|target/debug/desktop|tsx.*src/index.ts" || echo "all stopped"
+pgrep -fl "tauri dev|node_modules/.*vite.*bin|target/debug/desktop|tsx.*src/index.ts" || echo "all stopped"
 ```
 
 If `pgrep` still lists survivors, `kill -9` them by PID.
