@@ -1,0 +1,27 @@
+# pnpm workspace — the monorepo root lives here at app/ (repo root holds
+# railway.json + .github, which reference paths under app/).
+packages:
+  - apps/*
+
+# Single source of truth for deps that MUST stay version-identical across
+# desktop and server. yjs / y-protocols / @hocuspocus/provider form the sync
+# wire protocol — a version skew between the two sides is a correctness bug
+# in the CRDT bridge, not just hygiene.
+catalog:
+  "@hocuspocus/provider": ^4.4.0
+  typescript: ~5.8.3
+  vitest: ^4.1.10
+  y-protocols: ^1.0.7
+  yjs: ^13.6.31
+
+# pnpm 10 blocks dependency install scripts by default. These two are the
+# only packages in the lockfile that need them (esbuild's binary fetch,
+# fsevents' macOS watcher build). @node-rs/argon2 ships prebuilt binaries
+# as optionalDependencies and needs no approval — do not add it here.
+onlyBuiltDependencies:
+  - esbuild
+  - fsevents
+
+# Fail loudly if a new dep ever needs a build script instead of silently
+# skipping it (a silently-skipped esbuild postinstall breaks Vite in CI).
+strictDepBuilds: true
