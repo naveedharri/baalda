@@ -40,19 +40,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      # pnpm must be installed before setup-node: its pnpm cache support
+      # shells out to the pnpm binary. The version comes from the
+      # packageManager pin in app/package.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
 
       - name: Install
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
+      # Explicit ordered step (not a turbo task): it mutates the shared CI
+      # Postgres, so it must run exactly once, before the tests.
       - name: Apply migrations
-        run: npm run migrate --workspace=server
+        run: pnpm --filter server run migrate
 
-      # Runs both workspaces' vitest suites (server + desktop) via the root
-      # `test` script. Server suites run serially against the shared Postgres.
+      # Runs both workspaces' vitest suites (server + desktop) via turbo.
+      # Server suites run serially against the shared Postgres and are
+      # never cached (apps/server/turbo.json sets cache: false).
       - name: Test
-        run: npm test
+        run: pnpm turbo run test
