@@ -24,7 +24,7 @@
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@fontsource/radio-canada-big": "^5.2.7",
-    "@hocuspocus/provider": "^4.4.0",
+    "@hocuspocus/provider": "catalog:",
     "@lezer/highlight": "^1.2.3",
     "@lezer/markdown": "^1.7.1",
     "@tauri-apps/api": "^2",
@@ -41,8 +41,8 @@
     "react-arborist": "^3.13.2",
     "react-dom": "^19.1.0",
     "y-codemirror.next": "^0.3.5",
-    "y-protocols": "^1.0.7",
-    "yjs": "^13.6.31",
+    "y-protocols": "catalog:",
+    "yjs": "catalog:",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
@@ -53,9 +53,9 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.6.0",
     "jsdom": "^29.1.1",
-    "typescript": "~5.8.3",
+    "typescript": "catalog:",
     "vite": "^7.0.4",
-    "vitest": "^4.1.10",
+    "vitest": "catalog:",
     "ws": "^8.21.0"
   }
 }
