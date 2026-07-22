@@ -171,7 +171,7 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
                     <span className="upgrade-amount">{formatPrice(monthly)}</span>
                     <span className="upgrade-per">{perLabel("month")}</span>
                   </span>
-                  <span className="upgrade-plan-note">per workspace</span>
+                  <span className="upgrade-plan-note">per vault</span>
                 </button>
               )}
               {yearly && (
@@ -192,7 +192,7 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
                     <span className="upgrade-amount">{formatPrice(yearly)}</span>
                     <span className="upgrade-per">{perLabel("year")}</span>
                   </span>
-                  <span className="upgrade-plan-note">per workspace</span>
+                  <span className="upgrade-plan-note">per vault</span>
                 </button>
               )}
             </div>
@@ -200,7 +200,7 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
             <ul className="upgrade-features">
               <li>Unlimited team members</li>
               <li>Unlimited notes, devices &amp; AI edits</li>
-              <li>Doesn't count toward your free workspaces</li>
+              <li>Doesn't count toward your free vaults</li>
               <li>Priority support</li>
             </ul>
 
@@ -258,7 +258,7 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
             </div>
             <div className="subhead">You're on Pro</div>
             <div className="muted">
-              This workspace is now unlimited — invite your whole team.
+              This vault is now unlimited — invite your whole team.
             </div>
             <button className="primary sm" onClick={onClose}>
               Done

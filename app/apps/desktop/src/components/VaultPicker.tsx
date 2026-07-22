@@ -3,9 +3,9 @@ import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
 import {
-  readKnownWorkspaces,
+  readKnownVaults,
   readOrgVaults,
-  requestOpenWorkspace,
+  requestOpenVault,
   useStore,
 } from "../store";
 import { AuthDialog } from "./AccountMenu";
@@ -13,7 +13,7 @@ import { Wordmark } from "./Logo";
 
 /**
  * A row in the welcome-screen list: either a plain local folder (a recent vault
- * on disk) or a synced *remote* workspace (an org). Remote rows carry the org id
+ * on disk) or a synced *remote* vault (an org). Remote rows carry the org id
  * so a click can reopen + resync them — prompting sign-in first if signed out.
  */
 type PickerEntry =
@@ -82,8 +82,8 @@ export function VaultPicker() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<RecentVault[]>([]);
-  // When a signed-out user clicks a remote workspace we open the sign-in modal;
-  // the workspace to land in afterwards is stashed via requestOpenWorkspace().
+  // When a signed-out user clicks a remote vault we open the sign-in modal;
+  // the vault to land in afterwards is stashed via requestOpenVault().
   const [signInOpen, setSignInOpen] = useState(false);
   // New-vault flow: null = idle; a string = chosen parent, awaiting a name.
   const [newParent, setNewParent] = useState<string | null>(null);
@@ -180,7 +180,7 @@ export function VaultPicker() {
   function createInsideAnyway() {
     if (!alreadyVault) return;
     setNewParent(alreadyVault);
-    setNewName("Untitled Workspace");
+    setNewName("Untitled Vault");
     setAlreadyVault(null);
   }
 
@@ -223,10 +223,10 @@ export function VaultPicker() {
     }
   }
 
-  // Open a workspace row. Local folders open in place. A remote (synced)
-  // workspace needs a session: if we still have one, switch straight to it
+  // Open a vault row. Local folders open in place. A remote (synced)
+  // vault needs a session: if we still have one, switch straight to it
   // (opening its folder + resyncing); if we're signed out, remember it and
-  // prompt sign-in — landInLastWorkspace opens it once the session lands.
+  // prompt sign-in — landInLastVault opens it once the session lands.
   async function openEntry(e: PickerEntry) {
     if (e.kind === "local") {
       await reopenLocal(e.path);
@@ -243,7 +243,7 @@ export function VaultPicker() {
         setBusy(false);
       }
     } else {
-      requestOpenWorkspace(e.orgId);
+      requestOpenVault(e.orgId);
       setSignInOpen(true);
     }
   }
@@ -274,13 +274,13 @@ export function VaultPicker() {
   // with an already-a-vault folder) is showing — hides the recents/hint.
   const inFlow = naming || deciding;
 
-  // Merge synced (remote) workspaces with local recents into one list. Remote
-  // workspaces come from the locally-cached org list (survives sign-out) and are
+  // Merge synced (remote) vaults with local recents into one list. Remote
+  // vaults come from the locally-cached org list (survives sign-out) and are
   // shown first; their bound folder — if any — comes from the org→folder map.
-  // Local recents backing a synced workspace are folded into the remote row (by
+  // Local recents backing a synced vault are folded into the remote row (by
   // path) so nothing shows twice.
   const entries = useMemo<PickerEntry[]>(() => {
-    const known = readKnownWorkspaces();
+    const known = readKnownVaults();
     const orgVaults = readOrgVaults();
     const boundPaths = new Set(Object.values(orgVaults));
     const remote: PickerEntry[] = known.map((w) => ({
@@ -347,10 +347,10 @@ export function VaultPicker() {
                 exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
                 transition={SPRING}
               >
-                <label className="new-vault-label">This folder is already a workspace</label>
+                <label className="new-vault-label">This folder is already a vault</label>
                 <p className="new-vault-loc" title={alreadyVault ?? undefined}>
                   <code>{tidyPath(alreadyVault ?? "")}</code> already contains notes — open
-                  it instead of creating a new workspace inside?
+                  it instead of creating a new vault inside?
                 </p>
                 <div className="new-vault-buttons">
                   <button
@@ -375,7 +375,7 @@ export function VaultPicker() {
                     disabled={busy}
                     onClick={() => void openDetectedVault()}
                   >
-                    {busy ? "Opening…" : "Open workspace"}
+                    {busy ? "Opening…" : "Open vault"}
                   </button>
                 </div>
               </motion.div>
@@ -396,7 +396,7 @@ export function VaultPicker() {
                   void confirmNewVault();
                 }}
               >
-                <label className="new-vault-label">Name your workspace</label>
+                <label className="new-vault-label">Name your vault</label>
                 {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
                 <input
                   className="new-vault-input"
@@ -407,7 +407,7 @@ export function VaultPicker() {
                   onKeyDown={(e) => {
                     if (e.key === "Escape") cancelNewVault();
                   }}
-                  placeholder="Untitled Workspace"
+                  placeholder="Untitled Vault"
                   spellCheck={false}
                 />
                 <p className="new-vault-loc" title={newParent ?? undefined}>
@@ -427,7 +427,7 @@ export function VaultPicker() {
                     className="primary sm"
                     disabled={busy || !newName.trim()}
                   >
-                    {busy ? "Creating…" : "Create workspace"}
+                    {busy ? "Creating…" : "Create vault"}
                   </button>
                 </div>
               </motion.form>
@@ -449,7 +449,7 @@ export function VaultPicker() {
                   whileTap={reduceMotion ? undefined : { scale: 0.96 }}
                   transition={SPRING}
                 >
-                  New workspace
+                  New vault
                 </motion.button>
                 <motion.button
                   className="ghost-pill lg"
@@ -477,7 +477,7 @@ export function VaultPicker() {
               reduceMotion ? undefined : revealTransition(REVEAL_DELAY + 0.15)
             }
           >
-            <p className="recent-heading">Recent workspaces</p>
+            <p className="recent-heading">Recent vaults</p>
             <div
               ref={recentScrollRef}
               className={`recent-scroll${showAllRecents ? " expanded" : ""}`}
@@ -538,7 +538,7 @@ export function VaultPicker() {
               reduceMotion ? undefined : revealTransition(REVEAL_DELAY + 0.3)
             }
           >
-            A workspace is any folder of <code>.md</code> files.
+            A vault is any folder of <code>.md</code> files.
           </motion.p>
         )}
       </div>
@@ -546,12 +546,12 @@ export function VaultPicker() {
       {signInOpen && (
         <AuthDialog
           // Success: keep the pending open target — the store's post-sign-in
-          // landing opens exactly that workspace. Just dismiss the modal.
+          // landing opens exactly that vault. Just dismiss the modal.
           onSignedIn={() => setSignInOpen(false)}
           // Cancel: drop the pending target so a later sign-in from elsewhere
-          // doesn't surprise-open this workspace.
+          // doesn't surprise-open this vault.
           onClose={() => {
-            requestOpenWorkspace(null);
+            requestOpenVault(null);
             setSignInOpen(false);
           }}
         />

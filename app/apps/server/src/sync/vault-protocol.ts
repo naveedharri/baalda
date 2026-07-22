@@ -45,7 +45,7 @@ export type ServerControl =
   | { t: "drop"; docId: string } // access lost / doc removed -> client evicts
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token
   | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry
-  | { t: "member"; name: string } // a new teammate joined the workspace -> refresh + celebrate
+  | { t: "member"; name: string } // a new teammate joined the vault -> refresh + celebrate
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
   | { t: "err"; message: string };
 

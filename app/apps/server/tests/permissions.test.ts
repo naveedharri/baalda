@@ -11,7 +11,7 @@ import {
   seedShare,
   seedUser,
   seedVault,
-  seedWorkspaceGrant,
+  seedVaultGrant,
 } from "./helpers/seed.js";
 
 describe("effective-permission resolver matrix (spec 04 §3)", () => {
@@ -22,7 +22,7 @@ describe("effective-permission resolver matrix (spec 04 §3)", () => {
     await pool.end();
   });
 
-  it("workspace owner -> edit on everything", async () => {
+  it("vault owner -> edit on everything", async () => {
     const org = await seedOrg("Acme", "acme-owner");
     const owner = await seedUser("owner@a.com");
     await seedMember(org, owner, "owner");
@@ -31,7 +31,7 @@ describe("effective-permission resolver matrix (spec 04 §3)", () => {
     expect(await effectivePermission(owner, doc)).toBe("edit");
   });
 
-  it("workspace admin -> edit on everything", async () => {
+  it("vault admin -> edit on everything", async () => {
     const org = await seedOrg("Acme", "acme-admin");
     const admin = await seedUser("admin@a.com");
     await seedMember(org, admin, "admin");
@@ -112,32 +112,32 @@ describe("effective-permission resolver matrix (spec 04 §3)", () => {
     expect(await effectivePermission("nobody", "no-such-doc")).toBe("none");
   });
 
-  it("Open workspace: member gets edit on a ROOT note (folder_id NULL, no folder to share)", async () => {
+  it("Open vault: member gets edit on a ROOT note (folder_id NULL, no folder to share)", async () => {
     const org = await seedOrg("Acme", "acme-open-root");
     const member = await seedUser("m@a.com");
     await seedMember(org, member, "member");
     const vault = await seedVault(org);
     const doc = await seedNote(vault, null, "root.md"); // vault root, no folder
-    await seedWorkspaceGrant(org, "edit");
+    await seedVaultGrant(org, "edit");
     expect(await effectivePermission(member, doc)).toBe("edit");
   });
 
-  it("Read-only workspace: member gets view via the org-wide grant", async () => {
+  it("Read-only vault: member gets view via the org-wide grant", async () => {
     const org = await seedOrg("Acme", "acme-readonly");
     const member = await seedUser("m@a.com");
     await seedMember(org, member, "member");
     const vault = await seedVault(org);
     const doc = await seedNote(vault, null, "root.md");
-    await seedWorkspaceGrant(org, "view");
+    await seedVaultGrant(org, "view");
     expect(await effectivePermission(member, doc)).toBe("view");
   });
 
-  it("a workspace grant does not leak to non-members", async () => {
+  it("a vault grant does not leak to non-members", async () => {
     const org = await seedOrg("Acme", "acme-open-outsider");
     const outsider = await seedUser("out@a.com");
     const vault = await seedVault(org);
     const doc = await seedNote(vault, null, "root.md");
-    await seedWorkspaceGrant(org, "edit");
+    await seedVaultGrant(org, "edit");
     expect(await effectivePermission(outsider, doc)).toBe("none");
   });
 
@@ -149,7 +149,7 @@ describe("effective-permission resolver matrix (spec 04 §3)", () => {
     const other = await seedUser("other@a.com");
     await seedMember(org, author, "member");
     await seedMember(org, other, "member");
-    const vault = await seedVault(org); // no workspace grant → private
+    const vault = await seedVault(org); // no vault grant → private
     const doc = await seedNote(vault, null, "mine.md", author);
     expect(await effectivePermission(author, doc)).toBe("edit"); // creator
     expect(await effectivePermission(other, doc)).toBe("none"); // not shared
@@ -166,7 +166,7 @@ describe("effective-permission resolver matrix (spec 04 §3)", () => {
     const doc = await seedNote(vault, folder, "Team/shared.md", author);
     // "Share with team" = an org-principal edit grant on the folder.
     await pool.query(
-      `INSERT INTO shares (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
        VALUES (gen_random_uuid()::text, $1, 'folder', $2, 'org', $1, 'edit')`,
       [org, folder],
     );
@@ -176,14 +176,14 @@ describe("effective-permission resolver matrix (spec 04 §3)", () => {
     expect(await effectivePermission(outsider, doc)).toBe("none");
   });
 
-  it("a lock still caps an Open-workspace member at view", async () => {
+  it("a lock still caps an Open-vault member at view", async () => {
     const org = await seedOrg("Acme", "acme-open-locked");
     const member = await seedUser("m@a.com");
     await seedMember(org, member, "member");
     const vault = await seedVault(org);
     const folder = await seedFolder(vault, null, "Specs", "Specs");
     const doc = await seedNote(vault, folder, "Specs/frozen.md");
-    await seedWorkspaceGrant(org, "edit");
+    await seedVaultGrant(org, "edit");
     await seedLock(org, "folder", folder, { type: "org" });
     expect(await effectivePermission(member, doc)).toBe("view");
   });

@@ -74,7 +74,7 @@ export async function seedNote(
 }
 
 export async function seedShare(
-  workspaceId: string,
+  orgId: string,
   resourceType: "folder" | "file",
   resourceId: string,
   principalId: string,
@@ -83,23 +83,24 @@ export async function seedShare(
   const id = randomUUID();
   await pool.query(
     `INSERT INTO shares
-       (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
      VALUES ($1, $2, $3, $4, 'user', $5, $6)`,
-    [id, workspaceId, resourceType, resourceId, principalId, permission],
+    [id, orgId, resourceType, resourceId, principalId, permission],
   );
   return id;
 }
 
-/** Org-wide workspace grant — the "Open" (edit) / "Read-only" (view) posture. */
-export async function seedWorkspaceGrant(
+/** Org-wide vault grant — the "Open" (edit) / "Read-only" (view) posture. */
+export async function seedVaultGrant(
   organizationId: string,
   permission: "view" | "edit",
 ): Promise<string> {
   const id = randomUUID();
   await pool.query(
+    // 'vault' = the vault-wide grant (resource_id = organization id).
     `INSERT INTO shares
-       (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
-     VALUES ($1, $2, 'workspace', $2, 'org', $2, $3)`,
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+     VALUES ($1, $2, 'vault', $2, 'org', $2, $3)`,
     [id, organizationId, permission],
   );
   return id;
@@ -115,7 +116,7 @@ export async function seedLock(
   const id = randomUUID();
   await pool.query(
     `INSERT INTO shares
-       (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
      VALUES ($1, $2, $3, $4, $5, $6, 'locked')`,
     [
       id,

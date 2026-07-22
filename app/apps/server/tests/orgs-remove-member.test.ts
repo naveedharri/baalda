@@ -35,16 +35,16 @@ async function memberCount(orgId: string, userId: string): Promise<number> {
   return rows[0].c;
 }
 
-async function shareCount(workspaceId: string, principalId: string): Promise<number> {
+async function shareCount(orgId: string, principalId: string): Promise<number> {
   const { rows } = await pool.query<{ c: number }>(
     `SELECT count(*)::int AS c FROM shares
-      WHERE workspace_id = $1 AND principal_type = 'user' AND principal_id = $2`,
-    [workspaceId, principalId],
+      WHERE org_id = $1 AND principal_type = 'user' AND principal_id = $2`,
+    [orgId, principalId],
   );
   return rows[0].c;
 }
 
-describe("remove a member from a workspace", () => {
+describe("remove a member from a vault", () => {
   beforeEach(async () => {
     await resetDb();
   });
@@ -61,7 +61,7 @@ describe("remove a member from a workspace", () => {
     // A folder shared directly to the member — must be purged on removal.
     await pool.query(
       `INSERT INTO shares
-         (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
+         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
        VALUES ($1, $2, 'folder', $3, 'user', $4, 'edit')`,
       [randomUUID(), org.id, randomUUID(), member.userId],
     );
@@ -70,7 +70,7 @@ describe("remove a member from a workspace", () => {
     await addMember(org.id, bystander.userId);
     await pool.query(
       `INSERT INTO shares
-         (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
+         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
        VALUES ($1, $2, 'folder', $3, 'user', $4, 'edit')`,
       [randomUUID(), org.id, randomUUID(), bystander.userId],
     );

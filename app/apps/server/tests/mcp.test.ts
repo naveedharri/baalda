@@ -17,7 +17,7 @@ import { createMcpToken, listMcpTokens } from "../src/mcp/tokens.js";
 /**
  * End-to-end MCP surface: token auth, JSON-RPC dispatch, CRUD tools, and that
  * the tools honour the SAME ACL as the rest of the app (admins see all; members
- * see only what's shared; tokens can't reach outside their workspace).
+ * see only what's shared; tokens can't reach outside their vault).
  */
 
 const mem = memoryDocWriter();
@@ -280,7 +280,7 @@ describe("MCP server", () => {
     ).toBe(true);
   });
 
-  it("a token cannot reach a vault in another workspace", async () => {
+  it("a token cannot reach a vault in another vault", async () => {
     const a = await seedUser("a@mcp4.com");
     const orgA = await seedOrg("A", "a-mcp4");
     await seedMember(orgA, a, "owner");
@@ -293,7 +293,7 @@ describe("MCP server", () => {
 
     const res = await call(tokenA, "list_folders", { vaultId: vaultB });
     expect(res.isError).toBe(true);
-    expect(res.text).toMatch(/not in this token's workspace/i);
+    expect(res.text).toMatch(/outside the scope of this token/i);
   });
 
   it("tracks per-connection usage: tool calls, last-used, and client", async () => {

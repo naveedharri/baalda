@@ -14,6 +14,15 @@ stays continuously current on disk via a vault-wide feed, independent of the UI.
 becomes instant because the doc is already live. Builds on the per-doc engine in [[03-sync-engine]];
 ACL model from [[04-team-collaboration]]; storage from [[02-database-architecture]]. Index: [[Baalda]].
 
+> **What "vault" means in this spec.** Here "vault" = the **server note-collection scope** keyed by
+> `vaultId` — the `vaults` table row from [[02-database-architecture]], i.e. one always-on feed
+> (`/vault-sync`, topic `vault:{vaultId}`) covering that collection's docs. This is **1:1 in practice**
+> with the *user-facing vault* (the Better Auth `organization`, formerly "workspace"), so the "team,
+> <50 members" whose edits fan out on a vault topic is simply that org's membership. This resolves the
+> spec-02 (vault = child of the org) vs. the team-scoped reading here: they are the same unit seen from
+> the storage layer vs. the collaboration layer. All `vaultId`/`vault:*`/`/vault-sync` identifiers are
+> the collection handle and stay unchanged.
+
 ---
 
 ## 1. Why

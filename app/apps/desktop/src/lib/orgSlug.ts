@@ -1,6 +1,6 @@
-// Workspace (organization) identity is the unique org **id**; display names may
+// Vault (organization) identity is the unique org **id**; display names may
 // repeat. Better Auth keys organizations by a unique `slug`, which we derive
-// from the name — so two workspaces named the same would collide on the slug.
+// from the name — so two vaults named the same would collide on the slug.
 // `createWithUniqueSlug` resolves that by retrying with a short random suffix on
 // a slug collision, keeping the clean slug when it's free. Kept dependency-free
 // (only `ApiError`/types) so it's unit-testable without the store or IPC.
@@ -12,7 +12,7 @@ export function slugifyName(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return base || "workspace";
+  return base || "vault";
 }
 
 /** A short random slug suffix (base36) used to break slug collisions. */
@@ -35,7 +35,7 @@ export function isSlugConflict(e: unknown): boolean {
 }
 
 /**
- * Create a workspace whose display name may duplicate an existing one. Tries the
+ * Create a vault whose display name may duplicate an existing one. Tries the
  * clean slug first; on a slug collision, retries with `<slug>-<suffix>` so the
  * create still succeeds (the org's unique identity remains its id).
  *
@@ -58,5 +58,5 @@ export async function createWithUniqueSlug(
     }
   }
   // Unreachable (the loop either returns or throws), but keeps types honest.
-  throw new ApiError(409, "Could not find an available workspace URL");
+  throw new ApiError(409, "Could not find an available vault URL");
 }

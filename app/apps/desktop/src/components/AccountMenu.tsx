@@ -20,10 +20,10 @@ import { ThemeToggle } from "./ThemeToggle";
 import { UpgradeDialog } from "./UpgradeDialog";
 
 /**
- * Account & workspace menu (spec 04 §2/§6/§7), redesigned as the standard
+ * Account & vault menu (spec 04 §2/§6/§7), redesigned as the standard
  * desktop-app identity flow: the sidebar footer is a single compact identity
- * bar (avatar + workspace + sync dot). Clicking it opens a popover menu with
- * the workspace switcher, sync state, theme, server settings and sign-out.
+ * bar (avatar + vault + sync dot). Clicking it opens a popover menu with
+ * the vault switcher, sync state, theme, server settings and sign-out.
  * Heavy flows (sign-in, members & invites) live in focused modals so the
  * sidebar itself stays a file tree, not a settings page.
  */
@@ -40,7 +40,7 @@ export function AccountMenu() {
   const [open, setOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
-  // Which settings tab the workspace page should open on (View all → Workspaces).
+  // Which settings tab the vault page should open on (View all → Vaults).
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
   const [accountOpen, setAccountOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -64,8 +64,8 @@ export function AccountMenu() {
 
   if (authStatus !== "signed-in" || !session) {
     // Signed out is still local-first: the identity bar names the local
-    // workspace you're in (if any) and opens the switcher, so you can hop
-    // between local workspaces and sign in — not a dead-end "Sign in" button.
+    // vault you're in (if any) and opens the switcher, so you can hop
+    // between local vaults and sign in — not a dead-end "Sign in" button.
     return (
       <div className="account-menu" ref={rootRef}>
         <button
@@ -112,14 +112,14 @@ export function AccountMenu() {
             }}
             onViewAllLocal={() => {
               setOpen(false);
-              setSettingsTab("workspaces");
+              setSettingsTab("vaults");
               setMembersOpen(true);
             }}
           />
         )}
         {authOpen && <AuthDialog onClose={() => setAuthOpen(false)} />}
         {membersOpen && (
-          <WorkspaceSettingsDialog
+          <VaultSettingsDialog
             onClose={() => setMembersOpen(false)}
             onRequestSignIn={() => setAuthOpen(true)}
             initialTab={settingsTab}
@@ -180,7 +180,7 @@ export function AccountMenu() {
         </span>
         <span className="identity-meta">
           <span className="identity-line1">
-            {/* Name the workspace that's actually OPEN — a local one wins over a
+            {/* Name the vault that's actually OPEN — a local one wins over a
                 still-set activeOrg once sync is off (opening a local folder
                 disables sync but leaves the account's active org untouched). */}
             {(syncEnabled && activeOrg ? activeOrg.name : vault?.name) ?? userLabel}
@@ -190,7 +190,7 @@ export function AccountMenu() {
               ? userLabel
               : vault
                 ? "Local · not synced"
-                : "No workspace yet"}
+                : "No vault yet"}
           </span>
         </span>
         {hasInvites && <span className="identity-alert" aria-label="Pending invitation" />}
@@ -207,9 +207,9 @@ export function AccountMenu() {
             setSettingsTab(undefined);
             setMembersOpen(true);
           }}
-          onOpenWorkspaces={() => {
+          onOpenVaults={() => {
             setOpen(false);
-            setSettingsTab("workspaces");
+            setSettingsTab("vaults");
             setMembersOpen(true);
           }}
           onOpenAccount={() => {
@@ -219,7 +219,7 @@ export function AccountMenu() {
         />
       )}
       {membersOpen && (
-        <WorkspaceSettingsDialog
+        <VaultSettingsDialog
           onClose={() => setMembersOpen(false)}
           initialTab={settingsTab}
         />
@@ -229,17 +229,17 @@ export function AccountMenu() {
   );
 }
 
-// How many workspaces of EACH kind (synced, local) the popover shows inline.
-// Anything past this lives on the Workspaces settings page — reached via
+// How many vaults of EACH kind (synced, local) the popover shows inline.
+// Anything past this lives on the Vaults settings page — reached via
 // "View all" — so a long account never turns the menu into a scroll trap.
-const POPOVER_WORKSPACE_LIMIT = 2;
+const POPOVER_VAULT_LIMIT = 2;
 
 /**
- * Recent on-disk folders that aren't bound to a synced workspace — i.e. the
- * user's LOCAL workspaces. A workspace is one concept in two states; these are
+ * Recent on-disk folders that aren't bound to a synced vault — i.e. the
+ * user's LOCAL vaults. A vault is one concept in two states; these are
  * the ones that just aren't syncing to an org yet.
  */
-function useLocalWorkspaces(nonce = 0): RecentVault[] {
+function useLocalVaults(nonce = 0): RecentVault[] {
   const [recents, setRecents] = useState<RecentVault[]>([]);
   // Re-fetch when the open folder changes (a switch/open reorders recents) and
   // when `nonce` is bumped (after a local remove/delete removes a row).
@@ -260,12 +260,12 @@ function useLocalWorkspaces(nonce = 0): RecentVault[] {
   return recents.filter((r) => !bound.has(r.path));
 }
 
-/** Native-pick a folder and open it as a local workspace, then close the menu. */
-async function openFolderAsLocalWorkspace(onDone: () => void): Promise<void> {
+/** Native-pick a folder and open it as a local vault, then close the menu. */
+async function openFolderAsLocalVault(onDone: () => void): Promise<void> {
   try {
     const picked = await ipc.pickFolder();
     if (picked) {
-      await useStore.getState().openLocalWorkspace(picked);
+      await useStore.getState().openLocalVault(picked);
       onDone();
     }
   } catch {
@@ -274,13 +274,13 @@ async function openFolderAsLocalWorkspace(onDone: () => void): Promise<void> {
 }
 
 /**
- * The "On this device" rows: local workspaces you can switch to with one click.
+ * The "On this device" rows: local vaults you can switch to with one click.
  * `limit` caps how many show inline; when there are more, an `onViewAll` link
- * hands off to the full Workspaces page (which lists local + synced together).
- * The current local workspace is always pinned to the top so it never hides
+ * hands off to the full Vaults page (which lists local + synced together).
+ * The current local vault is always pinned to the top so it never hides
  * behind the cap.
  */
-function LocalWorkspaceRows({
+function LocalVaultRows({
   onClose,
   limit,
   onViewAll,
@@ -289,7 +289,7 @@ function LocalWorkspaceRows({
   limit?: number;
   onViewAll?: () => void;
 }) {
-  const locals = useLocalWorkspaces();
+  const locals = useLocalVaults();
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
   if (locals.length === 0) return null;
@@ -312,7 +312,7 @@ function LocalWorkspaceRows({
             aria-checked={isCurrent}
             title={r.path}
             onClick={() => {
-              if (!isCurrent) void useStore.getState().openLocalWorkspace(r.path);
+              if (!isCurrent) void useStore.getState().openLocalVault(r.path);
               onClose();
             }}
           >
@@ -333,7 +333,7 @@ function LocalWorkspaceRows({
           <span className="menu-swatch more" aria-hidden="true">
             …
           </span>
-          <span className="menu-item-label">All local workspaces ({locals.length})</span>
+          <span className="menu-item-label">All local vaults ({locals.length})</span>
         </button>
       )}
     </>
@@ -341,7 +341,7 @@ function LocalWorkspaceRows({
 }
 
 /**
- * Signed-out switcher. Local-first: you can hop between local workspaces and
+ * Signed-out switcher. Local-first: you can hop between local vaults and
  * open/create folders without an account; signing in is one item in the menu,
  * not the only thing you can do.
  */
@@ -359,21 +359,21 @@ function SignedOutPopover({
   const vault = useStore((s) => s.vault);
   return (
     <div className="account-popover" role="menu">
-      <div className="menu-label">Workspace</div>
-      <LocalWorkspaceRows
+      <div className="menu-label">Vault</div>
+      <LocalVaultRows
         onClose={onClose}
-        limit={POPOVER_WORKSPACE_LIMIT}
+        limit={POPOVER_VAULT_LIMIT}
         onViewAll={onViewAllLocal}
       />
 
       <button
         className="menu-item subtle"
-        onClick={() => void openFolderAsLocalWorkspace(onClose)}
+        onClick={() => void openFolderAsLocalVault(onClose)}
       >
         <span className="menu-swatch plus" aria-hidden="true">
           +
         </span>
-        <span className="menu-item-label">New workspace</span>
+        <span className="menu-item-label">New vault</span>
       </button>
 
       {vault && (
@@ -382,7 +382,7 @@ function SignedOutPopover({
             <circle cx="12" cy="12" r="3" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </MenuIcon>
-          <span className="menu-item-label">Workspace settings</span>
+          <span className="menu-item-label">Vault settings</span>
           <span className="menu-hint">Turn on sync</span>
         </button>
       )}
@@ -403,12 +403,12 @@ function SignedOutPopover({
 function AccountPopover({
   onClose,
   onOpenMembers,
-  onOpenWorkspaces,
+  onOpenVaults,
   onOpenAccount,
 }: {
   onClose: () => void;
   onOpenMembers: () => void;
-  onOpenWorkspaces: () => void;
+  onOpenVaults: () => void;
   onOpenAccount: () => void;
 }) {
   const session = useStore((s) => s.session);
@@ -426,7 +426,7 @@ function AccountPopover({
   if (!session) return null;
   const activeOrgId = session.activeOrganizationId;
   const userLabel = session.user.name || session.user.email;
-  // "Current" tracks the workspace whose folder is actually OPEN right now —
+  // "Current" tracks the vault whose folder is actually OPEN right now —
   // not merely the account's active org. After signing in you can be viewing a
   // local folder while an org is active; only one row may read "Current".
   const openPath = vault?.path ?? null;
@@ -437,7 +437,7 @@ function AccountPopover({
     setBusy(true);
     setJoinError(null);
     try {
-      await useStore.getState().joinWorkspace(joinCode);
+      await useStore.getState().joinVault(joinCode);
       setJoinCode("");
       setJoining(false);
       onClose();
@@ -464,7 +464,7 @@ function AccountPopover({
           {userInvitations.map((inv) => (
             <div key={inv.id} className="invite-row">
               <span className="muted" title={inv.organizationId}>
-                Workspace invitation · {inv.role}
+                Vault invitation · {inv.role}
               </span>
               <button
                 className="primary sm"
@@ -478,15 +478,15 @@ function AccountPopover({
       )}
 
       <div className="menu-sep" />
-      <div className="menu-label">Workspace</div>
+      <div className="menu-label">Vault</div>
 
-      {/* Active workspace pinned to the top — it's the one you're working in.
-          Only the first few show here; the rest live in Workspace settings. */}
+      {/* Active vault pinned to the top — it's the one you're working in.
+          Only the first few show here; the rest live in Vault settings. */}
       {[
         ...organizations.filter((o) => o.id === activeOrgId),
         ...organizations.filter((o) => o.id !== activeOrgId),
       ]
-        .slice(0, POPOVER_WORKSPACE_LIMIT)
+        .slice(0, POPOVER_VAULT_LIMIT)
         .map((o) => {
         const isActive = openPath != null && boundVaults[o.id] === openPath;
         return (
@@ -528,36 +528,36 @@ function AccountPopover({
         );
       })}
 
-      {organizations.length > POPOVER_WORKSPACE_LIMIT && (
-        <button className="menu-item subtle" onClick={onOpenWorkspaces}>
+      {organizations.length > POPOVER_VAULT_LIMIT && (
+        <button className="menu-item subtle" onClick={onOpenVaults}>
           <span className="menu-swatch more" aria-hidden="true">
             …
           </span>
           <span className="menu-item-label">
-            All synced workspaces ({organizations.length})
+            All synced vaults ({organizations.length})
           </span>
         </button>
       )}
 
-      <LocalWorkspaceRows
+      <LocalVaultRows
         onClose={onClose}
-        limit={POPOVER_WORKSPACE_LIMIT}
-        onViewAll={onOpenWorkspaces}
+        limit={POPOVER_VAULT_LIMIT}
+        onViewAll={onOpenVaults}
       />
 
-      {/* "New workspace" = pick a folder; it becomes your (local) workspace,
+      {/* "New vault" = pick a folder; it becomes your (local) vault,
           then Turn on sync promotes it. Same action as the old "Open a folder". */}
       <button
         className="menu-item subtle"
-        onClick={() => void openFolderAsLocalWorkspace(onClose)}
+        onClick={() => void openFolderAsLocalVault(onClose)}
       >
         <span className="menu-swatch plus" aria-hidden="true">
           +
         </span>
-        <span className="menu-item-label">New workspace</span>
+        <span className="menu-item-label">New vault</span>
       </button>
 
-      {/* Teammates join with the code shared from Workspace settings. */}
+      {/* Teammates join with the code shared from Vault settings. */}
       {joining ? (
         <div className="menu-create-org">
           <input
@@ -591,7 +591,7 @@ function AccountPopover({
             <circle cx="12" cy="12" r="3" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </MenuIcon>
-          <span className="menu-item-label">Workspace settings</span>
+          <span className="menu-item-label">Vault settings</span>
           {activeOrgId ? (
             <span className="menu-hint">
               {members.length} member{members.length === 1 ? "" : "s"}
@@ -902,7 +902,7 @@ export function AuthDialog({
 
 type SettingsTab =
   | "general"
-  | "workspaces"
+  | "vaults"
   | "members"
   | "billing"
   | "access"
@@ -911,8 +911,8 @@ type SettingsTab =
   | "appearance"
   | "updates";
 
-// Sections that only make sense once the workspace is synced to an org. On a
-// local workspace they're shown but locked, with a "Turn on sync" gate.
+// Sections that only make sense once the vault is synced to an org. On a
+// local vault they're shown but locked, with a "Turn on sync" gate.
 const TEAM_TABS = new Set<SettingsTab>(["members", "billing", "access", "mcp"]);
 
 /** General tab: name, folder, and sync state (incl. the Turn-on-sync CTA). */
@@ -929,8 +929,8 @@ const GENERAL_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
   {
-    id: "workspaces",
-    label: "Workspaces",
+    id: "vaults",
+    label: "Vaults",
     icon: (
       <MenuIcon>
         <rect x="3" y="3" width="7" height="7" rx="1.5" />
@@ -1017,11 +1017,11 @@ const BILLING_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
 };
 
 /**
- * Workspace settings — a dedicated full page (not a modal): everything about
- * the workspace lives here. Members (roster + join code + invites),
+ * Vault settings — a dedicated full page (not a modal): everything about
+ * the vault lives here. Members (roster + join code + invites),
  * Permissions (RBAC locks), and Appearance (theme + item colors).
  */
-function WorkspaceSettingsDialog({
+function VaultSettingsDialog({
   onClose,
   onRequestSignIn,
   initialTab,
@@ -1036,7 +1036,7 @@ function WorkspaceSettingsDialog({
   const billingConfig = useStore((s) => s.billingConfig);
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
-  const locals = useLocalWorkspaces();
+  const locals = useLocalVaults();
 
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
 
@@ -1050,25 +1050,25 @@ function WorkspaceSettingsDialog({
 
   const activeOrg =
     organizations.find((o) => o.id === session?.activeOrganizationId) ?? null;
-  // Is the workspace we're looking at actually syncing to an org? A local
-  // workspace (signed out, or an unsynced local folder) shows a reduced page
+  // Is the vault we're looking at actually syncing to an org? A local
+  // vault (signed out, or an unsynced local folder) shows a reduced page
   // with the team sections locked behind "Turn on sync".
   const isSynced = syncEnabled && !!activeOrg;
   const billingEnabled = billingConfig?.enabled === true;
 
-  // "Workspaces" (switch/create/manage) is shown for an account OR when there
+  // "Vaults" (switch/create/manage) is shown for an account OR when there
   // are local folders to list — that's what "View all" opens into.
-  const showWorkspaces = !!session || locals.length > 0;
+  const showVaults = !!session || locals.length > 0;
   const tabs = useMemo(() => {
     const out = [GENERAL_TAB];
-    if (showWorkspaces) out.push(...SETTINGS_TABS);
-    else out.push(...SETTINGS_TABS.filter((t) => t.id !== "workspaces"));
+    if (showVaults) out.push(...SETTINGS_TABS);
+    else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
       const idx = out.findIndex((t) => t.id === "members");
       out.splice(idx >= 0 ? idx + 1 : out.length, 0, BILLING_TAB);
     }
     return out;
-  }, [showWorkspaces, billingEnabled]);
+  }, [showVaults, billingEnabled]);
 
   if (!session && !vault) return null;
   const myMember = members.find((m) => m.userId === session?.user.id);
@@ -1081,9 +1081,9 @@ function WorkspaceSettingsDialog({
       <header className="settings-page-header">
         <div className="settings-title">
           <span className="settings-eyebrow">
-            {isSynced ? "Workspace settings" : "Local workspace"}
+            {isSynced ? "Vault settings" : "Local vault"}
           </span>
-          <h1>{activeOrg?.name ?? vault?.name ?? "Workspace"}</h1>
+          <h1>{activeOrg?.name ?? vault?.name ?? "Vault"}</h1>
         </div>
         <button className="icon-btn" onClick={onClose} aria-label="Close settings" title="Close (Esc)">
           ✕
@@ -1134,8 +1134,8 @@ function WorkspaceSettingsDialog({
             />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onGoToSync={() => setTab("general")} />
-          ) : tab === "workspaces" ? (
-            <WorkspacesTab />
+          ) : tab === "vaults" ? (
+            <VaultsTab />
           ) : tab === "members" ? (
             <MembersTab canManage={canManage} />
           ) : tab === "billing" ? (
@@ -1158,8 +1158,8 @@ function WorkspaceSettingsDialog({
 }
 
 /**
- * General tab: the identity of the current workspace. Its heart is the
- * Turn-on-sync card for a local workspace — which adopts the folder you're
+ * General tab: the identity of the current vault. Its heart is the
+ * Turn-on-sync card for a local vault — which adopts the folder you're
  * already in (files and all) rather than making you set up a new one.
  */
 function GeneralTab({
@@ -1213,7 +1213,7 @@ function GeneralTab({
       {isSynced ? (
         <>
           <div className="muted">
-            This workspace syncs to your team. Its notes stay as plain files on
+            This vault syncs to your team. Its notes stay as plain files on
             disk and live-sync to everyone with access.
           </div>
           <div className="menu-row">
@@ -1227,7 +1227,7 @@ function GeneralTab({
           </div>
           <div className="menu-row">
             <span className="menu-row-label">Server</span>
-            <code className="workspace-root-path" title={serverUrl}>
+            <code className="vault-root-path" title={serverUrl}>
               {serverUrl}
             </code>
           </div>
@@ -1236,8 +1236,8 @@ function GeneralTab({
         <>
           <div className="muted">
             {activeOrgName
-              ? "You're viewing a local folder. Turn on sync to keep this workspace on your account and across devices."
-              : "This workspace lives only on this computer. Turn on sync to reach it from other devices — or invite people to it."}
+              ? "You're viewing a local folder. Turn on sync to keep this vault on your account and across devices."
+              : "This vault lives only on this computer. Turn on sync to reach it from other devices — or invite people to it."}
           </div>
 
           <div className="sync-promo">
@@ -1249,7 +1249,7 @@ function GeneralTab({
             </p>
             <div className="row invite-bar">
               <input
-                placeholder="Workspace name"
+                placeholder="Vault name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
@@ -1282,7 +1282,7 @@ function GeneralTab({
       <div className="menu-sep" />
       <div className="subhead">Folder on disk</div>
       <div className="join-code-row">
-        <code className="workspace-root-path" title={vault?.path ?? ""}>
+        <code className="vault-root-path" title={vault?.path ?? ""}>
           {vault?.path ?? "—"}
         </code>
       </div>
@@ -1292,7 +1292,7 @@ function GeneralTab({
   );
 }
 
-/** Locked-section gate shown for a team tab on a local workspace. */
+/** Locked-section gate shown for a team tab on a local vault. */
 function SyncGate({ label, onGoToSync }: { label: string; onGoToSync: () => void }) {
   return (
     <div className="sync-gate">
@@ -1311,7 +1311,7 @@ function SyncGate({ label, onGoToSync }: { label: string; onGoToSync: () => void
       </svg>
       <h3>{label} unlocks with sync</h3>
       <p className="muted">
-        Turn on sync for this workspace to invite people, set sharing and
+        Turn on sync for this vault to invite people, set sharing and
         permissions, and connect AI clients.
       </p>
       <button className="primary" onClick={onGoToSync}>
@@ -1322,12 +1322,12 @@ function SyncGate({ label, onGoToSync }: { label: string; onGoToSync: () => void
 }
 
 /**
- * Workspaces: switch between workspaces, create/join, and manage where their
- * local folders live. Each workspace owns one folder under the managed root;
- * switching swaps the sidebar to that workspace's folder and repoints the
+ * Vaults: switch between vaults, create/join, and manage where their
+ * local folders live. Each vault owns one folder under the managed root;
+ * switching swaps the sidebar to that vault's folder and repoints the
  * stable `current` symlink external tools point at.
  */
-function WorkspacesTab() {
+function VaultsTab() {
   const session = useStore((s) => s.session);
   const organizations = useStore((s) => s.organizations);
   const members = useStore((s) => s.members);
@@ -1335,7 +1335,7 @@ function WorkspacesTab() {
   const syncEnabled = useStore((s) => s.syncEnabled);
   // Bumped after a local remove/delete so the recents list re-fetches.
   const [localsNonce, setLocalsNonce] = useState(0);
-  const locals = useLocalWorkspaces(localsNonce);
+  const locals = useLocalVaults(localsNonce);
 
   const [root, setRoot] = useState<string | null>(null);
   const [bound, setBound] = useState<Record<string, string>>(() => readOrgVaults());
@@ -1347,10 +1347,10 @@ function WorkspacesTab() {
   const [busy, setBusy] = useState(false);
   // orgId whose permanent deletion is awaiting a second confirming click.
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  // local-workspace path whose file deletion is awaiting a second confirming click.
+  // local-vault path whose file deletion is awaiting a second confirming click.
   const [confirmDeleteLocal, setConfirmDeleteLocal] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  // Free-plan workspace-cap hit while creating — shows an upgrade nudge instead.
+  // Free-plan vault-cap hit while creating — shows an upgrade nudge instead.
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
     null,
   );
@@ -1359,7 +1359,7 @@ function WorkspacesTab() {
   useEffect(() => {
     let cancelled = false;
     ipc
-      .getWorkspaceRoot()
+      .getVaultsRoot()
       .then((r) => {
         if (!cancelled) setRoot(r);
       })
@@ -1370,11 +1370,11 @@ function WorkspacesTab() {
   }, []);
 
   const activeOrgId = session?.activeOrganizationId ?? null;
-  // We only know the caller's role for the ACTIVE workspace (members are loaded
+  // We only know the caller's role for the ACTIVE vault (members are loaded
   // for it alone). On the active row we can therefore hide Delete from
   // non-owners; on other rows we can't tell, so we show it and let the server
-  // enforce owner-only (403, surfaced via actionError). `deleteWorkspace` takes
-  // an explicit org id, so deleting a non-active workspace works without first
+  // enforce owner-only (403, surfaced via actionError). `deleteRemoteVault` takes
+  // an explicit org id, so deleting a non-active vault works without first
   // switching to it.
   const isActiveOwner =
     members.find((m) => m.userId === session?.user.id)?.role === "owner";
@@ -1406,20 +1406,20 @@ function WorkspacesTab() {
     if (busy) return;
     setBusy(true);
     try {
-      await useStore.getState().openLocalWorkspace(path);
+      await useStore.getState().openLocalVault(path);
       setBound(readOrgVaults());
     } finally {
       setBusy(false);
     }
   };
 
-  // Detach a workspace from this device only (server data untouched).
+  // Detach a vault from this device only (server data untouched).
   const removeLocal = async (orgId: string) => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
     try {
-      await useStore.getState().removeWorkspaceLocally(orgId);
+      await useStore.getState().removeVaultLocally(orgId);
       setBound(readOrgVaults());
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -1428,13 +1428,13 @@ function WorkspacesTab() {
     }
   };
 
-  // Permanently delete a workspace everywhere (owner only, two-click confirm).
+  // Permanently delete a vault everywhere (owner only, two-click confirm).
   const deletePermanently = async (orgId: string) => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
     try {
-      await useStore.getState().deleteWorkspace(orgId);
+      await useStore.getState().deleteRemoteVault(orgId);
       setBound(readOrgVaults());
       setConfirmDelete(null);
     } catch (e) {
@@ -1444,13 +1444,13 @@ function WorkspacesTab() {
     }
   };
 
-  // Forget a local workspace from this device's list (files on disk are kept).
-  const removeLocalWorkspace = async (path: string) => {
+  // Forget a local vault from this device's list (files on disk are kept).
+  const removeLocalVaultRow = async (path: string) => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
     try {
-      await useStore.getState().removeLocalWorkspace(path);
+      await useStore.getState().removeLocalVault(path);
       setLocalsNonce((n) => n + 1);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -1459,13 +1459,13 @@ function WorkspacesTab() {
     }
   };
 
-  // Move a local workspace's folder to the OS trash (destructive, two-click confirm).
+  // Move a local vault's folder to the OS trash (destructive, two-click confirm).
   const deleteLocalFiles = async (path: string) => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
     try {
-      await useStore.getState().deleteLocalWorkspace(path);
+      await useStore.getState().deleteLocalVault(path);
       setConfirmDeleteLocal(null);
       setLocalsNonce((n) => n + 1);
     } catch (e) {
@@ -1486,7 +1486,7 @@ function WorkspacesTab() {
       setCreating(false);
       setBound(readOrgVaults());
     } catch (e) {
-      // A 402 workspace-cap rejection becomes an upgrade nudge; anything else is
+      // A 402 vault-cap rejection becomes an upgrade nudge; anything else is
       // a real error (previously swallowed silently — that was the create bug).
       const kind = classifyLimitError(e);
       if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
@@ -1501,7 +1501,7 @@ function WorkspacesTab() {
     setBusy(true);
     setJoinError(null);
     try {
-      await useStore.getState().joinWorkspace(joinCode);
+      await useStore.getState().joinVault(joinCode);
       setJoinCode("");
       setJoining(false);
       setBound(readOrgVaults());
@@ -1514,14 +1514,14 @@ function WorkspacesTab() {
 
   const changeRoot = async () => {
     try {
-      const picked = await ipc.pickWorkspaceRoot();
+      const picked = await ipc.pickVaultsRoot();
       if (picked) setRoot(picked);
     } catch {
       /* picker cancelled/unavailable */
     }
   };
 
-  // Active workspace pinned to the top.
+  // Active vault pinned to the top.
   const ordered = [
     ...organizations.filter((o) => o.id === activeOrgId),
     ...organizations.filter((o) => o.id !== activeOrgId),
@@ -1537,7 +1537,7 @@ function WorkspacesTab() {
       {session && (
         <>
       <div className="subhead">In this account ({organizations.length})</div>
-      <ul className="member-list workspace-list">
+      <ul className="member-list vault-list">
         {ordered.map((o) => {
           const isActive = isOpenOrg(o.id);
           const fname = folderName(o.id);
@@ -1548,13 +1548,13 @@ function WorkspacesTab() {
               </span>
               <span className="member-name">
                 {o.name}
-                <span className="muted workspace-folder">
+                <span className="muted vault-folder">
                   {" "}
                   {fname ? `· ${fname}` : "· folder created on first open"}
                 </span>
               </span>
               {confirmDelete === o.id ? (
-                <span className="workspace-row-actions">
+                <span className="vault-row-actions">
                   <span className="muted">Delete everything?</span>
                   <button
                     className="link-btn"
@@ -1572,7 +1572,7 @@ function WorkspacesTab() {
                   </button>
                 </span>
               ) : (
-                <span className="workspace-row-actions">
+                <span className="vault-row-actions">
                   {isActive ? (
                     <span className="member-role">Current</span>
                   ) : (
@@ -1587,7 +1587,7 @@ function WorkspacesTab() {
                   <button
                     className="link-btn"
                     disabled={busy}
-                    title="Stop syncing this workspace here; server data is kept"
+                    title="Stop syncing this vault here; server data is kept"
                     onClick={() => void removeLocal(o.id)}
                   >
                     Remove from device
@@ -1596,7 +1596,7 @@ function WorkspacesTab() {
                     <button
                       className="link-btn danger"
                       disabled={busy}
-                      title="Permanently delete this workspace and all its notes for everyone"
+                      title="Permanently delete this vault and all its notes for everyone"
                       onClick={() => {
                         setActionError(null);
                         setConfirmDelete(o.id);
@@ -1612,12 +1612,12 @@ function WorkspacesTab() {
         })}
       </ul>
 
-      <div className="row workspace-actions">
+      <div className="row vault-actions">
         {creating ? (
           <div className="menu-create-org">
             <input
               autoFocus
-              placeholder="Workspace name"
+              placeholder="Vault name"
               value={orgName}
               onChange={(e) => setOrgName(e.target.value)}
               onKeyDown={(e) => {
@@ -1649,7 +1649,7 @@ function WorkspacesTab() {
         ) : (
           <>
             <button className="link-btn" onClick={() => setCreating(true)}>
-              + New workspace
+              + New vault
             </button>
             <button className="link-btn" onClick={() => setJoining(true)}>
               # Join with code
@@ -1675,9 +1675,9 @@ function WorkspacesTab() {
           <div className="subhead">On this device ({localsOrdered.length})</div>
           <div className="muted">
             Local folders open on this computer. They aren't on your account —
-            turn on sync from a workspace's settings to reach it elsewhere.
+            turn on sync from a vault's settings to reach it elsewhere.
           </div>
-          <ul className="member-list workspace-list">
+          <ul className="member-list vault-list">
             {localsOrdered.map((r) => {
               const isCurrent = !syncEnabled && vault?.path === r.path;
               return (
@@ -1687,13 +1687,13 @@ function WorkspacesTab() {
                   </span>
                   <span className="member-name">
                     {r.name}
-                    <span className="muted workspace-folder" title={r.path}>
+                    <span className="muted vault-folder" title={r.path}>
                       {" · Local"}
                     </span>
                   </span>
                   {confirmDeleteLocal === r.path ? (
-                    <span className="workspace-row-actions">
-                      <span className="muted">Delete this workspace?</span>
+                    <span className="vault-row-actions">
+                      <span className="muted">Delete this vault?</span>
                       <button
                         className="link-btn"
                         disabled={busy}
@@ -1710,7 +1710,7 @@ function WorkspacesTab() {
                       </button>
                     </span>
                   ) : (
-                    <span className="workspace-row-actions">
+                    <span className="vault-row-actions">
                       {isCurrent ? (
                         <span className="member-role">Current</span>
                       ) : (
@@ -1726,14 +1726,14 @@ function WorkspacesTab() {
                         className="link-btn"
                         disabled={busy}
                         title="Remove this folder from the list. Files stay on disk."
-                        onClick={() => void removeLocalWorkspace(r.path)}
+                        onClick={() => void removeLocalVaultRow(r.path)}
                       >
                         Remove
                       </button>
                       <button
                         className="link-btn danger"
                         disabled={busy}
-                        title="Delete this workspace — moves its folder and all its notes to the Trash"
+                        title="Delete this vault — moves its folder and all its notes to the Trash"
                         onClick={() => {
                           setActionError(null);
                           setConfirmDeleteLocal(r.path);
@@ -1753,14 +1753,14 @@ function WorkspacesTab() {
       {session && (
         <>
           <div className="menu-sep" />
-          <div className="subhead">Workspace folder location</div>
+          <div className="subhead">Vault folder location</div>
           <div className="muted">
-            New workspaces get their own folder here. The active workspace is also
+            New vaults get their own folder here. The active vault is also
             linked at <code>current</code> so tools like Claude Desktop can point at
             one fixed path.
           </div>
           <div className="join-code-row">
-            <code className="workspace-root-path" title={root ?? ""}>
+            <code className="vault-root-path" title={root ?? ""}>
               {root ?? "…"}
             </code>
             <button className="link-btn" onClick={() => void changeRoot()}>
@@ -1796,7 +1796,7 @@ function MembersTab({ canManage }: { canManage: boolean }) {
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
 
-  // The caller's own role in this workspace, so we mirror the server's rules and
+  // The caller's own role in this vault, so we mirror the server's rules and
   // only show a Remove button where it would actually succeed: owners can remove
   // anyone but themselves and the (single) owner; admins can remove plain members.
   const myRole = members.find((m) => m.userId === session?.user.id)?.role;
@@ -1819,7 +1819,7 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     }
   };
 
-  // The workspace's shareable join code (owner/admin only; server creates it
+  // The vault's shareable join code (owner/admin only; server creates it
   // lazily). Older servers without the endpoint simply hide the section.
   useEffect(() => {
     if (!canManage) return;
@@ -1914,7 +1914,7 @@ function MembersTab({ canManage }: { canManage: boolean }) {
         />
       )}
 
-      <div className="subhead">In this workspace ({members.length})</div>
+      <div className="subhead">In this vault ({members.length})</div>
       <ul className="member-list">
         {members.map((m) => {
           const label = m.user?.name || m.user?.email || m.userId;
@@ -1982,7 +1982,7 @@ function MembersTab({ canManage }: { canManage: boolean }) {
 }
 
 /**
- * BillingTab: this workspace's plan + seat usage (spec 04). Facts are visible to
+ * BillingTab: this vault's plan + seat usage (spec 04). Facts are visible to
  * every member (read-only); the Upgrade/Manage actions are gated to owners/admins
  * the same way MembersTab gates its controls. Only rendered when the server has
  * billing enabled (the tab itself is hidden otherwise).
@@ -2023,7 +2023,7 @@ function BillingTab({ canManage }: { canManage: boolean }) {
   if (!orgId) {
     return (
       <div className="muted perm-empty">
-        Billing needs an active workspace — create or switch to one first.
+        Billing needs an active vault — create or switch to one first.
       </div>
     );
   }
@@ -2049,7 +2049,7 @@ function BillingTab({ canManage }: { canManage: boolean }) {
                   : "Active"}
             </span>
           </div>
-          <div className="muted">Everything unlimited on this workspace.</div>
+          <div className="muted">Everything unlimited on this vault.</div>
           {orgBilling.currentPeriodEnd && (
             <div className="menu-row">
               <span className="menu-row-label">
@@ -2103,7 +2103,7 @@ function BillingTab({ canManage }: { canManage: boolean }) {
           <ul className="upgrade-features">
             <li>Unlimited team members</li>
             <li>Unlimited notes, devices &amp; AI edits</li>
-            <li>Doesn't count toward your free workspaces</li>
+            <li>Doesn't count toward your free vaults</li>
             <li>Priority support</li>
           </ul>
 
@@ -2113,7 +2113,7 @@ function BillingTab({ canManage }: { canManage: boolean }) {
               Upgrade to Pro
             </button>
           ) : (
-            <div className="muted">Ask an owner or admin to upgrade this workspace.</div>
+            <div className="muted">Ask an owner or admin to upgrade this vault.</div>
           )}
         </div>
       )}
@@ -2131,7 +2131,7 @@ function formatDate(iso: string): string {
 }
 
 /**
- * Inline upgrade nudge shown in the create-workspace / invite-member error slot
+ * Inline upgrade nudge shown in the create-vault / invite-member error slot
  * when the server rejects with a 402 free-plan limit. Styled with --warning-soft
  * (reserved for upgrade nudges), not the danger palette — this isn't an error.
  */
@@ -2148,13 +2148,13 @@ function LimitNudge({
   const n =
     limit ??
     (kind === "member_limit"
-      ? freeLimits?.membersPerWorkspace
-      : freeLimits?.workspacesPerUser) ??
+      ? freeLimits?.membersPerVault
+      : freeLimits?.vaultsPerUser) ??
     3;
   const message =
     kind === "member_limit"
-      ? `Free plan limit reached — this workspace allows ${n} member${n === 1 ? "" : "s"}.`
-      : `You have ${n} free workspace${n === 1 ? "" : "s"}. Upgrade a workspace to Pro to create more.`;
+      ? `Free plan limit reached — this vault allows ${n} member${n === 1 ? "" : "s"}.`
+      : `You have ${n} free vault${n === 1 ? "" : "s"}. Upgrade a vault to Pro to create more.`;
   return (
     <div className="limit-nudge">
       <span>{message}</span>
@@ -2166,7 +2166,7 @@ function LimitNudge({
 }
 
 /**
- * MCP: expose this workspace to AI clients over the Model Context Protocol.
+ * MCP: expose this vault to AI clients over the Model Context Protocol.
  * The MCP endpoint is part of the same server; a client authenticates with a
  * token minted here and then gets the SAME CRUD access to notes/folders that
  * the signed-in user has (owners/admins see everything; members see what's
@@ -2177,7 +2177,7 @@ function McpTab() {
   const serverUrl = useStore((s) => s.serverUrl);
 
   const mcpUrl = `${serverUrl.replace(/\/+$/, "")}/api/mcp`;
-  const hasWorkspace = !!session?.activeOrganizationId;
+  const hasVault = !!session?.activeOrganizationId;
 
   const [tokens, setTokens] = useState<McpTokenRow[]>([]);
   const [tools, setTools] = useState<McpToolInfo[]>([]);
@@ -2194,7 +2194,7 @@ function McpTab() {
   const [, setTick] = useState(0);
 
   useEffect(() => {
-    if (!hasWorkspace) {
+    if (!hasVault) {
       setLoading(false);
       return;
     }
@@ -2220,7 +2220,7 @@ function McpTab() {
       window.clearInterval(poll);
       window.clearInterval(tickle);
     };
-  }, [hasWorkspace]);
+  }, [hasVault]);
 
   const copy = async (text: string, tag: string) => {
     try {
@@ -2261,10 +2261,10 @@ function McpTab() {
     }
   };
 
-  if (!hasWorkspace) {
+  if (!hasVault) {
     return (
       <div className="muted perm-empty">
-        MCP needs an active workspace — create or switch to one first.
+        MCP needs an active vault — create or switch to one first.
       </div>
     );
   }
@@ -2276,13 +2276,13 @@ function McpTab() {
   return (
     <>
       <div className="muted">
-        Connect any MCP-compatible AI client to this workspace. It gets the same
+        Connect any MCP-compatible AI client to this vault. It gets the same
         access you do — read, search, create, edit and delete notes and folders.
       </div>
 
       <div className="subhead">Endpoint URL</div>
       <div className="join-code-row">
-        <code className="workspace-root-path" title={mcpUrl}>
+        <code className="vault-root-path" title={mcpUrl}>
           {mcpUrl}
         </code>
         <button className="link-btn" onClick={() => void copy(mcpUrl, "url")}>
@@ -2293,7 +2293,7 @@ function McpTab() {
       <div className="menu-sep" />
       <div className="subhead">Access tokens</div>
       <div className="muted">
-        A token authenticates the client and scopes it to you in this workspace.
+        A token authenticates the client and scopes it to you in this vault.
         Add it as an <code>Authorization: Bearer</code> header. Revoke any time.
       </div>
 
@@ -2343,7 +2343,7 @@ function McpTab() {
       <div className="menu-sep" />
       <div className="subhead">Connections</div>
       <div className="muted">
-        Every token is a connection into this workspace. Each reaches the same{" "}
+        Every token is a connection into this vault. Each reaches the same{" "}
         {tools.length || ""} tools, gated by your access — expand one to see them,
         how active it is, and how much it's been used.
       </div>
@@ -2619,7 +2619,7 @@ function ImportExportTab() {
       const dest = await ipc.pickFolder();
       if (!dest) return null;
       await ipc.exportPath("", dest);
-      return "Exported the workspace.";
+      return "Exported the vault.";
     });
 
   return (
@@ -2652,7 +2652,7 @@ function ImportExportTab() {
         </p>
         <div className="io-actions">
           <button className="primary" disabled={busy !== null} onClick={() => void exportVault()}>
-            {busy === "export" ? "Exporting…" : "Export entire workspace…"}
+            {busy === "export" ? "Exporting…" : "Export entire vault…"}
           </button>
         </div>
       </section>
@@ -2702,7 +2702,7 @@ function AppearanceTab() {
       </div>
 
       {items.length === 0 ? (
-        <div className="muted perm-empty">Open a workspace to color its folders and notes.</div>
+        <div className="muted perm-empty">Open a vault to color its folders and notes.</div>
       ) : (
         <>
           <ul className="appearance-list">

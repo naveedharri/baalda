@@ -16,12 +16,12 @@ describe("classifyLimitError", () => {
     expect(classifyLimitError(new ApiError(500, "boom"))).toBeNull();
   });
 
-  it("classifies a 402 with a clean workspace token body", () => {
-    const e = new ApiError(402, "workspace_limit_reached", {
-      error: "workspace_limit_reached",
+  it("classifies a 402 with a clean vault token body", () => {
+    const e = new ApiError(402, "vault_limit_reached", {
+      error: "vault_limit_reached",
       limit: 3,
     });
-    expect(classifyLimitError(e)).toBe("workspace_limit");
+    expect(classifyLimitError(e)).toBe("vault_limit");
   });
 
   it("classifies a 402 with a clean member token body", () => {
@@ -41,8 +41,8 @@ describe("classifyLimitError", () => {
   });
 
   it("classifies when the token is only in a stringified body", () => {
-    const e = new ApiError(402, "HTTP 402", "workspace_limit_reached");
-    expect(classifyLimitError(e)).toBe("workspace_limit");
+    const e = new ApiError(402, "HTTP 402", "vault_limit_reached");
+    expect(classifyLimitError(e)).toBe("vault_limit");
   });
 
   it("returns null for a 402 without any contract token", () => {

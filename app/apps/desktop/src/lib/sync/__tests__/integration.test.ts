@@ -176,7 +176,7 @@ describe.skipIf(!RUN)("client↔server integration", () => {
     await a.setActiveOrganization(org.id);
     const vault = await a.createVault({ name: `AttVault ${stamp}`, organizationId: org.id });
 
-    // ---- User B joins the workspace (member) ----
+    // ---- User B joins the vault (member) ----
     const b = new ApiClient({ baseUrl: SERVER });
     await b.signUp({ email: `att-b-${stamp}@it.test`, password: "password123", name: "Member B" });
     await a.inviteMember({ email: `att-b-${stamp}@it.test`, role: "member", organizationId: org.id });

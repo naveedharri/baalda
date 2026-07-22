@@ -1,4 +1,4 @@
-// Lock (deny-overlay) helpers shared by the tree, editor, and the workspace
+// Lock (deny-overlay) helpers shared by the tree, editor, and the vault
 // settings Permissions tab. Locks arrive from the server keyed by resource id
 // (registry folder id / doc id); the UI thinks in vault-relative paths.
 

@@ -14,7 +14,7 @@ import { getSession } from "../session.js";
 
 /**
  * Share management API (session-authenticated) — spec 04 §3/§4.
- * Create/list/revoke shares on folders/files. Authorized for workspace
+ * Create/list/revoke shares on folders/files. Authorized for vault
  * owner/admin or the resource creator. On revoke we disconnect live sockets for
  * every affected doc (instant kill).
  */
@@ -32,13 +32,15 @@ export function createShareRoutes(deps: ShareDeps): Hono {
 
   async function canManage(
     userId: string,
-    resourceType: "folder" | "file" | "workspace",
+    // 'vault' = the vault-wide grant (resourceId is the organization id).
+    resourceType: "folder" | "file" | "vault",
     resourceId: string,
   ): Promise<{
     ok: boolean;
     organizationId?: string;
-    /** Vaults whose subscribers should re-evaluate on an ACL change. A folder/
-     *  file touches one vault; a workspace grant touches all of the org's. */
+    /** Note collections whose subscribers should re-evaluate on an ACL change. A
+     *  folder/file touches one note collection; a vault-wide grant touches all
+     *  of the org's. */
     vaultIds?: string[];
     status?: number;
     error?: string;
@@ -47,17 +49,17 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     if (!info) return { ok: false, status: 404, error: "Unknown resource" };
     const role = await orgRole(info.organizationId, userId);
     const isAdmin = role === "owner" || role === "admin";
-    // Workspace posture (Open/Read-only/Private) is an owner/admin decision;
+    // Vault posture (Open/Read-only/Private) is an owner/admin decision;
     // the per-resource "creator can manage" escape hatch doesn't apply.
     const isCreator =
-      resourceType !== "workspace" &&
+      resourceType !== "vault" &&
       info.createdBy !== null &&
       info.createdBy === userId;
     if (!isAdmin && !isCreator) {
       return { ok: false, status: 403, error: "Not allowed to manage shares here" };
     }
     const vaultIds =
-      resourceType === "workspace"
+      resourceType === "vault"
         ? (
             await pool.query<{ id: string }>(
               "SELECT id FROM vaults WHERE organization_id = $1",
@@ -71,7 +73,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
   // Create or update a share (upsert on the unique resource+principal key).
   // permission 'locked' is the deny overlay (spec 04 §3 extension): it caps
   // everyone it matches at read-only. principalType 'org' targets the whole
-  // workspace (principalId may be omitted — it becomes the organization id).
+  // vault (principalId may be omitted — it becomes the organization id).
   app.post("/shares", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -82,7 +84,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const principalType = body.principalType ?? "user";
     const permission = body.permission;
     if (
-      (resourceType !== "folder" && resourceType !== "file" && resourceType !== "workspace") ||
+      (resourceType !== "folder" && resourceType !== "file" && resourceType !== "vault") ||
       typeof resourceId !== "string" ||
       (principalType !== "user" && principalType !== "org") ||
       (permission !== "view" && permission !== "edit" && permission !== "locked")
@@ -90,14 +92,15 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       return c.json(
         {
           error:
-            "resourceType(folder|file|workspace), resourceId, principalType(user|org), permission(view|edit|locked) required",
+            "resourceType(folder|file|vault), resourceId, principalType(user|org), permission(view|edit|locked) required",
         },
         400,
       );
     }
     // An org-wide edit/view grant on a folder/file is "Share with team" (spec:
-    // private-by-default). On a workspace resource it's the "Open"/"Read-only"
-    // posture. Both are allowed; locks (deny overlays) may also be org-wide.
+    // private-by-default). On a vault resource it's the "Open"/"Read-only"
+    // posture. Both are allowed; locks (deny
+    // overlays) may also be org-wide.
 
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
@@ -142,7 +145,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const id = randomUUID();
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO shares
-         (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
+         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
        DO UPDATE SET permission = EXCLUDED.permission
@@ -174,7 +177,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // Any downgrade to read-only must reach live editors immediately — force
     // reconnect so open sessions come back with fresh (now read-only) sync
     // tokens, same as revocation does. This covers a lock, a per-user edit→view
-    // change, and a workspace Open→Read-only posture flip (all land as
+    // change, and a vault Open→Read-only posture flip (all land as
     // view/locked). An 'edit' grant only widens access, so it needs no kick;
     // the onAclChanged push below lets background subscribers pick it up.
     // Reconnect re-mints each client's own permission, so a peer who still has
@@ -195,7 +198,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     );
   });
 
-  // List every lock in a vault. Any member of the vault's workspace may read
+  // List every lock in a note collection. Any member of the vault may read
   // these — the client renders lock badges in the tree from this.
   app.get("/vaults/:vaultId/locks", async (c) => {
     const session = await getSession(c);
@@ -209,7 +212,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const org = vrows[0]?.organization_id;
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     const role = await orgRole(org, session.userId);
-    if (!role) return c.json({ error: "Not a member of this workspace" }, 403);
+    if (!role) return c.json({ error: "Not a member of this vault" }, 403);
 
     const { rows } = await pool.query(
       `SELECT s.id, s.resource_type, s.resource_id, s.principal_type, s.principal_id,
@@ -235,7 +238,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const resourceType = c.req.query("resourceType");
     const resourceId = c.req.query("resourceId");
     if (
-      (resourceType !== "folder" && resourceType !== "file" && resourceType !== "workspace") ||
+      (resourceType !== "folder" && resourceType !== "file" && resourceType !== "vault") ||
       !resourceId
     ) {
       return c.json({ error: "resourceType and resourceId query params required" }, 400);
@@ -251,7 +254,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     return c.json({ shares: rows });
   });
 
-  // Resolve WHO can access one resource: every workspace member with their
+  // Resolve WHO can access one resource: every vault member with their
   // effective permission (role + shares + inherited folder shares, capped by
   // locks) and its source. Powers the "who can access" view. Same canManage
   // gate as listing shares.
@@ -304,7 +307,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const shareId = c.req.param("id");
 
     const { rows } = await pool.query<{
-      resource_type: "folder" | "file" | "workspace";
+      resource_type: "folder" | "file" | "vault";
       resource_id: string;
     }>("SELECT resource_type, resource_id FROM shares WHERE id = $1", [shareId]);
     const share = rows[0];

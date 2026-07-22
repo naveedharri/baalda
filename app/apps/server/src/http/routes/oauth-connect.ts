@@ -4,7 +4,7 @@ import { auth, googleEnabled } from "../../auth/auth.js";
 import { config } from "../../config.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
-import { setWorkspaceBinding } from "../../mcp/oauth.js";
+import { setVaultBinding } from "../../mcp/oauth.js";
 import { BRAND_NAME } from "../../brand.js";
 import { GLYPH_FAVICON_DATA_URI, WORDMARK_DATA_URI } from "../../brand-assets.js";
 
@@ -13,8 +13,8 @@ import { GLYPH_FAVICON_DATA_URI, WORDMARK_DATA_URI } from "../../brand-assets.js
  * drives the machinery; these are the screens it redirects a browser through):
  *
  *   GET  /oauth/login    ← plugin's `loginPage`. Sign in to an existing account.
- *   GET  /oauth/consent  ← plugin's `consentPage`. Pick the workspace + Allow.
- *   POST /oauth/consent  → records the workspace binding, completes consent,
+ *   GET  /oauth/consent  ← plugin's `consentPage`. Pick the vault + Allow.
+ *   POST /oauth/consent  → records the vault binding, completes consent,
  *                          bounces back to the client's redirect_uri.
  *
  * Served by this (headless) server itself so the flow works on api.baalda.com
@@ -130,7 +130,7 @@ oauthConnectRoutes.get("/oauth/login", async (c) => {
   const url = new URL(c.req.url);
   const app = await clientName(url.searchParams.get("client_id") ?? undefined);
   // Re-enter authorize after sign-in with prompt=consent forced on. The Better
-  // Auth `mcp` plugin only shows a consent screen (our workspace picker) when
+  // Auth `mcp` plugin only shows a consent screen (our vault picker) when
   // the request carries prompt=consent — clients like Claude don't send it, so
   // we add it ourselves here (the one point in the flow we control).
   const authorizeParams = new URLSearchParams(url.search);
@@ -170,7 +170,7 @@ oauthConnectRoutes.get("/oauth/login", async (c) => {
           // redirect:'manual' — on success the mcp plugin's after-hook tries to
           // auto-resume authorize and answers with a 3xx; we deliberately ignore
           // that (opaqueredirect) and drive the browser to authorize ourselves,
-          // with prompt=consent, so the workspace picker always shows.
+          // with prompt=consent, so the vault picker always shows.
           const res = await fetch('/api/auth/sign-in/email', {
             method:'POST', credentials:'include', redirect:'manual',
             headers:{'Content-Type':'application/json'},
@@ -203,7 +203,7 @@ oauthConnectRoutes.get("/oauth/login", async (c) => {
   return c.html(page({ title: "Sign in", body }));
 });
 
-// ── Consent page with workspace picker (mcp plugin's consentPage) ───────────
+// ── Consent page with vault picker (mcp plugin's consentPage) ───────────────
 oauthConnectRoutes.get("/oauth/consent", async (c) => {
   const consentCode = c.req.query("consent_code") ?? "";
   const clientId = c.req.query("client_id") ?? "";
@@ -227,7 +227,7 @@ oauthConnectRoutes.get("/oauth/consent", async (c) => {
   }
 
   const app = await clientName(clientId);
-  const { rows: workspaces } = await pool.query<{ id: string; name: string; role: string }>(
+  const { rows: vaults } = await pool.query<{ id: string; name: string; role: string }>(
     `SELECT o.id, o.name, m.role
        FROM member m JOIN organization o ON o.id = m."organizationId"
       WHERE m."userId" = $1
@@ -235,20 +235,20 @@ oauthConnectRoutes.get("/oauth/consent", async (c) => {
     [session.userId],
   );
 
-  if (workspaces.length === 0) {
+  if (vaults.length === 0) {
     return c.html(
       page({
-        title: "No workspace",
-        body: `<h1>No workspace found</h1><p class="sub">Your account isn't a member of any ${esc(
+        title: "No vault",
+        body: `<h1>No vault found</h1><p class="sub">Your account isn't a member of any ${esc(
           BRAND_NAME,
-        )} workspace yet. Create or join one in the app, then try again.</p>`,
+        )} vault yet. Create or join one in the app, then try again.</p>`,
       }),
       400,
     );
   }
 
-  const preselect = session.activeOrganizationId ?? workspaces[0].id;
-  const options = workspaces
+  const preselect = session.activeOrganizationId ?? vaults[0].id;
+  const options = vaults
     .map(
       (w) => `
       <label class="ws">
@@ -268,7 +268,7 @@ oauthConnectRoutes.get("/oauth/consent", async (c) => {
     <form method="POST" action="/oauth/consent">
       <input type="hidden" name="consent_code" value="${esc(consentCode)}" />
       <input type="hidden" name="client_id" value="${esc(clientId)}" />
-      <label>Choose a workspace to connect</label>
+      <label>Choose a vault to connect</label>
       ${options}
       <div class="scopes"><ul>
         <li>Read and search notes you can access</li>
@@ -280,7 +280,7 @@ oauthConnectRoutes.get("/oauth/consent", async (c) => {
         <button type="submit" name="decision" value="allow" class="primary">Allow access</button>
       </div>
     </form>
-    <p class="foot">You can revoke this anytime in ${esc(BRAND_NAME)} workspace settings.</p>`;
+    <p class="foot">You can revoke this anytime in ${esc(BRAND_NAME)} vault settings.</p>`;
   return c.html(page({ title: "Authorize", body }));
 });
 
@@ -303,19 +303,19 @@ oauthConnectRoutes.post("/oauth/consent", async (c) => {
     return c.html(page({ title: "Invalid request", body: `<h1>Invalid request</h1>` }), 400);
   }
 
-  // On Allow: bind the chosen workspace BEFORE completing consent, and only if
+  // On Allow: bind the chosen vault BEFORE completing consent, and only if
   // the user is really a member of it (the picker is user-supplied input).
   if (accept) {
     if (!organizationId || !(await orgRole(organizationId, session.userId))) {
       return c.html(
         page({
           title: "Authorize",
-          body: `<h1>Pick a workspace</h1><p class="sub">Select a workspace you belong to, then try again.</p>`,
+          body: `<h1>Pick a vault</h1><p class="sub">Select a vault you belong to, then try again.</p>`,
         }),
         400,
       );
     }
-    await setWorkspaceBinding(clientId, session.userId, organizationId);
+    await setVaultBinding(clientId, session.userId, organizationId);
   }
 
   try {

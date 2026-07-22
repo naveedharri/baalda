@@ -14,8 +14,8 @@ import type { DocWriter } from "./doc-writer.js";
 /**
  * The CRUD operations the MCP exposes, each one gated by the SAME ACL the rest
  * of the app uses (src/permissions/resolver.ts). Every function takes an
- * McpContext (who is calling + which workspace) so the MCP can never reach
- * outside the token's (user, workspace) scope.
+ * McpContext (who is calling + which vault) so the MCP can never reach
+ * outside the token's (user, vault) scope.
  *
  * Read ops need `view`; write ops need `edit`; create/delete of folders needs
  * `edit` on the parent (owner/admin get `edit` everywhere).
@@ -38,7 +38,8 @@ function relPathStem(relPath: string): string {
 
 // ── scope + permission guards ───────────────────────────────────────────────
 
-/** Confirm a vault exists and belongs to the token's workspace. */
+/** Confirm a vault (a `vaults` note-collection row) exists and is in scope —
+ *  i.e. it belongs to the token's vault (the organization). */
 async function requireVaultInScope(auth: McpAuth, vaultId: string): Promise<void> {
   const { rows } = await pool.query<{ organization_id: string }>(
     "SELECT organization_id FROM vaults WHERE id = $1",
@@ -47,7 +48,7 @@ async function requireVaultInScope(auth: McpAuth, vaultId: string): Promise<void
   const org = rows[0]?.organization_id;
   if (!org) throw new McpToolError(`Unknown vault: ${vaultId}`);
   if (org !== auth.organizationId) {
-    throw new McpToolError("Vault is not in this token's workspace");
+    throw new McpToolError("This vault is outside the scope of this token");
   }
 }
 
@@ -234,7 +235,7 @@ async function locateNote(auth: McpAuth, docId: string) {
   const note = rows[0];
   if (!note) throw new McpToolError(`Unknown note: ${docId}`);
   if (note.organization_id !== auth.organizationId) {
-    throw new McpToolError("Note is not in this token's workspace");
+    throw new McpToolError("This note is outside the scope of this token");
   }
   return note;
 }

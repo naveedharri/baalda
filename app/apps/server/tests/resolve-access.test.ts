@@ -18,7 +18,7 @@ import {
 
 /** Insert a `locked` share (seedShare only covers user view/edit grants). */
 async function seedLock(
-  workspaceId: string,
+  orgId: string,
   resourceType: "folder" | "file",
   resourceId: string,
   principalType: "org" | "user",
@@ -26,9 +26,9 @@ async function seedLock(
 ): Promise<void> {
   await pool.query(
     `INSERT INTO shares
-       (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
      VALUES ($1, $2, $3, $4, $5, $6, 'locked')`,
-    [randomUUID(), workspaceId, resourceType, resourceId, principalType, principalId],
+    [randomUUID(), orgId, resourceType, resourceId, principalType, principalId],
   );
 }
 

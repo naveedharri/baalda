@@ -1,5 +1,5 @@
 // Account-level, device-local preferences that follow the app rather than any
-// one workspace: the user's activity status and the mention chime. Persisted in
+// one vault: the user's activity status and the mention chime. Persisted in
 // localStorage (device-local, like the theme). Profile fields (display name,
 // avatar) are NOT here — those are server-backed via Better Auth so they follow
 // the account across devices; see `ApiClient.updateUser`.

@@ -53,7 +53,7 @@ export interface NormalizedBillingEvent {
     | "subscription_updated"
     | "subscription_canceled"
     | "subscription_revoked";
-  /** The workspace this subscription belongs to (from checkout metadata). */
+  /** The vault (organization) this subscription belongs to (from checkout metadata). */
   organizationId: string;
   providerCustomerId: string;
   providerSubscriptionId: string;

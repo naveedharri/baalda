@@ -126,7 +126,7 @@ describe("registry structure sync", () => {
   });
 
   it("private-by-default: GET /notes and /folders hide another member's private items", async () => {
-    // A second member of the same workspace.
+    // A second member of the same vault.
     const member = await signUp("member@registry.test");
     const org = (await pgPool.query(`SELECT organization_id FROM vaults WHERE id = $1`, [vault]))
       .rows[0].organization_id as string;
@@ -141,7 +141,7 @@ describe("registry structure sync", () => {
     const teamFolder = await seedFolder(vault, null, "Team", "Team");
     const teamNote = await seedNote(vault, teamFolder, "Team/plan.md", owner.userId);
     await pgPool.query(
-      `INSERT INTO shares (id, workspace_id, resource_type, resource_id, principal_type, principal_id, permission)
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
        VALUES (gen_random_uuid()::text, $1, 'folder', $2, 'org', $1, 'edit')`,
       [org, teamFolder],
     );

@@ -133,7 +133,7 @@ export interface McpToolInfo {
   access: "read" | "write" | "destructive";
 }
 
-/** The MCP connections view for a workspace: each token plus the shared tool catalog. */
+/** The MCP connections view for a vault: each token plus the shared tool catalog. */
 export interface McpConnections {
   tokens: McpTokenRow[];
   tools: McpToolInfo[];
@@ -182,10 +182,10 @@ export interface BillingPlan {
 export interface BillingConfig {
   enabled: boolean;
   plans?: BillingPlan[];
-  freeLimits?: { workspacesPerUser: number; membersPerWorkspace: number };
+  freeLimits?: { vaultsPerUser: number; membersPerVault: number };
 }
 
-/** A single workspace's subscription state + seat usage. */
+/** A single vault's subscription state + seat usage. */
 export interface OrgBilling {
   plan: "free" | "pro";
   status: "none" | "active" | "past_due" | "canceled";
@@ -350,7 +350,7 @@ export class ApiClient {
   /**
    * Update the signed-in user's profile. Better Auth stores `name` and `image`
    * (avatar URL) on the user, so these follow the account across devices and
-   * every workspace. Callers re-fetch the session afterward to pick up the
+   * every vault. Callers re-fetch the session afterward to pick up the
    * updated user object.
    */
   async updateUser(input: { name?: string; image?: string | null }): Promise<void> {
@@ -442,7 +442,7 @@ export class ApiClient {
     const { data } = await this.request<Organization[]>("GET", "/api/auth/organization/list");
     // Dedupe by id: a user can transiently hold more than one membership row for
     // the same org (invite + join code both add a member), which would otherwise
-    // show the same workspace twice in the switcher. See issue #14.
+    // show the same vault twice in the switcher. See issue #14.
     const byId = new Map<string, Organization>();
     for (const org of data ?? []) if (!byId.has(org.id)) byId.set(org.id, org);
     return [...byId.values()];
@@ -509,14 +509,14 @@ export class ApiClient {
 
   // ---- Join codes -----------------------------------------------------------
 
-  /** The active workspace's shareable join code (owner/admin; lazily created). */
+  /** The active vault's shareable join code (owner/admin; lazily created). */
   async getJoinCode(): Promise<string> {
     const { data } = await this.request<{ code: string }>("GET", "/api/orgs/join-code");
     return data.code;
   }
 
-  /** Join a workspace by its shared code (any signed-in user). */
-  async joinWorkspace(code: string): Promise<{
+  /** Join a vault by its shared code (any signed-in user). */
+  async joinVault(code: string): Promise<{
     organizationId: string;
     name?: string;
     alreadyMember?: boolean;
@@ -530,11 +530,12 @@ export class ApiClient {
   }
 
   /**
-   * Permanently delete a workspace and all its server data (owner only). The
-   * server cascades members/vaults/folders/notes/shares and purges the FK-less
+   * Permanently delete a vault and all its server data (owner only). The server
+   * cascades members/note-collections/folders/notes/shares and purges the FK-less
    * CRDT stores. Throws ApiError 403 if the caller isn't the owner.
+   * (The vault's server identity is the Better Auth organization id.)
    */
-  async deleteWorkspace(
+  async deleteRemoteVault(
     organizationId: string,
   ): Promise<{ deleted: boolean; vaults: number; docs: number }> {
     const { data } = await this.request<{ deleted: boolean; vaults: number; docs: number }>(
@@ -545,7 +546,7 @@ export class ApiClient {
   }
 
   /**
-   * Remove a member from a workspace (owner/admin). The server deletes the
+   * Remove a member from a vault (owner/admin). The server deletes the
    * membership, purges any shares granted directly to that user, and force-closes
    * their live sync sockets so access is revoked immediately. Throws ApiError 403
    * if the caller lacks permission (e.g. an admin trying to remove another admin).
@@ -564,13 +565,13 @@ export class ApiClient {
     return `${this.baseUrl}/api/mcp`;
   }
 
-  /** The caller's MCP tokens for the active workspace (metadata only). */
+  /** The caller's MCP tokens for the active vault (metadata only). */
   async listMcpTokens(): Promise<McpTokenRow[]> {
     return (await this.listMcpConnections()).tokens;
   }
 
   /**
-   * The caller's MCP connections for the active workspace: each token (with live
+   * The caller's MCP connections for the active vault: each token (with live
    * usage/activity metadata) plus the shared tool catalog every one can reach.
    */
   async listMcpConnections(): Promise<McpConnections> {
@@ -610,7 +611,7 @@ export class ApiClient {
     }
   }
 
-  /** A workspace's subscription state + seat usage (any member of the org). */
+  /** A vault's subscription state + seat usage (any member of the org). */
   async getOrgBilling(orgId: string): Promise<OrgBilling> {
     const { data } = await this.request<OrgBilling>(
       "GET",
@@ -727,7 +728,7 @@ export class ApiClient {
   // ---- Shares -------------------------------------------------------------
 
   async listShares(
-    resourceType: "folder" | "file" | "workspace",
+    resourceType: "folder" | "file" | "vault",
     resourceId: string,
   ): Promise<Share[]> {
     const { data } = await this.request<{ shares: Share[] }>("GET", "/api/shares", {
@@ -736,14 +737,14 @@ export class ApiClient {
     return data.shares ?? [];
   }
 
-  /** Workspace-level shares (the Open/Read-only posture: an org grant on the
-   *  workspace). resourceId is the organization id. */
-  async listWorkspaceShares(orgId: string): Promise<Share[]> {
-    return this.listShares("workspace", orgId);
+  /** Vault-level shares (the Open/Read-only posture: an org-wide grant on the
+   *  vault). resourceId is the organization id. */
+  async listVaultShares(orgId: string): Promise<Share[]> {
+    return this.listShares("vault", orgId);
   }
 
   async createShare(input: {
-    resourceType: "folder" | "file" | "workspace";
+    resourceType: "folder" | "file" | "vault";
     resourceId: string;
     /** Required for user shares; ignored for org-wide grants/locks. */
     principalId?: string;
@@ -770,7 +771,7 @@ export class ApiClient {
     return { members: data.members ?? [] };
   }
 
-  /** All locks in a vault (readable by any workspace member — drives lock badges). */
+  /** All locks in a vault (readable by any vault member — drives lock badges). */
   async listVaultLocks(vaultId: string): Promise<Share[]> {
     const { data } = await this.request<{ locks: Share[] }>(
       "GET",
@@ -790,7 +791,7 @@ export class ApiClient {
   }
 
   /** Mint a vault-scoped token for the background replication channel (spec 05).
-   *  Throws ApiError(403) when the user isn't a member of the vault's workspace. */
+   *  Throws ApiError(403) when the user isn't a member of the vault. */
   async vaultSyncToken(vaultId: string): Promise<VaultSyncTokenResponse> {
     const { data } = await this.request<VaultSyncTokenResponse>(
       "POST",

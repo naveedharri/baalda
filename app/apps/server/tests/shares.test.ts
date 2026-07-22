@@ -10,7 +10,7 @@ import { seedNote, seedVault } from "./helpers/seed.js";
  * POST /api/shares must force-close live sockets for every affected doc whenever
  * a change lowers access to read-only, so open editors reconnect and re-mint a
  * read-only token immediately (realtime enforcement). Downgrades land as
- * permission 'view' (per-user edit→view, workspace Open→Read-only) or 'locked'.
+ * permission 'view' (per-user edit→view, vault Open→Read-only) or 'locked'.
  * A plain 'edit' grant only widens access and must NOT kick sockets.
  */
 
@@ -88,9 +88,9 @@ describe("POST /shares — realtime read-only enforcement", () => {
     expect(disconnected).toContainEqual({ vaultId: vault, docId });
   });
 
-  it("workspace Open→Read-only (org-wide view) kicks every doc in the workspace", async () => {
+  it("vault Open→Read-only (org-wide view) kicks every doc in the vault", async () => {
     const res = await postShare(owner, {
-      resourceType: "workspace",
+      resourceType: "vault",
       resourceId: orgId,
       principalType: "org",
       permission: "view",

@@ -65,7 +65,7 @@ function isSafeToEdit(relPath: string): boolean {
   return (
     relPath.startsWith("Team Journal/") ||
     relPath.endsWith("_Index.md") ||
-    relPath === "_Workspace Index.md"
+    relPath === "_Vault Index.md"
   );
 }
 
@@ -111,7 +111,7 @@ function pickHotNotes(notes: NoteRow[], memberCount: number): NoteRow[] {
   // Rank: generated index/journal notes first (guaranteed content), then
   // shallow top-level notes (read nicely), then everything else.
   const score = (n: NoteRow): number => {
-    if (n.relPath.endsWith("_Index.md") || n.relPath === "_Workspace Index.md") return 0;
+    if (n.relPath.endsWith("_Index.md") || n.relPath === "_Vault Index.md") return 0;
     if (n.relPath.startsWith("Team Journal/")) return 1;
     return 2 + n.relPath.split("/").length;
   };

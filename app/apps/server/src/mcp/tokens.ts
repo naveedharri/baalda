@@ -7,7 +7,7 @@ import { orgRole } from "../permissions/lookup.js";
  * MCP access tokens (migration 006).
  *
  * A token authenticates an AI client to POST /api/mcp AS one user WITHIN one
- * workspace. We persist only sha256(token) so a DB leak can't reveal live
+ * vault. We persist only sha256(token) so a DB leak can't reveal live
  * tokens; the plaintext is shown to the human exactly once, at creation.
  */
 
@@ -81,7 +81,7 @@ export async function createMcpToken(
   };
 }
 
-/** List a user's tokens for one workspace (never returns hashes). */
+/** List a user's tokens for one vault (never returns hashes). */
 export async function listMcpTokens(
   auth: McpAuth,
   db: Queryable = defaultPool,
@@ -131,7 +131,7 @@ const CLIENT_MAX = 200;
 
 /**
  * Resolve a presented token to its auth context. Returns null when the token is
- * unknown OR the user is no longer a member of the workspace it was scoped to
+ * unknown OR the user is no longer a member of the vault it was scoped to
  * (membership can be revoked out from under a live token). Stamps last_used_at
  * (and the client, when given) best-effort — this drives the desktop's "active"
  * indicator. This is the single gate every MCP request passes through.

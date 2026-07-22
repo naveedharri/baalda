@@ -13,7 +13,7 @@ import { config, billingEnabled } from "../config.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
-/** A workspace counts as paid (unlimited) while active or in the past_due grace. */
+/** A vault counts as paid (unlimited) while active or in the past_due grace. */
 const ACTIVE_STATUSES = ["active", "past_due"] as const;
 
 export interface Entitlement {
@@ -94,8 +94,8 @@ export async function orgHasActiveSubscription(
 }
 
 /**
- * Number of workspaces this user OWNS that do NOT have an active subscription.
- * Paid workspaces never count toward the free-tier workspace cap.
+ * Number of vaults this user OWNS that do NOT have an active subscription.
+ * Paid vaults never count toward the free-tier vault cap.
  */
 export async function countOwnedUnsubscribedOrgs(
   userId: string,
@@ -134,14 +134,14 @@ export async function seatCount(
 }
 
 /**
- * Can this user create another workspace? Allowed when billing is off, or when
- * they own fewer than the cap in UNSUBSCRIBED workspaces.
+ * Can this user create another vault? Allowed when billing is off, or when
+ * they own fewer than the cap in UNSUBSCRIBED vaults.
  */
 export async function canCreateOrganization(
   userId: string,
   db: Queryable = defaultPool,
 ): Promise<{ allowed: boolean; limit: number }> {
-  const limit = config.freeMaxWorkspaces;
+  const limit = config.freeMaxVaults;
   if (!billingEnabled()) return { allowed: true, limit };
   const owned = await countOwnedUnsubscribedOrgs(userId, db);
   return { allowed: owned < limit, limit };

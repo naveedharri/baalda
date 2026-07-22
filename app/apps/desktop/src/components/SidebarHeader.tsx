@@ -17,10 +17,10 @@ const FOLDER_ICON = (
 );
 
 /**
- * Sidebar header: the workspace you're in leads; the local folder backing it
- * is a quiet storage line underneath. "Switch" switches the WORKSPACE (it
- * opens a dropdown of your workspaces); changing the local folder is the
- * subtle last item in that same menu. Signed out — no workspaces to switch —
+ * Sidebar header: the vault you're in leads; the local folder backing it
+ * is a quiet storage line underneath. "Switch" switches the VAULT (it
+ * opens a dropdown of your vaults); changing the local folder is the
+ * subtle last item in that same menu. Signed out — no vaults to switch —
  * the folder takes the headline and Switch picks a folder, as before.
  */
 export function SidebarHeader() {
@@ -80,7 +80,7 @@ export function SidebarHeader() {
     }
   };
 
-  // A local (unsynced) folder is still a workspace — it just isn't syncing yet.
+  // A local (unsynced) folder is still a vault — it just isn't syncing yet.
   // Lead with its name and mark the state; "Switch" opens a different folder.
   if (!activeOrg) {
     return (
@@ -124,8 +124,8 @@ export function SidebarHeader() {
       </div>
 
       {open && (
-        <div className="workspace-popover" role="menu">
-          <div className="menu-label">Switch workspace</div>
+        <div className="vault-popover" role="menu">
+          <div className="menu-label">Switch vault</div>
           {[
             ...organizations.filter((o) => o.id === activeOrgId),
             ...organizations.filter((o) => o.id !== activeOrgId),
@@ -173,7 +173,7 @@ export function SidebarHeader() {
             <div className="menu-create-org">
               <input
                 autoFocus
-                placeholder="Workspace name"
+                placeholder="Vault name"
                 value={orgName}
                 onChange={(e) => setOrgName(e.target.value)}
                 onKeyDown={(e) => {
@@ -190,7 +190,7 @@ export function SidebarHeader() {
               <span className="menu-swatch plus" aria-hidden="true">
                 +
               </span>
-              <span className="menu-item-label">New workspace</span>
+              <span className="menu-item-label">New vault</span>
             </button>
           )}
 

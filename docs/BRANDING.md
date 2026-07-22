@@ -92,3 +92,28 @@ rebrands again, the bundle id and keychain service stay `com.baalda.context` for
    id/keychain service). If a diff touches either, stop. That is the bug this policy exists to prevent.
 5. Verify: existing installs keep their keychain entries and vault data; only user-visible strings
    change.
+
+## Precedent: the workspace → vault terminology rename
+
+This layering discipline is not only for the brand. When the user-facing unified entity was renamed from
+"workspace" to **"vault"**, the same "change the surface, freeze the durable" split applied — sorted into
+three tiers:
+
+- **Tier A (user-visible strings):** UI labels, error prose, docs, seeded welcome notes — all changed
+  freely (clients display these, they never pattern-match them).
+- **Tier B (internal identifiers):** desktop component/action/CSS names and server function names that
+  modelled the concept were renamed (`refreshWorkspace`→`refreshVault`, `WorkspaceSettingsDialog`→
+  `VaultSettingsDialog`, `get_workspace_root`→`get_vaults_root`, …). The real data key `organizationId`
+  stayed — only the concept *name* moved.
+- **Tier C (wire/DB/config literals):** first frozen byte-for-byte for a safe rollout, then — the
+  product being pre-launch with no external users — retired in one coordinated pass: migration 013 renamed
+  the `workspace_id` columns to `org_id`, rewrote `resource_type = 'workspace'` → `'vault'`, and renamed
+  `mcp_oauth_workspace` → `mcp_oauth_vault`, with the 402 tokens, billing JSON fields, and
+  `FREE_MAX_VAULTS` env var renamed on both client and server in the same change. The one surface that
+  keeps a compatibility shim is the desktop config file: `#[serde(alias = "workspace_root")]` still reads
+  pre-rename `config.json` files. Post-launch, tier C would have stayed frozen — that is the point of the
+  tiering.
+
+The through-line is identical to a rebrand: **rename what users read, never rename what storage,
+protocols, or shipped clients depend on.** See the root `CLAUDE.md` terminology glossary for the full
+frozen list.

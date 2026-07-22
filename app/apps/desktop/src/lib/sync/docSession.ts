@@ -68,9 +68,9 @@ export class SyncManager {
 
   // The UI shows ONE connection indicator, but two things can drive it: the
   // open note's provider (authoritative for that doc, incl. read-only grants)
-  // and the always-on vault channel (connects the instant a workspace opens,
+  // and the always-on vault channel (connects the instant a vault opens,
   // before any note). We track both and emit the effective status so switching
-  // workspaces lights up presence immediately — not only once a note is opened.
+  // vaults lights up presence immediately — not only once a note is opened.
   /** Latest per-note provider status; null when no networked note is open. */
   private docStatus: SyncStatus | null = null;
   /** Latest vault-channel status (the always-on background feed). */
@@ -143,7 +143,7 @@ export class SyncManager {
   }
 
   /**
-   * UI subscribes here to react when a new teammate joins the workspace: refresh
+   * UI subscribes here to react when a new teammate joins the vault: refresh
    * the roster (so the member list updates without a reload) and celebrate.
    */
   setMemberJoinedListener(cb: ((name: string) => void) | undefined): void {
@@ -218,7 +218,7 @@ export class SyncManager {
     this.stopVaultEngine();
     this.closeCurrent();
     // closeCurrent only emits when a note was open; make sure a note-less
-    // disable (e.g. switching to a local workspace) still drops to offline.
+    // disable (e.g. switching to a local vault) still drops to offline.
     this.emitStatus();
   }
 
@@ -275,7 +275,7 @@ export class SyncManager {
     const vaultId = this.registry.vaultId;
     if (!vaultId) return;
     this.stopVaultEngine();
-    // Reflect "connecting" the moment we switch into a workspace, so the light
+    // Reflect "connecting" the moment we switch into a vault, so the light
     // moves off a stale value before the socket reports back.
     this.vaultStatus = "connecting";
     if (!this.current) this.emitStatus();
@@ -302,7 +302,7 @@ export class SyncManager {
       onAclChanged: () => this.current?.refreshAccess(),
       // A teammate changed the folder/note structure — re-pull + refresh tree.
       onRegistryChanged: () => this.handleRegistryChanged(),
-      // A new teammate joined the workspace — refresh roster + celebrate.
+      // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),

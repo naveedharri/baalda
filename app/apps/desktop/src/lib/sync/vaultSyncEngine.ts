@@ -90,7 +90,7 @@ export interface VaultSyncEngineOptions {
    *  a teammate created/renamed/moved/deleted a folder or note. The client
    *  re-pulls the registry so its local tree reflects the change live. */
   onRegistryChanged?: () => void;
-  /** Fired when a new teammate joined the workspace (`member`): the client
+  /** Fired when a new teammate joined the vault (`member`): the client
    *  refreshes its roster and shows a join celebration. */
   onMemberJoined?: (name: string) => void;
   /** Fired for each teammate presence update (`presence`): who is now viewing

@@ -4,7 +4,7 @@
 // brain: a root `Welcome`, a `Map of Content` hub, and three folders
 // (`Getting Started`, `Concepts`, `Examples`) whose notes link to one another
 // with `[[wikilinks]]`. Those links become graph edges (they resolve by
-// basename), so a fresh workspace opens onto a populated constellation.
+// basename), so a fresh vault opens onto a populated constellation.
 //
 // This runs once, only when the vault has no notes and no folders — see
 // `vaultIsEmpty`. Content is written with `write_note` (full-file, atomic)
@@ -111,8 +111,10 @@ faster.
 
 ## 2. Work together in real time
 
-Sign in and create (or join) a **workspace** to sync this vault across your
-devices and with your team — more in [[Collaborating with your team]].
+This vault starts out **local** — just files on this computer. Sign in and
+turn on sync to keep it updated across your own devices, or accept a
+teammate's invite to collaborate on theirs — more in
+[[Collaborating with your team]].
 
 ## 3. Bring in your AI
 
@@ -147,7 +149,7 @@ Typing \`[[\` starts a link — that's the core move behind
 Baalda exposes your vault over **MCP**, so an assistant like **Claude** (in
 Claude Desktop or Cowork) can read and write these notes directly.
 
-1. Open **Workspace Settings → MCP** and create a connection token.
+1. Open **Vault Settings → MCP** and create a connection token.
 2. Add it to Claude as an MCP server.
 3. Ask Claude to search, summarise, and write notes — its edits appear here
    live, exactly the way a teammate's would (see [[Collaborating with your team]]).
@@ -160,7 +162,8 @@ Good first tasks: turn your [[Ideas inbox]] into [[Atomic notes]], or draft a
     path: "Getting Started/Collaborating with your team.md",
     body: `# Collaborating with your team
 
-A **workspace** syncs this vault across your devices and with people you invite.
+Turn on sync and this vault stops being local-only — it stays updated across
+your own devices and with everyone you invite, live.
 
 - Open the same note as a teammate and you'll see each other's cursors.
 - Edits **merge** in real time — nothing gets overwritten.

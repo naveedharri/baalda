@@ -1,6 +1,6 @@
 // ============================================================================
 //  DEMO SEED — "Test Organization"
-//  Builds a big, realistic team workspace so you can demo / record Baalda:
+//  Builds a big, realistic team vault so you can demo / record Baalda:
 //    • 1 organization ("Test Organization")
 //    • 15 members with real logins (1 owner, 2 admins, 12 members)
 //    • 1 vault, mirroring the folder tree + content of a source vault
@@ -23,7 +23,7 @@ import * as Y from "yjs";
 import { pool, closePool } from "../../src/db/pool.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { auth } from "../../src/auth/auth.js";
-import { seedMember, seedVault, seedWorkspaceGrant } from "../../tests/helpers/seed.js";
+import { seedMember, seedVault, seedVaultGrant } from "../../tests/helpers/seed.js";
 import { appendUpdate } from "../../src/yjs/persistence.js";
 import { backfillIndex } from "../../src/index/indexer.js";
 
@@ -78,7 +78,7 @@ async function resetDemo(): Promise<void> {
         await pool.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1::text[])", [docIds]);
       }
     }
-    await pool.query("DELETE FROM shares WHERE workspace_id = $1", [orgId]);
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [orgId]);
     // organization cascade removes vaults → folders → notes → files, member, invitation.
     await pool.query("DELETE FROM organization WHERE id = $1", [orgId]);
   }
@@ -182,7 +182,7 @@ async function main(): Promise<void> {
   }
 
   const vaultId = await seedVault(orgId, demoConfig.vaultName);
-  await seedWorkspaceGrant(orgId, "edit"); // org-wide "Open" → everyone can edit
+  await seedVaultGrant(orgId, "edit"); // org-wide "Open" → everyone can edit
   console.log(`🏢  Org ${orgId}\n📦  Vault ${vaultId}\n`);
 
   // --- plan the note set ---------------------------------------------------

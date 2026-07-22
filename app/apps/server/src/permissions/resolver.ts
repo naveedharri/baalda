@@ -4,19 +4,19 @@ import { pool as defaultPool } from "../db/pool.js";
 /**
  * Effective-permission resolver (spec 04 §3, plus locks).
  *
- *   1. Workspace owner/admin  -> `edit` on everything in the workspace.
+ *   1. Vault owner/admin  -> `edit` on everything in the vault.
  *   2. Else take the MAX of: a share on the file itself, a share on a
  *      containing folder (walking parent_id up to the root), and a
- *      workspace-scoped grant (org-wide "Open"/"Read-only", or per-user).
+ *      vault-scoped grant (org-wide "Open"/"Read-only", or per-user).
  *   3. `edit > view > none`. Folder grants inherit to descendants; a file
  *      share can only RAISE permission. No matching grant -> `none`.
  *
- * A plain `member` inherits the workspace grant (Open by default) and so gets
+ * A plain `member` inherits the vault grant (Open by default) and so gets
  * `edit`; with no grant at all it has no content access (`none`).
  *
  * Locks (permission = 'locked') are a DENY overlay resolved AFTER the rules
  * above: when a lock matches the doc or any ancestor folder — for this user
- * (principal_type 'user') or the whole workspace (principal_type 'org') — the
+ * (principal_type 'user') or the whole vault (principal_type 'org') — the
  * result is capped at `view`. Owners/admins are capped too (the point of a
  * lock is protecting content from accidental edits); they can still unlock
  * via the shares API. A lock never GRANTS access: `none` stays `none`.
@@ -40,8 +40,9 @@ interface DocLocation {
 }
 
 /**
- * Locate a doc's vault/folder/workspace. A doc_id maps to a `notes` row
- * (rich registry) or a `files` row (id == doc_id); we accept either.
+ * Locate a doc's note collection, folder, and owning organization (the
+ * user-facing vault). A doc_id maps to a `notes` row (rich registry) or a
+ * `files` row (id == doc_id); we accept either.
  */
 async function locateDoc(
   db: Queryable,
@@ -107,17 +108,18 @@ async function memberRole(
 
 /**
  * Highest share permission for a user across a file (if `docId` is set), a set
- * of folders, and the workspace itself. Passing `docId = null` resolves a
+ * of folders, and the vault itself. Passing `docId = null` resolves a
  * folder resource directly: only the folder rows in `folderIds` (the folder
  * itself + its ancestors) match.
  *
  * Grants come from three scopes, all combined with highest-wins:
  *   - per-user file / folder shares (the classic ACL);
- *   - a workspace-scoped grant (resource_type 'workspace', resource_id =
- *     `organizationId`) — either org-wide (`principal_type 'org'`, the "Open"/
- *     "Read-only" default) or for this user specifically. A workspace grant is
- *     the only thing that reaches notes at the vault root (folder_id NULL),
- *     which have no folder to hang a share on.
+ *   - a vault-scoped grant (resource_type 'vault',
+ *     do not rename; resource_id = `organizationId`) — either org-wide
+ *     (`principal_type 'org'`, the "Open"/"Read-only" default) or for this user
+ *     specifically. A vault-scoped grant is the only thing that reaches notes at
+ *     the collection root (folder_id NULL), which have no folder to hang a
+ *     share on.
  */
 async function sharePermission(
   db: Queryable,
@@ -127,15 +129,15 @@ async function sharePermission(
   organizationId: string,
   isMember: boolean,
 ): Promise<Permission> {
-  // Team (org-wide) grants apply ONLY to actual workspace members — never to
+  // Team (org-wide) grants apply ONLY to actual vault members — never to
   // outsiders who merely know a doc id. They can target a specific folder/file
-  // ("Share with team", private-by-default) or the whole workspace (Open/
+  // ("Share with team", private-by-default) or the whole vault (Open/
   // Read-only). Per-user grants are inherently scoped, so they need no gate.
   const orgGrantClause = isMember
     ? `OR (principal_type = 'org' AND principal_id = $4 AND (
             ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
             OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
-            OR (resource_type = 'workspace' AND resource_id = $4)
+            OR (resource_type = 'vault' AND resource_id = $4)
           ))`
     : "";
   // $2 (the doc id) is always referenced with an explicit cast + null guard so
@@ -148,7 +150,7 @@ async function sharePermission(
           (principal_type = 'user' AND principal_id = $1 AND (
             ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
             OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
-            OR (resource_type = 'workspace' AND resource_id = $4)
+            OR (resource_type = 'vault' AND resource_id = $4)
           ))
           ${orgGrantClause}
         )`,
@@ -165,7 +167,7 @@ async function sharePermission(
 
 /**
  * True when a lock row covers this resource (a file when `docId` is set, plus
- * any folder in `folderIds`) for this user or the whole workspace.
+ * any folder in `folderIds`) for this user or the whole vault.
  */
 export async function isLocked(
   db: Queryable,
@@ -262,7 +264,7 @@ export async function buildAccessContext(
       folderIds: await ancestorFolderIds(db, loc.folderId),
     };
   }
-  // folder: resolve its workspace, then walk itself + ancestors.
+  // folder: resolve its owning vault (organization), then walk itself + ancestors.
   const { rows } = await db.query<{ organization_id: string }>(
     `SELECT v.organization_id
        FROM folders f JOIN vaults v ON v.id = f.vault_id
