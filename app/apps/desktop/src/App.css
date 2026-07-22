@@ -3404,7 +3404,7 @@ button.primary.hero:hover:not(:disabled) {
   flex-shrink: 0;
   white-space: nowrap;
 }
-.vault-actions {
+.vault-tab-actions {
   gap: var(--sp-4);
   margin-top: var(--sp-2);
 }

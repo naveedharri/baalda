@@ -1612,7 +1612,7 @@ function VaultsTab() {
         })}
       </ul>
 
-      <div className="row vault-actions">
+      <div className="row vault-tab-actions">
         {creating ? (
           <div className="menu-create-org">
             <input
