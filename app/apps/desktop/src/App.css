@@ -855,6 +855,33 @@ button.primary.hero:hover:not(:disabled) {
   width: 16px;
   height: 16px;
 }
+/* The fold toggle holds both icons stacked; the inactive one fades + spins
+   away so a click reads as the button flipping into its opposite. */
+.filetree-actions .tree-fold-toggle {
+  position: relative;
+}
+.tree-fold-toggle .fold-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    opacity var(--t-med) var(--ease),
+    transform var(--t-med) var(--ease);
+}
+.tree-fold-toggle .fold-expand {
+  opacity: 0;
+  transform: scale(0.5) rotate(90deg);
+}
+.tree-fold-toggle.collapsed .fold-collapse {
+  opacity: 0;
+  transform: scale(0.5) rotate(-90deg);
+}
+.tree-fold-toggle.collapsed .fold-expand {
+  opacity: 1;
+  transform: none;
+}
 /* Hairline splitting the "create" pair from the "fold/unfold" pair. */
 .filetree-actions .tool-divider {
   width: 1px;
