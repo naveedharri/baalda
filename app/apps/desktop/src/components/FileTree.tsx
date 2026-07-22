@@ -148,6 +148,8 @@ export function FileTree() {
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
+  // Which way the fold toggle points: false → "collapse all", true → "expand all".
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
   // True while an OS drag hovers the tree, for the drop-target highlight.
   const [dropActive, setDropActive] = useState(false);
   // Transient status pill shown after an import (from the menu or a drop).
@@ -728,21 +730,24 @@ export function FileTree() {
             {ICON_NEW_FOLDER}
           </button>
           <span className="tool-divider" aria-hidden="true" />
+          {/* One fold toggle instead of a collapse/expand pair: each click runs
+              the shown action and cross-fades to its opposite. */}
           <button
-            className="tree-tool"
-            title="Collapse all folders"
-            aria-label="Collapse all folders"
-            onClick={() => treeRef.current?.closeAll()}
+            className={`tree-tool tree-fold-toggle${treeCollapsed ? " collapsed" : ""}`}
+            title={treeCollapsed ? "Expand all folders" : "Collapse all folders"}
+            aria-label={treeCollapsed ? "Expand all folders" : "Collapse all folders"}
+            onClick={() => {
+              if (treeCollapsed) treeRef.current?.openAll();
+              else treeRef.current?.closeAll();
+              setTreeCollapsed(!treeCollapsed);
+            }}
           >
-            {ICON_COLLAPSE_ALL}
-          </button>
-          <button
-            className="tree-tool"
-            title="Expand all folders"
-            aria-label="Expand all folders"
-            onClick={() => treeRef.current?.openAll()}
-          >
-            {ICON_EXPAND_ALL}
+            <span className="fold-icon fold-collapse" aria-hidden="true">
+              {ICON_COLLAPSE_ALL}
+            </span>
+            <span className="fold-icon fold-expand" aria-hidden="true">
+              {ICON_EXPAND_ALL}
+            </span>
           </button>
           <span className="tool-divider" aria-hidden="true" />
           <button
