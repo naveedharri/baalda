@@ -9,8 +9,12 @@
   },
   "scripts": {
     "dev:desktop": "pnpm --filter desktop tauri dev",
-    "dev:server": "pnpm --filter server dev",
+    "dev:server": "turbo run dev --filter=server",
+    "build": "turbo run build",
     "build:desktop": "pnpm --filter desktop tauri build",
-    "test": "pnpm -r test"
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.10.5"
   }
 }

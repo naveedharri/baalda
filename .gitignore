@@ -5,6 +5,7 @@ node_modules/
 dist/
 dist-ssr/
 target/
+.turbo/
 app/apps/desktop/gen/schemas/
 
 # Environment & secrets — never commit real keys
