@@ -148,7 +148,7 @@ export class PolarBillingProvider implements BillingProvider {
 
     const orgId = String(sub.metadata?.[META_ORG] ?? "");
     if (!orgId) {
-      // A subscription with no workspace metadata isn't ours to act on.
+      // A subscription with no vault (org) metadata isn't ours to act on.
       return null;
     }
 

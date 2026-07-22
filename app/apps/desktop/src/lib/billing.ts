@@ -2,7 +2,7 @@
 // (only `ApiError`/types) so it's unit-testable without the store, IPC, or DOM.
 //
 // The server enforces free-plan limits by rejecting with HTTP 402 and a body
-// carrying one of the contract tokens `workspace_limit_reached` /
+// carrying one of the contract tokens `vault_limit_reached` /
 // `member_limit_reached`. Some enforcement paths flow through Better Auth, whose
 // body shape can't be fully controlled — so the token may land in `message`
 // rather than a clean `{ error }` field. We therefore scan both the message and
@@ -10,7 +10,7 @@
 
 import { ApiError } from "./api";
 
-export type LimitKind = "workspace_limit" | "member_limit";
+export type LimitKind = "vault_limit" | "member_limit";
 
 /** Every place the contract token might surface on a rejected request. */
 function haystack(e: ApiError): string {
@@ -31,7 +31,7 @@ function haystack(e: ApiError): string {
 export function classifyLimitError(e: unknown): LimitKind | null {
   if (!(e instanceof ApiError) || e.status !== 402) return null;
   const hay = haystack(e);
-  if (hay.includes("workspace_limit_reached")) return "workspace_limit";
+  if (hay.includes("vault_limit_reached")) return "vault_limit";
   if (hay.includes("member_limit_reached")) return "member_limit";
   return null;
 }

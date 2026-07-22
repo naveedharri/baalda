@@ -75,6 +75,14 @@ round-trip lossless. Full detail: [[03-sync-engine]].
 
 ---
 
+> [!note] Terminology: "vault"
+> **Vault** is the single user-facing name for the unit you open, sync, and share. Historically it meant
+> only the *local folder* of `.md` files; it now also names the *synced/remote team* entity that used to be
+> called a "workspace" (a Better Auth `organization` under the hood). The two are the same thing seen in its
+> Local vs. Synced/Remote states — so one word covers all of them. Server-internal storage still keeps the
+> `vault*` wire/DB names for its own note-collection row; see [[02-database-architecture]] and the root
+> `CLAUDE.md` glossary for the layer distinction.
+
 ## The specs
 
 | Spec | Covers |

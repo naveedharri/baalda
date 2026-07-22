@@ -53,9 +53,9 @@ beforeEach(() => {
 });
 
 describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
-  it("adopts the workspace's existing vault even when the local folder name differs", async () => {
+  it("adopts the org's existing server vault even when the local folder name differs", async () => {
     // Owner created the vault under a folder named "MyNotes"; the member's fresh
-    // per-workspace folder is slugged from the org name ("acme") — no name match.
+    // per-vault folder is slugged from the org name ("acme") — no name match.
     const { api, createVault } = fakeApi({
       vaults: [{ id: "v-owner", name: "MyNotes", organization_id: ORG }],
       notes: [{ id: "n1", rel_path: "Team/hello.md" }],
@@ -65,7 +65,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
 
     expect(createVault).not.toHaveBeenCalled();
     expect(reg.vaultId).toBe("v-owner");
-    expect(seeded).toBe(false); // populated workspace never gets welcome content
+    expect(seeded).toBe(false); // populated vault never gets welcome content
     // Server-only note materialized locally so the sidebar shows it.
     expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledWith("Team/hello.md", "");
     expect(reg.getMapping("Team/hello.md")).toEqual({ vaultId: "v-owner", docId: "n1" });
@@ -73,7 +73,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
 
   it("adopts by id (oldest in org) — a name-matching vault never wins over it", async () => {
     // Names collide and differ per device; every device must deterministically
-    // land on the SAME vault. The org's oldest vault is the workspace vault,
+    // land on the SAME server vault. The org's oldest vault is the canonical one,
     // even when a legacy fork happens to match this folder's name.
     const { api, createVault } = fakeApi({
       vaults: [
@@ -87,7 +87,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     expect(reg.vaultId).toBe("v-original");
   });
 
-  it("ignores vaults from other workspaces and creates one when the org has none", async () => {
+  it("ignores server vaults from other orgs and creates one when the org has none", async () => {
     const { api, createVault } = fakeApi({
       vaults: [{ id: "v-other", name: "acme", organization_id: "other-org" }],
     });
@@ -113,9 +113,9 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     expect(createVault).not.toHaveBeenCalled();
   });
 
-  it("discards a config vault id that belongs to a DIFFERENT workspace", async () => {
-    // A folder previously bound to workspace A must not drag A's vault into
-    // workspace B — identity is (org id, vault id), never the folder.
+  it("discards a config vault id that belongs to a DIFFERENT org", async () => {
+    // A folder previously bound to org A must not drag A's vault into
+    // org B — identity is (org id, vault id), never the folder.
     vi.mocked(ipc.getVaultConfig).mockResolvedValue(
       JSON.stringify({ serverVaultId: "v-org-a", docs: {} }),
     );

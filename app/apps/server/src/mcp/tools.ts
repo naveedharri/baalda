@@ -66,7 +66,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "list_vaults",
     description:
-      "List the vaults (top-level note collections) in your workspace. Start here to get a vaultId for the other tools.",
+      "List the top-level note collections you can access, each with a vaultId. Start here to get a vaultId for the other tools.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
     handler: (ctx) => listVaults(ctx),

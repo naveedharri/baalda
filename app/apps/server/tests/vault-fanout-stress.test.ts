@@ -14,7 +14,7 @@ import { decodeWsUpdate } from "../src/sync/vault-protocol.js";
 // Two shapes:
 //   1. Spread load  — 10k updates round-robined across 20 vaults × 10 members.
 //   2. Hot-vault    — 10k updates all into ONE vault with 50 members (worst
-//                     case fanout: 500k deliveries from one busy workspace).
+//                     case fanout: 500k deliveries from one busy vault).
 // Both assert zero lost deliveries, zero cross-vault leakage, and report
 // throughput so a regression in fanout cost shows up as a timeout.
 

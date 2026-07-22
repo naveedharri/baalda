@@ -38,7 +38,7 @@ function RemovedBanner() {
 }
 
 /**
- * Celebrates a teammate joining the workspace: a soft top banner (auto-fades
+ * Celebrates a teammate joining the vault: a soft top banner (auto-fades
  * after a few seconds) plus a one-shot confetti burst over the whole window.
  * The chime is played by the store when the celebration is triggered.
  */
@@ -60,7 +60,7 @@ function MemberJoinedBanner() {
       <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
       <div className="banner celebrate-banner" role="status">
         <span>
-          🎉 <strong>{memberJoined.name}</strong> joined the workspace
+          🎉 <strong>{memberJoined.name}</strong> joined the vault
         </span>
         <div className="banner-actions">
           <button
@@ -76,12 +76,12 @@ function MemberJoinedBanner() {
 }
 
 /**
- * Shown when a workspace is active but has no local folder yet (freshly created
+ * Shown when a vault is active but has no local folder yet (freshly created
  * or joined). Rather than silently reusing whatever folder is open, ask the
- * user to point this workspace at its own folder — or start with an empty one.
+ * user to point this vault at its own folder — or start with an empty one.
  */
-function WorkspaceFolderPrompt() {
-  const pending = useStore((s) => s.pendingWorkspaceFolder);
+function VaultFolderPrompt() {
+  const pending = useStore((s) => s.pendingVaultFolder);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -100,8 +100,8 @@ function WorkspaceFolderPrompt() {
   };
 
   return (
-    <div className="modal-backdrop workspace-folder-backdrop">
-      <div className="modal workspace-folder-prompt" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop vault-folder-backdrop">
+      <div className="modal vault-folder-prompt" onClick={(e) => e.stopPropagation()}>
         <div className="wf-badge" aria-hidden="true">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
             <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.6.8l.9 1.2a2 2 0 0 0 1.6.8H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -111,14 +111,14 @@ function WorkspaceFolderPrompt() {
           Set up <strong>{pending.orgName}</strong>
         </h2>
         <p className="wf-desc">
-          Choose the local folder this workspace syncs to. Each workspace keeps
-          its own folder — separate from your other workspaces.
+          Choose the local folder this vault syncs to. Each vault keeps its own
+          folder — separate from your other vaults.
         </p>
-        <div className="workspace-folder-actions">
+        <div className="vault-folder-actions">
           <button
             className="wf-btn wf-btn-primary"
             disabled={busy}
-            onClick={run(() => useStore.getState().chooseWorkspaceFolder())}
+            onClick={run(() => useStore.getState().chooseVaultFolder())}
           >
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.6.8l.9 1.2a2 2 0 0 0 1.6.8H19a2 2 0 0 1 2 2" />
@@ -129,7 +129,7 @@ function WorkspaceFolderPrompt() {
           <button
             className="wf-btn wf-btn-ghost"
             disabled={busy}
-            onClick={run(() => useStore.getState().startEmptyWorkspace())}
+            onClick={run(() => useStore.getState().startEmptyVault())}
           >
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M12 5v14M5 12h14" />
@@ -142,7 +142,7 @@ function WorkspaceFolderPrompt() {
           <button
             className="link-btn"
             disabled={busy}
-            onClick={run(() => useStore.getState().cancelWorkspaceFolder())}
+            onClick={run(() => useStore.getState().cancelVaultFolder())}
           >
             Cancel
           </button>
@@ -414,13 +414,13 @@ export default function App() {
   }
 
   if (!vault) {
-    // The folder-prompt rides along here too: switching to a synced workspace
+    // The folder-prompt rides along here too: switching to a synced vault
     // that has no local folder yet (e.g. clicked from the welcome screen) asks
-    // the user to choose/create one before its vault opens.
+    // the user to choose/create one before its folder opens.
     return (
       <>
         <VaultPicker />
-        <WorkspaceFolderPrompt />
+        <VaultFolderPrompt />
       </>
     );
   }
@@ -502,7 +502,7 @@ export default function App() {
           <GraphView onClose={() => setGraphOpen(false)} />
         </ErrorBoundary>
       )}
-      <WorkspaceFolderPrompt />
+      <VaultFolderPrompt />
     </div>
   );
 }

@@ -153,17 +153,17 @@ clicks instead of one.
 | `REDIS_URL` | no | unset | **Multi-instance only.** Unset ⇒ single-instance (in-memory fanout), which is the default and covers hundreds of concurrent users. Set ⇒ the vault replication channel and the Hocuspocus editing path both fan out via Redis so N instances stay consistent (spec 05 §5). |
 | `BACKFILL_CONCURRENCY` | no | `6` | Max docs streamed concurrently to a freshly-connected vault subscriber. |
 | `VAULT_SYNC_PATH` | no | `/vault-sync` | WebSocket path for the background vault replication channel (served on `PORT`). |
-| `POLAR_ACCESS_TOKEN` | no | unset | **Billing (optional).** Unset ⇒ billing fully disabled: no upgrade UI in clients, no free-tier limits — every self-hosted workspace is unlimited. Set (with the vars below) ⇒ per-workspace Pro subscriptions via [Polar](https://polar.sh). |
+| `POLAR_ACCESS_TOKEN` | no | unset | **Billing (optional).** Unset ⇒ billing fully disabled: no upgrade UI in clients, no free-tier limits — every self-hosted vault is unlimited. Set (with the vars below) ⇒ per-vault Pro subscriptions via [Polar](https://polar.sh). |
 | `POLAR_WEBHOOK_SECRET` | with billing | unset | Signing secret of a Polar webhook endpoint pointed at `https://<your-domain>/api/billing/webhook` (raw format, `subscription.*` events). |
 | `POLAR_PRODUCT_MONTHLY_ID` | with billing | unset | Polar product id for the monthly plan. |
 | `POLAR_PRODUCT_YEARLY_ID` | with billing | unset | Polar product id for the yearly plan. |
 | `POLAR_SERVER` | no | `sandbox` | `sandbox` or `production` Polar environment. |
-| `FREE_MAX_WORKSPACES` | no | `3` | Free-tier cap on unsubscribed workspaces per user (only enforced when billing is enabled). |
-| `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed workspace (only enforced when billing is enabled). |
+| `FREE_MAX_VAULTS` | no | `3` | Free-tier cap on unsubscribed vaults per user (only enforced when billing is enabled). |
+| `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). |
 
 > Billing note: the Polar organization must have **allow multiple subscriptions per customer** enabled
 > (Organization settings, or `PATCH /v1/organizations/:id` with `subscription_settings.allow_multiple_subscriptions: true`),
-> otherwise a customer's second workspace upgrade is rejected at checkout.
+> otherwise a customer's second vault upgrade is rejected at checkout.
 
 See `app/apps/server/.env.example` for the same list with inline comments.
 

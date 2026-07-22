@@ -73,7 +73,7 @@ Baalda is built to grow with you, from a personal vault to a whole company:
 
 | | |
 |---|---|
-| 📚 **Millions of notes** | a workspace keeps growing without slowing down |
+| 📚 **Millions of notes** | a vault keeps growing without slowing down |
 | 👥 **Thousands of teammates online** | connected and kept in sync at the same time |
 | ✍️ **Hundreds editing together** | people writing in the same space, live |
 | ⚡ **Instant open** | notes are already up to date before you click, no waiting |
@@ -178,7 +178,7 @@ A **local** agent needs no setup at all: point Claude Code (or any tool) at your
 
 For **cloud and autonomous agents** that can't reach your disk, Baalda exposes a **Model Context Protocol** endpoint, so any MCP-speaking AI client can work with your vault exactly like a person, limited by the same per-folder permissions.
 
-1. In the app, go to **Workspace settings → MCP** and create a token.
+1. In the app, go to **Vault settings → MCP** and create a token.
 2. Register the endpoint with your AI client, e.g. Claude Code:
 
 ```bash

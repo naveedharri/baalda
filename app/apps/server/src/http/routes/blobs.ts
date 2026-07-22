@@ -8,10 +8,10 @@ import { getSession } from "../session.js";
  * Attachment blob store (spec 02 §2/§5A). BYTEA storage for the MVP; the
  * `storage_url` column is reserved for an S3/R2 upgrade in production.
  *
- * Authorization mirrors the registry routes: any membership in the vault's
- * workspace is edit-capable for vault-level attachments (owner/admin/member).
- * Downloads require the same membership (view is enough — membership *is* the
- * view grant at the vault level).
+ * Authorization mirrors the registry routes: any member of the vault (the
+ * note collection's owning organization) is edit-capable for its attachments
+ * (owner/admin/member). Downloads require the same membership (view is enough —
+ * membership *is* the view grant at the vault level).
  *
  *   POST /api/vaults/:vaultId/blobs   raw binary body → store (dedupe by sha256)
  *   GET  /api/vaults/:vaultId/blobs   list metadata
@@ -48,7 +48,7 @@ blobRoutes.post("/vaults/:vaultId/blobs", async (c) => {
   const org = await vaultOrg(vaultId);
   if (!org) return c.json({ error: "Unknown vault" }, 404);
   if (!(await orgRole(org, session.userId))) {
-    return c.json({ error: "Not a member of this workspace" }, 403);
+    return c.json({ error: "Not a member of this vault" }, 403);
   }
 
   const body = new Uint8Array(await c.req.arrayBuffer());
@@ -74,7 +74,7 @@ blobRoutes.post("/vaults/:vaultId/blobs", async (c) => {
 
   const id = randomUUID();
   const { rows } = await pool.query<BlobRow>(
-    `INSERT INTO blobs (id, vault_id, workspace_id, sha256, size, mime, data, rel_path, filename)
+    `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, data, rel_path, filename)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id, sha256, size, mime, rel_path, filename`,
     [id, vaultId, org, sha256, buf.byteLength, mime, buf, relPath, filename],
@@ -91,7 +91,7 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
   const org = await vaultOrg(vaultId);
   if (!org) return c.json({ error: "Unknown vault" }, 404);
   if (!(await orgRole(org, session.userId))) {
-    return c.json({ error: "Not a member of this workspace" }, 403);
+    return c.json({ error: "Not a member of this vault" }, 403);
   }
 
   const { rows } = await pool.query<BlobRow>(
@@ -110,18 +110,18 @@ blobRoutes.get("/blobs/:id", async (c) => {
   const id = c.req.param("id");
   const { rows } = await pool.query<{
     vault_id: string | null;
-    workspace_id: string | null;
+    org_id: string | null;
     mime: string | null;
     data: Buffer | null;
-  }>("SELECT vault_id, workspace_id, mime, data FROM blobs WHERE id = $1", [id]);
+  }>("SELECT vault_id, org_id, mime, data FROM blobs WHERE id = $1", [id]);
   const blob = rows[0];
   if (!blob || !blob.data) return c.json({ error: "Blob not found" }, 404);
 
-  // View requires workspace membership (via the blob's vault, or its
-  // workspace_id fallback for legacy rows without vault_id).
-  const org = blob.vault_id ? await vaultOrg(blob.vault_id) : blob.workspace_id;
+  // View requires vault membership (via the blob's note collection, or its
+  // org_id fallback for legacy rows without vault_id).
+  const org = blob.vault_id ? await vaultOrg(blob.vault_id) : blob.org_id;
   if (!org || !(await orgRole(org, session.userId))) {
-    return c.json({ error: "Not a member of this workspace" }, 403);
+    return c.json({ error: "Not a member of this vault" }, 403);
   }
 
   return c.body(blob.data, 200, {

@@ -48,11 +48,13 @@ struct AppConfig {
     /// Sync server base URL (spec 04 §7 — configurable; default in the TS layer).
     #[serde(default)]
     server_url: Option<String>,
-    /// Root directory the app manages: one persistent subfolder per workspace,
-    /// plus a stable `current` symlink repointed to the active workspace so
+    /// Root directory the app manages: one persistent subfolder per vault,
+    /// plus a stable `current` symlink repointed to the active vault so
     /// external tools (e.g. Claude Desktop MCP) can target one fixed path.
-    #[serde(default)]
-    workspace_root: Option<String>,
+    /// `alias` keeps pre-rename configs (which used `workspace_root`) loadable —
+    /// same migration pattern as `last_vault` → `recent_vaults` above.
+    #[serde(default, alias = "workspace_root")]
+    vaults_root: Option<String>,
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -240,8 +242,8 @@ pub fn remove_recent_vault(app: AppHandle, path: String) -> AppResult<()> {
     write_config(&app, &cfg)
 }
 
-/// Move a local workspace's folder — and all its notes — to the OS trash, then
-/// forget it from the recents list. Used by the local-workspace "Delete files"
+/// Move a local vault's folder — and all its notes — to the OS trash, then
+/// forget it from the recents list. Used by the local-vault "Delete files"
 /// action. This is the only copy of a local vault (no server), so we trash
 /// (recoverable) instead of hard-deleting, and the UI gates it behind a
 /// two-click confirm.
@@ -251,7 +253,7 @@ pub fn delete_vault(app: AppHandle, path: String) -> AppResult<()> {
     if !dir.is_dir() {
         return Err(AppError::new("selected path is not a folder"));
     }
-    // A missing parent means this is a filesystem root — never a real workspace
+    // A missing parent means this is a filesystem root — never a real vault
     // folder. Refuse rather than trash an entire drive.
     if dir.parent().is_none() {
         return Err(AppError::new("refusing to delete a filesystem root"));
@@ -306,13 +308,13 @@ pub fn get_server_url(app: AppHandle) -> AppResult<Option<String>> {
     Ok(read_config(&app).server_url)
 }
 
-// ---- workspace root + `current` pointer -----------------------------------
+// ---- vaults root + `current` pointer --------------------------------------
 //
-// A workspace (server org) maps 1:1 to a local folder. The app owns one root
-// directory; each workspace gets a persistent subfolder under it, and switching
-// workspaces repoints `<root>/current` at the active folder. Folders bound to a
-// workspace before the root existed keep their original location — the root is
-// only where *new* workspace folders are created.
+// A vault (server org) maps 1:1 to a local folder. The app owns one root
+// directory; each vault gets a persistent subfolder under it, and switching
+// vaults repoints `<root>/current` at the active folder. Folders bound to a
+// vault before the root existed keep their original location — the root is
+// only where *new* vault folders are created.
 
 /// User-visible name of the default managed-root folder. Layer-1 brand surface
 /// (spec: rebrand policy) — the one place the default root folder name is set.
@@ -321,7 +323,7 @@ const DEFAULT_ROOT_DIR_NAME: &str = "Baalda Vaults";
 /// Default managed root: `<home>/Documents/Baalda Vaults`. Lives under Documents
 /// so it's easy to find in the OS file browser (Finder/Explorer both surface
 /// Documents in their sidebar) instead of being buried at the top of home.
-fn default_workspace_root(app: &AppHandle) -> AppResult<PathBuf> {
+fn default_vaults_root(app: &AppHandle) -> AppResult<PathBuf> {
     let home = app
         .path()
         .home_dir()
@@ -329,16 +331,16 @@ fn default_workspace_root(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(home.join("Documents").join(DEFAULT_ROOT_DIR_NAME))
 }
 
-/// The effective workspace root, auto-initialized to the default and persisted
+/// The effective vaults root, auto-initialized to the default and persisted
 /// on first read so the rest of the app can rely on it always existing.
 #[tauri::command]
-pub fn get_workspace_root(app: AppHandle) -> AppResult<String> {
+pub fn get_vaults_root(app: AppHandle) -> AppResult<String> {
     let mut cfg = read_config(&app);
-    let root = match cfg.workspace_root.clone() {
+    let root = match cfg.vaults_root.clone() {
         Some(r) => PathBuf::from(r),
         None => {
-            let d = default_workspace_root(&app)?;
-            cfg.workspace_root = Some(d.to_string_lossy().to_string());
+            let d = default_vaults_root(&app)?;
+            cfg.vaults_root = Some(d.to_string_lossy().to_string());
             d
         }
     };
@@ -347,20 +349,20 @@ pub fn get_workspace_root(app: AppHandle) -> AppResult<String> {
     Ok(root.to_string_lossy().to_string())
 }
 
-/// Change the managed root (existing workspace folders keep their location;
+/// Change the managed vaults root (existing vault folders keep their location;
 /// only newly created ones land under the new root).
 #[tauri::command]
-pub fn set_workspace_root(app: AppHandle, path: String) -> AppResult<()> {
+pub fn set_vaults_root(app: AppHandle, path: String) -> AppResult<()> {
     let p = PathBuf::from(&path);
     std::fs::create_dir_all(&p)?;
     let mut cfg = read_config(&app);
-    cfg.workspace_root = Some(p.to_string_lossy().to_string());
+    cfg.vaults_root = Some(p.to_string_lossy().to_string());
     write_config(&app, &cfg)
 }
 
-/// Native folder picker for the managed root; persists and returns it.
+/// Native folder picker for the managed vaults root; persists and returns it.
 #[tauri::command]
-pub async fn pick_workspace_root(app: AppHandle) -> AppResult<Option<String>> {
+pub async fn pick_vaults_root(app: AppHandle) -> AppResult<Option<String>> {
     let Some(folder) = app.dialog().file().blocking_pick_folder() else {
         return Ok(None);
     };
@@ -369,14 +371,14 @@ pub async fn pick_workspace_root(app: AppHandle) -> AppResult<Option<String>> {
         .map_err(|e| AppError::new(format!("invalid folder: {e}")))?;
     std::fs::create_dir_all(&path)?;
     let mut cfg = read_config(&app);
-    cfg.workspace_root = Some(path.to_string_lossy().to_string());
+    cfg.vaults_root = Some(path.to_string_lossy().to_string());
     write_config(&app, &cfg)?;
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
 /// Native folder picker that only returns the chosen path (does NOT open it as
-/// a vault). Used to let the user pick the local folder for a workspace, which
-/// is then opened via `open_workspace_folder`.
+/// a vault). Used to let the user pick the local folder for a vault, which
+/// is then opened via `open_vault_in_root`.
 #[tauri::command]
 pub async fn pick_folder(app: AppHandle) -> AppResult<Option<String>> {
     let Some(folder) = app.dialog().file().blocking_pick_folder() else {
@@ -468,18 +470,19 @@ pub async fn export_path(
     import_export::export_path(&vault, &rel, &dest)
 }
 
-/// Open a workspace's folder: ensure it exists, repoint `<root>/current` at it,
-/// then open it as the active vault. The folder may live anywhere (a legacy
-/// folder bound before the root existed), but `current` always tracks it.
+/// Open a vault's folder within the managed root: ensure it exists, repoint
+/// `<root>/current` at it, then open it as the active vault. The folder may live
+/// anywhere (a legacy folder bound before the root existed), but `current`
+/// always tracks it.
 #[tauri::command]
-pub async fn open_workspace_folder(
+pub async fn open_vault_in_root(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> AppResult<VaultInfo> {
     let folder = PathBuf::from(&path);
     std::fs::create_dir_all(&folder)?;
-    if let Some(root) = read_config(&app).workspace_root {
+    if let Some(root) = read_config(&app).vaults_root {
         repoint_current(Path::new(&root), &folder);
     }
     open_vault_inner(&app, &state, folder)
@@ -495,22 +498,22 @@ fn repoint_current(root: &Path, target: &Path) {
             let _ = std::fs::remove_file(&link);
         }
         Ok(_) => {
-            eprintln!("[workspace] `current` is not a symlink; leaving it in place");
+            eprintln!("[vault] `current` is not a symlink; leaving it in place");
             return;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            eprintln!("[workspace] cannot stat `current`: {e}");
+            eprintln!("[vault] cannot stat `current`: {e}");
             return;
         }
     }
     #[cfg(unix)]
     if let Err(e) = std::os::unix::fs::symlink(target, &link) {
-        eprintln!("[workspace] symlink failed: {e}");
+        eprintln!("[vault] symlink failed: {e}");
     }
     #[cfg(windows)]
     if let Err(e) = std::os::windows::fs::symlink_dir(target, &link) {
-        eprintln!("[workspace] symlink_dir failed: {e}");
+        eprintln!("[vault] symlink_dir failed: {e}");
     }
 }
 
@@ -742,4 +745,35 @@ pub async fn list_attachments(state: State<'_, AppState>) -> AppResult<Vec<Attac
 #[tauri::command]
 pub async fn read_external_file(path: String) -> AppResult<Vec<u8>> {
     std::fs::read(&path).map_err(|e| AppError::new(format!("read external file failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config.json written before the `workspace_root` → `vaults_root` rename
+    /// must still load, so upgrading users keep their managed-root path instead
+    /// of silently falling back to the default and orphaning their vaults.
+    #[test]
+    fn app_config_loads_legacy_workspace_root_alias() {
+        let legacy = r#"{"workspace_root": "/home/me/Documents/Baalda Vaults"}"#;
+        let cfg: AppConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            cfg.vaults_root.as_deref(),
+            Some("/home/me/Documents/Baalda Vaults")
+        );
+    }
+
+    /// The current field name deserializes, and a round-trip writes it back
+    /// under the new `vaults_root` key (not the legacy alias).
+    #[test]
+    fn app_config_round_trips_vaults_root() {
+        let current = r#"{"vaults_root": "/tmp/vaults"}"#;
+        let cfg: AppConfig = serde_json::from_str(current).unwrap();
+        assert_eq!(cfg.vaults_root.as_deref(), Some("/tmp/vaults"));
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("vaults_root"));
+        assert!(!json.contains("workspace_root"));
+    }
 }

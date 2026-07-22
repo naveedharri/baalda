@@ -36,9 +36,9 @@ client can read and write the vault the same way a person does — gated by the
 
 - **Endpoint:** `POST /api/mcp` — JSON-RPC 2.0 over Streamable HTTP (single JSON
   reply; no SSE stream, so `GET`/`DELETE` return 405).
-- **Auth:** an MCP token minted from the desktop app's **Workspace settings → MCP**
+- **Auth:** an MCP token minted from the desktop app's **Vault settings → MCP**
   tab (or `POST /api/mcp/tokens`). Send it as `Authorization: Bearer <token>`
-  (or `?key=<token>`). Each token is scoped to one `(user, workspace)` pair, so
+  (or `?key=<token>`). Each token is scoped to one `(user, vault)` pair, so
   the client acts *as that user*: owners/admins get everything, members only what's
   shared with them. Only a sha256 hash is stored; revoke deletes the row.
 - **Tools:** `list_vaults`, `list_folders`, `create_folder`, `delete_folder`,
@@ -134,7 +134,7 @@ npm run build && npm run start
 ## Permissions (spec 04 §3)
 
 `effectivePermission(userId, docId)`:
-1. Workspace **owner/admin → edit** on everything.
+1. Vault **owner/admin → edit** on everything.
 2. Else **max** of: a share on the file itself + any share on a containing folder
    (walking `parent_id` up). Folder grants inherit to descendants; a file share can
    only **raise**.

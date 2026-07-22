@@ -16,7 +16,7 @@ import { successPageHtml } from "./billing-success.js";
  * Subscription billing routes (frozen API contract).
  *
  *  GET  /api/billing/config              — public; advertises plans + limits.
- *  GET  /api/billing/orgs/:orgId         — member: this workspace's plan/seats.
+ *  GET  /api/billing/orgs/:orgId         — member: this vault's plan/seats.
  *  POST /api/billing/orgs/:orgId/checkout — owner/admin: hosted checkout URL.
  *  POST /api/billing/orgs/:orgId/portal   — owner/admin: manage/cancel URL.
  *  POST /api/billing/webhook             — provider webhook (raw body, idempotent).
@@ -44,8 +44,9 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
       enabled: true,
       plans: PLANS,
       freeLimits: {
-        workspacesPerUser: config.freeMaxWorkspaces,
-        membersPerWorkspace: config.freeMaxMembers,
+        // Legacy wire field names (desktop parses by exact name); do not rename.
+        vaultsPerUser: config.freeMaxVaults,
+        membersPerVault: config.freeMaxMembers,
       },
     });
   });
@@ -143,7 +144,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     }
   });
 
-  // ── status for a workspace (any member) ─────────────────────────────────────
+  // ── status for a vault (any member) ─────────────────────────────────────────
   billing.get("/billing/orgs/:orgId", async (c) => {
     if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
     const session = await getSession(c);
@@ -151,7 +152,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
 
     const orgId = c.req.param("orgId");
     const role = await orgRole(orgId, session.userId);
-    if (!role) return c.json({ error: "Not a member of this workspace" }, 403);
+    if (!role) return c.json({ error: "Not a member of this vault" }, 403);
 
     const ent = await getEntitlement(orgId);
     const seats = await seatCount(orgId);
@@ -178,7 +179,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     const orgId = c.req.param("orgId");
     const role = await orgRole(orgId, session.userId);
     if (role !== "owner" && role !== "admin") {
-      return c.json({ error: "Only workspace owner/admin can start checkout" }, 403);
+      return c.json({ error: "Only vault owner/admin can start checkout" }, 403);
     }
 
     const body = (await c.req.json().catch(() => ({}))) as { interval?: unknown };
@@ -208,12 +209,12 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     const orgId = c.req.param("orgId");
     const role = await orgRole(orgId, session.userId);
     if (role !== "owner" && role !== "admin") {
-      return c.json({ error: "Only workspace owner/admin can manage billing" }, 403);
+      return c.json({ error: "Only vault owner/admin can manage billing" }, 403);
     }
 
     const ent = await getEntitlement(orgId);
     if (!ent.providerCustomerId) {
-      return c.json({ error: "No billing customer for this workspace" }, 400);
+      return c.json({ error: "No billing customer for this vault" }, 400);
     }
     try {
       const { url } = await deps.provider.getPortalUrl({

@@ -43,7 +43,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
 
     const role = await orgRole(organizationId, session.userId);
     if (role !== "owner" && role !== "admin") {
-      return c.json({ error: "Only workspace owner/admin can create vaults" }, 403);
+      return c.json({ error: "Only vault owner/admin can create vaults" }, 403);
     }
 
     const id = randomUUID();
@@ -51,9 +51,9 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       "INSERT INTO vaults (id, organization_id, name) VALUES ($1, $2, $3)",
       [id, organizationId, name],
     );
-    // Private-by-default: a new workspace grants NO org-wide access. Members see
+    // Private-by-default: a new vault grants NO org-wide access. Members see
     // only what they create or what an owner/admin explicitly shares with the
-    // team (per-folder/file, or a workspace-wide grant) via the Access panel.
+    // team (per-folder/file, or a vault-wide grant) via the Access panel.
     return c.json({ id, organizationId, name }, 201);
   });
 
@@ -84,7 +84,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     if (!(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
 
     // A given path maps to one folder per vault — adopt an existing row rather
@@ -114,10 +114,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
     const org = await vaultOrg(vaultId);
     if (!org || !(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     // Private-by-default: only folders the caller may see (created / shared /
-    // path-to-a-shared-note). Owner/admin + Open workspaces see everything.
+    // path-to-a-shared-note). Owner/admin + Open vaults see everything.
     const folders = await listVisibleFolders(session.userId, vaultId);
     return c.json({ folders });
   });
@@ -137,7 +137,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown folder" }, 404);
     if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     const oldPath: string = row.path;
     const newPath = typeof body.path === "string" ? body.path : oldPath;
@@ -170,7 +170,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown folder" }, 404);
     if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     await pool.query(
       `UPDATE notes SET deleted_at = now()
@@ -196,7 +196,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     if (!(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
 
     // Client may supply a stable doc_id (generated locally); else we mint one.
@@ -221,7 +221,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
     const org = await vaultOrg(vaultId);
     if (!org || !(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     const { rows } = await pool.query(
       `SELECT id, vault_id, folder_id, title, rel_path, doc_id, created_by, created_at, updated_at
@@ -230,7 +230,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     // Private-by-default: hide notes the caller can't read (leaks title/path and
     // would make the client materialize a note it can't sync). Owner/admin +
-    // Open workspaces get the full set from the readable-docs resolver.
+    // Open vaults get the full set from the readable-docs resolver.
     const readable = await listReadableDocsInVault(session.userId, vaultId);
     return c.json({ notes: rows.filter((n) => readable.has(n.id)) });
   });
@@ -248,7 +248,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown note" }, 404);
     if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     const relPath = typeof body.relPath === "string" ? body.relPath : row.rel_path;
     const title = body.title === undefined ? row.title : body.title;
@@ -273,7 +273,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown note" }, 404);
     if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [id]);
     changed(row.vault_id);
@@ -292,7 +292,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     if (!(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
     await pool.query(

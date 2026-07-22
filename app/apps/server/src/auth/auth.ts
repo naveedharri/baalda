@@ -16,7 +16,7 @@ import { announceMemberJoined } from "../sync/member-events.js";
  * - `bearer` plugin so the desktop client can authenticate with an
  *   `Authorization: Bearer <session-token>` header (token stored in the OS keychain),
  *   in addition to cookies.
- * - `organization` plugin = workspaces/teams: owner/admin/member roles + invitations
+ * - `organization` plugin = vaults/teams: owner/admin/member roles + invitations
  *   (48h expiry per spec).
  *
  * Better Auth wraps this raw pg Pool with its Kysely adapter. Column names are
@@ -104,7 +104,7 @@ export const auth = betterAuth({
       // Free-tier enforcement (spec: subscription billing). These run inside
       // Better Auth's create-organization / create-invitation endpoints and
       // throw an APIError with statusCode 402 whose message carries the
-      // contract token ("workspace_limit_reached" / "member_limit_reached").
+      // contract token ("vault_limit_reached" / "member_limit_reached").
       // The desktop keys off HTTP 402 + the token; a no-op when billing is off
       // (the entitlement helpers short-circuit to "allowed").
       organizationHooks: {
@@ -112,8 +112,8 @@ export const auth = betterAuth({
           const { allowed, limit } = await canCreateOrganization(data.user.id);
           if (!allowed) {
             throw new APIError("PAYMENT_REQUIRED", {
-              message: "workspace_limit_reached",
-              error: "workspace_limit_reached",
+              message: "vault_limit_reached",
+              error: "vault_limit_reached",
               limit,
             });
           }
@@ -129,10 +129,10 @@ export const auth = betterAuth({
           }
         },
         // A teammate accepted an invitation → announce to everyone live in the
-        // workspace so their roster refreshes and the join celebration fires.
+        // vault so their roster refreshes and the join celebration fires.
         // (The join-code path bypasses Better Auth and announces itself; org
         // creation adds the owner via `afterAddMember`, which we deliberately
-        // don't hook — no one should be "welcomed" to their own new workspace.)
+        // don't hook — no one should be "welcomed" to their own new vault.)
         afterAcceptInvitation: async (data) => {
           const name = data.user.name?.trim() || data.user.email;
           await announceMemberJoined(data.organization.id, name);
@@ -143,7 +143,7 @@ export const auth = betterAuth({
     // Lets a Claude "custom connector" run the standard discovery → dynamic
     // client registration → PKCE authorize/consent → token flow against an
     // EXISTING Baalda account. The issued access token carries the user id, so
-    // POST /api/mcp resolves it to that user + the workspace they picked on the
+    // POST /api/mcp resolves it to that user + the vault they picked on the
     // consent screen and enforces the very same per-file ACL an mcp_ token does.
     //
     // loginPage/consentPage are branded HTML we serve ourselves (see

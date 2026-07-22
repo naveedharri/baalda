@@ -146,7 +146,8 @@ server runs behind a single port/domain — that's what production deploys use (
 `railway.json` + `docs/DEPLOY.md`; migrations run pre-deploy via `npm run migrate:deploy`). MCP writes
 flow through the same sync server via `createDocWriter` so AI edits persist/broadcast like human edits.
 - `auth/auth.ts` — Better Auth; **argon2id** (overrides default scrypt) via `@node-rs/argon2`; `bearer` +
-  `organization` plugins (org = workspace; roles owner/admin/member; 48h invitations). Session token is
+  `organization` plugins (org = **vault**, the user-facing unified entity — Local / Synced / Remote states;
+  roles owner/admin/member; 48h invitations). Session token is
   opaque (instant revocation), stored client-side only in the OS keychain.
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
   `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`.
@@ -156,15 +157,15 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `COMPACTION_THRESHOLD`).
 - `permissions/resolver.ts` — `effectivePermission(userId, docId)`: owner/admin → edit; a note's
   **creator** → edit on their own note; else max of file/folder shares (walk `parent_id` up) — either
-  per-user or an org-wide "share with team" grant — plus any workspace grant; a `locked` share caps at
+  per-user or an org-wide "share with team" grant — plus any vault-wide grant; a `locked` share caps at
   view even for admins. `edit > view > none`; no grant → no sync access (403 at token mint). **New
-  workspaces are private by default** (no org-wide grant); existing ones keep their Open grant. Keep this
+  vaults are private by default** (no org-wide grant); existing ones keep their Open grant. Keep this
   in lockstep with `permissions/vault-docs.ts` (the readable-set dual that gates live sync + registry
   listings).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
   `list_vaults/list_folders/create_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/delete_note`.
-  Token = `mcp_…` minted from desktop Workspace Settings → MCP; scoped to one (user, workspace), gated by
+  Token = `mcp_…` minted from desktop Vault Settings → MCP; scoped to one (user, vault), gated by
   the **same** per-file ACL. Only a sha256 hash is stored.
 - `index/` — `embedder.ts` is a dependency-free 256-dim hashed bag-of-words (works air-gapped;
   `OPENAI_API_KEY` swap noted but not wired). `indexer.ts` derives search + wikilink graph from Yjs state.
@@ -195,6 +196,18 @@ change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011
   the spec's contentless one) because `snippet()` needs content; `SearchPanel` renders the Rust FTS snippet
   via `dangerouslySetInnerHTML`, relying on Rust emitting only sanitized `<mark>` tags.
 - Product identifier: `com.baalda.context`; Tauri `productName` is "Baalda".
+- **Terminology — "vault" (the workspace→vault rename).** *Vault* is the single user-facing name for the
+  unified entity (Local / Synced / Remote states). It maps to two internal things that are 1:1 in practice:
+  (1) the **user-facing vault = the Better Auth `organization`** — its data key stays `organizationId`; only
+  the *concept name* changed (identifiers like `refreshVault`/`joinVault`, UI copy, docs); and (2) the
+  **note collection = the Postgres `vaults` table row** (`vaultId`), the storage child that keeps all its
+  `vault*` wire/DB names. The rename went all the way down (pre-launch, no compat window): migration 013
+  renamed `shares`/`blobs.workspace_id` → `org_id` (org-id columns; `vault_id` already means the
+  collection), rewrote the org-wide grant value `resource_type = 'workspace'` → `'vault'` (+ CHECK), and
+  renamed `mcp_oauth_workspace` → `mcp_oauth_vault`; the 402 tokens are `vault_limit_reached` /
+  `member_limit_reached`, the billing JSON fields `vaultsPerUser` / `membersPerVault`, and the env var
+  `FREE_MAX_VAULTS`. The word *workspace* now survives only as npm-tooling `workspaces` plus the Rust
+  `#[serde(alias = "workspace_root")]` that keeps pre-rename desktop config files loadable.
 
 ## Build state (see `docs/STATUS.md`)
 

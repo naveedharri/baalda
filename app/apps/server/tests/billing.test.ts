@@ -124,13 +124,13 @@ describe("billing", () => {
       const body = (await res.json()) as {
         enabled: boolean;
         plans: Array<{ id: string; amount: number; interval: string }>;
-        freeLimits: { workspacesPerUser: number; membersPerWorkspace: number };
+        freeLimits: { vaultsPerUser: number; membersPerVault: number };
       };
       expect(body.enabled).toBe(true);
       expect(body.plans.map((p) => p.id)).toEqual(["pro-monthly", "pro-yearly"]);
       expect(body.plans.find((p) => p.id === "pro-monthly")!.amount).toBe(1000);
       expect(body.plans.find((p) => p.id === "pro-yearly")!.amount).toBe(9700);
-      expect(body.freeLimits).toEqual({ workspacesPerUser: 3, membersPerWorkspace: 3 });
+      expect(body.freeLimits).toEqual({ vaultsPerUser: 3, membersPerVault: 3 });
     });
 
     it("all other billing routes 404 when billing is off", async () => {
@@ -145,7 +145,7 @@ describe("billing", () => {
     it("enforces no free-tier limits when billing is off (self-host = unlimited)", async () => {
       delete process.env.POLAR_ACCESS_TOKEN;
       const user = await signUp("unlimited@billing.com");
-      // Create more than FREE_MAX_WORKSPACES (3) owned workspaces — none should be blocked.
+      // Create more than FREE_MAX_VAULTS (3) owned vaults — none should be blocked.
       await createOrg(user, "U1", "unl-w1");
       await createOrg(user, "U2", "unl-w2");
       await createOrg(user, "U3", "unl-w3");
@@ -153,7 +153,7 @@ describe("billing", () => {
       expect(fourth.id).toBeTruthy();
       expect((await canCreateOrganization(user.userId)).allowed).toBe(true);
 
-      // Add more than FREE_MAX_MEMBERS (3) pending invitations to one workspace — still unblocked.
+      // Add more than FREE_MAX_MEMBERS (3) pending invitations to one vault — still unblocked.
       await pool.query(
         `INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId")
          VALUES ('unl-inv1', $1, 'a@x.com', 'member', 'pending', now() + interval '1 day', $2),
@@ -184,7 +184,7 @@ describe("billing", () => {
       expect(await countOwnedUnsubscribedOrgs(user.userId)).toBe(2);
     });
 
-    it("canCreateOrganization blocks at the workspace cap (unsubscribed only)", async () => {
+    it("canCreateOrganization blocks at the vault cap (unsubscribed only)", async () => {
       const user = await signUp("cap@billing.com");
       await createOrg(user, "W1", "cap-w1");
       await createOrg(user, "W2", "cap-w2");
@@ -229,7 +229,7 @@ describe("billing", () => {
 
   // ── status endpoint ─────────────────────────────────────────────────────────
   describe("GET /api/billing/orgs/:orgId", () => {
-    it("returns free/none for an unsubscribed workspace with the seat cap", async () => {
+    it("returns free/none for an unsubscribed vault with the seat cap", async () => {
       const owner = await signUp("st-free@billing.com");
       const org = await createOrg(owner, "F", "st-free");
       const res = await req(app, "GET", `/api/billing/orgs/${org.id}`, { token: owner.token });
@@ -306,7 +306,7 @@ describe("billing", () => {
 
   // ── limit enforcement (402 + contract token) ───────────────────────────────
   describe("402 enforcement", () => {
-    it("org create → 402 workspace_limit_reached at the cap (via Better Auth)", async () => {
+    it("org create → 402 vault_limit_reached at the cap (via Better Auth)", async () => {
       const user = await signUp("oc@billing.com");
       await createOrg(user, "O1", "oc-1");
       await createOrg(user, "O2", "oc-2");
@@ -317,7 +317,7 @@ describe("billing", () => {
       });
       expect(res.status).toBe(402);
       const text = await res.text();
-      expect(text).toContain("workspace_limit_reached");
+      expect(text).toContain("vault_limit_reached");
     });
 
     it("invite-member → 402 member_limit_reached at the cap (via Better Auth)", async () => {
@@ -358,7 +358,7 @@ describe("billing", () => {
       expect(body.limit).toBe(3);
     });
 
-    it("a paid workspace has no member cap on join-code redemption", async () => {
+    it("a paid vault has no member cap on join-code redemption", async () => {
       const owner = await signUp("jcp@billing.com");
       const org = await createOrg(owner, "JcPaid", "jcp-org");
       await seedSubscription(org.id, "active");

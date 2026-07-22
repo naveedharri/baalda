@@ -125,7 +125,7 @@ export class VaultRegistry {
    * create missing rows, and persist the mapping. Idempotent.
    *
    * Returns `{ seeded }` — true only when this call wrote first-run starter
-   * content into a brand-new, empty workspace (so the caller can open it).
+   * content into a brand-new, empty vault (so the caller can open it).
    */
   async reconcile(
     input: ReconcileInput,
@@ -133,17 +133,18 @@ export class VaultRegistry {
   ): Promise<{ seeded: boolean }> {
     const cfg = await this.loadConfig();
 
-    // 1. Ensure a server vault — resolved by ID, never by name (names collide
-    //    and vary per device; the workspace's org id is the identity).
+    // 1. Ensure a server note collection (the `vaults` table row, 1:1 with this
+    //    vault in practice) — resolved by ID, never by name (names collide and
+    //    vary per device; the vault's org id is the identity).
     //    Precedence:
-    //      a. the vault id recorded in .context/config.json, IF it still exists
-    //         in THIS workspace (a stale or cross-workspace id is discarded);
-    //      b. the workspace's oldest existing vault (server lists created_at
+    //      a. the collection id recorded in .context/config.json, IF it still
+    //         exists in THIS vault (a stale or cross-vault id is discarded);
+    //      b. the vault's oldest existing collection (server lists created_at
     //         ASC), so every device deterministically adopts the same one —
-    //         matching by folder name here used to fork a second, empty vault
-    //         (and 403 for plain members, who can't create vaults), which is
-    //         why a freshly-joined device saw an empty workspace;
-    //      c. create one (owner/admin bootstrapping a brand-new workspace).
+    //         matching by folder name here used to fork a second, empty
+    //         collection (and 403 for plain members, who can't create them),
+    //         which is why a freshly-joined device saw an empty vault;
+    //      c. create one (owner/admin bootstrapping a brand-new vault).
     const vaults = await this.api.listVaults();
     const inOrg = vaults.filter((v) => vaultOrgId(v) === input.organizationId);
     let vaultId = cfg.serverVaultId ?? null;
@@ -159,11 +160,11 @@ export class VaultRegistry {
     }
     this.serverVaultId = vaultId;
 
-    // 1b. First-run seeding. A brand-new workspace — nothing on the server AND
+    // 1b. First-run seeding. A brand-new vault — nothing on the server AND
     //     an empty local folder — gets welcome/starter content so the vault
     //     isn't an empty void. We seed BEFORE flattening so the files register
     //     as ordinary server docs in steps 2–4. Skipped when the server already
-    //     has notes (joining/rejoining a populated workspace) or the folder
+    //     has notes (joining/rejoining a populated vault) or the folder
     //     already has content — those paths adopt/materialize instead.
     const serverNotes = await this.api.listNotes(vaultId);
     let workingTree = tree;
@@ -279,8 +280,8 @@ export class VaultRegistry {
     await this.saveConfig({ serverVaultId: vaultId, docs, folders: folderCfg });
 
     // 5. Materialize server-only notes locally. This is what makes a folder
-    //    that's empty on this device (a just-joined workspace, or a fresh
-    //    per-workspace folder) actually show the workspace's notes. We write an
+    //    that's empty on this device (a just-joined vault, or a fresh
+    //    per-vault folder) actually show the vault's notes. We write an
     //    empty file — `write_note` creates any missing parent folders — and the
     //    real content hydrates lazily when the note is opened (pull-before-seed
     //    in docSession, which never seeds a non-empty server doc from an empty

@@ -12,9 +12,9 @@ describe("slugifyName", () => {
     expect(slugifyName("My Team!!")).toBe("my-team");
     expect(slugifyName("  Hello  World  ")).toBe("hello-world");
   });
-  it("falls back to 'workspace' for empty results", () => {
-    expect(slugifyName("###")).toBe("workspace");
-    expect(slugifyName("")).toBe("workspace");
+  it("falls back to 'vault' for empty results", () => {
+    expect(slugifyName("###")).toBe("vault");
+    expect(slugifyName("")).toBe("vault");
   });
 });
 

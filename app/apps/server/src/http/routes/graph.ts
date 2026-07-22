@@ -10,8 +10,8 @@ import { cosineSimilarity, embed, tokenize } from "../../index/embedder.js";
  *  - GET /api/vaults/:vaultId/graph  → nodes + wikilink edges for a graph view.
  *  - GET /api/vaults/:vaultId/search → semantic + keyword search over notes.
  *
- * Both are gated like GET /vaults/:vaultId/locks: any member of the vault's
- * workspace may read.
+ * Both are gated like GET /vaults/:vaultId/locks: any member of the vault
+ * may read.
  */
 export const graphRoutes = new Hono();
 
@@ -21,7 +21,7 @@ function relPathStem(relPath: string): string {
   return base.replace(/\.[^.]+$/, "");
 }
 
-/** Gate: caller must be a member of the vault's workspace. 404/403 otherwise. */
+/** Gate: caller must be a member of the vault. 404/403 otherwise. */
 async function gateVaultMember(
   vaultId: string,
   userId: string,
@@ -29,7 +29,7 @@ async function gateVaultMember(
   const org = await vaultOrg(vaultId);
   if (!org) return { ok: false, status: 404, error: "Unknown vault" };
   if (!(await orgRole(org, userId))) {
-    return { ok: false, status: 403, error: "Not a member of this workspace" };
+    return { ok: false, status: 403, error: "Not a member of this vault" };
   }
   return { ok: true };
 }

@@ -22,8 +22,8 @@ export const demoConfig = {
   /** Root of the vault whose structure/content we mirror into the demo. */
   /** Source vault to mirror. Set DEMO_SOURCE_VAULT in your (git-ignored) .env. */
   sourceVaultPath: env("DEMO_SOURCE_VAULT", "./demo-source-vault"),
-  orgName: env("DEMO_ORG_NAME", "Demo Workspace"),
-  orgSlug: env("DEMO_ORG_SLUG", "demo-workspace"),
+  orgName: env("DEMO_ORG_NAME", "Demo Vault"),
+  orgSlug: env("DEMO_ORG_SLUG", "demo-vault"),
   vaultName: env("DEMO_VAULT_NAME", "Demo Vault"),
   emailDomain: env("DEMO_EMAIL_DOMAIN", "testorg.demo"),
   /** The owner account — this is YOU. Override with DEMO_OWNER_EMAIL /

@@ -9,9 +9,11 @@ type Queryable = Pick<pg.Pool, "query">;
  * the vault channel can compute a subscriber's readable set in a couple of
  * queries instead of one resolve per doc.
  *
- * Mirrors the resolver exactly:
- *   - workspace owner/admin  -> every (non-deleted) note + file in the vault;
- *   - a workspace-scoped view/edit grant (org-wide "Open"/"Read-only" for
+ * Mirrors the resolver exactly (here "vault" is the note collection; the
+ * owner/admin/member role belongs to its owning organization, the user-facing
+ * vault):
+ *   - vault owner/admin  -> every (non-deleted) note + file in the vault;
+ *   - a vault-scoped view/edit grant (org-wide "Open"/"Read-only" for
  *     members, or per-user) -> likewise every doc in the vault;
  *   - otherwise             -> docs reachable via a **user** share (view/edit)
  *     on the doc itself or any ancestor folder (folder grants inherit down).
@@ -22,7 +24,7 @@ type Queryable = Pick<pg.Pool, "query">;
  * Read = view OR edit, so the channel streams content to view-only grantees too.
  */
 /** Resolve a user's vault-level posture: their org, role, and whether they have
- *  vault-wide read (owner/admin, or a workspace-scoped Open/Read-only grant). */
+ *  vault-wide read (owner/admin, or a vault-scoped Open/Read-only grant). */
 async function vaultAccess(
   db: Queryable,
   userId: string,
@@ -43,7 +45,7 @@ async function vaultAccess(
     const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
     const grant = await db.query(
       `SELECT 1 FROM shares
-        WHERE resource_type = 'workspace' AND resource_id = $1
+        WHERE resource_type = 'vault' AND resource_id = $1
           AND permission IN ('view', 'edit')
           AND (${orgClause} (principal_type = 'user' AND principal_id = $2))
         LIMIT 1`,
@@ -72,13 +74,13 @@ export async function listReadableDocsInVault(
 
   let vaultWide = row.role === "owner" || row.role === "admin";
   if (!vaultWide) {
-    // Workspace-scoped grant (spec 04 "Access" model): the org-wide Open/
-    // Read-only default (members only), or a per-user workspace grant.
+    // Vault-scoped grant (spec 04 "Access" model): the org-wide Open/
+    // Read-only default (members only), or a per-user vault grant.
     const orgClause =
       row.role !== null ? "principal_type = 'org' OR" : "";
     const grant = await db.query(
       `SELECT 1 FROM shares
-        WHERE resource_type = 'workspace' AND resource_id = $1
+        WHERE resource_type = 'vault' AND resource_id = $1
           AND permission IN ('view', 'edit')
           AND (${orgClause} (principal_type = 'user' AND principal_id = $2))
         LIMIT 1`,
@@ -155,7 +157,7 @@ export interface VaultFolderRow {
 
 /**
  * Folders a user may SEE in the tree (private-by-default). Owner/admin or an
- * Open/Read-only workspace get every folder; otherwise a member sees folders
+ * Open/Read-only vault get every folder; otherwise a member sees folders
  * they created, folders shared to them or the team (+ their subtrees, since
  * grants inherit down), and the ANCESTORS of anything visible so the path to a
  * shared note/folder is never missing a link.

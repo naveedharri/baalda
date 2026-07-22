@@ -33,19 +33,22 @@ export interface ResourceInfo {
 }
 
 /**
- * Resolve a share resource (folder, file/note, or the workspace itself) to its
- * vault, workspace, and creator. Returns null if the resource does not exist.
+ * Resolve a share resource (folder, file/note, or the vault-wide grant itself)
+ * to its note collection, organization, and creator. Returns null if the
+ * resource does not exist.
  *
- * For a `workspace` resource the `resourceId` IS the organization id; there is
- * no single vault (a workspace may hold several), so `vaultId` is the empty
- * string and callers use {@link docsForResource} to enumerate affected docs.
+ * Terminology: "vault (organization, user-facing)" vs "note collection (vaults
+ * row, storage child)". For a `vault` resource (the vault-wide grant) the
+ * `resourceId` IS the organization id; there is no single note collection (an
+ * organization may own several), so `vaultId` is the empty string and callers
+ * use {@link docsForResource} to enumerate affected docs.
  */
 export async function resolveResource(
-  resourceType: "folder" | "file" | "workspace",
+  resourceType: "folder" | "file" | "vault",
   resourceId: string,
   db: Queryable = defaultPool,
 ): Promise<ResourceInfo | null> {
-  if (resourceType === "workspace") {
+  if (resourceType === "vault") {
     const { rows } = await db.query<{ id: string }>(
       "SELECT id FROM organization WHERE id = $1",
       [resourceId],
@@ -100,7 +103,7 @@ export async function resolveResource(
 
 /** Docs affected by a share, so live sockets can be killed on revoke. */
 export async function docsForResource(
-  resourceType: "folder" | "file" | "workspace",
+  resourceType: "folder" | "file" | "vault",
   resourceId: string,
   db: Queryable = defaultPool,
 ): Promise<Array<{ docId: string; vaultId: string }>> {
@@ -109,8 +112,8 @@ export async function docsForResource(
     return info ? [{ docId: resourceId, vaultId: info.vaultId }] : [];
   }
 
-  if (resourceType === "workspace") {
-    // Every note/file in every vault of the workspace (resourceId = org id).
+  if (resourceType === "vault") {
+    // Every note/file in every note collection of this vault (resourceId = org id).
     const { rows } = await db.query<{ doc_id: string; vault_id: string }>(
       `SELECT n.id AS doc_id, n.vault_id FROM notes n
          JOIN vaults v ON v.id = n.vault_id

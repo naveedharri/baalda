@@ -520,7 +520,7 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--text-tertiary);
   white-space: nowrap;
 }
-/* The Local/Remote tag on a workspace row, tucked into the top-right slot. */
+/* The Local/Remote tag on a vault row, tucked into the top-right slot. */
 .recent-badge {
   grid-area: time;
   justify-self: end;
@@ -595,13 +595,13 @@ button.primary.hero:hover:not(:disabled) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* No active workspace (signed out / folder-only): a quiet placeholder, not a
-   workspace title — muted and lighter so it never reads as a real workspace. */
+/* No active vault (signed out / folder-only): a quiet placeholder, not a
+   vault title — muted and lighter so it never reads as a real vault. */
 .vault-name.none {
   font-weight: 600;
   color: var(--text-tertiary);
 }
-/* The local folder backing the workspace — a quiet storage detail. */
+/* The local folder backing the vault — a quiet storage detail. */
 .vault-line {
   display: flex;
   align-items: center;
@@ -1758,7 +1758,7 @@ button.primary.hero:hover:not(:disabled) {
 
 /* ============================================================
    Sidebar footer — compact identity bar + account popover
-   The footer is a single row (avatar · workspace · sync dot);
+   The footer is a single row (avatar · vault · sync dot);
    everything else lives in the popover menu or a focused modal.
    ============================================================ */
 .sidebar-footer {
@@ -1911,9 +1911,9 @@ button.primary.hero:hover:not(:disabled) {
 }
 
 /* ---- Popover menus: account (opens up from the identity bar) and
-   workspace switcher (opens down from the sidebar header) ---- */
+   vault switcher (opens down from the sidebar header) ---- */
 .account-popover,
-.workspace-popover {
+.vault-popover {
   position: absolute;
   left: 0;
   right: 0;
@@ -1932,7 +1932,7 @@ button.primary.hero:hover:not(:disabled) {
 }
 .account-popover {
   bottom: calc(100% + var(--sp-2));
-  /* Break free of the narrow sidebar width so workspace names, the settings
+  /* Break free of the narrow sidebar width so vault names, the settings
      row and the server URL read without truncating or feeling crowded. */
   right: auto;
   width: 312px;
@@ -1944,7 +1944,7 @@ button.primary.hero:hover:not(:disabled) {
 .sidebar-header {
   position: relative;
 }
-.workspace-popover {
+.vault-popover {
   top: calc(100% - var(--sp-1));
   left: var(--sp-2);
   right: var(--sp-2);
@@ -1996,7 +1996,7 @@ button.primary.hero:hover:not(:disabled) {
 .menu-item:active {
   background: var(--bg-active);
 }
-/* The workspace you're in — pinned first, tinted, labelled Current */
+/* The vault you're in — pinned first, tinted, labelled Current */
 .menu-item.active {
   background: var(--accent-soft);
 }
@@ -2146,7 +2146,7 @@ button.primary.hero:hover:not(:disabled) {
 .auth-dialog .server-config {
   margin-top: var(--sp-4);
 }
-/* ---- Workspace settings — dedicated full page ---- */
+/* ---- Vault settings — dedicated full page ---- */
 .settings-page {
   position: fixed;
   inset: 0;
@@ -2217,7 +2217,7 @@ button.primary.hero:hover:not(:disabled) {
   padding: var(--sp-6) var(--sp-8) var(--sp-8);
   animation: rise-in var(--t-fast) var(--ease) both;
 }
-/* A team section that isn't available until the workspace is synced. Shown
+/* A team section that isn't available until the vault is synced. Shown
    greyed in the nav (discoverable), with a lock glyph. */
 .settings-nav .menu-item.locked {
   color: var(--text-tertiary);
@@ -2231,7 +2231,7 @@ button.primary.hero:hover:not(:disabled) {
   flex-shrink: 0;
   color: var(--text-tertiary);
 }
-/* Turn-on-sync promo card on the General tab of a local workspace. */
+/* Turn-on-sync promo card on the General tab of a local vault. */
 .sync-promo {
   margin: var(--sp-4) 0 var(--sp-2);
   padding: var(--sp-5);
@@ -2252,7 +2252,7 @@ button.primary.hero:hover:not(:disabled) {
   line-height: var(--lh-body);
   max-width: 46ch;
 }
-/* Gate panel shown when a locked team section is opened on a local workspace. */
+/* Gate panel shown when a locked team section is opened on a local vault. */
 .sync-gate {
   display: flex;
   flex-direction: column;
@@ -2528,7 +2528,7 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--text-secondary);
 }
 
-/* workspace-default posture block, above the per-item list */
+/* vault-default posture block, above the per-item list */
 .access-ws {
   margin-bottom: var(--sp-4);
   padding-bottom: var(--sp-4);
@@ -3362,7 +3362,7 @@ button.primary.hero:hover:not(:disabled) {
 }
 
 /* ============================================================
-   Workspace join code (Members tab)
+   Vault join code (Members tab)
    ============================================================ */
 .join-code-row {
   display: flex;
@@ -3392,23 +3392,23 @@ button.primary.hero:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-/* Workspaces tab: switcher rows, quick actions, and the managed-root path. */
-.workspace-list .workspace-folder {
+/* Vaults tab: switcher rows, quick actions, and the managed-root path. */
+.vault-list .vault-folder {
   font-weight: 400;
 }
 /* Trailing per-row actions (Switch · Remove from device · Delete). */
-.workspace-row-actions {
+.vault-row-actions {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   flex-shrink: 0;
   white-space: nowrap;
 }
-.workspace-actions {
+.vault-actions {
   gap: var(--sp-4);
   margin-top: var(--sp-2);
 }
-.workspace-root-path {
+.vault-root-path {
   flex: 1;
   min-width: 0;
   font-family: var(--font-mono);
@@ -3564,15 +3564,15 @@ button.primary.hero:hover:not(:disabled) {
   background: rgba(220, 38, 38, 0.14);
 }
 
-/* "Set up this workspace" folder prompt. Sits above the settings page. */
-.workspace-folder-backdrop {
+/* "Set up this vault" folder prompt. Sits above the settings page. */
+.vault-folder-backdrop {
   z-index: 210;
 }
 
-/* The workspace setup prompt gets a bespoke, minimal layout rather than the
+/* The vault setup prompt gets a bespoke, minimal layout rather than the
    generic modal-header/hero-button treatment: an accent folder badge, tight
    type hierarchy, and two calm buttons (gradient primary + outlined ghost). */
-.workspace-folder-prompt {
+.vault-folder-prompt {
   width: 400px;
   padding: var(--sp-6) var(--sp-6) var(--sp-5);
   text-align: center;
@@ -3607,7 +3607,7 @@ button.primary.hero:hover:not(:disabled) {
   font-size: var(--fs-md);
   line-height: var(--lh-body);
 }
-.workspace-folder-actions {
+.vault-folder-actions {
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -3663,10 +3663,10 @@ button.primary.hero:hover:not(:disabled) {
 .wf-btn-ghost:active:not(:disabled) {
   background: var(--bg-active);
 }
-.workspace-folder-prompt .error {
+.vault-folder-prompt .error {
   margin: var(--sp-4) 0 0;
 }
-.workspace-folder-prompt .link-btn {
+.vault-folder-prompt .link-btn {
   margin-top: var(--sp-4);
 }
 button.secondary {

@@ -1,7 +1,7 @@
-# Demo harness — big team workspace + live multiplayer
+# Demo harness — big team vault + live multiplayer
 
 A named, committed harness for **demoing / screen-recording** Baalda at scale. It
-builds a large, realistic team workspace and then drives live multiplayer
+builds a large, realistic team vault and then drives live multiplayer
 activity so you can film presence circles + moving remote cursors across a busy
 vault.
 
@@ -10,7 +10,7 @@ a path you set in your (git-ignored) `.env`; only these scripts live in git.
 
 ## What it creates
 
-- **1 organization** (workspace) — name from `DEMO_ORG_NAME`
+- **1 organization** (the user-facing vault) — name from `DEMO_ORG_NAME`
 - **15 members with real logins** — you as owner + 14 synthetic teammates
   (2 admins, 12 members), all sharing one password. You log in as yourself
   (OAuth or email+password); the simulator drives the other 14.
@@ -19,7 +19,7 @@ a path you set in your (git-ignored) `.env`; only these scripts live in git.
   so the tree exceeds the target size and looks busy
 - an **org-wide "Open" (edit) grant** so every member can open every note
 - generated **per-folder index notes** (`<Folder>/_Index.md`) + a root
-  `_Workspace Index.md`, and a full **search + wikilink-graph index**
+  `_Vault Index.md`, and a full **search + wikilink-graph index**
 
 ## Prerequisites
 
@@ -33,9 +33,9 @@ Set these in your **git-ignored `.env`** (real values never get committed):
 
 ```
 DEMO_SOURCE_VAULT=/absolute/path/to/the/vault/to/mirror
-DEMO_ORG_NAME=Your Workspace Name
-DEMO_ORG_SLUG=your-workspace
-DEMO_VAULT_NAME=Your Workspace Name
+DEMO_ORG_NAME=Your Vault Name
+DEMO_ORG_SLUG=your-vault
+DEMO_VAULT_NAME=Your Vault Name
 DEMO_OWNER_EMAIL=you@example.com     # the account you log in as
 DEMO_OWNER_NAME=You
 ```

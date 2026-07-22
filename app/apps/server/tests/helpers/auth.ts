@@ -48,7 +48,7 @@ export function bearerHeaders(user: TestUser): Headers {
   return new Headers({ authorization: `Bearer ${user.token}` });
 }
 
-/** Create an organization (workspace) owned by the given user. */
+/** Create an organization (vault) owned by the given user. */
 export async function createOrg(
   user: TestUser,
   name: string,

@@ -68,7 +68,7 @@ De-risk the hardest part before networking.
 
 ### Phase 3: Team collaboration ✅
 - [x] Better Auth organization plugin: `organization` / `member` / `invitation`; roles owner/admin/member
-  (server) + Workspace panel: create org, members, invite by email, pending/accept (client).
+  (server) + Vault panel (Vault Settings): create org, members, invite by email, pending/accept (client).
 - [x] Folder ACL (`folder` / `file` / `share`): view/edit, additive, folder-inherited, highest-wins
   (server) + folder/file Share dialog on right-click (client).
 - [x] `/sync-token` endpoint mints short-lived per-doc tokens; Hocuspocus `onAuthenticate` + `readOnly`

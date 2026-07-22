@@ -17,7 +17,7 @@ pub const DENIED_DIRS: &[&str] = &["node_modules", "dist", "build", "target", "v
 
 /// Allowlist of file extensions the vault surfaces + syncs (lowercase, no dot).
 /// Everything else — source code, lockfiles, binaries — is ignored, so importing
-/// a real project directory can't dump junk into the workspace.
+/// a real project directory can't dump junk into the vault.
 pub const ALLOWED_EXTS: &[&str] = &[
     // notes / text
     "md", "markdown", "mdx", "txt", "html", "htm", "canvas",

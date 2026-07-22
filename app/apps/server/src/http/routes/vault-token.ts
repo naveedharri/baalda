@@ -7,7 +7,7 @@ import { getSession } from "../session.js";
  * POST /api/vault-sync-token  { vaultId }  (spec 05 §7)
  *
  * Mints a vault-scoped JWT for the replication channel. Any member of the
- * vault's workspace may obtain one; the channel then streams only the docs the
+ * vault (organization) may obtain one; the channel then streams only the docs the
  * user can actually read (per-doc ACL on backfill + fanout). Non-members: 403.
  */
 export const vaultTokenRoutes = new Hono();

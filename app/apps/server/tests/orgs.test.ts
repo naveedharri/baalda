@@ -25,7 +25,7 @@ function join(token: string | null, code: unknown) {
   );
 }
 
-describe("workspace join codes", () => {
+describe("vault join codes", () => {
   beforeEach(async () => {
     await resetDb();
   });

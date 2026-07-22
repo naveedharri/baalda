@@ -6,8 +6,8 @@ import { Avatar } from "./Identity";
 import { ThemeToggle } from "./ThemeToggle";
 
 /**
- * Account settings — a dedicated full page (sibling to Workspace settings) for
- * everything that follows the *user* rather than any one workspace: profile
+ * Account settings — a dedicated full page (sibling to Vault settings) for
+ * everything that follows the *user* rather than any one vault: profile
  * (name/avatar), activity status, appearance, notifications, the server it syncs
  * against, and app updates. Profile fields are server-backed (Better Auth) so
  * they follow the account across devices; status/notifications/theme/server are

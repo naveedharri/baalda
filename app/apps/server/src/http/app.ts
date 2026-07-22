@@ -59,7 +59,7 @@ function allowedOrigins(): string[] {
  *  - /api/{vaults,folders,notes,files} → registry
  *  - /api/vaults/:id/blobs, /api/blobs/:id → attachment blob store
  *  - /api/shares → folder/file ACL management
- *  - /api/orgs/join-code, /api/orgs/join → workspace join codes
+ *  - /api/orgs/join-code, /api/orgs/join → vault join codes
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
  *  - /api/mcp → Model Context Protocol endpoint (AI clients); /api/mcp/tokens → token mgmt
  */

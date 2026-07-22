@@ -16,9 +16,11 @@ export function setMemberJoinedPublisher(fn: MemberJoinedPublisher): void {
 }
 
 /**
- * Tell everyone live in a workspace that `name` just joined. Fans out to every
- * vault the org owns (currently one). Best-effort: swallows its own errors so a
- * failed announce can never fail the join that triggered it.
+ * Tell everyone live in a vault that `name` just joined. Fans out to every note
+ * collection the vault (organization) owns (currently one) — the `vaultId`
+ * arguments below are note-collection ids, not the user-facing vault. Best-
+ * effort: swallows its own errors so a failed announce can never fail the join
+ * that triggered it.
  */
 export async function announceMemberJoined(
   organizationId: string,

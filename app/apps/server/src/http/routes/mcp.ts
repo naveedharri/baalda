@@ -49,7 +49,7 @@ const WWW_AUTHENTICATE = `Bearer resource_metadata="${config.betterAuthUrl}/.wel
  *                              JSON-RPC 2.0 / Streamable-HTTP (single JSON reply).
  *   GET/DELETE /api/mcp       → 405 (we don't offer a server→client SSE stream).
  *
- *   GET    /api/mcp/tokens        → list the caller's tokens for the active workspace
+ *   GET    /api/mcp/tokens        → list the caller's tokens for the active vault
  *   POST   /api/mcp/tokens {name} → mint a token (plaintext returned once)
  *   DELETE /api/mcp/tokens/:id    → revoke a token
  *
@@ -71,7 +71,7 @@ function extractToken(c: {
   return c.req.query("key") ?? c.req.query("token") ?? null;
 }
 
-/** Active workspace: the session's active org, else the user's sole membership. */
+/** Active vault: the session's active org, else the user's sole membership. */
 async function resolveActiveOrg(
   userId: string,
   activeOrganizationId: string | null,
@@ -88,10 +88,10 @@ export function createMcpRoutes(deps: McpDeps): Hono {
   const app = new Hono();
 
   // ── The MCP endpoint (token- OR OAuth-authenticated) ──────────────────────
-  // Two ways in, both resolving to the SAME (user, workspace) McpAuth:
+  // Two ways in, both resolving to the SAME (user, vault) McpAuth:
   //   1. a minted `mcp_` token (Bearer header or ?key=) — desktop power users;
   //   2. an OAuth 2.1 access token (Bearer header) from the custom-connector
-  //      flow — the workspace comes from the user's consent-screen choice.
+  //      flow — the vault comes from the user's consent-screen choice.
   app.post("/mcp", async (c) => {
     const token = extractToken(c);
     const client = c.req.header("user-agent") ?? c.req.header("User-Agent") ?? null;
@@ -154,9 +154,9 @@ export function createMcpRoutes(deps: McpDeps): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const org = await resolveActiveOrg(session.userId, session.activeOrganizationId);
-    if (!org) return c.json({ error: "No active workspace" }, 400);
+    if (!org) return c.json({ error: "No active vault" }, 400);
     if (!(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     const tokens = await listMcpTokens({ userId: session.userId, organizationId: org });
     // `tools` is the catalog every connection can reach — the desktop shows it
@@ -168,9 +168,9 @@ export function createMcpRoutes(deps: McpDeps): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const org = await resolveActiveOrg(session.userId, session.activeOrganizationId);
-    if (!org) return c.json({ error: "No active workspace" }, 400);
+    if (!org) return c.json({ error: "No active vault" }, 400);
     if (!(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this workspace" }, 403);
+      return c.json({ error: "Not a member of this vault" }, 403);
     }
     const body = (await c.req.json().catch(() => ({}))) as { name?: unknown };
     const name =

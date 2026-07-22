@@ -131,7 +131,9 @@ CREATE TABLE doc_updates   (id BIGSERIAL PRIMARY KEY, doc_id UUID NOT NULL,
 CREATE TABLE doc_snapshots (doc_id UUID PRIMARY KEY, snapshot BYTEA, state_vector BYTEA,
                             seq BIGINT, updated_at TIMESTAMPTZ);
 -- attachments (bytea for MVP; S3/R2 in production)
-CREATE TABLE blobs         (id UUID PRIMARY KEY, doc_id UUID, workspace_id UUID, sha256 TEXT,
+-- blobs.org_id is the org (vault) id — deliberately not named vault_id, which the same table also
+-- uses for the note-collection row (→ vaults.id). See the terminology note below §5B.
+CREATE TABLE blobs         (id UUID PRIMARY KEY, doc_id UUID, org_id UUID, sha256 TEXT,
                             size BIGINT, mime TEXT, storage_url TEXT, created_at TIMESTAMPTZ);
 ```
 
@@ -145,12 +147,12 @@ Owned by Better Auth + our ACL (detail in [[04-team-collaboration]]); shown here
 
 ```sql
 users        (id, email UNIQUE, name, avatar_url, created_at)
-organization (id, name, slug UNIQUE, logo, created_at)          -- = workspace/team
+organization (id, name, slug UNIQUE, logo, created_at)          -- = vault (the user-facing entity)
 member       (id, organization_id, user_id, role, created_at)    -- role: owner|admin|member
 invitation   (id, organization_id, email, role, inviter_id, status, expires_at)
 session      (id, user_id, token UNIQUE, expires_at, active_organization_id, ip, ua)
 
-vaults       (id, organization_id, name, created_at)             -- a shared folder set
+vaults       (id, organization_id, name, created_at)             -- note collection: child of the org (1:1 in practice)
 folders      (id, vault_id, parent_id NULL, name, path, sort)    -- nested via parent_id
 notes        (id, vault_id, folder_id, title, rel_path, doc_id,  -- doc_id → doc_updates/snapshots
               created_by, created_at, updated_at, deleted_at NULL)
@@ -161,6 +163,19 @@ shares       (id, resource_type, resource_id, principal_type, principal_id, perm
 **The join key is `doc_id`.** `notes.rel_path` mirrors the on-disk path, but the stable identity is
 `notes.id`/`doc_id`, so a rename or move never forks a document across the file / CRDT / relational
 worlds. `deleted_at` gives soft-delete + recovery.
+
+> **Terminology (workspace→vault rename).** The word "vault" appears at two layers here — resolve the
+> apparent overlap this way:
+> - The **user-facing vault** is the Better Auth **`organization`** (formerly "workspace"): the thing a
+>   user opens, syncs, shares, and is billed for. Its data key stays `organization_id`.
+> - The **`vaults` table row** is that org's **note collection** — the storage child (`vault_id`) that
+>   `folders`/`notes`/`files` hang off. One org owns one note collection in practice (registry adopts the
+>   org's oldest vault), so the user perceives a single vault; the two are 1:1.
+> - The **on-disk `VaultRoot`** (§1) is the *Local* state of the same user-facing vault.
+>
+> All `vault_id` / `vaults` names are kept as the storage-layer collection handle. The `org_id`
+> columns (`blobs`, `shares`; renamed from `workspace_id` in migration 013) hold the organization id —
+> they are *not* the note-collection `vault_id`.
 
 ## 6. How AI edits fit the data layer
 

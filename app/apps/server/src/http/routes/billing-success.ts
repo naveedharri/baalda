@@ -199,7 +199,7 @@ export const successPageHtml = `<!doctype html><html lang="en"><head>
     </span>
     <p class="eyebrow reveal d3">Payment confirmed</p>
     <h1 class="reveal d4">You&rsquo;re on Pro</h1>
-    <p class="sub reveal d5">Your workspace is now unlimited. Return to Baalda &mdash;
+    <p class="sub reveal d5">Your vault is now unlimited. Return to Baalda &mdash;
        your subscription appears automatically.</p>
     <div class="foot reveal d6">
       You can safely close this tab. <a href="#" onclick="window.close();return false;">Close window</a>

@@ -217,7 +217,7 @@ export function quickNotes(team: readonly TeamMember[]): PlannedNote[] {
 
 /**
  * Build clean index notes: one per top-level folder listing its immediate
- * children as wikilinks, plus a root workspace index linking the top folders.
+ * children as wikilinks, plus a root vault index linking the top folders.
  */
 export function buildIndexNotes(allRelPaths: readonly string[]): PlannedNote[] {
   const topLevel = new Map<string, Set<string>>(); // top folder → child titles
@@ -248,11 +248,11 @@ export function buildIndexNotes(allRelPaths: readonly string[]): PlannedNote[] {
     });
   }
   out.push({
-    relPath: `_Workspace Index.md`,
-    title: "Workspace Index",
+    relPath: `_Vault Index.md`,
+    title: "Vault Index",
     authorIndex: 0,
     body:
-      `# 📇 ${"Workspace Index"}\n\nTop-level areas of this workspace:\n\n` +
+      `# 📇 ${"Vault Index"}\n\nTop-level areas of this vault:\n\n` +
       sortedRoots.map((t) => `- [[${t} — Index]]`).join("\n") +
       "\n",
   });

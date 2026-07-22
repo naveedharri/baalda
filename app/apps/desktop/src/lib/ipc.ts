@@ -117,16 +117,16 @@ export const createVault = (parent: string, name: string) =>
 /** True if a folder already looks like a vault (has `.context/` or `.md` notes). */
 export const isVault = (path: string) => invoke<boolean>("is_vault", { path });
 
-// ---- Workspace root + `current` pointer (per-workspace folders) ------------
-// The app manages one root dir; each workspace gets a subfolder, and the active
-// workspace's folder is mirrored to `<root>/current` for external tools.
+// ---- Vaults root + `current` pointer (per-vault folders) -------------------
+// The app manages one root dir under which each vault gets a subfolder, and the
+// active vault's folder is mirrored to `<root>/current` for external tools.
 
-/** Effective managed root (auto-initialized to ~/Baalda on first call). */
-export const getWorkspaceRoot = () => invoke<string>("get_workspace_root");
-export const setWorkspaceRoot = (path: string) =>
-  invoke<void>("set_workspace_root", { path });
-/** Native folder picker for the managed root; persists + returns it. */
-export const pickWorkspaceRoot = () => invoke<string | null>("pick_workspace_root");
+/** Effective managed vaults root (auto-initialized to ~/Baalda on first call). */
+export const getVaultsRoot = () => invoke<string>("get_vaults_root");
+export const setVaultsRoot = (path: string) =>
+  invoke<void>("set_vaults_root", { path });
+/** Native folder picker for the managed vaults root; persists + returns it. */
+export const pickVaultsRoot = () => invoke<string | null>("pick_vaults_root");
 /** Native folder picker that only returns the path (does not open it). */
 export const pickFolder = () => invoke<string | null>("pick_folder");
 /** Native multi-file picker; returns chosen absolute paths (null if cancelled). */
@@ -135,8 +135,8 @@ export const pickFiles = () => invoke<string[] | null>("pick_files");
 export const saveFile = (defaultName: string) =>
   invoke<string | null>("save_file", { defaultName });
 /** Ensure `path` exists, repoint `<root>/current` to it, and open it as vault. */
-export const openWorkspaceFolder = (path: string) =>
-  invoke<VaultInfo>("open_workspace_folder", { path });
+export const openVaultInRoot = (path: string) =>
+  invoke<VaultInfo>("open_vault_in_root", { path });
 
 // ---- Tree + files ---------------------------------------------------------
 

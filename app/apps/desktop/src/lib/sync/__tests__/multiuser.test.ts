@@ -8,8 +8,8 @@
 //  - ApiClient      auth, org invitations, registry, shares, tokens
 //  - VaultRegistry  the joining-member reconcile path (ipc mocked to an
 //                   in-memory vault) — regression for "invited member sees an
-//                   empty workspace" (vault used to be adopted by folder-name
-//                   match only, forking a second empty vault)
+//                   empty vault" (the server vault used to be adopted by
+//                   folder-name match only, forking a second empty one)
 //  - DocSync        two peers on one doc: convergence, awareness (the presence
 //                   circles + activity status), lock → read-only propagation
 //  - VaultSyncEngine the always-on background feed: a member receives note
@@ -109,7 +109,7 @@ afterAll(() => {
 
 describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
   beforeAll(async () => {
-    // Owner signs up, creates the workspace and its vault + content registry.
+    // Owner signs up, creates the org and its server vault + content registry.
     const a = await owner.signUp({
       email: `mu-owner-${stamp}@it.test`,
       password: "password123",
@@ -138,12 +138,12 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     });
     teamDocId = noteDocId(teamNote);
 
-    // New workspaces are PRIVATE by default (no org-wide grant). These tests
-    // exercise team collaboration, so the owner shares the whole workspace with
+    // New vaults are PRIVATE by default (no org-wide grant). These tests
+    // exercise team collaboration, so the owner shares the whole vault with
     // the team ("Open" = org-wide edit) — the same action AccessPanel performs
-    // via setWorkspacePosture. Without this, members correctly resolve to "none".
+    // via setVaultPosture. Without this, members correctly resolve to "none".
     await owner.createShare({
-      resourceType: "workspace",
+      resourceType: "vault",
       resourceId: orgId,
       principalType: "org",
       permission: "edit",
@@ -151,7 +151,7 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
   }, 30_000);
 
   // ── 1. Invite → accept ────────────────────────────────────────────────────
-  it("owner invites; member accepts and lands in the workspace", async () => {
+  it("owner invites; member accepts and lands in the vault", async () => {
     await member.signUp({
       email: `mu-member-${stamp}@it.test`,
       password: "password123",
@@ -180,19 +180,19 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     expect(names).toEqual(["Olivia Owner", "Riley Member"]);
   }, 30_000);
 
-  // ── 2. The regression: joining member must SEE the workspace ─────────────
+  // ── 2. The regression: joining member must SEE the vault ─────────────────
   it("member reconcile adopts the owner's vault (no fork) and materializes its notes", async () => {
     memberFs.config = null;
     memberFs.files.clear();
 
     const reg = new VaultRegistry(member);
-    // Fresh per-workspace folder — name does NOT match the server vault name.
+    // Fresh per-vault folder — name does NOT match the server vault name.
     const { seeded } = await reg.reconcile(
       { organizationId: orgId, vaultName: `mu-${stamp}` },
       { id: "root", name: `mu-${stamp}`, path: "", isDir: true, children: [] },
     );
 
-    expect(seeded).toBe(false); // never seed a populated workspace
+    expect(seeded).toBe(false); // never seed a populated vault
     expect(reg.vaultId).toBe(vaultId); // adopted, not forked
     // Server-only notes materialized locally so the sidebar shows them.
     expect([...memberFs.files.keys()].sort()).toEqual(["Team/plan.md", "Welcome.md"]);
@@ -201,11 +201,11 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     // The mapping persisted to the vault config (travels with the folder).
     expect(memberFs.config && JSON.parse(memberFs.config).serverVaultId).toBe(vaultId);
 
-    // And crucially: still exactly ONE vault in the workspace.
+    // And crucially: still exactly ONE server vault in the org.
     const vaults = await owner.listVaults();
     expect(vaults.filter((v) => (v.organizationId ?? v.organization_id) === orgId)).toHaveLength(1);
 
-    // The workspace was shared with the team (Open) in setup, so a plain member
+    // The vault was shared with the team (Open) in setup, so a plain member
     // inherits edit access.
     const tok = await member.syncToken(welcomeDocId);
     expect(tok.readOnly).toBe(false);
@@ -416,7 +416,7 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     const res = await owner.resolveAccess("file", welcomeDocId);
     const byId = new Map(res.members.map((m) => [m.userId, m]));
     expect(byId.get(ownerId)?.permission).toBe("edit"); // owner/admin
-    expect(byId.get(memberId)?.permission).toBe("edit"); // via the workspace-wide team grant
+    expect(byId.get(memberId)?.permission).toBe("edit"); // via the vault-wide team grant
   }, 30_000);
 
   // ── 8. Outsiders stay out ─────────────────────────────────────────────────
@@ -433,8 +433,8 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     await expect(anon.listVaults()).rejects.toMatchObject({ status: 401 });
   }, 30_000);
 
-  // ── 9. Edge: member joins a workspace that has NO vault yet ──────────────
-  it("member joining a vault-less workspace fails gracefully (cannot create vaults)", async () => {
+  // ── 9. Edge: member joins an org that has NO server vault yet ────────────
+  it("member joining an org with no server vault fails gracefully (cannot create one)", async () => {
     const org2 = await owner.createOrganization({
       name: `MU2 ${stamp}`,
       slug: `mu2-${stamp}`,

@@ -65,9 +65,9 @@ export const config = {
   polarProductMonthlyId: optional("POLAR_PRODUCT_MONTHLY_ID"),
   polarProductYearlyId: optional("POLAR_PRODUCT_YEARLY_ID"),
   /** Free-tier caps (only enforced when billing is enabled). A user may OWN up
-   *  to this many UNSUBSCRIBED workspaces; each unsubscribed workspace may hold
+   *  to this many UNSUBSCRIBED vaults; each unsubscribed vault may hold
    *  up to this many members (incl. pending invitations). */
-  freeMaxWorkspaces: int("FREE_MAX_WORKSPACES", 3),
+  freeMaxVaults: int("FREE_MAX_VAULTS", 3),
   freeMaxMembers: int("FREE_MAX_MEMBERS", 3),
 } as const;
 

@@ -1,6 +1,6 @@
 //! OS keychain access for session tokens (spec 04 §7).
 //!
-//! Better Auth session tokens are the keys to a user's workspace, so they must
+//! Better Auth session tokens are the keys to a user's vault, so they must
 //! never live in `localStorage` or any plaintext file. They live in the OS
 //! keychain under the service `com.baalda.context`, keyed by a caller-supplied
 //! `service_key` (e.g. `session:<serverUrl>`). The `keyring` crate maps this to

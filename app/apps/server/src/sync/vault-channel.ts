@@ -73,8 +73,9 @@ export class VaultChannel {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubRegistryChanged());
   }
 
-  /** Announce that a new member joined the workspace this vault belongs to;
-   *  subscribers refresh their roster and show a join celebration. */
+  /** Announce that a new member joined the vault (organization) this note
+   *  collection belongs to; subscribers refresh their roster and show a join
+   *  celebration. (`vaultId` here is the note-collection id.) */
   async publishMemberJoined(vaultId: string, name: string): Promise<void> {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubMemberJoined(name));
   }
