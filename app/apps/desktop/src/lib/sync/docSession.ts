@@ -16,14 +16,18 @@ import type { SessionInfo } from "../api";
 import type { TreeNode } from "../ipc";
 import * as ipc from "../ipc";
 import { api } from "../auth/authManager";
-import { presenceUser } from "../presence/color";
+import { colorForUser, presenceUser } from "../presence/color";
 import type { ActivityStatus } from "../prefs";
 import { AttachmentSync } from "./attachments";
 import { decideSeed } from "./startup";
 import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry } from "./registry";
 import { VaultDocStore } from "./vaultDocStore";
-import { VaultSyncEngine, type VaultSyncStatus } from "./vaultSyncEngine";
+import {
+  VaultSyncEngine,
+  type VaultPeer,
+  type VaultSyncStatus,
+} from "./vaultSyncEngine";
 
 /** Basename of a vault-relative path (for the upload's x-file-name hint). */
 function baseName(relPath: string): string {
@@ -51,6 +55,7 @@ export class SyncManager {
   private onPending?: (pending: boolean) => void;
   private onFlushed?: () => void;
   private onRegistryChanged?: () => void;
+  private onMemberJoined?: (name: string) => void;
   private registryPullTimer: ReturnType<typeof setTimeout> | null = null;
   private attachments: AttachmentSync | null = null;
 
@@ -60,6 +65,13 @@ export class SyncManager {
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
+
+  // Vault-wide presence: which teammate is viewing which note. Keyed by userId
+  // (last-write-wins across a user's devices), fed by the engine's presence
+  // frames, surfaced to the sidebar. `viewingDocId` is our own current note.
+  private vaultPresence = new Map<string, VaultPeer>();
+  private viewingDocId: string | null = null;
+  private onVaultPresence?: (peers: VaultPeer[]) => void;
 
   /** UI subscribes here to render the per-note sync indicator. */
   setStatusListener(cb: ((status: SyncStatus) => void) | undefined): void {
@@ -85,6 +97,14 @@ export class SyncManager {
    */
   setRegistryListener(cb: (() => void) | undefined): void {
     this.onRegistryChanged = cb;
+  }
+
+  /**
+   * UI subscribes here to react when a new teammate joins the workspace: refresh
+   * the roster (so the member list updates without a reload) and celebrate.
+   */
+  setMemberJoinedListener(cb: ((name: string) => void) | undefined): void {
+    this.onMemberJoined = cb;
   }
 
   /**
@@ -149,6 +169,8 @@ export class SyncManager {
     this.enabled = false;
     this.presence = null;
     this.attachments = null;
+    this.viewingDocId = null;
+    this.clearVaultPresence();
     this.stopVaultEngine();
     this.closeCurrent();
   }
@@ -156,6 +178,49 @@ export class SyncManager {
   /** UI subscribes here for the vault-wide background-sync indicator. */
   setVaultStatusListener(cb: ((status: VaultSyncStatus) => void) | undefined): void {
     this.onVaultStatus = cb;
+  }
+
+  /**
+   * UI subscribes here for the live "who's viewing what" roster that drives the
+   * sidebar presence dots. Fires with the full peer list on every change.
+   */
+  setVaultPresenceListener(cb: ((peers: VaultPeer[]) => void) | undefined): void {
+    this.onVaultPresence = cb;
+  }
+
+  /** Record which note this client is now viewing (null = none) and broadcast it. */
+  setViewing(docId: string | null): void {
+    this.viewingDocId = docId;
+    this.pushLocalPresence();
+  }
+
+  /** Send our current viewing state over the vault channel. Invisible users
+   *  broadcast a null doc so they don't appear on teammates' sidebars. */
+  private pushLocalPresence(): void {
+    if (!this.vaultEngine || !this.presence) return;
+    const docId = this.status === "invisible" ? null : this.viewingDocId;
+    this.vaultEngine.setPresence({
+      docId,
+      name: this.presence.name,
+      color: colorForUser(this.presence.id),
+      status: this.status,
+    });
+  }
+
+  /** Fold an incoming teammate presence update into the roster and notify the UI. */
+  private handleVaultPresence(peer: VaultPeer): void {
+    // Never show ourselves in the sidebar — you know where you are.
+    if (this.presence && peer.userId === this.presence.id) return;
+    if (peer.docId === null) this.vaultPresence.delete(peer.userId);
+    else this.vaultPresence.set(peer.userId, peer);
+    this.onVaultPresence?.([...this.vaultPresence.values()]);
+  }
+
+  /** Drop the whole roster (on disconnect/disable) so no stale dots linger. */
+  private clearVaultPresence(): void {
+    if (this.vaultPresence.size === 0) return;
+    this.vaultPresence.clear();
+    this.onVaultPresence?.([]);
   }
 
   /** Start the always-on background feed for the reconciled vault (spec 05). */
@@ -171,15 +236,27 @@ export class SyncManager {
       api,
       vaultId,
       sink: store,
-      onStatus: (s) => this.onVaultStatus?.(s),
+      onStatus: (s) => {
+        // A dropped/reconnecting channel means we no longer have a live roster —
+        // clear it so the sidebar doesn't show ghosts (the engine re-announces
+        // everyone on the next `synced`).
+        if (s !== "synced") this.clearVaultPresence();
+        this.onVaultStatus?.(s);
+      },
       // An ACL change in this vault may have flipped the open note's grant
       // (view↔edit, lock/unlock). Re-mint its token so the editor becomes
       // read-only/editable live — no reopen (spec 04 §4).
       onAclChanged: () => this.current?.refreshAccess(),
       // A teammate changed the folder/note structure — re-pull + refresh tree.
       onRegistryChanged: () => this.handleRegistryChanged(),
+      // A new teammate joined the workspace — refresh roster + celebrate.
+      onMemberJoined: (name) => this.onMemberJoined?.(name),
+      // A teammate's viewing state changed — update the sidebar presence roster.
+      onPresence: (peer) => this.handleVaultPresence(peer),
     });
     this.vaultEngine.start();
+    // Seed our own presence into the fresh engine (it flushes on `ready`).
+    this.pushLocalPresence();
   }
 
   private stopVaultEngine(): void {
@@ -309,6 +386,9 @@ export class SyncManager {
     this.status = status;
     if (this.current) this.applyPresence(this.current.awareness);
     if (this.currentLocalAwareness) this.applyPresence(this.currentLocalAwareness);
+    // Reflect the new availability on the vault-wide sidebar presence too
+    // (also hides/shows us when toggling invisible).
+    this.pushLocalPresence();
   }
 
   private applyPresence(awareness: Awareness): void {

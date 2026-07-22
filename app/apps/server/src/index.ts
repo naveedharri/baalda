@@ -6,6 +6,7 @@ import { createSyncServer, disconnectDoc } from "./sync/hocuspocus.js";
 import { attachSyncUpgrade } from "./sync/http-upgrade.js";
 import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
+import { setMemberJoinedPublisher } from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 
@@ -23,6 +24,12 @@ async function main() {
   // is set, in which case fanout spans instances (HA / rolling deploys).
   const pubsub = await createPubSub(config.redisUrl);
   const vaultChannel = new VaultChannel({ pubsub });
+
+  // Let the HTTP/auth layer announce member joins onto the vault channel, so
+  // connected teammates refresh their roster + celebrate without a reload.
+  setMemberJoinedPublisher((vaultId, name) => {
+    void vaultChannel.publishMemberJoined(vaultId, name);
+  });
 
   // Every persisted doc change is fanned out to background vault subscribers.
   const sync = createSyncServer(config.hocuspocusPort, (vaultId, docId, update) => {

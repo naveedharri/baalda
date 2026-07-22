@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   Tree,
   type CursorProps,
@@ -26,6 +26,9 @@ import { activeNoteEditable, insertIntoActiveNote } from "../lib/editor/activeVi
 import { useStore } from "../store";
 import { shareResourceId } from "../lib/api";
 import { syncManager } from "../lib/sync/docSession";
+import type { VaultPeer } from "../lib/sync/vaultSyncEngine";
+import { PRESENCE_OFFLINE, ringShowsColor, statusTone } from "../lib/presence/color";
+import { characterSvg } from "./Identity";
 import { ShareDialog, type ShareTarget } from "./ShareDialog";
 
 interface Dimensions {
@@ -136,6 +139,7 @@ export function FileTree() {
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locks = useStore((s) => s.locks);
+  const vaultPresence = useStore((s) => s.vaultPresence);
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
   const itemColors = useStore((s) => s.itemColors);
@@ -165,6 +169,19 @@ export function FileTree() {
   // onActivate is captured by arborist; read the live mode through a ref.
   const selectModeRef = useRef(false);
   selectModeRef.current = selectMode;
+
+  // Group live presence by the note (docId) each teammate is viewing, so a row
+  // can look up "who's here" in O(1). Rebuilt only when the roster changes.
+  const presenceByDoc = useMemo(() => {
+    const map = new Map<string, VaultPeer[]>();
+    for (const peer of vaultPresence) {
+      if (!peer.docId) continue;
+      const arr = map.get(peer.docId);
+      if (arr) arr.push(peer);
+      else map.set(peer.docId, [peer]);
+    }
+    return map;
+  }, [vaultPresence]);
 
   // Resolve lock rows (server resource ids) to tree paths for the badges.
   const lockByPath = useMemo(
@@ -832,6 +849,7 @@ export function FileTree() {
               {...props}
               selectedPath={openNote?.path ?? null}
               lock={lockByPath.get(props.node.data.path) ?? null}
+              presenceByDoc={presenceByDoc}
               color={itemColors[props.node.data.path]}
               onMenu={(x, y, node) => setMenu({ x, y, node })}
               selectMode={selectMode}
@@ -929,6 +947,8 @@ export function FileTree() {
 interface NodeExtra {
   selectedPath: string | null;
   lock: LockScope | null;
+  /** docId -> teammates currently viewing that note (drives presence dots). */
+  presenceByDoc: Map<string, VaultPeer[]>;
   /** Item color id (vault-local preference) — tints the type glyph. */
   color: string | undefined;
   onMenu: (x: number, y: number, node: NodeApi<TreeNode>) => void;
@@ -996,12 +1016,94 @@ const ICON_LOCK = (
   </TreeSvg>
 );
 
+/** Max faces in a sidebar row's presence cluster before the rest roll into +N. */
+const MAX_ROW_AVATARS = 3;
+
+/** Collect the docIds of every note under a folder (recursively), so a collapsed
+ *  folder can roll up the presence of the notes hidden inside it. */
+function descendantDocIds(node: TreeNode, out: string[]): void {
+  for (const child of node.children ?? []) {
+    if (child.isDir) {
+      descendantDocIds(child, out);
+    } else {
+      const mapping = syncManager.registry.getMapping(child.path);
+      if (mapping) out.push(mapping.docId);
+    }
+  }
+}
+
+/** Resolve the teammates to show on a row: the note's own viewers, or — for a
+ *  collapsed folder — the union of everyone viewing a note inside it (deduped by
+ *  user). An expanded folder shows nothing; its avatars live on the child rows. */
+function peersForNode(
+  node: NodeApi<TreeNode>,
+  presenceByDoc: Map<string, VaultPeer[]>,
+): VaultPeer[] {
+  if (presenceByDoc.size === 0) return [];
+  if (node.data.isDir) {
+    if (node.isOpen) return [];
+    const ids: string[] = [];
+    descendantDocIds(node.data, ids);
+    const seen = new Set<string>();
+    const rolled: VaultPeer[] = [];
+    for (const id of ids) {
+      for (const peer of presenceByDoc.get(id) ?? []) {
+        if (seen.has(peer.userId)) continue;
+        seen.add(peer.userId);
+        rolled.push(peer);
+      }
+    }
+    return rolled;
+  }
+  const mapping = syncManager.registry.getMapping(node.data.path);
+  return mapping ? (presenceByDoc.get(mapping.docId) ?? []) : [];
+}
+
+/** One presence face: the teammate's illustrated character ringed in their
+ *  colour — the same treatment as the editor's PresenceAvatar, sized for a row. */
+function SidebarAvatar({ peer }: { peer: VaultPeer }) {
+  const svg = useMemo(
+    () => characterSvg(peer.name || peer.userId || "?"),
+    [peer.name, peer.userId],
+  );
+  const tone = statusTone(peer.status);
+  const live = ringShowsColor(tone);
+  return (
+    <span
+      className={`tree-presence-avatar tone-${tone}${live ? "" : " offline"}`}
+      style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
+      title={peer.name}
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
+/** The overlapping avatar cluster shown at the right edge of a row. */
+function SidebarPresence({ peers }: { peers: VaultPeer[] }) {
+  if (peers.length === 0) return null;
+  const shown =
+    peers.length > MAX_ROW_AVATARS ? peers.slice(0, MAX_ROW_AVATARS - 1) : peers;
+  const overflow = peers.length - shown.length;
+  const names = peers.map((p) => p.name).join(", ");
+  return (
+    <span className="tree-presence" title={names} aria-label={`Viewing: ${names}`}>
+      {shown.map((p) => (
+        <SidebarAvatar key={p.userId} peer={p} />
+      ))}
+      {overflow > 0 && (
+        <span className="tree-presence-avatar tree-presence-overflow">+{overflow}</span>
+      )}
+    </span>
+  );
+}
+
 function Node({
   node,
   style,
   dragHandle,
   selectedPath,
   lock,
+  presenceByDoc,
   color,
   onMenu,
   selectMode,
@@ -1012,6 +1114,7 @@ function Node({
   const isEmpty = isDir && (node.data.children?.length ?? 0) === 0;
   const isSelected = !isDir && node.data.path === selectedPath;
   const colorValue = itemColorValue(color);
+  const peers = peersForNode(node, presenceByDoc);
   // Compose arborist's per-level indent with the row's base inset so every
   // glyph on a level shares one left edge (no chevron column to misalign).
   // 20 = 12 base + 8 compensating the tree's full-bleed negative margin.
@@ -1107,6 +1210,7 @@ function Node({
               {ICON_LOCK}
             </span>
           )}
+          <SidebarPresence peers={peers} />
           {!selectMode && (
           <button
             className="tree-more"

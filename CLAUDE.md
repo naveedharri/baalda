@@ -154,9 +154,13 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `onChange` appends the binary update + schedules re-index. `disconnectDoc` force-closes sockets on revoke.
 - `yjs/persistence.ts` — binary-only store: `doc_updates` append log + `doc_snapshots` (compact past
   `COMPACTION_THRESHOLD`).
-- `permissions/resolver.ts` — `effectivePermission(userId, docId)`: owner/admin → edit; else max of
-  file share + ancestor-folder shares (walk `parent_id` up); a `locked` share caps at view even for admins.
-  `edit > view > none`; no grant → no sync access (403 at token mint).
+- `permissions/resolver.ts` — `effectivePermission(userId, docId)`: owner/admin → edit; a note's
+  **creator** → edit on their own note; else max of file/folder shares (walk `parent_id` up) — either
+  per-user or an org-wide "share with team" grant — plus any workspace grant; a `locked` share caps at
+  view even for admins. `edit > view > none`; no grant → no sync access (403 at token mint). **New
+  workspaces are private by default** (no org-wide grant); existing ones keep their Open grant. Keep this
+  in lockstep with `permissions/vault-docs.ts` (the readable-set dual that gates live sync + registry
+  listings).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
   `list_vaults/list_folders/create_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/delete_note`.

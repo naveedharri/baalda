@@ -58,7 +58,7 @@ We scanned **41** open-source Obsidian-like apps against **12 core requirements*
 
 - 📄 **Your notes are just files.** Plain `.md` on disk. No lock-in, works with Git, and survives even if the server disappears.
 - 🤖 **AI-editable, two ways.** Local-first means a local agent (Claude Code, Codex, any CLI tool) edits the `.md` files directly, no integration needed. Autonomous and cloud agents use the built-in [MCP](#-connect-an-ai-mcp) endpoint, gated by the exact same permissions as a human. Both paths merge live with everyone else's edits.
-- 👥 **Real-time collaboration.** Invite teammates, share folders or single files (view or edit), and see live cursors and who's viewing a note.
+- 👥 **Real-time collaboration.** Invite teammates and edit together with live cursors. Notes are **private by default** — share a folder or single file with the whole team or one person (view or edit), and folders/renames/moves sync live too.
 - 🔒 **Local-first and private.** A full desktop app that works offline. Your Markdown never travels the network in plain text; only opaque binary sync updates do, and each device re-derives its own `.md` files.
 - 🔎 **Fast search and links.** Built-in full-text search (SQLite FTS5), backlinks, and tags, all indexed locally.
 - 🖥️ **Native and cross-platform.** A lightweight Tauri v2 app for macOS, Windows, and Linux (iOS planned).

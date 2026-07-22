@@ -282,6 +282,33 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
           return false;
         }
 
+        // A ```html fenced block → render its HTML as an inline preview (the
+        // same sanitized render as a bare HTML block). The fence is what a
+        // pasted HTML snippet lands in (see paste.ts): it survives blank lines
+        // inside the markup, and shows raw source for editing when the cursor
+        // is inside it.
+        if (node.name === "FencedCode") {
+          const info = node.node.getChild("CodeInfo");
+          const lang = info
+            ? doc.sliceString(info.from, info.to).trim().toLowerCase()
+            : "";
+          if ((lang === "html" || lang === "htm") && !isActive(node.from, node.to)) {
+            const codeNode = node.node.getChild("CodeText");
+            const html = codeNode ? doc.sliceString(codeNode.from, codeNode.to) : "";
+            if (html.trim()) {
+              decos.push(
+                Decoration.replace({
+                  widget: new HtmlEmbedWidget(html, resolveAsset),
+                  block: true,
+                }).range(node.from, node.to)
+              );
+            }
+            return false;
+          }
+          // Non-HTML fences (and the active HTML fence) keep their raw source.
+          return;
+        }
+
         // GFM table → render as a real table off the active line; show the raw
         // pipe source (and descend for inline styling) while it's being edited.
         if (node.name === "Table") {

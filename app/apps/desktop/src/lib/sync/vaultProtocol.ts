@@ -15,15 +15,38 @@ export interface HelloFrame {
   priority?: string[];
 }
 
+/** A teammate's live "who's viewing what" state (mirror of the server type).
+ *  `docId` null means the user isn't viewing anything (or left) — clear them. */
+export interface PresenceState {
+  userId: string;
+  docId: string | null;
+  name: string;
+  color: string;
+  status: string;
+}
+
 export type ServerControl =
   | { t: "ready" }
   | { t: "drop"; docId: string }
   | { t: "reauth" }
   | { t: "registry" }
+  | { t: "member"; name: string }
+  | ({ t: "presence" } & PresenceState)
   | { t: "err"; message: string };
 
 export function encodeHello(frame: Omit<HelloFrame, "t">): string {
   return JSON.stringify({ t: "hello", ...frame });
+}
+
+/** Encode this client's presence frame (which note we're currently viewing).
+ *  `userId` is omitted — the server stamps it from our authenticated token. */
+export function encodePresence(frame: {
+  docId: string | null;
+  name: string;
+  color: string;
+  status: string;
+}): string {
+  return JSON.stringify({ t: "presence", ...frame });
 }
 
 /** Parse a server text control frame; null if it isn't one we recognise. */
@@ -39,6 +62,29 @@ export function parseServerControl(text: string): ServerControl | null {
   if (t === "ready") return { t: "ready" };
   if (t === "reauth") return { t: "reauth" };
   if (t === "registry") return { t: "registry" };
+  if (t === "member" && typeof (v as { name?: unknown }).name === "string") {
+    return { t: "member", name: (v as { name: string }).name };
+  }
+  if (t === "presence") {
+    const o = v as Record<string, unknown>;
+    if (
+      typeof o.userId === "string" &&
+      (o.docId === null || typeof o.docId === "string") &&
+      typeof o.name === "string" &&
+      typeof o.color === "string" &&
+      typeof o.status === "string"
+    ) {
+      return {
+        t: "presence",
+        userId: o.userId,
+        docId: (o.docId as string | null) ?? null,
+        name: o.name,
+        color: o.color,
+        status: o.status,
+      };
+    }
+    return null;
+  }
   if (t === "drop" && typeof (v as { docId?: unknown }).docId === "string") {
     return { t: "drop", docId: (v as { docId: string }).docId };
   }

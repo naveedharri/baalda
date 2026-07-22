@@ -11,12 +11,32 @@
 // CodeMirror — it moves opaque Yjs updates to the sink.
 
 import { ApiClient, ApiError } from "../api";
+import type { ActivityStatus } from "../prefs";
 import {
   bytesToBase64,
   decodeUpdateFrame,
   encodeHello,
+  encodePresence,
   parseServerControl,
 } from "./vaultProtocol";
+
+/** A teammate's live viewing state, surfaced to the UI for sidebar presence. */
+export interface VaultPeer {
+  userId: string;
+  /** The note they're currently viewing, or null when not on any note. */
+  docId: string | null;
+  name: string;
+  color: string;
+  status: ActivityStatus;
+}
+
+/** What this client broadcasts about itself over the vault channel. */
+export interface LocalPresence {
+  docId: string | null;
+  name: string;
+  color: string;
+  status: ActivityStatus;
+}
 
 export type VaultSyncStatus =
   | "idle" // not started / stopped
@@ -70,6 +90,13 @@ export interface VaultSyncEngineOptions {
    *  a teammate created/renamed/moved/deleted a folder or note. The client
    *  re-pulls the registry so its local tree reflects the change live. */
   onRegistryChanged?: () => void;
+  /** Fired when a new teammate joined the workspace (`member`): the client
+   *  refreshes its roster and shows a join celebration. */
+  onMemberJoined?: (name: string) => void;
+  /** Fired for each teammate presence update (`presence`): who is now viewing
+   *  which note (docId null = they left / closed the note). The sink aggregates
+   *  these into the sidebar roster. */
+  onPresence?: (peer: VaultPeer) => void;
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
   /** Backoff bounds (ms). */
@@ -106,6 +133,8 @@ export class VaultSyncEngine {
   private readonly onStatus?: (s: VaultSyncStatus) => void;
   private readonly onAclChanged?: () => void;
   private readonly onRegistryChanged?: () => void;
+  private readonly onMemberJoined?: (name: string) => void;
+  private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly wsFactory: WsFactory;
   private readonly baseMs: number;
   private readonly maxMs: number;
@@ -118,6 +147,10 @@ export class VaultSyncEngine {
   private stopped = false;
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Our own presence (which note we're viewing). Held so we can (re)announce it
+  // the moment the channel is ready — including after a reconnect.
+  private localPresence: LocalPresence | null = null;
+  private ready = false;
 
   constructor(opts: VaultSyncEngineOptions) {
     this.api = opts.api;
@@ -127,6 +160,8 @@ export class VaultSyncEngine {
     this.onStatus = opts.onStatus;
     this.onAclChanged = opts.onAclChanged;
     this.onRegistryChanged = opts.onRegistryChanged;
+    this.onMemberJoined = opts.onMemberJoined;
+    this.onPresence = opts.onPresence;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
     this.baseMs = opts.reconnect?.baseMs ?? 500;
@@ -140,6 +175,21 @@ export class VaultSyncEngine {
     return this.status;
   }
 
+  /**
+   * Broadcast which note this client is now viewing (null = none). Stored so it
+   * survives reconnects — the engine re-announces on every `ready`. Sent live
+   * only once the channel is ready; otherwise it goes out on the next ready.
+   */
+  setPresence(presence: LocalPresence | null): void {
+    this.localPresence = presence;
+    if (this.ready) this.sendPresence();
+  }
+
+  private sendPresence(): void {
+    if (!this.ws || !this.localPresence) return;
+    this.ws.send(encodePresence(this.localPresence));
+  }
+
   /** Open the connection (idempotent). */
   start(): void {
     if (this.stopped || this.ws) return;
@@ -149,6 +199,7 @@ export class VaultSyncEngine {
   /** Tear down permanently; no further reconnects. */
   stop(): void {
     this.stopped = true;
+    this.ready = false;
     if (this.reconnectTimer) {
       this.clearTimeoutImpl(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -228,7 +279,11 @@ export class VaultSyncEngine {
       if (!control) return;
       if (control.t === "ready") {
         this.attempt = 0; // a clean sync resets backoff
+        this.ready = true;
         this.setStatus("synced");
+        // (Re)announce our presence now the channel is live — covers first
+        // connect and every reconnect so teammates never see us go stale.
+        this.sendPresence();
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
       } else if (control.t === "reauth") {
@@ -238,6 +293,18 @@ export class VaultSyncEngine {
       } else if (control.t === "registry") {
         // Folder/note structure changed — re-pull the registry + refresh tree.
         this.onRegistryChanged?.();
+      } else if (control.t === "member") {
+        // A new teammate joined — refresh the roster + celebrate.
+        this.onMemberJoined?.(control.name);
+      } else if (control.t === "presence") {
+        // A teammate's viewing state changed — feed the sidebar roster.
+        this.onPresence?.({
+          userId: control.userId,
+          docId: control.docId,
+          name: control.name,
+          color: control.color,
+          status: control.status as ActivityStatus,
+        });
       } else if (control.t === "err") {
         // Server refused us mid-session (e.g. bad token) — reconnect fresh.
         this.onDisconnect();
@@ -256,6 +323,7 @@ export class VaultSyncEngine {
 
   private onDisconnect(): void {
     if (this.stopped) return;
+    this.ready = false; // must re-announce presence after we reconnect
     this.closeSocket();
     this.setStatus("error");
     this.scheduleReconnect();

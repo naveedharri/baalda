@@ -425,6 +425,43 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--text-tertiary);
   margin: 0 0 var(--sp-1) var(--sp-1);
 }
+/* Holds the recent cards. Collapsed it just stacks the 3 shown; once
+   "Load more" expands it, JS locks its height to that same collapsed footprint
+   and it scrolls internally — so the wordmark and action buttons above never
+   move (the whole card is vertically centered). */
+.recent-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.recent-scroll.expanded {
+  overflow-y: auto;
+  padding-right: 2px; /* breathing room beside the scrollbar */
+  scrollbar-width: thin;
+}
+/* "Load more (N)" — a quiet full-width reveal under the collapsed list. */
+.recent-more {
+  margin-top: var(--sp-1);
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  padding: var(--sp-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.recent-more:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.recent-more:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 .recent-card {
   display: flex;
   align-items: center;
@@ -1118,6 +1155,56 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--warning);
 }
 
+/* Live presence — a small stack of teammate faces on the right of a row showing
+   who is currently viewing that note (or, on a collapsed folder, the notes
+   inside it). Mirrors the editor's PresenceAvatar ring treatment, shrunk to fit
+   a 32px row. Each face's colour arrives inline as --user-color. */
+.tree-presence {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--sp-1);
+  /* Sits between the label and the ⋯ button; never pushed off by a long name
+     (the label ellipsizes first). */
+}
+.tree-presence-avatar {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border: 1.5px solid var(--user-color, var(--border-strong));
+  padding: 1px;
+  box-sizing: border-box;
+  margin-left: -6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tree-presence-avatar:first-child {
+  margin-left: 0;
+}
+.tree-presence-avatar svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 50%;
+}
+.tree-presence-avatar.offline {
+  opacity: 0.7;
+}
+/* Overflow chip (+N) when more teammates are here than fit in the stack. */
+.tree-presence-overflow {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 /* ⋯ actions — whispers in on row hover; its own hover stays small and faint */
 .tree-more {
   flex-shrink: 0;
@@ -1479,6 +1566,33 @@ button.primary.hero:hover:not(:disabled) {
 .update-banner {
   background: var(--accent-soft, var(--warning-soft));
 }
+
+/* Member-joined celebration: same banner shape, an accent tint, and a gentle
+   entrance so it reads as a happy moment rather than an alert. */
+.celebrate-banner {
+  background: var(--accent-soft, var(--warning-soft));
+  border: 1px solid var(--accent, transparent);
+  animation: celebrate-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+@keyframes celebrate-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+/* Confetti overlays the whole window and never intercepts clicks. */
+.celebrate-confetti {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 9999;
+}
 .update-detail {
   display: flex;
   flex-direction: column;
@@ -1728,6 +1842,14 @@ button.primary.hero:hover:not(:disabled) {
 .presence-light.active {
   background: var(--success);
 }
+/* Chosen availability (see AccountMenu): away → amber, busy → red. Matches the
+   Settings status dots and the note-roster peer dots. */
+.presence-light.away {
+  background: #f59e0b;
+}
+.presence-light.busy {
+  background: var(--danger);
+}
 .presence-light.idle {
   background: var(--warning);
   animation: sync-pulse 1.3s var(--ease) infinite;
@@ -1886,6 +2008,24 @@ button.primary.hero:hover:not(:disabled) {
   background: var(--bg-surface);
   border-radius: var(--radius-pill);
   padding: 1px var(--sp-2);
+}
+/* State chip on a switcher row: Local vs Synced. Distinct from --accent so it
+   reads as metadata, not an action. */
+.ws-badge {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: var(--radius-pill);
+  padding: 1px var(--sp-2);
+}
+.ws-badge.local {
+  color: var(--text-tertiary);
+  background: var(--bg-active);
+}
+.ws-badge.synced {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 .menu-item.subtle {
   color: var(--text-secondary);
@@ -2070,6 +2210,64 @@ button.primary.hero:hover:not(:disabled) {
   box-shadow: var(--shadow-sm);
   padding: var(--sp-6) var(--sp-8) var(--sp-8);
   animation: rise-in var(--t-fast) var(--ease) both;
+}
+/* A team section that isn't available until the workspace is synced. Shown
+   greyed in the nav (discoverable), with a lock glyph. */
+.settings-nav .menu-item.locked {
+  color: var(--text-tertiary);
+}
+.settings-nav .menu-item.locked .menu-icon {
+  opacity: 0.6;
+}
+.nav-lock {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+/* Turn-on-sync promo card on the General tab of a local workspace. */
+.sync-promo {
+  margin: var(--sp-4) 0 var(--sp-2);
+  padding: var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, var(--accent-soft), transparent 70%);
+}
+.sync-promo-title {
+  margin: 0 0 var(--sp-2);
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.sync-promo-desc {
+  margin: 0 0 var(--sp-4);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  max-width: 46ch;
+}
+/* Gate panel shown when a locked team section is opened on a local workspace. */
+.sync-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  max-width: 44ch;
+  padding: var(--sp-6) 0;
+}
+.sync-gate-icon {
+  width: 30px;
+  height: 30px;
+  color: var(--accent);
+}
+.sync-gate h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.sync-gate p {
+  margin: 0;
 }
 .settings-section-title {
   margin: 0 0 var(--sp-5);
@@ -3072,7 +3270,9 @@ button.primary.hero:hover:not(:disabled) {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 200;
+  /* Above the full-screen settings page (z-index 200) so a modal opened from
+     within Settings — e.g. Sign in from the Turn-on-sync card — sits on top. */
+  z-index: 300;
   animation: fade-in var(--t-med) var(--ease) both;
 }
 .modal {

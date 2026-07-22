@@ -80,23 +80,22 @@ export function SidebarHeader() {
     }
   };
 
-  // Signed out or no workspace yet: there's no workspace to lead with, so we
-  // say so plainly and show the local folder as what it actually is — the
-  // folder you're editing, not a workspace. "Switch" here changes the folder.
+  // A local (unsynced) folder is still a workspace — it just isn't syncing yet.
+  // Lead with its name and mark the state; "Switch" opens a different folder.
   if (!activeOrg) {
     return (
       <div className="sidebar-header">
         <div className="sidebar-header-main">
-          <span className="vault-name none">No workspace</span>
-        </div>
-        <div className="vault-line">
-          {FOLDER_ICON}
-          <span className="vault-line-name" title={vault.path}>
+          <span className="vault-name" title={vault.path}>
             {vault.name}
           </span>
           <button className="link-btn" onClick={() => void switchVault()}>
             Switch
           </button>
+        </div>
+        <div className="vault-line">
+          <span className="ws-badge local">Local</span>
+          <span className="vault-line-name">Not synced</span>
         </div>
       </div>
     );

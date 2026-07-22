@@ -130,6 +130,25 @@ describe("VaultSyncEngine", () => {
     expect(status).toBe("synced");
   });
 
+  it("fires onMemberJoined with the name on a member control frame", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const joined: string[] = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onMemberJoined: (name) => joined.push(name),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await tick();
+
+    ws!.onmessage?.({ data: JSON.stringify({ t: "member", name: "Ada" }) });
+    expect(joined).toEqual(["Ada"]);
+  });
+
   it("drops a doc on a drop control frame", async () => {
     const sink = new MemSink();
     let ws: FakeWs | null = null;

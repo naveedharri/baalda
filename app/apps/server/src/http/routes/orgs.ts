@@ -4,6 +4,7 @@ import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { canAddMember } from "../../billing/entitlements.js";
+import { announceMemberJoined } from "../../sync/member-events.js";
 import { billingEnabled } from "../../config.js";
 import type { BillingProvider } from "../../billing/provider.js";
 
@@ -142,6 +143,16 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
        VALUES ($1, $2, $3, 'member', now())`,
       [randomUUID(), organizationId, session.userId],
     );
+
+    // Announce to teammates already live in the workspace (this path bypasses
+    // Better Auth, so its hooks never fire — we do it explicitly here).
+    const who = await pool.query<{ name: string | null }>(
+      'SELECT name FROM "user" WHERE id = $1',
+      [session.userId],
+    );
+    const displayName = who.rows[0]?.name?.trim() || session.email;
+    void announceMemberJoined(organizationId, displayName);
+
     return c.json({ organizationId, name: target.name, alreadyMember: false });
   });
 

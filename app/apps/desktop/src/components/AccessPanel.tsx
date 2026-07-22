@@ -444,7 +444,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       <div className="access-body">
         {/* master list */}
         <div className="access-master">
-          <div className="access-listlabel">Your vault</div>
+          <div className="access-listlabel">Your workspace</div>
           {resources.length === 0 ? (
             <div className="muted perm-empty">Nothing synced yet.</div>
           ) : (

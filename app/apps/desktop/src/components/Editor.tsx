@@ -13,7 +13,8 @@ import { bridgeManager } from "../lib/bridge";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
 import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
-import { colorForUser, PRESENCE_OFFLINE } from "../lib/presence/color";
+import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../lib/presence/color";
+import type { ActivityStatus } from "../lib/prefs";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
 import { HtmlView } from "./HtmlView";
@@ -25,6 +26,8 @@ interface Peer {
   id: string;
   name: string;
   color: string;
+  /** Their chosen availability status, broadcast via awareness (`user.status`). */
+  status?: ActivityStatus;
   /** Line their cursor is on (from the `activity` awareness field), if known. */
   line: number | null;
   /** Timestamp (ms) of their last activity update — powers "last active". */
@@ -32,7 +35,7 @@ interface Peer {
 }
 
 interface AwarenessPeerState {
-  user?: { id?: string; name?: string; color?: string };
+  user?: { id?: string; name?: string; color?: string; status?: ActivityStatus };
   activity?: { line?: number; at?: number };
   ping?: { to?: string; name?: string; at?: number };
 }
@@ -52,11 +55,13 @@ function readPeers(awareness: Awareness): Peer[] {
         id: u.id,
         name: u.name ?? "Someone",
         color: u.color ?? colorForUser(u.id),
+        status: u.status,
         line,
         lastActive: at,
       });
     } else {
       if (prev.line == null && line != null) prev.line = line;
+      if (prev.status == null && u.status != null) prev.status = u.status;
       if (at != null && (prev.lastActive == null || at > prev.lastActive)) {
         prev.lastActive = at;
       }
@@ -113,14 +118,19 @@ function PresenceAvatar({
 }: {
   peer: Peer;
   className?: string;
-  /** When false the ring goes neutral gray — the peer isn't live. */
+  /** When false the ring goes neutral gray — the local session isn't live. */
   online?: boolean;
 }) {
   const svg = useMemo(() => characterSvg(peer.name || peer.id || "?"), [peer.name, peer.id]);
+  // The ring shows the peer's unique colour only when the local session is live
+  // AND the peer's own availability reads as present (online/busy). Away/invisible
+  // peers — or any peer when we're offline — get the neutral gray ring.
+  const tone = statusTone(peer.status);
+  const live = online && ringShowsColor(tone);
   return (
     <span
-      className={`presence-avatar${online ? "" : " offline"}${className ? ` ${className}` : ""}`}
-      style={{ "--user-color": online ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
+      className={`presence-avatar tone-${tone}${live ? "" : " offline"}${className ? ` ${className}` : ""}`}
+      style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
       aria-hidden="true"
       dangerouslySetInnerHTML={{ __html: svg }}
     />
@@ -181,6 +191,17 @@ function PeerRow({
 }) {
   const [pinged, setPinged] = useState(false);
   const editing = peer.line != null;
+  const tone = statusTone(peer.status);
+  // Availability wins over cursor activity: an away/busy teammate reads as
+  // away/busy even if their caret is still parked on a line.
+  const statusLabel =
+    tone === "away" || tone === "offline"
+      ? "Away"
+      : tone === "busy"
+        ? "Busy"
+        : editing
+          ? `Editing line ${peer.line}`
+          : "Viewing";
   return (
     <div className="peer-row">
       <PresenceAvatar peer={peer} className="sm" />
@@ -190,8 +211,8 @@ function PeerRow({
           {isSelf && <span className="muted"> (you)</span>}
         </span>
         <span className="peer-row-status">
-          <span className={`peer-dot${editing ? " active" : ""}`} />
-          {editing ? `Editing line ${peer.line}` : "Viewing"}
+          <span className={`peer-dot tone-${tone}${editing && tone === "online" ? " active" : ""}`} />
+          {statusLabel}
           {peer.lastActive != null && (
             <span className="peer-row-ago"> · {relativeAgo(peer.lastActive, now)}</span>
           )}

@@ -62,3 +62,33 @@ export function presenceUser(
 ): PresenceUser {
   return { id: userId, name, color: colorForUser(userId), ...(status ? { status } : {}) };
 }
+
+/**
+ * The visual tone of a presence indicator — the shared vocabulary the account
+ * avatar light and the note-roster rings both speak. It folds the four chosen
+ * availability states down to how *present* someone reads: `online`/`busy` are
+ * live (their unique ring colour shows), while `away`/`invisible` read as
+ * not-at-the-keyboard (a muted, neutral ring). This is what "the status depends
+ * on whether the user is active" means in practice.
+ */
+export type PresenceTone = "online" | "away" | "busy" | "offline";
+
+/** Fold a chosen availability status into a presence tone. */
+export function statusTone(status: ActivityStatus | undefined): PresenceTone {
+  switch (status) {
+    case "away":
+      return "away";
+    case "busy":
+      return "busy";
+    // "Invisible" is meant to read as offline to teammates.
+    case "invisible":
+      return "offline";
+    default:
+      return "online";
+  }
+}
+
+/** Whether a ring should show the user's unique colour (vs. neutral gray). */
+export function ringShowsColor(tone: PresenceTone): boolean {
+  return tone === "online" || tone === "busy";
+}

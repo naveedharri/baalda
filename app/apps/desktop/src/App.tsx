@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
 import { BacklinksPanel } from "./components/BacklinksPanel";
@@ -15,6 +15,7 @@ import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import { syncManager } from "./lib/sync/docSession";
 import { checkForUpdate, installUpdate, useUpdateState } from "./lib/updater";
+import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
 import { useStore } from "./store";
 
@@ -33,6 +34,44 @@ function RemovedBanner() {
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * Celebrates a teammate joining the workspace: a soft top banner (auto-fades
+ * after a few seconds) plus a one-shot confetti burst over the whole window.
+ * The chime is played by the store when the celebration is triggered.
+ */
+function MemberJoinedBanner() {
+  const memberJoined = useStore((s) => s.memberJoined);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Fire confetti whenever a new celebration starts (`at` changes on each join).
+  useEffect(() => {
+    if (!memberJoined || !canvasRef.current) return;
+    const cancel = runConfetti(canvasRef.current);
+    return cancel;
+  }, [memberJoined?.at]);
+
+  if (!memberJoined) return null;
+
+  return (
+    <>
+      <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
+      <div className="banner celebrate-banner" role="status">
+        <span>
+          🎉 <strong>{memberJoined.name}</strong> joined the workspace
+        </span>
+        <div className="banner-actions">
+          <button
+            className="secondary"
+            onClick={() => useStore.getState().dismissMemberJoined()}
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -390,6 +429,7 @@ export default function App() {
       </aside>
 
       <main className="main">
+        <MemberJoinedBanner />
         <UpdateBanner />
         <header className="main-header">
           <span className="note-title">{openNote?.title ?? "No note open"}</span>
