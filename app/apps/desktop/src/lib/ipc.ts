@@ -103,9 +103,13 @@ export interface RecentVault {
 }
 /** Recently opened vaults, newest first, pruned to those that still exist. */
 export const getRecentVaults = () => invoke<RecentVault[]>("get_recent_vaults");
-/** Forget one vault from the recents list. */
+/** Forget one vault from the recents list (files on disk are kept). */
 export const removeRecentVault = (path: string) =>
   invoke<void>("remove_recent_vault", { path });
+/** Move a local vault's folder (and all its notes) to the OS trash, then forget
+ *  it from recents. Destructive — the on-disk files are the only copy. */
+export const deleteVault = (path: string) =>
+  invoke<void>("delete_vault", { path });
 /** Create a new empty vault folder `<parent>/<name>` and open it. */
 export const createVault = (parent: string, name: string) =>
   invoke<VaultInfo>("create_vault", { parent, name });

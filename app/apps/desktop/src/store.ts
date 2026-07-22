@@ -163,6 +163,15 @@ interface AppStore {
    *  synced workspace's sync context behind. Used by the switcher's local rows
    *  and "Open a folder…". */
   openLocalWorkspace: (path: string) => Promise<void>;
+  /** Forget a local workspace from this device's list. The folder and its `.md`
+   *  files stay on disk — it can be re-opened later. */
+  removeLocalWorkspace: (path: string) => Promise<void>;
+  /** Move a local workspace's folder (and all its notes) to the OS trash, then
+   *  forget it. Destructive — there's no server copy, the on-disk files are the
+   *  only copy. */
+  deleteLocalWorkspace: (path: string) => Promise<void>;
+  /** Detach from the open local folder and drop to the empty/welcome state. */
+  closeLocalWorkspace: () => void;
 
   // Resolving a workspace's local folder (when none is bound yet)
   /** Bind `path` to `orgId`, open it, and enable sync. */
@@ -262,6 +271,48 @@ function forgetOrgVault(orgId: string): void {
   }
 }
 
+// A locally-cached list of the workspaces (orgs) this account belongs to, so the
+// signed-out welcome screen can still list your *remote* workspaces (with the
+// folder to reopen + resync) instead of only local folders. Refreshed on every
+// refreshWorkspace and — deliberately — KEPT across sign-out (that's the whole
+// point: you can pick a synced workspace to sign back into).
+const KNOWN_WORKSPACES_KEY = "context.knownWorkspaces";
+
+export interface KnownWorkspace {
+  id: string;
+  name: string;
+}
+
+export function readKnownWorkspaces(): KnownWorkspace[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(KNOWN_WORKSPACES_KEY) ?? "[]");
+    return Array.isArray(raw) ? (raw as KnownWorkspace[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeKnownWorkspaces(list: KnownWorkspace[]): void {
+  try {
+    localStorage.setItem(KNOWN_WORKSPACES_KEY, JSON.stringify(list));
+  } catch {
+    /* quota/unavailable — the cache is a convenience only */
+  }
+}
+
+// A workspace the user asked to open from the signed-out welcome screen but must
+// sign in for first. Consumed by landInLastWorkspace right after auth so we land
+// in exactly that workspace instead of the session's last-active one.
+let pendingOpenOrgId: string | null = null;
+export function requestOpenWorkspace(orgId: string | null): void {
+  pendingOpenOrgId = orgId;
+}
+function takePendingOpenWorkspace(): string | null {
+  const id = pendingOpenOrgId;
+  pendingOpenOrgId = null;
+  return id;
+}
+
 // The workspace the user was last actually working in (folder + org resolved
 // together). The server session carries an `activeOrganizationId`, but it can be
 // null (fresh session, 2+ orgs) and it doesn't know which *folder* to open — so
@@ -305,6 +356,14 @@ function forgetLastWorkspace(orgId?: string): void {
  */
 async function landInLastWorkspace(get: () => AppStore): Promise<void> {
   const orgs = get().organizations;
+  // An explicit "open this workspace" request (a remote workspace clicked on the
+  // signed-out welcome screen, which routed through sign-in) wins over every
+  // other heuristic — that's the workspace the user just asked for.
+  const requested = takePendingOpenWorkspace();
+  if (requested && orgs.some((o) => o.id === requested)) {
+    await get().setActiveOrganization(requested);
+    return;
+  }
   // The folder that's already open (App.tsx reopens the last one at launch) is
   // the strongest signal for "the workspace I was last in" — it unifies local
   // and synced workspaces under one recency signal.
@@ -694,6 +753,9 @@ export const useStore = create<AppStore>((set, get) => ({
         .then((invs) => invs.filter((i) => i.status === "pending"))
         .catch(() => []);
       set({ organizations, members, pendingInvitations, userInvitations });
+      // Cache the workspace list locally so the signed-out welcome screen can
+      // still offer them (kept across sign-out; refreshed here while signed in).
+      writeKnownWorkspaces(organizations.map((o) => ({ id: o.id, name: o.name })));
     } catch (e) {
       set({ authError: errMsg(e) });
     }
@@ -877,6 +939,41 @@ export const useStore = create<AppStore>((set, get) => ({
     await get().refreshTitles();
     // Give a brand-new empty folder its first-run welcome content.
     await get().seedLocalVaultIfEmpty();
+  },
+
+  removeLocalWorkspace: async (path) => {
+    // Forget it from this device's recents; the folder and its files stay on
+    // disk. If it's the one open now, close it and drop to the empty state —
+    // there's no server copy to fall back to, so we don't auto-switch elsewhere.
+    await ipc.removeRecentVault(path);
+    if (!get().syncEnabled && get().vault?.path === path) {
+      get().closeLocalWorkspace();
+    }
+  },
+
+  deleteLocalWorkspace: async (path) => {
+    // Tear down open state FIRST if this is the current folder, so nothing keeps
+    // reading from it while it's moved to the trash.
+    if (!get().syncEnabled && get().vault?.path === path) {
+      get().closeLocalWorkspace();
+    }
+    // Move the folder (and all its notes) to the OS trash; this also forgets it
+    // from recents. Destructive — the UI gates it behind a two-click confirm.
+    await ipc.deleteVault(path);
+  },
+
+  closeLocalWorkspace: () => {
+    // Detach from the open local folder and drop to the welcome/empty state.
+    syncManager.disable();
+    get().closeNote();
+    set({
+      vault: null,
+      locks: [],
+      syncEnabled: false,
+      syncStatus: "offline",
+      syncPending: false,
+      pendingWorkspaceFolder: null,
+    });
   },
 
   applyWorkspaceFolder: async (orgId, path) => {

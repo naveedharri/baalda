@@ -66,6 +66,16 @@ export class SyncManager {
   private vaultEngine: VaultSyncEngine | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
 
+  // The UI shows ONE connection indicator, but two things can drive it: the
+  // open note's provider (authoritative for that doc, incl. read-only grants)
+  // and the always-on vault channel (connects the instant a workspace opens,
+  // before any note). We track both and emit the effective status so switching
+  // workspaces lights up presence immediately — not only once a note is opened.
+  /** Latest per-note provider status; null when no networked note is open. */
+  private docStatus: SyncStatus | null = null;
+  /** Latest vault-channel status (the always-on background feed). */
+  private vaultStatus: VaultSyncStatus = "idle";
+
   // Vault-wide presence: which teammate is viewing which note. Keyed by userId
   // (last-write-wins across a user's devices), fed by the engine's presence
   // frames, surfaced to the sidebar. `viewingDocId` is our own current note.
@@ -73,9 +83,42 @@ export class SyncManager {
   private viewingDocId: string | null = null;
   private onVaultPresence?: (peers: VaultPeer[]) => void;
 
-  /** UI subscribes here to render the per-note sync indicator. */
+  /** UI subscribes here to render the connection indicator. */
   setStatusListener(cb: ((status: SyncStatus) => void) | undefined): void {
     this.onStatus = cb;
+  }
+
+  /** Map the vault channel's status onto the app-wide SyncStatus vocabulary.
+   *  The vault channel has no per-note "read-only" notion — that only applies
+   *  once a view-only note is open, and then the note's provider takes over. */
+  private vaultStatusAsSync(): SyncStatus {
+    switch (this.vaultStatus) {
+      case "synced":
+        return "synced";
+      case "connecting":
+        return "connecting";
+      case "no-access":
+        return "no-access";
+      case "error":
+        return "error";
+      default:
+        return "offline"; // "idle"
+    }
+  }
+
+  /** Push the effective status to the UI: an open networked note owns the
+   *  indicator; with none open we fall back to the always-on vault channel. */
+  private emitStatus(): void {
+    const effective = this.current
+      ? (this.docStatus ?? this.current.status)
+      : this.vaultStatusAsSync();
+    this.onStatus?.(effective);
+  }
+
+  /** Record the open note's provider status and re-emit the effective status. */
+  private handleDocStatus(s: SyncStatus): void {
+    this.docStatus = s;
+    this.emitStatus();
   }
 
   /**
@@ -170,9 +213,13 @@ export class SyncManager {
     this.presence = null;
     this.attachments = null;
     this.viewingDocId = null;
+    this.vaultStatus = "idle";
     this.clearVaultPresence();
     this.stopVaultEngine();
     this.closeCurrent();
+    // closeCurrent only emits when a note was open; make sure a note-less
+    // disable (e.g. switching to a local workspace) still drops to offline.
+    this.emitStatus();
   }
 
   /** UI subscribes here for the vault-wide background-sync indicator. */
@@ -228,6 +275,10 @@ export class SyncManager {
     const vaultId = this.registry.vaultId;
     if (!vaultId) return;
     this.stopVaultEngine();
+    // Reflect "connecting" the moment we switch into a workspace, so the light
+    // moves off a stale value before the socket reports back.
+    this.vaultStatus = "connecting";
+    if (!this.current) this.emitStatus();
     const store = new VaultDocStore({
       resolvePath: (docId) => this.registry.pathForDocId(docId),
     });
@@ -241,6 +292,8 @@ export class SyncManager {
         // clear it so the sidebar doesn't show ghosts (the engine re-announces
         // everyone on the next `synced`).
         if (s !== "synced") this.clearVaultPresence();
+        this.vaultStatus = s;
+        this.emitStatus();
         this.onVaultStatus?.(s);
       },
       // An ACL change in this vault may have flipped the open note's grant
@@ -321,11 +374,15 @@ export class SyncManager {
       doc: bridge.doc,
       docId: mapping.docId,
       vaultId: mapping.vaultId,
-      onStatus: this.onStatus,
+      onStatus: (s) => this.handleDocStatus(s),
       onPending: this.onPending,
       onFlushed: this.onFlushed,
     });
     this.current = sync;
+    // Take over the indicator from the vault channel right away with the
+    // provider's initial status (it fires again as the socket progresses).
+    this.docStatus = sync.status;
+    this.emitStatus();
 
     // INSTANT OPEN (spec 05 §1): we no longer BLOCK the editor on the initial
     // server sync. Vault-wide background sync has almost always already brought
@@ -369,6 +426,9 @@ export class SyncManager {
       // The closed note can't have outstanding local edits anymore — clear any
       // lingering "Saving…" so the next note starts clean.
       this.onPending?.(false);
+      // No note owns the indicator now — fall back to the vault channel.
+      this.docStatus = null;
+      this.emitStatus();
     }
     if (this.currentLocalAwareness) {
       this.currentLocalAwareness.destroy();

@@ -520,6 +520,12 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--text-tertiary);
   white-space: nowrap;
 }
+/* The Local/Remote tag on a workspace row, tucked into the top-right slot. */
+.recent-badge {
+  grid-area: time;
+  justify-self: end;
+  align-self: center;
+}
 .recent-remove {
   flex-shrink: 0;
   align-self: stretch;
