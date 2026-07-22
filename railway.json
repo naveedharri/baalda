@@ -5,7 +5,7 @@
     "dockerfilePath": "app/apps/server/Dockerfile"
   },
   "deploy": {
-    "preDeployCommand": ["npm run migrate:deploy"],
+    "preDeployCommand": ["node", "dist/db/migrate.js"],
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
