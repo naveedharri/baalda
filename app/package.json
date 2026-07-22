@@ -3,14 +3,18 @@
   "private": true,
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "workspaces": [
-    "apps/desktop",
-    "apps/server"
-  ],
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "dev:desktop": "npm run tauri dev --workspace=desktop",
-    "dev:server": "npm run dev --workspace=server",
-    "build:desktop": "npm run tauri build --workspace=desktop",
-    "test": "npm run test --workspaces --if-present"
+    "dev:desktop": "pnpm --filter desktop tauri dev",
+    "dev:server": "turbo run dev --filter=server",
+    "build": "turbo run build",
+    "build:desktop": "pnpm --filter desktop tauri build",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.10.5"
   }
 }

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": [
+    "DATABASE_URL",
+    "JWT_SECRET",
+    "BETTER_AUTH_URL",
+    "PORT",
+    "HOCUSPOCUS_PORT",
+    "SYNC_TOKEN_TTL_SECONDS",
+    "COMPACTION_THRESHOLD",
+    "CORS_ORIGINS",
+    "OPENAI_API_KEY",
+    "REDIS_URL",
+    "CONTEXT_IT",
+    "CONTEXT_SERVER"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

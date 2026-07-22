@@ -1,8 +1,8 @@
 // End-to-end client↔server integration (spec 03/04). Env-gated: it needs the
-// real server running (`npm run dev -w server`, with Docker Postgres up + migrated)
+// real server running (`pnpm --filter server dev`, with Docker Postgres up + migrated)
 // on :3010 (HTTP) / :3011 (Hocuspocus). Enable with CONTEXT_IT=1.
 //
-//   CONTEXT_IT=1 npm test -w desktop -- integration
+//   CONTEXT_IT=1 pnpm --filter desktop test -- integration
 //
 // It exercises the actual client modules: ApiClient (auth token capture, org,
 // vault, note registration, sync-token minting) and DocSync (HocuspocusProvider

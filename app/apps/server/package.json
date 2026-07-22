@@ -34,16 +34,17 @@
     "kysely": "^0.29.3",
     "pg": "^8.22.0",
     "ws": "^8.21.0",
-    "yjs": "^13.6.31"
+    "yjs": "catalog:"
   },
   "devDependencies": {
-    "@hocuspocus/provider": "^4.4.0",
+    "@hocuspocus/provider": "catalog:",
     "@types/node": "^24.10.0",
     "@types/pg": "^8.15.6",
     "@types/ws": "^8.18.1",
+    "standardwebhooks": "^1.0.0",
     "tsx": "^4.20.6",
-    "typescript": "~5.8.3",
-    "vitest": "^4.1.10",
-    "y-protocols": "^1.0.7"
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "y-protocols": "catalog:"
   }
 }

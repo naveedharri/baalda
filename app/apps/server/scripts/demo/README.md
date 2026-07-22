@@ -25,7 +25,7 @@ a path you set in your (git-ignored) `.env`; only these scripts live in git.
 
 ```bash
 cd app/apps/server
-npm run db:up          # local Postgres (host port 5439)
+pnpm run db:up          # local Postgres (host port 5439)
 # .env must exist with JWT_SECRET, and set at least DEMO_SOURCE_VAULT (below)
 ```
 
@@ -43,10 +43,10 @@ DEMO_OWNER_NAME=You
 ## Quickest path
 
 ```bash
-npm run demo     # reseed from scratch, then auto-launch the live teammates
+pnpm run demo     # reseed from scratch, then auto-launch the live teammates
 ```
 
-Or run the two phases separately (`npm run seed:demo:reset` then `npm run demo:activity`).
+Or run the two phases separately (`pnpm run seed:demo:reset` then `pnpm run demo:activity`).
 
 Useful env overrides:
 
@@ -62,10 +62,10 @@ The seed prints every account's email + the shared password at the end.
 
 ## Record
 
-1. Start the server (`npm run dev`) and the desktop app; sign in as your owner
+1. Start the server (`pnpm run dev`) and the desktop app; sign in as your owner
    account (OAuth, or email+password with the shared password), server URL
    `http://localhost:3010`.
-2. Launch the live teammates: `npm run demo:activity`. It connects the other 14
+2. Launch the live teammates: `pnpm run demo:activity`. It connects the other 14
    members as headless clients, concentrates them on a **hot set** of notes, and
    prints _which files to open on camera_. Open one and you'll see multiple
    profile circles + labelled, coloured remote carets gliding around, with
@@ -94,5 +94,5 @@ re-seed or set `"emailVerified" = true` on that user.
 
 - `config.ts` — env config, the 15-person roster, `colorForUser`, helpers
 - `content.ts` — vault walk, folder planning, synthetic notes, index notes
-- `seed-demo-org.ts` — the seed (`npm run seed:demo`)
-- `simulate-activity.ts` — the live simulator (`npm run demo:activity`)
+- `seed-demo-org.ts` — the seed (`pnpm run seed:demo`)
+- `simulate-activity.ts` — the live simulator (`pnpm run demo:activity`)
