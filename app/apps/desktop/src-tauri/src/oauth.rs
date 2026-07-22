@@ -80,25 +80,39 @@ pub fn google_oauth_listen(state: State<AppState>) -> AppResult<u16> {
     Ok(port)
 }
 
-/// Block until the redirect arrives, returning the one-time code. Errors if the
-/// flow returned an OAuth error, timed out, or `listen` was never called.
+/// Wait for the redirect and return the one-time code. Errors if the flow
+/// returned an OAuth error, timed out, or `listen` was never called.
+///
+/// `async` + `spawn_blocking` is load-bearing: the receive blocks for up to the
+/// flow timeout, and a *synchronous* command would run that on the main thread
+/// and freeze the whole webview until it returns (so nothing — not even a Cancel
+/// button — could respond). Off the main thread the UI stays live throughout.
 #[tauri::command]
-pub fn google_oauth_await(state: State<AppState>) -> AppResult<String> {
-    let rx = state
-        .oauth_rx
-        .lock()
-        .map_err(|_| AppError::new("oauth: state poisoned"))?
-        .take()
-        .ok_or_else(|| AppError::new("oauth: no listen in progress"))?;
+pub async fn google_oauth_await(state: State<'_, AppState>) -> AppResult<String> {
+    // Take the receiver out (dropping the guard) before we await — a MutexGuard
+    // can't be held across an await point, and the receiver moves into the task.
+    let rx = {
+        let mut guard = state
+            .oauth_rx
+            .lock()
+            .map_err(|_| AppError::new("oauth: state poisoned"))?;
+        guard
+            .take()
+            .ok_or_else(|| AppError::new("oauth: no listen in progress"))?
+    };
 
     // A hair longer than the listener's own deadline so we surface its message
     // rather than a bare channel timeout.
-    match rx.recv_timeout(FLOW_TIMEOUT + Duration::from_secs(5)) {
+    let recv = tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(FLOW_TIMEOUT + Duration::from_secs(5))
+    })
+    .await
+    .map_err(|e| AppError::new(format!("oauth: await task failed: {e}")))?;
+
+    match recv {
         Ok(Ok(code)) => Ok(code),
         Ok(Err(msg)) => Err(AppError::new(format!("Google sign-in failed: {msg}"))),
-        Err(RecvTimeoutError::Timeout) => {
-            Err(AppError::new("Google sign-in timed out"))
-        }
+        Err(RecvTimeoutError::Timeout) => Err(AppError::new("Google sign-in timed out")),
         Err(RecvTimeoutError::Disconnected) => {
             Err(AppError::new("Google sign-in was interrupted"))
         }

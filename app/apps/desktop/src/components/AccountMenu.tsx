@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type McpToolInfo, type McpTokenRow } from "../lib/api";
+import { type McpToolInfo, type McpTokenRow, type Member } from "../lib/api";
 import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import { classifyLimitError, type LimitKind, limitFromError } from "../lib/billing";
@@ -674,6 +674,10 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
   const [password, setPassword] = useState(import.meta.env.DEV ? "Context-Test-2026!" : "");
   const [urlDraft, setUrlDraft] = useState(serverUrl);
   const [busy, setBusy] = useState(false);
+  // Google sign-in runs in the system browser and the app just waits for the
+  // loopback handoff (up to a 3-min timeout). Its own busy flag lets us show a
+  // "waiting for your browser" state instead of a silently disabled button.
+  const [googleBusy, setGoogleBusy] = useState(false);
   // Google is only offered when the server is configured for it; ask on open
   // (and whenever the server changes) so a self-host without creds hides it.
   const [googleAvailable, setGoogleAvailable] = useState(false);
@@ -730,15 +734,35 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // Each Google attempt gets a generation number. Cancelling (or starting a new
+  // attempt) bumps it, so when an abandoned flow finally rejects — the loopback
+  // listener waits out its ~3-min timeout — we can drop that stale result instead
+  // of flashing a "timed out" error at someone who already moved on.
+  const googleFlow = useRef(0);
+
   const googleSignIn = async () => {
-    setBusy(true);
+    const flow = ++googleFlow.current;
+    useStore.setState({ authError: null });
+    setGoogleBusy(true);
     try {
       await useStore.getState().signInWithGoogle();
-    } catch {
-      /* error surfaced via authError */
+    } catch (e) {
+      if (flow === googleFlow.current) {
+        useStore.setState({ authError: e instanceof Error ? e.message : String(e) });
+      }
+      // else: cancelled or superseded — the user isn't waiting on this anymore.
     } finally {
-      setBusy(false);
+      if (flow === googleFlow.current) setGoogleBusy(false);
     }
+  };
+
+  // Stop waiting on the browser and return to the form so the user can retry or
+  // sign in with email instead. The abandoned loopback listener harmlessly times
+  // out on its own; its late result is ignored via the generation check above.
+  const cancelGoogleSignIn = () => {
+    googleFlow.current++;
+    setGoogleBusy(false);
+    useStore.setState({ authError: null });
   };
 
   return (
@@ -774,11 +798,19 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
               type="button"
               className="oauth-btn google"
               onClick={() => void googleSignIn()}
-              disabled={busy}
+              disabled={busy || googleBusy}
+              aria-busy={googleBusy}
             >
               <GoogleGlyph />
-              <span>Continue with Google</span>
+              <span>{googleBusy ? "Waiting for your browser…" : "Continue with Google"}</span>
             </button>
+            {googleBusy && (
+              <p className="auth-hint">
+                <button type="button" className="link-btn" onClick={cancelGoogleSignIn}>
+                  Cancel
+                </button>
+              </p>
+            )}
             <div className="auth-divider">
               <span>or</span>
             </div>
@@ -813,7 +845,7 @@ function AuthDialog({ onClose }: { onClose: () => void }) {
             minLength={8}
             required
           />
-          <button className="primary" type="submit" disabled={busy}>
+          <button className="primary" type="submit" disabled={busy || googleBusy}>
             {busy ? "…" : mode === "sign-in" ? "Sign in" : "Create account"}
           </button>
         </form>
@@ -1659,6 +1691,33 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     null,
   );
   const [upgradeOpen, setUpgradeOpen] = useState(false);
+  // Member removal: an inline "Remove → Confirm" per row so it's never one click.
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  // The caller's own role in this workspace, so we mirror the server's rules and
+  // only show a Remove button where it would actually succeed: owners can remove
+  // anyone but themselves and the (single) owner; admins can remove plain members.
+  const myRole = members.find((m) => m.userId === session?.user.id)?.role;
+  const canRemove = (m: Member): boolean =>
+    canManage &&
+    m.userId !== session?.user.id &&
+    m.role !== "owner" &&
+    (myRole === "owner" || m.role === "member");
+
+  const doRemove = async (userId: string) => {
+    setRemoveBusy(true);
+    setRemoveError(null);
+    try {
+      await useStore.getState().removeMember(userId);
+      setConfirmRemoveId(null);
+    } catch (e) {
+      setRemoveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRemoveBusy(false);
+    }
+  };
 
   // The workspace's shareable join code (owner/admin only; server creates it
   // lazily). Older servers without the endpoint simply hide the section.
@@ -1767,10 +1826,40 @@ function MembersTab({ canManage }: { canManage: boolean }) {
                 {m.userId === session?.user.id && <span className="muted"> (you)</span>}
               </span>
               <span className={`member-role ${m.role}`}>{m.role}</span>
+              {canRemove(m) &&
+                (confirmRemoveId === m.userId ? (
+                  <>
+                    <button
+                      className="link-btn danger"
+                      disabled={removeBusy}
+                      onClick={() => void doRemove(m.userId)}
+                    >
+                      {removeBusy ? "Removing…" : "Confirm"}
+                    </button>
+                    <button
+                      className="link-btn"
+                      disabled={removeBusy}
+                      onClick={() => setConfirmRemoveId(null)}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="link-btn danger"
+                    onClick={() => {
+                      setRemoveError(null);
+                      setConfirmRemoveId(m.userId);
+                    }}
+                  >
+                    Remove
+                  </button>
+                ))}
             </li>
           );
         })}
       </ul>
+      {removeError && <div className="auth-error">{removeError}</div>}
 
       {pendingInvitations.length > 0 && (
         <>

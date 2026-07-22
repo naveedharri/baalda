@@ -149,6 +149,8 @@ interface AppStore {
   turnOnSyncForCurrentVault: (name?: string) => Promise<void>;
   setActiveOrganization: (organizationId: string) => Promise<void>;
   inviteMember: (email: string, role: "member" | "admin") => Promise<void>;
+  /** Remove a member from the active workspace (owner/admin), then refresh. */
+  removeMember: (userId: string) => Promise<void>;
   acceptInvitation: (invitationId: string) => Promise<void>;
   joinWorkspace: (code: string) => Promise<void>;
   /** Detach a workspace from THIS device (forget its folder, stop syncing it).
@@ -534,21 +536,19 @@ export const useStore = create<AppStore>((set, get) => ({
 
   signInWithGoogle: async () => {
     set({ authError: null });
-    try {
-      await authManager.signInWithGoogle();
-      const session = await authManager.currentSession();
-      set({ session, authStatus: session ? "signed-in" : "signed-out" });
-      if (session) {
-        await get().refreshWorkspace();
-        await get().refreshBillingConfig();
-        // Open the workspace they last used, rather than making them pick one.
-        await landInLastWorkspace(get);
-        await get().refreshOrgBilling();
-        await get().openWelcomeIfPresent();
-      }
-    } catch (e) {
-      set({ authError: errMsg(e) });
-      throw e;
+    // Errors (incl. the loopback timeout on an abandoned flow) propagate to the
+    // caller, which decides whether to surface them — a cancelled/superseded flow
+    // must NOT flash a late error. See AuthDialog.googleSignIn.
+    await authManager.signInWithGoogle();
+    const session = await authManager.currentSession();
+    set({ session, authStatus: session ? "signed-in" : "signed-out" });
+    if (session) {
+      await get().refreshWorkspace();
+      await get().refreshBillingConfig();
+      // Open the workspace they last used, rather than making them pick one.
+      await landInLastWorkspace(get);
+      await get().refreshOrgBilling();
+      await get().openWelcomeIfPresent();
     }
   },
 
@@ -781,6 +781,13 @@ export const useStore = create<AppStore>((set, get) => ({
   inviteMember: async (email, role) => {
     const activeOrgId = get().session?.activeOrganizationId ?? undefined;
     await authManager.api.inviteMember({ email, role, organizationId: activeOrgId });
+    await get().refreshWorkspace();
+  },
+
+  removeMember: async (userId) => {
+    const activeOrgId = get().session?.activeOrganizationId;
+    if (!activeOrgId) throw new Error("No active workspace");
+    await authManager.api.removeMember(activeOrgId, userId);
     await get().refreshWorkspace();
   },
 
