@@ -8,6 +8,44 @@ function required(name: string, fallback?: string): string {
   return v;
 }
 
+/** The insecure example secret shipped in .env.example. Never allowed in prod. */
+const INSECURE_JWT_SECRET = "dev-only-insecure-change-me-please-32bytes";
+
+/**
+ * The shared signing secret (Better Auth crypto + HS256 sync/vault JWTs), read
+ * fail-closed. In production (NODE_ENV=production, set by the Dockerfile) an
+ * unset secret OR the known example placeholder is a FATAL startup error, so a
+ * deploy can never silently sign real tokens with a globally-known key
+ * (`cp .env.example .env` and forget). Outside production the placeholder is
+ * tolerated with a loud warning, so local dev / tests keep working unchanged.
+ */
+function jwtSecret(): string {
+  const v = process.env.JWT_SECRET;
+  const prod = process.env.NODE_ENV === "production";
+  if (v === undefined || v === "") {
+    if (prod) {
+      throw new Error(
+        "JWT_SECRET is required in production. Generate one with: openssl rand -base64 32",
+      );
+    }
+    console.warn(
+      "[config] JWT_SECRET is unset — falling back to an INSECURE development secret. Never run production this way.",
+    );
+    return INSECURE_JWT_SECRET;
+  }
+  if (v === INSECURE_JWT_SECRET) {
+    if (prod) {
+      throw new Error(
+        "JWT_SECRET is the insecure .env.example placeholder. Generate a real secret with: openssl rand -base64 32",
+      );
+    }
+    console.warn(
+      "[config] JWT_SECRET is the insecure .env.example placeholder — fine for local dev only, FATAL in production.",
+    );
+  }
+  return v;
+}
+
 function int(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
@@ -27,8 +65,9 @@ export const config = {
     "DATABASE_URL",
     "postgres://context:context@localhost:5439/context",
   ),
-  /** Shared secret: Better Auth crypto + HS256 per-doc sync JWTs. */
-  jwtSecret: required("JWT_SECRET", "dev-only-insecure-change-me-please-32bytes"),
+  /** Shared secret: Better Auth crypto + HS256 per-doc sync JWTs. Fail-closed
+   *  in production (see {@link jwtSecret}). */
+  jwtSecret: jwtSecret(),
   betterAuthUrl: required("BETTER_AUTH_URL", "http://localhost:3010"),
   port: int("PORT", 3010),
   hocuspocusPort: int("HOCUSPOCUS_PORT", 3011),

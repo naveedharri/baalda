@@ -68,9 +68,29 @@ fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
     (None, content)
 }
 
+/// Frontmatter above this size is ignored — real metadata is tiny, and a large
+/// blob is either junk or an attack. Bounds the bytes serde_yaml ever sees.
+const MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
+/// Max YAML anchor/alias sigils (`&`/`*`) tolerated before we refuse to parse.
+/// serde_yaml (unsafe-libyaml) materializes every alias into an owned Value
+/// with no expansion limit, so nested anchors/aliases are a billion-laughs DoS
+/// (a few KB → billions of nodes → OOM/crash). Legitimate frontmatter uses no
+/// anchors, so a small cap here defeats the bomb while leaving real notes
+/// untouched; even at the cap, alias doubling stays bounded to a few thousand
+/// nodes.
+const MAX_FRONTMATTER_SIGILS: usize = 32;
+
 /// Convert parsed YAML frontmatter into a compact JSON string.
 fn frontmatter_to_json(yaml: &str) -> Option<(String, serde_json::Value)> {
     if yaml.trim().is_empty() {
+        return None;
+    }
+    // Guard against YAML alias bombs before deserializing (see the consts).
+    if yaml.len() > MAX_FRONTMATTER_BYTES {
+        return None;
+    }
+    let sigils = yaml.bytes().filter(|&b| b == b'&' || b == b'*').count();
+    if sigils > MAX_FRONTMATTER_SIGILS {
         return None;
     }
     match serde_yaml::from_str::<serde_json::Value>(yaml) {
@@ -234,5 +254,24 @@ mod tests {
         let p = parse_note("---\ntags: one two three\n---\nbody", "s");
         assert!(p.tags.contains(&"one".to_string()));
         assert!(p.tags.contains(&"three".to_string()));
+    }
+
+    #[test]
+    fn yaml_alias_bomb_is_refused_not_expanded() {
+        // A billion-laughs frontmatter must be skipped (returns quickly, no
+        // frontmatter, no OOM) rather than deserialized. Nested anchor/alias
+        // chains push the sigil count over the cap, so parsing is refused.
+        let anchors = ['a', 'b', 'c', 'd', 'e', 'f'];
+        let mut yaml = String::from("a: &a [x,x,x,x,x,x,x,x,x,x]\n");
+        for w in anchors.windows(2) {
+            let (prev, cur) = (w[0], w[1]);
+            let refs = vec![format!("*{prev}"); 10].join(",");
+            yaml.push_str(&format!("{cur}: &{cur} [{refs}]\n"));
+        }
+        let content = format!("---\n{yaml}---\nbody");
+        let p = parse_note(&content, "s");
+        // Refused: no frontmatter materialized, body still intact.
+        assert!(p.frontmatter_json.is_none());
+        assert_eq!(p.body.trim(), "body");
     }
 }

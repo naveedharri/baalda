@@ -19,6 +19,11 @@ import { getSession } from "../session.js";
  */
 export const blobRoutes = new Hono();
 
+/** Max attachment upload size. Generous for real attachments (images, PDFs)
+ *  while stopping a single member from OOM-crashing the shared HTTP+sync
+ *  process with a multi-gigabyte body. */
+const MAX_BLOB_BYTES = 100 * 1024 * 1024; // 100 MB
+
 interface BlobRow {
   id: string;
   sha256: string;
@@ -51,9 +56,20 @@ blobRoutes.post("/vaults/:vaultId/blobs", async (c) => {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
 
+  // Reject oversized uploads before buffering the whole body into memory. A
+  // truthful Content-Length is short-circuited here; the post-read guard below
+  // catches a lying/absent one.
+  const declaredLen = Number(c.req.header("content-length"));
+  if (Number.isFinite(declaredLen) && declaredLen > MAX_BLOB_BYTES) {
+    return c.json({ error: "Attachment too large" }, 413);
+  }
+
   const body = new Uint8Array(await c.req.arrayBuffer());
   if (body.byteLength === 0) {
     return c.json({ error: "empty body" }, 400);
+  }
+  if (body.byteLength > MAX_BLOB_BYTES) {
+    return c.json({ error: "Attachment too large" }, 413);
   }
   const buf = Buffer.from(body);
 
@@ -124,8 +140,16 @@ blobRoutes.get("/blobs/:id", async (c) => {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
 
+  // The stored MIME is attacker-controlled (taken verbatim from the uploader's
+  // content-type). Serve every blob as a non-rendering download: `nosniff`
+  // stops the browser MIME-sniffing it into an active document, and
+  // `Content-Disposition: attachment` forces a download rather than inline
+  // rendering — so a stored text/html blob can't execute as script in the API
+  // origin. The desktop reads the raw bytes regardless of these headers.
   return c.body(blob.data, 200, {
     "Content-Type": blob.mime || "application/octet-stream",
     "Content-Length": String(blob.data.byteLength),
+    "X-Content-Type-Options": "nosniff",
+    "Content-Disposition": "attachment",
   });
 });

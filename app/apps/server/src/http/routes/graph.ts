@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
+import { listReadableDocsInVault } from "../../permissions/vault-docs.js";
 import { getSession } from "../session.js";
 import { cosineSimilarity, embed, tokenize } from "../../index/embedder.js";
 
@@ -45,7 +46,7 @@ graphRoutes.get("/vaults/:vaultId/graph", async (c) => {
   const gate = await gateVaultMember(vaultId, session.userId);
   if (!gate.ok) return c.json({ error: gate.error }, gate.status);
 
-  const { rows: noteRows } = await pool.query<{
+  const { rows: allNoteRows } = await pool.query<{
     id: string;
     title: string | null;
     rel_path: string;
@@ -54,6 +55,12 @@ graphRoutes.get("/vaults/:vaultId/graph", async (c) => {
       WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path`,
     [vaultId],
   );
+
+  // Private-by-default: restrict the graph to notes the caller may read, so a
+  // member can't harvest every private note's id/title/path. Owner/admin and
+  // Open vaults get the full set from the resolver. Mirrors GET /notes.
+  const readable = await listReadableDocsInVault(session.userId, vaultId);
+  const noteRows = allNoteRows.filter((n) => readable.has(n.id));
 
   const nodes = noteRows.map((n) => ({
     docId: n.id,
@@ -74,11 +81,15 @@ graphRoutes.get("/vaults/:vaultId/graph", async (c) => {
     "SELECT from_doc, to_title FROM note_links WHERE vault_id = $1",
     [vaultId],
   );
-  const links = linkRows.map((l) => ({
-    fromDoc: l.from_doc,
-    toTitle: l.to_title,
-    toDocId: byTitle.get(l.to_title.toLowerCase()) ?? null,
-  }));
+  // Only edges out of a readable note; targets already resolve within the
+  // readable node set (byTitle is built from noteRows).
+  const links = linkRows
+    .filter((l) => readable.has(l.from_doc))
+    .map((l) => ({
+      fromDoc: l.from_doc,
+      toTitle: l.to_title,
+      toDocId: byTitle.get(l.to_title.toLowerCase()) ?? null,
+    }));
 
   return c.json({ nodes, links });
 });
@@ -98,7 +109,7 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
   const kRaw = Number.parseInt(c.req.query("k") ?? "10", 10);
   const k = Number.isNaN(kRaw) || kRaw <= 0 ? 10 : Math.min(kRaw, 100);
 
-  const { rows } = await pool.query<{
+  const { rows: allRows } = await pool.query<{
     doc_id: string;
     title: string | null;
     rel_path: string;
@@ -111,6 +122,12 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
       WHERE ni.vault_id = $1`,
     [vaultId],
   );
+
+  // Restrict the candidate set to readable notes: the score is computed over
+  // note content, so scoring unreadable notes would be a content oracle.
+  // Mirrors the MCP search tool. Owner/admin + Open vaults see everything.
+  const readable = await listReadableDocsInVault(session.userId, vaultId);
+  const rows = allRows.filter((r) => readable.has(r.doc_id));
 
   const qVec = embed(q);
   const qTokens = Array.from(new Set(tokenize(q)));

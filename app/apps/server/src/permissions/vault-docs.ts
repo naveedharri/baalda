@@ -100,12 +100,13 @@ export async function listReadableDocsInVault(
   }
 
   // Non-privileged (private-by-default): readable docs are the union of
-  //   - notes the user created (created_by);
+  //   - notes the user created (created_by) — ONLY while still a member;
   //   - docs under a folder shared to the user OR the team (org grant), walking
   //     the subtree since folder grants inherit down;
   //   - files/notes shared directly to the user or the team.
-  // The org ($3) branches are gated by membership ($4) so a non-member with a
-  // stray doc id gets nothing. Mirrors resolver.sharePermission + creator rule.
+  // Both the creator branch and the org ($3) branches are gated by membership
+  // ($4) so a REMOVED member (session outlives removal) loses read on notes
+  // they authored — matching resolver.effectivePermission's creator rule.
   const isMember = row.role !== null;
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE shared_folders AS (
@@ -132,7 +133,7 @@ export async function listReadableDocsInVault(
      SELECT n.id FROM notes n
        WHERE n.vault_id = $2 AND n.deleted_at IS NULL
          AND (
-           n.created_by = $1
+           ($4 AND n.created_by = $1)
            OR n.folder_id IN (SELECT id FROM subtree)
            OR n.id IN (SELECT id FROM shared_files)
          )

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
+import { canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
 import { listReadableDocsInVault, listVisibleFolders } from "../../permissions/vault-docs.js";
 import { getSession } from "../session.js";
 
@@ -136,13 +137,21 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown folder" }, 404);
-    if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this vault" }, 403);
+    // Edit permission on the folder itself (not bare membership): owner/admin,
+    // the folder's creator, or an edit share. Blocks renaming/moving folders a
+    // member has no rights on.
+    if (!(await canEditFolder(session.userId, id))) {
+      return c.json({ error: "You cannot modify this folder" }, 403);
     }
     const oldPath: string = row.path;
     const newPath = typeof body.path === "string" ? body.path : oldPath;
     const newName = typeof body.name === "string" ? body.name : basename(newPath);
     const newParentId = body.parentId === undefined ? undefined : (body.parentId ?? null);
+    // Re-parenting under another folder must not be a way to change inherited
+    // access: require edit on the destination parent too (root/null is fine).
+    if (newParentId != null && !(await canEditFolder(session.userId, newParentId))) {
+      return c.json({ error: "You cannot move this folder there" }, 403);
+    }
 
     await pool.query(
       `UPDATE folders SET path = $1, name = $2${newParentId === undefined ? "" : ", parent_id = $4"}
@@ -169,14 +178,16 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown folder" }, 404);
-    if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this vault" }, 403);
+    if (!(await canEditFolder(session.userId, id))) {
+      return c.json({ error: "You cannot delete this folder" }, 403);
     }
+    // $2 is an exact match; $3 is the LIKE prefix with %/_ escaped so a folder
+    // path containing wildcards cannot widen the soft-delete beyond its subtree.
     await pool.query(
       `UPDATE notes SET deleted_at = now()
         WHERE vault_id = $1 AND deleted_at IS NULL
-          AND (rel_path = $2 OR rel_path LIKE $2 || '/%')`,
-      [row.vault_id, row.path],
+          AND (rel_path = $2 OR rel_path LIKE $3 || '/%' ESCAPE '\\')`,
+      [row.vault_id, row.path, likeEscape(row.path)],
     );
     await pool.query("DELETE FROM folders WHERE id = $1", [id]);
     changed(row.vault_id);
@@ -247,8 +258,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown note" }, 404);
-    if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this vault" }, 403);
+    // Edit permission on the note itself (owner/admin, creator, or edit share),
+    // not bare membership. This also closes the relocate-to-escalate path: a
+    // member with no access to the note can't rename/move it at all.
+    if (!(await canEditDoc(session.userId, id))) {
+      return c.json({ error: "You cannot modify this note" }, 403);
     }
     const relPath = typeof body.relPath === "string" ? body.relPath : row.rel_path;
     const title = body.title === undefined ? row.title : body.title;
@@ -272,8 +286,9 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     const row = rows[0];
     if (!row) return c.json({ error: "Unknown note" }, 404);
-    if (!(await orgRole((await vaultOrg(row.vault_id))!, session.userId))) {
-      return c.json({ error: "Not a member of this vault" }, 403);
+    // Edit permission required to destroy a note — not bare membership.
+    if (!(await canEditDoc(session.userId, id))) {
+      return c.json({ error: "You cannot delete this note" }, 403);
     }
     await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [id]);
     changed(row.vault_id);
@@ -317,21 +332,31 @@ async function rewriteDescendantPaths(
   // $4::int cast is load-bearing: a bare text param would select substring's
   // REGEX overload (substring(text FROM text)) and silently return NULL.
   const from = oldPath.length + 1;
+  // $3 is the LIKE prefix with %/_ escaped so a folder path containing SQL
+  // wildcards cannot match (and rewrite) unrelated notes/folders. The substring
+  // offset ($4) is the true prefix length, unaffected by escaping.
+  const prefix = likeEscape(oldPath);
   await pool.query(
     `UPDATE folders
         SET path = $2 || substring(path FROM $4::int)
-      WHERE vault_id = $1 AND path LIKE $3 || '/%'`,
-    [vaultId, newPath, oldPath, from],
+      WHERE vault_id = $1 AND path LIKE $3 || '/%' ESCAPE '\\'`,
+    [vaultId, newPath, prefix, from],
   );
   await pool.query(
     `UPDATE notes
         SET rel_path = $2 || substring(rel_path FROM $4::int), updated_at = now()
-      WHERE vault_id = $1 AND rel_path LIKE $3 || '/%'`,
-    [vaultId, newPath, oldPath, from],
+      WHERE vault_id = $1 AND rel_path LIKE $3 || '/%' ESCAPE '\\'`,
+    [vaultId, newPath, prefix, from],
   );
 }
 
 function basename(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? path : path.slice(i + 1);
+}
+
+/** Escape SQL LIKE metacharacters (\ % _) so a value is matched literally under
+ *  `LIKE … ESCAPE '\'`. */
+function likeEscape(s: string): string {
+  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }

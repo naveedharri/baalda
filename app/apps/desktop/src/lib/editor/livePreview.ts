@@ -69,20 +69,37 @@ const BLOCKED_HTML_TAGS = new Set([
  * whole app away). `DOMParser` splits head/body even for a full-document paste,
  * so `<!DOCTYPE html>…<body>…` renders just its body content.
  */
+/**
+ * Is a URL attribute value dangerous to keep? Browsers ignore ASCII whitespace
+ * and control chars inside a scheme, so `java\tscript:` executes — strip those
+ * before checking, then block script-y schemes and non-image `data:` (which can
+ * carry `data:text/html`). A tab/newline no longer defeats the check.
+ */
+function isDangerousUrl(raw: string): boolean {
+  const v = raw.replace(/[\u0000-\u0020]+/g, "").toLowerCase();
+  if (v.startsWith("data:")) return !v.startsWith("data:image/");
+  return v.startsWith("javascript:") || v.startsWith("vbscript:");
+}
+
 function renderEmbeddedHtml(target: HTMLElement, html: string, resolveAsset: ResolveAsset) {
   const parsed = new DOMParser().parseFromString(html, "text/html");
   parsed.querySelectorAll("*").forEach((el) => {
-    if (BLOCKED_HTML_TAGS.has(el.tagName)) {
+    // Uppercase so a foreign-content (SVG/MathML) <script> — whose tagName is
+    // lowercase — is caught by the same blocklist as an HTML one.
+    if (BLOCKED_HTML_TAGS.has(el.tagName.toUpperCase())) {
       el.remove();
       return;
     }
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
-      const value = attr.value.trim().toLowerCase();
       const isUrlAttr = name === "href" || name === "src" || name === "xlink:href";
       if (name.startsWith("on")) {
+        // Inline event handlers.
         el.removeAttribute(attr.name);
-      } else if (isUrlAttr && value.startsWith("javascript:")) {
+      } else if (name === "style") {
+        // Inline styles enable full-screen fixed overlays / UI spoofing.
+        el.removeAttribute(attr.name);
+      } else if (isUrlAttr && isDangerousUrl(attr.value)) {
         el.removeAttribute(attr.name);
       }
     }

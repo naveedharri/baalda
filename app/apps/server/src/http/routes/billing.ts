@@ -63,8 +63,21 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
   billing.post("/billing/webhook", async (c) => {
     if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
 
+    // This route is unauthenticated (signature is checked below), so bound the
+    // body BEFORE buffering it — a Polar event is a few KB; 256 KB is ample.
+    // Without this an attacker who knows the path could OOM the shared process
+    // with a huge payload before the signature check ever runs.
+    const MAX_WEBHOOK_BYTES = 256 * 1024;
+    const declaredLen = Number(c.req.header("content-length"));
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_WEBHOOK_BYTES) {
+      return c.json({ error: "payload too large" }, 413);
+    }
+
     // MUST read the raw body before any JSON parsing so the signature matches.
     const raw = await c.req.text();
+    if (Buffer.byteLength(raw, "utf8") > MAX_WEBHOOK_BYTES) {
+      return c.json({ error: "payload too large" }, 413);
+    }
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((v, k) => {
       headers[k] = v;
