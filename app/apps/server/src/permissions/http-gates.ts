@@ -8,8 +8,15 @@ import {
   isLocked,
   resolveAccessForUser,
 } from "./resolver.js";
+import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
 
 type Queryable = Pick<pg.Pool, "query">;
+
+/** Escape SQL LIKE metacharacters so a value is matched literally under
+ *  `LIKE … ESCAPE '\'`. */
+function likeEscape(s: string): string {
+  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
 
 /**
  * Authorization gates for the session-authenticated HTTP registry/blob routes.
@@ -73,4 +80,67 @@ export async function canEditFolder(
   if (!ctx) return false;
   const resolved = await resolveAccessForUser(ctx, userId, role, db);
   return resolved.permission === "edit";
+}
+
+/**
+ * May `userId` read attachment blob `relPath` in vault `vaultId`?
+ *
+ * Attachments have no per-blob ACL row, so their access derives from the notes
+ * that embed them: a caller with vault-wide read (owner/admin, or an
+ * Open/Read-only grant) sees every blob — including orphaned ones — while a
+ * scoped member may fetch a blob only if some note they can READ references it.
+ * This closes the IDOR where any member could download every attachment
+ * (including those in private notes) while keeping attachment sync working for
+ * legitimately-shared notes.
+ *
+ * Best-effort by design: the reference check reads `note_index.content`, so a
+ * just-embedded attachment becomes fetchable to other readers once its note is
+ * indexed (attachment sync is already eventually-consistent).
+ */
+export async function canReadAttachment(
+  userId: string,
+  vaultId: string,
+  relPath: string | null,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
+  const access = await vaultAccess(db, userId, vaultId);
+  if (!access) return false; // unknown vault or not a member
+  if (access.vaultWide) return true; // owner/admin or vault-wide grant
+  if (!relPath) return false; // legacy blob w/o a path — no readable note to tie it to
+
+  const readable = await listReadableDocsInVault(userId, vaultId, db);
+  if (readable.size === 0) return false;
+  const { rows } = await db.query<{ ok: number }>(
+    `SELECT 1 AS ok FROM note_index
+      WHERE vault_id = $1 AND doc_id = ANY($2::text[])
+        AND content LIKE '%' || $3 || '%' ESCAPE '\\'
+      LIMIT 1`,
+    [vaultId, [...readable], likeEscape(relPath)],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Filter a vault's blob list to the ones `userId` may read (see
+ * {@link canReadAttachment}). Vault-wide readers get everything; a scoped
+ * member gets only blobs referenced by a note they can read.
+ */
+export async function filterReadableBlobs<T extends { rel_path: string | null }>(
+  userId: string,
+  vaultId: string,
+  blobs: T[],
+  db: Queryable = defaultPool,
+): Promise<T[]> {
+  const access = await vaultAccess(db, userId, vaultId);
+  if (!access) return [];
+  if (access.vaultWide) return blobs;
+
+  const readable = await listReadableDocsInVault(userId, vaultId, db);
+  if (readable.size === 0) return [];
+  const { rows } = await db.query<{ content: string | null }>(
+    `SELECT content FROM note_index WHERE vault_id = $1 AND doc_id = ANY($2::text[])`,
+    [vaultId, [...readable]],
+  );
+  const haystack = rows.map((r) => r.content ?? "").join("\n");
+  return blobs.filter((b) => !!b.rel_path && haystack.includes(b.rel_path));
 }

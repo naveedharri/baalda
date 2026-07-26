@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
+import { canReadAttachment, filterReadableBlobs } from "../../permissions/http-gates.js";
 import { getSession } from "../session.js";
 
 /**
@@ -115,7 +116,10 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
        FROM blobs WHERE vault_id = $1 ORDER BY rel_path`,
     [vaultId],
   );
-  return c.json({ blobs: rows.map(toMeta) });
+  // Private-by-default: a scoped member only sees blobs referenced by notes
+  // they can read (owner/admin + Open vaults see all). Mirrors the download gate.
+  const visible = await filterReadableBlobs(session.userId, vaultId, rows);
+  return c.json({ blobs: visible.map(toMeta) });
 });
 
 // ── download ────────────────────────────────────────────────────────────────
@@ -128,16 +132,23 @@ blobRoutes.get("/blobs/:id", async (c) => {
     vault_id: string | null;
     org_id: string | null;
     mime: string | null;
+    rel_path: string | null;
     data: Buffer | null;
-  }>("SELECT vault_id, org_id, mime, data FROM blobs WHERE id = $1", [id]);
+  }>("SELECT vault_id, org_id, mime, rel_path, data FROM blobs WHERE id = $1", [id]);
   const blob = rows[0];
   if (!blob || !blob.data) return c.json({ error: "Blob not found" }, 404);
 
-  // View requires vault membership (via the blob's note collection, or its
-  // org_id fallback for legacy rows without vault_id).
+  // Membership is necessary but not sufficient (via the blob's note collection,
+  // or its org_id fallback for legacy rows without vault_id).
   const org = blob.vault_id ? await vaultOrg(blob.vault_id) : blob.org_id;
   if (!org || !(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
+  }
+  // Per-attachment ACL: a scoped member may only download a blob referenced by
+  // a note they can read (owner/admin + Open vaults are allowed everything).
+  // Legacy rows without a vault_id keep membership-only access (no note to gate on).
+  if (blob.vault_id && !(await canReadAttachment(session.userId, blob.vault_id, blob.rel_path))) {
+    return c.json({ error: "You do not have access to this attachment" }, 403);
   }
 
   // The stored MIME is attacker-controlled (taken verbatim from the uploader's

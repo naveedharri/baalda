@@ -97,8 +97,12 @@ export class AuthManager {
    * like an email/password sign-in.
    */
   async signInWithGoogle(): Promise<AuthUser> {
-    const port = await ipc.googleOauthListen();
-    const redirect = `http://127.0.0.1:${port}/cb`;
+    const { port, state } = await ipc.googleOauthListen();
+    // Embed the loopback listener's single-use nonce in the callback URL. The
+    // server's `finish` only sets `code`/`error`, so this `state` survives the
+    // round-trip and the Rust listener rejects any callback that doesn't echo
+    // it — blocking a local process from injecting its own auth code.
+    const redirect = `http://127.0.0.1:${port}/cb?state=${encodeURIComponent(state)}`;
     const callbackURL = `${this.serverUrl}/api/desktop-auth/finish?redirect=${encodeURIComponent(
       redirect,
     )}`;

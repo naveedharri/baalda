@@ -25,7 +25,7 @@ type Queryable = Pick<pg.Pool, "query">;
  */
 /** Resolve a user's vault-level posture: their org, role, and whether they have
  *  vault-wide read (owner/admin, or a vault-scoped Open/Read-only grant). */
-async function vaultAccess(
+export async function vaultAccess(
   db: Queryable,
   userId: string,
   vaultId: string,

@@ -5,7 +5,17 @@ import { testAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, signUp } from "./helpers/auth.js";
-import { seedMember, seedOrg, seedVault } from "./helpers/seed.js";
+import { seedMember, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
+
+/** Insert a note_index row so an attachment reference is discoverable by the
+ *  per-attachment ACL (which scans indexed note content). */
+async function indexNote(docId: string, vaultId: string, content: string) {
+  await pool.query(
+    `INSERT INTO note_index (doc_id, vault_id, title, content, vector, updated_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, now())`,
+    [docId, vaultId, "t", content, JSON.stringify([])],
+  );
+}
 
 const app = createApp(testAppDeps());
 
@@ -146,5 +156,49 @@ describe("attachment blob store (spec 02 §2/§5A)", () => {
     expect((await uploadBlob(null, vault, new Uint8Array([1]))).status).toBe(401);
     expect((await uploadBlob(owner.token, "no-such-vault", new Uint8Array([1]))).status).toBe(404);
     expect((await downloadBlob(owner.token, "no-such-blob")).status).toBe(404);
+  });
+
+  // F13: a scoped member must not be able to list/download attachments of notes
+  // they cannot read, while still getting attachments of notes they can.
+  it("scopes a member's blob access to attachments of readable notes", async () => {
+    const owner = await signUp("owner@blob5.com");
+    const org = await seedOrg("Acme", "acme-blob5");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    // Private-by-default vault: a plain member with no shares.
+    const member = await signUp("member@blob5.com");
+    await seedMember(org, member.userId, "member");
+
+    // Owner's private note references secret.png; member's own note references mine.png.
+    const secretNote = await seedNote(vault, null, "Secret.md", owner.userId);
+    await indexNote(secretNote, vault, "see ![x](/attachments/secret.png)");
+    const myNote = await seedNote(vault, null, "Mine.md", member.userId);
+    await indexNote(myNote, vault, "mine ![y](/attachments/mine.png)");
+
+    const secretBlob = (await (
+      await uploadBlob(owner.token, vault, new Uint8Array([1, 1]), {
+        relPath: "attachments/secret.png",
+      })
+    ).json()) as { id: string };
+    const mineBlob = (await (
+      await uploadBlob(owner.token, vault, new Uint8Array([2, 2]), {
+        relPath: "attachments/mine.png",
+      })
+    ).json()) as { id: string };
+
+    // Owner (vault-wide) sees and downloads both.
+    const ownerList = (await (await listBlobs(owner.token, vault)).json()) as {
+      blobs: unknown[];
+    };
+    expect(ownerList.blobs).toHaveLength(2);
+    expect((await downloadBlob(owner.token, secretBlob.id)).status).toBe(200);
+
+    // Member: only the attachment of their own readable note.
+    expect((await downloadBlob(member.token, secretBlob.id)).status).toBe(403);
+    expect((await downloadBlob(member.token, mineBlob.id)).status).toBe(200);
+    const memberList = (await (await listBlobs(member.token, vault)).json()) as {
+      blobs: Array<{ relPath: string | null }>;
+    };
+    expect(memberList.blobs.map((b) => b.relPath)).toEqual(["attachments/mine.png"]);
   });
 });
