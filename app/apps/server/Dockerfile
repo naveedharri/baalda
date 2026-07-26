@@ -49,4 +49,13 @@ COPY --from=build /out ./
 ENV PORT=3010
 EXPOSE 3010
 
+# Bound V8's heap so it garbage-collects aggressively instead of letting RSS
+# ratchet toward the host's total RAM. On a container with no memory limit,
+# Node otherwise sizes its old space against the (large) host and lets memory
+# creep into the gigabytes over days of allocation churn — which bills as
+# continuous memory usage even with no traffic. 512 MB is ~3x the idle
+# footprint (~160 MB), ample for backfill/compaction of a single note while
+# keeping resident memory low. Pair with a container memory limit for a hard cap.
+ENV NODE_OPTIONS="--max-old-space-size=512"
+
 CMD ["node", "dist/index.js"]
