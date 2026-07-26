@@ -208,9 +208,12 @@ export async function effectivePermission(
   let granted: Permission;
   if (role === "owner" || role === "admin") {
     granted = "edit";
-  } else if (loc.createdBy && loc.createdBy === userId) {
+  } else if (role !== null && loc.createdBy && loc.createdBy === userId) {
     // Private-by-default: a member always has edit on a note they created, even
-    // with no explicit share (that's what makes "my private notes" work).
+    // with no explicit share (that's what makes "my private notes" work). The
+    // `role !== null` gate is load-bearing: a user REMOVED from the vault must
+    // lose this grant (their session outlives removal), else they keep edit on
+    // notes they authored and can re-mint sync tokens indefinitely.
     granted = "edit";
   } else {
     granted = await sharePermission(

@@ -38,9 +38,34 @@ pub fn read_binary_file(vault: &Path, rel: &str) -> AppResult<Vec<u8>> {
     Ok(std::fs::read(&abs)?)
 }
 
+/// A binary write may only target the `attachments/` subtree — never a note
+/// path, the hidden `.context/` store, or any ignored/dotfile segment.
+/// Server-supplied blob `rel_path`s flow into `write_binary_file`, so this
+/// bounds an attacker-chosen path. Defence in depth behind the TS
+/// `isSafeAttachmentRelPath` download filter and `resolve_in_vault`'s traversal
+/// check.
+fn ensure_attachment_rel(rel: &str) -> AppResult<()> {
+    let mut segs = rel.split('/');
+    if segs.next() != Some("attachments") {
+        return Err(AppError::new("attachment path must be under attachments/"));
+    }
+    let mut named = false;
+    for seg in segs {
+        named = true;
+        if seg.is_empty() || seg == "." || seg == ".." || is_ignored_name(seg) {
+            return Err(AppError::new("invalid attachment path segment"));
+        }
+    }
+    if !named {
+        return Err(AppError::new("attachment path must name a file"));
+    }
+    Ok(())
+}
+
 /// Atomic write of raw bytes: temp file in the same dir, then rename over the
 /// target so readers never observe a half-written file. Creates parent dirs.
 pub fn write_binary_file(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
+    ensure_attachment_rel(rel)?;
     let abs = resolve_in_vault(vault, rel)?;
     let parent = abs
         .parent()
@@ -138,6 +163,21 @@ mod tests {
         assert!(write_binary_file(tmp.path(), "../escape.bin", &[1]).is_err());
         assert!(read_binary_file(tmp.path(), "../../etc/passwd").is_err());
         assert!(write_binary_file(tmp.path(), "attachments/../../x.bin", &[1]).is_err());
+    }
+
+    #[test]
+    fn write_confined_to_attachments_subtree() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A server-supplied rel_path targeting a note or the hidden .context
+        // store must be refused even though it does not escape the vault.
+        assert!(write_binary_file(tmp.path(), ".context/index.sqlite", &[1]).is_err());
+        assert!(write_binary_file(tmp.path(), "Team Plans.md", &[1]).is_err());
+        assert!(write_binary_file(tmp.path(), "attachments/.context/x", &[1]).is_err());
+        assert!(write_binary_file(tmp.path(), "attachments/.hidden", &[1]).is_err());
+        assert!(write_binary_file(tmp.path(), "attachments", &[1]).is_err());
+        // Legitimate attachment paths still work.
+        assert!(write_binary_file(tmp.path(), "attachments/ok.png", &[1]).is_ok());
+        assert!(write_binary_file(tmp.path(), "attachments/sub/ok.pdf", &[1]).is_ok());
     }
 
     #[test]

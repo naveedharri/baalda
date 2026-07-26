@@ -226,7 +226,12 @@ export const keychainDelete = (serviceKey: string) =>
 // (so the caller can build the callback URL); `await` blocks until the redirect
 // lands and resolves with the one-time handoff code.
 
-export const googleOauthListen = () => invoke<number>("google_oauth_listen");
+/** Loopback port + the single-use `state` nonce to embed in the callback URL. */
+export interface OauthListen {
+  port: number;
+  state: string;
+}
+export const googleOauthListen = () => invoke<OauthListen>("google_oauth_listen");
 export const googleOauthAwait = () => invoke<string>("google_oauth_await");
 
 // ---- Sync server URL (app config, next to last-vault) ----------------------

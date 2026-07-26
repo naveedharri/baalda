@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AttachmentSync,
   diffAttachments,
+  isSafeAttachmentRelPath,
   mimeForPath,
   type AttachmentSyncDeps,
   type LocalAttachment,
@@ -39,6 +40,35 @@ describe("diffAttachments (content-hash diff)", () => {
     ];
     const { toDownload } = diffAttachments([], server);
     expect(toDownload.map((b) => b.id)).toEqual(["3"]);
+  });
+
+  it("refuses server blobs whose relPath escapes attachments/ (path-traversal ACL bypass)", () => {
+    const server: ServerBlob[] = [
+      { id: "evil-ctx", relPath: ".context/index.sqlite", sha256: "1" },
+      { id: "evil-note", relPath: "Team Plans.md", sha256: "2" },
+      { id: "evil-dot", relPath: "attachments/.context/x", sha256: "3" },
+      { id: "evil-up", relPath: "attachments/../secret", sha256: "4" },
+      { id: "ok", relPath: "attachments/img.png", sha256: "5" },
+      { id: "ok-sub", relPath: "attachments/sub/doc.pdf", sha256: "6" },
+    ];
+    const { toDownload } = diffAttachments([], server);
+    // Only the two legitimate attachment paths survive; the rest are dropped.
+    expect(toDownload.map((b) => b.id).sort()).toEqual(["ok", "ok-sub"]);
+  });
+});
+
+describe("isSafeAttachmentRelPath", () => {
+  it("accepts only non-traversing paths under attachments/", () => {
+    expect(isSafeAttachmentRelPath("attachments/a.png")).toBe(true);
+    expect(isSafeAttachmentRelPath("attachments/sub/deep/b.pdf")).toBe(true);
+    // Rejected: root files, dotfiles/.context, traversal, wrong root, bare dir.
+    expect(isSafeAttachmentRelPath("note.md")).toBe(false);
+    expect(isSafeAttachmentRelPath(".context/index.sqlite")).toBe(false);
+    expect(isSafeAttachmentRelPath("attachments/.hidden")).toBe(false);
+    expect(isSafeAttachmentRelPath("attachments/../x")).toBe(false);
+    expect(isSafeAttachmentRelPath("attachments")).toBe(false);
+    expect(isSafeAttachmentRelPath("attachments\\..\\x")).toBe(false);
+    expect(isSafeAttachmentRelPath("")).toBe(false);
   });
 });
 

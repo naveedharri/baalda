@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 // `@tauri-apps/api` (unavailable in the Node test env). These fakes stand in for
 // the Rust loopback + keychain + browser-opener.
 vi.mock("../../ipc", () => ({
-  googleOauthListen: vi.fn(async () => 5123),
+  googleOauthListen: vi.fn(async () => ({ port: 5123, state: "test-nonce" })),
   googleOauthAwait: vi.fn(async () => "code-xyz"),
   openExternal: vi.fn(async () => {}),
   keychainSet: vi.fn(async () => {}),
@@ -44,6 +44,12 @@ describe("AuthManager.signInWithGoogle", () => {
     expect(api.socialSignInUrl).toHaveBeenCalledWith(
       "google",
       expect.stringContaining("127.0.0.1%3A5123%2Fcb"),
+    );
+    // …and carries the listener's CSRF state nonce (URL-encoded in the nested
+    // redirect), so a foreign callback is rejected by the Rust listener.
+    expect(api.socialSignInUrl).toHaveBeenCalledWith(
+      "google",
+      expect.stringContaining("state%3Dtest-nonce"),
     );
     // The authorize URL is opened in the system browser.
     expect(ipc.openExternal).toHaveBeenCalledWith("https://accounts.google.com/authorize?x=1");

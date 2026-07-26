@@ -32,10 +32,29 @@ export interface AttachmentDiff {
 }
 
 /**
+ * Whether a server-supplied `relPath` is a safe attachment target to write to
+ * disk. The server stores the uploader's `x-rel-path` header verbatim, so a
+ * malicious member could set it to `.context/index.sqlite` or a note path and
+ * have every teammate's client overwrite that file. We accept ONLY paths under
+ * `attachments/`, with no traversal or dotfile/ignored segments — attachments
+ * are the only thing this sync channel is allowed to place.
+ */
+export function isSafeAttachmentRelPath(relPath: string): boolean {
+  if (!relPath) return false;
+  // Normalize separators; reject Windows-style just in case.
+  const parts = relPath.split(/[\\/]/);
+  if (parts[0] !== "attachments" || parts.length < 2) return false;
+  return parts.every(
+    (seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith("."),
+  );
+}
+
+/**
  * Pure content-hash diff. A file is "the same" iff its sha256 matches; rel_path
  * is not part of identity (dedupe is by content), so a rename with unchanged
- * bytes is a no-op. Server blobs without a sha or a rel_path can't be placed on
- * disk, so they're skipped from the download set.
+ * bytes is a no-op. Server blobs without a sha or a rel_path — or with a
+ * relPath outside `attachments/` (see {@link isSafeAttachmentRelPath}) — can't
+ * be placed on disk, so they're skipped from the download set.
  */
 export function diffAttachments(
   local: LocalAttachment[],
@@ -46,7 +65,11 @@ export function diffAttachments(
 
   const toUpload = local.filter((a) => !serverShas.has(a.sha256));
   const toDownload = server.filter(
-    (b) => !!b.sha256 && !!b.relPath && !localShas.has(b.sha256),
+    (b) =>
+      !!b.sha256 &&
+      !!b.relPath &&
+      isSafeAttachmentRelPath(b.relPath) &&
+      !localShas.has(b.sha256),
   );
   return { toUpload, toDownload };
 }
