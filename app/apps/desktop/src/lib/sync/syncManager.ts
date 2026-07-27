@@ -128,6 +128,13 @@ export class DocSync {
   private settleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private reconnectPending = false;
+  /**
+   * Consecutive auth rejections, driving the backoff below. Reset the moment a
+   * connection authenticates (onSynced/connected), so a single expiry still
+   * reconnects instantly and only a genuinely stuck token backs off.
+   */
+  private authFailures = 0;
+  private authRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: DocSyncOptions) {
     this.api = opts.api;
@@ -154,9 +161,16 @@ export class DocSync {
       onAuthenticationFailed: () => {
         // Token rejected/expired. If we still have access, a reconnect re-mints;
         // if the mint itself 403s, mintToken() sets 'no-access' and we stop.
+        //
+        // This MUST back off. Reconnecting immediately makes rejection
+        // self-sustaining whenever the re-mint can't produce a usable token
+        // (mintToken() returning null yields the empty-string token below, which
+        // the server always rejects): reject → reconnect → reject, as fast as the
+        // socket can cycle. That spins the CPU, floods the server log, and — since
+        // each lap flips status error→connecting→error — strobes the sync badge.
         if (!this.destroyed && this._status !== "no-access") {
           this.setStatus("error");
-          this.reconnectWithFreshToken();
+          this.scheduleAuthRetry();
         }
       },
       onClose: ({ event }) => {
@@ -177,8 +191,16 @@ export class DocSync {
       onStatus: ({ status }) => {
         if (this.destroyed) return;
         if (status === "connected") {
+          // Connected means the server accepted our token, so the streak is over.
+          this.noteAuthSuccess();
           this.setStatus(this._readOnly ? "read-only" : "synced");
         } else if (status === "connecting") {
+          // `no-access` is TERMINAL and must survive this. The provider runs its
+          // own reconnect loop, and each lap emits "connecting" — which used to
+          // overwrite no-access, reopening the guard on every other handler here.
+          // A doc we've been refused then retried forever: 403 → no-access →
+          // "connecting" clears it → empty token → rejected → repeat, ~4×/second.
+          if (this._status === "no-access") return;
           this.setStatus("connecting");
         } else if (status === "disconnected") {
           if (this._status !== "no-access") this.setStatus("offline");
@@ -186,6 +208,7 @@ export class DocSync {
       },
       onSynced: () => {
         if (!this.destroyed && this._status !== "no-access") {
+          this.noteAuthSuccess();
           this.setStatus(this._readOnly ? "read-only" : "synced");
         }
       },
@@ -253,23 +276,72 @@ export class DocSync {
     });
   }
 
+  /**
+   * Reconnect after an auth rejection, with exponential backoff + jitter.
+   *
+   * 500ms → 1s → 2s … capped at 30s, jittered 50–100% so many open docs don't
+   * retry in lockstep. The first retry is quick because the common cause is a
+   * token that expired a moment ago and a fresh mint just works; the cap is what
+   * stops a persistently-unusable session (expired login, revoked account) from
+   * turning into an unbounded reconnect storm.
+   */
+  private scheduleAuthRetry(): void {
+    if (this.destroyed || this.authRetryTimer) return;
+    const backoff = Math.min(30_000, 500 * 2 ** this.authFailures);
+    const delay = backoff * (0.5 + 0.5 * Math.random());
+    this.authFailures++;
+    this.authRetryTimer = setTimeout(() => {
+      this.authRetryTimer = null;
+      if (this.destroyed || this._status === "no-access") return;
+      this.reconnectWithFreshToken();
+    }, delay);
+  }
+
+  /** A connection authenticated: forget the failure streak. */
+  private noteAuthSuccess(): void {
+    this.authFailures = 0;
+    if (this.authRetryTimer) {
+      clearTimeout(this.authRetryTimer);
+      this.authRetryTimer = null;
+    }
+  }
+
   private async mintToken(): Promise<string | null> {
     try {
       const res = await this.api.syncToken(this.docId);
       this._readOnly = res.readOnly;
       // (Re)arm refresh based on the real token TTL.
       this.refresher.schedule(ttlFromToken(res.token));
-      if (this._status !== "no-access") {
-        this.setStatus(res.readOnly ? "read-only" : "synced");
+      // A minted token is NOT a connected socket. Claiming "synced" here (and,
+      // via setSyncStatus, stamping lastSyncedAt) painted a green "Synced · just
+      // now" before the server had even seen the token — so a token the server
+      // then rejected still flashed success first. Read-only is a property of the
+      // grant rather than the connection, so it's safe to reflect immediately;
+      // "synced" now waits for onStatus/onSynced.
+      if (this._status !== "no-access" && res.readOnly) {
+        this.setStatus("read-only");
       }
       return res.token;
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
         this.setStatus("no-access");
         this.refresher.cancel();
+        // Guards alone can't stop this: HocuspocusProvider reconnects on its own
+        // schedule, so a refused doc would keep opening sockets (and keep getting
+        // rejected) for as long as the note stayed open. Refusal is terminal until
+        // something re-opens the note or an ACL change calls refreshAccess(), so
+        // take the socket down instead of leaving it to cycle.
+        try {
+          this.provider.configuration.websocketProvider?.disconnect();
+        } catch {
+          /* provider already torn down */
+        }
         return null;
       }
-      this.setStatus("error");
+      // A 401 means the stored session is no longer valid (expired, or the user
+      // no longer exists on this server). Re-minting cannot fix that, so treat it
+      // as offline and let the backoff stretch out instead of retrying hard.
+      this.setStatus(e instanceof ApiError && e.status === 401 ? "offline" : "error");
       return null;
     }
   }
@@ -339,6 +411,12 @@ export class DocSync {
     if (this.settleTimer) {
       clearTimeout(this.settleTimer);
       this.settleTimer = null;
+    }
+    // A pending auth retry outlives the provider otherwise, reconnecting a doc
+    // the user already closed.
+    if (this.authRetryTimer) {
+      clearTimeout(this.authRetryTimer);
+      this.authRetryTimer = null;
     }
     this.refresher.cancel();
     try {

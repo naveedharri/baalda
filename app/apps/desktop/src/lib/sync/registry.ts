@@ -13,6 +13,7 @@
 
 import {
   ApiClient,
+  ApiError,
   noteDocId,
   noteRelPath,
   vaultOrgId,
@@ -261,6 +262,18 @@ export class VaultRegistry {
         });
         docIdByPath.set(rp, noteDocId(created));
       } catch (e) {
+        // 409 = this note's local doc_id is already a note in a DIFFERENT vault
+        // (e.g. this folder was previously synced to another vault whose ids the
+        // local index still carries). Deliberately leave it UNMAPPED: the note
+        // keeps working locally, whereas mapping it would point sync at a doc the
+        // user has no grant on, which only yields a permanent 403. Rotating the
+        // local doc_id to rejoin such a note to this vault is not implemented.
+        if (e instanceof ApiError && e.status === 409) {
+          console.warn(
+            `[registry] ${rp}: local doc_id belongs to another vault — staying local-only`,
+          );
+          continue;
+        }
         console.error("[registry] createNote failed", rp, e);
       }
     }

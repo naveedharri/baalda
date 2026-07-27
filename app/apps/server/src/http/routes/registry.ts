@@ -212,12 +212,39 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
 
     // Client may supply a stable doc_id (generated locally); else we mint one.
     const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
-    await pool.query(
+    // RETURNING tells us whether the row is actually ours. `DO NOTHING` alone is
+    // silent about *why* nothing happened, and answering 201 regardless told the
+    // client "doc `id` now belongs to `vaultId`" even when that id was already a
+    // note in a DIFFERENT vault. The client persisted that mapping and then synced
+    // against a doc it has no grant on: /api/sync-token 403s forever, the provider
+    // reconnects on every rejection, and the note never loads. A doc_id is global,
+    // so a collision across vaults has to be reported, not swallowed.
+    const inserted = await pool.query(
       `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by)
        VALUES ($1, $2, $3, $4, $5, $1, $6)
-       ON CONFLICT (id) DO NOTHING`,
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
       [id, vaultId, folderId ?? null, title ?? null, relPath, session.userId],
     );
+    if (inserted.rowCount === 0) {
+      const { rows: existing } = await pool.query<{ vault_id: string; rel_path: string }>(
+        "SELECT vault_id, rel_path FROM notes WHERE id = $1",
+        [id],
+      );
+      const row = existing[0];
+      // Re-registering the same note in the same vault is the ordinary adopt
+      // path (a second device, or a repeat reconcile) — still a success.
+      if (row && row.vault_id !== vaultId) {
+        return c.json(
+          {
+            error: "doc_id already belongs to another vault",
+            code: "doc_id_conflict",
+            docId: id,
+          },
+          409,
+        );
+      }
+    }
     changed(vaultId);
     return c.json(
       { id, docId: id, vaultId, folderId: folderId ?? null, title: title ?? null, relPath },
