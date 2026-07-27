@@ -62,6 +62,20 @@ export interface BridgeConfig {
   compactThreshold: number;
   /** Take a recovery snapshot before a diff that churns this fraction of the doc. */
   largeDiffRatio: number;
+  /**
+   * Undo grouping window: local edits landing within this many ms of each other
+   * merge into ONE undo step (Yjs `UndoManager.captureTimeout`). This is what
+   * keeps a burst of keystrokes from becoming one stack item per character.
+   */
+  undoCaptureTimeoutMs: number;
+  /**
+   * Hard cap on retained undo steps for one open note. Past this, the OLDEST
+   * steps are dropped and their GC pins released (see
+   * `NoteBridge.trimUndoHistory`) so a long session in one note cannot grow the
+   * undo stack — or the deleted content it keeps un-collectable — without bound.
+   * 0 disables trimming.
+   */
+  undoStackLimit: number;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -69,6 +83,13 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   egestDebounceMs: 300,
   compactThreshold: 64,
   largeDiffRatio: 0.6,
+  // 500ms matches Yjs' own default and CodeMirror's `newGroupDelay`, so undo
+  // granularity feels the same as the non-collab editor.
+  undoCaptureTimeoutMs: 500,
+  // 500 grouped steps ≈ 500 distinct edit bursts in a single note without
+  // switching away — far past any realistic Ctrl+Z run (CodeMirror's own
+  // history keeps ~100), while still bounding the stack.
+  undoStackLimit: 500,
 };
 
 export interface NoteBridgeOptions {

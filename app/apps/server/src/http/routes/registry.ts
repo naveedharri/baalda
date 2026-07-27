@@ -4,6 +4,7 @@ import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
 import { listReadableDocsInVault, listVisibleFolders } from "../../permissions/vault-docs.js";
+import { purgeNoteIndex } from "../../index/indexer.js";
 import { getSession } from "../session.js";
 
 export interface RegistryDeps {
@@ -183,13 +184,17 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     }
     // $2 is an exact match; $3 is the LIKE prefix with %/_ escaped so a folder
     // path containing wildcards cannot widen the soft-delete beyond its subtree.
-    await pool.query(
+    // RETURNING id gives us exactly the cascade's victims, so their derived
+    // index rows go with them (see the single-note delete below).
+    const { rows: cascaded } = await pool.query<{ id: string }>(
       `UPDATE notes SET deleted_at = now()
         WHERE vault_id = $1 AND deleted_at IS NULL
-          AND (rel_path = $2 OR rel_path LIKE $3 || '/%' ESCAPE '\\')`,
+          AND (rel_path = $2 OR rel_path LIKE $3 || '/%' ESCAPE '\\')
+        RETURNING id`,
       [row.vault_id, row.path, likeEscape(row.path)],
     );
     await pool.query("DELETE FROM folders WHERE id = $1", [id]);
+    await purgeNoteIndex(cascaded.map((n) => n.id));
     changed(row.vault_id);
     return c.json({ ok: true }, 200);
   });
@@ -318,6 +323,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "You cannot delete this note" }, 403);
     }
     await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [id]);
+    // Drop the DERIVED search/graph rows with the note. They are a rebuildable
+    // cache of the canonical Yjs state (migration 005), and note_index keeps a
+    // full plain-text copy of the body — leaving it behind grew those tables
+    // without bound and kept "deleted" content readable server-side. The Yjs
+    // doc and the doc_id survive untouched, so re-creating the note re-indexes
+    // it on its next store (indexer.scheduleIndex / backfillIndex).
+    await purgeNoteIndex([id]);
     changed(row.vault_id);
     return c.json({ ok: true }, 200);
   });

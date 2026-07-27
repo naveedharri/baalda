@@ -82,6 +82,49 @@ export const config = {
   backfillConcurrency: int("BACKFILL_CONCURRENCY", 6),
   /** WebSocket path for the vault replication channel. */
   vaultSyncPath: required("VAULT_SYNC_PATH", "/vault-sync"),
+  /**
+   * Outbound bound for ONE vault-channel connection: how many bytes may sit in
+   * its socket queue before the server stops producing frames for it (backfill
+   * parks *before* its Postgres read; live updates fold into a pending
+   * full-state resend). The channel keeps no second userland queue, so
+   * `ws.bufferedAmount` is the connection's whole outbound footprint and this is
+   * a real bound, not a watermark on part of it. Peak per connection is this cap
+   * plus the frames the concurrently-admitted backfill loads hand over (at most
+   * `backfillConcurrency` of them — a WebSocket frame is indivisible, so it is
+   * always enqueued whole once its doc has been read).
+   *
+   * 4 MiB is ~320 ms of a 100 Mbit/s link, so producing never becomes the
+   * throughput limit for a healthy client; 32 connections backfilling at once
+   * total 128 MiB, which fits the headroom the 512 MB heap cap (Dockerfile
+   * NODE_OPTIONS) leaves above the ~160 MB idle footprint.
+   */
+  vaultSendCapBytes: int("VAULT_SEND_CAP_BYTES", 4 * 1024 * 1024),
+  /**
+   * How long a connection may sit AT `vaultSendCapBytes` with **zero** bytes
+   * leaving its socket before it is terminated. Any drain progress at all resets
+   * the window, so a peer draining even a trickle is paced indefinitely and is
+   * never closed for being slow; this fires only on a peer that has stopped
+   * reading. 60 s matches the idle deadline `@hocuspocus/server` applies to its
+   * own sockets in this same process.
+   */
+  vaultSendStallMs: int("VAULT_SEND_STALL_MS", 60_000),
+  /**
+   * Sampling period for a **blocked** connection — no timer runs for a
+   * connection that is under its cap. This is how often it re-reads
+   * `ws.bufferedAmount` to release parked producers and to check drain progress.
+   * At 25 ms the cap can be refilled ~40×/s (≈160 MB/s at the 4 MiB default),
+   * well above any real link, so sampling latency is never the bottleneck.
+   */
+  vaultSendPollMs: int("VAULT_SEND_POLL_MS", 25),
+  /**
+   * Vault-channel heartbeat period. One shared interval pings every connection
+   * and terminates any that did not answer the previous tick, so a peer that
+   * vanished without FIN/RST is reaped after one to two ticks (30–60 s) instead
+   * of keeping its PubSub subscription — and its presence dot in every
+   * teammate's sidebar — forever. Comparable to `@hocuspocus/server`'s 60 s
+   * `timeout` default.
+   */
+  vaultHeartbeatMs: int("VAULT_HEARTBEAT_MS", 30_000),
   // ---- Google OAuth (spec 04 §7 — social sign-in) ----
   /** Google OAuth client id/secret. Both unset ⇒ Google sign-in is simply
    *  disabled and the desktop hides the button; self-host stays fully usable

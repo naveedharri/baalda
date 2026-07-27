@@ -55,6 +55,7 @@ export class NoteBridge {
 
   private readonly onDocUpdate: (update: Uint8Array, origin: unknown) => void;
   private readonly onTextChange: (evt: Y.YTextEvent, tr: Y.Transaction) => void;
+  private readonly onUndoStackItemAdded: () => void;
 
   // UndoManager scoped to local editor edits only — 'disk'/'remote' origins are
   // never undoable. y-codemirror's yCollab additionally registers its own sync
@@ -71,7 +72,15 @@ export class NoteBridge {
     this.text = this.doc.getText("content");
     this.undoManager = new Y.UndoManager(this.text, {
       trackedOrigins: new Set([ORIGIN_EDITOR]),
+      // Group rapid keystrokes into one undo step (Yjs default, made explicit
+      // because the whole bound below is expressed in *steps*).
+      captureTimeout: this.cfg.undoCaptureTimeoutMs,
     });
+    // Bound the history: without this, one long session in a single note grows
+    // the undo stack for every edit AND keeps every deleted struct pinned
+    // against garbage collection (Yjs `keepItem(item, true)`).
+    this.onUndoStackItemAdded = () => this.trimUndoHistory();
+    this.undoManager.on("stack-item-added", this.onUndoStackItemAdded);
 
     this.setT =
       io.setTimeout ??
@@ -334,6 +343,69 @@ export class NoteBridge {
     Y.applyUpdate(this.doc, update, ORIGIN_REMOTE);
   }
 
+  // ---- Undo history bound -----------------------------------------------
+
+  /** Retained undo steps (for tests/observability). */
+  get undoDepth(): number {
+    return this.undoManager.undoStack.length;
+  }
+
+  /**
+   * Drop the oldest undo steps once the stack exceeds `cfg.undoStackLimit`.
+   *
+   * Two things grow per step, and both have to be released:
+   *   1. the `StackItem` itself, and
+   *   2. the GC pin Yjs puts on every struct that step deleted —
+   *      `UndoManager`'s afterTransaction handler calls `keepItem(item, true)`
+   *      so undo can restore the text, which makes the deleted content
+   *      un-collectable for the lifetime of the doc.
+   *
+   * Yjs releases (2) in `clear()` but exposes no "forget the oldest step" API,
+   * so we mirror its `clearUndoManagerStackItem` with the public primitives
+   * (`iterateDeletedStructs` + `Item.keep` + `tryGc`). Steps are dropped from
+   * the FRONT, so recent history — the only history a user actually reaches —
+   * is untouched.
+   */
+  private trimUndoHistory(): void {
+    const limit = this.cfg.undoStackLimit;
+    if (limit <= 0) return;
+    const stack = this.undoManager.undoStack;
+    const excess = stack.length - limit;
+    if (excess <= 0) return;
+    const dropped = stack.splice(0, excess);
+
+    // Un-pin what the dropped steps were holding. A step's `deletions` set is
+    // disjoint from every other step's (a struct can only be deleted once), so
+    // this can never un-pin content a retained step still needs to restore.
+    this.doc.transact((tr) => {
+      for (const item of dropped) {
+        Y.iterateDeletedStructs(tr, item.deletions, (struct) => {
+          // `keepItem` also walks parents, but this doc's scope is a ROOT
+          // Y.Text, so a struct's parent has no `_item` to un-pin.
+          if (struct instanceof Y.Item && this.inUndoScope(tr, struct)) {
+            struct.keep = false;
+          }
+        });
+      }
+    });
+    // The current transaction's own deletions are GC'd by Yjs at cleanup, but
+    // these were deleted long ago — collect them explicitly now that nothing
+    // pins them. (This transaction changes no content, so it emits no update.)
+    if (this.doc.gc) {
+      for (const item of dropped) {
+        Y.tryGc(item.deletions, this.doc.store, this.doc.gcFilter);
+      }
+    }
+  }
+
+  private inUndoScope(tr: Y.Transaction, struct: Y.Item): boolean {
+    return this.undoManager.scope.some(
+      (type) =>
+        type === tr.doc ||
+        (type instanceof Y.AbstractType && Y.isParentOf(type, struct)),
+    );
+  }
+
   // ---- Compaction -------------------------------------------------------
 
   /** Merge the log into one snapshot and truncate it (spec 02 §4). */
@@ -346,6 +418,11 @@ export class NoteBridge {
 
   // ---- Teardown ---------------------------------------------------------
 
+  /** True once `destroy()` has run — a destroyed bridge must not be reused. */
+  get isDestroyed(): boolean {
+    return this.destroyed;
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -355,6 +432,7 @@ export class NoteBridge {
     this.egestTimer = null;
     this.text.unobserve(this.onTextChange);
     this.doc.off("update", this.onDocUpdate);
+    this.undoManager.off("stack-item-added", this.onUndoStackItemAdded);
     this.undoManager.destroy();
     this.doc.destroy();
   }
