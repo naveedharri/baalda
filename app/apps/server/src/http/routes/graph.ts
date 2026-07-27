@@ -3,7 +3,7 @@ import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { listReadableDocsInVault } from "../../permissions/vault-docs.js";
 import { getSession } from "../session.js";
-import { cosineSimilarity, embed, tokenize } from "../../index/embedder.js";
+import { searchNoteIndex } from "../../index/indexer.js";
 
 /**
  * Read-only views over the note index (spec: links + vectors).
@@ -77,8 +77,15 @@ graphRoutes.get("/vaults/:vaultId/graph", async (c) => {
     if (!byTitle.has(stem)) byTitle.set(stem, n.id);
   }
 
+  // The JOIN keeps edges of soft-deleted notes out of the graph. The delete
+  // paths now purge note_links (registry.ts / indexer.ts), so this is a
+  // belt-and-braces guard against any row that outlives its note — and it means
+  // the rows never reach the heap in the first place.
   const { rows: linkRows } = await pool.query<{ from_doc: string; to_title: string }>(
-    "SELECT from_doc, to_title FROM note_links WHERE vault_id = $1",
+    `SELECT l.from_doc, l.to_title
+       FROM note_links l
+       JOIN notes n ON n.id = l.from_doc AND n.deleted_at IS NULL
+      WHERE l.vault_id = $1`,
     [vaultId],
   );
   // Only edges out of a readable note; targets already resolve within the
@@ -109,46 +116,21 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
   const kRaw = Number.parseInt(c.req.query("k") ?? "10", 10);
   const k = Number.isNaN(kRaw) || kRaw <= 0 ? 10 : Math.min(kRaw, 100);
 
-  const { rows: allRows } = await pool.query<{
-    doc_id: string;
-    title: string | null;
-    rel_path: string;
-    content: string;
-    vector: number[] | null;
-  }>(
-    `SELECT ni.doc_id, ni.title, n.rel_path, ni.content, ni.vector
-       FROM note_index ni
-       JOIN notes n ON n.id = ni.doc_id AND n.deleted_at IS NULL
-      WHERE ni.vault_id = $1`,
-    [vaultId],
-  );
-
   // Restrict the candidate set to readable notes: the score is computed over
   // note content, so scoring unreadable notes would be a content oracle.
   // Mirrors the MCP search tool. Owner/admin + Open vaults see everything.
   const readable = await listReadableDocsInVault(session.userId, vaultId);
-  const rows = allRows.filter((r) => readable.has(r.doc_id));
 
-  const qVec = embed(q);
-  const qTokens = Array.from(new Set(tokenize(q)));
-
-  const results = rows
-    .map((r) => {
-      const sim = r.vector ? cosineSimilarity(qVec, r.vector) : 0;
-      // Keyword boost: fraction of distinct query tokens present in the
-      // title/body, scaled small so it only breaks near-ties.
-      const haystack = `${r.title ?? ""} ${r.content}`.toLowerCase();
-      const matched = qTokens.filter((t) => haystack.includes(t)).length;
-      const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
-      return {
-        docId: r.doc_id,
-        title: r.title ?? relPathStem(r.rel_path),
-        relPath: r.rel_path,
-        score: sim + boost,
-      };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
+  // Scoring lives in index/indexer.ts, which walks the vault in keyset batches
+  // and keeps only {docId, score} per note — note bodies and embedding vectors
+  // are no longer all pulled into the heap just to slice off the top k.
+  // Identical ranking + response shape.
+  const results = await searchNoteIndex({
+    vaultId,
+    query: q,
+    k,
+    readableDocIds: readable,
+  });
 
   return c.json({ results });
 });

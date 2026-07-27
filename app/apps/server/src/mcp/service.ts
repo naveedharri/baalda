@@ -7,7 +7,8 @@ import {
   isLocked,
   type Permission,
 } from "../permissions/resolver.js";
-import { cosineSimilarity, embed, tokenize } from "../index/embedder.js";
+import { listReadableDocsInVault } from "../permissions/vault-docs.js";
+import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
 import type { DocWriter } from "./doc-writer.js";
 
@@ -321,8 +322,7 @@ export async function deleteNote(ctx: McpContext, docId: string) {
   const note = await requireEditableNote(ctx.auth, docId);
   await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [docId]);
   // Drop derived index rows and kick any live editors off the now-gone doc.
-  await pool.query("DELETE FROM note_index WHERE doc_id = $1", [docId]);
-  await pool.query("DELETE FROM note_links WHERE from_doc = $1", [docId]);
+  await purgeNoteIndex([docId]);
   ctx.disconnectDoc(note.vault_id, docId);
   return { deleted: docId };
 }
@@ -338,39 +338,18 @@ export async function searchNotes(
   await requireVaultInScope(ctx.auth, vaultId);
   const limit = Number.isFinite(k) && k > 0 ? Math.min(Math.trunc(k), 50) : 10;
 
-  const { rows } = await pool.query<{
-    doc_id: string;
-    title: string | null;
-    rel_path: string;
-    content: string;
-    vector: number[] | null;
-  }>(
-    `SELECT ni.doc_id, ni.title, n.rel_path, ni.content, ni.vector
-       FROM note_index ni
-       JOIN notes n ON n.id = ni.doc_id AND n.deleted_at IS NULL
-      WHERE ni.vault_id = $1`,
-    [vaultId],
-  );
-
-  const qVec = embed(query);
-  const qTokens = Array.from(new Set(tokenize(query)));
-  const admin = await isAdmin(ctx.auth);
-
-  const scored: Array<{ docId: string; title: string; relPath: string; score: number }> =
-    [];
-  for (const r of rows) {
-    const perm = admin ? "edit" : await effectivePermission(ctx.auth.userId, r.doc_id);
-    if (perm === "none") continue;
-    const sim = r.vector ? cosineSimilarity(qVec, r.vector) : 0;
-    const haystack = `${r.title ?? ""} ${r.content}`.toLowerCase();
-    const matched = qTokens.filter((t) => haystack.includes(t)).length;
-    const boost = qTokens.length > 0 ? 0.1 * (matched / qTokens.length) : 0;
-    scored.push({
-      docId: r.doc_id,
-      title: r.title ?? relPathStem(r.rel_path),
-      relPath: r.rel_path,
-      score: sim + boost,
-    });
-  }
-  return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+  // Two changes, neither of which alters the result shape or the ranking:
+  //
+  //  - the candidate set comes from `listReadableDocsInVault` (ONE query) rather
+  //    than an O(N) sequential `effectivePermission` loop. That function is the
+  //    documented readable-set dual of the resolver — same owner/admin, creator,
+  //    folder/file/vault-grant and membership rules; `locked` only caps edit
+  //    down to view, so it can't change which notes are readable. It also
+  //    subsumes the old `isAdmin` short-circuit.
+  //  - scoring runs in index/indexer.ts, which walks note_index in keyset
+  //    batches and never pulls note bodies onto the heap. The old version
+  //    selected `ni.content` + `ni.vector` for every row in the vault with no
+  //    LIMIT and then pinned that whole array across the permission loop.
+  const readable = await listReadableDocsInVault(ctx.auth.userId, vaultId);
+  return searchNoteIndex({ vaultId, query, k: limit, readableDocIds: readable });
 }

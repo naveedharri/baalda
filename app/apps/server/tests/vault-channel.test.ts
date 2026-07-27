@@ -213,4 +213,45 @@ describe("VaultChannel relay (spec 05 §3.1)", () => {
     const drops = ws.controls().filter((c) => c.t === "drop");
     expect(drops).toEqual([{ t: "drop", docId: "B" }]);
   });
+
+  it("releases the pubsub subscription when the socket dies inside the hello handshake", async () => {
+    // The handshake subscribes only AFTER awaiting the ACL resolve. A socket that
+    // closes inside that window has already had its `close` handler run (ws emits
+    // it once), so the connection must notice and release the subscription itself
+    // — otherwise the handler stays in the topic forever with no owner to remove
+    // it, and every later vault event re-runs the ACL query for a dead client.
+    const pubsub = new InMemoryPubSub();
+    pubsubs.push(pubsub);
+    let aclCalls = 0;
+    let releaseAcl!: () => void;
+    const aclGate = new Promise<void>((r) => {
+      releaseAcl = r;
+    });
+    const channel = new VaultChannel({
+      pubsub,
+      verifyToken: async () => ({ userId: "u1", vaultId: "v1" }),
+      listReadableDocs: async () => {
+        aclCalls += 1;
+        await aclGate; // hold the handshake open inside its await window
+        return new Set(["A"]);
+      },
+      loadDiff: async (docId: string) => diffFor(docId),
+      backfillConcurrency: 4,
+    });
+
+    const ws = new FakeWs();
+    channel.handleConnection(ws as never);
+    ws.hello("good");
+    await waitFor(() => aclCalls === 1); // handshake is now parked mid-await
+
+    ws.close(); // cleanup() runs here — before the subscription is ever assigned
+    releaseAcl(); // handshake resumes and reaches the subscribe
+    await new Promise((r) => setTimeout(r, 20)); // let the continuation finish
+
+    // A leaked handler would answer this by kicking off another ACL resolve.
+    await channel.publishAclChanged("v1");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(aclCalls).toBe(1);
+    expect(ws.controls().some((c) => c.t === "ready")).toBe(false);
+  });
 });

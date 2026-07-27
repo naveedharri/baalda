@@ -95,9 +95,36 @@ export function createSyncServer(
     async onLoadDocument(data) {
       const parsed = parseDocName(data.documentName);
       if (!parsed) return data.document;
-      const state = await loadDocState(parsed.docId);
-      if (state) {
-        Y.applyUpdate(data.document, state, LOAD_ORIGIN);
+      try {
+        const state = await loadDocState(parsed.docId);
+        if (state) {
+          Y.applyUpdate(data.document, state, LOAD_ORIGIN);
+        }
+      } catch (err) {
+        // Destroy-then-rethrow is load-bearing; Hocuspocus cannot clean this up
+        // for us. It only inserts the Document into its `documents` map AFTER
+        // this hook resolves (Hocuspocus.createDocument), and its own failure
+        // path calls `unloadDocument(document)`, which early-returns on
+        // `if (!this.documents.has(documentName)) return;` — so `destroy()` is
+        // never reached. Meanwhile `new Document(...)` built a `y-protocols`
+        // Awareness whose constructor arms a plain (non-`unref`'d) 3-second
+        // `setInterval` closing over the doc; `Awareness.destroy()` — reached
+        // only via the Y.Doc `destroy` event — is the sole `clearInterval`.
+        // Without this, one failed load (a dead pooled client, or an in-flight
+        // query during a Postgres restart/failover) permanently leaks the doc
+        // plus a live timer that keeps it reachable.
+        try {
+          data.document.destroy();
+        } catch (destroyErr) {
+          console.error(
+            `Failed to destroy document ${data.documentName} after a failed load:`,
+            destroyErr,
+          );
+        }
+        // Rethrow so Hocuspocus still rejects the connection — a client must
+        // never get an empty doc it would then treat as authoritative and sync
+        // its local state into.
+        throw err;
       }
       return data.document;
     },

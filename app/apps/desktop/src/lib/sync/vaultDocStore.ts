@@ -48,7 +48,11 @@ export class VaultDocStore implements DocUpdateSink {
   private readonly svCache = new Map<string, Uint8Array>();
   /** Most-recently-touched docIds (tail = newest) for backfill prioritisation. */
   private readonly recent: string[] = [];
-  /** Per-doc promise chain so concurrent cold applies for one doc serialise. */
+  /** Per-doc promise chain so concurrent cold applies for one doc serialise.
+   *  Self-clearing: a chain removes its own entry when it settles, so this map
+   *  only ever holds *in-flight* work (see `enqueueCold`). That's why `drop()`
+   *  leaves it alone — deleting a live entry would let the next update for that
+   *  doc run in parallel with the one still writing. */
   private readonly coldChains = new Map<string, Promise<void>>();
 
   private touchSeq = 0;
@@ -101,11 +105,14 @@ export class VaultDocStore implements DocUpdateSink {
     if (entry) {
       this.hot.delete(docId);
       // Flush any pending write, then tear down — access is gone, so stop syncing.
-      void entry.bridge.flushEgest().finally(() => entry.bridge.destroy());
+      void this.retire(entry.bridge);
     }
     this.svCache.delete(docId);
     const i = this.recent.indexOf(docId);
     if (i !== -1) this.recent.splice(i, 1);
+    // coldChains is deliberately untouched: it only holds in-flight work, which
+    // must be allowed to finish (and clears itself). A later update for a dropped
+    // doc is skipped by `coldApply` once the registry stops resolving its path.
   }
 
   // ---- Public tier controls (used by the open-note path, Phase E) -------
@@ -145,29 +152,45 @@ export class VaultDocStore implements DocUpdateSink {
     if (this.recent.length > RECENT_CAP) this.recent.shift();
   }
 
-  /** Tear everything down (app shutdown / sign-out). */
+  /**
+   * Tear everything down (app shutdown / sign-out). Drops ALL state the store
+   * holds — hot bridges, the manifest cache, the recency list and the suppressed
+   * doc — and waits for any in-flight cold apply so no transient bridge is left
+   * mid-write.
+   */
   async destroyAll(): Promise<void> {
     const entries = [...this.hot.values()];
+    const cold = [...this.coldChains.values()];
     this.hot.clear();
-    await Promise.all(
-      entries.map((e) => e.bridge.flushEgest().finally(() => e.bridge.destroy())),
-    );
+    this.coldChains.clear();
+    this.svCache.clear();
+    this.recent.length = 0;
+    this.suppressed = null;
+    await Promise.all([
+      ...entries.map((e) => this.retire(e.bridge)),
+      ...cold.map((c) => c.catch(() => {})),
+    ]);
   }
 
   // ---- internals --------------------------------------------------------
 
   private enqueueCold(docId: string, update: Uint8Array): Promise<void> {
     const prev = this.coldChains.get(docId) ?? Promise.resolve();
-    const next = prev
-      .catch(() => {})
-      .then(() => this.coldApply(docId, update));
-    this.coldChains.set(
-      docId,
-      next.finally(() => {
-        if (this.coldChains.get(docId) === next) this.coldChains.delete(docId);
-      }),
-    );
-    return next;
+    const run = prev.catch(() => {}).then(() => this.coldApply(docId, update));
+    // The map must hold the SAME promise the guard compares against, otherwise
+    // the self-delete never fires and the entry is never reclaimed. The identity
+    // check is what keeps an older chain from deleting a newer one enqueued for
+    // the same doc while it was still running.
+    const chain: Promise<void> = run.finally(() => {
+      if (this.coldChains.get(docId) === chain) this.coldChains.delete(docId);
+    });
+    this.coldChains.set(docId, chain);
+    return chain;
+  }
+
+  /** In-flight cold applies, for tests/observability. */
+  pendingColdDocs(): string[] {
+    return [...this.coldChains.keys()];
   }
 
   private async coldApply(docId: string, update: Uint8Array): Promise<void> {
@@ -199,7 +222,18 @@ export class VaultDocStore implements DocUpdateSink {
       const e = this.hot.get(lruId)!;
       this.hot.delete(lruId);
       // Keep the svCache entry so the manifest stays cheap after eviction.
-      void e.bridge.flushEgest().finally(() => e.bridge.destroy());
+      void this.retire(e.bridge);
     }
+  }
+
+  /** Flush a bridge's pending write, then tear it down. Never throws, and always
+   *  destroys — a failed flush must not leak the bridge's observers. */
+  private async retire(bridge: NoteBridge): Promise<void> {
+    try {
+      await bridge.flushEgest();
+    } catch (e) {
+      console.error("[vaultDocStore] flush on retire failed", e);
+    }
+    bridge.destroy();
   }
 }
