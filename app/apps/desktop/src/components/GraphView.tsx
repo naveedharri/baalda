@@ -38,9 +38,22 @@ const LABEL_FADE_END = 2.4; // camera.k at which labels are fully opaque (labelS
 const DEFAULT_FONT_FAMILY = "sans-serif";
 const FALLBACK_ACCENT = "#7f73ff";
 
-// Startup "come to life" burst.
-const INTRO_MS = 1200; // duration of the light flare + settle
-const INTRO_KICK = 28; // initial random velocity magnitude — the quick shake
+// Startup "come to life" burst. Deliberately gentle: the graph should ease open,
+// not explode. A big random kick reads as chaos rather than life, because every
+// node scatters in an unrelated direction at once — the settle that follows is
+// then large enough to look like a glitch. A small nudge over a slightly longer
+// window gives the same "it's alive" impression while staying legible.
+const INTRO_MS = 1600; // duration of the light flare + settle
+const INTRO_KICK = 7; // initial random velocity magnitude — a nudge, not a shake
+
+// How hard a *data refresh* re-energizes the layout. The first build needs real
+// energy to find a shape from seeded positions; later rebuilds already have a
+// settled layout and only need to absorb what changed, so they get a small warm
+// nudge. Reheating those to 1 was what made the graph appear to "reset": every
+// `file-changed` event (a whole storm of them while a vault syncs) threw the
+// entire layout back to maximum energy and it visibly flew apart and re-settled.
+const REHEAT_FIRST = 1;
+const REHEAT_REFRESH = 0.22;
 
 // Matte-sphere lighting. A single soft key light from the upper-left, tilted
 // toward the viewer, is baked once into grayscale alpha sprites (makeShadeSprites)
@@ -343,11 +356,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // {source,target} ids against the current node array.
     sim.nodes(visNodes);
     (sim.force("link") as ForceLink<SimNode, SimLink>).links(links);
-    sim.alpha(1);
 
-    // First time real data lands: light the graph up. Give every node a random
-    // velocity impulse (the "quick shake") and start the intro clock so the
-    // draw loop paints the light flare from all nodes, then it all settles.
+    // Only the first build gets a full reheat. After that, warm the layout just
+    // enough to absorb the change (and never *cool* one that's already hotter).
+    const first = !S.introKicked;
+    sim.alpha(first ? REHEAT_FIRST : Math.max(sim.alpha(), REHEAT_REFRESH));
+
+    // First time real data lands: light the graph up. Give every node a small
+    // random velocity impulse and start the intro clock so the draw loop paints
+    // the light flare from all nodes, then it all settles.
     if (!S.introKicked && visNodes.length > 0) {
       for (const node of visNodes) {
         const a = Math.random() * Math.PI * 2;
@@ -593,7 +610,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const introT =
         S.introStart > 0 ? clamp((nowT - S.introStart) / INTRO_MS, 0, 1) : 1;
       const introEase = 1 - Math.pow(1 - introT, 3); // easeOutCubic
-      const glowBoost = 1 + (1 - introEase) * 2.4; // nodes are brightest at birth
+      // Nodes are brightest at birth, but only modestly so — a 3.4× flare blew
+      // out to near-white and read as a flash rather than a fade-in.
+      const glowBoost = 1 + (1 - introEase) * 1.1;
 
       const nodeScale = s.nodeSize;
       const time = nowT / 1000;

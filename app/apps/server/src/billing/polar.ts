@@ -30,6 +30,48 @@ import {
 const META_ORG = "organization_id";
 const META_USER = "user_id";
 
+/**
+ * Run one Polar SDK call, converting its errors into something diagnosable.
+ *
+ * The SDK's `ResponseValidationError` carries a `message` of exactly
+ * "Response validation failed" — the Zod cause, the HTTP status and the body
+ * that failed to parse live on the error object and are NOT in `message`. Since
+ * the routes surface `err.message` to the client, an unhandled one of these
+ * reaches the UI as a bare "Response validation failed" with every clue
+ * dropped. So log the detail server-side (that's the only place it can go — it
+ * may quote a provider payload, which must not travel to the client) and
+ * rethrow a neutral Error that at least names the operation and status.
+ *
+ * Note this fires on error responses too, not just success ones: the SDK
+ * validates a 4xx/5xx body against its declared error schema with the same
+ * message, so a wrong token/server/product — whose error body doesn't match —
+ * shows up here rather than as the actual "not found"/"unauthorized".
+ */
+async function polarCall<T>(op: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const e = err as {
+      name?: string;
+      statusCode?: number;
+      body?: string;
+      rawValue?: unknown;
+      pretty?: () => string;
+    };
+    if (typeof e.pretty === "function") {
+      const body = typeof e.body === "string" ? e.body.slice(0, 2000) : "";
+      console.error(
+        `[billing] Polar ${op} failed: ${e.name} status=${e.statusCode ?? "?"}\n` +
+          `${e.pretty()}\nbody: ${body}`,
+      );
+      throw new Error(
+        `Polar ${op} returned a response this SDK could not parse (HTTP ${e.statusCode ?? "?"}) — see server logs`,
+      );
+    }
+    throw err;
+  }
+}
+
 function client(): Polar {
   if (!config.polarAccessToken) {
     throw new Error("Polar access token not configured");
@@ -84,27 +126,33 @@ export class PolarBillingProvider implements BillingProvider {
         `No Polar product configured for interval "${args.interval}"`,
       );
     }
-    const checkout = await client().checkouts.create({
-      products: [productId],
-      successUrl: args.successUrl,
-      customerEmail: args.email,
-      metadata: {
-        [META_ORG]: args.orgId,
-        [META_USER]: args.userId,
-      },
-    });
+    const checkout = await polarCall("checkouts.create", () =>
+      client().checkouts.create({
+        products: [productId],
+        successUrl: args.successUrl,
+        customerEmail: args.email,
+        metadata: {
+          [META_ORG]: args.orgId,
+          [META_USER]: args.userId,
+        },
+      }),
+    );
     return { url: checkout.url };
   }
 
   async getPortalUrl(args: { customerId: string }): Promise<{ url: string }> {
-    const session = await client().customerSessions.create({
-      customerId: args.customerId,
-    });
+    const session = await polarCall("customerSessions.create", () =>
+      client().customerSessions.create({
+        customerId: args.customerId,
+      }),
+    );
     return { url: session.customerPortalUrl };
   }
 
   async cancelSubscription(providerSubscriptionId: string): Promise<void> {
-    await client().subscriptions.revoke({ id: providerSubscriptionId });
+    await polarCall("subscriptions.revoke", () =>
+      client().subscriptions.revoke({ id: providerSubscriptionId }),
+    );
   }
 
   verifyAndNormalizeWebhook(

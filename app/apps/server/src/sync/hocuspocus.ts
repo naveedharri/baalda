@@ -60,7 +60,17 @@ export function createSyncServer(
       let claims;
       try {
         claims = await verifySyncToken(data.token);
-      } catch {
+      } catch (err) {
+        // Log WHY, not just that it failed: an empty token (the client couldn't
+        // mint one) and an expired or wrong-secret token are completely different
+        // faults, and "Invalid or expired sync token" alone can't tell them apart
+        // — which turned a client-side retry storm into thousands of identical,
+        // undiagnosable log lines.
+        const len = typeof data.token === "string" ? data.token.length : -1;
+        const code = (err as { code?: string })?.code ?? (err as Error)?.name;
+        console.warn(
+          `[onAuthenticate] rejected token for ${data.documentName}: ${code} (token length ${len})`,
+        );
         throw new Error("Invalid or expired sync token");
       }
 
