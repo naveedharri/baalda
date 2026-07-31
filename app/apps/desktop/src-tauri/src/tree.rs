@@ -38,6 +38,78 @@ pub fn list_tree(vault: &Path) -> AppResult<TreeNode> {
     })
 }
 
+/// List one directory's immediate children for lazy sidebar loading.
+///
+/// Unlike [`list_tree`], this does NOT recurse: sub-directories come back with
+/// an empty `children` vec — a "not yet loaded" marker that still renders as an
+/// expandable folder in react-arborist — and files come back as leaves. The
+/// front-end fetches each folder's children on first expand, so switching a
+/// huge vault costs O(top-level entries) instead of O(all notes). `rel` is the
+/// vault-relative directory ("" for the root).
+pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
+    let dir = if rel.is_empty() {
+        vault.to_path_buf()
+    } else {
+        vault.join(rel)
+    };
+    let mut dirs: Vec<TreeNode> = Vec::new();
+    let mut files: Vec<TreeNode> = Vec::new();
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_ignored_name(&name) {
+            continue;
+        }
+        // Root-level attachments/ is the binary-sync store — hidden (see walk_dir).
+        if rel.is_empty()
+            && name == "attachments"
+            && entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+        {
+            continue;
+        }
+        let child_rel = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if file_type.is_dir() {
+            dirs.push(TreeNode {
+                id: child_rel.clone(),
+                name,
+                path: child_rel,
+                is_dir: true,
+                children: Some(Vec::new()), // lazy marker: expandable, not yet loaded
+            });
+        } else if file_type.is_file() {
+            if !is_allowed_file(&name) {
+                continue;
+            }
+            files.push(TreeNode {
+                id: child_rel.clone(),
+                name,
+                path: child_rel,
+                is_dir: false,
+                children: None,
+            });
+        }
+    }
+
+    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.extend(files);
+    Ok(dirs)
+}
+
 fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
     let mut dirs: Vec<TreeNode> = Vec::new();
     let mut files: Vec<TreeNode> = Vec::new();

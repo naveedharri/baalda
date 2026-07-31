@@ -1,5 +1,5 @@
-// Live-preview inline rendering — the Obsidian "Live Preview" feel, built on
-// CodeMirror decorations only (the buffer stays raw markdown, so files still
+// Live-preview inline rendering — inline-rendered markdown while you edit, built
+// on CodeMirror decorations only (the buffer stays raw markdown, so files still
 // round-trip losslessly and the CRDT is untouched — spec 01 §1).
 //
 // While the cursor is off a line, that line's markdown *markers* are hidden and

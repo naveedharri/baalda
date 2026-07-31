@@ -17,6 +17,8 @@ import {
   type GraphSettings,
 } from "../lib/graph/graphSettings";
 import { useGraphData } from "../lib/graph/useGraphData";
+import { WebGLGraphRenderer, type RenderNode } from "../lib/graph/webglRenderer";
+import { SimClient } from "../lib/graph/simClient";
 import { useStore } from "../store";
 import { GraphControls } from "./GraphControls";
 import "./graph.css";
@@ -54,6 +56,20 @@ const INTRO_KICK = 7; // initial random velocity magnitude — a nudge, not a sh
 // entire layout back to maximum energy and it visibly flew apart and re-settled.
 const REHEAT_FIRST = 1;
 const REHEAT_REFRESH = 0.22;
+
+// Fallback cap for the global scope on the 2D canvas, which only stays smooth
+// up to a few hundred nodes. The GPU (WebGL) renderer draws the whole vault, so
+// this cap only applies when WebGL is unavailable.
+const GLOBAL_2D_CAP = 600;
+const WEBGL_ENABLED = true;
+
+// Above this node count, the global graph runs its force layout in a Web Worker
+// (see simWorker.ts) so a huge vault (50k+) can settle without freezing the UI
+// thread. At or below it, the sim runs inline — proven smooth up to ~5.5k and it
+// keeps drag/interaction latency zero. If the Worker API is unavailable, the
+// global sim is capped to this size so the main thread can never lock up.
+const WORKER_THRESHOLD = 8000;
+
 
 // Matte-sphere lighting. A single soft key light from the upper-left, tilted
 // toward the viewer, is baked once into grayscale alpha sprites (makeShadeSprites)
@@ -263,9 +279,69 @@ function buildSimNodes(graph: Graph, previous: Map<string, SimNode>): SimNode[] 
   });
 }
 
+// Undirected adjacency (node id -> neighbor ids), memoized per Graph instance so
+// navigating between notes doesn't rebuild it from the full edge list each time.
+const adjacencyCache = new WeakMap<Graph, Map<string, string[]>>();
+function adjacencyOf(graph: Graph): Map<string, string[]> {
+  const cached = adjacencyCache.get(graph);
+  if (cached) return cached;
+  const adj = new Map<string, string[]>();
+  const link = (a: string, b: string) => {
+    const list = adj.get(a);
+    if (list) list.push(b);
+    else adj.set(a, [b]);
+  };
+  for (const e of graph.edges) {
+    link(e.source, e.target);
+    link(e.target, e.source);
+  }
+  adjacencyCache.set(graph, adj);
+  return adj;
+}
+
+/** Ids within `depth` link-hops of `startId` (inclusive), following links in
+ *  both directions — the node set of the local graph. */
+function neighborhoodIds(graph: Graph, startId: string, depth: number): Set<string> {
+  const adj = adjacencyOf(graph);
+  const seen = new Set<string>([startId]);
+  let frontier = [startId];
+  for (let d = 0; d < depth && frontier.length; d++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const nb of adj.get(id) ?? []) {
+        if (!seen.has(nb)) {
+          seen.add(nb);
+          next.push(nb);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return seen;
+}
+
 export function GraphView({ onClose }: { onClose: () => void }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Separate GPU canvas for the global scope (a canvas can hold only one context
+  // type, so WebGL gets its own; the 2D canvas keeps the local view).
+  const webglCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Whether the GPU renderer initialized. Read imperatively by `rebuild` to
+  // decide the global fallback; mirrored to state (`webglError`) for the UI.
+  const webglOkRef = useRef(false);
+  const [webglError, setWebglError] = useState<string | null>(null);
+  // On-screen WebGL diagnostic (updated imperatively, sampled to state below).
+  const diagRef = useRef("");
+  const [diag, setDiag] = useState("");
+  // Hover tooltip for the WebGL global view: the hovered note's name + position
+  // (canvas-local px). Set only when the hovered node changes.
+  const [hoverTip, setHoverTip] = useState<{ title: string; x: number; y: number } | null>(null);
+  // Bounded self-heal: the graph can mount before the vault is fully open and
+  // come back empty; retry a few times so it fills in instead of getting stuck.
+  const emptyRetriesRef = useRef(0);
+  // One-shot: fit the WebGL camera to the graph on (re)entry, then the user's
+  // pan/zoom (shared `S.camera`) takes over.
+  const webglNeedsFitRef = useRef(true);
 
   const { graph, loading, error, refresh } = useGraphData();
 
@@ -277,7 +353,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
   const [legend, setLegend] = useState<LegendEntry[]>([]);
   const [showControls, setShowControls] = useState(false);
-  const [counts, setCounts] = useState({ nodes: 0, edges: 0 });
+  const [counts, setCounts] = useState({ nodes: 0, edges: 0, total: 0 });
   const [refreshSpin, setRefreshSpin] = useState(false);
 
   const openNotePath = useStore((s) => s.openNote?.path ?? null);
@@ -308,6 +384,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     drag: null as Drag | null,
     rafId: null as number | null,
     needsDraw: true,
+    // Large global graphs offload the force sim to a Web Worker so the UI thread
+    // never blocks. `useWorker` is set per-rebuild; `workerActive` mirrors the
+    // worker's "still settling" state (drives redraws); `workerGen` drops stale
+    // position buffers after a rebuild; `indexById` maps a node id to its slot
+    // in the position buffer for drag fix/release.
+    useWorker: false,
+    workerActive: false,
+    workerGen: 0,
+    indexById: new Map<string, number>(),
     // Startup "come to life" burst: timestamp when the graph first got data, and
     // a one-time flag so the energizing velocity kick is applied only once.
     introStart: 0,
@@ -330,6 +415,42 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   // the legend to React state. Also set by the canvas effect (needs S.accent).
   const recolorRef = useRef<() => void>(() => {});
 
+  // Force-layout Web Worker for large global graphs. Created once, lives for the
+  // component's whole life (like simRef). Its streamed positions are written
+  // straight into the current render nodes, so the renderer/edges/hover code all
+  // keep reading the same objects — the only difference is the sim math happens
+  // off-thread. Created lazily and defensively: if Worker isn't available the
+  // ref stays null and rebuild() caps the global sim so the main thread is safe.
+  const workerRef = useRef<SimClient | null>(null);
+  if (workerRef.current === null && typeof Worker !== "undefined") {
+    try {
+      workerRef.current = new SimClient(
+        (buf, alpha, gen) => {
+          if (gen !== S.workerGen) return; // stale layout, ignore
+          const vn = S.visNodes;
+          if (buf.length !== vn.length * 2) return; // set changed under us
+          for (let i = 0; i < vn.length; i++) {
+            vn[i].x = buf[i * 2];
+            vn[i].y = buf[i * 2 + 1];
+          }
+          S.workerActive = alpha > 0.005;
+          S.needsDraw = true;
+          requestDrawRef.current();
+        },
+        (gen) => {
+          if (gen !== S.workerGen) return;
+          S.workerActive = false;
+          S.needsDraw = true;
+          requestDrawRef.current();
+        },
+      );
+    } catch {
+      workerRef.current = null;
+    }
+  }
+  // Tear the worker down for good on final unmount.
+  useEffect(() => () => workerRef.current?.dispose(), []);
+
   // Recompute visible nodes/edges from the latest graph + filter settings, feed
   // them to the simulation, refresh colors, and reheat. Called on data change
   // and whenever a filter setting changes.
@@ -342,11 +463,42 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const all = buildSimNodes(g, S.nodesById);
     S.nodesById = new Map(all.map((n) => [n.id, n]));
 
-    // Filter DIMS via search (draw-time); here we only HIDE by degree/orphans.
-    const visNodes = all.filter(
-      (n) =>
-        !(s.hideOrphans && n.linkCount === 0) && n.linkCount >= s.minDegree,
-    );
+    // Local scope: draw only the open note's neighborhood (a handful of nodes,
+    // so it stays smooth on any vault and re-centers as you move between notes).
+    // Falls back to the global overview when nothing is open.
+    const openNode =
+      s.scope === "local"
+        ? all.find((n) => n.path === openNotePathRef.current)
+        : undefined;
+
+    let visNodes: SimNode[];
+    if (openNode) {
+      const keep = neighborhoodIds(g, openNode.id, Math.max(1, s.localDepth));
+      visNodes = all.filter((n) => keep.has(n.id));
+    } else {
+      // Global overview: HIDE by degree/orphans (search DIMS at draw-time). With
+      // the GPU renderer we draw the whole set; without it (WebGL unavailable) we
+      // fall back to the 2D canvas and cap to the most-connected nodes so it
+      // stays smooth. The header reports the full total, so the cap is visible.
+      visNodes = all.filter(
+        (n) => !(s.hideOrphans && n.linkCount === 0) && n.linkCount >= s.minDegree,
+      );
+      if (!webglOkRef.current && visNodes.length > GLOBAL_2D_CAP) {
+        visNodes = [...visNodes]
+          .sort((a, b) => b.linkCount - a.linkCount)
+          .slice(0, GLOBAL_2D_CAP);
+      } else if (
+        workerRef.current === null &&
+        visNodes.length > WORKER_THRESHOLD
+      ) {
+        // No Web Worker available to offload the layout — cap the live sim so a
+        // huge vault can't lock up the main thread. (When the worker exists, the
+        // full set goes to it below instead of being capped.)
+        visNodes = [...visNodes]
+          .sort((a, b) => b.linkCount - a.linkCount)
+          .slice(0, WORKER_THRESHOLD);
+      }
+    }
     const visible = new Set(visNodes.map((n) => n.id));
     const links: SimLink[] = g.edges
       .filter((e) => visible.has(e.source) && visible.has(e.target))
@@ -356,6 +508,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // {source,target} ids against the current node array.
     sim.nodes(visNodes);
     (sim.force("link") as ForceLink<SimNode, SimLink>).links(links);
+    // Re-apply forces now that the node count is known — repulsion scales with
+    // it, so a 5k global graph spreads while a small local one stays compact.
+    configureForces(sim, s);
 
     // Only the first build gets a full reheat. After that, warm the layout just
     // enough to absorb the change (and never *cool* one that's already hotter).
@@ -380,11 +535,40 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     S.visEdges = links; // now resolved in place by forceLink
     S.drawOrder = [...visNodes].sort((a, b) => a.radius - b.radius);
 
+    // Large global graphs: run the force layout in a Web Worker so the UI thread
+    // never blocks. The worker owns its own copy and streams positions back into
+    // these same node objects (loop() skips the main-thread tick while active).
+    const worker = workerRef.current;
+    const useWorker =
+      !openNode && worker !== null && visNodes.length > WORKER_THRESHOLD;
+    S.useWorker = useWorker;
+    if (useWorker && worker) {
+      S.indexById = new Map(visNodes.map((n, i) => [n.id, i]));
+      const nodeSpec = visNodes.map((n) => ({
+        id: n.id,
+        radius: n.radius,
+        weight: n.weight,
+      }));
+      const linkSpec = links
+        .map((l) => {
+          const sid = typeof l.source === "string" ? l.source : l.source.id;
+          const tid = typeof l.target === "string" ? l.target : l.target.id;
+          return { source: S.indexById.get(sid)!, target: S.indexById.get(tid)! };
+        })
+        .filter((l) => l.source !== undefined && l.target !== undefined);
+      S.workerGen = worker.init(nodeSpec, linkSpec, s, 1200, 800, first);
+      S.workerActive = true;
+    } else if (worker) {
+      // Switched to local or a small enough set: park the worker.
+      worker.stop();
+      S.workerActive = false;
+    }
+
     const accent = S.colors.accent || FALLBACK_ACCENT;
     const { colorById, legend: lg } = assignColors(visNodes, s.colorMode, accent);
     S.colorById = colorById;
     setLegend(lg);
-    setCounts({ nodes: visNodes.length, edges: links.length });
+    setCounts({ nodes: visNodes.length, edges: links.length, total: g.nodes.length });
 
     requestDrawRef.current();
   }, [S]);
@@ -403,7 +587,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
       const keys = Object.keys(patch) as (keyof GraphSettings)[];
       const touchesFilter = keys.some(
-        (k) => k === "minDegree" || k === "hideOrphans",
+        (k) =>
+          k === "minDegree" ||
+          k === "hideOrphans" ||
+          k === "scope" ||
+          k === "localDepth",
       );
       const touchesForces = keys.some(
         (k) =>
@@ -421,8 +609,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (touchesForces) {
         // Physics changed: re-apply params without disturbing positions, then
         // gently reheat so the layout eases into its new equilibrium.
-        configureForces(sim, next);
-        sim.alpha(Math.max(sim.alpha(), 0.3));
+        if (S.useWorker) {
+          // The off-thread sim owns the layout here — hand it the new params.
+          workerRef.current?.setSettings(next);
+          S.workerActive = true;
+        } else {
+          configureForces(sim, next);
+          sim.alpha(Math.max(sim.alpha(), 0.3));
+        }
         requestDrawRef.current();
         return;
       }
@@ -449,8 +643,46 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   // Feed freshly-built graph data into the running simulation.
   useEffect(() => {
     graphRef.current = graph;
-    if (graph) rebuild();
+    if (graph) {
+      webglNeedsFitRef.current = true; // re-fit the WebGL camera to new data
+      rebuild();
+    }
   }, [graph, rebuild]);
+
+  // Re-fit the WebGL camera each time Global scope is (re)entered.
+  useEffect(() => {
+    if (settings.scope === "global") webglNeedsFitRef.current = true;
+  }, [settings.scope]);
+
+  // Re-center the local graph when the open note changes (no-op in global scope,
+  // where the view doesn't depend on which note is open).
+  useEffect(() => {
+    if (settingsRef.current.scope === "local" && graphRef.current) rebuild();
+  }, [openNotePath, rebuild]);
+
+  // Sample the imperative WebGL diagnostic into state a couple times a second
+  // (diagnostic HUD only; avoids a per-frame setState).
+  useEffect(() => {
+    if (!WEBGL_ENABLED) return;
+    const id = setInterval(() => setDiag(diagRef.current), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  // Self-heal an empty graph: if the data came back with no nodes (the view can
+  // mount before the vault's index is ready), retry a few times. A genuinely
+  // empty vault just settles after the retries and shows the empty state.
+  useEffect(() => {
+    if (loading) return;
+    if (graph && graph.nodes.length > 0) {
+      emptyRetriesRef.current = 0;
+      return;
+    }
+    if (graph && graph.nodes.length === 0 && emptyRetriesRef.current < 3) {
+      emptyRetriesRef.current += 1;
+      const id = setTimeout(refresh, 400);
+      return () => clearTimeout(id);
+    }
+  }, [graph, loading, refresh]);
 
   // ---- Canvas setup: runs once; everything else flows through refs. ----
   useEffect(() => {
@@ -460,6 +692,22 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const sim = simRef.current!;
+
+    // GPU renderer for the global scope (best-effort; if WebGL2 is unavailable
+    // we simply never switch to it). Its own canvas — a canvas can hold only one
+    // context type.
+    let webgl: WebGLGraphRenderer | null = null;
+    const webglCanvas = webglCanvasRef.current;
+    if (webglCanvas && WEBGL_ENABLED) {
+      try {
+        webgl = new WebGLGraphRenderer(webglCanvas);
+      } catch (e) {
+        webgl = null;
+        setWebglError(e instanceof Error ? e.message : String(e));
+        console.error("[graph] WebGL init failed:", e);
+      }
+    }
+    webglOkRef.current = webgl !== null;
 
     // Baked lighting sprites (color-independent) + a tiny color-parse cache so
     // the per-frame draw stays allocation-free even with continuous animation.
@@ -508,6 +756,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       dpr = window.devicePixelRatio || 1;
       canvas!.width = Math.max(1, Math.floor(width * dpr));
       canvas!.height = Math.max(1, Math.floor(height * dpr));
+      if (webgl) webgl.resize(width, height, dpr);
       requestDraw();
     }
 
@@ -779,6 +1028,106 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       }
     }
 
+    // Global scope: draw every node on the GPU (auto-fit to the viewport for
+    // now; pan/zoom/hover come next). Rebuilds the instance buffer each frame —
+    // fine for this first cut.
+    const webglNodes: RenderNode[] = [];
+    let edgePositions = new Float32Array(0);
+    function drawWebGL() {
+      if (!webgl || !webglCanvas) return;
+      const fallback = S.colors.nodeFallback;
+      const nodeScale = settingsRef.current.nodeSize;
+      // Shrink nodes as the graph grows so a bigger vault reads as "smaller
+      // dots, more space" rather than a compacted pile. ~1 for a few hundred
+      // nodes, ~0.2 at 50k. The layout also spreads (repulsion scales with n),
+      // so together the graph expands and keeps breathing room.
+      const countScale = Math.min(1, 40 / Math.sqrt(Math.max(1, S.visNodes.length)));
+      // Hover: light up the hovered node + its direct neighbors, dim the rest,
+      // so you can see a note's connections at a glance.
+      const hoveredId = S.hoveredId;
+      const hlSet =
+        hoveredId && graphRef.current
+          ? neighborhoodIds(graphRef.current, hoveredId, 1)
+          : null;
+      webglNodes.length = 0;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const n of S.visNodes) {
+        const c = getRgb(S.colorById.get(n.id) ?? fallback);
+        const dim = hlSet && !hlSet.has(n.id) ? 0.16 : 1;
+        const big =
+          n.id === hoveredId ? 2.4 : hlSet && hlSet.has(n.id) ? 1.8 : 1;
+        webglNodes.push({
+          x: n.x,
+          y: n.y,
+          r: n.radius * nodeScale * countScale * big,
+          color: [(c[0] / 255) * dim, (c[1] / 255) * dim, (c[2] / 255) * dim],
+        });
+        if (n.x < minX) minX = n.x;
+        if (n.y < minY) minY = n.y;
+        if (n.x > maxX) maxX = n.x;
+        if (n.y > maxY) maxY = n.y;
+      }
+      webgl.setNodes(webglNodes);
+      // Edges: two world-space vertices per link (source → target), read from
+      // the sim nodes forceLink resolved in place.
+      const edges = S.visEdges;
+      if (edgePositions.length < edges.length * 4) {
+        edgePositions = new Float32Array(edges.length * 4);
+      }
+      for (let i = 0; i < edges.length; i++) {
+        const src = edges[i].source as SimNode;
+        const tgt = edges[i].target as SimNode;
+        const o = i * 4;
+        edgePositions[o] = src.x;
+        edgePositions[o + 1] = src.y;
+        edgePositions[o + 2] = tgt.x;
+        edgePositions[o + 3] = tgt.y;
+      }
+      webgl.setEdges(edgePositions.subarray(0, edges.length * 4));
+      // Hover: bright rays from the hovered node to each of its neighbors, so
+      // connections are traceable even in a huge cloud.
+      if (hoveredId) {
+        const hl: number[] = [];
+        for (let i = 0; i < edges.length; i++) {
+          const s = edges[i].source as SimNode;
+          const t = edges[i].target as SimNode;
+          if (s.id === hoveredId || t.id === hoveredId) {
+            hl.push(s.x, s.y, t.x, t.y);
+          }
+        }
+        webgl.setHighlightEdges(new Float32Array(hl));
+      } else {
+        webgl.setHighlightEdges(new Float32Array(0));
+      }
+      // One-shot: fit the shared camera to the graph. After that the user's
+      // pan/zoom (which mutates S.camera via the 2D handlers) drives the view.
+      if (webglNeedsFitRef.current && webglNodes.length > 0) {
+        // Keep the graph framed as the layout expands during settle; the flag is
+        // cleared the moment the user pans/zooms (in the interaction handlers).
+        const bw = Math.max(1, maxX - minX);
+        const bh = Math.max(1, maxY - minY);
+        S.camera.k = Math.min((width - 80) / bw, (height - 80) / bh);
+        S.camera.x = -((minX + maxX) / 2) * S.camera.k;
+        S.camera.y = -((minY + maxY) / 2) * S.camera.k;
+      }
+      // Same transform as the 2D path: screen_css = width/2 + cam.x + world·cam.k,
+      // then scaled by dpr into the device-pixel drawing buffer.
+      const cam = S.camera;
+      webgl.draw(
+        cam.k * dpr,
+        (width / 2 + cam.x) * dpr,
+        (height / 2 + cam.y) * dpr,
+        // Small floor so nodes can shrink to give space at the whole-graph
+        // overview (they grow back as you zoom in); avoids the compacted pile.
+        1.5 * dpr,
+      );
+      diagRef.current =
+        `webgl ✓ · nodes ${webglNodes.length} · buf ${webglCanvas.width}×${webglCanvas.height} · ` +
+        `k ${cam.k.toFixed(3)} · cam ${Math.round(cam.x)},${Math.round(cam.y)} · ` +
+        `bounds ${Math.round(minX)},${Math.round(minY)}..${Math.round(maxX)},${Math.round(maxY)} · ` +
+        `gl ${webgl.glError()}`;
+    }
+
     // Single frame clock. The loop stays alive the whole time the graph is
     // mounted so the lighting keeps breathing and the scene feels alive at rest.
     // Physics is the expensive part, so we tick it ONLY while the sim is warm
@@ -787,8 +1136,25 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       S.rafId = null;
       const introActive =
         S.introStart > 0 && performance.now() - S.introStart < INTRO_MS;
-      if (sim.alpha() > sim.alphaMin() || introActive) sim.tick();
-      draw();
+      // When the Web Worker owns the layout (big global graph) we NEVER tick the
+      // main-thread sim — that's the whole point, it would freeze the UI. The
+      // worker streams positions in and flips S.workerActive; we just repaint.
+      let active: boolean;
+      if (S.useWorker) {
+        active = S.workerActive || introActive;
+      } else {
+        active = sim.alpha() > sim.alphaMin() || introActive;
+        if (active) sim.tick();
+      }
+      if (settingsRef.current.scope === "global" && webgl) {
+        // Only rebuild + re-upload + redraw while the layout is moving (or on an
+        // explicit request). Once settled the last frame stands, so idle cost is
+        // ~zero — this is what keeps the app responsive instead of re-uploading
+        // every node every frame forever.
+        if (active || S.needsDraw) drawWebGL();
+      } else {
+        draw();
+      }
       S.needsDraw = false;
       S.rafId = requestAnimationFrame(loop);
     }
@@ -807,6 +1173,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
     function handleWheel(e: WheelEvent) {
       e.preventDefault();
+      webglNeedsFitRef.current = false; // user is driving the camera now
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -820,6 +1187,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     }
 
     function handlePointerDown(e: PointerEvent) {
+      webglNeedsFitRef.current = false; // user is driving the camera now
       const { x: sx, y: sy } = clientToLocal(e);
       const hit = nodeAt(sx, sy);
       canvas!.setPointerCapture(e.pointerId);
@@ -828,7 +1196,12 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Pin the grabbed node and keep the sim warm so neighbors react live.
         hit.fx = hit.x;
         hit.fy = hit.y;
-        sim.alphaTarget(0.3);
+        if (S.useWorker) {
+          const i = S.indexById.get(hit.id);
+          if (i !== undefined) workerRef.current?.fix(i, hit.x, hit.y);
+        } else {
+          sim.alphaTarget(0.3);
+        }
         S.drag = {
           type: "node",
           node: hit,
@@ -862,6 +1235,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           const { x: wx, y: wy } = screenToWorld(sx, sy);
           drag.node.fx = wx;
           drag.node.fy = wy;
+          if (S.useWorker) {
+            // Move it locally for zero-latency feedback, and pin it in the worker
+            // so the off-thread sim keeps the neighbors reacting around it.
+            drag.node.x = wx;
+            drag.node.y = wy;
+            const i = S.indexById.get(drag.node.id);
+            if (i !== undefined) workerRef.current?.fix(i, wx, wy);
+          }
           if (!drag.moved) {
             const dist = Math.hypot(
               e.clientX - drag.startX,
@@ -879,6 +1260,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (hitId !== S.hoveredId) {
         S.hoveredId = hitId;
         canvas!.classList.toggle("is-hovering-node", hitId != null);
+        // Name tooltip near the cursor (canvas-local coords). Only updated on
+        // change of hovered node, so mousemove itself stays cheap.
+        setHoverTip(hit ? { title: hit.title, x: sx, y: sy } : null);
         requestDraw();
       }
     }
@@ -888,16 +1272,25 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       canvas!.classList.remove("is-dragging");
       S.drag = null;
       if (drag?.type === "node") {
-        sim.alphaTarget(0); // stop feeding energy; let it cool naturally
         // Release the pin either way — a dropped node is handed back to the
         // forces so gravity pulls it toward the center and the whole graph
         // re-stabilizes. Nothing stays where you put it.
         drag.node.fx = null;
         drag.node.fy = null;
+        const wi = S.useWorker ? S.indexById.get(drag.node.id) : undefined;
+        if (S.useWorker) {
+          if (wi !== undefined) workerRef.current?.release(wi);
+        } else {
+          sim.alphaTarget(0); // stop feeding energy; let it cool naturally
+        }
         if (!drag.moved) {
           // A click, not a drag: open the note.
           const path = drag.node.path;
           useStore.getState().openNoteByPath(path).then(onClose);
+        } else if (S.useWorker) {
+          // A real drag: gentle reheat so the displaced node drifts home calmly.
+          if (wi !== undefined) workerRef.current?.reheat(0.25);
+          requestDrawRef.current();
         } else {
           // A real drag: a gentle reheat so the displaced node drifts home
           // slowly and calmly (low energy = slow return, not a snap-back).
@@ -930,6 +1323,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // guard on a StrictMode remount.
       S.rafId = null;
       sim.stop();
+      webgl?.dispose();
       requestDrawRef.current = () => {};
       recolorRef.current = () => {};
       canvas.removeEventListener("wheel", handleWheel);
@@ -964,8 +1358,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       <div className="graph-header">
         <span className="graph-title">Graph</span>
         <span className="graph-counts">
-          {counts.nodes} {counts.nodes === 1 ? "note" : "notes"} · {counts.edges}{" "}
-          {counts.edges === 1 ? "link" : "links"}
+          {counts.total > counts.nodes
+            ? `${counts.nodes.toLocaleString()} of ${counts.total.toLocaleString()} notes`
+            : `${counts.nodes} ${counts.nodes === 1 ? "note" : "notes"}`}{" "}
+          · {counts.edges} {counts.edges === 1 ? "link" : "links"}
         </span>
         <span className="graph-header-spacer" />
         <button
@@ -997,6 +1393,83 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
       <div className="graph-canvas-wrap">
         <canvas className="graph-canvas" ref={canvasRef} />
+        <canvas
+          className="graph-canvas"
+          ref={webglCanvasRef}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            // Events pass through to the 2D canvas below, which owns the shared
+            // pan/zoom + hit-test handlers.
+            pointerEvents: "none",
+            display:
+              WEBGL_ENABLED && settings.scope === "global" && !webglError
+                ? "block"
+                : "none",
+          }}
+        />
+        {settings.scope === "global" && webglError && (
+          <div
+            style={{
+              position: "absolute",
+              top: 8,
+              left: 8,
+              maxWidth: "60%",
+              padding: "6px 10px",
+              borderRadius: 6,
+              background: "rgba(180,40,40,0.85)",
+              color: "#fff",
+              font: "11px/1.4 ui-monospace, monospace",
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          >
+            WebGL unavailable — showing capped 2D fallback. {webglError}
+          </div>
+        )}
+        {WEBGL_ENABLED && settings.scope === "global" && diag && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 8,
+              left: 8,
+              padding: "4px 8px",
+              borderRadius: 6,
+              background: "rgba(0,0,0,0.6)",
+              color: "#9fef9f",
+              font: "10px/1.4 ui-monospace, monospace",
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          >
+            {diag}
+          </div>
+        )}
+        {settings.scope === "global" && hoverTip && (
+          <div
+            style={{
+              position: "absolute",
+              left: hoverTip.x + 12,
+              top: hoverTip.y + 12,
+              maxWidth: 260,
+              padding: "3px 8px",
+              borderRadius: 6,
+              background: "rgba(18,18,26,0.94)",
+              color: "#fff",
+              font: "12px/1.3 var(--font-body, ui-sans-serif)",
+              border: "1px solid rgba(255,255,255,0.14)",
+              pointerEvents: "none",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              zIndex: 6,
+            }}
+          >
+            {hoverTip.title}
+          </div>
+        )}
 
         {showControls && (
           <GraphControls

@@ -234,16 +234,33 @@ export default function App() {
   const [booting, setBooting] = useState(true);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
+  const didAutoReopenRef = useRef(false);
 
   // Auto-reopen the last vault on launch, then restore the session (spec 04 §7)
   // and enable sync. Vault first so `enableSyncForVault` (called inside initAuth)
   // sees the loaded tree.
   useEffect(() => {
+    // Run exactly once. In dev, StrictMode double-invokes this effect, which
+    // otherwise fires two concurrent `openVault` calls that race on the index
+    // write lock → "database is locked" → the vault fails to open.
+    if (didAutoReopenRef.current) return;
+    didAutoReopenRef.current = true;
     (async () => {
       try {
         const last = await ipc.getLastVault();
         if (last) {
-          await ipc.openVault(last.path);
+          // The index can be briefly write-locked right at startup; retry a few
+          // times before giving up so a transient lock doesn't strand the vault.
+          for (let attempt = 0; ; attempt++) {
+            try {
+              await ipc.openVault(last.path);
+              break;
+            } catch (err) {
+              if (attempt >= 3) throw err;
+              await new Promise((r) => setTimeout(r, 400));
+            }
+          }
           useStore.getState().setVault(last);
           await useStore.getState().refreshTree();
           await useStore.getState().refreshTitles();

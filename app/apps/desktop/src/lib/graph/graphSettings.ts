@@ -8,7 +8,18 @@
 /** How node fill colors are derived. */
 export type ColorMode = "folder" | "degree" | "uniform";
 
+/** What the graph draws: the whole vault (`global`) or just the neighborhood of
+ *  the currently-open note (`local` — stays small and smooth on any vault, and
+ *  re-centers as you move between notes). */
+export type GraphScope = "local" | "global";
+
 export interface GraphSettings {
+  // ---- Scope ----
+  /** Draw the open note's local neighborhood, or the whole vault. */
+  scope: GraphScope;
+  /** How many link-hops out from the open note the local graph reaches. */
+  localDepth: number;
+
   // ---- Forces (physics) ----
   /** Many-body repulsion. More negative = stronger push-apart. */
   charge: number;
@@ -39,10 +50,12 @@ export interface GraphSettings {
 }
 
 export const DEFAULT_SETTINGS: GraphSettings = {
+  scope: "local",
+  localDepth: 1,
   charge: -10.8,
   linkDistance: 1.5,
   linkStrength: 1,
-  gravity: 0.5,
+  gravity: 0.7,
   nodeSize: 1,
   edgeThickness: 1,
   labelScale: 1,
@@ -54,6 +67,7 @@ export const DEFAULT_SETTINGS: GraphSettings = {
 
 /** Inclusive slider ranges + step for the numeric controls, keyed by setting. */
 export const SETTING_RANGES = {
+  localDepth: { min: 1, max: 3, step: 1 },
   charge: { min: -1500, max: -1, step: 0.2 },
   linkDistance: { min: 1, max: 400, step: 0.5 },
   linkStrength: { min: 0, max: 1, step: 0.02 },
@@ -64,8 +78,8 @@ export const SETTING_RANGES = {
   minDegree: { min: 0, max: 20, step: 1 },
 } as const;
 
-// Bumped v1 → v2 so the new physics defaults take effect over any saved values.
-export const SETTINGS_STORAGE_KEY = "context.graph.settings.v2";
+// Bumped to v4 so the new physics defaults take effect over any saved values.
+export const SETTINGS_STORAGE_KEY = "context.graph.settings.v4";
 
 /** Load persisted settings, merged over defaults (tolerant of missing/old keys). */
 export function loadSettings(): GraphSettings {
