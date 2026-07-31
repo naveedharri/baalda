@@ -18,6 +18,7 @@ import {
 } from "../lib/graph/graphSettings";
 import { useGraphData } from "../lib/graph/useGraphData";
 import { WebGLGraphRenderer, type RenderNode } from "../lib/graph/webglRenderer";
+import { SimClient } from "../lib/graph/simClient";
 import { useStore } from "../store";
 import { GraphControls } from "./GraphControls";
 import "./graph.css";
@@ -57,11 +58,17 @@ const REHEAT_FIRST = 1;
 const REHEAT_REFRESH = 0.22;
 
 // Fallback cap for the global scope on the 2D canvas, which only stays smooth
-// up to a few hundred nodes. The full-graph GPU (WebGL) renderer is wired but
-// still being finished, so it's gated off for now — global uses this capped 2D
-// view (the clean hub cluster) until WebGL is ready.
+// up to a few hundred nodes. The GPU (WebGL) renderer draws the whole vault, so
+// this cap only applies when WebGL is unavailable.
 const GLOBAL_2D_CAP = 600;
 const WEBGL_ENABLED = true;
+
+// Above this node count, the global graph runs its force layout in a Web Worker
+// (see simWorker.ts) so a huge vault (50k+) can settle without freezing the UI
+// thread. At or below it, the sim runs inline — proven smooth up to ~5.5k and it
+// keeps drag/interaction latency zero. If the Worker API is unavailable, the
+// global sim is capped to this size so the main thread can never lock up.
+const WORKER_THRESHOLD = 8000;
 
 
 // Matte-sphere lighting. A single soft key light from the upper-left, tilted
@@ -377,6 +384,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     drag: null as Drag | null,
     rafId: null as number | null,
     needsDraw: true,
+    // Large global graphs offload the force sim to a Web Worker so the UI thread
+    // never blocks. `useWorker` is set per-rebuild; `workerActive` mirrors the
+    // worker's "still settling" state (drives redraws); `workerGen` drops stale
+    // position buffers after a rebuild; `indexById` maps a node id to its slot
+    // in the position buffer for drag fix/release.
+    useWorker: false,
+    workerActive: false,
+    workerGen: 0,
+    indexById: new Map<string, number>(),
     // Startup "come to life" burst: timestamp when the graph first got data, and
     // a one-time flag so the energizing velocity kick is applied only once.
     introStart: 0,
@@ -398,6 +414,42 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   // Recomputes per-node colors from the current visible set + accent, and pushes
   // the legend to React state. Also set by the canvas effect (needs S.accent).
   const recolorRef = useRef<() => void>(() => {});
+
+  // Force-layout Web Worker for large global graphs. Created once, lives for the
+  // component's whole life (like simRef). Its streamed positions are written
+  // straight into the current render nodes, so the renderer/edges/hover code all
+  // keep reading the same objects — the only difference is the sim math happens
+  // off-thread. Created lazily and defensively: if Worker isn't available the
+  // ref stays null and rebuild() caps the global sim so the main thread is safe.
+  const workerRef = useRef<SimClient | null>(null);
+  if (workerRef.current === null && typeof Worker !== "undefined") {
+    try {
+      workerRef.current = new SimClient(
+        (buf, alpha, gen) => {
+          if (gen !== S.workerGen) return; // stale layout, ignore
+          const vn = S.visNodes;
+          if (buf.length !== vn.length * 2) return; // set changed under us
+          for (let i = 0; i < vn.length; i++) {
+            vn[i].x = buf[i * 2];
+            vn[i].y = buf[i * 2 + 1];
+          }
+          S.workerActive = alpha > 0.005;
+          S.needsDraw = true;
+          requestDrawRef.current();
+        },
+        (gen) => {
+          if (gen !== S.workerGen) return;
+          S.workerActive = false;
+          S.needsDraw = true;
+          requestDrawRef.current();
+        },
+      );
+    } catch {
+      workerRef.current = null;
+    }
+  }
+  // Tear the worker down for good on final unmount.
+  useEffect(() => () => workerRef.current?.dispose(), []);
 
   // Recompute visible nodes/edges from the latest graph + filter settings, feed
   // them to the simulation, refresh colors, and reheat. Called on data change
@@ -435,6 +487,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         visNodes = [...visNodes]
           .sort((a, b) => b.linkCount - a.linkCount)
           .slice(0, GLOBAL_2D_CAP);
+      } else if (
+        workerRef.current === null &&
+        visNodes.length > WORKER_THRESHOLD
+      ) {
+        // No Web Worker available to offload the layout — cap the live sim so a
+        // huge vault can't lock up the main thread. (When the worker exists, the
+        // full set goes to it below instead of being capped.)
+        visNodes = [...visNodes]
+          .sort((a, b) => b.linkCount - a.linkCount)
+          .slice(0, WORKER_THRESHOLD);
       }
     }
     const visible = new Set(visNodes.map((n) => n.id));
@@ -472,6 +534,35 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     S.visNodes = visNodes;
     S.visEdges = links; // now resolved in place by forceLink
     S.drawOrder = [...visNodes].sort((a, b) => a.radius - b.radius);
+
+    // Large global graphs: run the force layout in a Web Worker so the UI thread
+    // never blocks. The worker owns its own copy and streams positions back into
+    // these same node objects (loop() skips the main-thread tick while active).
+    const worker = workerRef.current;
+    const useWorker =
+      !openNode && worker !== null && visNodes.length > WORKER_THRESHOLD;
+    S.useWorker = useWorker;
+    if (useWorker && worker) {
+      S.indexById = new Map(visNodes.map((n, i) => [n.id, i]));
+      const nodeSpec = visNodes.map((n) => ({
+        id: n.id,
+        radius: n.radius,
+        weight: n.weight,
+      }));
+      const linkSpec = links
+        .map((l) => {
+          const sid = typeof l.source === "string" ? l.source : l.source.id;
+          const tid = typeof l.target === "string" ? l.target : l.target.id;
+          return { source: S.indexById.get(sid)!, target: S.indexById.get(tid)! };
+        })
+        .filter((l) => l.source !== undefined && l.target !== undefined);
+      S.workerGen = worker.init(nodeSpec, linkSpec, s, 1200, 800, first);
+      S.workerActive = true;
+    } else if (worker) {
+      // Switched to local or a small enough set: park the worker.
+      worker.stop();
+      S.workerActive = false;
+    }
 
     const accent = S.colors.accent || FALLBACK_ACCENT;
     const { colorById, legend: lg } = assignColors(visNodes, s.colorMode, accent);
@@ -518,8 +609,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (touchesForces) {
         // Physics changed: re-apply params without disturbing positions, then
         // gently reheat so the layout eases into its new equilibrium.
-        configureForces(sim, next);
-        sim.alpha(Math.max(sim.alpha(), 0.3));
+        if (S.useWorker) {
+          // The off-thread sim owns the layout here — hand it the new params.
+          workerRef.current?.setSettings(next);
+          S.workerActive = true;
+        } else {
+          configureForces(sim, next);
+          sim.alpha(Math.max(sim.alpha(), 0.3));
+        }
         requestDrawRef.current();
         return;
       }
@@ -1039,8 +1136,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       S.rafId = null;
       const introActive =
         S.introStart > 0 && performance.now() - S.introStart < INTRO_MS;
-      const active = sim.alpha() > sim.alphaMin() || introActive;
-      if (active) sim.tick();
+      // When the Web Worker owns the layout (big global graph) we NEVER tick the
+      // main-thread sim — that's the whole point, it would freeze the UI. The
+      // worker streams positions in and flips S.workerActive; we just repaint.
+      let active: boolean;
+      if (S.useWorker) {
+        active = S.workerActive || introActive;
+      } else {
+        active = sim.alpha() > sim.alphaMin() || introActive;
+        if (active) sim.tick();
+      }
       if (settingsRef.current.scope === "global" && webgl) {
         // Only rebuild + re-upload + redraw while the layout is moving (or on an
         // explicit request). Once settled the last frame stands, so idle cost is
@@ -1091,7 +1196,12 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Pin the grabbed node and keep the sim warm so neighbors react live.
         hit.fx = hit.x;
         hit.fy = hit.y;
-        sim.alphaTarget(0.3);
+        if (S.useWorker) {
+          const i = S.indexById.get(hit.id);
+          if (i !== undefined) workerRef.current?.fix(i, hit.x, hit.y);
+        } else {
+          sim.alphaTarget(0.3);
+        }
         S.drag = {
           type: "node",
           node: hit,
@@ -1125,6 +1235,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           const { x: wx, y: wy } = screenToWorld(sx, sy);
           drag.node.fx = wx;
           drag.node.fy = wy;
+          if (S.useWorker) {
+            // Move it locally for zero-latency feedback, and pin it in the worker
+            // so the off-thread sim keeps the neighbors reacting around it.
+            drag.node.x = wx;
+            drag.node.y = wy;
+            const i = S.indexById.get(drag.node.id);
+            if (i !== undefined) workerRef.current?.fix(i, wx, wy);
+          }
           if (!drag.moved) {
             const dist = Math.hypot(
               e.clientX - drag.startX,
@@ -1154,16 +1272,25 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       canvas!.classList.remove("is-dragging");
       S.drag = null;
       if (drag?.type === "node") {
-        sim.alphaTarget(0); // stop feeding energy; let it cool naturally
         // Release the pin either way — a dropped node is handed back to the
         // forces so gravity pulls it toward the center and the whole graph
         // re-stabilizes. Nothing stays where you put it.
         drag.node.fx = null;
         drag.node.fy = null;
+        const wi = S.useWorker ? S.indexById.get(drag.node.id) : undefined;
+        if (S.useWorker) {
+          if (wi !== undefined) workerRef.current?.release(wi);
+        } else {
+          sim.alphaTarget(0); // stop feeding energy; let it cool naturally
+        }
         if (!drag.moved) {
           // A click, not a drag: open the note.
           const path = drag.node.path;
           useStore.getState().openNoteByPath(path).then(onClose);
+        } else if (S.useWorker) {
+          // A real drag: gentle reheat so the displaced node drifts home calmly.
+          if (wi !== undefined) workerRef.current?.reheat(0.25);
+          requestDrawRef.current();
         } else {
           // A real drag: a gentle reheat so the displaced node drifts home
           // slowly and calmly (low energy = slow return, not a snap-back).
