@@ -5,7 +5,9 @@
 use crate::attachments::{self, AttachmentMeta};
 use crate::error::{AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
-use crate::index::{Backlink, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsState};
+use crate::index::{
+    Backlink, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsState,
+};
 use crate::notefile;
 use crate::state::AppState;
 use crate::tree::{self, TreeNode};
@@ -559,6 +561,19 @@ pub async fn list_tree(state: State<'_, AppState>) -> AppResult<TreeNode> {
     tree::list_tree(&vault)
 }
 
+/// Lazy sidebar loading: return only one directory's immediate children.
+/// `path` is the vault-relative dir ("" = root). Sub-dirs come back as
+/// expandable-but-unloaded folders (empty `children`); the UI fetches deeper
+/// levels on expand. Keeps vault switching O(entries) instead of O(all notes).
+#[tauri::command]
+pub async fn list_children(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<Vec<TreeNode>> {
+    let (vault, _) = require_vault(&state)?;
+    tree::list_children(&vault, &path)
+}
+
 #[tauri::command]
 pub async fn read_note(state: State<'_, AppState>, path: String) -> AppResult<String> {
     let (vault, _) = require_vault(&state)?;
@@ -647,6 +662,15 @@ pub async fn get_backlinks(
     let (_, index) = require_vault(&state)?;
     let guard = index.lock().unwrap();
     guard.get_backlinks(&note_id)
+}
+
+/// Every resolved edge of the note graph in one call — backs the Graph view so
+/// it no longer fires one `get_backlinks` per note.
+#[tauri::command]
+pub async fn graph_edges(state: State<'_, AppState>) -> AppResult<Vec<GraphEdge>> {
+    let (_, index) = require_vault(&state)?;
+    let guard = index.lock().unwrap();
+    guard.graph_edges()
 }
 
 #[tauri::command]

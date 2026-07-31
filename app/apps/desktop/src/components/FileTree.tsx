@@ -240,6 +240,16 @@ export function FileTree() {
 
   const allSelected = nodeByPath.size > 0 && selected.size === nodeByPath.size;
 
+  // Lazy loading: a folder arrives with an empty `children` placeholder; the
+  // first time it's expanded, fetch its real children on demand. Genuinely
+  // empty folders just re-fetch an empty list (harmless).
+  const onToggle = (id: string) => {
+    const node = nodeByPath.get(id);
+    if (node?.isDir && (node.children?.length ?? 0) === 0) {
+      void useStore.getState().loadChildren(id);
+    }
+  };
+
   function toggleSelect(path: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -843,6 +853,7 @@ export function FileTree() {
           height={dim.height - 34 - (selectMode ? 36 : 0)}
           indent={14}
           rowHeight={32}
+          onToggle={onToggle}
           onActivate={onActivate}
           onRename={onRename}
           onMove={onMove}

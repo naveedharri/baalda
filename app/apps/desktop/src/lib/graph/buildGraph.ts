@@ -1,17 +1,16 @@
-// Assembles the wikilink graph for the Graph View (Obsidian-style).
+// Assembles the wikilink graph for the Graph View.
 //
-// Data source: `listNoteTitles` gives every note id/title/path; `getBacklinks`
-// gives, per note, the notes that link INTO it. Inverting each backlink turns
-// it into a directed edge in the "links to" direction (A -> B means A links
-// to B), which is what a force graph wants to draw. This is the same data the
-// Rust index already maintains for the BacklinksPanel, so no new Rust command
-// is needed and the call fans out at O(notes) — fine for a few hundred notes.
+// Data source: `listNoteTitles` gives every note id/title/path; `getGraphEdges`
+// gives every resolved edge (source id -> target id, "A -> B means A links to
+// B") in a single query. Both are one IPC round-trip each, so building the
+// graph is O(1) calls regardless of vault size — the old path fanned out one
+// `getBacklinks` call per note, which stalled on large vaults.
 //
 // The IPC calls and the pure transformation are kept separate so the
 // transformation (dedupe, self-link/dangling-link filtering, linkCount
 // aggregation) can be unit-tested without Tauri.
 
-import { getBacklinks, listNoteTitles, type Backlink, type NoteTitle } from "../ipc";
+import { getGraphEdges, listNoteTitles, type NoteTitle } from "../ipc";
 
 export interface GraphNode {
   id: string;
@@ -34,31 +33,27 @@ export interface Graph {
 }
 
 /**
- * Pure transformation: notes + per-note backlinks -> a deduped node/edge graph.
+ * Pure transformation: notes + resolved edges -> a deduped node/edge graph.
  * Exported separately from `buildGraph` so tests can exercise it with fixture
- * data instead of a real Tauri backend.
+ * data instead of a real Tauri backend. Drops self-loops and any edge whose
+ * endpoints aren't both known notes, dedupes repeated links between a pair, and
+ * aggregates each node's `linkCount` (distinct edges touching it).
  */
-export function assembleGraph(
-  titles: NoteTitle[],
-  backlinksByNoteId: Map<string, Backlink[]>,
-): Graph {
+export function assembleGraph(titles: NoteTitle[], rawEdges: GraphEdge[]): Graph {
   const knownIds = new Set(titles.map((t) => t.id));
   const linkCount = new Map<string, number>();
   const edgeKeys = new Set<string>();
   const edges: GraphEdge[] = [];
 
-  for (const note of titles) {
-    const backlinks = backlinksByNoteId.get(note.id) ?? [];
-    for (const bl of backlinks) {
-      if (bl.id === note.id) continue; // no self-loops
-      if (!knownIds.has(bl.id)) continue; // ignore dangling/unresolved refs
-      const key = `${bl.id}->${note.id}`;
-      if (edgeKeys.has(key)) continue; // dedupe repeated [[wikilinks]] between the same pair
-      edgeKeys.add(key);
-      edges.push({ source: bl.id, target: note.id });
-      linkCount.set(bl.id, (linkCount.get(bl.id) ?? 0) + 1);
-      linkCount.set(note.id, (linkCount.get(note.id) ?? 0) + 1);
-    }
+  for (const e of rawEdges) {
+    if (e.source === e.target) continue; // no self-loops
+    if (!knownIds.has(e.source) || !knownIds.has(e.target)) continue; // drop dangling refs
+    const key = `${e.source}->${e.target}`;
+    if (edgeKeys.has(key)) continue; // dedupe repeated [[wikilinks]] between the same pair
+    edgeKeys.add(key);
+    edges.push({ source: e.source, target: e.target });
+    linkCount.set(e.source, (linkCount.get(e.source) ?? 0) + 1);
+    linkCount.set(e.target, (linkCount.get(e.target) ?? 0) + 1);
   }
 
   const nodes: GraphNode[] = titles.map((t) => ({
@@ -71,12 +66,8 @@ export function assembleGraph(
   return { nodes, edges };
 }
 
-/** Fetch note titles + backlinks from Tauri and assemble the graph. */
+/** Fetch note titles + all resolved edges from Tauri and assemble the graph. */
 export async function buildGraph(): Promise<Graph> {
-  const titles = await listNoteTitles();
-  const entries = await Promise.all(
-    titles.map(async (t) => [t.id, await getBacklinks(t.id)] as const),
-  );
-  const backlinksByNoteId = new Map(entries);
-  return assembleGraph(titles, backlinksByNoteId);
+  const [titles, edges] = await Promise.all([listNoteTitles(), getGraphEdges()]);
+  return assembleGraph(titles, edges);
 }

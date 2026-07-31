@@ -141,6 +141,9 @@ export const openVaultInRoot = (path: string) =>
 // ---- Tree + files ---------------------------------------------------------
 
 export const listTree = () => invoke<TreeNode>("list_tree");
+/** Lazy sidebar loading: immediate children of one dir ("" = root). */
+export const listChildren = (path: string) =>
+  invoke<TreeNode[]>("list_children", { path });
 export const readNote = (path: string) => invoke<string>("read_note", { path });
 export const writeNote = (path: string, content: string) =>
   invoke<void>("write_note", { path, content });
@@ -165,6 +168,10 @@ export const searchNotes = (query: string) =>
   invoke<SearchResult[]>("search_notes", { query });
 export const getBacklinks = (noteId: string) =>
   invoke<Backlink[]>("get_backlinks", { noteId });
+/** Every resolved graph edge (source id -> target id) in one call — backs the
+ *  Graph view instead of one getBacklinks per note. */
+export const getGraphEdges = () =>
+  invoke<{ source: string; target: string }[]>("graph_edges");
 export const getNoteMeta = (path: string) =>
   invoke<NoteMeta | null>("get_note_meta", { path });
 export const resolveWikilink = (name: string) =>

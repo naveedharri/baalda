@@ -119,20 +119,44 @@ export function configureForces(
   sim: Simulation<SimNode, SimLink>,
   settings: GraphSettings,
 ): void {
-  (sim.force("charge") as ForceManyBody<SimNode>).strength(settings.charge);
+  // Repulsion scales with graph size. A fixed strength that spaces a ~20-node
+  // local graph nicely lets a 5k global graph collapse into a dense ball, so we
+  // grow it ~√n (identity for small graphs, much stronger for large ones). This
+  // keeps node spacing roughly consistent as the vault grows.
+  const n = Math.max(1, sim.nodes().length);
+  const chargeScale = Math.max(1, Math.sqrt(n) / 3);
+  // Clamp the scaled repulsion so an extreme slider value on a big graph can't
+  // send nodes to infinity (with weak/zero gravity the layout would explode).
+  const scaledCharge = Math.max(-6000, settings.charge * chargeScale);
+  const charge = sim.force("charge") as ForceManyBody<SimNode>;
+  charge.strength(scaledCharge);
+  // CRUCIAL for large graphs: cap the RANGE of repulsion so each node only
+  // pushes against nearby neighbors, not every node in the vault. Without a
+  // cutoff, global many-body repulsion on thousands of nodes evacuates the
+  // center and blows the layout out into a hollow shell/ring, and the O(n)
+  // far-field never lets the sim cool (it looks "stuck"). A local cutoff keeps
+  // the cloud filled and lets it settle quickly. Scaled to the natural node
+  // spacing (collide keeps nodes ~radius+5 apart) so it stays local as the
+  // graph grows; floored so tiny graphs still get a sensible neighborhood.
+  const spacing = MAX_RADIUS + 5;
+  charge.distanceMin(1).distanceMax(Math.max(120, spacing * 8));
 
   const link = sim.force("link") as ForceLink<SimNode, SimLink>;
   link.distance(settings.linkDistance).strength(settings.linkStrength);
 
   // Gravity slider scales the center pull; each node's own mass (weight) makes
-  // heavier nodes pull harder toward the single center point. Clamp to [0,1] so
-  // the positional force never overshoots/oscillates.
+  // heavier nodes pull harder toward the single center point. A small floor
+  // keeps *some* centering even at gravity 0, so strong repulsion can't fling
+  // the graph off-screen. Clamp to [0,1] so the force never overshoots.
+  const gravity = Math.max(0.04, settings.gravity);
   const centerStrength = (d: SimNode) =>
-    Math.max(0, Math.min(1, settings.gravity * (d.weight ?? 0.12)));
+    Math.max(0, Math.min(1, gravity * (d.weight ?? 0.12)));
   (sim.force("x") as ForceX<SimNode>).strength(centerStrength);
   (sim.force("y") as ForceY<SimNode>).strength(centerStrength);
 
+  // A little extra margin beyond each node's visual radius so nodes keep some
+  // breathing room instead of touching — the even, spaced look of a good graph.
   (sim.force("collide") as ForceCollide<SimNode>)
-    .radius((d) => d.radius + 2)
-    .strength(0.75);
+    .radius((d) => d.radius + 5)
+    .strength(0.85);
 }

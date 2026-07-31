@@ -1,9 +1,10 @@
 //! The local SQLite index (spec 02 §3). A derived, rebuildable layer over the
 //! `.md` files: FTS5 search, backlinks, tags, and the stable `doc_id` ↔ path map.
 //!
-//! Identity rule: notes are keyed by `doc_id` (a UUID), never by path. A full
-//! rebuild preserves existing ids by matching on path, so reopening a vault
-//! never forks a note's identity. On rename we update the path column by id, so
+//! Identity rule: notes are keyed by `doc_id` (a UUID), never by path. The
+//! open-time `rebuild` reconciles against the `.md` files incrementally,
+//! preserving existing ids by matching on path, so reopening a vault never
+//! forks a note's identity. On rename we update the path column by id, so
 //! inbound links (which store `dst_note_id`) never break.
 
 use crate::error::AppResult;
@@ -12,7 +13,7 @@ use crate::parse::parse_note;
 use crate::vault::{is_ignored_name, rel_from_abs};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -37,6 +38,14 @@ pub struct Backlink {
     pub path: String,
     pub title: String,
     pub link_text: String,
+}
+
+/// One resolved directed edge of the note graph (`source` links to `target`,
+/// both note ids). Serialized field names match the front-end `GraphEdge`.
+#[derive(Debug, Serialize, Clone)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -75,6 +84,10 @@ impl Index {
         let conn = Connection::open(db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Wait up to 5s for a contended lock instead of failing immediately with
+        // "database is locked" — a big index build and a concurrent read/sync
+        // can briefly overlap, and a short wait is far better than an error.
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         let idx = Index { conn };
         idx.migrate()?;
         Ok(idx)
@@ -165,29 +178,43 @@ impl Index {
 
     // ---- Write path -------------------------------------------------------
 
-    /// Full rebuild: index every `.md` under the vault, preserving existing ids
-    /// by path, and drop rows for notes/folders that no longer exist.
+    /// Reconcile the index with the `.md` files on disk, re-parsing only what
+    /// changed. This runs on vault open; keying each note on its stored `mtime`
+    /// lets an unchanged vault reopen without re-reading a single file — and
+    /// without the long write transaction a full re-index held, which was the
+    /// source of the "database is locked" errors on large vaults. New files are
+    /// indexed, changed files (a different mtime) re-indexed in place with the
+    /// doc_id preserved, and files gone from disk dropped. Links are only
+    /// re-resolved when the note set actually changed.
+    ///
+    /// `mtime` has one-second granularity, so an *external* edit landing in the
+    /// same wall-clock second as the last index could slip past this check — but
+    /// live edits are indexed by the file watcher through `index_note`, so this
+    /// only governs changes made while the app was closed, where mtimes differ.
     pub fn rebuild(&self, vault: &Path) -> AppResult<()> {
         let tx = self.conn.unchecked_transaction()?;
 
-        // Existing path → id map (so identity survives a rebuild).
-        let mut existing: HashMap<String, String> = HashMap::new();
+        // Snapshot what's already indexed: path -> (id, mtime, rowid).
+        let mut indexed: HashMap<String, (String, i64, i64)> = HashMap::new();
         {
-            let mut stmt = tx.prepare("SELECT path, id FROM notes")?;
+            let mut stmt = tx.prepare("SELECT path, id, mtime, rowid FROM notes")?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    r.get::<_, i64>(3)?,
+                ))
             })?;
             for row in rows {
-                let (p, i) = row?;
-                existing.insert(p, i);
+                let (path, id, mtime, rowid) = row?;
+                indexed.insert(path, (id, mtime, rowid));
             }
         }
 
-        // Wipe derived tables; we re-populate from disk.
-        tx.execute_batch(
-            "DELETE FROM notes; DELETE FROM notes_fts; DELETE FROM note_tags;
-             DELETE FROM links; DELETE FROM tags; DELETE FROM folders;",
-        )?;
+        let mut seen_notes: HashSet<String> = HashSet::new();
+        let mut seen_folders: HashSet<String> = HashSet::new();
+        let mut changed = false;
 
         for entry in WalkDir::new(vault)
             .into_iter()
@@ -201,6 +228,7 @@ impl Index {
             let abs = entry.path();
             if entry.file_type().is_dir() {
                 if entry.depth() > 0 {
+                    seen_folders.insert(rel_from_abs(vault, abs)?);
                     self.upsert_folder(&tx, vault, abs)?;
                 }
                 continue;
@@ -213,11 +241,50 @@ impl Index {
                 continue;
             }
             let rel = rel_from_abs(vault, abs)?;
-            let reuse_id = existing.get(&rel).cloned();
-            self.index_one(&tx, vault, abs, reuse_id)?;
+            let disk_mtime = file_mtime(abs);
+            seen_notes.insert(rel.clone());
+
+            match indexed.get(&rel) {
+                // Unchanged since the last index — skip the read + parse.
+                Some((_, mtime, _)) if *mtime == disk_mtime => {}
+                // Changed — re-index in place, preserving the doc_id.
+                Some((id, _, _)) => {
+                    self.index_one(&tx, vault, abs, Some(id.clone()))?;
+                    changed = true;
+                }
+                // New file.
+                None => {
+                    self.index_one(&tx, vault, abs, None)?;
+                    changed = true;
+                }
+            }
         }
 
-        self.resolve_all_links(&tx)?;
+        // Drop notes whose files are gone from disk.
+        for (path, (id, _, rowid)) in &indexed {
+            if !seen_notes.contains(path) {
+                Self::delete_note_rows(&tx, id, *rowid)?;
+                changed = true;
+            }
+        }
+
+        // Drop folders that no longer exist.
+        let stale_folders: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT path FROM folders")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok())
+                .filter(|path| !seen_folders.contains(path))
+                .collect()
+        };
+        for path in stale_folders {
+            tx.execute("DELETE FROM folders WHERE path = ?1", params![path])?;
+            changed = true;
+        }
+
+        // Link targets only need re-resolving when the note set changed.
+        if changed {
+            self.resolve_all_links(&tx)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -326,12 +393,7 @@ impl Index {
             .unwrap_or("untitled");
         let parsed = parse_note(&content, stem);
         let sha = sha256_hex(&content);
-        let mtime = std::fs::metadata(abs)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let mtime = file_mtime(abs);
 
         let id = reuse_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -538,6 +600,25 @@ impl Index {
                 path: r.get(1)?,
                 title: r.get(2)?,
                 link_text: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Every resolved edge of the note graph in one query — the whole-graph
+    /// counterpart to `get_backlinks`. Backs the Graph view so it no longer
+    /// fans out one IPC call per note (which didn't scale past a few hundred).
+    /// `DISTINCT` collapses repeated `[[wikilinks]]` between the same pair.
+    pub fn graph_edges(&self) -> AppResult<Vec<GraphEdge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT src_note_id, dst_note_id
+             FROM links
+             WHERE dst_note_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(GraphEdge {
+                source: r.get(0)?,
+                target: r.get(1)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -756,6 +837,19 @@ pub struct YjsState {
     pub update_count: i64,
 }
 
+/// A file's modification time as whole seconds since the Unix epoch (0 if
+/// unavailable). This is the cache key `rebuild` compares to skip unchanged
+/// notes, so `index_one` stamps `notes.mtime` with the identical value — hence
+/// the shared helper, so the two can never drift apart.
+fn file_mtime(abs: &Path) -> i64 {
+    std::fs::metadata(abs)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Turn free-form user input into a safe FTS5 MATCH query: each term becomes a
 /// prefix match, joined by AND. Quotes special chars to avoid syntax errors.
 fn build_fts_query(input: &str) -> String {
@@ -826,6 +920,50 @@ mod tests {
         // Beta backlinks include Alpha (Alpha -> [[Beta]]).
         let beta = idx.get_note_meta("sub/Beta.md").unwrap().unwrap();
         let backlinks = idx.get_backlinks(&beta.id).unwrap();
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(backlinks[0].title, "Alpha");
+    }
+
+    #[test]
+    fn rebuild_is_incremental_and_reconciles_changes() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let alpha_id = idx.get_note_meta("Alpha.md").unwrap().unwrap().id;
+
+        // Reopening an unchanged vault preserves every note and its id.
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.list_note_titles().unwrap().len(), 3);
+        assert_eq!(idx.get_note_meta("Alpha.md").unwrap().unwrap().id, alpha_id);
+
+        // Mutate the vault as if edited while the app was closed: add a note,
+        // delete one, and change one.
+        write_note(&v, "Delta.md", "# Delta\n\nOnly here for a moment.").unwrap();
+        std::fs::remove_file(v.join("Gamma.md")).unwrap();
+        write_note(&v, "Alpha.md", "# Alpha\n\nNow links to [[Delta]].").unwrap();
+        // Force Alpha's stored mtime stale so the change is detected regardless
+        // of the filesystem's one-second mtime granularity in a fast test.
+        idx.conn
+            .execute("UPDATE notes SET mtime = 0 WHERE path = 'Alpha.md'", [])
+            .unwrap();
+
+        idx.rebuild(&v).unwrap();
+
+        let paths: std::collections::HashSet<String> = idx
+            .list_note_titles()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.path)
+            .collect();
+        assert!(paths.contains("Delta.md"), "new file should be indexed");
+        assert!(!paths.contains("Gamma.md"), "deleted file should be dropped");
+        assert_eq!(paths.len(), 3); // Alpha, sub/Beta, Delta
+
+        // Alpha kept its identity through the edit, and its new link resolved
+        // (a re-index of a changed note must re-resolve links too).
+        assert_eq!(idx.get_note_meta("Alpha.md").unwrap().unwrap().id, alpha_id);
+        let delta = idx.get_note_meta("Delta.md").unwrap().unwrap();
+        let backlinks = idx.get_backlinks(&delta.id).unwrap();
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].title, "Alpha");
     }

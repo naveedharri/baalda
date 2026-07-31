@@ -112,6 +112,8 @@ interface AppStore {
   setItemColor: (path: string, colorId: string | null) => void;
   setItemOrder: (order: ItemOrder) => void;
   refreshTree: () => Promise<void>;
+  /** Lazily load one folder's immediate children into the sidebar tree. */
+  loadChildren: (path: string) => Promise<void>;
   refreshTitles: () => Promise<void>;
   /** First-run seeding for a local (not-yet-synced) empty vault. */
   seedLocalVaultIfEmpty: () => Promise<void>;
@@ -225,6 +227,20 @@ export function readOrgVaults(): Record<string, string> {
  * A folder name for a vault that won't collide with a folder already bound
  * to another vault under the managed root. Deterministic-ish for the MVP.
  */
+/** Immutably replace one node's `children` (by path) in a lazy-loaded tree. */
+function setChildrenAt(
+  node: ipc.TreeNode,
+  path: string,
+  children: ipc.TreeNode[],
+): ipc.TreeNode {
+  if (node.path === path) return { ...node, children };
+  if (!node.children) return node;
+  return {
+    ...node,
+    children: node.children.map((c) => setChildrenAt(c, path, children)),
+  };
+}
+
 function uniqueFolderSlug(name: string, bound: Record<string, string>): string {
   const base = slugify(name);
   const taken = new Set(
@@ -456,8 +472,27 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   refreshTree: async () => {
-    const tree = await ipc.listTree();
-    set({ tree });
+    // Lazy loading: fetch only the vault's top level, not the whole tree.
+    // Folders load their children on first expand (see `loadChildren`), so
+    // switching a large vault no longer ships/parses the entire node set.
+    const children = await ipc.listChildren("");
+    const vault = get().vault;
+    set({
+      tree: {
+        id: "",
+        name: vault?.name ?? "vault",
+        path: "",
+        isDir: true,
+        children,
+      },
+    });
+  },
+
+  loadChildren: async (path) => {
+    const kids = await ipc.listChildren(path);
+    set((s) => ({
+      tree: s.tree ? setChildrenAt(s.tree, path, kids) : s.tree,
+    }));
   },
 
   refreshTitles: async () => {
