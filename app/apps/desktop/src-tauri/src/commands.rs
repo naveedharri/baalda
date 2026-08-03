@@ -7,6 +7,7 @@ use crate::error::{AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
     Backlink, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsState,
+    YjsStateVector,
 };
 use crate::notefile;
 use crate::state::AppState;
@@ -23,6 +24,12 @@ use tauri_plugin_dialog::DialogExt;
 pub struct VaultInfo {
     pub path: String,
     pub name: String,
+    /// The vault epoch (see `state::Inner::vault_epoch`) in effect for this
+    /// info. For an open (`open_vault`, `pick_vault`, `create_vault`,
+    /// `open_vault_in_root`) it is the epoch that open established, so the
+    /// caller can pin every follow-up write to *this* vault. Purely
+    /// informational for `get_last_vault`, which doesn't open anything.
+    pub epoch: u64,
 }
 
 /// One entry in the "recently opened vaults" list surfaced on the welcome
@@ -61,8 +68,42 @@ struct AppConfig {
 
 // ---- helpers --------------------------------------------------------------
 
+/// Marker prefix on the error a vault-epoch mismatch produces. Callers in the TS
+/// sync layer match on it to tell "your vault moved out from under you" (drop the
+/// work silently) apart from a real I/O failure.
+pub const VAULT_MISMATCH: &str = "vault-mismatch";
+
+/// Reject a command whose caller pinned a different vault epoch than the one
+/// currently open. `expected == None` means the caller didn't pin anything (UI
+/// reads, user-driven edits) — those keep the legacy "whatever is open" behaviour.
+fn check_epoch(expected: Option<u64>, current: u64) -> AppResult<()> {
+    match expected {
+        Some(e) if e != current => Err(AppError::new(format!(
+            "{VAULT_MISMATCH}: caller pinned vault epoch {e}, but epoch {current} is open"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Resolve the open vault WITHOUT an epoch assertion. Only for commands that
+/// purely read the index for display (`search_notes`, `get_backlinks`,
+/// `graph_edges`, `get_note_meta`, `resolve_wikilink`) — nothing writes based on
+/// their result, so "whatever vault is open" is the correct answer. Anything that
+/// writes, or whose result is written back, must use `require_vault_at`.
 fn require_vault(state: &State<AppState>) -> AppResult<(PathBuf, Arc<Mutex<Index>>)> {
+    require_vault_at(state, None)
+}
+
+/// `require_vault`, but asserting the caller's expected vault epoch first, so a
+/// command that crossed a vault switch fails instead of resolving against the
+/// wrong vault. Every vault-relative command the sync layer drives goes through
+/// here with the epoch its VaultScope was opened under.
+fn require_vault_at(
+    state: &State<AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<(PathBuf, Arc<Mutex<Index>>)> {
     let inner = state.inner.lock().unwrap();
+    check_epoch(expected_epoch, inner.vault_epoch)?;
     let vault = inner
         .vault
         .clone()
@@ -105,7 +146,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn vault_info(path: &Path) -> VaultInfo {
+fn vault_info(path: &Path, epoch: u64) -> VaultInfo {
     VaultInfo {
         path: path.to_string_lossy().to_string(),
         name: path
@@ -113,7 +154,15 @@ fn vault_info(path: &Path) -> VaultInfo {
             .and_then(|s| s.to_str())
             .unwrap_or("vault")
             .to_string(),
+        epoch,
     }
+}
+
+/// The epoch of the currently-open vault (0 when none has been opened). The TS
+/// layer reads this when it starts a VaultScope for a vault it didn't just open.
+#[tauri::command]
+pub fn get_vault_epoch(state: State<'_, AppState>) -> AppResult<u64> {
+    Ok(state.inner.lock().unwrap().vault_epoch)
 }
 
 /// Open a vault: build/refresh its index, start the watcher, remember it, and
@@ -140,14 +189,18 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
 
     let watcher = watcher::start(path.clone(), index.clone(), app.clone())?;
 
-    {
+    let epoch = {
         let mut inner = state.inner.lock().unwrap();
         inner.vault = Some(path.clone());
         inner.index = Some(index);
         inner.watcher = Some(watcher); // replaces & drops any previous watcher
-    }
+        // Every open invalidates the previous vault's epoch, so any command still
+        // in flight for it is rejected rather than applied to this one.
+        inner.vault_epoch += 1;
+        inner.vault_epoch
+    };
 
-    let info = vault_info(&path);
+    let info = vault_info(&path, epoch);
     // Preserve other config keys (e.g. server_url) when updating recents.
     let mut cfg = read_config(app);
     cfg.last_vault = Some(info.path.clone()); // kept for back-compat
@@ -193,13 +246,16 @@ pub async fn open_vault(
     open_vault_inner(&app, &state, PathBuf::from(path))
 }
 
-/// The last-opened vault path from config (None on first launch).
+/// The last-opened vault path from config (None on first launch). This does NOT
+/// open the vault, so the returned `epoch` is the currently-open one (0 at
+/// launch) — callers must pin the epoch returned by the subsequent `open_vault`.
 #[tauri::command]
-pub fn get_last_vault(app: AppHandle) -> AppResult<Option<VaultInfo>> {
+pub fn get_last_vault(app: AppHandle, state: State<'_, AppState>) -> AppResult<Option<VaultInfo>> {
     let cfg = read_config(&app);
+    let epoch = state.inner.lock().unwrap().vault_epoch;
     Ok(cfg.last_vault.and_then(|p| {
         let path = PathBuf::from(p);
-        path.is_dir().then(|| vault_info(&path))
+        path.is_dir().then(|| vault_info(&path, epoch))
     }))
 }
 
@@ -215,7 +271,7 @@ pub fn get_recent_vaults(app: AppHandle) -> AppResult<Vec<RecentVault>> {
             let path = PathBuf::from(&p);
             if path.is_dir() {
                 cfg.recent_vaults.push(RecentVault {
-                    name: vault_info(&path).name,
+                    name: vault_info(&path, 0).name,
                     path: p,
                     opened_at: 0,
                 });
@@ -433,8 +489,12 @@ pub async fn import_paths(
     state: State<'_, AppState>,
     dest: String,
     sources: Vec<String>,
+    expected_epoch: Option<u64>,
 ) -> AppResult<ImportSummary> {
-    let (vault, index) = require_vault(&state)?;
+    // Epoch-pinned: the caller sits behind a native file-picker dialog, the longest
+    // await in the app, and `dest` is a path from the tree that was on screen when
+    // it opened. Without the pin an import could copy files into a different vault.
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let summary = import_export::import_paths(&vault, &dest, &sources);
     // Index every new note under the imported top-level items.
     let guard = index.lock().unwrap();
@@ -467,8 +527,12 @@ pub async fn export_path(
     state: State<'_, AppState>,
     rel: String,
     dest: String,
+    expected_epoch: Option<u64>,
 ) -> AppResult<()> {
-    let (vault, _) = require_vault(&state)?;
+    // Epoch-pinned like `import_paths` (same post-dialog window). Exporting the
+    // wrong vault's notes to the chosen destination leaks them out of the vault
+    // the user actually picked.
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     import_export::export_path(&vault, &rel, &dest)
 }
 
@@ -523,9 +587,16 @@ fn repoint_current(root: &Path, target: &Path) {
 /// The TS sync layer owns the schema (server vault id + doc-id mapping); Rust is
 /// a dumb reader/writer so the registry mapping travels with the vault, not the
 /// app profile (spec 03 §5 "store server vault id in .context/config.json").
+///
+/// `expected_epoch` is the vault epoch the caller pinned (see `check_epoch`).
+/// It's a read, but its result is written back to the SAME file, so reading the
+/// wrong vault's config is how two vaults' doc maps got merged.
 #[tauri::command]
-pub async fn get_vault_config(state: State<'_, AppState>) -> AppResult<Option<String>> {
-    let (vault, _) = require_vault(&state)?;
+pub async fn get_vault_config(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<String>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     let p = vault.join(".context").join("config.json");
     match std::fs::read_to_string(&p) {
         Ok(s) => Ok(Some(s)),
@@ -536,8 +607,12 @@ pub async fn get_vault_config(state: State<'_, AppState>) -> AppResult<Option<St
 
 /// Overwrite the open vault's `.context/config.json` with `content`.
 #[tauri::command]
-pub async fn set_vault_config(state: State<'_, AppState>, content: String) -> AppResult<()> {
-    let (vault, _) = require_vault(&state)?;
+pub async fn set_vault_config(
+    state: State<'_, AppState>,
+    content: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     let dir = vault.join(".context");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("config.json"), content)?;
@@ -556,8 +631,14 @@ pub fn set_server_url(app: AppHandle, url: Option<String>) -> AppResult<()> {
 // ---- tree + file commands -------------------------------------------------
 
 #[tauri::command]
-pub async fn list_tree(state: State<'_, AppState>) -> AppResult<TreeNode> {
-    let (vault, _) = require_vault(&state)?;
+pub async fn list_tree(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<TreeNode> {
+    // Epoch-pinned for the sync layer: the registry feeds this tree straight into
+    // `syncStructure`, so returning the WRONG vault's tree is what created one
+    // vault's folders/notes under another vault's server rows.
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     tree::list_tree(&vault)
 }
 
@@ -569,14 +650,19 @@ pub async fn list_tree(state: State<'_, AppState>) -> AppResult<TreeNode> {
 pub async fn list_children(
     state: State<'_, AppState>,
     path: String,
+    expected_epoch: Option<u64>,
 ) -> AppResult<Vec<TreeNode>> {
-    let (vault, _) = require_vault(&state)?;
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     tree::list_children(&vault, &path)
 }
 
 #[tauri::command]
-pub async fn read_note(state: State<'_, AppState>, path: String) -> AppResult<String> {
-    let (vault, _) = require_vault(&state)?;
+pub async fn read_note(
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<String> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     notefile::read_note(&vault, &path)
 }
 
@@ -585,8 +671,9 @@ pub async fn write_note(
     state: State<'_, AppState>,
     path: String,
     content: String,
+    expected_epoch: Option<u64>,
 ) -> AppResult<()> {
-    let (vault, index) = require_vault(&state)?;
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
     notefile::write_note(&vault, &path, &content)?;
     // Re-index immediately so search/backlinks are fresh without waiting for
     // the watcher echo.
@@ -600,8 +687,9 @@ pub async fn create_note(
     state: State<'_, AppState>,
     parent: String,
     name: String,
+    expected_epoch: Option<u64>,
 ) -> AppResult<String> {
-    let (vault, index) = require_vault(&state)?;
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let rel = notefile::create_note(&vault, &parent, &name)?;
     let abs = vault::resolve_in_vault(&vault, &rel)?;
     index.lock().unwrap().index_note(&vault, &abs)?;
@@ -613,8 +701,9 @@ pub async fn create_folder(
     state: State<'_, AppState>,
     parent: String,
     name: String,
+    expected_epoch: Option<u64>,
 ) -> AppResult<String> {
-    let (vault, _) = require_vault(&state)?;
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     notefile::create_folder(&vault, &parent, &name)
 }
 
@@ -623,8 +712,12 @@ pub async fn rename_path(
     state: State<'_, AppState>,
     from: String,
     to: String,
+    expected_epoch: Option<u64>,
 ) -> AppResult<String> {
-    let (vault, index) = require_vault(&state)?;
+    // Epoch-pinned because the UI renames a multi-select in a loop: every lap
+    // after the first runs past an await, and a rename applied to the wrong vault
+    // moves a same-named file the user never touched.
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let old_abs = vault::resolve_in_vault(&vault, &from)?;
     let new_rel = notefile::rename_path(&vault, &from, &to)?;
     let new_abs = vault::resolve_in_vault(&vault, &new_rel)?;
@@ -634,8 +727,15 @@ pub async fn rename_path(
 }
 
 #[tauri::command]
-pub async fn delete_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
-    let (vault, index) = require_vault(&state)?;
+pub async fn delete_path(
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    // Epoch-pinned for the same reason as `rename_path`, and it matters more here:
+    // a delete that lands in the wrong vault destroys a file at the same relative
+    // path in a vault the user wasn't even looking at.
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let abs = vault::resolve_in_vault(&vault, &path)?;
     notefile::delete_path(&vault, &path)?;
     index.lock().unwrap().remove_note(&vault, &abs)?;
@@ -694,8 +794,13 @@ pub async fn resolve_wikilink(
 }
 
 #[tauri::command]
-pub async fn list_note_titles(state: State<'_, AppState>) -> AppResult<Vec<NoteTitle>> {
-    let (_, index) = require_vault(&state)?;
+pub async fn list_note_titles(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<NoteTitle>> {
+    // Epoch-pinned like `list_tree`: the registry uses these ids as the doc_ids it
+    // registers server-side, so the wrong vault's ids would fork every note.
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
     guard.list_note_titles()
 }
@@ -710,15 +815,23 @@ pub async fn append_yjs_update(
     state: State<'_, AppState>,
     doc_id: String,
     update: Vec<u8>,
+    expected_epoch: Option<u64>,
 ) -> AppResult<()> {
-    let (_, index) = require_vault(&state)?;
+    // The CRDT log lives in the vault's own `.context/index.sqlite`, so an
+    // epoch-less append that crossed a switch would file vault A's doc history
+    // under vault B.
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
     guard.append_yjs_update(&doc_id, &update)
 }
 
 #[tauri::command]
-pub async fn load_yjs_state(state: State<'_, AppState>, doc_id: String) -> AppResult<YjsState> {
-    let (_, index) = require_vault(&state)?;
+pub async fn load_yjs_state(
+    state: State<'_, AppState>,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<YjsState> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
     guard.load_yjs_state(&doc_id)
 }
@@ -729,10 +842,39 @@ pub async fn save_yjs_snapshot(
     doc_id: String,
     snapshot: Vec<u8>,
     state_vector: Vec<u8>,
+    expected_epoch: Option<u64>,
 ) -> AppResult<()> {
-    let (_, index) = require_vault(&state)?;
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
     guard.save_yjs_snapshot(&doc_id, &snapshot, &state_vector)
+}
+
+/// Persist a batch of per-doc Yjs state vectors (the durable sync manifest).
+///
+/// Batched on purpose: the vault-wide background feed touches many docs, and one
+/// IPC round trip + one SQLite transaction for the batch is what keeps that off
+/// the hot path. Epoch-pinned like every other CRDT write — the manifest lives in
+/// the vault's own `.context/index.sqlite`.
+#[tauri::command]
+pub async fn save_yjs_state_vectors(
+    state: State<'_, AppState>,
+    entries: Vec<(String, Vec<u8>)>,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.save_yjs_state_vectors(&entries)
+}
+
+/// Every state vector this vault holds, for the sync engine's `hello` manifest.
+#[tauri::command]
+pub async fn list_yjs_state_vectors(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<YjsStateVector>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.list_yjs_state_vectors()
 }
 
 // ---- Attachment I/O (Phase 3 blob store, spec 02 §2) ----------------------
@@ -742,8 +884,12 @@ pub async fn save_yjs_snapshot(
 // never touch the note/CRDT pipeline.
 
 #[tauri::command]
-pub async fn read_binary_file(state: State<'_, AppState>, rel_path: String) -> AppResult<Vec<u8>> {
-    let (vault, _) = require_vault(&state)?;
+pub async fn read_binary_file(
+    state: State<'_, AppState>,
+    rel_path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<u8>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     attachments::read_binary_file(&vault, &rel_path)
 }
 
@@ -752,14 +898,18 @@ pub async fn write_binary_file(
     state: State<'_, AppState>,
     rel_path: String,
     bytes: Vec<u8>,
+    expected_epoch: Option<u64>,
 ) -> AppResult<()> {
-    let (vault, _) = require_vault(&state)?;
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     attachments::write_binary_file(&vault, &rel_path, &bytes)
 }
 
 #[tauri::command]
-pub async fn list_attachments(state: State<'_, AppState>) -> AppResult<Vec<AttachmentMeta>> {
-    let (vault, _) = require_vault(&state)?;
+pub async fn list_attachments(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<AttachmentMeta>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
     attachments::list_attachments(&vault)
 }
 
@@ -786,6 +936,40 @@ mod tests {
             cfg.vaults_root.as_deref(),
             Some("/home/me/Documents/Baalda Vaults")
         );
+    }
+
+    /// A caller that pins the epoch it started under is accepted only while that
+    /// vault is still the open one — this is what stops an in-flight sync write
+    /// from landing in the vault the user just switched to.
+    #[test]
+    fn check_epoch_rejects_a_stale_pin() {
+        assert!(check_epoch(Some(7), 7).is_ok());
+        let err = check_epoch(Some(7), 8).unwrap_err();
+        assert!(
+            err.0.starts_with(VAULT_MISMATCH),
+            "mismatch must be recognisable by the TS sync layer: {}",
+            err.0
+        );
+        // A vault opened while the caller was mid-flight, then re-opened back to
+        // the same folder, still counts as a different epoch (paths repeat, epochs
+        // don't).
+        assert!(check_epoch(Some(1), 3).is_err());
+    }
+
+    /// Unpinned callers (UI reads, user-driven edits) keep the legacy behaviour:
+    /// resolve against whatever vault is open. Enforcement is opt-in.
+    #[test]
+    fn check_epoch_ignores_an_absent_pin() {
+        assert!(check_epoch(None, 0).is_ok());
+        assert!(check_epoch(None, 42).is_ok());
+    }
+
+    /// `epoch` must survive the camelCase serialization the UI receives.
+    #[test]
+    fn vault_info_serializes_the_epoch() {
+        let json = serde_json::to_string(&vault_info(Path::new("/tmp/My Vault"), 5)).unwrap();
+        assert!(json.contains("\"epoch\":5"), "{json}");
+        assert!(json.contains("\"name\":\"My Vault\""), "{json}");
     }
 
     /// The current field name deserializes, and a round-trip writes it back

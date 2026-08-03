@@ -20,7 +20,9 @@ import {
 } from "./lib/api";
 import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
+import { vaultScopes } from "./lib/sync/vaultScope";
 import type { SyncStatus } from "./lib/sync/syncManager";
+import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
 import {
@@ -80,6 +82,30 @@ interface AppStore {
   /** True while the open note has local edits not yet acked by the server
    *  (drives the "Saving…" badge state). */
   syncPending: boolean;
+  /**
+   * Counted progress of the current vault's sync run; null when none is running.
+   * Belongs to ONE vault — dropped on every vault switch (see
+   * `vaultScopedSyncReset`), because a half-finished count from the vault we
+   * left would read as progress on the vault we landed in.
+   */
+  syncProgress: SyncProgress | null;
+  /**
+   * Per-doc sync state for the sidebar badge, keyed by **docId, never by path**
+   * (paths change on rename and collide across vaults). Dropped on every vault
+   * switch alongside `syncProgress`.
+   */
+  docSyncState: Record<string, DocSyncState>;
+  /**
+   * Vault-relative note path → that note's **server docId**, mirroring the
+   * registry's map for the open vault (empty when sync is off).
+   *
+   * This is a path *index over* docId identity, never a substitute for it: the
+   * sidebar knows its rows by path while every sync fact (`docSyncState`) is
+   * keyed by docId, so something has to bridge the two, and the registry is the
+   * only thing that can. Dropped on every vault switch — two vaults both have a
+   * `Welcome.md`.
+   */
+  docIdByPath: Record<string, string>;
   /** Locks (read-only overlays) in the synced vault — drives tree badges. */
   locks: Share[];
   /** Live "who's viewing what" roster (teammates only) — drives the sidebar
@@ -178,6 +204,17 @@ interface AppStore {
   // Resolving a vault's local folder (when none is bound yet)
   /** Bind `path` to `orgId`, open it, and enable sync. */
   applyVaultFolder: (orgId: string, path: string) => Promise<void>;
+  /**
+   * Adopt a vault Rust has ALREADY opened (the native-picker commands open as
+   * part of picking). Retires the previous vault's sync, swaps view state, and
+   * reloads the tree. `resync: true` re-enables sync on the new folder for the
+   * active vault (the sidebar "Switch" flow); otherwise the folder stays local
+   * and gets first-run seeding if it's empty.
+   */
+  adoptOpenedVault: (
+    info: ipc.VaultInfo,
+    opts?: { resync?: boolean },
+  ) => Promise<void>;
   /** Native-pick a folder for the pending vault. */
   chooseVaultFolder: () => Promise<void>;
   /** Create a fresh empty folder under the managed root for the pending vault. */
@@ -204,6 +241,12 @@ interface AppStore {
   setSyncStatus: (status: SyncStatus) => void;
   setSyncPending: (pending: boolean) => void;
   markSynced: () => void;
+  /** Publish the current vault's sync progress (null clears it). */
+  setSyncProgress: (progress: SyncProgress | null) => void;
+  /** Merge per-doc sync states in. Keys are docIds; `null` drops an entry. */
+  patchDocSyncState: (patch: Record<string, DocSyncState | null>) => void;
+  /** Replace the path→docId index (the registry mirror; `{}` = nothing synced). */
+  setDocIdByPath: (map: Record<string, string>) => void;
   enableSyncForVault: () => Promise<void>;
 }
 
@@ -416,6 +459,77 @@ async function landInLastVault(get: () => AppStore): Promise<void> {
  *  repeat join resets it rather than stacking). */
 let memberJoinedTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Bumped by every `setActiveOrganization`. A call whose captured generation no
+ *  longer matches has been superseded by a newer switch and drops its remaining
+ *  work rather than racing it to bind a folder / enable sync. */
+let orgSwitchGen = 0;
+
+/**
+ * Tear down networked sync for the vault we're leaving. Call this BEFORE any
+ * `ipc.openVault*` that swaps the Rust vault slot: Rust holds ONE global vault,
+ * so a sync operation still in flight would resolve against the folder we just
+ * opened. `disable()` aborts the vault scope, clears every timer it owns, and
+ * resets the registry's in-memory maps + serverVaultId.
+ */
+function leaveVaultSync(): void {
+  syncManager.disable();
+}
+
+/**
+ * Claim the vault that is now open. Rust holds ONE global vault slot, so
+ * `info.epoch` is the only unambiguous handle on "the vault this work is for" —
+ * pinning IPC to it is what makes a stale write fail instead of silently landing
+ * in the wrong folder.
+ *
+ * Called for EVERY open, including a plain local folder with no sync: two vaults
+ * both have a `Welcome.md`, so the open note's debounced egest flushing after a
+ * switch would otherwise overwrite the other vault's file at the same path. The
+ * bridge picks the epoch up via `currentVaultEpoch()` when it opens a note.
+ *
+ * `ensure` (not `begin`) because one open signals twice — Rust's `vault-opened`
+ * event and the `open_vault` response — and because `syncManager.enable` may
+ * already have replaced this scope with an org-bound one worth keeping.
+ */
+function enterVaultScope(info: ipc.VaultInfo, orgId: string | null): void {
+  vaultScopes.ensure({ orgId, vaultPath: info.path, vaultEpoch: info.epoch });
+}
+
+/**
+ * Is `epoch` still the open vault? Every `set()` that happens after an await in
+ * a vault/sync path must be guarded on this, or a slow operation for vault A
+ * lands its results (tree, titles, syncEnabled) on vault B's view state.
+ * `null`/`undefined` means "the caller had no vault", which only matches the
+ * still-no-vault case.
+ */
+function sameVault(get: () => AppStore, epoch: number | null | undefined): boolean {
+  return (get().vault?.epoch ?? null) === (epoch ?? null);
+}
+
+/**
+ * Sync view-state that belongs to ONE vault and must never survive a switch.
+ * Spread into every `set()` on a vault-change path, right after
+ * `leaveVaultSync()` has torn the sync layer down.
+ *
+ * `syncProgress`, `docSyncState` and `docIdByPath` matter most: `docSyncState` is
+ * keyed by docId, so leaking it would badge the new vault's rows with the
+ * previous vault's results; `docIdByPath` is keyed by path, which two vaults
+ * share outright (both have a `Welcome.md`); and a stale `syncProgress` would
+ * report the vault we left as still uploading.
+ */
+function vaultScopedSyncReset() {
+  // A fresh object each call: handing out one shared `{}`/`[]` would let any
+  // future in-place mutation of `docSyncState`/`locks` leak into every later reset.
+  return {
+    syncEnabled: false,
+    syncStatus: "offline" as SyncStatus,
+    syncPending: false,
+    syncProgress: null,
+    docSyncState: {} as Record<string, DocSyncState>,
+    docIdByPath: {} as Record<string, string>,
+    locks: [] as Share[],
+  } satisfies Partial<AppStore>;
+}
+
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
@@ -432,11 +546,8 @@ export const useStore = create<AppStore>((set, get) => ({
   members: [],
   pendingInvitations: [],
   userInvitations: [],
-  syncEnabled: false,
-  syncStatus: "offline",
+  ...vaultScopedSyncReset(),
   lastSyncedAt: null,
-  syncPending: false,
-  locks: [],
   vaultPresence: [],
   itemColors: {},
   itemOrder: {},
@@ -447,12 +558,16 @@ export const useStore = create<AppStore>((set, get) => ({
   mentionSound: readMentionSound(),
   memberJoined: null,
 
-  setVault: (v) =>
+  setVault: (v) => {
+    // Also fires from Rust's `vault-opened` event, which is the only signal some
+    // opens produce — so this is where a local vault gets its scope.
+    if (v) enterVaultScope(v, get().session?.activeOrganizationId ?? null);
     set({
       vault: v,
       itemColors: readItemColors(v?.path),
       itemOrder: readItemOrder(v?.path),
-    }),
+    });
+  },
 
   setItemColor: (path, colorId) => {
     const vault = get().vault;
@@ -475,8 +590,21 @@ export const useStore = create<AppStore>((set, get) => ({
     // Lazy loading: fetch only the vault's top level, not the whole tree.
     // Folders load their children on first expand (see `loadChildren`), so
     // switching a large vault no longer ships/parses the entire node set.
-    const children = await ipc.listChildren("");
     const vault = get().vault;
+    let children: ipc.TreeNode[];
+    try {
+      children = await ipc.listChildren("", vault?.epoch);
+    } catch (e) {
+      // These reads are epoch-pinned, so a vault switch mid-read makes Rust
+      // REJECT them. That is the guard working, not a failure — and several call
+      // sites fire this without awaiting, where a rejection would surface as an
+      // unhandled promise rejection instead of being dropped.
+      if (ipc.isVaultMismatch(e)) return;
+      throw e;
+    }
+    // A vault switch during the read would otherwise paint the old vault's
+    // children under the new vault's name.
+    if (!sameVault(get, vault?.epoch)) return;
     set({
       tree: {
         id: "",
@@ -489,14 +617,30 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   loadChildren: async (path) => {
-    const kids = await ipc.listChildren(path);
+    const epoch = get().vault?.epoch;
+    let kids: ipc.TreeNode[];
+    try {
+      kids = await ipc.listChildren(path, epoch);
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return; // the vault moved on (see refreshTree)
+      throw e;
+    }
+    if (!sameVault(get, epoch)) return;
     set((s) => ({
       tree: s.tree ? setChildrenAt(s.tree, path, kids) : s.tree,
     }));
   },
 
   refreshTitles: async () => {
-    const titles = await ipc.listNoteTitles();
+    const epoch = get().vault?.epoch;
+    let titles: ipc.NoteTitle[];
+    try {
+      titles = await ipc.listNoteTitles(epoch);
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return; // the vault moved on (see refreshTree)
+      throw e;
+    }
+    if (!sameVault(get, epoch)) return;
     set({ titles });
   },
 
@@ -506,11 +650,16 @@ export const useStore = create<AppStore>((set, get) => ({
     // the sync reconcile seeds instead — so the notes register on the server —
     // hence the syncEnabled guard here to avoid seeding twice.
     if (get().syncEnabled) return;
+    const epoch = get().vault?.epoch;
     const tree = get().tree;
     if (!tree || !vaultIsEmpty(tree)) return;
-    const welcomePath = await seedWelcomeContent();
+    // Seeding writes ~20 notes; pin them all to this vault so a switch part-way
+    // through can't scatter the rest into the folder the user just opened.
+    const welcomePath = await seedWelcomeContent(epoch);
+    if (!sameVault(get, epoch)) return;
     await get().refreshTree();
     await get().refreshTitles();
+    if (!sameVault(get, epoch)) return;
     if (welcomePath) await get().openNoteByPath(welcomePath);
   },
 
@@ -523,7 +672,9 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   openNoteByPath: async (path) => {
+    const epoch = get().vault?.epoch;
     const meta = await ipc.getNoteMeta(path);
+    if (!sameVault(get, epoch)) return; // vault switched mid-open — drop it
     const title = meta?.title ?? path.split("/").pop() ?? path;
     // Ensure the note is registered server-side BEFORE the editor opens it, so
     // its doc_id is known and the sync provider connects on first open.
@@ -536,6 +687,7 @@ export const useStore = create<AppStore>((set, get) => ({
       } catch (e) {
         console.warn("[sync] registerNote failed", e);
       }
+      if (!sameVault(get, epoch)) return;
     }
     set({
       openNote: { path, id: meta?.id ?? null, title },
@@ -591,6 +743,14 @@ export const useStore = create<AppStore>((set, get) => ({
     // Live sidebar presence — the vault channel tells us which teammate is
     // viewing which note; mirror the roster into the store for FileTree.
     syncManager.setVaultPresenceListener((peers) => set({ vaultPresence: peers }));
+    // Bulk-sync progress for the open vault. Both of these are already throttled
+    // (~10 emissions/second) and batched by `SyncProgressReporter`, so a 500-note
+    // run costs ~10 store writes per second rather than one per note.
+    syncManager.setSyncProgressListener((progress) => get().setSyncProgress(progress));
+    syncManager.setDocStateListener((patch) => get().patchDocSyncState(patch));
+    // The path→docId index the sidebar needs to attach a docId-keyed sync state
+    // to a path-keyed row. Coalesced by SyncManager on the same ~10/second budget.
+    syncManager.setRegistryMapListener((map) => get().setDocIdByPath(map));
     try {
       const session = await authManager.init();
       set({ serverUrl: authManager.getServerUrl() });
@@ -671,8 +831,10 @@ export const useStore = create<AppStore>((set, get) => ({
     } catch (err) {
       console.error("flush before sign-out failed", err);
     }
+    // Retire the vault scope BEFORE the session goes away, so nothing tries to
+    // reconcile/pull with a token that is about to be revoked.
+    leaveVaultSync();
     await authManager.signOut();
-    syncManager.disable();
     set({
       session: null,
       authStatus: "signed-out",
@@ -680,10 +842,7 @@ export const useStore = create<AppStore>((set, get) => ({
       members: [],
       pendingInvitations: [],
       userInvitations: [],
-      syncEnabled: false,
-      syncStatus: "offline",
-      syncPending: false,
-      locks: [],
+      ...vaultScopedSyncReset(),
       pendingVaultFolder: null,
       billingConfig: null,
       orgBilling: null,
@@ -808,6 +967,14 @@ export const useStore = create<AppStore>((set, get) => ({
   turnOnSyncForCurrentVault: async (name) => {
     const vault = get().vault;
     if (!vault) throw new Error("Open a vault first.");
+    // This binds the folder you're ALREADY in, so every step below has to stay
+    // about that folder: a vault switch mid-flight would bind the new org to the
+    // folder we left and then reconcile the wrong tree into it. Claim the switch
+    // generation too, so a concurrent `setActiveOrganization` supersedes us
+    // instead of the two fighting over which vault ends up active.
+    const epoch = vault.epoch;
+    const gen = ++orgSwitchGen;
+    const stale = () => orgSwitchGen !== gen || !sameVault(get, epoch);
     // Unlike createOrganization (which prompts for a fresh folder), this binds
     // the folder you're already in and syncs its existing files up. Create the
     // org directly, bind THIS folder, then let enableSyncForVault reconcile the
@@ -815,18 +982,31 @@ export const useStore = create<AppStore>((set, get) => ({
     const org = await createWithUniqueSlug(name?.trim() || vault.name, (input) =>
       authManager.api.createOrganization(input),
     );
+    if (stale()) return;
     await authManager.api.setActiveOrganization(org.id);
+    if (stale()) return;
     const session = await authManager.currentSession();
+    if (stale()) return;
     set({ session });
     await get().refreshVault();
+    if (stale()) return;
     rememberOrgVault(org.id, vault.path);
     rememberLastVault(org.id);
     await get().enableSyncForVault();
+    if (stale()) return;
     await get().refreshOrgBilling();
   },
 
   setActiveOrganization: async (organizationId) => {
     const previousOrgId = get().session?.activeOrganizationId ?? null;
+    // Claim the switch. Everything below awaits the network, so a second switch
+    // (impatient double-click, or a join/accept-invite firing while this one is in
+    // flight) would otherwise race us: two interleaved switches would both reach
+    // `applyVaultFolder`, and the loser would re-point the Rust vault slot and
+    // re-enable sync for the vault the user is no longer in. Same generation
+    // pattern as `BridgeManager.generation`, at vault-switch granularity.
+    const gen = ++orgSwitchGen;
+    const superseded = () => orgSwitchGen !== gen;
 
     // Re-assert that the vault we're leaving solely owns its open folder,
     // evicting any other vault still bound to it (this is what heals legacy
@@ -845,12 +1025,25 @@ export const useStore = create<AppStore>((set, get) => ({
       rememberOrgVault(previousOrgId, currentVaultPath);
     }
 
+    // Stop syncing the vault we're leaving before anything else. Everything
+    // below awaits the network, and one branch swaps the Rust vault slot
+    // (applyVaultFolder) while the other leaves the old folder on screen with a
+    // different org active — in both cases the old vault's registry, engine and
+    // debounced pull must already be gone. `enableSyncForVault` re-arms sync for
+    // whatever vault we land in.
+    leaveVaultSync();
+    set(vaultScopedSyncReset());
+
     await authManager.api.setActiveOrganization(organizationId);
+    if (superseded()) return;
     const session = await authManager.currentSession();
+    if (superseded()) return;
     set({ session });
     await get().refreshVault();
+    if (superseded()) return;
     // Seat usage + plan are per-vault, so refresh on every switch.
     await get().refreshOrgBilling();
+    if (superseded()) return;
 
     // Each vault owns its own local folder. If one is already bound, swap
     // to it. If not, do NOT reuse the folder that's currently open — ask the
@@ -929,14 +1122,11 @@ export const useStore = create<AppStore>((set, get) => ({
       if (next) {
         await get().setActiveOrganization(next.id);
       } else {
-        syncManager.disable();
+        leaveVaultSync();
         get().closeNote();
         set({
           vault: null,
-          locks: [],
-          syncEnabled: false,
-          syncStatus: "offline",
-          syncPending: false,
+          ...vaultScopedSyncReset(),
           pendingVaultFolder: null,
         });
       }
@@ -953,27 +1143,51 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // ---- Vault folder resolution ----
 
-  openLocalVault: async (path) => {
-    // A local vault is a plain folder that isn't syncing to an org. Opening
-    // one tears down any active vault sync (we're no longer in that org's
-    // folder) and leaves sync off until the user explicitly turns it on.
-    const info = await ipc.openVault(path);
-    syncManager.disable();
+  adoptOpenedVault: async (info, opts = {}) => {
+    // For the picker paths (`pick_vault`, `create_vault`): Rust opens the vault
+    // as part of picking it, so we can't tear down first. The vault epoch is what
+    // saves us — it changed the instant Rust swapped, so every in-flight write
+    // from the previous vault is already being refused. Retire the scope here so
+    // the in-memory half (registry maps, timers, engine) goes with it.
+    leaveVaultSync();
+    enterVaultScope(
+      info,
+      opts.resync ? (get().session?.activeOrganizationId ?? null) : null,
+    );
     get().closeNote();
     set({
       vault: info,
-      locks: [],
-      syncEnabled: false,
-      syncStatus: "offline",
-      syncPending: false,
+      ...vaultScopedSyncReset(),
       itemColors: readItemColors(info.path),
       itemOrder: readItemOrder(info.path),
       pendingVaultFolder: null,
     });
     await get().refreshTree();
     await get().refreshTitles();
-    // Give a brand-new empty folder its first-run welcome content.
-    await get().seedLocalVaultIfEmpty();
+    if (!sameVault(get, info.epoch)) return;
+    if (opts.resync && get().session?.activeOrganizationId) {
+      await get().enableSyncForVault();
+    } else {
+      // Give a brand-new empty folder its first-run welcome content.
+      await get().seedLocalVaultIfEmpty();
+    }
+  },
+
+  openLocalVault: async (path) => {
+    // A local vault is a plain folder that isn't syncing to an org. Opening
+    // one tears down any active vault sync (we're no longer in that org's
+    // folder) and leaves sync off until the user explicitly turns it on.
+    //
+    // ORDER IS LOAD-BEARING: sync must be torn down BEFORE the Rust vault slot
+    // is swapped. With the old ordering, the surviving 250ms registry-pull timer
+    // fired after `openVault` and pulled with THIS org's serverVaultId against
+    // the NEW folder's tree — creating one vault's structure on the other's
+    // server rows and merging their doc maps.
+    // Prefer this entry point over `adoptOpenedVault` wherever the caller controls
+    // the open, precisely because it can tear down first; `adoptOpenedVault` exists
+    // for the picker commands, which open the vault themselves as part of picking.
+    leaveVaultSync();
+    await get().adoptOpenedVault(await ipc.openVault(path));
   },
 
   removeLocalVault: async (path) => {
@@ -999,24 +1213,25 @@ export const useStore = create<AppStore>((set, get) => ({
 
   closeLocalVault: () => {
     // Detach from the open local folder and drop to the welcome/empty state.
-    syncManager.disable();
+    leaveVaultSync();
     get().closeNote();
     set({
       vault: null,
-      locks: [],
-      syncEnabled: false,
-      syncStatus: "offline",
-      syncPending: false,
+      ...vaultScopedSyncReset(),
       pendingVaultFolder: null,
     });
   },
 
   applyVaultFolder: async (orgId, path) => {
+    // Same ordering rule as openLocalVault: retire the previous vault's sync
+    // (scope, timers, registry maps) before Rust points at the new folder.
+    leaveVaultSync();
     const v = await ipc.openVaultInRoot(path);
+    enterVaultScope(v, orgId);
     get().closeNote();
     set({
       vault: v,
-      locks: [],
+      ...vaultScopedSyncReset(),
       itemColors: readItemColors(v.path),
       itemOrder: readItemOrder(v.path),
       pendingVaultFolder: null,
@@ -1025,6 +1240,9 @@ export const useStore = create<AppStore>((set, get) => ({
     rememberLastVault(orgId);
     await get().refreshTree();
     await get().refreshTitles();
+    // Another vault switch during those reads makes the rest of this call stale —
+    // that switch runs its own `enableSyncForVault` for the vault it landed in.
+    if (!sameVault(get, v.epoch)) return;
     await get().enableSyncForVault();
   },
 
@@ -1033,6 +1251,12 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!pending) return;
     const picked = await ipc.pickFolder();
     if (!picked) return; // cancelled the native dialog — keep the prompt up
+    // The native picker is the longest await in the app (the user browsing their
+    // filesystem), so the prompt can be superseded or dismissed while it is open.
+    // Binding this folder then would point the Rust vault slot at it on behalf of
+    // a vault that is no longer the one being resolved. Same guard as
+    // `startEmptyVault`, which has a far shorter window.
+    if (get().pendingVaultFolder?.orgId !== pending.orgId) return;
     await get().applyVaultFolder(pending.orgId, picked);
   },
 
@@ -1040,6 +1264,9 @@ export const useStore = create<AppStore>((set, get) => ({
     const pending = get().pendingVaultFolder;
     if (!pending) return;
     const root = await ipc.getVaultsRoot();
+    // A switch during that read would replace the prompt; binding a folder for the
+    // superseded vault would point the Rust slot at the wrong folder.
+    if (get().pendingVaultFolder?.orgId !== pending.orgId) return;
     const slug = uniqueFolderSlug(pending.orgName, readOrgVaults());
     await get().applyVaultFolder(pending.orgId, `${root}/${slug}`);
   },
@@ -1060,11 +1287,16 @@ export const useStore = create<AppStore>((set, get) => ({
       set({ locks: [] });
       return;
     }
+    const epoch = get().vault?.epoch;
     try {
       const locks = await authManager.api.listVaultLocks(vaultId);
+      // Locks are per-vault; publishing another vault's set would badge the
+      // wrong rows in the sidebar.
+      if (!sameVault(get, epoch) || syncManager.registry.vaultId !== vaultId) return;
       set({ locks });
     } catch (e) {
       console.warn("[locks] refresh failed", e);
+      if (!sameVault(get, epoch)) return;
       set({ locks: [] });
     }
   },
@@ -1126,41 +1358,80 @@ export const useStore = create<AppStore>((set, get) => ({
   // A server ack of all pending changes: this is the real "synced just now".
   markSynced: () => set({ lastSyncedAt: Date.now(), syncPending: false }),
 
+  setSyncProgress: (progress) => set({ syncProgress: progress }),
+
+  // Merged rather than replaced: per-doc transitions arrive one (or a batch) at a
+  // time over a long run, so a writer never has to hold the whole map. Keys are
+  // docIds; a `null` value drops the entry (the doc is no longer tracked).
+  patchDocSyncState: (patch) =>
+    set((s) => {
+      const next = { ...s.docSyncState };
+      for (const [docId, state] of Object.entries(patch)) {
+        if (state === null) delete next[docId];
+        else next[docId] = state;
+      }
+      return { docSyncState: next };
+    }),
+
+  // Replaced, not merged: the registry publishes the whole index for the open
+  // vault, so a merge would keep rows for notes it has stopped mapping (deleted,
+  // renamed, or belonging to the vault we just left).
+  setDocIdByPath: (map) => set({ docIdByPath: map }),
+
   enableSyncForVault: async () => {
     const { session, vault } = get();
     if (!session || !vault) {
       set({ syncEnabled: false });
       return;
     }
-    if (!session.activeOrganizationId) {
+    const orgId = session.activeOrganizationId;
+    if (!orgId) {
       set({ syncEnabled: false });
       return;
     }
+    // The vault this call is FOR. `reconcile` can take many seconds on a large
+    // vault, and the user can switch vaults during it — every `set()` past an
+    // await below is gated on this still being the open vault. Without the gate,
+    // a finished reconcile for vault A flipped `syncEnabled` back on while vault
+    // B was on screen, with the vault engine started for A's server ids.
+    const epoch = vault.epoch;
+    const stale = () => !sameVault(get, epoch) || get().session?.activeOrganizationId !== orgId;
+
     // Registry reconcile needs the tree; make sure it's loaded.
     let tree = get().tree;
     if (!tree) {
       await get().refreshTree();
+      if (stale()) return;
       tree = get().tree;
     }
     if (!tree) {
       set({ syncEnabled: false });
       return;
     }
-    const result = await syncManager.enable(session, tree, vault.name);
+    const result = await syncManager.enable(session, tree, {
+      orgId,
+      name: vault.name,
+      path: vault.path,
+      epoch,
+    });
+    // `syncManager.enable` already dropped its own work if the scope went stale;
+    // this guard keeps the STORE from claiming sync is on for the wrong vault.
+    if (stale()) return;
     set({ syncEnabled: result.ok });
     if (result.ok) {
       // Broadcast the user's current activity status on this session's presence.
       syncManager.setPresenceStatus(get().activityStatus);
       // This folder is now the one this vault opens with.
-      if (session.activeOrganizationId) {
-        rememberOrgVault(session.activeOrganizationId, vault.path);
-        rememberLastVault(session.activeOrganizationId);
-      }
+      rememberOrgVault(orgId, vault.path);
+      rememberLastVault(orgId);
       // Reconcile may have materialized server-only notes onto disk; refresh so
       // the sidebar reflects the full vault, not just what was already local.
       await get().refreshTree();
+      if (stale()) return;
       await get().refreshTitles();
+      if (stale()) return;
       await get().refreshLocks();
+      if (stale()) return;
       // A brand-new vault was just seeded with welcome content — greet the
       // user with the welcome note if nothing else is open.
       if (result.seeded && !get().openNote) {

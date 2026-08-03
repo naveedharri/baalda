@@ -1117,6 +1117,11 @@ button.primary.hero:hover:not(:disabled) {
   .tree-row.dragging {
     transition: none;
   }
+  /* A pulsing dot on every syncing row is a lot of motion; the colour alone
+     still distinguishes the state. */
+  .tree-sync.syncing .sync-dot {
+    animation: none;
+  }
 }
 
 /* Type glyph — folder (closed/open) or document */
@@ -1186,6 +1191,62 @@ button.primary.hero:hover:not(:disabled) {
 .tree-lock.all,
 .tree-lock.you {
   color: var(--warning);
+}
+
+/* Per-row sync mark — "is this on the server?" — sized like .tree-lock so the
+   two status glyphs share one column rhythm, and built from the same .sync-dot
+   element + semantic tone tokens as the vault-level .sync-badge, so "synced"
+   reads identically everywhere. Absent entirely when sync is off. */
+.tree-sync {
+  flex-shrink: 0;
+  min-width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+.tree-sync .sync-dot {
+  width: 5px;
+  height: 5px;
+}
+/* Synced is the normal state, so it whispers: present enough to scan a column
+   of them, quiet enough not to decorate every row. */
+.tree-sync.synced {
+  color: var(--success);
+}
+.tree-sync.synced .sync-dot {
+  opacity: 0.6;
+}
+.tree-sync.syncing {
+  color: var(--warning);
+}
+.tree-sync.syncing .sync-dot {
+  animation: sync-pulse 1.3s var(--ease) infinite;
+}
+.tree-sync.queued .sync-dot {
+  opacity: 0.7;
+}
+/* Not on the server: a hollow ring — the "absence" reading of the same dot. */
+.tree-sync.unsynced .sync-dot {
+  width: 7px;
+  height: 7px;
+  background: none;
+  border: 1.5px solid currentColor;
+  box-sizing: border-box;
+  opacity: 0.55;
+}
+.tree-sync.error {
+  color: var(--danger);
+}
+/* A folder mid-sync shows its real progress instead of a dot; tabular figures
+   keep the width steady as the number climbs. */
+.tree-sync-pct {
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Live presence — a small stack of teammate faces on the right of a row showing
@@ -3284,6 +3345,21 @@ button.primary.hero:hover:not(:disabled) {
   }
   to {
     left: 100%;
+  }
+}
+/* Determinate variant: the bulk sync run knows how much work it has, so the bar
+   fills instead of sliding. Same element, same tokens — only the motion differs. */
+.sync-progress.determinate .sync-progress-fill {
+  animation: none;
+  left: 0;
+  transition: width 240ms var(--ease);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The fill still has to show the ratio, so only the easing goes. (The
+     indeterminate slide is left alone: without it the bar would sit frozen at
+     45%, which reads as stuck rather than calm.) */
+  .sync-progress.determinate .sync-progress-fill {
+    transition: none;
   }
 }
 

@@ -21,6 +21,11 @@ import {
 } from "../lib/ordering";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
 import { previewKind } from "../lib/preview";
+import {
+  buildTreeSyncIndex,
+  rowSyncMark,
+  type TreeSyncIndex,
+} from "../lib/syncRollup";
 import { embedDroppedFile } from "../lib/attachments";
 import { activeNoteEditable, insertIntoActiveNote } from "../lib/editor/activeView";
 import { useStore } from "../store";
@@ -144,6 +149,9 @@ export function FileTree() {
   const members = useStore((s) => s.members);
   const itemColors = useStore((s) => s.itemColors);
   const itemOrder = useStore((s) => s.itemOrder);
+  const docSyncState = useStore((s) => s.docSyncState);
+  const docIdByPath = useStore((s) => s.docIdByPath);
+  const titles = useStore((s) => s.titles);
   const [containerRef, dim] = useDimensions();
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -184,6 +192,29 @@ export function FileTree() {
     }
     return map;
   }, [vaultPresence]);
+
+  // Per-row sync indicators, rolled up for the WHOLE vault in one O(N) pass —
+  // never per rendered row, which would be O(subtree) each and quadratic on a
+  // large vault, re-run on every progress emission.
+  //
+  // `null` when sync is off, and that is deliberate: a local-only vault gets no
+  // indicators at all. Badging every row "not synced" in a vault the user never
+  // asked to sync is an alarm about nothing.
+  //
+  // Note the denominator comes from `titles` + `docIdByPath`, NOT from `tree`:
+  // the tree is lazily loaded, so a folder nobody expanded would roll up nothing
+  // and read as fully synced.
+  const syncIndex = useMemo<TreeSyncIndex | null>(
+    () =>
+      syncEnabled
+        ? buildTreeSyncIndex({
+            docIdByPath,
+            docSyncState,
+            localNotePaths: titles.map((t) => t.path),
+          })
+        : null,
+    [syncEnabled, docIdByPath, docSyncState, titles],
+  );
 
   // Resolve lock rows (server resource ids) to tree paths for the badges.
   const lockByPath = useMemo(
@@ -281,12 +312,16 @@ export function FileTree() {
       (a, b) => b.split("/").length - a.split("/").length,
     );
     const store = useStore.getState();
+    // Pinned to the vault this bulk delete was asked for: every lap after the
+    // first runs past an await, and a delete that landed in the vault the user
+    // switched to would destroy a same-named file they never selected.
+    const epoch = store.vault?.epoch;
     let order = store.itemOrder;
     setBulkProgress({ done: 0, total: paths.length });
     let done = 0;
     for (const p of paths) {
       try {
-        await ipc.deletePath(p);
+        await ipc.deletePath(p, epoch);
         order = removeFromOrder(order, p);
         if (openNote && (openNote.path === p || openNote.path.startsWith(p + "/"))) {
           store.closeNote();
@@ -435,7 +470,11 @@ export function FileTree() {
           // note open). Same import the menu uses — files or whole folders.
           const dest = pt ? dirAtClientPoint(pt.x, pt.y) : "";
           try {
-            const summary = await ipc.importPaths(dest, p.paths);
+            const summary = await ipc.importPaths(
+              dest,
+              p.paths,
+              useStore.getState().vault?.epoch,
+            );
             await refreshAll();
             await registerImported(summary);
             announceImport(summary);
@@ -467,9 +506,12 @@ export function FileTree() {
   async function importFilesInto(dir: string) {
     setMenu(null);
     try {
+      // Captured BEFORE the native picker — the longest await in the app, and
+      // `dir` came from the tree that was on screen when it opened.
+      const epoch = useStore.getState().vault?.epoch;
       const sources = await ipc.pickFiles();
       if (!sources || sources.length === 0) return;
-      const summary = await ipc.importPaths(dir, sources);
+      const summary = await ipc.importPaths(dir, sources, epoch);
       await refreshAll();
       await registerImported(summary);
       announceImport(summary);
@@ -483,9 +525,10 @@ export function FileTree() {
   async function importFolderInto(dir: string) {
     setMenu(null);
     try {
+      const epoch = useStore.getState().vault?.epoch; // before the dialog
       const src = await ipc.pickFolder();
       if (!src) return;
-      const summary = await ipc.importPaths(dir, [src]);
+      const summary = await ipc.importPaths(dir, [src], epoch);
       await refreshAll();
       await registerImported(summary);
       announceImport(summary);
@@ -499,11 +542,14 @@ export function FileTree() {
   async function exportNode(node: NodeApi<TreeNode>) {
     setMenu(null);
     try {
+      const epoch = useStore.getState().vault?.epoch; // before the dialog
       const dest = node.data.isDir
         ? await ipc.pickFolder()
         : await ipc.saveFile(basename(node.data.path));
       if (!dest) return;
-      await ipc.exportPath(node.data.path, dest);
+      // Pinned so a switch during the dialog can't export the OTHER vault's notes
+      // to the destination the user chose for this one.
+      await ipc.exportPath(node.data.path, dest, epoch);
     } catch (e) {
       console.error("export failed", e);
     }
@@ -594,11 +640,14 @@ export function FileTree() {
     store.setItemOrder(order);
 
     // 2) Apply cross-folder moves on disk (a pure reorder has from === to).
+    // Epoch-pinned for the same reason as `bulkDelete` — this is a loop of writes
+    // across awaits, so it must stay bound to the vault the drop happened in.
+    const moveEpoch = store.vault?.epoch;
     let movedOnDisk = false;
     for (let i = 0; i < from.length; i++) {
       if (from[i] === to[i]) continue;
       try {
-        await ipc.renamePath(from[i], to[i]);
+        await ipc.renamePath(from[i], to[i], moveEpoch);
         try {
           await syncManager.registry.renamePath(from[i], to[i]);
         } catch (e) {
@@ -865,6 +914,7 @@ export function FileTree() {
               {...props}
               selectedPath={openNote?.path ?? null}
               lock={lockByPath.get(props.node.data.path) ?? null}
+              syncIndex={syncIndex}
               presenceByDoc={presenceByDoc}
               color={itemColors[props.node.data.path]}
               onMenu={(x, y, node) => setMenu({ x, y, node })}
@@ -963,6 +1013,8 @@ export function FileTree() {
 interface NodeExtra {
   selectedPath: string | null;
   lock: LockScope | null;
+  /** Whole-vault sync roll-up; null when sync is off (no indicators at all). */
+  syncIndex: TreeSyncIndex | null;
   /** docId -> teammates currently viewing that note (drives presence dots). */
   presenceByDoc: Map<string, VaultPeer[]>;
   /** Item color id (vault-local preference) — tints the type glyph. */
@@ -1075,6 +1127,35 @@ function peersForNode(
   return mapping ? (presenceByDoc.get(mapping.docId) ?? []) : [];
 }
 
+/**
+ * The row's sync tell: one quiet dot, or — for a folder that hasn't settled — the
+ * percentage of the notes inside it that are on the server.
+ *
+ * Sized and positioned like `.tree-lock` (its neighbour) and built from the same
+ * `.sync-dot` element and semantic tone tokens the vault-level `.sync-badge`
+ * uses, so "synced" looks the same everywhere in the app. One span, no layout
+ * shift while settled, nothing at all when there is nothing to say.
+ */
+function TreeSyncMark({
+  node,
+  index,
+}: {
+  node: NodeApi<TreeNode>;
+  index: TreeSyncIndex;
+}) {
+  const mark = rowSyncMark(node.data, index);
+  if (!mark) return null;
+  return (
+    <span className={`tree-sync ${mark.state}`} title={mark.title} aria-label={mark.title}>
+      {mark.percent != null ? (
+        <span className="tree-sync-pct">{mark.percent}%</span>
+      ) : (
+        <span className="sync-dot" aria-hidden="true" />
+      )}
+    </span>
+  );
+}
+
 /** One presence face: the teammate's illustrated character ringed in their
  *  colour — the same treatment as the editor's PresenceAvatar, sized for a row. */
 function SidebarAvatar({ peer }: { peer: VaultPeer }) {
@@ -1119,6 +1200,7 @@ function Node({
   dragHandle,
   selectedPath,
   lock,
+  syncIndex,
   presenceByDoc,
   color,
   onMenu,
@@ -1226,6 +1308,7 @@ function Node({
               {ICON_LOCK}
             </span>
           )}
+          {syncIndex && <TreeSyncMark node={node} index={syncIndex} />}
           <SidebarPresence peers={peers} />
           {!selectMode && (
           <button

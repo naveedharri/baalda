@@ -165,3 +165,85 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     reconcile.mockRestore();
   });
 });
+
+// Vault isolation: this sync is built per vault and captures that vault's server
+// vaultId + IPC epoch, so it must go quiet the moment its vault stops being the
+// open one. See `vaultScope.test.ts` / `docSessionVaultScope.test.ts`.
+describe("AttachmentSync vault scoping", () => {
+  it("stop() drops the pending debounced pass instead of leaking it", () => {
+    const { deps } = makeDeps();
+    const cleared: unknown[] = [];
+    const setTimeoutImpl = (() =>
+      7 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout;
+    const clearTimeoutImpl = ((h: unknown) => cleared.push(h)) as unknown as typeof clearTimeout;
+
+    const sync = new AttachmentSync(deps, 400, setTimeoutImpl, clearTimeoutImpl);
+    sync.scheduleReconcile();
+    expect(sync.hasPendingReconcile()).toBe(true);
+
+    sync.stop();
+    // A live timer would keep this instance — and the vaultId it captured — alive
+    // and fire a pass against the vault the user just left.
+    expect(sync.hasPendingReconcile()).toBe(false);
+    expect(cleared).toEqual([7]);
+  });
+
+  it("a debounced pass that fires after the vault changed is a no-op", async () => {
+    const { deps, server } = makeDeps([
+      { relPath: "attachments/only-local.png", bytes: new Uint8Array([1]) },
+    ]);
+    let current = true;
+    let fn: (() => void) | null = null;
+    const setTimeoutImpl = ((cb: () => void) => {
+      fn = cb;
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+
+    const sync = new AttachmentSync(
+      { ...deps, isCurrent: () => current },
+      400,
+      setTimeoutImpl,
+      (() => {}) as unknown as typeof clearTimeout,
+    );
+    sync.scheduleReconcile();
+    current = false; // the user switched vaults while the pass was armed
+    fn!();
+    await Promise.resolve();
+    // Nothing uploaded into the vault we left.
+    expect(server.size).toBe(0);
+  });
+
+  it("reconcile() called directly for a stale vault uploads nothing", async () => {
+    const { deps, local, server } = makeDeps(
+      [{ relPath: "attachments/a.png", bytes: new Uint8Array([2]) }],
+      [{ id: "s1", relPath: "attachments/b.pdf", bytes: new Uint8Array([3]) }],
+    );
+    const sync = new AttachmentSync({ ...deps, isCurrent: () => false });
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(server.size).toBe(1); // no upload into the old vault's blob store
+    expect(local.size).toBe(1); // no download into the new vault's folder
+  });
+
+  it("swallows a failed listing instead of rejecting (every caller is fire-and-forget)", async () => {
+    // The local listing is epoch-pinned, so Rust REJECTS it the moment the vault
+    // changes, and the server listing fails whenever we're offline. Neither is an
+    // exception for the caller: `void sync.reconcile()` would turn it into an
+    // unhandled promise rejection.
+    const { deps } = makeDeps();
+    const local = new AttachmentSync({
+      ...deps,
+      listLocal: async () => {
+        throw new Error("vault-mismatch: caller pinned vault epoch 1");
+      },
+    });
+    await expect(local.reconcile()).resolves.toEqual({ uploaded: 0, downloaded: 0 });
+
+    const offline = new AttachmentSync({
+      ...deps,
+      listServer: async () => {
+        throw new Error("network down");
+      },
+    });
+    await expect(offline.reconcile()).resolves.toEqual({ uploaded: 0, downloaded: 0 });
+  });
+});

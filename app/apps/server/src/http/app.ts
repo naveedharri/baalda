@@ -5,7 +5,7 @@ import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { blobRoutes } from "./routes/blobs.js";
-import { createRegistryRoutes } from "./routes/registry.js";
+import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
 import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { desktopOauthRoutes } from "./routes/desktop-oauth.js";
@@ -23,8 +23,10 @@ export interface AppDeps extends ShareDeps {
   docWriter: DocWriter;
   /** Payment provider. Defaults to Polar; tests inject a fake. */
   billingProvider?: BillingProvider;
-  /** Structure changed (folder/note create/rename/move/delete) → broadcast. */
-  onRegistryChanged?: (vaultId: string) => void;
+  /** Structure changed (folder/note create/rename/move/delete) → broadcast.
+   *  `originId` identifies the client that made the change (x-baalda-origin), so
+   *  the broadcast can skip it — see `RegistryDeps.onRegistryChanged`. */
+  onRegistryChanged?: (vaultId: string, originId: string | null) => void;
 }
 
 /**
@@ -76,7 +78,15 @@ export function createApp(deps: AppDeps): Hono {
       origin: origins,
       credentials: true,
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Authorization", "x-file-name", "x-rel-path"],
+      allowHeaders: [
+        "Content-Type",
+        "Authorization",
+        "x-file-name",
+        "x-rel-path",
+        // Opaque per-client instance id on registry writes, so the vault channel
+        // doesn't tell a client to re-pull its own structural change.
+        ORIGIN_HEADER,
+      ],
       // set-auth-token carries the session token the desktop client reads after
       // sign-in/up; without exposing it the browser hides it even on success.
       exposeHeaders: ["set-auth-token"],

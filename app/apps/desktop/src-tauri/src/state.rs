@@ -23,4 +23,11 @@ pub struct Inner {
     pub vault: Option<PathBuf>,
     pub index: Option<Arc<Mutex<Index>>>,
     pub watcher: Option<VaultWatcher>,
+    /// Monotonic counter bumped on EVERY vault open. There is one global vault
+    /// slot, so a vault-relative command resolves against whatever vault is open
+    /// when it *lands* — not the vault its caller intended. Callers that write
+    /// (or read in order to write) pass the epoch they started under; a mismatch
+    /// is rejected instead of writing vault A's data into vault B's folder.
+    /// An epoch is unambiguous where a path can repeat (reopen, rebind, rename).
+    pub vault_epoch: u64,
 }

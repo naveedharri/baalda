@@ -360,11 +360,17 @@ export function vaultIsEmpty(tree: TreeNode): boolean {
  * Write the first-run starter content into an (assumed empty) vault. Returns the
  * welcome note's vault-relative path so the caller can open it, or null if any
  * write failed (seeding is best-effort — a failure must never block vault open).
+ *
+ * `expectedEpoch` pins the writes to one vault: seeding 20 notes takes many
+ * awaits, and without the pin a vault switch part-way through would scatter the
+ * remaining starter notes into the vault the user just opened.
  */
-export async function seedWelcomeContent(): Promise<string | null> {
+export async function seedWelcomeContent(
+  expectedEpoch?: ipc.VaultEpoch,
+): Promise<string | null> {
   try {
     for (const note of STARTER_NOTES) {
-      await ipc.writeNote(note.path, note.body);
+      await ipc.writeNote(note.path, note.body, expectedEpoch);
     }
     return WELCOME_NOTE_PATH;
   } catch (e) {

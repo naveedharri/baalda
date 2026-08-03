@@ -214,6 +214,20 @@ export interface ApiClientOptions {
   token?: string | null;
   /** Injectable for tests. Defaults to the global fetch. */
   fetchImpl?: FetchLike;
+  /** Override the generated client instance id (tests). See `getClientId`. */
+  clientId?: string;
+}
+
+/** Header carrying `ApiClient.getClientId()`; mirrors the server's ORIGIN_HEADER. */
+export const ORIGIN_HEADER = "x-baalda-origin";
+
+/** A random opaque id for one app instance. */
+function newClientId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `c-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+  }
 }
 
 /**
@@ -224,6 +238,7 @@ export class ApiClient {
   private baseUrl: string;
   private token: string | null;
   private readonly fetchImpl: FetchLike;
+  private readonly clientId: string;
 
   constructor(opts: ApiClientOptions = {}) {
     this.baseUrl = stripTrailingSlash(opts.baseUrl ?? DEFAULT_SERVER_URL);
@@ -231,6 +246,19 @@ export class ApiClient {
     // Bind so a destructured fetch keeps its `this` (window/globalThis).
     const f = opts.fetchImpl ?? fetch;
     this.fetchImpl = f === fetch ? f.bind(globalThis) : f;
+    this.clientId = opts.clientId ?? newClientId();
+  }
+
+  /**
+   * This app instance's opaque id. Sent on every HTTP call as `x-baalda-origin`
+   * and in the vault channel's `hello`, so the server can tell "this structural
+   * change came from the client I'm about to notify" and skip the round trip —
+   * a reconcile no longer makes the server tell its author to re-pull its own
+   * writes (one full ACL recompute per notification). Stable for the process,
+   * meaningless across restarts, and never used for authorization.
+   */
+  getClientId(): string {
+    return this.clientId;
   }
 
   getBaseUrl(): string {
@@ -260,7 +288,10 @@ export class ApiClient {
       }
     }
 
-    const headers: Record<string, string> = { Accept: "application/json" };
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      [ORIGIN_HEADER]: this.clientId,
+    };
     // Better Auth requires an Origin (CSRF). In the Tauri webview the browser
     // sets the real webview origin (the server trusts it via trustedOrigins);
     // in Node (tests) fetch sends none, so we supply the server's own origin,

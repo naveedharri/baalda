@@ -216,3 +216,175 @@ describe("VaultSyncEngine", () => {
     expect(created).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Inbound (download) queue — phase 2.
+//
+// `ws.onmessage` used to be fire-and-forget, so N binary frames started N
+// concurrent `NoteBridge.open` + SQLite load + sha256 + atomic write on the main
+// thread. That is what made the app stop responding while a large vault backfilled.
+// ---------------------------------------------------------------------------
+
+/** A sink whose applies are slow and observable, so overlap is detectable. */
+class SlowSink implements DocUpdateSink {
+  applied: string[] = [];
+  inFlight = 0;
+  maxInFlight = 0;
+  ready = false;
+  constructor(private readonly known: Record<string, Uint8Array> = {}) {}
+  async whenReady() {
+    await tick();
+    this.ready = true;
+  }
+  knownDocs() {
+    return Object.keys(this.known);
+  }
+  async stateVector(docId: string) {
+    return this.known[docId] ?? null;
+  }
+  recentDocs() {
+    return [];
+  }
+  async applyUpdate(docId: string, update: Uint8Array) {
+    this.inFlight++;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    await tick();
+    await tick();
+    this.applied.push(`${docId}:${[...update].join(",")}`);
+    this.inFlight--;
+  }
+  drop() {}
+}
+
+describe("VaultSyncEngine — inbound queue", () => {
+  it("applies frames ONE AT A TIME, in arrival order", async () => {
+    const sink = new SlowSink();
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await tick();
+
+    // Ten frames delivered in one burst, exactly as a backfill arrives.
+    for (let i = 0; i < 10; i++) {
+      ws!.onmessage?.({ data: updateFrame(`d${i % 3}`, [i]) });
+    }
+    expect(sink.maxInFlight).toBeLessThanOrEqual(1); // never a stampede
+
+    for (let i = 0; i < 60 && !engine.inboundIdle(); i++) await tick();
+    expect(sink.maxInFlight).toBe(1);
+    expect(sink.applied).toEqual([
+      "d0:0", "d1:1", "d2:2", "d0:3", "d1:4",
+      "d2:5", "d0:6", "d1:7", "d2:8", "d0:9",
+    ]);
+    expect(engine.inboundProgress()).toMatchObject({ done: 10, total: 10, queued: 0 });
+  });
+
+  it("reports inbound progress as frames land", async () => {
+    const sink = new SlowSink();
+    let ws: FakeWs | null = null;
+    const seen: Array<[number, number]> = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onInboundProgress: (done, total) => seen.push([done, total]),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await tick();
+    ws!.onmessage?.({ data: updateFrame("a", [1]) });
+    ws!.onmessage?.({ data: updateFrame("b", [2]) });
+    for (let i = 0; i < 40 && !engine.inboundIdle(); i++) await tick();
+    expect(seen).toEqual([
+      [1, 2],
+      [2, 2],
+    ]);
+  });
+
+  it("applies backpressure past the byte cap: closes the socket, drains, reconnects", async () => {
+    const sink = new SlowSink();
+    const created: FakeWs[] = [];
+    const scheduled: Array<{ fn: () => void; ms: number }> = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => {
+        const w = new FakeWs();
+        created.push(w);
+        return w;
+      },
+      inboundQueueMaxBytes: 8, // tiny, so three small frames overflow it
+      random: () => 0,
+      reconnect: { baseMs: 1000, maxMs: 30_000 },
+      setTimeoutImpl: (fn, ms) => {
+        scheduled.push({ fn, ms });
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimeoutImpl: () => {},
+    });
+    engine.start();
+    created[0].onopen?.(null);
+    await tick();
+
+    for (let i = 0; i < 4; i++) {
+      created[0].onmessage?.({ data: updateFrame("d", [i, i, i, i]) });
+    }
+    // The producer is told to stop by closing the socket — never by dropping a
+    // frame (a cold apply silently discards an update whose predecessor is
+    // missing, so dropping would lose content).
+    expect(created[0].closed).toBe(true);
+    expect(scheduled).toHaveLength(0); // no reconnect until we've caught up
+
+    for (let i = 0; i < 60 && !engine.inboundIdle(); i++) await tick();
+    expect(sink.applied).toHaveLength(4); // nothing dropped
+    expect(scheduled).toHaveLength(1); // and the feed resumes
+    scheduled[0].fn();
+    expect(created).toHaveLength(2);
+  });
+
+  it("stop() drops whatever is still queued for the vault being left", async () => {
+    const sink = new SlowSink();
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await tick();
+    for (let i = 0; i < 8; i++) ws!.onmessage?.({ data: updateFrame("d", [i]) });
+
+    engine.stop(); // vault switch
+    for (let i = 0; i < 20; i++) await tick();
+    // Only the one already in flight when we stopped may have landed.
+    expect(sink.applied.length).toBeLessThanOrEqual(1);
+    expect(engine.inboundProgress().queued).toBe(0);
+  });
+
+  it("waits for the sink's durable manifest before sending hello", async () => {
+    const sink = new SlowSink({ A: new Uint8Array([5]) });
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    for (let i = 0; i < 5 && !ws!.helloText(); i++) await tick();
+
+    expect(sink.ready).toBe(true); // hello never precedes the manifest load
+    expect((ws!.helloText()!.manifest as Record<string, string>).A).toBe("BQ==");
+  });
+});

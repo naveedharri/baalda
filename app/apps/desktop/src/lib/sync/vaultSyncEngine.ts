@@ -50,6 +50,11 @@ export type VaultSyncStatus =
  * layer (Phase D); a trivial in-memory version backs the unit tests.
  */
 export interface DocUpdateSink {
+  /** Optional: resolve once the sink's DURABLE manifest has been loaded. The
+   *  engine awaits this before building `hello`, so a relaunch advertises the
+   *  state vectors it persisted instead of an empty manifest (which made the
+   *  server re-send the full state of every readable doc on every launch). */
+  whenReady?(): Promise<void>;
   /** docIds the client already holds state for (populate the manifest). */
   knownDocs(): string[];
   /** Current Yjs state vector for a doc, or null if we hold nothing. */
@@ -97,15 +102,36 @@ export interface VaultSyncEngineOptions {
    *  which note (docId null = they left / closed the note). The sink aggregates
    *  these into the sidebar roster. */
   onPresence?: (peer: VaultPeer) => void;
+  /**
+   * Progress of the inbound (download) queue: `done` frames applied out of
+   * `total` ever enqueued for this engine. Drives the `downloading` phase of the
+   * vault's sync progress — a backfill of a big vault is minutes of work that
+   * previously reported nothing at all.
+   */
+  onInboundProgress?: (done: number, total: number) => void;
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
   /** Backoff bounds (ms). */
   reconnect?: { baseMs?: number; maxMs?: number };
+  /** Queued inbound bytes past which the engine applies backpressure (default
+   *  {@link INBOUND_QUEUE_MAX_BYTES}). */
+  inboundQueueMaxBytes?: number;
   /** Injected for deterministic tests. */
   random?: () => number;
   setTimeoutImpl?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimeoutImpl?: (h: ReturnType<typeof setTimeout>) => void;
 }
+
+/**
+ * Inbound queue bound, in bytes of pending Yjs updates.
+ *
+ * The server paces what it sends by its own socket buffer, which says nothing
+ * about how fast THIS client can absorb it: every frame costs a `NoteBridge.open`
+ * (SQLite read + Y.Doc rebuild), a sha256 and an atomic file write, all on the
+ * webview's single thread. 8 MB of queued updates is far more than any healthy
+ * client accumulates and still a hard ceiling on the heap the queue can pin.
+ */
+export const INBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Derive the vault channel's WebSocket URL. Unlike the per-doc `deriveWsUrl`
@@ -135,7 +161,9 @@ export class VaultSyncEngine {
   private readonly onRegistryChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
+  private readonly onInboundProgress?: (done: number, total: number) => void;
   private readonly wsFactory: WsFactory;
+  private readonly inboundMaxBytes: number;
   private readonly baseMs: number;
   private readonly maxMs: number;
   private readonly random: () => number;
@@ -152,6 +180,26 @@ export class VaultSyncEngine {
   private localPresence: LocalPresence | null = null;
   private ready = false;
 
+  // ---- inbound (download) queue ----
+  //
+  // `ws.onmessage` used to be fire-and-forget: `void this.onMessage(data)`. Every
+  // binary frame therefore started its own `NoteBridge.open` + SQLite load +
+  // sha256 + atomic write CONCURRENTLY, on the main thread. A backfill of N docs
+  // spawned N of those at once — which is what made the app stop responding on a
+  // large vault. Frames now go into this FIFO and are applied by a single drain
+  // loop; the queue is bounded by bytes, and overflow closes the socket (real
+  // backpressure) rather than growing the heap or dropping an update.
+  private readonly inbound: Array<{ docId: string; update: Uint8Array }> = [];
+  private inboundBytes = 0;
+  private draining = false;
+  /** Frames ever enqueued / ever applied — the download progress numerator and
+   *  denominator. Monotonic for the lifetime of the engine. */
+  private inboundTotal = 0;
+  private inboundDone = 0;
+  /** True while the socket is closed *because* the queue overflowed: the drain
+   *  loop reconnects once it has caught up. */
+  private backpressured = false;
+
   constructor(opts: VaultSyncEngineOptions) {
     this.api = opts.api;
     this.vaultId = opts.vaultId;
@@ -162,6 +210,8 @@ export class VaultSyncEngine {
     this.onRegistryChanged = opts.onRegistryChanged;
     this.onMemberJoined = opts.onMemberJoined;
     this.onPresence = opts.onPresence;
+    this.onInboundProgress = opts.onInboundProgress;
+    this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
     this.baseMs = opts.reconnect?.baseMs ?? 500;
@@ -204,8 +254,25 @@ export class VaultSyncEngine {
       this.clearTimeoutImpl(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // Drop anything still queued: these updates belong to the vault we're leaving,
+    // and applying them would write its content into whatever vault opens next
+    // (the sink's IO is epoch-pinned, so Rust would refuse — but the work itself
+    // must not even be attempted).
+    this.inbound.length = 0;
+    this.inboundBytes = 0;
+    this.backpressured = false;
     this.closeSocket();
     this.setStatus("idle");
+  }
+
+  /** Inbound (download) queue counters: frames applied / ever enqueued. */
+  inboundProgress(): { done: number; total: number; queued: number } {
+    return { done: this.inboundDone, total: this.inboundTotal, queued: this.inbound.length };
+  }
+
+  /** True when every inbound frame received so far has been applied. */
+  inboundIdle(): boolean {
+    return this.inbound.length === 0 && !this.draining;
   }
 
   private setStatus(s: VaultSyncStatus): void {
@@ -250,6 +317,10 @@ export class VaultSyncEngine {
 
     let manifest: Record<string, string>;
     try {
+      // Wait for the sink's DURABLE manifest before advertising what we hold. Skip
+      // this and every launch sends `{}`, which asks the server for the full state
+      // of every readable doc — the bug this whole phase exists to remove.
+      await this.sink.whenReady?.();
       manifest = await this.buildManifest();
     } catch {
       manifest = {};
@@ -257,7 +328,11 @@ export class VaultSyncEngine {
     const priority = this.sink.recentDocs();
     // The socket may have closed while we were minting/building — guard the send.
     if (!this.ws) return;
-    this.ws.send(encodeHello({ token, manifest, priority }));
+    // `origin` is this app instance's id, matching the `x-baalda-origin` header on
+    // our registry writes, so the server won't ask us to re-pull our own changes.
+    this.ws.send(
+      encodeHello({ token, manifest, priority, origin: this.api.getClientId() }),
+    );
   }
 
   private async buildManifest(): Promise<Record<string, string>> {
@@ -311,14 +386,96 @@ export class VaultSyncEngine {
       }
       return;
     }
-    // Binary: an incremental update frame for one doc.
+    // Binary: an incremental update frame for one doc. Queue it — never apply it
+    // inline (see the `inbound` field comment).
     const bytes = toUint8Array(data);
     if (!bytes) return;
     const frame = decodeUpdateFrame(bytes);
     if (!frame) return;
-    await this.sink.applyUpdate(frame.docId, frame.update).catch((err) => {
-      console.warn(`[vault-sync] applyUpdate failed for ${frame.docId}`, err);
-    });
+    this.enqueueInbound(frame);
+  }
+
+  // ---- inbound queue -----------------------------------------------------
+
+  private enqueueInbound(frame: { docId: string; update: Uint8Array }): void {
+    if (this.stopped) return;
+    // Copy out of the socket's buffer: `decodeUpdateFrame` returns a subarray of
+    // the received ArrayBuffer, and holding a view keeps the WHOLE frame alive
+    // (and, for some transports, lets it be reused underneath us).
+    const update = new Uint8Array(frame.update);
+    this.inbound.push({ docId: frame.docId, update });
+    this.inboundBytes += update.byteLength;
+    this.inboundTotal++;
+    if (!this.backpressured && this.inboundBytes > this.inboundMaxBytes) {
+      this.applyBackpressure();
+    }
+    this.kickDrain();
+  }
+
+  /**
+   * We are further behind than we are willing to buffer. Close the socket so the
+   * server stops producing, finish what we have, then reconnect.
+   *
+   * This is real backpressure rather than dropping: an update whose causal
+   * predecessor is missing is silently discarded by a cold apply (the transient
+   * Y.Doc is destroyed), so dropping frames would lose content outright.
+   * Reconnecting is cheap and lossless precisely because the manifest is now
+   * durable — the server resumes from the state vectors we actually hold.
+   */
+  private applyBackpressure(): void {
+    this.backpressured = true;
+    console.warn(
+      `[vault-sync] inbound queue at ${this.inboundBytes} bytes — pausing the feed to catch up`,
+    );
+    this.closeSocket();
+    this.ready = false;
+    this.setStatus("connecting"); // the feed is down but the work is still ours
+  }
+
+  private kickDrain(): void {
+    if (this.draining) return;
+    this.draining = true;
+    void this.drainInbound()
+      // The loop guards each apply, but not the progress callback it invokes
+      // afterwards — which reaches all the way into a React store write. A throw
+      // there must not become an unhandled rejection that also strands
+      // `draining === true` and silently wedges the whole inbound queue.
+      .catch((err) => console.warn("[vault-sync] inbound drain failed", err))
+      .finally(() => {
+        this.draining = false;
+        // A frame that arrived between the loop's last check and here would
+        // otherwise sit forever.
+        if (!this.stopped && this.inbound.length > 0) this.kickDrain();
+      });
+  }
+
+  /**
+   * Apply queued frames ONE AT A TIME.
+   *
+   * Serial on purpose: two workers pulling from a shared FIFO can hand two
+   * updates for the SAME doc to the sink out of order, and the cold tier drops an
+   * update whose causal predecessor hasn't landed. Serial is also the honest
+   * shape for this work — each apply is a bridge open + file write on the
+   * webview's only thread, so width buys peak memory, not throughput.
+   */
+  private async drainInbound(): Promise<void> {
+    while (!this.stopped && this.inbound.length > 0) {
+      const frame = this.inbound.shift()!;
+      this.inboundBytes = Math.max(0, this.inboundBytes - frame.update.byteLength);
+      try {
+        await this.sink.applyUpdate(frame.docId, frame.update);
+      } catch (err) {
+        console.warn(`[vault-sync] applyUpdate failed for ${frame.docId}`, err);
+      }
+      this.inboundDone++;
+      this.onInboundProgress?.(this.inboundDone, this.inboundTotal);
+    }
+    // Caught up after a pause — resume the feed. The reconnect re-sends `hello`
+    // with the state vectors we just advanced, so nothing is re-delivered.
+    if (this.backpressured && !this.stopped) {
+      this.backpressured = false;
+      this.scheduleReconnect();
+    }
   }
 
   private onDisconnect(): void {

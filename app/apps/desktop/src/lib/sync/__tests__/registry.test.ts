@@ -66,8 +66,10 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     expect(createVault).not.toHaveBeenCalled();
     expect(reg.vaultId).toBe("v-owner");
     expect(seeded).toBe(false); // populated vault never gets welcome content
-    // Server-only note materialized locally so the sidebar shows it.
-    expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledWith("Team/hello.md", "");
+    // Server-only note materialized locally so the sidebar shows it. The third
+    // argument is the vault-epoch pin (null here — no VaultScope in this unit
+    // test); in the app it is what makes Rust refuse the write after a switch.
+    expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledWith("Team/hello.md", "", null);
     expect(reg.getMapping("Team/hello.md")).toEqual({ vaultId: "v-owner", docId: "n1" });
   });
 
@@ -198,7 +200,7 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
     };
     await reg.reconcile({ organizationId: ORG, vaultName: "laptop" }, tree);
     expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledWith("Shared.md", "");
+    expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledWith("Shared.md", "", null);
   });
 });
 

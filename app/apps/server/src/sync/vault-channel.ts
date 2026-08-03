@@ -64,7 +64,15 @@ export interface VaultChannelDeps {
   sendPollMs?: number;
   /** Heartbeat period for {@link VaultChannel.startHeartbeat} (ms). */
   heartbeatMs?: number;
+  /** Coalescing window for `registry` broadcasts (ms; 0 disables). */
+  registryCoalesceMs?: number;
 }
+
+/** Default coalescing window for structural-change broadcasts (ms). A reconcile
+ *  creates one row per folder/note, each firing `onRegistryChanged`; folding them
+ *  into one frame per window is the difference between ~1,100 broadcasts (and
+ *  ~1,100 per-subscriber ACL recomputes) and a handful. */
+export const REGISTRY_COALESCE_MS = 120;
 
 export class VaultChannel {
   private readonly pubsub: PubSub;
@@ -80,6 +88,13 @@ export class VaultChannel {
    *  remove themselves from `cleanup()`, i.e. on close/terminate/failure. */
   private readonly connections = new Set<VaultConnection>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private readonly registryCoalesceMs: number;
+  /** Pending structural-change broadcasts, per vault: the timer that will fire
+   *  and the set of client origins whose writes are folded into it. */
+  private readonly pendingRegistry = new Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; origins: Set<string>; anonymous: boolean }
+  >();
 
   constructor(deps: VaultChannelDeps) {
     this.pubsub = deps.pubsub;
@@ -91,6 +106,7 @@ export class VaultChannel {
     this.sendStallMs = deps.sendStallMs ?? config.vaultSendStallMs;
     this.sendPollMs = deps.sendPollMs ?? config.vaultSendPollMs;
     this.heartbeatMs = deps.heartbeatMs ?? config.vaultHeartbeatMs;
+    this.registryCoalesceMs = deps.registryCoalesceMs ?? REGISTRY_COALESCE_MS;
   }
 
   /** Fan an incremental doc update out to the vault's subscribers (any instance). */
@@ -103,10 +119,66 @@ export class VaultChannel {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubAclChanged());
   }
 
-  /** Signal that the folder/note structure changed in a vault (create/rename/
-   *  move/delete); subscribers re-pull the registry to update their local tree. */
-  async publishRegistryChanged(vaultId: string): Promise<void> {
-    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubRegistryChanged());
+  /**
+   * Signal that the folder/note structure changed in a vault (create/rename/
+   * move/delete); subscribers re-pull the registry to update their local tree.
+   *
+   * Coalesced per vault over `registryCoalesceMs`: a reconcile fires this once
+   * per created row, and every broadcast makes every subscriber recompute its
+   * readable-doc set. `originId` (the writing client's `x-baalda-origin`) rides
+   * along so the author of the change isn't told to re-pull its own writes; a
+   * window that mixes several origins — or any change of unknown origin — is
+   * broadcast to everyone.
+   */
+  async publishRegistryChanged(vaultId: string, originId?: string | null): Promise<void> {
+    if (this.registryCoalesceMs <= 0) {
+      await this.pubsub.publish(
+        vaultTopic(vaultId),
+        encodePubsubRegistryChanged(originId ? [originId] : []),
+      );
+      return;
+    }
+    const pending = this.pendingRegistry.get(vaultId);
+    if (pending) {
+      // Fold into the window already open — no extra timer, no extra broadcast.
+      if (originId) pending.origins.add(originId);
+      else pending.anonymous = true;
+      return;
+    }
+    const entry = {
+      timer: setTimeout(() => this.flushRegistry(vaultId), this.registryCoalesceMs),
+      origins: new Set<string>(originId ? [originId] : []),
+      anonymous: !originId,
+    };
+    entry.timer.unref?.();
+    this.pendingRegistry.set(vaultId, entry);
+  }
+
+  private flushRegistry(vaultId: string): void {
+    const entry = this.pendingRegistry.get(vaultId);
+    if (!entry) return;
+    this.pendingRegistry.delete(vaultId);
+    // Any anonymous contributor means we can't attribute the whole window, so
+    // send an empty origin list and let every subscriber re-pull.
+    const origins = entry.anonymous ? [] : [...entry.origins];
+    void this.pubsub
+      .publish(vaultTopic(vaultId), encodePubsubRegistryChanged(origins))
+      .catch((err) => console.error("Vault channel registry publish failed:", err));
+  }
+
+  /**
+   * Publish every still-open coalescing window immediately instead of waiting out
+   * its timer. Called when this instance's WebSocketServer closes: the publish
+   * goes to the shared pubsub, so subscribers on OTHER instances still learn about
+   * a change this one had coalesced when it went down — a rolling deploy would
+   * otherwise silently lose it.
+   */
+  flushPendingRegistry(): void {
+    for (const vaultId of [...this.pendingRegistry.keys()]) {
+      const entry = this.pendingRegistry.get(vaultId);
+      if (entry) clearTimeout(entry.timer);
+      this.flushRegistry(vaultId);
+    }
   }
 
   /** Announce that a new member joined the vault (organization) this note
@@ -130,7 +202,12 @@ export class VaultChannel {
     // WebSocketServer down (index.ts `vaultWss.close()`), and unref'd so it can
     // never be the reason the process stays alive.
     const stopHeartbeat = this.startHeartbeat();
-    wss.on("close", stopHeartbeat);
+    wss.on("close", () => {
+      stopHeartbeat();
+      // Flush (not drop) the still-open coalescing windows, so a change this
+      // instance had folded into one isn't lost when it goes away.
+      this.flushPendingRegistry();
+    });
     return wss;
   }
 
@@ -198,6 +275,10 @@ interface ConnDeps {
 class VaultConnection {
   private userId: string | null = null;
   private vaultId: string | null = null;
+  /** This client's self-declared instance id (hello `origin`), used to skip
+   *  telling it to re-pull structural changes it made itself. Null ⇒ no
+   *  self-exclusion, so it hears about everything (older clients). */
+  private clientId: string | null = null;
   private readable = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private helloSeen = false;
@@ -289,6 +370,7 @@ class VaultConnection {
     const hello = parseHello(text);
     if (!hello) return this.fail("expected hello");
     this.helloSeen = true;
+    this.clientId = hello.origin ?? null;
     clearTimeout(this.helloTimer);
 
     let claims;
@@ -394,8 +476,26 @@ class VaultConnection {
     if (msg.type === "registry-changed") {
       // The set of folders/notes changed. The ACL set may also have shifted (a
       // new note the user can read, or one revoked), so re-evaluate that too —
-      // this drops/back-fills docs — and tell the client to re-pull the tree.
+      // this drops/back-fills docs.
+      //
+      // Deliberately NOT self-excluded: a note this client created itself must
+      // still enter its readable set, or the background feed would silently drop
+      // every teammate edit to that note until the next reconnect. Coalescing
+      // (see `publishRegistryChanged`) is what makes this cheap — a 500-note
+      // reconcile costs a handful of recomputes, not ~1,100.
       void this.refreshAcl();
+      // Self-exclusion applies to the re-pull only. This client already holds the
+      // ids the API returned it, so asking it to re-pull its own writes is a
+      // wasted round trip (listFolders + listNotes + a full client syncStructure).
+      // Skipped only when EVERY origin folded into this window is ours; a window
+      // that also carried someone else's change — or an unattributed one — lands.
+      if (
+        this.clientId !== null &&
+        msg.origins.length > 0 &&
+        msg.origins.every((o) => o === this.clientId)
+      ) {
+        return;
+      }
       this.send({ t: "registry" });
       return;
     }

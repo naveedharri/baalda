@@ -1176,6 +1176,9 @@ function GeneralTab({
   const syncEnabledState = useStore((s) => s.syncEnabled);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   const syncPending = useStore((s) => s.syncPending);
+  // The vault's bulk-run counter ("Syncing 128/500"), so this row reports the
+  // whole vault's state and not just whether a socket is up.
+  const syncProgress = useStore((s) => s.syncProgress);
   const serverUrl = useStore((s) => s.serverUrl);
   const authStatus = useStore((s) => s.authStatus);
 
@@ -1223,6 +1226,7 @@ function GeneralTab({
               enabled={syncEnabledState}
               lastSyncedAt={lastSyncedAt}
               pending={syncPending}
+              progress={syncProgress}
             />
           </div>
           <div className="menu-row">
@@ -2598,27 +2602,32 @@ function ImportExportTab() {
 
   const importFiles = () =>
     run("files", async () => {
+      // Captured before the native picker — a vault switch while it is open must
+      // not redirect the import into the vault the user landed in.
+      const epoch = useStore.getState().vault?.epoch;
       const sources = await ipc.pickFiles();
       if (!sources || sources.length === 0) return null;
-      const summary = await ipc.importPaths("", sources);
+      const summary = await ipc.importPaths("", sources, epoch);
       await refresh();
       return importSummaryText(summary);
     });
 
   const importFolder = () =>
     run("folder", async () => {
+      const epoch = useStore.getState().vault?.epoch; // before the dialog
       const src = await ipc.pickFolder();
       if (!src) return null;
-      const summary = await ipc.importPaths("", [src]);
+      const summary = await ipc.importPaths("", [src], epoch);
       await refresh();
       return importSummaryText(summary);
     });
 
   const exportVault = () =>
     run("export", async () => {
+      const epoch = useStore.getState().vault?.epoch; // before the dialog
       const dest = await ipc.pickFolder();
       if (!dest) return null;
-      await ipc.exportPath("", dest);
+      await ipc.exportPath("", dest, epoch);
       return "Exported the vault.";
     });
 

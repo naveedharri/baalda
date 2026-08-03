@@ -12,6 +12,7 @@
 
 import { Awareness } from "y-protocols/awareness";
 import type { NoteBridge } from "../bridge";
+import { createTauriBridgeIO } from "../bridge/adapter";
 import type { SessionInfo } from "../api";
 import type { TreeNode } from "../ipc";
 import * as ipc from "../ipc";
@@ -19,10 +20,18 @@ import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
 import type { ActivityStatus } from "../prefs";
 import { AttachmentSync } from "./attachments";
+import { ContentUploader } from "./contentUpload";
+import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
 import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry } from "./registry";
-import { VaultDocStore } from "./vaultDocStore";
+import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
+import {
+  vaultScopes,
+  type DocSyncState,
+  type SyncProgress,
+  type VaultScope,
+} from "./vaultScope";
 import {
   VaultSyncEngine,
   type VaultPeer,
@@ -35,6 +44,16 @@ function baseName(relPath: string): string {
   return i === -1 ? relPath : relPath.slice(i + 1);
 }
 
+/**
+ * Coalescing window for the {relPath → docId} mirror pushed to the UI.
+ *
+ * The registry fires its map listener once per adopted/created note, so a
+ * 500-note reconcile fires it 500 times; each publish rebuilds a 500-key object
+ * and re-renders the sidebar. Same budget as `SyncProgressReporter` (~10 store
+ * writes/second) for the same reason.
+ */
+const REGISTRY_MAP_PUBLISH_MS = 100;
+
 export interface OpenedDoc {
   awareness: Awareness;
   sync: DocSync | null;
@@ -42,10 +61,33 @@ export interface OpenedDoc {
   status: SyncStatus;
 }
 
+/** The vault a sync session is being enabled for. */
+export interface VaultTarget {
+  /** Better Auth organization id (the user-facing vault). */
+  orgId: string;
+  /** Display name — used when a brand-new server note collection is created. */
+  name: string;
+  /** Absolute local folder bound to this vault. */
+  path: string;
+  /** Rust `vault_epoch` this folder was opened under (`ipc.VaultInfo.epoch`). */
+  epoch: number | null;
+}
+
 export class SyncManager {
   readonly registry = new VaultRegistry(api);
 
+  constructor() {
+    // The registry owns the only {relPath → docId} map there is, and the sidebar
+    // needs it to badge a row (every sync fact is keyed by docId). Mirror it out
+    // reactively — coalesced — instead of letting the UI read it imperatively
+    // during render, which never re-rendered when the mapping changed.
+    this.registry.setMapListener(() => this.scheduleRegistryMapPublish());
+  }
+
   private current: DocSync | null = null;
+  /** docId of the open networked note (null when none) — the key its per-doc sync
+   *  state is reported under. Keyed by docId, never by path. */
+  private currentDocId: string | null = null;
   private currentLocalAwareness: Awareness | null = null;
   private enabled = false;
   private presence: { id: string; name: string } | null = null;
@@ -56,8 +98,13 @@ export class SyncManager {
   private onFlushed?: () => void;
   private onRegistryChanged?: () => void;
   private onMemberJoined?: (name: string) => void;
+  /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
+  private onRegistryMap?: (map: Record<string, string>) => void;
+  private mapPublishTimer: ReturnType<typeof setTimeout> | null = null;
   private registryPullTimer: ReturnType<typeof setTimeout> | null = null;
   private attachments: AttachmentSync | null = null;
+  /** The vault generation everything below belongs to; null while disabled. */
+  private scope: VaultScope | null = null;
 
   // Vault-wide background sync (spec 05): the engine (one WS to /vault-sync)
   // feeds the store, which keeps every authorized doc current on disk without
@@ -65,6 +112,24 @@ export class SyncManager {
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
+
+  // ---- bulk sync run (phase 2) ----
+  //
+  // One run per vault scope: register structure → push content → drain the
+  // inbound backfill → report a terminal phase. Everything here is allocated in
+  // `enable` and released in `teardown`, so a run can never outlive its vault.
+  /** Throttled progress mirror for the store (`syncProgress`/`docSyncState`). */
+  private progress: SyncProgressReporter | null = null;
+  private onSyncProgress?: (progress: SyncProgress | null) => void;
+  private onDocState?: (patch: Record<string, DocSyncState | null>) => void;
+  /** The content upload for the current scope, while one is running. */
+  private uploader: ContentUploader | null = null;
+  /** True while the run is reporting the vault channel's inbound queue. */
+  private downloadPhase = false;
+  private lastInboundDone = 0;
+  private lastInboundTotal = 0;
+  /** Resolves when the current bulk run finishes (tests). */
+  private bulkRun: Promise<void> | null = null;
 
   // The UI shows ONE connection indicator, but two things can drive it: the
   // open note's provider (authoritative for that doc, incl. read-only grants)
@@ -86,6 +151,29 @@ export class SyncManager {
   /** UI subscribes here to render the connection indicator. */
   setStatusListener(cb: ((status: SyncStatus) => void) | undefined): void {
     this.onStatus = cb;
+  }
+
+  /**
+   * UI subscribes here for the current vault's bulk-sync progress
+   * (`store.setSyncProgress`). Emitted at most ~10×/second; `null` means no run
+   * is in flight for the open vault.
+   *
+   * The sync layer never imports the store — it pushes through listeners, exactly
+   * like `setStatusListener`/`setRegistryListener`.
+   */
+  setSyncProgressListener(cb: ((progress: SyncProgress | null) => void) | undefined): void {
+    this.onSyncProgress = cb;
+  }
+
+  /**
+   * UI subscribes here for per-document sync state transitions
+   * (`store.patchDocSyncState`). Batched: one patch per progress emission, keyed
+   * by docId — never by path.
+   */
+  setDocStateListener(
+    cb: ((patch: Record<string, DocSyncState | null>) => void) | undefined,
+  ): void {
+    this.onDocState = cb;
   }
 
   /** Map the vault channel's status onto the app-wide SyncStatus vocabulary.
@@ -115,10 +203,22 @@ export class SyncManager {
     this.onStatus?.(effective);
   }
 
-  /** Record the open note's provider status and re-emit the effective status. */
+  /** Record the open note's provider status and re-emit the effective status.
+   *  Also mirrors it into the open note's per-doc sync state, so the sidebar badge
+   *  for the note you're editing stays as honest as the bulk run's badges. */
   private handleDocStatus(s: SyncStatus): void {
     this.docStatus = s;
     this.emitStatus();
+    const docId = this.currentDocId;
+    if (docId && this.progress) {
+      const state: DocSyncState =
+        s === "synced" || s === "read-only"
+          ? "synced"
+          : s === "no-access" || s === "error"
+            ? "error"
+            : "syncing";
+      this.progress.doc(docId, state);
+    }
   }
 
   /**
@@ -143,6 +243,55 @@ export class SyncManager {
   }
 
   /**
+   * UI subscribes here for the open vault's {relPath → docId} index
+   * (`store.docIdByPath`) — the bridge between rows, which the sidebar knows by
+   * path, and sync state, which is keyed by docId. Emitted at most ~10×/second;
+   * an empty object means "no vault is synced" (sync off, or teardown).
+   *
+   * Fires immediately with the current map so a late subscriber isn't blind until
+   * the next change.
+   */
+  setRegistryMapListener(cb: ((map: Record<string, string>) => void) | undefined): void {
+    this.onRegistryMap = cb;
+    if (cb) this.publishRegistryMap();
+  }
+
+  /** Coalesce a burst of per-note mapping changes into one publish. */
+  private scheduleRegistryMapPublish(): void {
+    if (!this.onRegistryMap || this.mapPublishTimer) return;
+    this.mapPublishTimer = setTimeout(
+      () => this.publishRegistryMap(),
+      REGISTRY_MAP_PUBLISH_MS,
+    );
+  }
+
+  /**
+   * Push the registry's path→docId index out now.
+   *
+   * Publishes an EMPTY map unless a live, current scope owns the registry: this
+   * class is a process singleton, so a coalesced publish can land after a vault
+   * switch, and the registry it reads would then describe the vault we left. An
+   * empty map is the honest answer there — the store also clears the field on
+   * every switch (`vaultScopedSyncReset`), which is the second line of defence.
+   */
+  private publishRegistryMap(): void {
+    if (this.mapPublishTimer) {
+      clearTimeout(this.mapPublishTimer);
+      this.mapPublishTimer = null;
+    }
+    const cb = this.onRegistryMap;
+    if (!cb) return;
+    const map: Record<string, string> = {};
+    // Gated on the SCOPE, not on `enabled`: the scope exists from the first line
+    // of `enable()`, so notes badge progressively as the reconcile maps them —
+    // `enabled` only flips once the whole (multi-minute) reconcile is done.
+    if (this.scope?.isCurrent()) {
+      for (const { docId, relPath } of this.registry.mappedNotes()) map[relPath] = docId;
+    }
+    cb(map);
+  }
+
+  /**
    * UI subscribes here to react when a new teammate joins the vault: refresh
    * the roster (so the member list updates without a reload) and celebrate.
    */
@@ -154,20 +303,95 @@ export class SyncManager {
    * A `registry` signal arrived from the vault channel. Debounce a re-pull (a
    * burst of changes — e.g. a folder move rewriting many rows — coalesces into
    * one), then tell the UI to refresh the tree.
+   *
+   * This 250ms timer is the one that corrupted vaults: it outlived a vault
+   * switch, then pulled with vault A's `serverVaultId` against vault B's tree.
+   * It is now both cleared by `disable()` and scope-guarded (the timer captures
+   * the scope it was armed under and drops if that scope is no longer current).
+   *
+   * Public like `handleAttachmentChanged` — both are "an external signal for this
+   * vault arrived"; the vault engine wires this one in `startVaultEngine`.
    */
-  private handleRegistryChanged(): void {
+  handleRegistryChanged(): void {
+    // A signal that arrives once sync is down (or for the vault we just left) must
+    // not even ARM the timer — an armed timer is the thing that outlived the switch
+    // in the first place. Requiring a live, current scope is strictly stronger than
+    // checking `isCurrent()` on a possibly-null one.
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
     if (this.registryPullTimer) clearTimeout(this.registryPullTimer);
     this.registryPullTimer = setTimeout(() => {
       this.registryPullTimer = null;
+      if (!scope.isCurrent()) return;
       void this.registry
         .pull()
-        .then(() => this.onRegistryChanged?.())
+        .then(() => {
+          if (!scope.isCurrent()) return;
+          this.onRegistryChanged?.();
+          this.settleAfterPull(scope);
+        })
         .catch((e) => console.warn("[sync] registry pull failed", e));
     }, 250);
   }
 
+  /** True while a debounced registry pull is still armed (teardown assertions). */
+  hasPendingRegistryPull(): boolean {
+    return this.registryPullTimer != null;
+  }
+
+  /**
+   * Notes this device has NOT confirmed the content of. Excludes the open note,
+   * whose own editor session owns its provider.
+   *
+   * A freshly materialized note is an EMPTY `.md` on disk (the registry writes a
+   * placeholder and hydrates lazily), so "not confirmed" is literally "this
+   * device does not have the content" — not a bookkeeping detail.
+   */
+  private unconfirmedNotes(): number {
+    const open = this.docStore?.suppressedDoc() ?? null;
+    let n = 0;
+    for (const note of this.registry.mappedNotes()) {
+      if (note.docId !== open && !this.registry.isPushed(note.docId)) n++;
+    }
+    return n;
+  }
+
+  /**
+   * Land the vault on a coherent state after a registry pull.
+   *
+   * A pull re-enters the `registering` phase (it may create rows for a teammate's
+   * new folders/notes), so *something* has to re-stamp a terminal phase or the
+   * vault sits on "registering 1/1" forever after someone else adds one note.
+   *
+   * But a pull can also ADOPT notes — a teammate's new note arrives as a mapped
+   * row plus an empty placeholder file. Stamping `done` there would claim the
+   * vault is fully synced while that note has no content on this device, and the
+   * sidebar would (correctly, and contradictorily) badge its row as not synced.
+   * So: if anything is unconfirmed, run the content pass that confirms it, and let
+   * THAT run stamp the terminal phase. Otherwise stamp it here.
+   */
+  private settleAfterPull(scope: VaultScope): void {
+    // A live run will reach its own terminal phase and will pick up whatever the
+    // pull added, because the queue is rebuilt from `mappedNotes()` minus the
+    // pushed set. Restarting it here instead would let a busy team's structural
+    // churn abandon the initial backfill over and over.
+    if (this.uploader?.isRunning()) return;
+    if (this.unconfirmedNotes() === 0) {
+      this.completeRun(scope);
+      return;
+    }
+    this.bulkRun = this.runBulkSync(scope).catch((e) => {
+      console.warn("[sync] follow-up content sync failed", e);
+    });
+  }
+
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  /** The vault scope this session is running under (null when disabled). */
+  currentScope(): VaultScope | null {
+    return this.scope;
   }
 
   /** True if opening `relPath` will connect a network provider. */
@@ -179,47 +403,255 @@ export class SyncManager {
    * Enable networked sync for a vault: reconcile the registry so doc_ids are
    * shared across devices, and remember the presence identity. Requires an
    * active organization; a no-op (disabled) otherwise.
+   *
+   * Everything this starts belongs to ONE {@link VaultScope}. `begin` retires the
+   * previous scope first, so any operation still in flight for the vault we're
+   * leaving sees `isCurrent() === false` at its next checkpoint and drops. The
+   * returned `scope` lets the caller check whether its own post-await state
+   * updates are still about the vault it asked for.
    */
   async enable(
     session: SessionInfo,
     tree: TreeNode,
-    vaultName: string,
-  ): Promise<{ ok: boolean; reason?: string; seeded?: boolean }> {
+    vault: VaultTarget,
+  ): Promise<{ ok: boolean; reason?: string; seeded?: boolean; scope?: VaultScope }> {
     if (!session.activeOrganizationId) {
-      this.enabled = false;
+      this.disable();
       return { ok: false, reason: "no active organization" };
     }
+    // Retire whatever was running for the previous vault BEFORE any await, so no
+    // old-vault work can interleave with this reconcile.
+    this.teardown();
+    const scope = vaultScopes.begin({
+      orgId: vault.orgId,
+      vaultPath: vault.path,
+      vaultEpoch: vault.epoch,
+    });
+    this.scope = scope;
     this.presence = { id: session.user.id, name: session.user.name || session.user.email };
+    // The progress mirror is created BEFORE the reconcile so the `registering`
+    // phase is visible from its first item — that phase alone is minutes of work
+    // on a large vault, and it used to report nothing at all.
+    const progress = new SyncProgressReporter({
+      onProgress: (p) => this.onSyncProgress?.(p),
+      onDocState: (patch) => this.onDocState?.(patch),
+    });
+    this.progress = progress;
+    this.registry.setProgressSink(progress);
     try {
       const { seeded } = await this.registry.reconcile(
-        { organizationId: session.activeOrganizationId, vaultName },
+        { organizationId: session.activeOrganizationId, vaultName: vault.name },
         tree,
       );
+      // The user may have switched vaults during the reconcile. Bringing sync up
+      // now would start the engine for the OLD vault id while the NEW vault's
+      // folder is open — exactly the state that merged two vaults.
+      if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
       this.enabled = true;
-      this.setupAttachments();
-      // Initial attachment reconcile (fire-and-forget; errors are logged).
-      void this.attachments?.reconcile();
-      this.startVaultEngine();
-      return { ok: true, seeded };
+      this.setupAttachments(scope);
+      // Initial attachment reconcile (fire-and-forget; errors are logged rather
+      // than left to surface as an unhandled rejection).
+      void this.attachments
+        ?.reconcile()
+        .catch((e) => console.warn("[attachments] initial reconcile failed", e));
+      this.startVaultEngine(scope);
+      // Bulk content sync runs in the BACKGROUND: `enable` must return as soon as
+      // the vault is usable, or "Turn on sync" would block the UI for the whole
+      // backfill. Progress + per-doc state are reported as it advances.
+      this.bulkRun = this.runBulkSync(scope).catch((e) => {
+        console.warn("[sync] bulk run failed", e);
+      });
+      return { ok: true, seeded, scope };
     } catch (e) {
-      this.enabled = false;
-      return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      if (scope.isCurrent()) this.disable();
+      return { ok: false, reason: e instanceof Error ? e.message : String(e), scope };
     }
   }
 
-  /** Sign-out / vault-switch: stop networked sync. */
+  /** Resolves when the current bulk sync run settles (tests / shutdown). */
+  whenBulkSyncSettled(): Promise<void> {
+    return this.bulkRun ?? Promise.resolve();
+  }
+
+  /**
+   * Push every registered note's CONTENT to the server, then wait out the inbound
+   * backfill, then report a terminal phase.
+   *
+   * This is the half of "turn on sync" that did not exist: reconcile created a
+   * `notes` row (and an EMPTY server Y.Doc) per file, and a note's markdown only
+   * ever reached the server when a human opened that note. See `contentUpload.ts`
+   * for why re-running it cannot duplicate content.
+   */
+  private async runBulkSync(scope: VaultScope): Promise<void> {
+    const vaultId = this.registry.vaultId;
+    const store = this.docStore;
+    const progress = this.progress;
+    if (!vaultId || !store || !progress) return;
+
+    const uploader: ContentUploader = new ContentUploader({
+      vaultId,
+      notes: this.registry.mappedNotes(),
+      deps: {
+        // Hold the doc in the hot tier (pinned) for the duration of its push, so
+        // there is exactly ONE bridge for it even while the background feed is
+        // delivering updates for the same doc.
+        acquire: (docId, relPath) =>
+          store.promote(docId, relPath, {
+            seedFromFile: false, // pull-before-seed; the uploader seeds an orphan
+            markRecent: false, // a 500-note run must not evict the real recency list
+            pin: true,
+          }),
+        release: (docId) => store.demote(docId),
+        connect: ({ docId, vaultId: collectionId, doc }) =>
+          new DocSync({ api, doc, docId, vaultId: collectionId }),
+      },
+      isPushed: (docId) => this.registry.isPushed(docId),
+      markPushed: (docId) => this.registry.markPushed(docId),
+      // Never touch the open note: its editor session owns a provider for that doc.
+      skip: (docId) => store.suppressedDoc() === docId,
+      progress,
+      shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+    });
+    this.uploader = uploader;
+
+    const result = await uploader.run();
+    if (!scope.isCurrent() || this.uploader !== uploader) return;
+    // Durably record what we pushed before claiming anything: this is the resume
+    // point a kill -9 falls back to.
+    await this.registry.flushCheckpoint();
+    if (!scope.isCurrent() || this.uploader !== uploader) return;
+    if (result.cancelled) return;
+    this.beginDownloadPhase(scope);
+  }
+
+  /**
+   * Second half of the run: report the vault channel's inbound (download) queue
+   * until it drains, then finish. Driven by the engine's progress callback rather
+   * than polling — the queue is serial, so every applied frame is a tick.
+   */
+  private beginDownloadPhase(scope: VaultScope): void {
+    const engine = this.vaultEngine;
+    const progress = this.progress;
+    if (!engine || !progress) return;
+    const { done, total } = engine.inboundProgress();
+    if (engine.inboundIdle()) {
+      this.completeRun(scope);
+      return;
+    }
+    this.lastInboundDone = done;
+    this.lastInboundTotal = total;
+    this.downloadPhase = true;
+    progress.phase("downloading", total - done);
+  }
+
+  /** One inbound frame applied by the vault channel. */
+  private handleInboundProgress(done: number, total: number, scope: VaultScope): void {
+    if (!this.downloadPhase || !scope.isCurrent()) return;
+    const progress = this.progress;
+    if (!progress) return;
+    if (total > this.lastInboundTotal) {
+      progress.addTotal(total - this.lastInboundTotal);
+      this.lastInboundTotal = total;
+    }
+    for (let i = this.lastInboundDone; i < done; i++) progress.item("ok");
+    this.lastInboundDone = done;
+    if (this.vaultEngine?.inboundIdle()) this.completeRun(scope);
+  }
+
+  /**
+   * Terminal phase for the run. `done` only when NOTHING failed: a vault with any
+   * registry failure, any un-pushed note or a plan limit reports `error`, so the
+   * UI can never claim a vault is fully synced while an arbitrary subset is
+   * local-only. The counters are left intact (e.g. 480/500, failed 20).
+   */
+  private completeRun(scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    const progress = this.progress;
+    if (!progress) return;
+    this.downloadPhase = false;
+    const uploadFailures = this.uploader?.failedDocs().length ?? 0;
+    const clean =
+      uploadFailures === 0 &&
+      !this.registry.hasFailures() &&
+      this.registry.limitCode() == null;
+    progress.phase(clean ? "done" : "error");
+    progress.flush();
+  }
+
+  /** Everything the current run could not sync — registry rows and note content. */
+  syncFailures(): {
+    registry: ReturnType<VaultRegistry["failures"]>;
+    content: Array<{ docId: string; relPath: string; reason: string }>;
+    limitCode: string | null;
+  } {
+    return {
+      registry: this.registry.failures(),
+      content: this.uploader?.failedDocs() ?? [],
+      limitCode: this.registry.limitCode(),
+    };
+  }
+
+  /**
+   * Sign-out / vault-switch: stop networked sync. MUST run BEFORE the Rust vault
+   * slot is swapped (`ipc.openVault*`) — that ordering is what stops a surviving
+   * timer from pulling with vault A's server ids against vault B's tree. The
+   * scope guard is the second line of defence for call sites that get it wrong.
+   */
   disable(): void {
-    this.enabled = false;
-    this.presence = null;
-    this.attachments = null;
-    this.viewingDocId = null;
-    this.vaultStatus = "idle";
-    this.clearVaultPresence();
-    this.stopVaultEngine();
-    this.closeCurrent();
+    this.teardown();
     // closeCurrent only emits when a note was open; make sure a note-less
     // disable (e.g. switching to a local vault) still drops to offline.
     this.emitStatus();
+  }
+
+  /**
+   * Release every resource tied to the current vault. Shared by `disable()` and
+   * `enable()` (which re-arms immediately afterwards). Anything vault-scoped
+   * added later belongs here — a leak here is a cross-vault write.
+   */
+  private teardown(): void {
+    this.enabled = false;
+    this.presence = null;
+    this.viewingDocId = null;
+    this.vaultStatus = "idle";
+    // Timers first: a timer that fires after we've cleared the state below would
+    // still see a live `registry`/`attachments` and act on the wrong vault.
+    if (this.registryPullTimer) {
+      clearTimeout(this.registryPullTimer);
+      this.registryPullTimer = null;
+    }
+    // The bulk run before the engine it borrows from: `stop()` makes every pool
+    // lane drop at its next checkpoint, so nothing is still promoting a bridge
+    // when `stopVaultEngine` destroys the store underneath it.
+    this.uploader?.stop();
+    this.uploader = null;
+    this.bulkRun = null;
+    this.downloadPhase = false;
+    this.lastInboundDone = 0;
+    this.lastInboundTotal = 0;
+    this.attachments?.stop();
+    this.attachments = null;
+    this.clearVaultPresence();
+    this.stopVaultEngine();
+    this.closeCurrent();
+    // The registry is a process singleton: a surviving `serverVaultId` + path
+    // maps are precisely what let vault A's ids be applied to vault B's tree.
+    // (`reset` also disposes its config-checkpointer synchronously, so a pending
+    // flush can't write this vault's doc map into the next one.)
+    this.registry.reset();
+    // Nulls the store's `syncProgress`, so a half-finished count from the vault we
+    // just left is never on screen.
+    this.progress?.dispose();
+    this.progress = null;
+    // Retire the scope LAST so anything above that consults `isCurrent()` while
+    // tearing down still sees a coherent scope; after this, every captured scope
+    // in flight reads as stale.
+    this.scope = null;
+    vaultScopes.end();
+    // Now that no scope is current, this publishes an EMPTY path→docId map (and
+    // clears the coalescing timer, so nothing from the vault we left arrives
+    // 100ms into the next one).
+    this.publishRegistryMap();
   }
 
   /** UI subscribes here for the vault-wide background-sync indicator. */
@@ -271,7 +703,7 @@ export class SyncManager {
   }
 
   /** Start the always-on background feed for the reconciled vault (spec 05). */
-  private startVaultEngine(): void {
+  private startVaultEngine(scope: VaultScope): void {
     const vaultId = this.registry.vaultId;
     if (!vaultId) return;
     this.stopVaultEngine();
@@ -281,6 +713,15 @@ export class SyncManager {
     if (!this.current) this.emitStatus();
     const store = new VaultDocStore({
       resolvePath: (docId) => this.registry.pathForDocId(docId),
+      // The background feed writes .md files for docs nobody has open. Pin its
+      // IO to this vault's epoch so a cold apply that lands after a vault switch
+      // is refused by Rust instead of overwriting the new vault's file at the
+      // same relative path.
+      io: createTauriBridgeIO(scope.vaultEpoch),
+      // Durable state-vector manifest in this vault's own `.context/index.sqlite`,
+      // epoch-pinned for the same reason. Without it the engine's `hello` was empty
+      // on every launch and the server re-sent the full state of every doc, forever.
+      manifest: createIpcManifestStore(scope.vaultEpoch),
     });
     this.docStore = store;
     this.vaultEngine = new VaultSyncEngine({
@@ -306,6 +747,8 @@ export class SyncManager {
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
+      // Inbound backfill progress — the `downloading` half of the run's progress.
+      onInboundProgress: (done, total) => this.handleInboundProgress(done, total, scope),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).
@@ -315,8 +758,14 @@ export class SyncManager {
   private stopVaultEngine(): void {
     this.vaultEngine?.stop();
     this.vaultEngine = null;
-    void this.docStore?.destroyAll();
+    // Kick the durable manifest write FIRST, while this vault's epoch is still the
+    // open one: the store's IPC is epoch-pinned, so a write issued after Rust has
+    // swapped vaults is refused (benignly — the manifest just misses its last
+    // second of updates and the next connect back-fills a little more).
+    const store = this.docStore;
     this.docStore = null;
+    void store?.flushStateVectors();
+    void store?.destroyAll();
   }
 
   /**
@@ -328,17 +777,21 @@ export class SyncManager {
     this.attachments?.scheduleReconcile();
   }
 
-  /** Build the AttachmentSync from the reconciled server vault id + ipc/api. */
-  private setupAttachments(): void {
+  /** Build the AttachmentSync from the reconciled server vault id + ipc/api.
+   *  Bound to `scope`: the captured `vaultId` is only valid while that vault is
+   *  open, so both the pass guard and the pinned IPC epoch reference it. */
+  private setupAttachments(scope: VaultScope): void {
     const vaultId = this.registry.vaultId;
     if (!vaultId) {
       this.attachments = null;
       return;
     }
+    const epoch = scope.vaultEpoch;
     this.attachments = new AttachmentSync({
-      listLocal: () => ipc.listAttachments(),
-      readLocal: (relPath) => ipc.readBinaryFile(relPath),
-      writeLocal: (relPath, bytes) => ipc.writeBinaryFile(relPath, bytes),
+      isCurrent: () => scope.isCurrent(),
+      listLocal: () => ipc.listAttachments(epoch),
+      readLocal: (relPath) => ipc.readBinaryFile(relPath, epoch),
+      writeLocal: (relPath, bytes) => ipc.writeBinaryFile(relPath, bytes, epoch),
       listServer: () => api.listVaultBlobs(vaultId),
       uploadServer: (relPath, bytes, mime) =>
         api
@@ -379,10 +832,12 @@ export class SyncManager {
       onFlushed: this.onFlushed,
     });
     this.current = sync;
+    this.currentDocId = mapping.docId;
     // Take over the indicator from the vault channel right away with the
     // provider's initial status (it fires again as the socket progresses).
     this.docStatus = sync.status;
     this.emitStatus();
+    this.progress?.doc(mapping.docId, "syncing");
 
     // INSTANT OPEN (spec 05 §1): we no longer BLOCK the editor on the initial
     // server sync. Vault-wide background sync has almost always already brought
@@ -390,7 +845,7 @@ export class SyncManager {
     // content and the editor renders it immediately. The pull-before-seed rule
     // (spec 03 §5) still holds — we just run it off the critical path: wait for
     // the provider's first sync, THEN seed only a genuine orphan.
-    void this.seedOrphanAfterSync(sync, bridge);
+    void this.seedOrphanAfterSync(sync, bridge, this.scope);
 
     this.applyPresence(sync.awareness);
     return {
@@ -402,8 +857,15 @@ export class SyncManager {
   }
 
   /** Background half of pull-before-seed: never blocks the editor (spec 05 §1). */
-  private async seedOrphanAfterSync(sync: DocSync, bridge: NoteBridge): Promise<void> {
+  private async seedOrphanAfterSync(
+    sync: DocSync,
+    bridge: NoteBridge,
+    scope: VaultScope | null,
+  ): Promise<void> {
+    // Up to 5s of waiting — easily long enough to span a vault switch. Seeding
+    // then would read the NEW vault's file at this path into the OLD vault's doc.
     await sync.whenSynced(5000);
+    if (scope && !scope.isCurrent()) return;
     const decision = decideSeed({
       signedIn: true,
       serverSynced: true, // past whenSynced (real sync or its offline timeout)
@@ -423,6 +885,7 @@ export class SyncManager {
     if (this.current) {
       this.current.destroy();
       this.current = null;
+      this.currentDocId = null;
       // The closed note can't have outstanding local edits anymore — clear any
       // lingering "Saving…" so the next note starts clean.
       this.onPending?.(false);
