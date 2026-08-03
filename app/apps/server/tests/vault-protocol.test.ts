@@ -35,7 +35,26 @@ describe("vault channel framing", () => {
   });
 
   it("decodes the registry-changed control payload", () => {
-    expect(decodePubsub(encodePubsubRegistryChanged())).toEqual({ type: "registry-changed" });
+    // `origins` is always present, empty when unattributed — the channel reads
+    // `msg.origins.length` unguarded, so the field is part of the contract.
+    expect(decodePubsub(encodePubsubRegistryChanged())).toEqual({
+      type: "registry-changed",
+      origins: [],
+    });
+  });
+
+  it("round-trips the origin list that drives self-exclusion", () => {
+    // A window carrying only our own writes lets the channel skip telling us to
+    // re-pull them; one carrying anyone else's must still land. That decision is
+    // made entirely from this field.
+    expect(decodePubsub(encodePubsubRegistryChanged(["client-a"]))).toEqual({
+      type: "registry-changed",
+      origins: ["client-a"],
+    });
+    expect(decodePubsub(encodePubsubRegistryChanged(["client-a", "client-b"]))).toEqual({
+      type: "registry-changed",
+      origins: ["client-a", "client-b"],
+    });
   });
 
   it("round-trips a member-joined payload with the member's name (incl. unicode)", () => {

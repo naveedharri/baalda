@@ -25,6 +25,14 @@ export interface HelloFrame {
   manifest: Record<string, string>;
   /** Optional recently-touched docIds to backfill first (spec 05 §4). */
   priority?: string[];
+  /**
+   * Opaque per-app-instance id, echoed by the client on its registry HTTP writes
+   * (`x-baalda-origin`). It lets the channel skip telling a client about a
+   * structural change it made itself — a 500-note reconcile used to bounce ~1,100
+   * `registry` frames straight back to its author, each costing a full
+   * per-subscriber ACL recompute. Absent ⇒ no self-exclusion (older clients).
+   */
+  origin?: string;
 }
 
 /** A teammate's live "who's viewing what" state, forwarded to every subscriber
@@ -107,6 +115,7 @@ export function parseHello(text: string): HelloFrame | null {
     token: f.token,
     manifest: f.manifest ?? {},
     priority: Array.isArray(f.priority) ? f.priority : undefined,
+    origin: typeof f.origin === "string" && f.origin ? f.origin : undefined,
   };
 }
 
@@ -143,8 +152,20 @@ export function encodePubsubAclChanged(): Uint8Array {
   return new Uint8Array([PS_ACL_CHANGED]);
 }
 
-export function encodePubsubRegistryChanged(): Uint8Array {
-  return new Uint8Array([PS_REGISTRY_CHANGED]);
+/**
+ * Structure changed in a vault. `origins` names the client(s) whose HTTP writes
+ * caused it (see {@link HelloFrame.origin}); a connection self-excludes only when
+ * EVERY contributing origin is its own — if two clients changed things inside one
+ * coalescing window, both must still hear about the other's change. An empty list
+ * means "unknown origin", i.e. notify everyone (the safe default).
+ */
+export function encodePubsubRegistryChanged(origins: string[] = []): Uint8Array {
+  if (origins.length === 0) return new Uint8Array([PS_REGISTRY_CHANGED]);
+  const body = enc.encode(JSON.stringify(origins));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_REGISTRY_CHANGED;
+  out.set(body, 1);
+  return out;
 }
 
 export function encodePubsubMemberJoined(name: string): Uint8Array {
@@ -174,7 +195,7 @@ export function encodePubsubPresenceQuery(): Uint8Array {
 export type PubsubMessage =
   | { type: "update"; docId: string; update: Uint8Array }
   | { type: "acl-changed" }
-  | { type: "registry-changed" }
+  | { type: "registry-changed"; origins: string[] }
   | { type: "member-joined"; name: string }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" };
@@ -188,8 +209,19 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
     }
     case PS_ACL_CHANGED:
       return { type: "acl-changed" };
-    case PS_REGISTRY_CHANGED:
-      return { type: "registry-changed" };
+    case PS_REGISTRY_CHANGED: {
+      if (bytes.length === 1) return { type: "registry-changed", origins: [] };
+      try {
+        const parsed: unknown = JSON.parse(dec.decode(bytes.subarray(1)));
+        const origins = Array.isArray(parsed)
+          ? parsed.filter((o): o is string => typeof o === "string")
+          : [];
+        return { type: "registry-changed", origins };
+      } catch {
+        // Unparseable origin list ⇒ fall back to notifying everyone.
+        return { type: "registry-changed", origins: [] };
+      }
+    }
     case PS_MEMBER_JOINED:
       return { type: "member-joined", name: dec.decode(bytes.subarray(1)) };
     case PS_PRESENCE: {

@@ -766,14 +766,20 @@ impl Index {
     /// Load a doc's persisted CRDT state: the latest snapshot (if any) plus every
     /// update logged since that snapshot, in insertion order.
     pub fn load_yjs_state(&self, doc_id: &str) -> AppResult<YjsState> {
+        // Read the column as an Option, then flatten: `.optional()` only covers
+        // "no row". A row CAN exist with a NULL snapshot — `save_yjs_state_vectors`
+        // creates exactly that shape when it records a state vector for a doc that
+        // has never been snapshotted — and a bare `get::<Vec<u8>>` would fail the
+        // whole load with "Invalid column type Null", losing the doc's update log.
         let snapshot: Option<Vec<u8>> = self
             .conn
             .query_row(
                 "SELECT snapshot FROM yjs_snapshot WHERE doc_id = ?1",
                 params![doc_id],
-                |r| r.get::<_, Vec<u8>>(0),
+                |r| r.get::<_, Option<Vec<u8>>>(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
 
         let updates: Vec<Vec<u8>> = {
             let mut stmt = self
@@ -823,6 +829,57 @@ impl Index {
         tx.commit()?;
         Ok(())
     }
+
+    /// Record just a doc's Yjs **state vector**, without writing a snapshot and
+    /// without truncating its update log.
+    ///
+    /// This is the durable form of the sync engine's `hello` manifest. That
+    /// manifest used to be built from an in-memory cache, so it was EMPTY on
+    /// every launch and the server re-sent the full state of every readable doc
+    /// forever. A state vector is tiny (a clock per contributing client), so
+    /// persisting it per doc costs almost nothing next to the snapshot it rides
+    /// alongside.
+    ///
+    /// Upserted into `yjs_snapshot` on purpose: it is the per-doc row that
+    /// already owns `state_vector`, and a row created here (snapshot NULL,
+    /// seq 0) is exactly what `load_yjs_state` already handles — it reads
+    /// `snapshot` as an Option and falls back to the update log.
+    ///
+    /// Written in ONE transaction: a 500-doc backfill would otherwise be 500
+    /// implicit transactions (500 fsyncs) against a WAL database.
+    pub fn save_yjs_state_vectors(&self, entries: &[(String, Vec<u8>)]) -> AppResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO yjs_snapshot (doc_id, snapshot, state_vector, seq)
+                 VALUES (?1, NULL, ?2, 0)
+                 ON CONFLICT(doc_id) DO UPDATE SET state_vector=excluded.state_vector",
+            )?;
+            for (doc_id, sv) in entries {
+                stmt.execute(params![doc_id, sv])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every doc we hold a state vector for, for the sync manifest. Cheap: one
+    /// scan of a table with one small row per doc, and no Y.Doc is rebuilt.
+    pub fn list_yjs_state_vectors(&self) -> AppResult<Vec<YjsStateVector>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT doc_id, state_vector FROM yjs_snapshot WHERE state_vector IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(YjsStateVector {
+                doc_id: r.get(0)?,
+                state_vector: r.get::<_, Vec<u8>>(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 /// A doc's persisted CRDT state, as loaded from SQLite (spec 02 §4).
@@ -835,6 +892,14 @@ pub struct YjsState {
     pub updates: Vec<Vec<u8>>,
     /// `updates.len()` — the TS side compacts when this exceeds 64.
     pub update_count: i64,
+}
+
+/// One doc's persisted Yjs state vector — the durable sync manifest entry.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct YjsStateVector {
+    pub doc_id: String,
+    pub state_vector: Vec<u8>,
 }
 
 /// A file's modification time as whole seconds since the Unix epoch (0 if
@@ -1176,6 +1241,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(seq, 2, "seq increments across snapshots");
+    }
+
+    #[test]
+    fn state_vectors_persist_without_touching_the_update_log() {
+        // The durable sync manifest: a state-vector-only write must NOT behave like
+        // a snapshot. Truncating the log here would silently discard local CRDT
+        // history that no snapshot covers.
+        let idx = Index::open_in_memory().unwrap();
+        idx.append_yjs_update("doc-a", &[1, 2]).unwrap();
+        idx.append_yjs_update("doc-a", &[3]).unwrap();
+
+        idx.save_yjs_state_vectors(&[("doc-a".to_string(), vec![7, 7])])
+            .unwrap();
+
+        let a = idx.load_yjs_state("doc-a").unwrap();
+        assert_eq!(a.update_count, 2, "log survives a state-vector write");
+        assert!(a.snapshot.is_none(), "no snapshot was invented");
+
+        let manifest = idx.list_yjs_state_vectors().unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].doc_id, "doc-a");
+        assert_eq!(manifest[0].state_vector, vec![7, 7]);
+    }
+
+    #[test]
+    fn state_vector_write_preserves_an_existing_snapshot() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.save_yjs_snapshot("doc-a", &[10, 20], &[1]).unwrap();
+        idx.save_yjs_state_vectors(&[("doc-a".to_string(), vec![2, 2])])
+            .unwrap();
+
+        let a = idx.load_yjs_state("doc-a").unwrap();
+        assert_eq!(a.snapshot, Some(vec![10, 20]), "snapshot untouched");
+        let manifest = idx.list_yjs_state_vectors().unwrap();
+        assert_eq!(manifest[0].state_vector, vec![2, 2], "vector advanced");
+    }
+
+    #[test]
+    fn state_vector_manifest_is_batched_and_survives_rebuild() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.save_yjs_state_vectors(&[
+            ("a".to_string(), vec![1]),
+            ("b".to_string(), vec![2]),
+            ("c".to_string(), vec![3]),
+        ])
+        .unwrap();
+        // `rebuild` only wipes the file-derived tables; CRDT state (and therefore
+        // the manifest that makes a relaunch incremental) must survive it.
+        let dir = tempfile::tempdir().unwrap();
+        idx.rebuild(dir.path()).unwrap();
+
+        let mut ids: Vec<String> = idx
+            .list_yjs_state_vectors()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.doc_id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+        // An empty batch is a no-op rather than an error.
+        idx.save_yjs_state_vectors(&[]).unwrap();
+        assert_eq!(idx.list_yjs_state_vectors().unwrap().len(), 3);
     }
 
     #[test]

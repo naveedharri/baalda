@@ -16,6 +16,11 @@ pub struct TreeNode {
     pub is_dir: bool,
     /// Present (possibly empty) for directories; None for files (arborist leaf).
     pub children: Option<Vec<TreeNode>>,
+    /// Directories only: whether `children` is the real listing or the lazy
+    /// placeholder. Without this the UI cannot tell "no notes in here" from "not
+    /// fetched yet" — both are `children: []` — and every unexpanded folder is
+    /// labelled "empty". Always true for files and for [`list_tree`]'s output.
+    pub children_loaded: bool,
 }
 
 /// Walk the vault into a nested tree. Skips dotfolders, `.git`, `.context/`,
@@ -35,6 +40,7 @@ pub fn list_tree(vault: &Path) -> AppResult<TreeNode> {
         path: "".to_string(),
         is_dir: true,
         children: Some(children),
+        children_loaded: true,
     })
 }
 
@@ -89,6 +95,7 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
                 path: child_rel,
                 is_dir: true,
                 children: Some(Vec::new()), // lazy marker: expandable, not yet loaded
+                children_loaded: false,
             });
         } else if file_type.is_file() {
             if !is_allowed_file(&name) {
@@ -100,6 +107,7 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
                 path: child_rel,
                 is_dir: false,
                 children: None,
+                children_loaded: true,
             });
         }
     }
@@ -149,6 +157,7 @@ fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
                 path: rel,
                 is_dir: true,
                 children: Some(children),
+                children_loaded: true,
             });
         } else if file_type.is_file() {
             // Only surface allowed file types (notes/images/PDFs); skip code,
@@ -162,6 +171,7 @@ fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
                 path: rel,
                 is_dir: false,
                 children: None,
+                children_loaded: true,
             });
         }
     }
@@ -235,5 +245,42 @@ mod tests {
             .map(|n| n.name.as_str())
             .collect();
         assert!(inner.contains(&"attachments"));
+    }
+
+    /// `children: []` means two different things depending on which call produced
+    /// it, and the sidebar has to tell them apart — otherwise every unexpanded
+    /// folder is labelled "empty", including ones holding hundreds of notes.
+    #[test]
+    fn children_loaded_separates_a_lazy_placeholder_from_a_genuinely_empty_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Full")).unwrap();
+        fs::write(root.join("Full/a.md"), b"# A").unwrap();
+        fs::create_dir_all(root.join("Bare")).unwrap();
+        fs::write(root.join("top.md"), b"# T").unwrap();
+
+        // Lazy listing: subfolders are placeholders, whether or not they hold
+        // anything. Both have `children: []`; only the flag distinguishes them.
+        let top = list_children(root, "").unwrap();
+        for dir in top.iter().filter(|n| n.is_dir) {
+            assert_eq!(dir.children.as_ref().unwrap().len(), 0);
+            assert!(!dir.children_loaded, "{} must read as not-yet-loaded", dir.name);
+        }
+        // Files are never "unloaded".
+        assert!(top.iter().filter(|n| !n.is_dir).all(|n| n.children_loaded));
+
+        // Expanding resolves them, and now the flag is what makes "Bare" honestly
+        // empty and "Full" honestly not.
+        let full = list_children(root, "Full").unwrap();
+        assert_eq!(full.len(), 1);
+        let bare = list_children(root, "Bare").unwrap();
+        assert_eq!(bare.len(), 0);
+
+        // The full recursive walk has nothing outstanding by definition.
+        let tree = list_tree(root).unwrap();
+        assert!(tree.children_loaded);
+        for dir in tree.children.as_ref().unwrap().iter().filter(|n| n.is_dir) {
+            assert!(dir.children_loaded);
+        }
     }
 }

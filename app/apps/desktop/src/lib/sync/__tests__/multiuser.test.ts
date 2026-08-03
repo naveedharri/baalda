@@ -35,6 +35,12 @@ vi.mock("../../ipc", () => ({
   writeNote: vi.fn(async (relPath: string, content: string) => {
     memberFs.files.set(relPath, content);
   }),
+  // Create-only, like the real command: materialization must never overwrite.
+  writeNoteIfMissing: vi.fn(async (relPath: string, content: string) => {
+    if (memberFs.files.has(relPath)) return false;
+    memberFs.files.set(relPath, content);
+    return true;
+  }),
 }));
 vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
 
@@ -43,6 +49,7 @@ import { presenceUser } from "../../presence/color";
 import { DocSync } from "../syncManager";
 import { VaultRegistry } from "../registry";
 import { VaultSyncEngine, type DocUpdateSink } from "../vaultSyncEngine";
+import { reconcileWithTree } from "./helpers/reconcile";
 
 const RUN = process.env.CONTEXT_IT === "1";
 const SERVER = process.env.CONTEXT_SERVER ?? "http://localhost:3010";
@@ -187,10 +194,7 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
 
     const reg = new VaultRegistry(member);
     // Fresh per-vault folder — name does NOT match the server vault name.
-    const { seeded } = await reg.reconcile(
-      { organizationId: orgId, vaultName: `mu-${stamp}` },
-      { id: "root", name: `mu-${stamp}`, path: "", isDir: true, children: [] },
-    );
+    const { seeded } = await reconcileWithTree(reg, { organizationId: orgId, vaultName: `mu-${stamp}` }, { id: "root", name: `mu-${stamp}`, path: "", isDir: true, children: [] });
 
     expect(seeded).toBe(false); // never seed a populated vault
     expect(reg.vaultId).toBe(vaultId); // adopted, not forked
@@ -226,7 +230,7 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
         { id: "n1", name: "Scratch.md", path: "Scratch.md", isDir: false },
       ],
     };
-    await reg.reconcile({ organizationId: orgId, vaultName: "laptop" }, tree);
+    await reconcileWithTree(reg, { organizationId: orgId, vaultName: "laptop" }, tree);
     expect(reg.vaultId).toBe(vaultId);
     const notes = await member.listNotes(vaultId);
     const paths = notes.map((n) => n.relPath ?? n.rel_path).sort();
@@ -451,10 +455,7 @@ describe.skipIf(!RUN)("multi-user collaboration (live server)", () => {
     memberFs.files.clear();
     const reg = new VaultRegistry(member);
     await expect(
-      reg.reconcile(
-        { organizationId: org2.id, vaultName: "riley-folder" },
-        { id: "root", name: "riley-folder", path: "", isDir: true, children: [] },
-      ),
+      reconcileWithTree(reg, { organizationId: org2.id, vaultName: "riley-folder" }, { id: "root", name: "riley-folder", path: "", isDir: true, children: [] }),
     ).rejects.toMatchObject({ status: 403 });
     // No stray vault appeared.
     const vaults = await owner.listVaults();

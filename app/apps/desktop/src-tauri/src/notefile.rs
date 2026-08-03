@@ -34,6 +34,29 @@ pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Write a note ONLY if nothing is there yet. Returns true when the file was
+/// created, false when it already existed (left byte-for-byte untouched).
+///
+/// This exists for one caller — the registry materializing a server-only note as
+/// an empty placeholder — and for one reason. That caller decides "the server has
+/// this note, this device doesn't" from a *list*, and if the list is ever wrong
+/// the plain [`write_note`] turns the mistake into silent, unrecoverable data
+/// loss: an empty atomic overwrite of a note full of content. It has happened
+/// (428 notes, from a lazily-loaded tree the caller mistook for the whole vault).
+/// A create-only write makes that class of bug cost nothing.
+///
+/// `exists()` + write is not atomic, but it does not need to be: the only writer
+/// that races here is the same app, and the failure mode this guards against is a
+/// wrong *decision*, not a concurrent one.
+pub fn write_note_if_missing(vault: &Path, rel: &str, content: &str) -> AppResult<bool> {
+    let abs = resolve_in_vault(vault, rel)?;
+    if abs.exists() {
+        return Ok(false);
+    }
+    write_note(vault, rel, content)?;
+    Ok(true)
+}
+
 /// Create a new empty note. `parent_rel` is "" for the vault root. Returns the
 /// new note's vault-relative path. Fails if it already exists.
 pub fn create_note(vault: &Path, parent_rel: &str, name: &str) -> AppResult<String> {
@@ -147,6 +170,32 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn write_note_if_missing_creates_but_never_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Creates, parents and all.
+        assert!(write_note_if_missing(tmp.path(), "Context/brand/kit.md", "").unwrap());
+        assert_eq!(read_note(tmp.path(), "Context/brand/kit.md").unwrap(), "");
+
+        // A real note is then written there by the user.
+        write_note(tmp.path(), "Context/brand/kit.md", "# Brand kit\n\nreal content").unwrap();
+
+        // Materializing it again — the exact call that emptied 428 notes when it
+        // was a plain write — reports "already there" and changes nothing.
+        assert!(!write_note_if_missing(tmp.path(), "Context/brand/kit.md", "").unwrap());
+        assert_eq!(
+            read_note(tmp.path(), "Context/brand/kit.md").unwrap(),
+            "# Brand kit\n\nreal content"
+        );
+    }
+
+    #[test]
+    fn write_note_if_missing_rejects_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(write_note_if_missing(tmp.path(), "../escape.md", "x").is_err());
     }
 
     #[test]

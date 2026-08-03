@@ -13,6 +13,12 @@ export interface HelloFrame {
   manifest: Record<string, string>;
   /** Recently-touched docIds to backfill first (spec 05 §4). */
   priority?: string[];
+  /**
+   * This app instance's id (`ApiClient.getClientId()`), the same value sent as
+   * `x-baalda-origin` on registry writes. Lets the server skip telling us to
+   * re-pull a structural change we made ourselves.
+   */
+  origin?: string;
 }
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).

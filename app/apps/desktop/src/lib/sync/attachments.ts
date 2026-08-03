@@ -107,6 +107,14 @@ export function mimeForPath(relPath: string): string {
 
 /** Injected I/O so the sync loop is testable without Tauri or a live server. */
 export interface AttachmentSyncDeps {
+  /**
+   * Is the vault this sync was built for still the open one? Every pass and
+   * every debounced fire consults it, so a reconcile that spans a vault switch
+   * stops instead of uploading the NEW vault's attachments into the OLD vault's
+   * blob store (and downloading the old vault's into the new folder). Defaults
+   * to always-current when omitted (unit tests).
+   */
+  isCurrent?: () => boolean;
   /** List local attachment files under `attachments/`. */
   listLocal: () => Promise<LocalAttachment[]>;
   /** Read a local attachment's bytes (vault-relative path). */
@@ -138,8 +146,14 @@ export class AttachmentSync {
     private readonly clearTimeoutImpl: typeof clearTimeout = clearTimeout,
   ) {}
 
+  /** Is the vault this sync belongs to still the open one? */
+  private current(): boolean {
+    return this.deps.isCurrent?.() ?? true;
+  }
+
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
   async reconcile(): Promise<ReconcileResult> {
+    if (!this.current()) return { uploaded: 0, downloaded: 0 };
     if (this.running) {
       // Ensure the in-flight pass runs again to pick up whatever changed.
       this.rerun = true;
@@ -151,7 +165,7 @@ export class AttachmentSync {
       do {
         this.rerun = false;
         result = await this.pass();
-      } while (this.rerun);
+      } while (this.rerun && this.current());
     } finally {
       this.running = false;
     }
@@ -159,29 +173,48 @@ export class AttachmentSync {
   }
 
   private async pass(): Promise<ReconcileResult> {
-    const [local, server] = await Promise.all([
-      this.deps.listLocal(),
-      this.deps.listServer(),
-    ]);
+    // Listing is the one step outside a per-file try/catch, and it is the step
+    // that fails routinely: the local read is epoch-pinned (so Rust REJECTS it the
+    // moment the vault changes) and the server read fails whenever we're offline.
+    // Both mean "no pass this time", not an exception for the caller — which
+    // matters because every call site is fire-and-forget.
+    let local: LocalAttachment[];
+    let server: ServerBlob[];
+    try {
+      [local, server] = await Promise.all([this.deps.listLocal(), this.deps.listServer()]);
+    } catch (e) {
+      console.warn("[attachments] listing failed — skipping this pass", e);
+      return { uploaded: 0, downloaded: 0 };
+    }
+    if (!this.current()) return { uploaded: 0, downloaded: 0 };
     const { toUpload, toDownload } = diffAttachments(local, server);
 
+    let uploaded = 0;
+    let downloaded = 0;
     for (const a of toUpload) {
+      // Re-checked per file: a big vault is hundreds of awaits, and every one of
+      // them is a chance for the user to switch vaults. Continuing would upload
+      // the NEW vault's files into the OLD vault's blob store.
+      if (!this.current()) break;
       try {
         const bytes = await this.deps.readLocal(a.relPath);
         await this.deps.uploadServer(a.relPath, bytes, mimeForPath(a.relPath));
+        uploaded++;
       } catch (e) {
         console.error("[attachments] upload failed", a.relPath, e);
       }
     }
     for (const b of toDownload) {
+      if (!this.current()) break;
       try {
         const bytes = await this.deps.downloadServer(b.id);
         await this.deps.writeLocal(b.relPath as string, bytes);
+        downloaded++;
       } catch (e) {
         console.error("[attachments] download failed", b.relPath, e);
       }
     }
-    return { uploaded: toUpload.length, downloaded: toDownload.length };
+    return { uploaded, downloaded };
   }
 
   /** Debounced reconcile — collapses a burst of watcher events into one pass. */
@@ -189,7 +222,28 @@ export class AttachmentSync {
     if (this.timer) this.clearTimeoutImpl(this.timer);
     this.timer = this.setTimeoutImpl(() => {
       this.timer = null;
-      void this.reconcile();
+      if (!this.current()) return;
+      void this.reconcile().catch((e) =>
+        console.warn("[attachments] debounced reconcile failed", e),
+      );
     }, this.debounceMs);
+  }
+
+  /**
+   * Drop the pending debounced pass. MUST be called when the vault this sync
+   * belongs to stops being current: dereferencing the instance is not enough —
+   * a live `setTimeout` keeps it (and its captured vaultId) alive and would fire
+   * a reconcile against the vault the user just left.
+   */
+  stop(): void {
+    if (this.timer) {
+      this.clearTimeoutImpl(this.timer);
+      this.timer = null;
+    }
+  }
+
+  /** True while a debounced pass is still armed (teardown assertions/tests). */
+  hasPendingReconcile(): boolean {
+    return this.timer != null;
   }
 }

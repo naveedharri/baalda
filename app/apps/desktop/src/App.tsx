@@ -211,17 +211,21 @@ function SaveIndicator() {
 }
 
 function SyncIndicator() {
-  // Per-note sync status (offline / connecting / synced / read-only).
+  // Per-note sync status (offline / connecting / synced / read-only) PLUS the
+  // vault's bulk-run progress, so a vault that is still uploading 380 of its 500
+  // notes says so instead of claiming "Synced · just now" off a live socket.
   const status = useStore((s) => s.syncStatus);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   const pending = useStore((s) => s.syncPending);
+  const progress = useStore((s) => s.syncProgress);
   return (
     <SyncBadge
       status={status}
       enabled={syncEnabled}
       lastSyncedAt={lastSyncedAt}
       pending={pending}
+      progress={progress}
     />
   );
 }
@@ -252,16 +256,20 @@ export default function App() {
         if (last) {
           // The index can be briefly write-locked right at startup; retry a few
           // times before giving up so a transient lock doesn't strand the vault.
+          let opened: ipc.VaultInfo | null = null;
           for (let attempt = 0; ; attempt++) {
             try {
-              await ipc.openVault(last.path);
+              opened = await ipc.openVault(last.path);
               break;
             } catch (err) {
               if (attempt >= 3) throw err;
               await new Promise((r) => setTimeout(r, 400));
             }
           }
-          useStore.getState().setVault(last);
+          // Use the info the OPEN returned, not the pre-open probe: only the
+          // former carries the vault epoch this session must pin its writes to
+          // (`get_last_vault` reports the epoch from before it opened anything).
+          useStore.getState().setVault(opened ?? last);
           await useStore.getState().refreshTree();
           await useStore.getState().refreshTitles();
         }

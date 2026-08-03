@@ -129,6 +129,16 @@ export class DocSync {
   private destroyed = false;
   private reconnectPending = false;
   /**
+   * Raw count of local changes the server has not acked yet (the provider's own
+   * number, NOT the debounced `_pending` badge state). The bulk content upload
+   * needs the un-smoothed value: "has the server durably taken this note's
+   * content" is the difference between checkpointing a doc as pushed and lying
+   * about it.
+   */
+  private unsyncedCount = 0;
+  /** Waiters parked in {@link whenFlushed}. */
+  private flushWaiters: Array<(ok: boolean) => void> = [];
+  /**
    * Consecutive auth rejections, driving the backoff below. Reset the moment a
    * connection authenticates (onSynced/connected), so a single expiry still
    * reconnects instantly and only a genuinely stuck token backs off.
@@ -219,6 +229,8 @@ export class DocSync {
       // the count stays >0 (no acks), so we correctly show "Saving…"/pending.
       onUnsyncedChanges: ({ number }: { number: number }) => {
         if (this.destroyed) return;
+        this.unsyncedCount = number;
+        if (number === 0) this.releaseFlushWaiters(true);
         if (number > 0) {
           // An edit is outstanding — show "Saving…" at once and cancel any
           // in-flight settle so a typing burst stays continuous.
@@ -277,6 +289,42 @@ export class DocSync {
   }
 
   /**
+   * Resolve once every local change has been acknowledged by the server, or
+   * `false` after `timeoutMs`.
+   *
+   * This is the durability gate the bulk content upload checkpoints on: the
+   * provider only decrements its unsynced count as the server acks each update,
+   * so `0` means "the note's content is on the server", not "we sent it". A
+   * `false` here is what keeps a doc out of the pushed checkpoint and marks it
+   * `error` instead of quietly claiming it synced.
+   */
+  whenFlushed(timeoutMs = 30_000): Promise<boolean> {
+    if (this.destroyed) return Promise.resolve(false);
+    if (this._status === "no-access") return Promise.resolve(false);
+    if (this.unsyncedCount === 0 && this.provider.isSynced) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const settle = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        const i = this.flushWaiters.indexOf(settle);
+        if (i !== -1) this.flushWaiters.splice(i, 1);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => settle(false), timeoutMs);
+      this.flushWaiters.push(settle);
+    });
+  }
+
+  private releaseFlushWaiters(ok: boolean): void {
+    if (this.flushWaiters.length === 0) return;
+    const waiters = this.flushWaiters;
+    this.flushWaiters = [];
+    for (const w of waiters) w(ok);
+  }
+
+  /**
    * Reconnect after an auth rejection, with exponential backoff + jitter.
    *
    * 500ms → 1s → 2s … capped at 30s, jittered 50–100% so many open docs don't
@@ -326,6 +374,8 @@ export class DocSync {
       if (e instanceof ApiError && e.status === 403) {
         this.setStatus("no-access");
         this.refresher.cancel();
+        // Refusal is terminal: anything waiting on a flush will never get one.
+        this.releaseFlushWaiters(false);
         // Guards alone can't stop this: HocuspocusProvider reconnects on its own
         // schedule, so a refused doc would keep opening sockets (and keep getting
         // rejected) for as long as the note stayed open. Refusal is terminal until
@@ -408,6 +458,9 @@ export class DocSync {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    // Unpark anything waiting on a flush: the provider is going away, so the ack
+    // will never come and the waiter must not sit out its whole timeout.
+    this.releaseFlushWaiters(false);
     if (this.settleTimer) {
       clearTimeout(this.settleTimer);
       this.settleTimer = null;

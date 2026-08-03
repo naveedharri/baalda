@@ -15,6 +15,29 @@ export const openExternal = (url: string) => openUrl(url);
 export interface VaultInfo {
   path: string;
   name: string;
+  /**
+   * The Rust vault epoch this info belongs to (see `state::Inner::vault_epoch`).
+   * Rust holds ONE global vault slot, so a vault-relative command resolves
+   * against whatever vault is open when it *lands*. Every open bumps the epoch;
+   * a caller pins the epoch it started under (see `VaultScope.vaultEpoch`) and
+   * Rust rejects the call with `vault-mismatch: …` rather than writing vault A's
+   * data into vault B. Meaningful only for infos returned by an *open*;
+   * `getLastVault` reports the epoch that was current before it opened anything.
+   */
+  epoch: number;
+}
+
+/**
+ * The epoch to pin a vault-relative command to, or `null` for "don't enforce"
+ * (UI reads and user-driven edits keep the legacy whatever-is-open behaviour).
+ */
+export type VaultEpoch = number | null | undefined;
+
+/** True if `err` is Rust refusing a call because the vault changed underneath it. */
+export function isVaultMismatch(err: unknown): boolean {
+  return typeof err === "string"
+    ? err.startsWith("vault-mismatch")
+    : err instanceof Error && err.message.startsWith("vault-mismatch");
 }
 
 export interface TreeNode {
@@ -23,6 +46,11 @@ export interface TreeNode {
   path: string;
   isDir: boolean;
   children?: TreeNode[];
+  /** Directories only: is `children` the real listing, or the lazy placeholder?
+   *  `children: []` alone is ambiguous — a folder with no notes and a folder
+   *  nobody has expanded look identical — which is why an unexpanded folder used
+   *  to be labelled "empty" in the sidebar. Absent ⇒ treat as not loaded. */
+  childrenLoaded?: boolean;
 }
 
 export interface SearchResult {
@@ -140,27 +168,57 @@ export const openVaultInRoot = (path: string) =>
 
 // ---- Tree + files ---------------------------------------------------------
 
-export const listTree = () => invoke<TreeNode>("list_tree");
+// The `expectedEpoch` argument on the commands below is the vault-isolation
+// guard: pass the epoch your VaultScope was opened under and Rust refuses the
+// call once a different vault is open. Omit it (or pass null) for unscoped UI
+// work. Reads take it too when their result is used to write (`listTree` and
+// `listNoteTitles` feed the registry's server-side structure sync).
+export const listTree = (expectedEpoch?: VaultEpoch) =>
+  invoke<TreeNode>("list_tree", { expectedEpoch: expectedEpoch ?? null });
 /** Lazy sidebar loading: immediate children of one dir ("" = root). */
-export const listChildren = (path: string) =>
-  invoke<TreeNode[]>("list_children", { path });
-export const readNote = (path: string) => invoke<string>("read_note", { path });
-export const writeNote = (path: string, content: string) =>
-  invoke<void>("write_note", { path, content });
-export const createNote = (parent: string, name: string) =>
-  invoke<string>("create_note", { parent, name });
-export const createFolder = (parent: string, name: string) =>
-  invoke<string>("create_folder", { parent, name });
-export const renamePath = (from: string, to: string) =>
-  invoke<string>("rename_path", { from, to });
-export const deletePath = (path: string) => invoke<void>("delete_path", { path });
+export const listChildren = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<TreeNode[]>("list_children", { path, expectedEpoch: expectedEpoch ?? null });
+export const readNote = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string>("read_note", { path, expectedEpoch: expectedEpoch ?? null });
+export const writeNote = (path: string, content: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("write_note", { path, content, expectedEpoch: expectedEpoch ?? null });
+/** Create a note only if the path is free. Resolves true when it was created,
+ *  false when a file was already there (untouched). The registry materializes
+ *  server-only notes through THIS, never `writeNote`, so a wrong "this device
+ *  doesn't have it" decision can't empty a real note. */
+export const writeNoteIfMissing = (
+  path: string,
+  content: string,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<boolean>("write_note_if_missing", {
+    path,
+    content,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+export const createNote = (parent: string, name: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string>("create_note", { parent, name, expectedEpoch: expectedEpoch ?? null });
+export const createFolder = (parent: string, name: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string>("create_folder", { parent, name, expectedEpoch: expectedEpoch ?? null });
+// Pass `expectedEpoch` whenever the call sits behind an await — a multi-select
+// loop or a native dialog. A rename/delete that lands after a vault switch would
+// otherwise move or destroy the same relative path in the vault the user just
+// opened.
+export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string>("rename_path", { from, to, expectedEpoch: expectedEpoch ?? null });
+export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("delete_path", { path, expectedEpoch: expectedEpoch ?? null });
 
 /** Import external files/folders (absolute host paths) into `dest` (vault-relative). */
-export const importPaths = (dest: string, sources: string[]) =>
-  invoke<ImportSummary>("import_paths", { dest, sources });
+export const importPaths = (dest: string, sources: string[], expectedEpoch?: VaultEpoch) =>
+  invoke<ImportSummary>("import_paths", {
+    dest,
+    sources,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 /** Export a note, folder subtree, or the whole vault (`rel === ""`) to `dest`. */
-export const exportPath = (rel: string, dest: string) =>
-  invoke<void>("export_path", { rel, dest });
+export const exportPath = (rel: string, dest: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("export_path", { rel, dest, expectedEpoch: expectedEpoch ?? null });
 
 // ---- Queries --------------------------------------------------------------
 
@@ -176,39 +234,88 @@ export const getNoteMeta = (path: string) =>
   invoke<NoteMeta | null>("get_note_meta", { path });
 export const resolveWikilink = (name: string) =>
   invoke<ResolvedLink | null>("resolve_wikilink", { name });
-export const listNoteTitles = () => invoke<NoteTitle[]>("list_note_titles");
+export const listNoteTitles = (expectedEpoch?: VaultEpoch) =>
+  invoke<NoteTitle[]>("list_note_titles", { expectedEpoch: expectedEpoch ?? null });
 
 // ---- CRDT persistence (Phase 1, spec 02 §4) ------------------------------
 // Binary Yjs updates are marshalled as plain number arrays over the IPC bridge.
 
-export const appendYjsUpdate = (docId: string, update: Uint8Array) =>
-  invoke<void>("append_yjs_update", { docId, update: Array.from(update) });
+export const appendYjsUpdate = (
+  docId: string,
+  update: Uint8Array,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<void>("append_yjs_update", {
+    docId,
+    update: Array.from(update),
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
-export const loadYjsState = (docId: string) =>
-  invoke<YjsState>("load_yjs_state", { docId });
+export const loadYjsState = (docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<YjsState>("load_yjs_state", { docId, expectedEpoch: expectedEpoch ?? null });
 
 export const saveYjsSnapshot = (
   docId: string,
   snapshot: Uint8Array,
   stateVector: Uint8Array,
+  expectedEpoch?: VaultEpoch,
 ) =>
   invoke<void>("save_yjs_snapshot", {
     docId,
     snapshot: Array.from(snapshot),
     stateVector: Array.from(stateVector),
+    expectedEpoch: expectedEpoch ?? null,
   });
+
+/**
+ * Persist a batch of per-doc Yjs state vectors — the DURABLE form of the vault
+ * sync engine's `hello` manifest.
+ *
+ * Without this the manifest came from an in-memory cache, so it was empty on
+ * every launch and the server re-sent the FULL state of every readable doc,
+ * forever. Batched (one IPC call + one SQLite transaction) because the vault-wide
+ * feed touches many docs at once.
+ */
+export const saveYjsStateVectors = (
+  entries: Array<[docId: string, stateVector: Uint8Array]>,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<void>("save_yjs_state_vectors", {
+    entries: entries.map(([docId, sv]) => [docId, Array.from(sv)]),
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
+/** Every state vector this vault holds, to rebuild the manifest on launch. */
+export const listYjsStateVectors = (expectedEpoch?: VaultEpoch) =>
+  invoke<{ docId: string; stateVector: number[] }[]>("list_yjs_state_vectors", {
+    expectedEpoch: expectedEpoch ?? null,
+  }).then((rows) =>
+    rows.map((r) => ({ docId: r.docId, stateVector: Uint8Array.from(r.stateVector) })),
+  );
 
 // ---- Attachment binary I/O (Phase 3 blob store, spec 02 §2) ---------------
 // Raw bytes are marshalled as plain number arrays over the IPC bridge, like the
 // Yjs updates above. All paths are validated inside the vault by Rust.
 
-export const readBinaryFile = (relPath: string) =>
-  invoke<number[]>("read_binary_file", { relPath }).then((a) => Uint8Array.from(a));
+export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<number[]>("read_binary_file", {
+    relPath,
+    expectedEpoch: expectedEpoch ?? null,
+  }).then((a) => Uint8Array.from(a));
 
-export const writeBinaryFile = (relPath: string, bytes: Uint8Array) =>
-  invoke<void>("write_binary_file", { relPath, bytes: Array.from(bytes) });
+export const writeBinaryFile = (
+  relPath: string,
+  bytes: Uint8Array,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<void>("write_binary_file", {
+    relPath,
+    bytes: Array.from(bytes),
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
-export const listAttachments = () => invoke<AttachmentMeta[]>("list_attachments");
+export const listAttachments = (expectedEpoch?: VaultEpoch) =>
+  invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
 export const readExternalFile = (path: string) =>
@@ -251,9 +358,15 @@ export const setServerUrl = (url: string | null) =>
 // Raw JSON string; the TS sync layer owns the schema (server vault id + doc-id
 // map) so it travels with the vault across devices (spec 03 §5).
 
-export const getVaultConfig = () => invoke<string | null>("get_vault_config");
-export const setVaultConfig = (content: string) =>
-  invoke<void>("set_vault_config", { content });
+export const getVaultConfig = (expectedEpoch?: VaultEpoch) =>
+  invoke<string | null>("get_vault_config", { expectedEpoch: expectedEpoch ?? null });
+export const setVaultConfig = (content: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("set_vault_config", { content, expectedEpoch: expectedEpoch ?? null });
+
+/** Epoch of the currently-open vault (0 if none). Used to start a VaultScope for
+ *  a vault this call site didn't open itself (e.g. enabling sync on the folder
+ *  that is already open). */
+export const getVaultEpoch = () => invoke<number>("get_vault_epoch");
 
 // ---- Events ---------------------------------------------------------------
 

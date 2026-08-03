@@ -58,13 +58,9 @@ export function SidebarHeader() {
   const switchVault = async () => {
     setOpen(false);
     const v = await ipc.pickVault();
-    if (v) {
-      useStore.getState().setVault(v);
-      useStore.getState().closeNote();
-      await useStore.getState().refreshTree();
-      await useStore.getState().refreshTitles();
-      await useStore.getState().enableSyncForVault();
-    }
+    // Routed through the store so the vault we're leaving is properly retired
+    // (scope, registry maps, debounced pulls) instead of leaking into this one.
+    if (v) await useStore.getState().adoptOpenedVault(v, { resync: true });
   };
 
   const createOrg = async () => {

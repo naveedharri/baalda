@@ -117,11 +117,9 @@ export function VaultPicker() {
 
   async function openVault(vault: VaultInfo | null) {
     if (!vault) return;
-    useStore.getState().setVault(vault);
-    await useStore.getState().refreshTree();
-    await useStore.getState().refreshTitles();
-    // A brand-new empty vault gets first-run welcome content.
-    await useStore.getState().seedLocalVaultIfEmpty();
+    // Rust already opened it (these are the picker/create commands), so the store
+    // retires the previous vault's sync and reloads view state from the new one.
+    await useStore.getState().adoptOpenedVault(vault);
   }
 
   // "Open existing": native folder picker → open the chosen vault.
@@ -152,8 +150,9 @@ export function VaultPicker() {
         return;
       }
       setBusy(true);
-      const info = await ipc.openVault(picked);
-      await openVault(info);
+      // `openLocalVault` opens it for us, and does so AFTER retiring the previous
+      // vault's sync — the ordering `adoptOpenedVault` can't offer.
+      await useStore.getState().openLocalVault(picked);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -167,8 +166,7 @@ export function VaultPicker() {
     setBusy(true);
     setError(null);
     try {
-      const info = await ipc.openVault(alreadyVault);
-      await openVault(info);
+      await useStore.getState().openLocalVault(alreadyVault);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -214,8 +212,7 @@ export function VaultPicker() {
     setBusy(true);
     setError(null);
     try {
-      const info = await ipc.openVault(path);
-      await openVault(info);
+      await useStore.getState().openLocalVault(path);
     } catch (e) {
       setError(String(e));
     } finally {

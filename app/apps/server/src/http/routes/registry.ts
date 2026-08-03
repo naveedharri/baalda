@@ -13,9 +13,18 @@ export interface RegistryDeps {
    * move, delete). The vault channel broadcasts a `registry` control frame so
    * every open client re-pulls the registry and updates its local tree live —
    * without this, structural changes only surfaced on the next app restart.
+   *
+   * `originId` is the calling client's `x-baalda-origin` (the same opaque id it
+   * sends in its vault-channel hello), or null when it didn't send one. The
+   * channel uses it to skip notifying the client that caused the change: a
+   * 500-note reconcile otherwise bounced ~1,100 `registry` frames back at its
+   * own author, each triggering a full per-subscriber ACL recompute.
    */
-  onRegistryChanged?: (vaultId: string) => void;
+  onRegistryChanged?: (vaultId: string, originId: string | null) => void;
 }
+
+/** Header carrying the calling client's opaque instance id (see RegistryDeps). */
+export const ORIGIN_HEADER = "x-baalda-origin";
 
 /**
  * Registry API (session-authenticated). Lets the client map local vault files to
@@ -26,7 +35,11 @@ export interface RegistryDeps {
  */
 export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
   const registryRoutes = new Hono();
-  const changed = (vaultId: string) => deps.onRegistryChanged?.(vaultId);
+  // `c` is threaded in so the origin travels with the notification. It is a hint
+  // only — a client that omits or forges it just gets told to re-pull, which is
+  // exactly the pre-existing behaviour. It never affects authorization.
+  const changed = (c: { req: { header: (n: string) => string | undefined } }, vaultId: string) =>
+    deps.onRegistryChanged?.(vaultId, c.req.header(ORIGIN_HEADER) ?? null);
 
   // ── vaults ─────────────────────────────────────────────────────────────────
   registryRoutes.post("/vaults", async (c) => {
@@ -105,7 +118,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [id, vaultId, parentId ?? null, name, path, body.sort ?? 0, session.userId],
     );
-    changed(vaultId);
+    changed(c, vaultId);
     return c.json({ id, vaultId, parentId: parentId ?? null, name, path }, 201);
   });
 
@@ -162,7 +175,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (newPath !== oldPath) {
       await rewriteDescendantPaths(row.vault_id, oldPath, newPath);
     }
-    changed(row.vault_id);
+    changed(c, row.vault_id);
     return c.json({ id, vaultId: row.vault_id, name: newName, path: newPath }, 200);
   });
 
@@ -195,7 +208,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     await pool.query("DELETE FROM folders WHERE id = $1", [id]);
     await purgeNoteIndex(cascaded.map((n) => n.id));
-    changed(row.vault_id);
+    changed(c, row.vault_id);
     return c.json({ ok: true }, 200);
   });
 
@@ -250,7 +263,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
         );
       }
     }
-    changed(vaultId);
+    changed(c, vaultId);
     return c.json(
       { id, docId: id, vaultId, folderId: folderId ?? null, title: title ?? null, relPath },
       201,
@@ -303,7 +316,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       "UPDATE notes SET rel_path = $1, title = $2, folder_id = $3, updated_at = now() WHERE id = $4",
       [relPath, title, folderId, id],
     );
-    changed(row.vault_id);
+    changed(c, row.vault_id);
     return c.json({ id, docId: id, vaultId: row.vault_id, relPath, title, folderId }, 200);
   });
 
@@ -330,7 +343,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // doc and the doc_id survive untouched, so re-creating the note re-indexes
     // it on its next store (indexer.scheduleIndex / backfillIndex).
     await purgeNoteIndex([id]);
-    changed(row.vault_id);
+    changed(c, row.vault_id);
     return c.json({ ok: true }, 200);
   });
 
@@ -353,7 +366,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
       [id, vaultId, folderId ?? null, path],
     );
-    changed(vaultId);
+    changed(c, vaultId);
     return c.json({ id, docId: id, vaultId, folderId: folderId ?? null, path }, 201);
   });
 

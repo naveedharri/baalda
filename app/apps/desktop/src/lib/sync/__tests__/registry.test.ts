@@ -6,6 +6,7 @@ vi.mock("../../ipc", () => ({
   listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [] })),
   listNoteTitles: vi.fn(async () => []),
   writeNote: vi.fn(async () => {}),
+  writeNoteIfMissing: vi.fn(async () => true),
 }));
 vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
 
@@ -14,6 +15,7 @@ import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
 import { seedWelcomeContent } from "../../vault/seed";
 import { VaultRegistry } from "../registry";
+import { reconcileWithTree } from "./helpers/reconcile";
 
 const ORG = "org-1";
 
@@ -49,6 +51,7 @@ function fakeApi(opts: {
 beforeEach(() => {
   vi.mocked(ipc.getVaultConfig).mockResolvedValue(null);
   vi.mocked(ipc.writeNote).mockClear();
+  vi.mocked(ipc.writeNoteIfMissing).mockClear().mockResolvedValue(true);
   vi.mocked(seedWelcomeContent).mockClear();
 });
 
@@ -61,13 +64,15 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
       notes: [{ id: "n1", rel_path: "Team/hello.md" }],
     });
     const reg = new VaultRegistry(api);
-    const { seeded } = await reg.reconcile({ organizationId: ORG, vaultName: "acme" }, emptyTree());
+    const { seeded } = await reconcileWithTree(reg, { organizationId: ORG, vaultName: "acme" }, emptyTree());
 
     expect(createVault).not.toHaveBeenCalled();
     expect(reg.vaultId).toBe("v-owner");
     expect(seeded).toBe(false); // populated vault never gets welcome content
-    // Server-only note materialized locally so the sidebar shows it.
-    expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledWith("Team/hello.md", "");
+    // Server-only note materialized locally so the sidebar shows it. The third
+    // argument is the vault-epoch pin (null here — no VaultScope in this unit
+    // test); in the app it is what makes Rust refuse the write after a switch.
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Team/hello.md", "", null);
     expect(reg.getMapping("Team/hello.md")).toEqual({ vaultId: "v-owner", docId: "n1" });
   });
 
@@ -82,7 +87,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
       ],
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "acme" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "acme" }, emptyTree());
     expect(createVault).not.toHaveBeenCalled();
     expect(reg.vaultId).toBe("v-original");
   });
@@ -92,7 +97,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
       vaults: [{ id: "v-other", name: "acme", organization_id: "other-org" }],
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "acme" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "acme" }, emptyTree());
     expect(createVault).toHaveBeenCalledWith({ name: "acme", organizationId: ORG });
     expect(reg.vaultId).toBe("created-acme");
   });
@@ -108,7 +113,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
       ],
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "acme" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "acme" }, emptyTree());
     expect(reg.vaultId).toBe("v-cfg"); // the recorded id wins over oldest-in-org
     expect(createVault).not.toHaveBeenCalled();
   });
@@ -126,7 +131,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
       ],
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "acme" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "acme" }, emptyTree());
     expect(reg.vaultId).toBe("v-org-b");
     expect(createVault).not.toHaveBeenCalled();
   });
@@ -140,7 +145,7 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
       notes: [{ id: "n1", rel_path: "Welcome.md" }],
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "some-folder" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "some-folder" }, emptyTree());
     expect(reg.vaultId).toBe("v-live");
     expect(createVault).not.toHaveBeenCalled();
     // Mapping rebuilt from the live vault, not the dead config.
@@ -153,10 +158,7 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
   it("seeds welcome content ONLY when both the server vault and local folder are empty", async () => {
     const { api } = fakeApi({ vaults: [{ id: "v1", name: "fresh", organization_id: ORG }] });
     const reg = new VaultRegistry(api);
-    const { seeded } = await reg.reconcile(
-      { organizationId: ORG, vaultName: "fresh" },
-      emptyTree(),
-    );
+    const { seeded } = await reconcileWithTree(reg, { organizationId: ORG, vaultName: "fresh" }, emptyTree());
     expect(seeded).toBe(true);
     expect(seedWelcomeContent).toHaveBeenCalledTimes(1);
   });
@@ -173,7 +175,7 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
       isDir: true,
       children: [{ id: "a", name: "Mine.md", path: "Mine.md", isDir: false }],
     };
-    const { seeded } = await reg.reconcile({ organizationId: ORG, vaultName: "laptop" }, tree);
+    const { seeded } = await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, tree);
     expect(seeded).toBe(false);
     expect(seedWelcomeContent).not.toHaveBeenCalled();
     // The local-only note was registered on the server instead.
@@ -196,9 +198,127 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
       isDir: true,
       children: [{ id: "a", name: "Mine.md", path: "Mine.md", isDir: false }],
     };
-    await reg.reconcile({ organizationId: ORG, vaultName: "laptop" }, tree);
-    expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(ipc.writeNote)).toHaveBeenCalledWith("Shared.md", "");
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, tree);
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Shared.md", "", null);
+  });
+
+  // ── The 428-note regression ────────────────────────────────────────────────
+  // `reconcile` used to take the tree from its caller, and the caller had only
+  // the SIDEBAR's tree — which is lazy: top level only, every unexpanded folder
+  // an empty `children` placeholder. Handed that, `flattenTree` saw root-level
+  // notes and nothing else, so every nested note the server already knew about
+  // was classified server-only and materialized as an EMPTY file over real
+  // content. These two tests pin both halves of the fix.
+
+  it("reads the FULL tree itself, so nested notes register instead of being missed", async () => {
+    const { api, createNote } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+    });
+    const reg = new VaultRegistry(api);
+    const full: TreeNode = {
+      id: "root",
+      name: "laptop",
+      path: "",
+      isDir: true,
+      children: [
+        { id: "r", name: "Root.md", path: "Root.md", isDir: false },
+        {
+          id: "Context",
+          name: "Context",
+          path: "Context",
+          isDir: true,
+          children: [
+            { id: "c1", name: "brand.md", path: "Context/brand.md", isDir: false },
+            {
+              id: "Context/brand",
+              name: "brand",
+              path: "Context/brand",
+              isDir: true,
+              children: [
+                {
+                  id: "c2",
+                  name: "kit.md",
+                  path: "Context/brand/kit.md",
+                  isDir: false,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, full);
+
+    // Every depth reaches the server, not just the root.
+    const registered = createNote.mock.calls.map((c) => c[0].relPath).sort();
+    expect(registered).toEqual(["Context/brand.md", "Context/brand/kit.md", "Root.md"]);
+    expect(reg.getMapping("Context/brand/kit.md")).not.toBeNull();
+  });
+
+  it("never materializes over a nested note that exists on disk", async () => {
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      // The server knows all three. All three are also on disk, nested.
+      notes: [
+        { id: "n1", rel_path: "Context/brand.md" },
+        { id: "n2", rel_path: "Context/brand/kit.md" },
+        { id: "n3", rel_path: "Daily/2026-08-03.md" },
+      ],
+    });
+    const reg = new VaultRegistry(api);
+    const dir = (path: string, children: TreeNode[]): TreeNode => ({
+      id: path,
+      name: path.split("/").pop()!,
+      path,
+      isDir: true,
+      children,
+    });
+    const file = (path: string): TreeNode => ({
+      id: path,
+      name: path.split("/").pop()!,
+      path,
+      isDir: false,
+    });
+    const full: TreeNode = {
+      id: "root",
+      name: "laptop",
+      path: "",
+      isDir: true,
+      children: [
+        dir("Context", [
+          file("Context/brand.md"),
+          dir("Context/brand", [file("Context/brand/kit.md")]),
+        ]),
+        dir("Daily", [file("Daily/2026-08-03.md")]),
+      ],
+    };
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, full);
+
+    // Nothing is server-only, so nothing is written at all. Before the fix this
+    // fired three empty writes — one per nested note — and each one was a note
+    // truncated to zero bytes.
+    expect(vi.mocked(ipc.writeNoteIfMissing)).not.toHaveBeenCalled();
+    expect(vi.mocked(ipc.writeNote)).not.toHaveBeenCalled();
+  });
+
+  it("materialization is create-only, so a wrong server-only verdict costs nothing", async () => {
+    // Belt and braces: even if the local list were short again (here the tree
+    // omits a file the server has), the write must not be able to clobber. The
+    // real command checks the filesystem; the mock stands in for a file that is
+    // already there.
+    vi.mocked(ipc.writeNoteIfMissing).mockResolvedValue(false);
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Context/brand.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    // It tried — and the create-only command refused, without failing the run.
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Context/brand.md", "", null);
+    expect(vi.mocked(ipc.writeNote)).not.toHaveBeenCalled();
+    expect(reg.hasFailures()).toBe(false);
   });
 });
 
@@ -215,7 +335,7 @@ describe("VaultRegistry.registerNote", () => {
       notes: [{ id: "n1", rel_path: "Welcome.md" }],
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "acme" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "acme" }, emptyTree());
     const mapping = await reg.registerNote("Ideas/New.md", "New");
     expect(createNote).toHaveBeenCalledWith(
       expect.objectContaining({ relPath: "Ideas/New.md", vaultId: "v1" }),
