@@ -14,9 +14,11 @@ Then push a matching `v*` tag:
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` builds bundles for macOS (arm64 + x64), Windows,
-and Linux, and publishes a GitHub Release with the installers plus `latest.json`
-(the updater manifest).
+`.github/workflows/release.yml` builds bundles for **macOS only** (arm64 + x64)
+and publishes a GitHub Release with the installers plus `latest.json` (the updater
+manifest). Windows and Linux are commented out of the build matrix — macOS is the
+only platform with OS signing wired up, so it's the only one we ship. Re-enable
+them by uncommenting the two matrix entries.
 
 > ⚠️ **The release goes live automatically.** `releaseDraft` is `false`, so the
 > moment the build finishes `releases/latest` points at the new version and every
@@ -81,11 +83,16 @@ on disk.
 
 ## Windows code signing (optional)
 
+> Not currently built — `windows-latest` is commented out of the release matrix.
+> This section applies whenever it is re-enabled.
+
 Unsigned Windows installers still run but show a SmartScreen
 *"Windows protected your PC"* warning. To remove it, obtain an OV/EV code-signing
 certificate and add Tauri's Windows signing config; this is optional and can be
 deferred.
 
 ## Linux
+
+> Not currently built — `ubuntu-22.04` is commented out of the release matrix.
 
 No OS-level signing gate. Bundles install as-is.
