@@ -5,9 +5,9 @@ name: release
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# This builds signed bundles for macOS (arm64 + x64), Windows, and Linux, and
-# publishes a GitHub Release with the installers + latest.json (the updater
-# manifest).
+# This builds signed, notarized bundles for macOS (arm64 + x64) and publishes a
+# GitHub Release with the installers + latest.json (the updater manifest).
+# Windows and Linux are commented out of the matrix below — see the note there.
 #
 # ⚠️ The release goes live as soon as the build finishes — `releases/latest`
 # moves to it immediately and running apps pick up the update on their next
@@ -31,10 +31,14 @@ jobs:
             args: '--target aarch64-apple-darwin'
           - platform: 'macos-latest'
             args: '--target x86_64-apple-darwin'
-          - platform: 'ubuntu-22.04'
-            args: ''
-          - platform: 'windows-latest'
-            args: ''
+          # macOS only for now — macOS is the only platform with real OS signing
+          # wired up (Developer ID + notarization), so it's the only one we ship.
+          # Uncomment to resume Windows/Linux; the Linux dependency step below is
+          # already guarded by an `if` and stays inert until then.
+          # - platform: 'ubuntu-22.04'
+          #   args: ''
+          # - platform: 'windows-latest'
+          #   args: ''
 
     runs-on: ${{ matrix.platform }}
     steps:
