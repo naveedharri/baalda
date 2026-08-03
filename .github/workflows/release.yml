@@ -78,15 +78,16 @@ jobs:
           # `tauri signer generate`; add both as repo Actions secrets.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing + notarization is intentionally NOT wired here:
-          # with no Apple secrets present, macOS builds are ad-hoc signed (users
-          # right-click → Open once to bypass Gatekeeper). Do NOT add empty
-          # APPLE_* env vars — an empty APPLE_CERTIFICATE makes tauri attempt a
-          # keychain import and fails the whole macOS build. To enable clean,
-          # notarized installs, add these six as repo Actions secrets AND
-          # re-add the matching APPLE_* env lines here:
-          #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
-          #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID  (see docs/RELEASE.md).
+          # macOS Developer ID signing + notarization (see docs/RELEASE.md).
+          # All six must be non-empty: an empty APPLE_CERTIFICATE still makes
+          # tauri attempt a keychain import and fails the whole macOS build, so
+          # comment the block out wholesale rather than blanking a single secret.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: app/apps/desktop
           tagName: v__VERSION__
