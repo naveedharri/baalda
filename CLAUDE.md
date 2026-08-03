@@ -14,9 +14,10 @@ edit together in real time. Every OSS competitor does one or the other; the whol
 Three pieces; this open-source repo holds the first two.
 
 - **Desktop app** (`app/apps/desktop`) — the product people install. Released by pushing a
-  `v*` tag: `.github/workflows/release.yml` builds signed installers for macOS/Windows/Linux and
-  drafts a GitHub Release with `latest.json`; publishing the draft is what makes running apps
-  see the update (Tauri updater polls `releases/latest`).
+  `v*` tag: `.github/workflows/release.yml` builds signed (macOS: Developer ID + notarized)
+  installers for macOS/Windows/Linux and **publishes** a GitHub Release with `latest.json`.
+  There is no draft/review gate — pushing a `v*` tag ships to every running app on its next
+  updater poll (Tauri updater polls `releases/latest`).
 - **Backend server** (`app/apps/server`) — open source and self-hostable (Node + Postgres).
   The managed option runs this **same server code**, publicly reachable at
   `https://api.baalda.com`; users choose an instance via the server URL in Settings. There is

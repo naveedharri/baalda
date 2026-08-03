@@ -1,18 +1,28 @@
 # Releasing the Baalda desktop app
 
-The desktop app ships via a git tag. Bump the version in
-`app/apps/desktop/src-tauri/tauri.conf.json` **and** `app/apps/desktop/package.json`,
-then push a matching `v*` tag:
+The desktop app ships via a git tag. Bump the version in all four places — they
+must agree or the build fails the tag/version check:
+
+- `app/apps/desktop/src-tauri/tauri.conf.json`
+- `app/apps/desktop/package.json`
+- `app/apps/desktop/src-tauri/Cargo.toml`
+- `app/apps/desktop/src-tauri/Cargo.lock` (the `desktop` package entry)
+
+Then push a matching `v*` tag:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
 `.github/workflows/release.yml` builds bundles for macOS (arm64 + x64), Windows,
-and Linux, and drafts a GitHub Release with the installers plus `latest.json`
-(the updater manifest). The release is a **draft** — review it, then click
-**Publish**. Only then does `releases/latest` point at it and do running apps
-see the update (the Tauri updater polls `releases/latest`).
+and Linux, and publishes a GitHub Release with the installers plus `latest.json`
+(the updater manifest).
+
+> ⚠️ **The release goes live automatically.** `releaseDraft` is `false`, so the
+> moment the build finishes `releases/latest` points at the new version and every
+> running app updates on its next updater poll. There is no review gate — pushing
+> a `v*` tag ships to all users. Flip `releaseDraft` back to `true` in
+> `release.yml` if you want to inspect bundles before they go out.
 
 ## Two kinds of signing
 

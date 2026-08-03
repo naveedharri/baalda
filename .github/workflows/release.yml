@@ -6,9 +6,13 @@ name: release
 #   git tag v0.2.0 && git push origin v0.2.0
 #
 # This builds signed bundles for macOS (arm64 + x64), Windows, and Linux, and
-# drafts a GitHub Release with the installers + latest.json (the updater
-# manifest). Review the draft, then click "Publish" — only then does
-# `releases/latest` point at it and do running apps see the update.
+# publishes a GitHub Release with the installers + latest.json (the updater
+# manifest).
+#
+# ⚠️ The release goes live as soon as the build finishes — `releases/latest`
+# moves to it immediately and running apps pick up the update on their next
+# updater poll. There is no review step. Push a `v*` tag only when you mean to
+# ship to everyone; set `releaseDraft: true` below if you want a manual gate.
 on:
   push:
     tags:
@@ -93,6 +97,6 @@ jobs:
           tagName: v__VERSION__
           releaseName: 'Baalda v__VERSION__'
           releaseBody: 'See the assets below to download and install this version.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
