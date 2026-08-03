@@ -52,8 +52,17 @@ stops the repeated macOS Keychain password prompt during normal use.
 
 Once present, `tauri-action` imports the cert into a temporary keychain, signs
 with the hardened runtime using `entitlements.plist`, and notarizes automatically.
-No workflow changes are needed — the env vars are already wired in `release.yml`
-and stay inert on Windows/Linux and until the secrets exist.
+The env vars are wired in `release.yml`; on Windows/Linux they are ignored.
+
+> ⚠️ It is all six or none. An **empty** `APPLE_CERTIFICATE` still makes tauri
+> attempt a keychain import and fails the macOS build — it does not fall back to
+> ad-hoc signing. If you fork this repo and don't have an Apple account, comment
+> out the whole `APPLE_*` block in `release.yml` rather than leaving the secrets
+> unset. Ad-hoc builds are then what you get (right-click → Open to launch).
+
+`tauri.conf.json` pins `bundle.macOS.signingIdentity` to `"-"` (ad-hoc) so local
+`build:desktop` runs work without a certificate. That is **not** a conflict: the
+`APPLE_SIGNING_IDENTITY` env var takes precedence over the config value in CI.
 
 The entitlements (`app/apps/desktop/src-tauri/entitlements.plist`) grant the two
 JIT/executable-memory keys the WKWebView needs under the hardened runtime. The app
