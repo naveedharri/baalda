@@ -19,6 +19,7 @@ vi.mock("../../ipc", () => ({
   listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [] })),
   listNoteTitles: vi.fn(async () => []),
   writeNote: vi.fn(async () => {}),
+  writeNoteIfMissing: vi.fn(async () => true),
   listAttachments: vi.fn(async () => []),
   readBinaryFile: vi.fn(async () => new Uint8Array()),
   writeBinaryFile: vi.fn(async () => {}),
@@ -30,6 +31,7 @@ import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
 import { VaultRegistry } from "../registry";
 import { VaultScopeManager } from "../vaultScope";
+import { reconcileWithTree } from "./helpers/reconcile";
 
 const ORG_A = "org-a";
 const ORG_B = "org-b";
@@ -61,6 +63,7 @@ beforeEach(() => {
   vi.mocked(ipc.getVaultConfig).mockClear().mockResolvedValue(null);
   vi.mocked(ipc.setVaultConfig).mockClear();
   vi.mocked(ipc.writeNote).mockClear();
+  vi.mocked(ipc.writeNoteIfMissing).mockClear().mockResolvedValue(true);
   vi.mocked(ipc.listTree)
     .mockClear()
     .mockResolvedValue(emptyTree());
@@ -171,10 +174,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
     } as unknown as ApiClient;
 
     const reg = new VaultRegistry(api, scopes);
-    const running = reg.reconcile(
-      { organizationId: ORG_A, vaultName: "a" },
-      treeWith("Notes/OnlyInA.md"),
-    );
+    const running = reconcileWithTree(reg, { organizationId: ORG_A, vaultName: "a" }, treeWith("Notes/OnlyInA.md"));
 
     // The user switches to vault B while the reconcile is parked.
     scopes.begin({ orgId: ORG_B, vaultPath: "/vaults/b", vaultEpoch: 2 });
@@ -187,7 +187,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
     // …vault A's doc map was not written into B's .context/config.json…
     expect(ipc.setVaultConfig).not.toHaveBeenCalled();
     // …and A's server-only note was not materialized inside B's folder.
-    expect(ipc.writeNote).not.toHaveBeenCalled();
+    expect(ipc.writeNoteIfMissing).not.toHaveBeenCalled();
   });
 
   it("still completes normally when no switch happens (the guard is not a stall)", async () => {
@@ -209,7 +209,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
     } as unknown as ApiClient;
 
     const reg = new VaultRegistry(api, scopes);
-    await reg.reconcile({ organizationId: ORG_A, vaultName: "a" }, treeWith("Mine.md"));
+    await reconcileWithTree(reg, { organizationId: ORG_A, vaultName: "a" }, treeWith("Mine.md"));
 
     expect(createNote).toHaveBeenCalledWith(expect.objectContaining({ relPath: "Mine.md" }));
     expect(reg.vaultId).toBe("vault-a");
@@ -217,7 +217,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
     expect(scope.serverVaultId).toBe("vault-a");
     // Every vault-relative write carries this scope's epoch, so Rust refuses it
     // if the vault changes before the call lands.
-    expect(ipc.writeNote).toHaveBeenCalledWith("FromServer.md", "", 7);
+    expect(ipc.writeNoteIfMissing).toHaveBeenCalledWith("FromServer.md", "", 7);
     expect(ipc.setVaultConfig).toHaveBeenCalledWith(expect.any(String), 7);
   });
 
@@ -235,7 +235,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
       createNote: vi.fn(),
     } as unknown as ApiClient;
     const reg = new VaultRegistry(api, scopes);
-    await reg.reconcile({ organizationId: ORG_A, vaultName: "a" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG_A, vaultName: "a" }, emptyTree());
 
     vi.mocked(ipc.listTree).mockClear();
     vi.mocked(ipc.setVaultConfig).mockClear();
@@ -262,7 +262,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
       createNote: vi.fn(),
     } as unknown as ApiClient;
     const reg = new VaultRegistry(api, scopes);
-    await reg.reconcile({ organizationId: ORG_A, vaultName: "a" }, emptyTree());
+    await reconcileWithTree(reg, { organizationId: ORG_A, vaultName: "a" }, emptyTree());
     expect(reg.vaultId).toBe("vault-a");
     expect(reg.getMapping("Kept.md")).not.toBeNull();
 

@@ -276,7 +276,10 @@ function setChildrenAt(
   path: string,
   children: ipc.TreeNode[],
 ): ipc.TreeNode {
-  if (node.path === path) return { ...node, children };
+  // Filling in a folder's children is also what makes it *loaded* — that flag is
+  // the only thing separating "this folder has no notes" from "nobody has opened
+  // it yet", and the sidebar labels the first case "empty".
+  if (node.path === path) return { ...node, children, childrenLoaded: true };
   if (!node.children) return node;
   return {
     ...node,
@@ -612,6 +615,9 @@ export const useStore = create<AppStore>((set, get) => ({
         path: "",
         isDir: true,
         children,
+        // The root's own listing IS what we just fetched; only its subfolders
+        // are still placeholders (Rust marks those `childrenLoaded: false`).
+        childrenLoaded: true,
       },
     });
   },
@@ -1397,18 +1403,10 @@ export const useStore = create<AppStore>((set, get) => ({
     const epoch = vault.epoch;
     const stale = () => !sameVault(get, epoch) || get().session?.activeOrganizationId !== orgId;
 
-    // Registry reconcile needs the tree; make sure it's loaded.
-    let tree = get().tree;
-    if (!tree) {
-      await get().refreshTree();
-      if (stale()) return;
-      tree = get().tree;
-    }
-    if (!tree) {
-      set({ syncEnabled: false });
-      return;
-    }
-    const result = await syncManager.enable(session, tree, {
+    // No tree is passed: `store.tree` is the sidebar's LAZY tree (top level only,
+    // unexpanded folders hold an empty `children` placeholder), and reconcile
+    // needs every note in the vault. It reads the full tree itself.
+    const result = await syncManager.enable(session, {
       orgId,
       name: vault.name,
       path: vault.path,

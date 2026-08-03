@@ -46,6 +46,11 @@ export interface TreeNode {
   path: string;
   isDir: boolean;
   children?: TreeNode[];
+  /** Directories only: is `children` the real listing, or the lazy placeholder?
+   *  `children: []` alone is ambiguous — a folder with no notes and a folder
+   *  nobody has expanded look identical — which is why an unexpanded folder used
+   *  to be labelled "empty" in the sidebar. Absent ⇒ treat as not loaded. */
+  childrenLoaded?: boolean;
 }
 
 export interface SearchResult {
@@ -177,6 +182,20 @@ export const readNote = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<string>("read_note", { path, expectedEpoch: expectedEpoch ?? null });
 export const writeNote = (path: string, content: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("write_note", { path, content, expectedEpoch: expectedEpoch ?? null });
+/** Create a note only if the path is free. Resolves true when it was created,
+ *  false when a file was already there (untouched). The registry materializes
+ *  server-only notes through THIS, never `writeNote`, so a wrong "this device
+ *  doesn't have it" decision can't empty a real note. */
+export const writeNoteIfMissing = (
+  path: string,
+  content: string,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<boolean>("write_note_if_missing", {
+    path,
+    content,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 export const createNote = (parent: string, name: string, expectedEpoch?: VaultEpoch) =>
   invoke<string>("create_note", { parent, name, expectedEpoch: expectedEpoch ?? null });
 export const createFolder = (parent: string, name: string, expectedEpoch?: VaultEpoch) =>

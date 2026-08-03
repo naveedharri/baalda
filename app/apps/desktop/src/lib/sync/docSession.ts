@@ -14,7 +14,6 @@ import { Awareness } from "y-protocols/awareness";
 import type { NoteBridge } from "../bridge";
 import { createTauriBridgeIO } from "../bridge/adapter";
 import type { SessionInfo } from "../api";
-import type { TreeNode } from "../ipc";
 import * as ipc from "../ipc";
 import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
@@ -71,6 +70,18 @@ export interface VaultTarget {
   path: string;
   /** Rust `vault_epoch` this folder was opened under (`ipc.VaultInfo.epoch`). */
   epoch: number | null;
+}
+
+/**
+ * Should the open note's provider state reach its sidebar badge?
+ *
+ * Pure so the rule is pinned by a test rather than by a socket. `confirmed` is
+ * `registry.isPushed(docId)` — the durable "the server has this note's content"
+ * checkpoint. See {@link SyncManager.reportOpenDocState} for why a confirmed
+ * doc's badge must not follow the provider down.
+ */
+export function shouldReportOpenDocState(state: DocSyncState, confirmed: boolean): boolean {
+  return state === "synced" || !confirmed;
 }
 
 export class SyncManager {
@@ -210,15 +221,39 @@ export class SyncManager {
     this.docStatus = s;
     this.emitStatus();
     const docId = this.currentDocId;
-    if (docId && this.progress) {
+    if (docId) {
       const state: DocSyncState =
         s === "synced" || s === "read-only"
           ? "synced"
           : s === "no-access" || s === "error"
             ? "error"
             : "syncing";
-      this.progress.doc(docId, state);
+      this.reportOpenDocState(docId, state);
     }
+  }
+
+  /**
+   * Mirror the OPEN note's provider state into the sidebar badge — but never
+   * downgrade a note whose content the server already has.
+   *
+   * `DocSyncState` answers "is this note safe on the server?" (see
+   * `DOC_SYNC_TITLES`), not "is a socket handshaking right now". Opening a note
+   * spins up its own provider, which reports `connecting` for a few hundred
+   * milliseconds; mapping that to `syncing` knocked exactly one doc out of
+   * `synced`, and a folder rolls up as `synced` only when EVERY note under it is.
+   * So clicking a file inside a settled green folder made it flash "83%" — which
+   * reads as "my data isn't safe" and is precisely the opposite of the truth.
+   *
+   * For a confirmed doc the only honest badge is `synced`: a dropped socket or a
+   * revoked grant changes what you can DO with the note, not whether the server
+   * has it. Those belong to the vault-level indicator ("Retrying…", "No access"),
+   * which reports them already. An unconfirmed doc still reports everything —
+   * there, `syncing` and `error` are the truth.
+   */
+  private reportOpenDocState(docId: string, state: DocSyncState): void {
+    if (!this.progress) return;
+    if (!shouldReportOpenDocState(state, this.registry.isPushed(docId))) return;
+    this.progress.doc(docId, state);
   }
 
   /**
@@ -412,7 +447,6 @@ export class SyncManager {
    */
   async enable(
     session: SessionInfo,
-    tree: TreeNode,
     vault: VaultTarget,
   ): Promise<{ ok: boolean; reason?: string; seeded?: boolean; scope?: VaultScope }> {
     if (!session.activeOrganizationId) {
@@ -439,10 +473,13 @@ export class SyncManager {
     this.progress = progress;
     this.registry.setProgressSink(progress);
     try {
-      const { seeded } = await this.registry.reconcile(
-        { organizationId: session.activeOrganizationId, vaultName: vault.name },
-        tree,
-      );
+      // The registry reads the vault tree itself (the FULL recursive walk); it
+      // deliberately does not take one from here, because the tree this layer
+      // has access to is the sidebar's lazy one. See `reconcile`.
+      const { seeded } = await this.registry.reconcile({
+        organizationId: session.activeOrganizationId,
+        vaultName: vault.name,
+      });
       // The user may have switched vaults during the reconcile. Bringing sync up
       // now would start the engine for the OLD vault id while the NEW vault's
       // folder is open — exactly the state that merged two vaults.
@@ -525,16 +562,25 @@ export class SyncManager {
   }
 
   /**
-   * Second half of the run: report the vault channel's inbound (download) queue
-   * until it drains, then finish. Driven by the engine's progress callback rather
-   * than polling — the queue is serial, so every applied frame is a tick.
+   * Second half of the run: report the vault channel's BACKFILL until it lands,
+   * then finish. Driven by the engine's callbacks rather than polling — the queue
+   * is serial, so every applied document is a tick.
+   *
+   * Bounded to the backfill, which is bounded by the server's `ready`. Steady-
+   * state traffic is explicitly not this phase's business: the server fans a doc
+   * update back to its own author, so counting live frames meant every keystroke
+   * in the open note ticked the counter — a five-note vault reporting
+   * "Syncing 55/55", climbing, forever.
    */
   private beginDownloadPhase(scope: VaultScope): void {
     const engine = this.vaultEngine;
     const progress = this.progress;
     if (!engine || !progress) return;
     const { done, total } = engine.inboundProgress();
-    if (engine.inboundIdle()) {
+    // `backfillSettled`, not `inboundIdle`: an idle queue mid-backfill just means
+    // the next document hasn't arrived yet, and stopping there would claim a
+    // still-arriving vault is fully synced.
+    if (engine.backfillSettled()) {
       this.completeRun(scope);
       return;
     }
@@ -544,7 +590,7 @@ export class SyncManager {
     progress.phase("downloading", total - done);
   }
 
-  /** One inbound frame applied by the vault channel. */
+  /** One backfilled document applied by the vault channel. */
   private handleInboundProgress(done: number, total: number, scope: VaultScope): void {
     if (!this.downloadPhase || !scope.isCurrent()) return;
     const progress = this.progress;
@@ -555,7 +601,15 @@ export class SyncManager {
     }
     for (let i = this.lastInboundDone; i < done; i++) progress.item("ok");
     this.lastInboundDone = done;
-    if (this.vaultEngine?.inboundIdle()) this.completeRun(scope);
+    // Completion is NOT decided here. This runs inside the engine's drain loop,
+    // where `draining` is true and therefore nothing can ever look settled; the
+    // engine signals the real edge through `handleInboundIdle`.
+  }
+
+  /** The backfill finished and everything it sent has been applied. */
+  private handleInboundIdle(scope: VaultScope): void {
+    if (!this.downloadPhase || !scope.isCurrent()) return;
+    this.completeRun(scope);
   }
 
   /**
@@ -749,6 +803,8 @@ export class SyncManager {
       onPresence: (peer) => this.handleVaultPresence(peer),
       // Inbound backfill progress — the `downloading` half of the run's progress.
       onInboundProgress: (done, total) => this.handleInboundProgress(done, total, scope),
+      // …and the edge that ends it.
+      onInboundIdle: () => this.handleInboundIdle(scope),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).
@@ -837,7 +893,9 @@ export class SyncManager {
     // provider's initial status (it fires again as the socket progresses).
     this.docStatus = sync.status;
     this.emitStatus();
-    this.progress?.doc(mapping.docId, "syncing");
+    // Only for a note the server doesn't have yet — see `reportOpenDocState`.
+    // Unconditionally stamping "syncing" here was the other half of the flash.
+    this.reportOpenDocState(mapping.docId, "syncing");
 
     // INSTANT OPEN (spec 05 §1): we no longer BLOCK the editor on the initial
     // server sync. Vault-wide background sync has almost always already brought
@@ -845,7 +903,7 @@ export class SyncManager {
     // content and the editor renders it immediately. The pull-before-seed rule
     // (spec 03 §5) still holds — we just run it off the critical path: wait for
     // the provider's first sync, THEN seed only a genuine orphan.
-    void this.seedOrphanAfterSync(sync, bridge, this.scope);
+    void this.confirmOpenDoc(sync, bridge, mapping.docId, this.scope);
 
     this.applyPresence(sync.awareness);
     return {
@@ -856,16 +914,35 @@ export class SyncManager {
     };
   }
 
-  /** Background half of pull-before-seed: never blocks the editor (spec 05 §1). */
-  private async seedOrphanAfterSync(
+  /**
+   * Background half of pull-before-seed for the OPEN note — and the thing that
+   * finally marks it confirmed. Never blocks the editor (spec 05 §1).
+   *
+   * The bulk uploader deliberately skips the open note, because its editor
+   * session already owns a provider for that doc and two writers on one Y.Doc is
+   * the one thing to avoid. But skipping is all it used to do: nothing ever
+   * called `markPushed` for it. So every note you opened became permanently
+   * unconfirmed — `unconfirmedNotes()` counted it the moment you closed it, the
+   * next registry signal started another bulk run to "fix" it, and its folder
+   * dropped from a settled dot back to a percentage. Opening a note made the
+   * vault look less synced, indefinitely.
+   *
+   * This runs the same contract `ContentUploader.pushOne` runs, over the
+   * provider this doc already has: pull first, seed only a genuine orphan, wait
+   * for the server to ack, and only then record the push.
+   */
+  private async confirmOpenDoc(
     sync: DocSync,
     bridge: NoteBridge,
+    docId: string,
     scope: VaultScope | null,
   ): Promise<void> {
+    const current = (): boolean =>
+      (!scope || scope.isCurrent()) && this.current === sync && !!this.enabled;
     // Up to 5s of waiting — easily long enough to span a vault switch. Seeding
     // then would read the NEW vault's file at this path into the OLD vault's doc.
     await sync.whenSynced(5000);
-    if (scope && !scope.isCurrent()) return;
+    if (!current()) return;
     const decision = decideSeed({
       signedIn: true,
       serverSynced: true, // past whenSynced (real sync or its offline timeout)
@@ -874,7 +951,17 @@ export class SyncManager {
     });
     if (decision.action === "seed-from-file") {
       await bridge.seedFromFileIfEmpty();
+      if (!current()) return;
     }
+    // `isSynced` (not "the timeout elapsed") — the same honesty the uploader
+    // insists on. An offline open must not be recorded as confirmed.
+    if (!sync.isSynced) return;
+    // A view-only grant has nothing to push; the server's copy IS the content, so
+    // the doc is confirmed without a flush.
+    if (!sync.readOnly && !(await sync.whenFlushed(30_000))) return;
+    if (!current()) return;
+    this.registry.markPushed(docId);
+    this.progress?.doc(docId, "synced");
   }
 
   currentSync(): DocSync | null {

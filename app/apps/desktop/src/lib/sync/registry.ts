@@ -399,13 +399,21 @@ export class VaultRegistry {
    * Ensure the server knows this vault's folders + notes; adopt existing ids,
    * create missing rows, and persist the mapping. Idempotent.
    *
+   * Reads the tree ITSELF (`listTree`, the full recursive walk) rather than
+   * accepting one from the caller — exactly as `pull()` does, and for a reason
+   * that cost 428 notes: the sidebar's tree is LAZY. `store.refreshTree` fetches
+   * only the top level, and every unexpanded folder carries an empty `children`
+   * placeholder. Handed that tree, `flattenTree` sees root-level notes and
+   * nothing else, so (a) no nested note is ever registered or uploaded, and
+   * (b) — the destructive half — every nested note the server already knows
+   * about looks server-only to step 5 below and gets materialized as an EMPTY
+   * file over real content. A partial tree must never reach this method, and the
+   * only way to guarantee that is for this method to be the one that reads it.
+   *
    * Returns `{ seeded }` — true only when this call wrote first-run starter
    * content into a brand-new, empty vault (so the caller can open it).
    */
-  async reconcile(
-    input: ReconcileInput,
-    tree: TreeNode,
-  ): Promise<{ seeded: boolean }> {
+  async reconcile(input: ReconcileInput): Promise<{ seeded: boolean }> {
     // Bind this registry to the vault the reconcile is FOR — this is the one
     // operation allowed to (re)claim it. Every await below is a chance for the
     // user to switch vaults; each `stale()` checkpoint drops the rest of the work
@@ -415,6 +423,10 @@ export class VaultRegistry {
     this.limitReached = null;
     this.newCheckpointer();
     this.sink.phase("registering", 0);
+    // Epoch-pinned like every other read here: a vault switch mid-walk makes Rust
+    // reject it, which `stale()` then turns into a clean drop.
+    const tree = await ipc.listTree(this.epoch());
+    if (this.stale()) return { seeded: false };
     const cfg = await this.loadConfig();
     if (this.stale()) return { seeded: false };
 
@@ -666,10 +678,19 @@ export class VaultRegistry {
     // 5. Materialize server-only notes locally. This is what makes a folder
     //    that's empty on this device (a just-joined vault, or a fresh
     //    per-vault folder) actually show the vault's notes. We write an
-    //    empty file — `write_note` creates any missing parent folders — and the
-    //    real content hydrates lazily when the note is opened (pull-before-seed
-    //    in docSession, which never seeds a non-empty server doc from an empty
-    //    file, so this can't clobber anything).
+    //    empty file — `writeNoteIfMissing` creates any missing parent folders —
+    //    and the real content hydrates lazily when the note is opened
+    //    (pull-before-seed in docSession, which never seeds a non-empty server
+    //    doc from an empty file).
+    //
+    //    CREATE-ONLY, never overwrite. `toMaterialize` is a *difference of two
+    //    lists*, and the local side of that difference is only as complete as the
+    //    tree we were given. When it was short — a lazily-loaded tree that stopped
+    //    at the vault root — every nested note read as "server-only" and a plain
+    //    empty `writeNote` destroyed 428 real notes. `reconcile` now reads the
+    //    full tree itself, which fixes the wrong input; this call makes the same
+    //    mistake non-destructive if it ever recurs. Both, deliberately: one bug
+    //    here is worth a belt and braces.
     const localNotePaths = new Set(notes.map((n) => n.path));
     const toMaterialize = [...resolvedNotePaths].filter((rp) => !localNotePaths.has(rp));
     this.sink.addTotal(toMaterialize.length);
@@ -681,7 +702,7 @@ export class VaultRegistry {
         // slips past (this loop used to litter vault A's note paths through
         // vault B's folder).
         try {
-          await ipc.writeNote(rp, "", this.epoch());
+          await ipc.writeNoteIfMissing(rp, "", this.epoch());
           this.sink.item("ok");
         } catch (e) {
           if (ipc.isVaultMismatch(e)) return; // the vault moved on — not a failure

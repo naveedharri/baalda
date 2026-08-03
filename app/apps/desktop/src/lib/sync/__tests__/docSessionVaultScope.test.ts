@@ -54,17 +54,12 @@ vi.mock("../registry", () => ({
 }));
 
 import type { SessionInfo } from "../../api";
-import type { TreeNode } from "../../ipc";
-import { SyncManager } from "../docSession";
+import { SyncManager, shouldReportOpenDocState } from "../docSession";
 import type { SyncProgressSink } from "../progress";
 import { vaultScopes, type DocSyncState, type SyncProgress } from "../vaultScope";
 
 const ORG_A = "org-a";
 const ORG_B = "org-b";
-
-function emptyTree(): TreeNode {
-  return { id: "root", name: "vault", path: "", isDir: true, children: [] };
-}
 
 /** A deferred promise, to hold an async step open across a vault switch. */
 function gate() {
@@ -99,7 +94,7 @@ describe("SyncManager.disable — teardown completeness", () => {
   it("leaves no live timer, a reset registry, and no current scope", async () => {
     vi.useFakeTimers();
     const sm = new SyncManager();
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -135,7 +130,7 @@ describe("SyncManager.disable — teardown completeness", () => {
   it("a registry signal arriving after disable() does not even arm the timer", async () => {
     vi.useFakeTimers();
     const sm = new SyncManager();
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -154,7 +149,7 @@ describe("SyncManager.disable — teardown completeness", () => {
 
   it("is idempotent — a second disable() is harmless", async () => {
     const sm = new SyncManager();
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -172,7 +167,7 @@ describe("SyncManager registry-pull timer across a vault switch", () => {
   it("a timer that survives the switch is a no-op", async () => {
     vi.useFakeTimers();
     const sm = new SyncManager();
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -196,7 +191,7 @@ describe("SyncManager registry-pull timer across a vault switch", () => {
     const sm = new SyncManager();
     const refreshed = vi.fn();
     sm.setRegistryListener(refreshed);
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -225,7 +220,7 @@ describe("SyncManager — settling after a teammate's structural change", () => 
     sm.setSyncProgressListener((p) => progress.push(p));
     fakeRegistry.mappedNotes.mockReturnValue([{ docId: "doc-1", relPath: "a.md" }]);
     fakeRegistry.isPushed.mockReturnValue(true);
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -252,7 +247,7 @@ describe("SyncManager — settling after a teammate's structural change", () => 
     sm.setSyncProgressListener((p) => progress.push(p));
     fakeRegistry.mappedNotes.mockReturnValue([{ docId: "doc-new", relPath: "Teammate.md" }]);
     fakeRegistry.isPushed.mockReturnValue(false);
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -271,7 +266,7 @@ describe("SyncManager — settling after a teammate's structural change", () => 
 describe("SyncManager.enable — scope handover", () => {
   it("retires the previous vault's scope and registry before reconciling", async () => {
     const sm = new SyncManager();
-    await sm.enable(session(ORG_A), emptyTree(), {
+    await sm.enable(session(ORG_A), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -280,7 +275,7 @@ describe("SyncManager.enable — scope handover", () => {
     const first = sm.currentScope()!;
     fakeRegistry.reset.mockClear();
 
-    await sm.enable(session(ORG_B), emptyTree(), {
+    await sm.enable(session(ORG_B), {
       orgId: ORG_B,
       name: "b",
       path: "/vaults/b",
@@ -302,7 +297,7 @@ describe("SyncManager.enable — scope handover", () => {
       return { seeded: false };
     });
     const sm = new SyncManager();
-    const enabling = sm.enable(session(), emptyTree(), {
+    const enabling = sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -342,7 +337,7 @@ describe("SyncManager.enable — scope handover", () => {
       return { seeded: false };
     });
 
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -384,7 +379,7 @@ describe("SyncManager.enable — scope handover", () => {
       { docId: "doc-1", relPath: "Work/a.md" },
       { docId: "doc-2", relPath: "b.md" },
     ]);
-    await sm.enable(session(), emptyTree(), {
+    await sm.enable(session(), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -419,7 +414,7 @@ describe("SyncManager.enable — scope handover", () => {
     sm.setRegistryMapListener((m) => maps.push(m));
 
     fakeRegistry.mappedNotes.mockReturnValue([{ docId: "doc-a", relPath: "Welcome.md" }]);
-    await sm.enable(session(ORG_A), emptyTree(), {
+    await sm.enable(session(ORG_A), {
       orgId: ORG_A,
       name: "a",
       path: "/vaults/a",
@@ -444,11 +439,37 @@ describe("SyncManager.enable — scope handover", () => {
     const sm = new SyncManager();
     const result = await sm.enable(
       { ...session(), activeOrganizationId: null } as unknown as SessionInfo,
-      emptyTree(),
       { orgId: "", name: "a", path: "/vaults/a", epoch: 1 },
     );
     expect(result.ok).toBe(false);
     expect(sm.isEnabled()).toBe(false);
     expect(sm.currentScope()).toBeNull();
+  });
+});
+
+// ── The "green folder flashes 83% when you click into it" regression ─────────
+// A folder rolls up as `synced` only when EVERY note under it is, and shows a
+// PERCENTAGE the moment one isn't. Opening a note spun up its provider, which
+// reports `connecting` for a few hundred milliseconds; mirroring that as
+// `syncing` knocked one doc out of `synced` and dragged its whole folder from a
+// settled dot to "83%" — a flash that reads as "my data isn't safe" about a
+// vault that is fully synced.
+
+describe("shouldReportOpenDocState", () => {
+  it("never downgrades a note the server already has", () => {
+    for (const state of ["syncing", "queued", "unsynced", "error"] as const) {
+      expect(shouldReportOpenDocState(state, true)).toBe(false);
+    }
+  });
+
+  it("still lets a confirmed note report that it is synced", () => {
+    expect(shouldReportOpenDocState("synced", true)).toBe(true);
+  });
+
+  it("reports everything for a note the server does NOT have yet", () => {
+    // Here the states are the literal truth and the percentage is earned.
+    for (const state of ["syncing", "queued", "unsynced", "error", "synced"] as const) {
+      expect(shouldReportOpenDocState(state, false)).toBe(true);
+    }
   });
 });

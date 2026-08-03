@@ -103,12 +103,26 @@ export interface VaultSyncEngineOptions {
    *  these into the sidebar roster. */
   onPresence?: (peer: VaultPeer) => void;
   /**
-   * Progress of the inbound (download) queue: `done` frames applied out of
-   * `total` ever enqueued for this engine. Drives the `downloading` phase of the
-   * vault's sync progress — a backfill of a big vault is minutes of work that
-   * previously reported nothing at all.
+   * Progress of the inbound BACKFILL: `done` applied out of `total` received.
+   *
+   * Backfill frames only — the server sends at most one per document
+   * (`sendDocBackfill`), so this counts DOCUMENTS, which is the only unit worth
+   * showing a person. Live frames are excluded on purpose: they are unbounded and
+   * self-inflicted. The server does not self-exclude `update` fan-out, so every
+   * keystroke in the open note comes straight back here; counting those turned
+   * the header into "Syncing 55/55" climbing by one per letter typed, on a
+   * five-note vault.
    */
   onInboundProgress?: (done: number, total: number) => void;
+  /**
+   * The backfill has finished AND every frame of it has been applied.
+   *
+   * Fired from outside the drain loop, which is the whole point:
+   * `inboundIdle()` requires `!draining`, so a completion check made *inside*
+   * the loop — where `draining` is true by construction — can never be true. The
+   * download phase used to end that way, i.e. never.
+   */
+  onInboundIdle?: () => void;
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
   /** Backoff bounds (ms). */
@@ -162,6 +176,7 @@ export class VaultSyncEngine {
   private readonly onMemberJoined?: (name: string) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
+  private readonly onInboundIdle?: () => void;
   private readonly wsFactory: WsFactory;
   private readonly inboundMaxBytes: number;
   private readonly baseMs: number;
@@ -189,13 +204,23 @@ export class VaultSyncEngine {
   // large vault. Frames now go into this FIFO and are applied by a single drain
   // loop; the queue is bounded by bytes, and overflow closes the socket (real
   // backpressure) rather than growing the heap or dropping an update.
-  private readonly inbound: Array<{ docId: string; update: Uint8Array }> = [];
+  private readonly inbound: Array<{
+    docId: string;
+    update: Uint8Array;
+    /** Part of a backfill (vs. live fan-out) — only these are counted. */
+    counted: boolean;
+  }> = [];
   private inboundBytes = 0;
   private draining = false;
-  /** Frames ever enqueued / ever applied — the download progress numerator and
-   *  denominator. Monotonic for the lifetime of the engine. */
+  /** BACKFILL frames enqueued / applied — the download progress denominator and
+   *  numerator. Monotonic; one frame per document, so these are document counts.
+   *  Live frames are never counted (see `onInboundProgress`). */
   private inboundTotal = 0;
   private inboundDone = 0;
+  /** True from `hello` until the server's `ready`, which terminates the backfill
+   *  it follows (server: "`ready` can never overtake the backfill it
+   *  terminates"). This flag is the live/backfill boundary. */
+  private backfilling = false;
   /** True while the socket is closed *because* the queue overflowed: the drain
    *  loop reconnects once it has caught up. */
   private backpressured = false;
@@ -211,6 +236,7 @@ export class VaultSyncEngine {
     this.onMemberJoined = opts.onMemberJoined;
     this.onPresence = opts.onPresence;
     this.onInboundProgress = opts.onInboundProgress;
+    this.onInboundIdle = opts.onInboundIdle;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
@@ -261,11 +287,14 @@ export class VaultSyncEngine {
     this.inbound.length = 0;
     this.inboundBytes = 0;
     this.backpressured = false;
+    this.backfilling = false; // this engine will never open another window
     this.closeSocket();
     this.setStatus("idle");
   }
 
-  /** Inbound (download) queue counters: frames applied / ever enqueued. */
+  /** Backfill counters: documents applied / received. `queued` is the whole
+   *  inbound queue (backfill and live alike) — that is what "is it drained?"
+   *  has to mean. */
   inboundProgress(): { done: number; total: number; queued: number } {
     return { done: this.inboundDone, total: this.inboundTotal, queued: this.inbound.length };
   }
@@ -273,6 +302,25 @@ export class VaultSyncEngine {
   /** True when every inbound frame received so far has been applied. */
   inboundIdle(): boolean {
     return this.inbound.length === 0 && !this.draining;
+  }
+
+  /**
+   * The backfill is over and nothing is left to apply — the honest end of the
+   * download phase.
+   *
+   * Strictly stronger than {@link inboundIdle}, which is also true in the middle
+   * of a backfill whose next frame is merely still in flight. Ending the phase
+   * there would report "Synced" over a vault that is still arriving.
+   */
+  backfillSettled(): boolean {
+    return !this.backfilling && this.inboundIdle();
+  }
+
+  /** Fire `onInboundIdle` iff the backfill has genuinely settled. Called from the
+   *  two places that can be the last event: the end of a drain, and `ready`. */
+  private maybeSignalIdle(): void {
+    if (this.stopped || !this.backfillSettled()) return;
+    this.onInboundIdle?.();
   }
 
   private setStatus(s: VaultSyncStatus): void {
@@ -330,6 +378,9 @@ export class VaultSyncEngine {
     if (!this.ws) return;
     // `origin` is this app instance's id, matching the `x-baalda-origin` header on
     // our registry writes, so the server won't ask us to re-pull our own changes.
+    // Everything the server sends between this `hello` and its `ready` is
+    // backfill, and that window is what the download progress measures.
+    this.backfilling = true;
     this.ws.send(
       encodeHello({ token, manifest, priority, origin: this.api.getClientId() }),
     );
@@ -355,6 +406,11 @@ export class VaultSyncEngine {
       if (control.t === "ready") {
         this.attempt = 0; // a clean sync resets backoff
         this.ready = true;
+        this.backfilling = false;
+        // `ready` routinely arrives AFTER the last backfill frame has already been
+        // applied, so this is the edge that settles the download phase. Checking
+        // only on drain would strand it: no further frame is coming to trigger one.
+        this.maybeSignalIdle();
         this.setStatus("synced");
         // (Re)announce our presence now the channel is live — covers first
         // connect and every reconnect so teammates never see us go stale.
@@ -403,9 +459,12 @@ export class VaultSyncEngine {
     // the received ArrayBuffer, and holding a view keeps the WHOLE frame alive
     // (and, for some transports, lets it be reused underneath us).
     const update = new Uint8Array(frame.update);
-    this.inbound.push({ docId: frame.docId, update });
+    // Counted only if it belongs to the backfill; live fan-out (including the
+    // echo of our own edits) must not move a progress bar.
+    const counted = this.backfilling;
+    this.inbound.push({ docId: frame.docId, update, counted });
     this.inboundBytes += update.byteLength;
-    this.inboundTotal++;
+    if (counted) this.inboundTotal++;
     if (!this.backpressured && this.inboundBytes > this.inboundMaxBytes) {
       this.applyBackpressure();
     }
@@ -445,7 +504,11 @@ export class VaultSyncEngine {
         this.draining = false;
         // A frame that arrived between the loop's last check and here would
         // otherwise sit forever.
-        if (!this.stopped && this.inbound.length > 0) this.kickDrain();
+        if (!this.stopped && this.inbound.length > 0) {
+          this.kickDrain();
+          return;
+        }
+        this.maybeSignalIdle();
       });
   }
 
@@ -467,8 +530,10 @@ export class VaultSyncEngine {
       } catch (err) {
         console.warn(`[vault-sync] applyUpdate failed for ${frame.docId}`, err);
       }
-      this.inboundDone++;
-      this.onInboundProgress?.(this.inboundDone, this.inboundTotal);
+      if (frame.counted) {
+        this.inboundDone++;
+        this.onInboundProgress?.(this.inboundDone, this.inboundTotal);
+      }
     }
     // Caught up after a pause — resume the feed. The reconnect re-sends `hello`
     // with the state vectors we just advanced, so nothing is re-delivered.

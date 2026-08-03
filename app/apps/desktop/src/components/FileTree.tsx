@@ -272,11 +272,12 @@ export function FileTree() {
   const allSelected = nodeByPath.size > 0 && selected.size === nodeByPath.size;
 
   // Lazy loading: a folder arrives with an empty `children` placeholder; the
-  // first time it's expanded, fetch its real children on demand. Genuinely
-  // empty folders just re-fetch an empty list (harmless).
+  // first time it's expanded, fetch its real children on demand. Keyed off
+  // `childrenLoaded` rather than an empty array, so a folder we've listed and
+  // found genuinely empty isn't re-fetched on every expand.
   const onToggle = (id: string) => {
     const node = nodeByPath.get(id);
-    if (node?.isDir && (node.children?.length ?? 0) === 0) {
+    if (node?.isDir && node.childrenLoaded !== true) {
       void useStore.getState().loadChildren(id);
     }
   };
@@ -1209,7 +1210,11 @@ function Node({
   onToggleCheck,
 }: NodeRendererProps<TreeNode> & NodeExtra) {
   const isDir = node.data.isDir;
-  const isEmpty = isDir && (node.data.children?.length ?? 0) === 0;
+  // Only a folder we have actually listed can be called empty. An unexpanded one
+  // also carries `children: []`, and claiming "empty" for it is a flat lie about
+  // a folder that may hold hundreds of notes.
+  const isEmpty =
+    isDir && node.data.childrenLoaded === true && (node.data.children?.length ?? 0) === 0;
   const isSelected = !isDir && node.data.path === selectedPath;
   const colorValue = itemColorValue(color);
   const peers = peersForNode(node, presenceByDoc);

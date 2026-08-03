@@ -682,6 +682,25 @@ pub async fn write_note(
     Ok(())
 }
 
+/// Create a note only if it doesn't exist yet; returns true when it was created.
+/// Used by the registry to materialize server-only notes without ever being able
+/// to overwrite local content — see `notefile::write_note_if_missing`.
+#[tauri::command]
+pub async fn write_note_if_missing(
+    state: State<'_, AppState>,
+    path: String,
+    content: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    if !notefile::write_note_if_missing(&vault, &path, &content)? {
+        return Ok(false);
+    }
+    let abs = vault::resolve_in_vault(&vault, &path)?;
+    index.lock().unwrap().index_note(&vault, &abs)?;
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn create_note(
     state: State<'_, AppState>,

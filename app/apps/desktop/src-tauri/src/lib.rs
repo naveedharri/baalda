@@ -46,6 +46,7 @@ pub fn run() {
             commands::list_children,
             commands::read_note,
             commands::write_note,
+            commands::write_note_if_missing,
             commands::create_note,
             commands::create_folder,
             commands::rename_path,

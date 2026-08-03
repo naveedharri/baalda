@@ -77,6 +77,19 @@ class MemSink implements DocUpdateSink {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+/**
+ * Wait until the engine's `hello` is actually on the wire.
+ *
+ * The engine opens its backfill window when it SENDS hello (mint token + build
+ * manifest are async), and a real server cannot answer before it has one. Frames
+ * delivered ahead of it are live fan-out, which is deliberately uncounted — so a
+ * test that skips this measures the wrong thing.
+ */
+async function awaitHello(ws: FakeWs): Promise<void> {
+  for (let i = 0; i < 40 && ws.helloText() === null; i++) await tick();
+  if (ws.helloText() === null) throw new Error("hello was never sent");
+}
+
 describe("deriveVaultWsUrl", () => {
   it("keeps the HTTP port and appends /vault-sync (never bumps to 3011)", () => {
     expect(deriveVaultWsUrl("http://localhost:3010")).toBe("ws://localhost:3010/vault-sync");
@@ -268,7 +281,7 @@ describe("VaultSyncEngine — inbound queue", () => {
     });
     engine.start();
     ws!.onopen?.(null);
-    await tick();
+    await awaitHello(ws!);
 
     // Ten frames delivered in one burst, exactly as a backfill arrives.
     for (let i = 0; i < 10; i++) {
@@ -298,7 +311,7 @@ describe("VaultSyncEngine — inbound queue", () => {
     });
     engine.start();
     ws!.onopen?.(null);
-    await tick();
+    await awaitHello(ws!);
     ws!.onmessage?.({ data: updateFrame("a", [1]) });
     ws!.onmessage?.({ data: updateFrame("b", [2]) });
     for (let i = 0; i < 40 && !engine.inboundIdle(); i++) await tick();
@@ -306,6 +319,124 @@ describe("VaultSyncEngine — inbound queue", () => {
       [1, 2],
       [2, 2],
     ]);
+  });
+
+  // ── The "Syncing 55/55, climbing" regression ──────────────────────────────
+  // The server does not self-exclude `update` fan-out, so a client receives the
+  // echo of its own edits. Counting those made the download progress unbounded:
+  // one tick per keystroke, on a phase that (see below) could never end.
+
+  it("counts the backfill only — live fan-out never moves the counter", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const seen: Array<[number, number]> = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onInboundProgress: (done, total) => seen.push([done, total]),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+
+    // Two documents of backfill, then the server closes the window.
+    ws!.onmessage?.({ data: updateFrame("a", [1]) });
+    ws!.onmessage?.({ data: updateFrame("b", [2]) });
+    for (let i = 0; i < 40 && !engine.inboundIdle(); i++) await tick();
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+    await tick();
+    expect(engine.inboundProgress()).toMatchObject({ done: 2, total: 2 });
+
+    // Now type: every keystroke's update comes back to us as live fan-out. It is
+    // still applied — it just isn't progress.
+    for (let i = 0; i < 25; i++) ws!.onmessage?.({ data: updateFrame("a", [9]) });
+    for (let i = 0; i < 60 && !engine.inboundIdle(); i++) await tick();
+
+    expect(engine.inboundProgress()).toMatchObject({ done: 2, total: 2, queued: 0 });
+    expect(seen).toEqual([
+      [1, 2],
+      [2, 2],
+    ]);
+    // Applied all the same — excluded from the count, not from the sync.
+    expect(sink.applied.length).toBe(27);
+  });
+
+  // ── The "never says Synced" regression ────────────────────────────────────
+  // `inboundIdle()` requires `!draining`, and the old completion check ran inside
+  // the drain loop, where `draining` is true by construction. It could not fire.
+
+  it("signals idle once the backfill has landed, whichever arrives last", async () => {
+    // Case 1: `ready` first, then the last frame drains.
+    {
+      const sink = new MemSink();
+      let ws: FakeWs | null = null;
+      let idle = 0;
+      const engine = new VaultSyncEngine({
+        api: tokenApi(),
+        vaultId: "v1",
+        sink,
+        wsFactory: () => (ws = new FakeWs()),
+        onInboundIdle: () => idle++,
+      });
+      engine.start();
+      ws!.onopen?.(null);
+      await awaitHello(ws!);
+      ws!.onmessage?.({ data: updateFrame("a", [1]) });
+      ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+      for (let i = 0; i < 40 && !engine.backfillSettled(); i++) await tick();
+      expect(engine.backfillSettled()).toBe(true);
+      expect(idle).toBeGreaterThan(0);
+    }
+    // Case 2: the frames drain first and `ready` is the last event. Nothing else
+    // is coming, so `ready` itself has to be an edge — this is the ordering that
+    // deadlocked the phase.
+    {
+      const sink = new MemSink();
+      let ws: FakeWs | null = null;
+      let idle = 0;
+      const engine = new VaultSyncEngine({
+        api: tokenApi(),
+        vaultId: "v1",
+        sink,
+        wsFactory: () => (ws = new FakeWs()),
+        onInboundIdle: () => idle++,
+      });
+      engine.start();
+      ws!.onopen?.(null);
+      await awaitHello(ws!);
+      ws!.onmessage?.({ data: updateFrame("a", [1]) });
+      for (let i = 0; i < 40 && !engine.inboundIdle(); i++) await tick();
+      expect(idle).toBe(0); // still backfilling — the vault is still arriving
+      expect(engine.backfillSettled()).toBe(false);
+
+      ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+      await tick();
+      expect(idle).toBe(1);
+      expect(engine.backfillSettled()).toBe(true);
+    }
+  });
+
+  it("does not call an empty queue mid-backfill 'settled'", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+    ws!.onmessage?.({ data: updateFrame("a", [1]) });
+    for (let i = 0; i < 40 && !engine.inboundIdle(); i++) await tick();
+
+    // The queue is empty, but only because document two hasn't arrived yet.
+    // `inboundIdle` says yes; the question the download phase must ask says no.
+    expect(engine.inboundIdle()).toBe(true);
+    expect(engine.backfillSettled()).toBe(false);
   });
 
   it("applies backpressure past the byte cap: closes the socket, drains, reconnects", async () => {

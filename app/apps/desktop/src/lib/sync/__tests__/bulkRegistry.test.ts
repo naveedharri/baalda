@@ -18,6 +18,7 @@ vi.mock("../../ipc", () => ({
   listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [] })),
   listNoteTitles: vi.fn(async () => [] as Array<{ id: string; path: string; title: string }>),
   writeNote: vi.fn(async () => {}),
+  writeNoteIfMissing: vi.fn(async () => true),
   isVaultMismatch: (e: unknown) =>
     e instanceof Error && e.message.startsWith("vault-mismatch"),
 }));
@@ -30,6 +31,7 @@ import { VaultRegistry } from "../registry";
 import { REGISTRY_CONCURRENCY } from "../pool";
 import type { SyncProgressSink } from "../progress";
 import type { DocSyncState, SyncProgressPhase, VaultScope } from "../vaultScope";
+import { reconcileWithTree } from "./helpers/reconcile";
 
 const ORG = "org-1";
 const VAULT = "v-1";
@@ -166,13 +168,14 @@ beforeEach(() => {
   vi.mocked(ipc.setVaultConfig).mockResolvedValue(undefined);
   vi.mocked(ipc.listNoteTitles).mockResolvedValue([]);
   vi.mocked(ipc.writeNote).mockResolvedValue(undefined);
+  vi.mocked(ipc.writeNoteIfMissing).mockClear().mockResolvedValue(true);
 });
 
 describe("bounded concurrency", () => {
   it("registers 60 notes with at most REGISTRY_CONCURRENCY requests in flight", async () => {
     const { api, state } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(60));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(60));
 
     expect(state.createdNotes).toHaveLength(60);
     expect(state.maxInFlight).toBeGreaterThan(1); // NOT the old sequential loop
@@ -206,7 +209,7 @@ describe("bounded concurrency", () => {
         },
       ],
     };
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, t);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, t);
 
     expect(state.createdFolders).toEqual(["A", "A/B", "A/B/C"]);
     const calls = vi.mocked(api.createFolder).mock.calls.map((c) => c[0]);
@@ -220,7 +223,7 @@ describe("incremental checkpointing + resume", () => {
     const cfg = configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(60));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(60));
 
     // 60 notes at a 25-item batch ⇒ several writes. The old code wrote exactly 1.
     expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBeGreaterThan(1);
@@ -242,7 +245,7 @@ describe("incremental checkpointing + resume", () => {
       return serverNote(input.relPath);
     });
     const reg1 = new VaultRegistry(api, source);
-    await reg1.reconcile({ organizationId: ORG, vaultName: "v" }, tree(50));
+    await reconcileWithTree(reg1, { organizationId: ORG, vaultName: "v" }, tree(50));
     expect(created.length).toBeGreaterThanOrEqual(30);
     expect(created.length).toBeLessThan(50); // it really did stop early
     expect(cfg.read()!.serverVaultId).toBe(VAULT);
@@ -251,7 +254,7 @@ describe("incremental checkpointing + resume", () => {
     const alreadyThere = created.map((rel) => ({ id: `srv-${rel}`, rel_path: rel }));
     const second = fakeApi({ serverNotes: alreadyThere });
     const reg2 = new VaultRegistry(second.api);
-    await reg2.reconcile({ organizationId: ORG, vaultName: "v" }, tree(50));
+    await reconcileWithTree(reg2, { organizationId: ORG, vaultName: "v" }, tree(50));
 
     expect(second.state.createdNotes).toHaveLength(50 - created.length);
     expect(reg2.allDocIds()).toHaveLength(50);
@@ -261,7 +264,7 @@ describe("incremental checkpointing + resume", () => {
     const cfg = configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(3));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(3));
     reg.markPushed("srv-Note0.md");
     reg.markPushed("srv-Note1.md");
     await reg.flushCheckpoint();
@@ -269,7 +272,7 @@ describe("incremental checkpointing + resume", () => {
 
     // A fresh registry (relaunch) adopts it, so the upload skips those docs.
     const reg2 = new VaultRegistry(fakeApi({ serverNotes: [] }).api);
-    await reg2.reconcile({ organizationId: ORG, vaultName: "v" }, tree(3));
+    await reconcileWithTree(reg2, { organizationId: ORG, vaultName: "v" }, tree(3));
     expect(reg2.isPushed("srv-Note0.md")).toBe(true);
     expect(reg2.isPushed("srv-Note2.md")).toBe(false);
   });
@@ -278,7 +281,7 @@ describe("incremental checkpointing + resume", () => {
     configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(1));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(1));
     const readsAfterReconcile = vi.mocked(ipc.getVaultConfig).mock.calls.length;
     const writesAfterReconcile = vi.mocked(ipc.setVaultConfig).mock.calls.length;
 
@@ -309,7 +312,7 @@ describe("cancellation on a vault switch", () => {
       return serverNote(input.relPath);
     });
 
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(200));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(200));
 
     // The pool re-checks per item, so it abandons within one in-flight batch.
     expect(seen).toBeLessThan(200);
@@ -322,7 +325,7 @@ describe("cancellation on a vault switch", () => {
     expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(writesAfterStale);
     expect(apiState.maxInFlight).toBeLessThanOrEqual(REGISTRY_CONCURRENCY);
     // Materialization for the stale vault never ran either.
-    expect(vi.mocked(ipc.writeNote)).not.toHaveBeenCalled();
+    expect(vi.mocked(ipc.writeNoteIfMissing)).not.toHaveBeenCalled();
     void cfg;
   });
 
@@ -350,7 +353,7 @@ describe("cancellation on a vault switch", () => {
       return serverNote(input.relPath);
     });
 
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(50));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(50));
 
     // Everything from the switch onward is silent: the in-flight lanes finish
     // their requests but report nothing into the vault now on screen.
@@ -365,7 +368,7 @@ describe("cancellation on a vault switch", () => {
     const cfg = configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(2));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(2));
     const writes = vi.mocked(ipc.setVaultConfig).mock.calls.length;
     reg.markPushed("srv-Note0.md"); // dirty, batch not full
     reg.reset();
@@ -386,7 +389,7 @@ describe("honest failure reporting", () => {
       return serverNote(input.relPath);
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(1));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(1));
     expect(attempts).toBe(2);
     expect(reg.hasFailures()).toBe(false);
     expect(reg.getMapping("Note0.md")).not.toBeNull();
@@ -401,7 +404,7 @@ describe("honest failure reporting", () => {
       { id: "local-1", path: "Note1.md", title: "One" },
     ]);
 
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(3));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(3));
 
     // A 4xx is not retried — one attempt, then reported.
     expect(state.noteAttempts.get("Note1.md")).toBe(1);
@@ -430,7 +433,7 @@ describe("honest failure reporting", () => {
       return serverNote(input.relPath);
     });
     const reg = new VaultRegistry(api);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(100));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(100));
 
     expect(reg.limitCode()).toBe("vault_limit_reached");
     expect(reg.failures()[0].code).toBe("vault_limit_reached");
@@ -442,7 +445,7 @@ describe("honest failure reporting", () => {
     const { api } = fakeApi();
     const { sink, phases, counts } = recordingSink();
     const reg = new VaultRegistry(api, undefined, sink);
-    await reg.reconcile({ organizationId: ORG, vaultName: "v" }, tree(5, ["Sub"]));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(5, ["Sub"]));
     expect(phases).toContain("registering");
     expect(counts().done).toBe(6); // 5 notes + 1 folder
     expect(counts().failed).toBe(0);
