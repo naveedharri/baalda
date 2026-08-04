@@ -1,109 +1,35 @@
 name: notary-probe
 
-# TEMPORARY diagnostic. Delete once the release runner image is settled.
+# TEMPORARY diagnostic. Delete once notarization is settled.
 #
-# `xcrun notarytool` hangs indefinitely on the `macos-latest` image (currently
-# macos-26-arm64): v0.1.9 sat 50 minutes then died with NSURLErrorDomain -1009
-# ("no network route", "Resolved 0 endpoints"), and v0.1.10 was still wedged at
-# 69 minutes. Signing works in one second on the same runner, and checkout /
-# pnpm / cargo all have network — so it is notarytool's path to Apple, not the
-# job's, that is broken.
+# What this established (2026-08-04):
+#   * every runner image reaches Apple in <2s, and the credentials authenticate
+#   * `notarytool submit` UPLOADS fine — a junk zip gets a submission id
+#   * but submissions are never PROCESSED: 4 of 5 sat "In Progress", two of them
+#     for 20 hours, including a 173-byte file that should be rejected instantly
 #
-# Bisecting that with real releases costs ~35 minutes per guess. `notarytool
-# history` makes the same authenticated call to the same endpoints and returns
-# in seconds, so this probes every candidate image at once and says plainly
-# which ones can reach Apple.
+# So the release hang is Apple-side queueing, not signing, credentials, runner
+# image, or concurrency — all of which were tested and cleared. This job now just
+# reports the current queue state so we can tell when Apple has drained it.
 on:
   workflow_dispatch:
 
 jobs:
-  probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        image: ['macos-latest', 'macos-15', 'macos-14']
-    runs-on: ${{ matrix.image }}
+  history:
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
-      - name: Report the image under test
-        run: |
-          echo "label:   ${{ matrix.image }}"
-          echo "product: $(sw_vers -productVersion)  build: $(sw_vers -buildVersion)"
-          echo "arch:    $(uname -m)"
-          # NB: no `| head` here — it SIGPIPEs xcodebuild, which then dumps an
-          # NSFileHandleOperationException stack trace that looks alarming and
-          # means nothing.
-          xcodebuild -version > /tmp/xcv 2>/dev/null; echo "xcode:   $(sed -n 1p /tmp/xcv)"
-          echo "notarytool: $(xcrun --find notarytool)"
-
-      - name: Can this runner reach Apple at all?
-        run: |
-          # Plain HTTPS to the notary host. Separates "no network to Apple"
-          # from "notarytool specifically is broken".
-          curl -sS -o /dev/null -w 'appstoreconnect.apple.com -> HTTP %{http_code} in %{time_total}s\n' \
-            --max-time 30 https://appstoreconnect.apple.com/ || echo "curl FAILED (exit $?)"
-
-      - name: notarytool history (the real call, hard-capped at 120s)
-        id: probe
-        continue-on-error: true
+      - name: Submission queue state
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set +e
-          start=$(date +%s)
-          # `timeout` is not on macOS by default; use perl's alarm instead so a
-          # wedged notarytool is reported as a hang rather than eating the job.
           perl -e 'alarm 120; exec @ARGV' \
             xcrun notarytool history \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_PASSWORD" \
               --team-id "$APPLE_TEAM_ID" \
               --output-format json
-          rc=$?
-          elapsed=$(( $(date +%s) - start ))
-          echo "---"
-          echo "exit=$rc after ${elapsed}s"
-          if [ $rc -eq 142 ] || [ $elapsed -ge 118 ]; then
-            echo "VERDICT history: ${{ matrix.image }} => HUNG (notarytool never returned)"
-          elif [ $rc -eq 0 ]; then
-            echo "VERDICT history: ${{ matrix.image }} => OK (Apple answered)"
-          else
-            echo "VERDICT history: ${{ matrix.image }} => FAILED rc=$rc (see output above)"
-          fi
-          exit 0
-
-      # `history` is a small GET; `submit` UPLOADS. Only submit hangs in the real
-      # build, so the upload path is what has to be tested. A junk zip exercises
-      # exactly that path — Apple accepts the upload, then rejects the contents as
-      # not-a-bundle, which is a perfectly good answer: it proves the transfer
-      # completed. No certificate or app build required.
-      - name: notarytool submit — the upload path, hard-capped at 300s
-        continue-on-error: true
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set +e
-          mkdir -p /tmp/probe && echo "not an app" > /tmp/probe/hello.txt
-          ditto -c -k /tmp/probe /tmp/probe.zip
-          echo "zip: $(stat -f%z /tmp/probe.zip) bytes"
-          start=$(date +%s)
-          perl -e 'alarm 300; exec @ARGV' \
-            xcrun notarytool submit /tmp/probe.zip \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" \
-              --wait --timeout 4m --output-format json
-          rc=$?
-          elapsed=$(( $(date +%s) - start ))
-          echo "---"
-          echo "exit=$rc after ${elapsed}s"
-          if [ $rc -eq 142 ] || [ $elapsed -ge 295 ]; then
-            echo "VERDICT submit: ${{ matrix.image }} => HUNG — reproduces the release failure"
-          else
-            echo "VERDICT submit: ${{ matrix.image }} => RETURNED rc=$rc in ${elapsed}s (upload works)"
-          fi
-          exit 0
+          echo "(exit $?)"
