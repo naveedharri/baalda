@@ -26,70 +26,69 @@ them by uncommenting the two matrix entries.
 > a `v*` tag ships to all users. Flip `releaseDraft` back to `true` in
 > `release.yml` if you want to inspect bundles before they go out.
 
-## Notarization runs *after* the release, not inside it
+## Signing and notarization are part of the release
 
-Signing and notarization are two different things, and only one of them is under
-our control:
+Two different things happen to the app, and only one of them is under our
+control:
 
 - **Code signing** answers "who built this and has it been altered?" Every build
-  is signed with our Developer ID certificate and hardened runtime. This is
-  instant and never fails.
-- **Notarization** answers "has Apple scanned this binary for malware?" We upload
-  the DMG, Apple scans it and returns a ticket, and we staple that ticket into the
-  DMG. The upload is instant; **how long Apple takes to scan is entirely Apple's
-  call** — for this account it has ranged from two minutes to over a day.
+  is signed with our Developer ID certificate and hardened runtime. Instant,
+  never fails.
+- **Notarization** answers "has Apple scanned this binary for malware?" Tauri
+  uploads the app, Apple scans it and returns a ticket, and Tauri staples that
+  ticket into the bundle. The upload is instant; **how long Apple takes to scan is
+  entirely Apple's call** — for this account it has ranged from two minutes to
+  over a day.
 
-So notarization is kept off the release critical path:
+Both happen inside `release.yml`, in one pass, before anything is published.
+`NOTARIZE_ON_TAG: 'yes'` is the default and should stay that way. Order matters
+and Tauri gets it right: the `.app` is signed → notarized → **stapled**, and only
+then is the `.dmg` built around it. So the ticket travels inside the app itself
+and survives being dragged to `/Applications`, and Gatekeeper can verify it with
+no network.
 
-| Workflow | Does | Takes |
-| --- | --- | --- |
-| `release.yml` | build → sign → publish the GitHub Release | ~7 min, never blocked |
-| `notarize.yml` | notarize the published DMGs → staple → replace the assets in place | minutes to days, invisible |
+This is how essentially every macOS app ships — Zed and Lapce both notarize and
+staple inline in their release job, as do ~94 public repos invoking
+`notarytool submit --wait` directly from a workflow.
 
-`release.yml` sets `NOTARIZE_ON_TAG: 'no'` for exactly this reason. **Leave it
-that way** — it is the design, not a workaround. Setting it to `'yes'` puts
-Apple's queue back in front of every shipped fix.
+**The trade we are accepting:** a release is only as fast as Apple's notary queue,
+and if that queue stalls, the job fails and *nothing* publishes. That is the right
+failure mode. A green release carrying a bundle Gatekeeper will refuse is worse
+than no release — it looks shipped and is broken. tauri-action does not create the
+GitHub Release until the build succeeds, so a failed run leaves nothing behind to
+clean up (the wedged v0.1.9 run left no `v0.1.9` release at all).
 
-The user-visible consequence is small and self-correcting: someone who downloads
-the `.dmg` in the window before the ticket lands sees Gatekeeper's "cannot be
-verified" prompt; everyone after gets a clean first launch. No new version is cut
-— the same release's DMG is swapped for the stapled one. **Auto-update is never
-involved**: `latest.json` points only at the `.app.tar.gz` bundles, which the
-updater validates with our minisign key, not Apple's ticket. `notarize.yml`
-deliberately never touches the tarballs, the `.sig` files, or `latest.json`.
+**Auto-update never depends on any of this.** `latest.json` points only at the
+`.app.tar.gz` bundles, which the updater validates with our minisign key, not
+Apple's ticket. Notarization only affects a *fresh download* of the `.dmg`.
 
-### notarize.yml
+### The escape hatch
 
-Triggers: automatically after every `release.yml` run, every 6 hours as a retry,
-and manually.
+When Apple's queue is wedged and a fix has to ship anyway, run the workflow by
+hand with notarization off:
 
-```bash
-gh workflow run notarize.yml --ref main                          # latest release
-gh workflow run notarize.yml --ref main -f tag=v0.1.11           # a specific one
-gh workflow run notarize.yml --ref main -f wait_minutes=300      # sit on it longer
-```
+Actions → **release** → *Run workflow* → `notarize: false`
 
-It will not pile submissions into a queue that is already the bottleneck. Per DMG
-it checks, in order: already stapled → exit; a prior `Accepted` submission for
-that exact filename → staple that ticket without resubmitting; a prior
-`In Progress` one → wait on that same submission id; otherwise submit once. A run
-that times out is therefore free to repeat — the next one resumes rather than
-restarts.
+That produces a signed, hardened-runtime build that publishes normally. The cost
+is that fresh downloads hit Gatekeeper's "cannot be verified" prompt until a later
+notarized version replaces them. Existing users are unaffected — they auto-update.
 
-Read the run summary for the outcome (`✅ stapled`, `⏳ still queued`, `❌ status`).
+Do this from the Actions UI rather than by editing `NOTARIZE_ON_TAG`, so the
+switch can never be left off by accident.
 
 ### Confirming a release is clean
 
 ```bash
 gh release download v0.1.11 --pattern '*_aarch64.dmg'
-xcrun stapler validate Baalda_0.1.11_aarch64.dmg
-spctl -a -t open --context context:primary-signature -v Baalda_0.1.11_aarch64.dmg
+hdiutil attach Baalda_0.1.11_aarch64.dmg
+xcrun stapler validate /Volumes/Baalda/Baalda.app
+spctl -a -vv /Volumes/Baalda/Baalda.app
 ```
 
-On an installed copy, `spctl -a -vv /Applications/Baalda.app` says `accepted` +
-`source=Notarized Developer ID` once the ticket is in place; before that it says
-`rejected` + `source=Unnotarized Developer ID`, which means signed-but-not-scanned,
-not insecure.
+`spctl` says `accepted` + `source=Notarized Developer ID` when the ticket is in
+place. Before that it says `rejected` + `source=Unnotarized Developer ID`, which
+means signed-but-not-scanned — not insecure, but Gatekeeper will block a fresh
+download.
 
 ## When notarization hangs
 
@@ -128,9 +127,16 @@ Every layer on our side was tested and cleared when this first hit (v0.1.9/v0.1.
   authenticate and upload correctly; the delay is downstream of auth. (If you ever
   do switch: a **Team** key with the Developer role is required — Personal keys are
   not eligible for the Notary API — and you must drop `--apple-id`/`--team-id`.)
-- *Resubmitting.* Adds to the queue that is already the problem. `notarize.yml`
-  resumes instead, on purpose.
+- *Re-running the release.* Every attempt adds another submission to the queue
+  that is already the bottleneck. Run the probe first; only re-tag once it shows
+  submissions being `Accepted` again.
 - *A different runner image, or notarizing locally.* Same queue.
+
+**What to actually do while it is stalled:** ship with `notarize: false` if the
+release cannot wait (see the escape hatch above), and otherwise leave it alone.
+Apple's own escalation threshold is a week; before that, Developer Support will
+tell you to wait. Each successful notarization teaches their system to recognize
+our builds, so this fades on its own.
 
 **Checking the queue** — `notary-probe.yml` (workflow_dispatch) prints the
 account's submission history in ~10 seconds:

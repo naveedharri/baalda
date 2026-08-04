@@ -25,24 +25,34 @@ on:
         default: true
 
 # ── The notarization switch ───────────────────────────────────────────────────
-# Notarization is the ONE step that can wedge a release, and it fails outside our
-# control: Apple accepts a submission and then processes it whenever it feels like
-# it (see docs/RELEASE.md → "When notarization hangs"). Tauri puts no timeout
-# around it, so a stuck submission used to consume the entire job.
+# Notarizing is part of releasing, not a follow-up. Tauri signs the `.app`,
+# submits it to Apple, waits, and staples the returned ticket into the bundle
+# before the `.dmg` is built around it — so the app carries its own ticket even
+# after the user drags it out of the DMG, and verifies offline. This is how
+# essentially every macOS app ships (Zed, Lapce, and ~94 public repos calling
+# `notarytool submit --wait` straight from their release job).
 #
-# This is the master switch for TAG PUSHES. `workflow_dispatch` overrides it via
+# The consequence, accepted deliberately: a release is only as fast as Apple's
+# notary queue, and if that queue stalls the job fails and NOTHING publishes.
+# That is the right failure — a green release carrying a bundle Gatekeeper will
+# refuse is worse than no release at all. tauri-action does not create the
+# GitHub Release until the build succeeds, so a failed run leaves no wreckage.
+#
+# This is the master switch for TAG PUSHES; `workflow_dispatch` overrides it via
 # the input above.
 #
-#   yes → sign + notarize inline (ties the release to Apple's queue)
-#   no  → sign only, and let notarize.yml staple the DMGs afterwards
+#   yes → sign + notarize (default; a clean install with no Gatekeeper prompt)
+#   no  → sign only        (escape hatch: ships while Apple's queue is wedged,
+#                           but fresh downloads get the "cannot be verified"
+#                           prompt. Auto-update is unaffected either way — the
+#                           updater checks our minisign signature, not Apple's
+#                           ticket.)
 #
-# ⚠️ Keep this 'no'. It is the intended design, not a workaround: `notarize.yml`
-# runs after this workflow, notarizes the published `.dmg` assets and replaces
-# them in place once Apple answers. Releases therefore ship in ~7 minutes and a
-# notary outage can never block a fix again. Setting it to 'yes' only makes sense
-# if you specifically need the DMGs stapled before the release goes public.
+# Use the escape hatch by hand — Actions → release → Run workflow →
+# `notarize: false` — rather than editing this line, so it can never be left off
+# by accident. See docs/RELEASE.md → "When notarization hangs".
 env:
-  NOTARIZE_ON_TAG: 'no'
+  NOTARIZE_ON_TAG: 'yes'
 
 jobs:
   release:
@@ -51,9 +61,13 @@ jobs:
     # Build + sign takes ~7 minutes; Apple's notary service normally answers well
     # inside 15. Without a bound, a wedged `notarytool` sits on the runner until
     # the 6-hour default — v0.1.9 burned 50 minutes before erroring and v0.1.10
-    # was still hung at 69 (the runner had to kill the orphan process). Failing
-    # at 35 makes a bad notary run cost one coffee instead of an afternoon.
-    timeout-minutes: 35
+    # was still hung at 69 (the runner had to kill the orphan process).
+    #
+    # 120 is a compromise between the two ways this goes wrong: too tight and a
+    # merely slow notary queue fails a release that would have succeeded; too
+    # loose and a wedged one holds a runner all afternoon before telling you
+    # what the probe could have in ten seconds.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       # One at a time. Both macOS jobs otherwise submit to Apple's notary service
