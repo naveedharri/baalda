@@ -30,7 +30,10 @@ jobs:
           echo "label:   ${{ matrix.image }}"
           echo "product: $(sw_vers -productVersion)  build: $(sw_vers -buildVersion)"
           echo "arch:    $(uname -m)"
-          echo "xcode:   $(xcodebuild -version | head -1)"
+          # NB: no `| head` here — it SIGPIPEs xcodebuild, which then dumps an
+          # NSFileHandleOperationException stack trace that looks alarming and
+          # means nothing.
+          xcodebuild -version > /tmp/xcv 2>/dev/null; echo "xcode:   $(sed -n 1p /tmp/xcv)"
           echo "notarytool: $(xcrun --find notarytool)"
 
       - name: Can this runner reach Apple at all?
@@ -63,10 +66,44 @@ jobs:
           echo "---"
           echo "exit=$rc after ${elapsed}s"
           if [ $rc -eq 142 ] || [ $elapsed -ge 118 ]; then
-            echo "VERDICT: ${{ matrix.image }} => HUNG (notarytool never returned)"
+            echo "VERDICT history: ${{ matrix.image }} => HUNG (notarytool never returned)"
           elif [ $rc -eq 0 ]; then
-            echo "VERDICT: ${{ matrix.image }} => OK (Apple answered)"
+            echo "VERDICT history: ${{ matrix.image }} => OK (Apple answered)"
           else
-            echo "VERDICT: ${{ matrix.image }} => FAILED rc=$rc (see output above)"
+            echo "VERDICT history: ${{ matrix.image }} => FAILED rc=$rc (see output above)"
+          fi
+          exit 0
+
+      # `history` is a small GET; `submit` UPLOADS. Only submit hangs in the real
+      # build, so the upload path is what has to be tested. A junk zip exercises
+      # exactly that path — Apple accepts the upload, then rejects the contents as
+      # not-a-bundle, which is a perfectly good answer: it proves the transfer
+      # completed. No certificate or app build required.
+      - name: notarytool submit — the upload path, hard-capped at 300s
+        continue-on-error: true
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set +e
+          mkdir -p /tmp/probe && echo "not an app" > /tmp/probe/hello.txt
+          ditto -c -k /tmp/probe /tmp/probe.zip
+          echo "zip: $(stat -f%z /tmp/probe.zip) bytes"
+          start=$(date +%s)
+          perl -e 'alarm 300; exec @ARGV' \
+            xcrun notarytool submit /tmp/probe.zip \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 4m --output-format json
+          rc=$?
+          elapsed=$(( $(date +%s) - start ))
+          echo "---"
+          echo "exit=$rc after ${elapsed}s"
+          if [ $rc -eq 142 ] || [ $elapsed -ge 295 ]; then
+            echo "VERDICT submit: ${{ matrix.image }} => HUNG — reproduces the release failure"
+          else
+            echo "VERDICT submit: ${{ matrix.image }} => RETURNED rc=$rc in ${elapsed}s (upload works)"
           fi
           exit 0
