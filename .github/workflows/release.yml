@@ -23,8 +23,18 @@ jobs:
   release:
     permissions:
       contents: write
+    # Build + sign takes ~7 minutes; Apple's notary service normally answers well
+    # inside 15. Without a bound, a wedged `notarytool` sits on the runner until
+    # the 6-hour default — v0.1.9 burned 50 minutes before erroring and v0.1.10
+    # was still hung at 69 (the runner had to kill the orphan process). Failing
+    # at 35 makes a bad notary run cost one coffee instead of an afternoon.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
+      # One at a time. Both macOS jobs otherwise submit to Apple's notary service
+      # concurrently under the SAME Apple ID, which is the one unusual thing about
+      # this setup and costs nothing to rule out. Serial adds ~7 minutes.
+      max-parallel: 1
       matrix:
         include:
           - platform: 'macos-latest'
