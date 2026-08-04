@@ -1,0 +1,72 @@
+name: notary-probe
+
+# TEMPORARY diagnostic. Delete once the release runner image is settled.
+#
+# `xcrun notarytool` hangs indefinitely on the `macos-latest` image (currently
+# macos-26-arm64): v0.1.9 sat 50 minutes then died with NSURLErrorDomain -1009
+# ("no network route", "Resolved 0 endpoints"), and v0.1.10 was still wedged at
+# 69 minutes. Signing works in one second on the same runner, and checkout /
+# pnpm / cargo all have network — so it is notarytool's path to Apple, not the
+# job's, that is broken.
+#
+# Bisecting that with real releases costs ~35 minutes per guess. `notarytool
+# history` makes the same authenticated call to the same endpoints and returns
+# in seconds, so this probes every candidate image at once and says plainly
+# which ones can reach Apple.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['macos-latest', 'macos-15', 'macos-14']
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 10
+    steps:
+      - name: Report the image under test
+        run: |
+          echo "label:   ${{ matrix.image }}"
+          echo "product: $(sw_vers -productVersion)  build: $(sw_vers -buildVersion)"
+          echo "arch:    $(uname -m)"
+          echo "xcode:   $(xcodebuild -version | head -1)"
+          echo "notarytool: $(xcrun --find notarytool)"
+
+      - name: Can this runner reach Apple at all?
+        run: |
+          # Plain HTTPS to the notary host. Separates "no network to Apple"
+          # from "notarytool specifically is broken".
+          curl -sS -o /dev/null -w 'appstoreconnect.apple.com -> HTTP %{http_code} in %{time_total}s\n' \
+            --max-time 30 https://appstoreconnect.apple.com/ || echo "curl FAILED (exit $?)"
+
+      - name: notarytool history (the real call, hard-capped at 120s)
+        id: probe
+        continue-on-error: true
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set +e
+          start=$(date +%s)
+          # `timeout` is not on macOS by default; use perl's alarm instead so a
+          # wedged notarytool is reported as a hang rather than eating the job.
+          perl -e 'alarm 120; exec @ARGV' \
+            xcrun notarytool history \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --output-format json
+          rc=$?
+          elapsed=$(( $(date +%s) - start ))
+          echo "---"
+          echo "exit=$rc after ${elapsed}s"
+          if [ $rc -eq 142 ] || [ $elapsed -ge 118 ]; then
+            echo "VERDICT: ${{ matrix.image }} => HUNG (notarytool never returned)"
+          elif [ $rc -eq 0 ]; then
+            echo "VERDICT: ${{ matrix.image }} => OK (Apple answered)"
+          else
+            echo "VERDICT: ${{ matrix.image }} => FAILED rc=$rc (see output above)"
+          fi
+          exit 0
