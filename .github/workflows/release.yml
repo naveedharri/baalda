@@ -26,19 +26,21 @@ on:
 
 # ── The notarization switch ───────────────────────────────────────────────────
 # Notarization is the ONE step that can wedge a release, and it fails outside our
-# control: Apple accepts a submission and then never processes it (see
-# docs/RELEASE.md → "When notarization hangs"). Tauri puts no timeout around it,
-# so a stuck submission used to consume the entire job.
+# control: Apple accepts a submission and then processes it whenever it feels like
+# it (see docs/RELEASE.md → "When notarization hangs"). Tauri puts no timeout
+# around it, so a stuck submission used to consume the entire job.
 #
 # This is the master switch for TAG PUSHES. `workflow_dispatch` overrides it via
 # the input above.
 #
-#   yes → sign + notarize (the goal; a clean install with no Gatekeeper prompt)
-#   no  → sign only        (ships today; fresh downloads need right-click → Open)
+#   yes → sign + notarize inline (ties the release to Apple's queue)
+#   no  → sign only, and let notarize.yml staple the DMGs afterwards
 #
-# ⚠️ Currently 'no': Apple has not processed a submission from this account since
-# 2026-08-03. Flip back to 'yes' once `gh workflow run notary-probe.yml` shows the
-# queue draining — that is the whole cost of turning it back on.
+# ⚠️ Keep this 'no'. It is the intended design, not a workaround: `notarize.yml`
+# runs after this workflow, notarizes the published `.dmg` assets and replaces
+# them in place once Apple answers. Releases therefore ship in ~7 minutes and a
+# notary outage can never block a fix again. Setting it to 'yes' only makes sense
+# if you specifically need the DMGs stapled before the release goes public.
 env:
   NOTARIZE_ON_TAG: 'no'
 

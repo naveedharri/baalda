@@ -26,43 +26,90 @@ them by uncommenting the two matrix entries.
 > a `v*` tag ships to all users. Flip `releaseDraft` back to `true` in
 > `release.yml` if you want to inspect bundles before they go out.
 
-## The notarization switch
+## Notarization runs *after* the release, not inside it
 
-`release.yml` has one line that decides whether a tag push notarizes:
+Signing and notarization are two different things, and only one of them is under
+our control:
 
-```yaml
-env:
-  NOTARIZE_ON_TAG: 'no'   # 'yes' = sign + notarize, 'no' = sign only
-```
+- **Code signing** answers "who built this and has it been altered?" Every build
+  is signed with our Developer ID certificate and hardened runtime. This is
+  instant and never fails.
+- **Notarization** answers "has Apple scanned this binary for malware?" We upload
+  the DMG, Apple scans it and returns a ticket, and we staple that ticket into the
+  DMG. The upload is instant; **how long Apple takes to scan is entirely Apple's
+  call** — for this account it has ranged from two minutes to over a day.
 
-**It is currently `'no'`.** Apple stopped processing this account's notarization
-submissions on 2026-08-03 (see below), and notarization is the only step that can
-wedge a release. With it off, a tag push still produces Developer ID signed,
-hardened-runtime bundles and publishes normally; the only cost is that a **fresh
-download** shows Gatekeeper's "cannot be verified" prompt until the user does
-right-click → Open. **Auto-update is completely unaffected** — the updater checks
-the minisign signature, not Apple's ticket.
+So notarization is kept off the release critical path:
 
-To notarize a single run without touching the file, use the manual trigger:
-Actions → release → *Run workflow* → `notarize: true`.
+| Workflow | Does | Takes |
+| --- | --- | --- |
+| `release.yml` | build → sign → publish the GitHub Release | ~7 min, never blocked |
+| `notarize.yml` | notarize the published DMGs → staple → replace the assets in place | minutes to days, invisible |
 
-**Turning it back on** — once Apple recovers:
+`release.yml` sets `NOTARIZE_ON_TAG: 'no'` for exactly this reason. **Leave it
+that way** — it is the design, not a workaround. Setting it to `'yes'` puts
+Apple's queue back in front of every shipped fix.
+
+The user-visible consequence is small and self-correcting: someone who downloads
+the `.dmg` in the window before the ticket lands sees Gatekeeper's "cannot be
+verified" prompt; everyone after gets a clean first launch. No new version is cut
+— the same release's DMG is swapped for the stapled one. **Auto-update is never
+involved**: `latest.json` points only at the `.app.tar.gz` bundles, which the
+updater validates with our minisign key, not Apple's ticket. `notarize.yml`
+deliberately never touches the tarballs, the `.sig` files, or `latest.json`.
+
+### notarize.yml
+
+Triggers: automatically after every `release.yml` run, every 6 hours as a retry,
+and manually.
 
 ```bash
-gh workflow run notary-probe.yml --ref main   # then read the run's log
+gh workflow run notarize.yml --ref main                          # latest release
+gh workflow run notarize.yml --ref main -f tag=v0.1.11           # a specific one
+gh workflow run notarize.yml --ref main -f wait_minutes=300      # sit on it longer
 ```
 
-If the queue shows recent submissions reaching `Accepted` rather than piling up
-as `In Progress`, set `NOTARIZE_ON_TAG: 'yes'` and cut the next release normally.
+It will not pile submissions into a queue that is already the bottleneck. Per DMG
+it checks, in order: already stapled → exit; a prior `Accepted` submission for
+that exact filename → staple that ticket without resubmitting; a prior
+`In Progress` one → wait on that same submission id; otherwise submit once. A run
+that times out is therefore free to repeat — the next one resumes rather than
+restarts.
+
+Read the run summary for the outcome (`✅ stapled`, `⏳ still queued`, `❌ status`).
+
+### Confirming a release is clean
+
+```bash
+gh release download v0.1.11 --pattern '*_aarch64.dmg'
+xcrun stapler validate Baalda_0.1.11_aarch64.dmg
+spctl -a -t open --context context:primary-signature -v Baalda_0.1.11_aarch64.dmg
+```
+
+On an installed copy, `spctl -a -vv /Applications/Baalda.app` says `accepted` +
+`source=Notarized Developer ID` once the ticket is in place; before that it says
+`rejected` + `source=Unnotarized Developer ID`, which means signed-but-not-scanned,
+not insecure.
 
 ## When notarization hangs
 
-**Symptom.** The build compiles and signs in ~7 minutes, logs `Notarizing …`, and
-then nothing. The job used to run to GitHub's 6-hour default; it is now bounded at
-`timeout-minutes: 35`, so it fails in a bearable time instead.
+**Symptom.** Submissions upload fine and get ids, then sit at `In Progress`
+indefinitely — sometimes for a day or more — while Apple's status page reads green
+and a sibling submission from the same minute comes back `Accepted`.
 
-**This is not a repo problem, and it is worth not re-diagnosing from scratch.**
-When it happened for v0.1.9 and v0.1.10, every layer was tested and cleared:
+**This is Apple, it is expected for a young account, and it is not worth
+re-diagnosing.** Apple DTS ([thread 782674](https://developer.apple.com/forums/thread/782674),
+[thread 822109](https://developer.apple.com/forums/thread/822109)):
+
+> Occasionally, some uploads are held for in-depth analysis and may take longer to
+> complete. As you notarize your apps, the system will learn how to recognize them,
+> and you should see fewer delays.
+
+Reported waits on new accounts run to ~4 days before the backlog clears and normal
+minutes-long turnaround begins. Apple's own escalation threshold is **one week** —
+below that, Developer Support will tell you to wait.
+
+Every layer on our side was tested and cleared when this first hit (v0.1.9/v0.1.10):
 
 | Suspect | Verdict |
 | --- | --- |
@@ -72,22 +119,28 @@ When it happened for v0.1.9 and v0.1.10, every layer was tested and cleared:
 | Runner image | Not it — macOS 26, 15 and 14 all behave identically |
 | Concurrent submissions | Not it — a lone serialized submission wedged too |
 | Upload | Fine — submissions are accepted and get IDs |
+| Bundle contents | Not it — a 173-byte junk zip stuck exactly as long as the app |
+| License agreement / membership | Checked in the portal, nothing pending |
 
-What actually failed is Apple **processing** what it accepted. A 173-byte junk zip
-sat `In Progress` exactly as long as a real app did, so it has nothing to do with
-the bundle. At the time, 7 of 8 submissions were stuck, two of them for 20 hours,
-while Apple's status page reported the service green.
+**Things that look like fixes but are not:**
 
-**Diagnosing it in ~2 minutes** — `notary-probe.yml` (workflow_dispatch) prints
-the account's submission queue. Submissions accumulating as `In Progress` and
-never reaching `Accepted` is the signature. Do not spend 35-minute release cycles
-guessing; run the probe.
+- *Switching to an App Store Connect API key.* Our Apple ID credentials
+  authenticate and upload correctly; the delay is downstream of auth. (If you ever
+  do switch: a **Team** key with the Developer role is required — Personal keys are
+  not eligible for the Notary API — and you must drop `--apple-id`/`--team-id`.)
+- *Resubmitting.* Adds to the queue that is already the problem. `notarize.yml`
+  resumes instead, on purpose.
+- *A different runner image, or notarizing locally.* Same queue.
 
-**Worth checking once** at [developer.apple.com/account](https://developer.apple.com/account),
-since both silently stall processing rather than returning an error:
+**Checking the queue** — `notary-probe.yml` (workflow_dispatch) prints the
+account's submission history in ~10 seconds:
 
-- an unaccepted **Apple Developer Program License Agreement**
-- a lapsed or not-yet-active **membership**
+```bash
+gh workflow run notary-probe.yml --ref main
+```
+
+Submissions reaching `Accepted` within minutes means Apple has warmed to the
+account and delays should stop.
 
 ## Cutting a release from your Mac
 

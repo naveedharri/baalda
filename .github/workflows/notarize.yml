@@ -1,0 +1,211 @@
+name: notarize
+
+# Notarization, decoupled from the release.
+#
+# WHY THIS EXISTS
+# ---------------
+# Apple's notary service accepts our submissions instantly and then processes
+# them on its own schedule — currently hours to days, because a new Developer
+# account gets held for "in-depth analysis" until Apple's system has seen enough
+# of our builds (Apple DTS, developer.apple.com/forums/thread/782674 and /822109).
+# Nothing about our signing, credentials, runner, or bundle is wrong; submissions
+# from 2026-08-03 sat `In Progress` for 22h while one of their siblings was
+# Accepted in minutes.
+#
+# So notarization must not sit on the release critical path. `release.yml` builds,
+# signs and publishes in ~7 minutes and never waits for Apple. This workflow then
+# catches up: it notarizes the published `.dmg` files, staples the ticket into
+# them, and replaces the release assets in place. Users who download before it
+# lands get today's signed-but-unnotarized DMG; everyone after gets a clean
+# first launch, with no new version and no human involvement.
+#
+# WHAT IT TOUCHES
+# ---------------
+# Only the `.dmg` assets. `latest.json` points exclusively at the `.app.tar.gz`
+# bundles, and the updater verifies our minisign signature rather than Apple's
+# ticket — so auto-update is entirely outside this workflow's blast radius, and
+# re-tarring/re-signing the app (the one thing that could silently kill updates)
+# never happens here.
+#
+# IT DOES NOT PILE UP SUBMISSIONS
+# -------------------------------
+# Each run first looks the DMG up in `notarytool history` by filename:
+#   already stapled  -> exit immediately (a ~30s no-op)
+#   Accepted         -> staple the existing ticket, never resubmit
+#   In Progress      -> wait on that submission id
+#   anything else    -> submit once
+# So a retry resumes the pending submission instead of adding another to a queue
+# that is already the bottleneck.
+on:
+  # Fires after release.yml finishes. Note this cannot be `on: release`: releases
+  # created with GITHUB_TOKEN deliberately do not trigger further workflows.
+  workflow_run:
+    workflows: ['release']
+    types: [completed]
+  # Self-healing retry. While Apple is slow, this keeps trying until the tickets
+  # land; once they have, every run is an immediate no-op.
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to notarize (blank = latest release)'
+        required: false
+        type: string
+      wait_minutes:
+        description: 'Minutes to wait for Apple before giving up'
+        required: false
+        default: '120'
+        type: string
+
+concurrency:
+  group: notarize-${{ github.event.inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  staple:
+    # A failed release has no assets to notarize. Tag pushes only — head_branch
+    # is the tag name for a tag-triggered run.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: macos-15
+    # Must exceed wait_minutes; the job ends as soon as the script does.
+    timeout-minutes: 350
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x64]
+
+    steps:
+      - name: Resolve target tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_run" ]; then
+            TAG="$RUN_TAG"
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(gh release view --json tagName -q .tagName)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Target release: $TAG"
+
+      - name: Download the DMG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          gh release download "$TAG" --pattern "*_${ARCH}.dmg" --dir dl --clobber
+          ls -la dl
+
+      - name: Notarize and staple
+        id: staple
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ARCH: ${{ matrix.arch }}
+          WAIT_MINUTES: ${{ github.event.inputs.wait_minutes || '120' }}
+        run: |
+          set -uo pipefail
+
+          DMG=$(ls dl/*_"${ARCH}".dmg 2>/dev/null | head -1)
+          if [ -z "$DMG" ]; then
+            echo "No *_${ARCH}.dmg in this release." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          BASE=$(basename "$DMG")
+          AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          echo "dmg=$BASE" >> "$GITHUB_OUTPUT"
+
+          note() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+            echo "$BASE already carries a stapled ticket — nothing to do."
+            note "✅ \`$BASE\` — already stapled."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Reuse an existing submission for this exact filename rather than
+          # adding another to Apple's queue.
+          HISTORY=$(xcrun notarytool history "${AUTH[@]}" --output-format json 2>/dev/null || echo '{}')
+          ENTRY=$(echo "$HISTORY" | jq -c --arg n "$BASE" \
+            '[(.history // [])[] | select(.name == $n)] | sort_by(.createdDate) | last // {}')
+          ID=$(echo "$ENTRY" | jq -r '.id // empty')
+          STATUS=$(echo "$ENTRY" | jq -r '.status // empty')
+          echo "Prior submission for $BASE: ${STATUS:-none} ${ID:-}"
+
+          case "$STATUS" in
+            Accepted)
+              echo "Reusing accepted submission $ID."
+              ;;
+            "In Progress")
+              echo "Resuming submission $ID (waiting up to ${WAIT_MINUTES}m)."
+              xcrun notarytool wait "$ID" "${AUTH[@]}" --timeout "${WAIT_MINUTES}m"
+              ;;
+            Invalid|Rejected)
+              # Resubmitting a rejected bundle just fails again on a 6-hourly
+              # loop. A real fix ships as a new version, i.e. a new filename.
+              note "❌ \`$BASE\` — a previous submission came back **$STATUS** (\`$ID\`); not resubmitting. Fix the bundle and cut a new release."
+              xcrun notarytool log "$ID" "${AUTH[@]}" || true
+              exit 1
+              ;;
+            *)
+              echo "Submitting $BASE (waiting up to ${WAIT_MINUTES}m)."
+              OUT=$(xcrun notarytool submit "$DMG" "${AUTH[@]}" --output-format json)
+              echo "$OUT"
+              ID=$(echo "$OUT" | jq -r '.id // empty')
+              if [ -z "$ID" ]; then
+                note "❌ \`$BASE\` — upload failed, no submission id."
+                exit 1
+              fi
+              xcrun notarytool wait "$ID" "${AUTH[@]}" --timeout "${WAIT_MINUTES}m"
+              ;;
+          esac
+
+          FINAL=$(xcrun notarytool info "$ID" "${AUTH[@]}" --output-format json | jq -r '.status // "Unknown"')
+          echo "Final status: $FINAL"
+
+          if [ "$FINAL" != "Accepted" ]; then
+            if [ "$FINAL" = "In Progress" ]; then
+              note "⏳ \`$BASE\` — still queued at Apple after ${WAIT_MINUTES}m (submission \`$ID\`). The next scheduled run resumes this same submission."
+            else
+              note "❌ \`$BASE\` — notarization returned **$FINAL** (submission \`$ID\`)."
+              xcrun notarytool log "$ID" "${AUTH[@]}" || true
+            fi
+            exit 1
+          fi
+
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl -a -t open --context context:primary-signature -v "$DMG"
+          note "✅ \`$BASE\` — notarized and stapled (submission \`$ID\`)."
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Replace the release asset
+        if: steps.staple.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          DMG: ${{ steps.staple.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" "dl/$DMG" --clobber
+          echo "Replaced $DMG on $TAG with the stapled build." >> "$GITHUB_STEP_SUMMARY"
