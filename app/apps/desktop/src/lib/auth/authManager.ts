@@ -8,7 +8,27 @@
 import { ApiClient, DEFAULT_SERVER_URL, type AuthUser, type SessionInfo } from "../api";
 import * as ipc from "../ipc";
 
-const KEY_PREFIX = "session:";
+/**
+ * Keychain key namespace. Bumped from `session:` when macOS builds started being
+ * signed with a Developer ID certificate (v0.1.10).
+ *
+ * A macOS keychain item's ACL is bound to the code identity of the app that
+ * CREATED it. Every build up to and including v0.1.8 was ad-hoc signed
+ * (`Signature=adhoc`, no team), so the items those builds wrote are owned by an
+ * identity the signed app cannot match. Reading one back does not fail quietly —
+ * macOS puts up "Baalda wants to use your confidential information", asking for
+ * the user's *login keychain password*. That is indistinguishable from malware
+ * to most people, and denying it is worse than it looks: writing the session
+ * back needs the same ACL, so a denied user is asked to sign in on every launch,
+ * forever.
+ *
+ * Changing the prefix means the signed app looks up a key that does not exist —
+ * no item, no ACL check, no prompt. It signs in once and creates an item it
+ * genuinely owns, and is never prompted again. The orphaned `session:` items are
+ * left alone deliberately: deleting them needs the very permission we are
+ * avoiding asking for.
+ */
+const KEY_PREFIX = "session-v2:";
 
 export class AuthManager {
   /** The single shared client; the sync layer imports this too. */

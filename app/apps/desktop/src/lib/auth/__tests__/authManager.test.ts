@@ -55,11 +55,17 @@ describe("AuthManager.signInWithGoogle", () => {
     expect(ipc.openExternal).toHaveBeenCalledWith("https://accounts.google.com/authorize?x=1");
     // The one-time code from the loopback is exchanged.
     expect(api.exchangeDesktopCode).toHaveBeenCalledWith("code-xyz");
-    // The resulting session token is persisted to the OS keychain.
-    expect(ipc.keychainSet).toHaveBeenCalledWith(
-      expect.stringContaining("session:"),
-      "sess-1",
-    );
+    // The resulting session token is persisted to the OS keychain, under the
+    // per-server namespace. Asserted exactly rather than by substring: the
+    // prefix is versioned, and the ONLY thing that must never happen is
+    // reverting to the bare `session:` keys that pre-Developer-ID (ad-hoc
+    // signed) builds wrote — reading one of those makes macOS demand the user's
+    // login keychain password. See the KEY_PREFIX comment in authManager.ts.
+    const calls = vi.mocked(ipc.keychainSet).mock.calls;
+    const [key, value] = calls[calls.length - 1];
+    expect(value).toBe("sess-1");
+    expect(key).toBe("session-v2:http://localhost:3010");
+    expect(key.startsWith("session:")).toBe(false);
   });
 
   it("propagates a failure from the loopback wait (no token stored)", async () => {
