@@ -18,6 +18,29 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Submit to Apple for notarization (off ships signed-only)'
+        type: boolean
+        default: true
+
+# ── The notarization switch ───────────────────────────────────────────────────
+# Notarization is the ONE step that can wedge a release, and it fails outside our
+# control: Apple accepts a submission and then never processes it (see
+# docs/RELEASE.md → "When notarization hangs"). Tauri puts no timeout around it,
+# so a stuck submission used to consume the entire job.
+#
+# This is the master switch for TAG PUSHES. `workflow_dispatch` overrides it via
+# the input above.
+#
+#   yes → sign + notarize (the goal; a clean install with no Gatekeeper prompt)
+#   no  → sign only        (ships today; fresh downloads need right-click → Open)
+#
+# ⚠️ Currently 'no': Apple has not processed a submission from this account since
+# 2026-08-03. Flip back to 'yes' once `gh workflow run notary-probe.yml` shows the
+# queue draining — that is the whole cost of turning it back on.
+env:
+  NOTARIZE_ON_TAG: 'no'
 
 jobs:
   release:
@@ -89,7 +112,28 @@ jobs:
         working-directory: app
         run: pnpm install --frozen-lockfile
 
-      - uses: tauri-apps/tauri-action@v0
+      # Resolve the switch once, here, rather than repeating the expression on
+      # each step. A tag push reads NOTARIZE_ON_TAG; a manual run reads the input.
+      - name: Resolve notarization mode
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            want='${{ inputs.notarize }}'
+          else
+            want='${{ env.NOTARIZE_ON_TAG == 'yes' }}'
+          fi
+          echo "notarize=$want" >> "$GITHUB_OUTPUT"
+          echo "Notarization: $want"
+
+      # Two steps rather than one with conditional env, deliberately. Blanking
+      # APPLE_ID/PASSWORD/TEAM_ID does not reliably disable notarization — a GitHub
+      # expression yields an EMPTY STRING, not an unset variable, and "set but
+      # empty" is exactly the state the APPLE_CERTIFICATE note below warns about.
+      # An `if:` on the whole step cannot misfire.
+
+      - name: Build, sign and notarize
+        if: steps.cfg.outputs.notarize == 'true'
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Tauri updater signing key (minisign). Generated locally with
@@ -106,6 +150,31 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: app/apps/desktop
+          tagName: v__VERSION__
+          releaseName: 'Baalda v__VERSION__'
+          releaseBody: 'See the assets below to download and install this version.'
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      # Same build, minus the three notarization variables. Tauri logs
+      # "skipping app notarization, no APPLE_ID & APPLE_PASSWORD & APPLE_TEAM_ID"
+      # and produces a Developer ID signed, hardened-runtime bundle — everything
+      # Gatekeeper wants except the notarization ticket. Auto-update is unaffected
+      # (it verifies the minisign signature, not Apple's ticket); only fresh
+      # downloads prompt, and right-click → Open clears it.
+      - name: Build and sign (notarization skipped)
+        if: steps.cfg.outputs.notarize != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           projectPath: app/apps/desktop
           tagName: v__VERSION__

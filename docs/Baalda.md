@@ -104,7 +104,10 @@ topology) are covered in [[DEPLOY]]. The managed backend is live at `https://api
 the desktop app points at it (or at any self-hosted instance) via the server URL in Settings.
 
 Cutting a desktop release — the `v*` tag flow, updater vs. OS code signing, and the
-macOS notarization setup — is covered in [[RELEASE]].
+macOS notarization setup — is covered in [[RELEASE]]. It also carries the two runbooks
+you want when a release will not go out: what to check when **notarization hangs**
+(and what has already been ruled out), and how to **cut a release from your Mac**
+when CI cannot ship.
 
 ---
 
