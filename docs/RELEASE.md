@@ -108,6 +108,34 @@ Reported waits on new accounts run to ~4 days before the backlog clears and norm
 minutes-long turnaround begins. Apple's own escalation threshold is **one week** —
 below that, Developer Support will tell you to wait.
 
+### Slow is not the same as wedged (learned on v0.1.12)
+
+The release job has **no `timeout-minutes`** — it runs to GitHub's 6-hour default.
+That is deliberate, and it replaced a 120-minute cap that was actively harmful.
+
+v0.1.12 is the case that settled it. Both macOS jobs died in `Notarizing`: the
+aarch64 job hit the 120-minute cap at 1h55m, and the x86_64 job died at 1h49m when
+`notarytool`'s status poll returned `NSURLErrorDomain -1009 … No network route` —
+a transient runner DNS failure, [known flaky](https://github.com/electron/notarize/issues/219)
+on GitHub's macOS images. Nothing published. But the probe run the next morning
+showed **both** submissions (`bd2708e5…`, `cfa7884f…`) as `Accepted`. We had thrown
+away a release Apple was in the middle of approving.
+
+So distinguish two failures that look identical in the log:
+
+- **Slow queue** — the submission is fine and will land; the only correct response
+  is to wait. Capping the job converts a slow success into a hard failure.
+- **Transient runner network error** — the poll dies mid-flight with a `-1009`
+  or `-1001`. The submission itself usually still completes; check `notarytool
+  history` before assuming the build was bad.
+
+Tauri has no retry or timeout around notarization polling. Its only lever is a
+`--no-wait` flag ([PR #13521](https://github.com/tauri-apps/tauri/pull/13521)),
+which skips stapling and so is not an option for us. Waiting is the whole strategy.
+
+**Before re-tagging after a notarization failure, always run the probe first.** If
+the failed run's submission id shows `Accepted`, Apple's queue is not your problem.
+
 Every layer on our side was tested and cleared when this first hit (v0.1.9/v0.1.10):
 
 | Suspect | Verdict |

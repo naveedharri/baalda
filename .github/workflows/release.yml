@@ -58,16 +58,20 @@ jobs:
   release:
     permissions:
       contents: write
-    # Build + sign takes ~7 minutes; Apple's notary service normally answers well
-    # inside 15. Without a bound, a wedged `notarytool` sits on the runner until
-    # the 6-hour default — v0.1.9 burned 50 minutes before erroring and v0.1.10
-    # was still hung at 69 (the runner had to kill the orphan process).
+    # No explicit timeout: the job runs to GitHub's 6-hour default, which is as
+    # close to "wait for Apple" as a hosted runner allows. Build + sign takes ~7
+    # minutes; the rest is Apple's notary queue, and we now know that queue is
+    # slow rather than dead.
     #
-    # 120 is a compromise between the two ways this goes wrong: too tight and a
-    # merely slow notary queue fails a release that would have succeeded; too
-    # loose and a wedged one holds a runner all afternoon before telling you
-    # what the probe could have in ten seconds.
-    timeout-minutes: 120
+    # A 120-minute cap used to live here, on the theory that a submission still
+    # pending after two hours was wedged forever. v0.1.12 disproved that: the cap
+    # killed the aarch64 job at 1h55m and a transient runner DNS error killed the
+    # x86_64 one at 1h49m, yet `notarytool history` later showed BOTH submissions
+    # Accepted. The cap was throwing away releases Apple was about to approve.
+    #
+    # Capping this bought nothing anyway — a failed run publishes nothing, so the
+    # only thing a short timeout saves is runner minutes, which are free on a
+    # public repo. Waiting is strictly better than re-tagging.
     strategy:
       fail-fast: false
       # One at a time. Both macOS jobs otherwise submit to Apple's notary service

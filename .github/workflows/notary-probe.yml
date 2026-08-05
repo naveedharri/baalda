@@ -5,12 +5,19 @@ name: notary-probe
 # What this established (2026-08-04):
 #   * every runner image reaches Apple in <2s, and the credentials authenticate
 #   * `notarytool submit` UPLOADS fine — a junk zip gets a submission id
-#   * but submissions are never PROCESSED: 4 of 5 sat "In Progress", two of them
-#     for 20 hours, including a 173-byte file that should be rejected instantly
+#   * but submissions were not being PROCESSED promptly: 4 of 5 sat "In Progress",
+#     two for 20 hours, including a 173-byte file that should be rejected instantly
 #
-# So the release hang is Apple-side queueing, not signing, credentials, runner
-# image, or concurrency — all of which were tested and cleared. This job now just
-# reports the current queue state so we can tell when Apple has drained it.
+# So the release hang was Apple-side queueing, not signing, credentials, runner
+# image, or concurrency — all of which were tested and cleared.
+#
+# Update (2026-08-05): the queue DRAINED. Every submission above reached a terminal
+# state — the junk zips `Invalid`, the real bundles `Accepted`, including both
+# v0.1.12 submissions whose release jobs had already been killed for taking too
+# long. Slow, never dead. See docs/RELEASE.md → "Slow is not the same as wedged".
+#
+# Run this FIRST after any notarization failure: if the failed run's submission id
+# comes back `Accepted`, the bundle was fine and only the job gave up.
 on:
   workflow_dispatch:
 
