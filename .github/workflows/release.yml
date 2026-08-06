@@ -5,9 +5,9 @@ name: release
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# This builds signed, notarized bundles for macOS (arm64 + x64) and publishes a
-# GitHub Release with the installers + latest.json (the updater manifest).
-# Windows and Linux are commented out of the matrix below — see the note there.
+# This builds bundles for macOS (arm64 + x64), Linux (x64) and Windows (x64) and
+# publishes a GitHub Release with the installers + latest.json (the updater
+# manifest). Only macOS is OS-signed; see the matrix note on what that means.
 #
 # ⚠️ The release goes live as soon as the build finishes — `releases/latest`
 # moves to it immediately and running apps pick up the update on their next
@@ -74,9 +74,15 @@ jobs:
     # public repo. Waiting is strictly better than re-tagging.
     strategy:
       fail-fast: false
-      # One at a time. Both macOS jobs otherwise submit to Apple's notary service
-      # concurrently under the SAME Apple ID, which is the one unusual thing about
-      # this setup and costs nothing to rule out. Serial adds ~7 minutes.
+      # One at a time, for two reasons now that the matrix is four wide:
+      #   1. Both macOS jobs otherwise submit to Apple's notary service
+      #      concurrently under the SAME Apple ID — the one unusual thing about
+      #      this setup, and it costs nothing to rule out.
+      #   2. Every job calls tauri-action, which creates the GitHub Release if it
+      #      does not exist yet. Run them in parallel and several race to create
+      #      the same tag. Serial means the first job creates it and the rest
+      #      upload into it.
+      # The cost is wall-clock: a full four-platform release runs ~35-45 min.
       max-parallel: 1
       matrix:
         include:
@@ -84,24 +90,48 @@ jobs:
             args: '--target aarch64-apple-darwin'
           - platform: 'macos-latest'
             args: '--target x86_64-apple-darwin'
-          # macOS only for now — macOS is the only platform with real OS signing
-          # wired up (Developer ID + notarization), so it's the only one we ship.
-          # Uncomment to resume Windows/Linux; the Linux dependency step below is
-          # already guarded by an `if` and stays inert until then.
-          # - platform: 'ubuntu-22.04'
-          #   args: ''
-          # - platform: 'windows-latest'
-          #   args: ''
+          - platform: 'ubuntu-22.04'
+            args: ''
+          - platform: 'windows-latest'
+            args: ''
+          # ── What "signed" means per platform ─────────────────────────────────
+          # macOS is the only one with real OS signing (Developer ID + notarized
+          # + stapled). Linux and Windows ship UNSIGNED, so a fresh download
+          # warns: Windows SmartScreen shows "unrecognized app" (More info → Run
+          # anyway) and Linux has no signing story to speak of. Fixing Windows
+          # means an Authenticode/EV cert in WINDOWS_CERTIFICATE — not wired up.
+          #
+          # Auto-update is unaffected on every platform: the updater verifies our
+          # minisign signature over the bundle, not any OS certificate.
+          #
+          # Linux is pinned to ubuntu-22.04, NOT ubuntu-latest, on purpose: a
+          # binary linked against a newer glibc refuses to start on older
+          # distros, so we build on the oldest image that still ships
+          # libwebkit2gtk-4.1-dev. That buys Ubuntu 22.04+/Debian 12+ coverage.
+          # ⚠️ Dated: GitHub begins deprecating the 22.04 image 2026-09-17 and
+          # removes it 2027-04-17 (actions/runner-images#14254). Before then,
+          # move to ubuntu-24.04 and accept the higher glibc floor, or build
+          # Linux in a container. Bump the `if:` on the deps step to match.
 
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
+      # Tauri v2's documented Ubuntu prerequisite set, plus patchelf (AppImage).
+      # Note webkit2gtk **4.1** and **ayatana**-appindicator: 4.0 and the plain
+      # libappindicator3-dev are the Tauri v1 packages and do not link here.
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            curl wget file patchelf
 
       # pnpm must be installed before setup-node: its pnpm cache support
       # shells out to the pnpm binary. The version comes from the

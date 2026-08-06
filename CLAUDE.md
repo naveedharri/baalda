@@ -14,9 +14,11 @@ edit together in real time. Every OSS competitor does one or the other; the whol
 Three pieces; this open-source repo holds the first two.
 
 - **Desktop app** (`app/apps/desktop`) — the product people install. Released by pushing a
-  `v*` tag: `.github/workflows/release.yml` builds signed, notarized (Developer ID)
-  installers for **macOS only** — Windows/Linux are commented out of the matrix — and
-  **publishes** a GitHub Release with `latest.json`.
+  `v*` tag: `.github/workflows/release.yml` builds installers for **macOS (arm64 + x64),
+  Linux x64 and Windows x64**, and **publishes** a GitHub Release with `latest.json`.
+  Only macOS is OS-signed (Developer ID + notarized + stapled); Linux/Windows ship
+  unsigned, so fresh downloads warn (SmartScreen) — auto-update is unaffected everywhere
+  because the updater checks our minisign signature, not an OS certificate.
   There is no draft/review gate — pushing a `v*` tag ships to every running app on its next
   updater poll (Tauri updater polls `releases/latest`).
 - **Backend server** (`app/apps/server`) — open source and self-hostable (Node + Postgres).

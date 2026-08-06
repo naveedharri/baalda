@@ -884,7 +884,7 @@ export function AuthDialog({
             <input
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
-              placeholder="http://localhost:3010"
+              placeholder="https://api.baalda.com"
               spellCheck={false}
             />
             <button

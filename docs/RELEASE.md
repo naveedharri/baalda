@@ -14,11 +14,35 @@ Then push a matching `v*` tag:
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` builds bundles for **macOS only** (arm64 + x64)
-and publishes a GitHub Release with the installers plus `latest.json` (the updater
-manifest). Windows and Linux are commented out of the build matrix — macOS is the
-only platform with OS signing wired up, so it's the only one we ship. Re-enable
-them by uncommenting the two matrix entries.
+`.github/workflows/release.yml` builds bundles for **macOS (arm64 + x64), Linux
+(x64) and Windows (x64)** and publishes a GitHub Release with the installers plus
+`latest.json` (the updater manifest).
+
+| Platform | Runner | Artifacts | OS signing |
+| --- | --- | --- | --- |
+| macOS arm64 | `macos-latest` | `.dmg`, `.app.tar.gz` | Developer ID + notarized + stapled |
+| macOS x64 | `macos-latest` | `.dmg`, `.app.tar.gz` | Developer ID + notarized + stapled |
+| Linux x64 | `ubuntu-22.04` | `.AppImage`, `.deb`, `.rpm` | **none** |
+| Windows x64 | `windows-latest` | `.exe` (NSIS), `.msi` | **none** |
+
+**Only macOS is OS-signed.** Windows downloads trip SmartScreen's "unrecognized
+app" warning (More info → Run anyway) until an Authenticode/EV certificate is
+wired into `WINDOWS_CERTIFICATE`; Linux has no signing story to wire up. That
+affects *fresh downloads only* — **auto-update is unaffected on every platform**,
+because the updater verifies our minisign signature over the bundle rather than
+any OS certificate.
+
+Jobs run one at a time (`max-parallel: 1`) because every job calls tauri-action,
+which creates the Release if it is missing — in parallel they race to create the
+same tag. Serial costs wall-clock: budget ~35-45 min for a four-platform release.
+
+**Linux is pinned to `ubuntu-22.04`, not `ubuntu-latest`,** because a binary
+linked against a newer glibc will not start on older distros; 22.04 is the oldest
+image still shipping `libwebkit2gtk-4.1-dev`, which buys Ubuntu 22.04+/Debian 12+
+coverage. ⚠️ GitHub begins deprecating that image **2026-09-17** and removes it
+**2027-04-17** ([runner-images#14254](https://github.com/actions/runner-images/issues/14254)).
+Before then either move to `ubuntu-24.04` and accept the higher glibc floor, or
+build Linux in a container — and update the `if:` on the Linux deps step to match.
 
 > ⚠️ **The release goes live automatically.** `releaseDraft` is `false`, so the
 > moment the build finishes `releases/latest` points at the new version and every
