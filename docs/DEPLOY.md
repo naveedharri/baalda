@@ -146,10 +146,17 @@ Its three variables are Railway template expressions, so **every deployment gets
 its own values** rather than inheriting the publisher's:
 
 ```
-DATABASE_URL     = ${{Postgres.DATABASE_URL}}
-JWT_SECRET       = ${{secret(32)}}
-BETTER_AUTH_URL  = https://${{RAILWAY_PUBLIC_DOMAIN}}
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+JWT_SECRET=${{secret(32)}}
+BETTER_AUTH_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}
 ```
+
+Paste that into the template's **Raw Editor** exactly as written — unquoted, and
+with no spaces around `=`. Railway's ENV parser keeps what it is given: padding
+around `=` can land a **leading space inside the value** (a `BETTER_AUTH_URL` of
+` https://…` breaks every invitation link), and `JWT_SECRET="…"` can bake literal
+quote characters into the signing secret. Reopen the Raw Editor after saving and
+check it shows three lines — pasting twice silently leaves duplicates.
 
 `${{secret(32)}}` is what makes the template safe to publish at all — a literal
 secret baked into a public template would let anyone mint a sync token for any
