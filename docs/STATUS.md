@@ -104,6 +104,13 @@ De-risk the hardest part before networking.
 - [x] Per-speaker leaky-bucket rate limit on the relay (the channel had no abuse guard before).
 - [x] Older clients are protected by a `hello` capability flag — a new *binary* frame would
   otherwise be misparsed as a doc update, and releases auto-update.
+- **Milestone:** two teammates in one vault, one holds the talk button, the other hears them
+  live with nothing written to disk on either side. ✔ (unit-tested end to end through the relay;
+  real-hardware audio between two machines still unverified)
+- **Known limitation:** revocation on the vault channel is TTL-bound (no `disconnectDoc`
+  equivalent), so a removed member can still receive broadcasts until their token expires
+  (≤600s). Pre-existing — `member-joined` behaves the same way — but louder for audio.
+- Specs: [[05-vault-sync-engine]] (transport), [[04-team-collaboration]] (membership gate)
 
 ### Phase 4: Polish / upgrades _(deferred)_ ⬜
 - [ ] Structural rich-text CRDT (y-prosemirror / `Y.XmlFragment`) for full WYSIWYG.

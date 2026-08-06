@@ -620,6 +620,15 @@ class VaultConnection {
       // Vault-wide, like member-joined: audio is addressed to the team, and
       // vault membership is already proven by the token behind every connection.
       //
+      // KNOWN LIMITATION, inherited from this channel rather than introduced
+      // here: membership revocation is TTL-bound. There is no `disconnectDoc`
+      // equivalent for the vault channel, so a just-removed member keeps its
+      // socket — and keeps receiving vault-wide broadcasts — until the socket
+      // drops or their vault token expires (`SYNC_TOKEN_TTL_SECONDS`, 600s by
+      // default). `member-joined` already behaves this way, but a name is a
+      // smaller leak than live audio. Closing it means force-closing vault
+      // sockets on member removal; tracked as follow-up work, not solved here.
+      //
       // Two gates. Never echo to the speaker — they are hearing themselves live
       // and a loopback would be an echo, not a feature. And only send to clients
       // that advertised `voice`: this is a new BINARY frame, which an older
