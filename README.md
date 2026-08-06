@@ -106,17 +106,17 @@ Everything else (the desktop app, the search index, the sync server) is a rebuil
 
 ## Tech stack
 
-| Layer | Choice |
-|---|---|
-| Desktop shell | **Tauri v2** (Rust core) |
-| UI | **React + Vite + TypeScript** |
-| Editor | **CodeMirror 6** |
-| Files & watcher | **Rust** (`std::fs` / `tokio::fs`) |
-| Local index | **SQLite** (FTS5 search + backlinks + tags) |
-| Real-time sync | **Yjs** CRDT + **Hocuspocus** server |
-| Database | **Postgres** (binary sync store) |
-| Accounts & teams | **Better Auth** (argon2id, organizations) |
-| AI access | **MCP** (Model Context Protocol) endpoint |
+| Layer | Choice | Why this one |
+| :--- | :--- | :--- |
+| Desktop shell | **Tauri v2** (Rust core) | Real filesystem access behind a web UI, in a fraction of Electron's footprint |
+| UI | **React + Vite + TypeScript** | Typed IPC boundary to Rust; the UI never touches the disk itself |
+| Editor | **CodeMirror 6** | The buffer *is* the Markdown — no rich-text model to translate through |
+| Files & watcher | **Rust** (`std::fs` / `tokio::fs`) | Atomic writes plus a debounced watcher, so edits from an AI or `git` are noticed |
+| Local index | **SQLite** (FTS5 search + backlinks + tags) | Entirely derived — deletable, and rebuilt from the `.md` files on demand |
+| Real-time sync | **Yjs** CRDT + **Hocuspocus** server | A human typing and an AI rewriting a paragraph merge as operations, not overwrites |
+| Database | **Postgres** (binary sync store) | Holds opaque Yjs updates only; your Markdown never travels the wire |
+| Accounts & teams | **Better Auth** (argon2id, organizations) | Vaults map onto organizations, with per-folder permissions layered on top |
+| AI access | **MCP** (Model Context Protocol) endpoint | Cloud agents get a vault through the same ACL that governs people |
 
 ---
 
