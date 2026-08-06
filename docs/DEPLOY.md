@@ -133,9 +133,10 @@ Settings.
 
 ### Option B (one-click)
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/CZ25Mu?referralCode=t4V3Hc&utm_medium=integration&utm_source=template&utm_campaign=generic)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/baalda-server?utm_medium=integration&utm_source=button&utm_campaign=baalda)
 
-Template **`CZ25Mu`** — two services, no manual configuration:
+Template [**`baalda-server`**](https://railway.com/deploy/baalda-server) — two
+services, no manual configuration:
 
 | Service | What the deploy does |
 | --- | --- |
@@ -179,6 +180,17 @@ There is no API or CLI path to publishing: `railway deploy` *consumes* a templat
 by code, the `railway mcp` server exposes only `deploy_template`/`search_templates`,
 and `backboard.railway.com/graphql/v2` rejects non-browser clients (403). It is a
 dashboard-only operation.
+
+⚠️ **Publishing changes the URL.** An unpublished template is reachable at a random
+code (`/deploy/CZ25Mu`); publishing moves it to the vanity slug (`/deploy/baalda-server`)
+and the old code stops resolving — it silently serves Railway's generic landing page
+rather than 404ing, so a stale button looks fine in Markdown and is dead on click.
+After any republish, re-check the link:
+
+```bash
+curl -sL https://railway.com/deploy/baalda-server | grep -o '<title>[^<]*</title>'
+# expect: <title>Deploy &amp; Host Baalda Server | Railway</title>
+```
 
 > ⚠️ **Never use "generate template from this project" on the project that runs
 > the managed instance.** That flow copies a real project's service configuration,

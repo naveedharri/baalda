@@ -169,7 +169,7 @@ To run a server for your team without managing machines, deploy one to Railway i
 a click — it provisions Postgres, generates its own signing secret, runs the
 migrations and gives you an HTTPS URL:
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/CZ25Mu?referralCode=t4V3Hc&utm_medium=integration&utm_source=template&utm_campaign=generic)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/baalda-server?utm_medium=integration&utm_source=button&utm_campaign=baalda)
 
 Then paste that URL into the desktop app's **Server settings** and create an
 account. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for details.
