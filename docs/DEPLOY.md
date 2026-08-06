@@ -133,28 +133,17 @@ Settings.
 
 ### Option B (one-click)
 
-<!-- BUTTON: once the template is published, replace TEMPLATE_CODE below and
-     mirror the same markup into README.md where the placeholder comment sits.
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/TEMPLATE_CODE?utm_medium=integration&utm_source=button&utm_campaign=baalda)
--->
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/CZ25Mu?referralCode=t4V3Hc&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
-A one-click button needs a **published Railway template**, which only exists
-after publishing from a Railway account — the template code is generated at
-publish time, so it cannot be checked in ahead of time. The Railway CLI cannot do
-this (`railway deploy` *consumes* a template; it does not create one).
+Template **`CZ25Mu`** — two services, no manual configuration:
 
-**Publish it by hand, once** — Railway dashboard → **Templates → New Template**:
-
-| Field | Value |
+| Service | What the deploy does |
 | --- | --- |
-| Service 1 | **Postgres** (Railway's own database) |
-| Service 2 source | GitHub repo `naveedharri/baalda` |
-| Service 2 name | `baalda-server` |
-| Healthcheck path | `/health` (already in `railway.json`) |
-| Attach public domain | **yes**, on `baalda-server` only |
+| `Postgres` | Railway's Postgres, volume at `/var/lib/postgresql/data` |
+| `baalda` | Builds `app/apps/server/Dockerfile` from this repo, gets an HTTPS domain |
 
-Then set these three variables on `baalda-server`, using Railway's template
-expressions so each deploy gets its own values rather than yours:
+Its three variables are Railway template expressions, so **every deployment gets
+its own values** rather than inheriting the publisher's:
 
 ```
 DATABASE_URL     = ${{Postgres.DATABASE_URL}}
@@ -162,19 +151,32 @@ JWT_SECRET       = ${{secret(32)}}
 BETTER_AUTH_URL  = https://${{RAILWAY_PUBLIC_DOMAIN}}
 ```
 
-`${{secret(32)}}` is what keeps this safe to publish: every deployment generates
-its own signing secret instead of inheriting a shared one. Leave everything else
-unset — billing stays off (which means *no* limits), Google sign-in stays hidden,
-and Redis is only for multi-instance setups.
+`${{secret(32)}}` is what makes the template safe to publish at all — a literal
+secret baked into a public template would let anyone mint a sync token for any
+note on every instance deployed from it. Nothing else is set: billing stays off
+(so there are **no** vault or member limits), Google sign-in stays hidden until
+you add OAuth credentials, and Redis is only needed to run several instances.
 
-> ⚠️ **Do not use "generate template from this project" on the project that runs
-> the managed instance.** That flow copies an existing project's service
-> configuration, and publishing it would push a public marketplace template built
-> from production — env values, domain and all. Build the template fresh from the
-> repo instead, as above.
+Once it's up, put the generated `*.up.railway.app` URL into the desktop app's
+Server settings and create an account.
 
-Publishing yields a URL like `https://railway.com/new/template/AbCdEf`. Drop that
-code into the two places marked above and the button works.
+### Maintaining the template
+
+The service config lives in Railway's template editor, **not** in this repo — the
+only parts version-controlled here are `railway.json` (builder, pre-deploy
+migration, healthcheck) and the Dockerfile. Changing the required env vars means
+editing the template in the dashboard too, or one-click deploys will boot
+misconfigured.
+
+There is no API or CLI path to publishing: `railway deploy` *consumes* a template
+by code, the `railway mcp` server exposes only `deploy_template`/`search_templates`,
+and `backboard.railway.com/graphql/v2` rejects non-browser clients (403). It is a
+dashboard-only operation.
+
+> ⚠️ **Never use "generate template from this project" on the project that runs
+> the managed instance.** That flow copies a real project's service configuration,
+> and publishing it would push a public marketplace template built from production
+> — env values, domain and all. Always compose the template fresh, as above.
 
 ## Environment variables
 

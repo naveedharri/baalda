@@ -165,8 +165,17 @@ your own instance.
 
 ### I want my own hosted server
 
-To run a server for your team without managing machines, deploy one with Docker
-Compose — Postgres, migrations and the sync server come up together:
+To run a server for your team without managing machines, deploy one to Railway in
+a click — it provisions Postgres, generates its own signing secret, runs the
+migrations and gives you an HTTPS URL:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/CZ25Mu?referralCode=t4V3Hc&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+Then paste that URL into the desktop app's **Server settings** and create an
+account. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for details.
+
+Prefer your own machine? The Compose bundle brings up the same stack in one
+command:
 
 ```bash
 cd deploy/compose
@@ -175,14 +184,8 @@ docker compose up -d
 ```
 
 See [`deploy/compose/README.md`](deploy/compose/README.md) for TLS, backups and
-upgrades, or [`docs/DEPLOY.md`](docs/DEPLOY.md) for plain Docker, Railway and the
-full environment variable reference.
-
-<!-- Deploy on Railway button — replace TEMPLATE_CODE once the template is
-     published; see docs/DEPLOY.md → "Option B (one-click)" for the exact
-     services and variable expressions to publish it with.
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/TEMPLATE_CODE?utm_medium=integration&utm_source=button&utm_campaign=baalda)
--->
+upgrades, or [`docs/DEPLOY.md`](docs/DEPLOY.md) for plain Docker and the full
+environment variable reference.
 
 ---
 
