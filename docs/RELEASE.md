@@ -1,18 +1,42 @@
 # Releasing the Baalda desktop app
 
-The desktop app ships via a git tag. Bump the version in all four places — they
-must agree or the build fails the tag/version check:
+**The version bump *is* the release.** Bump it in all four places — they must
+agree or the build fails the tag/version check — and merge to `main`. There is no
+tag to push by hand: the workflow sees the version changed and tauri-action
+creates `v<version>` for you.
 
-- `app/apps/desktop/src-tauri/tauri.conf.json`
+- `app/apps/desktop/src-tauri/tauri.conf.json` ← the one the `gate` job reads
 - `app/apps/desktop/package.json`
 - `app/apps/desktop/src-tauri/Cargo.toml`
 - `app/apps/desktop/src-tauri/Cargo.lock` (the `desktop` package entry)
 
-Then push a matching `v*` tag:
-
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+# bump the four files to 0.2.0, then:
+git commit -am "Release v0.2.0" && git push origin main   # ← ships
 ```
+
+Run `pnpm install --frozen-lockfile` from `app/` after bumping. A desynced
+lockfile fails *every* platform job at the install step, several minutes in.
+
+### What triggers a release, and what doesn't
+
+| Event | Releases? |
+| --- | --- |
+| Merge to `main` **with** a changed `tauri.conf.json` version | ✅ builds + publishes |
+| Merge to `main` with the version unchanged (docs, refactors, fixes) | ❌ `gate` skips in ~15s |
+| Merge to `main` at a version that already has a release | ❌ refuses, won't overwrite |
+| Push a `v*` tag | ✅ forced, ignores the diff |
+| Actions → release → *Run workflow* | ✅ forced (and can turn notarization off) |
+
+Gating on the version is not caution, it's the only workable rule: the updater
+compares versions and the release is named `v__VERSION__`, so shipping main twice
+at one version would collide with the existing tag and hand clients an "update"
+they rightly ignore. The forced tag path exists to re-run a build that died for
+infrastructure reasons without burning a version number.
+
+A `concurrency: release` group means one release at a time, and `cancel-in-progress`
+is **false** on purpose — killing a run mid-notarization throws away an Apple
+submission already paid for in wall-clock.
 
 `.github/workflows/release.yml` builds bundles for **macOS (arm64 + x64), Linux
 (x64) and Windows (x64)** and publishes a GitHub Release with the installers plus

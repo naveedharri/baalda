@@ -1,20 +1,32 @@
 name: release
 
-# Cut a release by bumping the version in app/apps/desktop/src-tauri/tauri.conf.json
-# (and package.json), then pushing a matching tag:
-#
-#   git tag v0.2.0 && git push origin v0.2.0
+# Cut a release by bumping the version in the four places that must agree
+# (see docs/RELEASE.md) and merging to main. No tag to push by hand — the `gate`
+# job below notices the version changed and tauri-action creates `v<version>`.
 #
 # This builds bundles for macOS (arm64 + x64), Linux (x64) and Windows (x64) and
 # publishes a GitHub Release with the installers + latest.json (the updater
 # manifest). Only macOS is OS-signed; see the matrix note on what that means.
 #
+# ── Why merging to main does not *always* release ─────────────────────────────
+# It releases exactly when the version in tauri.conf.json changes, and that is
+# not a hedge — it is the only thing that can work. The updater compares versions
+# and tauri-action names the release `v__VERSION__`, so re-running main at an
+# unchanged version would collide with the tag that already exists and hand
+# clients a "new" release they correctly ignore. Bumping the version IS the
+# release trigger; a docs-only or refactor merge ships nothing.
+#
+# A `v*` tag push still forces a release, for re-running a build that failed for
+# infrastructure reasons without inventing a version number.
+#
 # ⚠️ The release goes live as soon as the build finishes — `releases/latest`
 # moves to it immediately and running apps pick up the update on their next
-# updater poll. There is no review step. Push a `v*` tag only when you mean to
+# updater poll. There is no review step. Bump the version only when you mean to
 # ship to everyone; set `releaseDraft: true` below if you want a manual gate.
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -23,6 +35,13 @@ on:
         description: 'Submit to Apple for notarization (off ships signed-only)'
         type: boolean
         default: true
+
+# One release at a time, and never cancel one in flight: a run killed mid-notarize
+# throws away an Apple submission we already waited on, and two concurrent runs
+# would race to create the same GitHub Release.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 # ── The notarization switch ───────────────────────────────────────────────────
 # Notarizing is part of releasing, not a follow-up. Tauri signs the `.app`,
@@ -55,7 +74,65 @@ env:
   NOTARIZE_ON_TAG: 'yes'
 
 jobs:
+  # Cheap (~15s) decision job so a docs-only merge does not spend 40 minutes of
+  # four-platform build time discovering it had nothing to ship.
+  gate:
+    name: Decide whether to release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      # depth 2 so we can diff this push's version against its parent.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Version changed?
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          CONF=app/apps/desktop/src-tauri/tauri.conf.json
+          version=$(jq -r .version "$CONF")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          say() {
+            echo "release=$1" >> "$GITHUB_OUTPUT"
+            echo "### $2" >> "$GITHUB_STEP_SUMMARY"
+            echo "$2"
+          }
+
+          # An explicit tag push means "ship this", regardless of the diff.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            say true "Tag push — releasing v$version"; exit 0
+          fi
+
+          # Manual dispatch is also explicit.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            say true "Manual dispatch — releasing v$version"; exit 0
+          fi
+
+          prev=$(git show "HEAD^:$CONF" 2>/dev/null | jq -r .version 2>/dev/null || echo none)
+          if [ "$version" = "$prev" ]; then
+            say false "Version unchanged at v$version — nothing to release"; exit 0
+          fi
+
+          # Belt and braces: never try to re-ship a version that already shipped.
+          # Protects against a revert-then-reapply, or a re-run of an old push.
+          if gh release view "v$version" >/dev/null 2>&1; then
+            say false "v$version is already released — refusing to overwrite it"; exit 0
+          fi
+
+          say true "Version $prev → $version — releasing v$version"
+
   release:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     permissions:
       contents: write
     # No explicit timeout: the job runs to GitHub's 6-hour default, which is as

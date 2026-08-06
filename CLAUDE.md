@@ -13,8 +13,10 @@ edit together in real time. Every OSS competitor does one or the other; the whol
 
 Three pieces; this open-source repo holds the first two.
 
-- **Desktop app** (`app/apps/desktop`) — the product people install. Released by pushing a
-  `v*` tag: `.github/workflows/release.yml` builds installers for **macOS (arm64 + x64),
+- **Desktop app** (`app/apps/desktop`) — the product people install. Released by a
+  version bump: bump `tauri.conf.json` (+ the other three files) and merge to `main` —
+  `.github/workflows/release.yml`'s `gate` job releases only when that version changed
+  (a `v*` tag still forces one). It builds installers for **macOS (arm64 + x64),
   Linux x64 and Windows x64**, and **publishes** a GitHub Release with `latest.json`.
   Only macOS is OS-signed (Developer ID + notarized + stapled); Linux/Windows ship
   unsigned, so fresh downloads warn (SmartScreen) — auto-update is unaffected everywhere
