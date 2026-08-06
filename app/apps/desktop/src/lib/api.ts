@@ -18,7 +18,15 @@
 // closed) plus "Load failed" on sign-in. Since self-hosting means the server URL
 // is not knowable at build time, connect-src allows `https:`/`wss:` broadly;
 // `script-src 'self'` stays the actual XSS boundary.
-export const DEFAULT_SERVER_URL = "http://localhost:3010";
+// The server a build points at before the user picks one in Settings. Dev talks
+// to the local stack; a RELEASE build has to default to a server that actually
+// exists for the person who just installed it — defaulting release builds to
+// localhost:3010 meant a fresh install could only ever report "Load failed"
+// until the user found Server settings on their own. Self-hosters override it
+// there; nothing here is pinned at build time beyond this default.
+export const DEFAULT_SERVER_URL = import.meta.env.DEV
+  ? "http://localhost:3010"
+  : "https://api.baalda.com";
 
 // ---- Types (mirror the server's JSON) -------------------------------------
 
