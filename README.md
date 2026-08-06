@@ -163,12 +163,26 @@ real-time team collaboration, and hosted AI. The desktop app is identical either
 way: in Settings, set the server URL to `https://api.baalda.com` (managed) or to
 your own instance.
 
-Want to run the server yourself in Docker or on Railway instead of your laptop?
-See [`docs/DEPLOY.md`](docs/DEPLOY.md).
+### I want my own hosted server
 
-<!-- Deploy on Railway button goes here once a template is published from the
-     Railway dashboard (Project → Settings → generate template). The button
-     URL is generated at publish time, so this stays a placeholder until then. -->
+To run a server for your team without managing machines, deploy one with Docker
+Compose — Postgres, migrations and the sync server come up together:
+
+```bash
+cd deploy/compose
+cp .env.example .env      # fill in POSTGRES_PASSWORD, JWT_SECRET, BETTER_AUTH_URL
+docker compose up -d
+```
+
+See [`deploy/compose/README.md`](deploy/compose/README.md) for TLS, backups and
+upgrades, or [`docs/DEPLOY.md`](docs/DEPLOY.md) for plain Docker, Railway and the
+full environment variable reference.
+
+<!-- Deploy on Railway button — replace TEMPLATE_CODE once the template is
+     published; see docs/DEPLOY.md → "Option B (one-click)" for the exact
+     services and variable expressions to publish it with.
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/TEMPLATE_CODE?utm_medium=integration&utm_source=button&utm_campaign=baalda)
+-->
 
 ---
 

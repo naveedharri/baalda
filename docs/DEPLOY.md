@@ -131,11 +131,50 @@ almost no manual configuration:
 Point the desktop app at the deployed server via the server URL field in
 Settings.
 
-Once this is stable, the maintainer can publish a **Railway template** from
-the dashboard (Project → Settings → generate template) to enable a true
-one-click "Deploy on Railway" button in the README. Until then, deploying
-from the git repo as above works the same way, just with a few manual
-clicks instead of one.
+### Option B (one-click)
+
+<!-- BUTTON: once the template is published, replace TEMPLATE_CODE below and
+     mirror the same markup into README.md where the placeholder comment sits.
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/TEMPLATE_CODE?utm_medium=integration&utm_source=button&utm_campaign=baalda)
+-->
+
+A one-click button needs a **published Railway template**, which only exists
+after publishing from a Railway account — the template code is generated at
+publish time, so it cannot be checked in ahead of time. The Railway CLI cannot do
+this (`railway deploy` *consumes* a template; it does not create one).
+
+**Publish it by hand, once** — Railway dashboard → **Templates → New Template**:
+
+| Field | Value |
+| --- | --- |
+| Service 1 | **Postgres** (Railway's own database) |
+| Service 2 source | GitHub repo `naveedharri/baalda` |
+| Service 2 name | `baalda-server` |
+| Healthcheck path | `/health` (already in `railway.json`) |
+| Attach public domain | **yes**, on `baalda-server` only |
+
+Then set these three variables on `baalda-server`, using Railway's template
+expressions so each deploy gets its own values rather than yours:
+
+```
+DATABASE_URL     = ${{Postgres.DATABASE_URL}}
+JWT_SECRET       = ${{secret(32)}}
+BETTER_AUTH_URL  = https://${{RAILWAY_PUBLIC_DOMAIN}}
+```
+
+`${{secret(32)}}` is what keeps this safe to publish: every deployment generates
+its own signing secret instead of inheriting a shared one. Leave everything else
+unset — billing stays off (which means *no* limits), Google sign-in stays hidden,
+and Redis is only for multi-instance setups.
+
+> ⚠️ **Do not use "generate template from this project" on the project that runs
+> the managed instance.** That flow copies an existing project's service
+> configuration, and publishing it would push a public marketplace template built
+> from production — env values, domain and all. Build the template fresh from the
+> repo instead, as above.
+
+Publishing yields a URL like `https://railway.com/new/template/AbCdEf`. Drop that
+code into the two places marked above and the button works.
 
 ## Environment variables
 
