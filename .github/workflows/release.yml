@@ -243,6 +243,11 @@ jobs:
       # each step. A tag push reads NOTARIZE_ON_TAG; a manual run reads the input.
       - name: Resolve notarization mode
         id: cfg
+        # REQUIRED on windows-latest, where the default shell is PowerShell and
+        # `if [ … ]; then` is a parse error ("Missing '(' after 'if'"). This step
+        # runs on every platform, so it killed the Windows job before it built
+        # anything the first time Windows was in the matrix.
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             want='${{ inputs.notarize }}'
