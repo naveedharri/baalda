@@ -34,10 +34,26 @@ export class MicPermissionError extends Error {
 /**
  * Start capturing. Each chunk is handed to `onChunk` with its sequence number.
  *
- * Rejects with {@link MicPermissionError} when the mic isn't available. On
- * macOS that is the likely first failure for anyone running a signed build
- * without `NSMicrophoneUsageDescription` and the `audio-input` entitlement —
- * see `src-tauri/Info.plist` and `entitlements.plist`.
+ * Rejects with {@link MicPermissionError} when the mic isn't available.
+ *
+ * PLATFORM STATE (verified 2026-08-06, wry 0.55.1 / tauri 2.11.5):
+ *
+ *  - **macOS** — needs `NSMicrophoneUsageDescription` (`src-tauri/Info.plist`)
+ *    and `com.apple.security.device.audio-input` (`entitlements.plist`); both
+ *    are now present. Older macOS 14.0–14.1 double-prompted (once at app level,
+ *    once at webview level); Apple fixed that around 14.2.
+ *  - **Windows / WebView2** — expected to prompt normally.
+ *  - **Linux / WebKitGTK** — the known weak spot. WebKitGTK only grants media
+ *    capture if the embedder answers `WebKitUserMediaPermissionRequest`, and
+ *    wry's expanded permission API (`PermissionKind`, `PermissionResponse::Prompt`
+ *    across WebView2/WKWebView/WebKitGTK) landed in **wry 0.56.0**, which is
+ *    NEWER than the 0.55.1 this app pins. Users have reported Tauri v2 apps on
+ *    WebKitGTK getting no prompt and no access at all. So expect this to reject
+ *    on Linux until wry is bumped — which is exactly why the failure is surfaced
+ *    as a message in the UI rather than swallowed.
+ *
+ * Untested on real Windows/Linux hardware; treat the two non-macOS rows as
+ * expectations, not verified behaviour.
  */
 export async function startCapture(onChunk: ChunkSink): Promise<CaptureHandle> {
   let stream: MediaStream;
