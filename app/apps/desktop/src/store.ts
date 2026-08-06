@@ -24,6 +24,8 @@ import { vaultScopes } from "./lib/sync/vaultScope";
 import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
+import type { VoiceSpeaker } from "./lib/sync/docSession";
+import { MicPermissionError } from "./lib/voice/capture";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
 import {
   type ActivityStatus,
@@ -111,6 +113,16 @@ interface AppStore {
   /** Live "who's viewing what" roster (teammates only) — drives the sidebar
    *  presence dots on notes/folders. Empty when sync is off or disconnected. */
   vaultPresence: VaultPeer[];
+  /** Teammates transmitting right now (push-to-talk). Purely transient — this
+   *  is the only record a voice broadcast ever leaves anywhere. */
+  voiceSpeakers: VoiceSpeaker[];
+  /** True while this user is holding the talk button. */
+  broadcasting: boolean;
+  /** True when the vault channel is live, so talking would actually reach
+   *  someone. Mirrors the vault-wide channel, not the open note's socket. */
+  voiceReady: boolean;
+  /** Set when the mic couldn't be opened, so the UI can say why once. */
+  voiceError: string | null;
   /** Per-item accent colors (vault-local preference), path → color id. */
   itemColors: Record<string, string>;
   /** Custom sidebar arrangement (vault-local preference), parent → child order. */
@@ -164,6 +176,10 @@ interface AppStore {
   updateProfile: (input: { name?: string; image?: string | null }) => Promise<void>;
   setActivityStatus: (status: ActivityStatus) => void;
   setMentionSound: (enabled: boolean) => void;
+  /** Open the mic and start broadcasting to the vault (button pressed). */
+  startBroadcast: () => Promise<void>;
+  /** Stop broadcasting and release the mic (button released). */
+  stopBroadcast: () => Promise<void>;
   /** A teammate joined — show the celebration (banner + confetti + chime). */
   celebrateMemberJoined: (name: string) => void;
   /** Dismiss the join celebration (auto-fires after a few seconds). */
@@ -462,6 +478,10 @@ async function landInLastVault(get: () => AppStore): Promise<void> {
  *  repeat join resets it rather than stacking). */
 let memberJoinedTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** The in-flight push-to-talk capture, if the button is down. Module scope
+ *  rather than store state because it's a live mic handle, not view state. */
+let activeBroadcast: { stop: () => Promise<void> } | null = null;
+
 /** Bumped by every `setActiveOrganization`. A call whose captured generation no
  *  longer matches has been superseded by a newer switch and drops its remaining
  *  work rather than racing it to bind a folder / enable sync. */
@@ -552,6 +572,10 @@ export const useStore = create<AppStore>((set, get) => ({
   ...vaultScopedSyncReset(),
   lastSyncedAt: null,
   vaultPresence: [],
+  voiceSpeakers: [],
+  broadcasting: false,
+  voiceReady: false,
+  voiceError: null,
   itemColors: {},
   itemOrder: {},
   pendingVaultFolder: null,
@@ -749,6 +773,16 @@ export const useStore = create<AppStore>((set, get) => ({
     // Live sidebar presence — the vault channel tells us which teammate is
     // viewing which note; mirror the roster into the store for FileTree.
     syncManager.setVaultPresenceListener((peers) => set({ vaultPresence: peers }));
+    // Who's talking right now. Nothing is stored — this list empties itself as
+    // each transmission finishes playing.
+    syncManager.setVoiceListener((speaking) => set({ voiceSpeakers: speaking }));
+    // Push-to-talk rides the vault channel, so its availability tracks that
+    // channel — not the open note's socket, which may not exist at all.
+    syncManager.setVaultStatusListener((status) => {
+      const ready = status === "synced";
+      if (!ready && get().broadcasting) void get().stopBroadcast();
+      set({ voiceReady: ready });
+    });
     // Bulk-sync progress for the open vault. Both of these are already throttled
     // (~10 emissions/second) and batched by `SyncProgressReporter`, so a 500-note
     // run costs ~10 store writes per second rather than one per note.
@@ -902,6 +936,39 @@ export const useStore = create<AppStore>((set, get) => ({
   setMentionSound: (enabled) => {
     writeMentionSound(enabled);
     set({ mentionSound: enabled });
+  },
+
+  startBroadcast: async () => {
+    // Re-entrancy guard: key repeat fires press events continuously while held,
+    // and a second capture would open the mic twice and double every chunk.
+    if (get().broadcasting || activeBroadcast) return;
+    if (!syncManager.canBroadcastVoice()) {
+      set({ voiceError: "Not connected — nobody would hear you." });
+      return;
+    }
+    set({ broadcasting: true, voiceError: null });
+    try {
+      activeBroadcast = await syncManager.startBroadcast();
+    } catch (err) {
+      activeBroadcast = null;
+      set({
+        broadcasting: false,
+        voiceError:
+          err instanceof MicPermissionError && err.denied
+            ? "Microphone access is blocked. Enable it in your system settings."
+            : "Couldn't open the microphone.",
+      });
+      return;
+    }
+    // Released before the mic finished opening — don't leave it live.
+    if (!get().broadcasting) await get().stopBroadcast();
+  },
+
+  stopBroadcast: async () => {
+    const handle = activeBroadcast;
+    activeBroadcast = null;
+    set({ broadcasting: false });
+    if (handle) await handle.stop().catch(() => {});
   },
 
   celebrateMemberJoined: (name) => {

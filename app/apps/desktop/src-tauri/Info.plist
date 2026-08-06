@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Extra Info.plist keys merged into the macOS bundle by Tauri.
+
+  NSMicrophoneUsageDescription is what macOS shows the first time push-to-talk
+  opens the mic. It is not optional: without it the system terminates the app
+  the moment getUserMedia asks for audio, rather than showing a prompt. Pairs
+  with com.apple.security.device.audio-input in entitlements.plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Baalda uses your microphone only while you hold the talk button, to broadcast live audio to your vault. Nothing is recorded or stored.</string>
+</dict>
+</plist>

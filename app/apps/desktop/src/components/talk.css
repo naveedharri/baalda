@@ -1,0 +1,113 @@
+/* Push-to-talk control in the sidebar footer. Follows DESIGN-BRIEF: pill
+   button, violet accent for the live state, soft shadows, 4pt grid, tokens
+   only — no hardcoded colors, spacing, radii, or shadows. */
+
+.talk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.talk-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    border-color var(--t-fast);
+  /* Holding the button is a drag-like gesture; text selection fights it. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.talk-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.talk-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  box-shadow: none;
+}
+
+/* Live. Deliberately the loudest thing in the sidebar: an open mic the user has
+   forgotten about is the failure mode worth designing against. */
+.talk-btn.live {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+  animation: talk-pulse 1.6s ease-in-out infinite;
+}
+
+.talk-icon {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.talk-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.talk-speakers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+  padding: 0 var(--sp-1);
+}
+
+.talk-speaker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.talk-speaker-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  animation: talk-pulse 1.2s ease-in-out infinite;
+}
+
+.talk-error {
+  margin: 0;
+  padding: 0 var(--sp-1);
+  font-size: 0.75rem;
+  color: var(--danger);
+}
+
+@keyframes talk-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* Respect a reduced-motion preference: the pulse is decorative, and the colour
+   change alone still communicates "live". */
+@media (prefers-reduced-motion: reduce) {
+  .talk-btn.live,
+  .talk-speaker-dot {
+    animation: none;
+  }
+}

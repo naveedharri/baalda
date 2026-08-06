@@ -16,7 +16,12 @@ import {
   encodePubsubMemberJoined,
   encodePubsubPresence,
   encodePubsubPresenceQuery,
+  encodePubsubVoice,
+  encodeVoiceFrame,
   decodePubsub,
+  decodeVoiceFrame,
+  VOICE_FRAME,
+  VOICE_RATE_BYTES_PER_SEC,
   type ServerControl,
   type PresenceFrame,
 } from "./vault-protocol.js";
@@ -279,6 +284,9 @@ class VaultConnection {
    *  telling it to re-pull structural changes it made itself. Null ⇒ no
    *  self-exclusion, so it hears about everything (older clients). */
   private clientId: string | null = null;
+  /** Feature flags from `hello.caps`. Gates new binary frame types, which older
+   *  clients would misparse as doc updates (see {@link HelloFrame.caps}). */
+  private caps = new Set<string>();
   private readable = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private helloSeen = false;
@@ -292,6 +300,15 @@ class VaultConnection {
   private myPresence: { docId: string | null; name: string; color: string; status: string } | null =
     null;
   private announced = false;
+  // ---- inbound voice budget ----
+  // Nothing else on this channel is client-*originated* bulk traffic, so voice
+  // is the first thing here that needs a rate limit rather than just
+  // backpressure: a peer that ignores the intended cadence would otherwise
+  // amplify straight into every other member's socket. A plain leaky bucket —
+  // credit refills at VOICE_RATE_BYTES_PER_SEC, chunks over budget are dropped.
+  private voiceCredit = VOICE_RATE_BYTES_PER_SEC;
+  private voiceCreditAt = 0;
+  private voiceDropped = 0;
 
   // ---- outbound accounting (F2) ----
   /** Cumulative bytes handed to `ws.send()`. Monotonic. */
@@ -328,7 +345,12 @@ class VaultConnection {
 
     ws.on("message", (data, isBinary) => {
       this.alive = true; // traffic from the peer is proof of life, like a pong
-      if (isBinary) return; // clients only send the JSON hello; ignore stray binary
+      if (isBinary) {
+        // The only binary a client sends is a push-to-talk voice chunk; anything
+        // else on this path is stray and ignored.
+        this.onBinary(toBytes(data));
+        return;
+      }
       void this.onText(data.toString());
     });
     ws.on("pong", () => {
@@ -371,6 +393,7 @@ class VaultConnection {
     if (!hello) return this.fail("expected hello");
     this.helloSeen = true;
     this.clientId = hello.origin ?? null;
+    this.caps = new Set(hello.caps ?? []);
     clearTimeout(this.helloTimer);
 
     let claims;
@@ -411,6 +434,13 @@ class VaultConnection {
     this.send({ t: "ready" });
   }
 
+  /** Binary from the client. Only voice frames are defined; the leading type
+   *  byte leaves room for more without another compat break. */
+  private onBinary(bytes: Uint8Array): void {
+    if (this.closed || bytes.length === 0) return;
+    if (bytes[0] === VOICE_FRAME) this.handleVoice(bytes);
+  }
+
   /** A client announced which note it's now viewing. Stamp the authenticated
    *  userId (never trust the client's), fan it out to the vault, and — on the
    *  first announce — ask everyone else to re-announce so this newcomer learns
@@ -431,6 +461,77 @@ class VaultConnection {
       this.announced = true;
       void this.pubsub.publish(vaultTopic(this.vaultId), encodePubsubPresenceQuery());
     }
+  }
+
+  /**
+   * A push-to-talk chunk from this client. Re-frame it with the speaker stamped
+   * from the authenticated token — never from the payload, so a client cannot
+   * put words in a teammate's mouth — and fan it out to the vault.
+   *
+   * Deliberately NOT gated on the per-doc ACL that filters presence: a voice
+   * broadcast is addressed to the team, not to a note, so it follows
+   * `member-joined` and reaches every member of the vault. Membership is
+   * already proven by the vault token, which is the right granularity here.
+   *
+   * Audio is never written anywhere. If nobody is connected, it evaporates.
+   */
+  private handleVoice(bytes: Uint8Array): void {
+    if (!this.helloSeen || !this.userId || !this.vaultId) return;
+    const parsed = decodeVoiceFrame(bytes);
+    if (!parsed) return; // malformed or over the per-chunk cap
+    if (!this.admitVoice(parsed.audio.length)) return;
+    const { header, audio } = parsed;
+    const speaker = this.myPresence;
+    const out = encodeVoiceFrame(
+      {
+        s: header.s,
+        n: header.n,
+        ...(header.f === 1 ? { f: 1 as const } : {}),
+        ...(header.fmt ? { fmt: header.fmt } : {}),
+        ...(header.sr ? { sr: header.sr } : {}),
+        u: this.userId,
+        // Name/colour ride the opening chunk only — the receiver caches them for
+        // the rest of the transmission, so the other ~10 chunks a second stay lean.
+        ...(header.n === 0 && speaker?.name ? { m: speaker.name } : {}),
+        ...(header.n === 0 && speaker?.color ? { c: speaker.color } : {}),
+      },
+      audio,
+    );
+    void this.pubsub
+      .publish(vaultTopic(this.vaultId), encodePubsubVoice(out))
+      .catch((err) => console.error("Vault channel voice publish failed:", err));
+  }
+
+  /** Leaky-bucket admission for inbound audio. Returns false when this speaker
+   *  is over budget, in which case the chunk is dropped rather than queued —
+   *  delayed audio is worthless, so shedding beats buffering. */
+  private admitVoice(bytes: number): boolean {
+    const now = Date.now();
+    if (this.voiceCreditAt === 0) {
+      this.voiceCreditAt = now;
+    } else {
+      const elapsed = (now - this.voiceCreditAt) / 1000;
+      this.voiceCreditAt = now;
+      this.voiceCredit = Math.min(
+        VOICE_RATE_BYTES_PER_SEC,
+        this.voiceCredit + elapsed * VOICE_RATE_BYTES_PER_SEC,
+      );
+    }
+    if (this.voiceCredit < bytes) {
+      // Log once per run of drops, not once per chunk — a spamming client would
+      // otherwise turn our own logs into the amplification.
+      if (this.voiceDropped === 0) {
+        console.warn(
+          `Vault channel dropping voice over budget (user=${this.userId ?? "?"} ` +
+            `vault=${this.vaultId ?? "?"})`,
+        );
+      }
+      this.voiceDropped++;
+      return false;
+    }
+    this.voiceCredit -= bytes;
+    this.voiceDropped = 0;
+    return true;
   }
 
   /** Stream missing ops for every readable doc, priority docs first. */
@@ -513,6 +614,25 @@ class VaultConnection {
       if (presence.docId === null || this.readable.has(presence.docId)) {
         this.send({ t: "presence", ...presence });
       }
+      return;
+    }
+    if (msg.type === "voice") {
+      // Vault-wide, like member-joined: audio is addressed to the team, and
+      // vault membership is already proven by the token behind every connection.
+      //
+      // Two gates. Never echo to the speaker — they are hearing themselves live
+      // and a loopback would be an echo, not a feature. And only send to clients
+      // that advertised `voice`: this is a new BINARY frame, which an older
+      // client would push through `decodeUpdateFrame` and apply as a corrupt doc
+      // update.
+      if (msg.speakerId === this.userId) return;
+      if (!this.caps.has("voice")) return;
+      // Shed rather than queue when the socket is already at its bound. Late
+      // audio is worse than missing audio, and unlike a doc update there is
+      // nothing to resync — the chunk is simply gone, which is what "ephemeral"
+      // means here.
+      if (this.bufferedBytes() >= this.deps.sendCapBytes) return;
+      this.sendBinary(msg.frame);
       return;
     }
     if (msg.type === "presence-query") {
@@ -790,6 +910,18 @@ class VaultConnection {
       this.unsubscribe = null;
     }
   }
+}
+
+/** Normalize whatever `ws` hands a binary message handler (Buffer, ArrayBuffer,
+ *  or a fragment array) into one flat Uint8Array. */
+function toBytes(data: unknown): Uint8Array {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (Array.isArray(data)) return Buffer.concat(data as Buffer[]);
+  if (ArrayBuffer.isView(data)) {
+    const v = data as ArrayBufferView;
+    return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  }
+  return new Uint8Array(0);
 }
 
 /** Run `fn` over items with at most `limit` in flight. Errors are swallowed per

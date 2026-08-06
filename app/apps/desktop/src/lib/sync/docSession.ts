@@ -36,6 +36,16 @@ import {
   type VaultPeer,
   type VaultSyncStatus,
 } from "./vaultSyncEngine";
+import type { VoiceFrame } from "./vaultProtocol";
+import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
+import { VoicePlayer } from "../voice/playback";
+
+/** A teammate currently transmitting, for the "talking" indicator. */
+export interface VoiceSpeaker {
+  userId: string;
+  name: string;
+  color: string;
+}
 
 /** Basename of a vault-relative path (for the upload's x-file-name hint). */
 function baseName(relPath: string): string {
@@ -123,6 +133,22 @@ export class SyncManager {
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
+
+  // ---- push-to-talk voice ----
+  //
+  // Entirely ephemeral: the player holds only what is scheduled to play in the
+  // next second or so, and `voiceNames` is a display cache keyed by speaker.
+  // Nothing here is written to disk, the CRDT, or the index.
+  private readonly speakingIds = new Set<string>();
+  private readonly voiceNames = new Map<string, { name: string; color: string }>();
+  private onVoiceSpeakers?: (speaking: VoiceSpeaker[]) => void;
+  private readonly voicePlayer = new VoicePlayer({
+    onSpeakingChange: (userId, speaking) => {
+      if (speaking) this.speakingIds.add(userId);
+      else this.speakingIds.delete(userId);
+      this.emitVoiceSpeakers();
+    },
+  });
 
   // ---- bulk sync run (phase 2) ----
   //
@@ -721,6 +747,79 @@ export class SyncManager {
     this.onVaultPresence = cb;
   }
 
+  // ---- push-to-talk voice ------------------------------------------------
+
+  /**
+   * UI subscribes here to learn who is currently talking. Fires with the set of
+   * speaking user ids on every change, so the sidebar can light them up.
+   */
+  setVoiceListener(cb: ((speaking: VoiceSpeaker[]) => void) | undefined): void {
+    this.onVoiceSpeakers = cb;
+  }
+
+  /** True when the vault channel is live, i.e. talking would reach someone. */
+  canBroadcastVoice(): boolean {
+    return this.vaultEngine !== null && this.vaultStatus === "synced";
+  }
+
+  /**
+   * Open the mic and stream to the vault until the returned handle is stopped.
+   *
+   * One transmission per press. The stream id is minted here so every chunk of
+   * a single press-and-hold groups on the receiving end, and the format rides
+   * the opening chunk only.
+   */
+  async startBroadcast(): Promise<{ stop: () => Promise<void> }> {
+    if (!this.vaultEngine) throw new Error("not connected to a vault");
+    const engine = this.vaultEngine;
+    const streamId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let lastSeq = -1;
+
+    const capture = await startCapture((audio, seq) => {
+      lastSeq = seq;
+      engine.sendVoice(
+        { s: streamId, n: seq, ...(seq === 0 ? CAPTURE_FORMAT : {}) },
+        audio,
+      );
+    });
+
+    return {
+      stop: async () => {
+        await capture.stop();
+        // Always send a final marker, even with an empty payload: it's what
+        // closes the stream on every listener. Without it a receiver holds the
+        // "talking" indicator until its own timeout.
+        engine.sendVoice({ s: streamId, n: lastSeq + 1, f: 1 }, new Uint8Array());
+      },
+    };
+  }
+
+  /** Route one inbound chunk into the player and keep the speaking roster fresh. */
+  private handleVoice(frame: VoiceFrame): void {
+    const { header, audio } = frame;
+    const userId = header.u;
+    if (!userId) return;
+    if (header.m) this.voiceNames.set(userId, { name: header.m, color: header.c ?? "" });
+    this.voicePlayer.push({
+      streamId: header.s,
+      userId,
+      seq: header.n,
+      audio,
+      sampleRate: header.sr,
+      final: header.f === 1,
+    });
+  }
+
+  private emitVoiceSpeakers(): void {
+    this.onVoiceSpeakers?.(
+      [...this.speakingIds].map((id) => ({
+        userId: id,
+        name: this.voiceNames.get(id)?.name ?? "Someone",
+        color: this.voiceNames.get(id)?.color || colorForUser(id),
+      })),
+    );
+  }
+
   /** Record which note this client is now viewing (null = none) and broadcast it. */
   setViewing(docId: string | null): void {
     this.viewingDocId = docId;
@@ -801,6 +900,8 @@ export class SyncManager {
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
+      // A teammate is talking. Play it as it lands; nothing is kept.
+      onVoice: (frame) => this.handleVoice(frame),
       // Inbound backfill progress — the `downloading` half of the run's progress.
       onInboundProgress: (done, total) => this.handleInboundProgress(done, total, scope),
       // …and the edge that ends it.
@@ -814,6 +915,13 @@ export class SyncManager {
   private stopVaultEngine(): void {
     this.vaultEngine?.stop();
     this.vaultEngine = null;
+    // Cut any audio still playing: it belongs to the vault we're leaving, and
+    // hearing a teammate from the previous vault after switching would be a bug
+    // with an unpleasant privacy flavour.
+    this.voicePlayer.stopAll();
+    this.speakingIds.clear();
+    this.voiceNames.clear();
+    this.emitVoiceSpeakers();
     // Kick the durable manifest write FIRST, while this vault's epoch is still the
     // open one: the store's IPC is epoch-pinned, so a write issued after Rust has
     // swapped vaults is refused (benignly — the manifest just misses its last

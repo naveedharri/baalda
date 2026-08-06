@@ -90,6 +90,21 @@ De-risk the hardest part before networking.
 > local orphan only if the doc is still empty, preventing split-brain. Remote provider edits DO egest
 > to the local `.md` (only `'disk'`-origin changes are dropped).
 
+### Push-to-talk voice broadcast ✔
+- [x] Hold-to-talk on the vault relay: 16 kHz mono PCM16 chunks ride a new binary frame
+  (`VOICE_FRAME`) on `/vault-sync`, fanned out vault-wide via `PS_VOICE` like `member-joined`
+  (audio is addressed to the team, and the vault token already proves membership). The speaker
+  is stamped from the token, never trusted from the payload.
+- [x] **Nothing is persisted** — no blob, no row, no file, no history. A chunk is played and
+  dropped; a listener who was offline simply missed it. Adds no storage and no retention policy.
+- [x] Capture `getUserMedia` → `AudioWorklet` → downsample → PCM16; playback schedules buffers
+  back-to-back on an `AudioContext` cursor so the stream is gapless. Zero new dependencies:
+  no Opus/wasm encoder, no `MediaRecorder` container problem, no WebRTC/SFU. The `fmt` wire
+  field leaves room for a native WebCodecs Opus path later without a protocol change.
+- [x] Per-speaker leaky-bucket rate limit on the relay (the channel had no abuse guard before).
+- [x] Older clients are protected by a `hello` capability flag — a new *binary* frame would
+  otherwise be misparsed as a doc update, and releases auto-update.
+
 ### Phase 4: Polish / upgrades _(deferred)_ ⬜
 - [ ] Structural rich-text CRDT (y-prosemirror / `Y.XmlFragment`) for full WYSIWYG.
 - [ ] Vector / hybrid search (Orama) for semantic + AI retrieval.

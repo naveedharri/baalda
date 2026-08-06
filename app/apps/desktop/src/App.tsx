@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
+import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { Editor } from "./components/Editor";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -457,6 +458,7 @@ export default function App() {
         {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
         <FileTree />
         <div className="sidebar-footer">
+          <TalkButton />
           <AccountMenu />
         </div>
       </aside>

@@ -8,6 +8,20 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  build: {
+    /**
+     * Never inline the AudioWorklet module.
+     *
+     * It's ~2 KB, so Vite's default `assetsInlineLimit` turns it into a `data:`
+     * URL — and the Tauri CSP is `script-src 'self'`, which blocks a worklet
+     * loaded from `data:`. Push-to-talk then fails only in a packaged build,
+     * where `tauri dev` (which serves the file over http) looks fine. Keep it a
+     * real same-origin asset.
+     */
+    assetsInlineLimit: (filePath: string) =>
+      filePath.endsWith("recorder-worklet.js") ? false : undefined,
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
