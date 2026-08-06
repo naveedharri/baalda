@@ -1,0 +1,88 @@
+# Baalda server — production Compose bundle (server + Postgres).
+#
+#   cp .env.example .env    # then edit it: JWT_SECRET and POSTGRES_PASSWORD are required
+#   docker compose up -d
+#
+# This is the self-host path for people who want one command and a machine they
+# control. It is NOT the dev stack — `app/apps/server/docker-compose.yml` is that
+# one, and it runs Postgres alone so `pnpm run dev` can talk to it.
+#
+# What you get: Postgres with a persistent volume, migrations applied before the
+# server ever accepts traffic, and exactly one HTTP port exposed. The Hocuspocus
+# WebSocket rides that same port at /sync, so there is no second port to open and
+# no second hostname to configure.
+name: baalda
+
+# The server and the migration job are the same image with the same environment;
+# only the command differs. Anchors keep them from drifting apart.
+x-server-image: &server-image
+  build:
+    context: ../..
+    dockerfile: app/apps/server/Dockerfile
+
+x-server-env: &server-env
+  NODE_ENV: production
+  # Compose resolves this against the postgres service below, on the internal
+  # network — Postgres is never published to the host.
+  DATABASE_URL: postgres://baalda:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/baalda
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — openssl rand -base64 32}
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL:?set BETTER_AUTH_URL in .env — the public https URL clients reach}
+  PORT: "3010"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: baalda
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: baalda
+    volumes:
+      # Named volume, not a bind mount: this is the durable copy of every note's
+      # CRDT history. `docker compose down -v` deletes it. Back it up.
+      - baalda_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baalda -d baalda"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Runs to completion, then the server starts. Mirrors railway.json's
+  # `preDeployCommand`: schema changes land before anything serves traffic, so a
+  # deploy can never briefly answer requests against an old schema.
+  migrate:
+    <<: *server-image
+    command: ["node", "dist/db/migrate.js"]
+    environment: *server-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    <<: *server-image
+    environment: *server-env
+    # Bind to localhost by default. Putting this straight on 0.0.0.0 would serve
+    # the API over plain HTTP to the internet; terminate TLS in front of it (see
+    # the README) and let the proxy reach this port.
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-3010}:3010"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      # node's global fetch rather than curl — the runtime image is node:22-alpine
+      # and deliberately ships no HTTP client binaries.
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  baalda_pgdata:
