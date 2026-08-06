@@ -8,6 +8,16 @@
 // `Authorization: Bearer <token>` on every authenticated call. The token is
 // persisted in the OS keychain by the auth manager — never here.
 
+// ⚠️ Every call below is a WEBVIEW `fetch`, not Rust — we deliberately do not use
+// tauri-plugin-http. So the `connect-src` in tauri.conf.json's CSP has to permit
+// whatever server URL the user configures, or WebKit blocks the request before it
+// leaves the app and reports only `TypeError: Load failed` (no CORS hint, nothing
+// in the network tab). It bit us once: a CSP of `connect-src 'self' ipc: …` broke
+// ALL remote traffic in packaged builds while dev kept working, which surfaced as
+// a missing "Continue with Google" button (the capability probe below fails
+// closed) plus "Load failed" on sign-in. Since self-hosting means the server URL
+// is not knowable at build time, connect-src allows `https:`/`wss:` broadly;
+// `script-src 'self'` stays the actual XSS boundary.
 export const DEFAULT_SERVER_URL = "http://localhost:3010";
 
 // ---- Types (mirror the server's JSON) -------------------------------------
@@ -399,7 +409,12 @@ export class ApiClient {
       );
       return { emailPassword: data.emailPassword !== false, google: !!data.google };
     } catch {
-      // Older server without the endpoint: assume email/password only.
+      // Fails CLOSED, and deliberately so: an older/self-hosted server without
+      // this endpoint should hide the Google button rather than offer a route
+      // that cannot work. Note the cost of that choice — a plain network failure
+      // (server down, wrong URL, CSP blocking us) is indistinguishable here from
+      // "Google not configured", so a hidden Google button is not proof the
+      // server lacks it. Check /api/auth-methods with curl before believing it.
       return { emailPassword: true, google: false };
     }
   }
