@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
+import { AsyncButton } from "./components/AsyncButton";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { Editor } from "./components/Editor";
@@ -11,6 +13,7 @@ import { SyncBadge } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { SidebarResizer } from "./components/SidebarResizer";
+import { Toasts } from "./components/Toasts";
 import { VaultPicker } from "./components/VaultPicker";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
@@ -22,21 +25,65 @@ import { previewKind } from "./lib/preview";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { useStore } from "./store";
 
+/**
+ * Every banner in the app slides down out of the chrome it belongs to and
+ * collapses its own height on the way out.
+ *
+ * The height animation is the part that matters: a banner that appears with
+ * `display: none → block` shoves the editor down by 44px in one frame, and the
+ * eye reads that as the *content* jumping rather than as a message arriving.
+ * Animating `height` means the layout opens up for it, so attention follows the
+ * banner instead of chasing the text that moved.
+ */
+function Banner({
+  children,
+  show,
+  className = "",
+  role,
+}: {
+  children: React.ReactNode;
+  show: boolean;
+  className?: string;
+  role?: "status" | "alert";
+}) {
+  const reduceMotion = useReducedMotion();
+  return (
+    <AnimatePresence initial={false}>
+      {show && (
+        <motion.div
+          className="banner-slot"
+          initial={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
+          animate={reduceMotion ? { opacity: 1 } : { height: "auto", opacity: 1 }}
+          exit={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
+          transition={
+            reduceMotion
+              ? { duration: 0.12 }
+              : { type: "spring", stiffness: 380, damping: 34 }
+          }
+        >
+          <div className={`banner ${className}`.trim()} role={role}>
+            {children}
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
 function RemovedBanner() {
   const noteRemoved = useStore((s) => s.noteRemoved);
   const openNote = useStore((s) => s.openNote);
-  if (!noteRemoved || !openNote) return null;
   return (
-    <div className="banner">
+    <Banner show={!!noteRemoved && !!openNote}>
       <span>
-        <strong>{openNote.title}</strong> was deleted on disk.
+        <strong>{openNote?.title}</strong> was deleted on disk.
       </span>
       <div className="banner-actions">
         <button className="primary" onClick={() => useStore.getState().closeNote()}>
           Close note
         </button>
       </div>
-    </div>
+    </Banner>
   );
 }
 
@@ -50,9 +97,8 @@ function RemovedBanner() {
  */
 function DeletedByTeammateBanner() {
   const trashedTo = useStore((s) => s.noteRemovedByTeammate);
-  if (!trashedTo) return null;
   return (
-    <div className="banner">
+    <Banner show={!!trashedTo}>
       <span>
         A teammate deleted this note. Your copy was moved to <code>{trashedTo}</code>.
       </span>
@@ -64,7 +110,7 @@ function DeletedByTeammateBanner() {
           Dismiss
         </button>
       </div>
-    </div>
+    </Banner>
   );
 }
 
@@ -84,14 +130,14 @@ function MemberJoinedBanner() {
     return cancel;
   }, [memberJoined?.at]);
 
-  if (!memberJoined) return null;
-
   return (
     <>
-      <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
-      <div className="banner celebrate-banner" role="status">
+      {memberJoined && (
+        <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
+      )}
+      <Banner show={!!memberJoined} className="celebrate-banner" role="status">
         <span>
-          🎉 <strong>{memberJoined.name}</strong> joined the vault
+          🎉 <strong>{memberJoined?.name}</strong> joined the vault
         </span>
         <div className="banner-actions">
           <button
@@ -101,7 +147,7 @@ function MemberJoinedBanner() {
             Dismiss
           </button>
         </div>
-      </div>
+      </Banner>
     </>
   );
 }
@@ -146,9 +192,12 @@ function VaultFolderPrompt() {
           folder — separate from your other vaults.
         </p>
         <div className="vault-folder-actions">
-          <button
+          {/* Both of these open a vault: a native picker, then a full vault open
+              + reconcile. Easily a second or two, so each reports for itself. */}
+          <AsyncButton
             className="wf-btn wf-btn-primary"
             disabled={busy}
+            spinnerTone="on-accent"
             onClick={run(() => useStore.getState().chooseVaultFolder())}
           >
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -156,8 +205,8 @@ function VaultFolderPrompt() {
               <path d="M3 10h16.5a2 2 0 0 1 1.95 2.46l-1.1 5A2 2 0 0 1 18.4 19H5a2 2 0 0 1-2-2z" />
             </svg>
             <span>Open a folder…</span>
-          </button>
-          <button
+          </AsyncButton>
+          <AsyncButton
             className="wf-btn wf-btn-ghost"
             disabled={busy}
             onClick={run(() => useStore.getState().startEmptyVault())}
@@ -166,7 +215,7 @@ function VaultFolderPrompt() {
               <path d="M12 5v14M5 12h14" />
             </svg>
             <span>Start with an empty folder</span>
-          </button>
+          </AsyncButton>
         </div>
         {error && <p className="error">{error}</p>}
         {pending.previousOrgId && (
@@ -199,20 +248,20 @@ function UpdateBanner() {
 
   if (update.phase === "available") {
     return (
-      <div className="banner update-banner">
+      <Banner show className="update-banner">
         <span>
           A new version of {BRAND_NAME} (<strong>{update.version}</strong>) is
           available.
         </span>
         <div className="banner-actions">
-          <button className="primary" onClick={() => void installUpdate()}>
+          <AsyncButton className="primary" onClick={() => installUpdate()}>
             Install &amp; Restart
-          </button>
+          </AsyncButton>
           <button className="secondary" onClick={() => setDismissed(true)}>
             Later
           </button>
         </div>
-      </div>
+      </Banner>
     );
   }
 
@@ -222,13 +271,29 @@ function UpdateBanner() {
         ? Math.round((update.downloaded / update.total) * 100)
         : null;
     return (
-      <div className="banner update-banner">
+      <Banner show className="update-banner" role="status">
         <span>
           {update.phase === "installing"
             ? "Installing update — the app will restart…"
             : `Downloading update${pct != null ? ` — ${pct}%` : "…"}`}
         </span>
-      </div>
+        {/* A determinate bar when the server sent a content length, an
+            indeterminate sweep when it didn't. The distinction is worth the
+            extra rule: a bar that fills to an unknown target and stalls is
+            worse than one that never claimed to know. */}
+        <div
+          className={`update-progress${pct == null ? " indeterminate" : ""}`}
+          role="progressbar"
+          aria-valuenow={pct ?? undefined}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <span
+            className="update-progress-fill"
+            style={pct != null ? { width: `${pct}%` } : undefined}
+          />
+        </div>
+      </Banner>
     );
   }
 
@@ -264,6 +329,7 @@ function SyncIndicator() {
 export default function App() {
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
+  const switchingVault = useStore((s) => s.switchingVault);
   // An open image/PDF preview isn't a synced note — hide the save/sync chrome.
   const isPreview = openNote != null && previewKind(openNote.path) != null;
   const [booting, setBooting] = useState(true);
@@ -492,7 +558,13 @@ export default function App() {
       {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
       <aside className="sidebar">
         <SidebarHeader />
-        <FileTree />
+        {/* The tree still lists the OUTGOING vault's files until the folder
+            swaps, so a switch fades it and stops taking clicks — opening a note
+            from a vault you're leaving would be cancelled by the epoch guard
+            anyway, and a row that highlights then does nothing reads as a bug. */}
+        <div className={`sidebar-tree-wrap${switchingVault ? " is-switching" : ""}`}>
+          <FileTree />
+        </div>
         <div className="sidebar-footer">
           <AccountMenu />
         </div>
@@ -569,6 +641,8 @@ export default function App() {
         </ErrorBoundary>
       )}
       <VaultFolderPrompt />
+      {/* Last child so it layers over everything without a z-index race. */}
+      <Toasts />
     </div>
   );
 }

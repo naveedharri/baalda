@@ -1,5 +1,7 @@
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
+import { Spinner } from "./Spinner";
 
 /**
  * Sidebar header: the name of the vault you're in, where it lives on disk,
@@ -18,19 +20,39 @@ export function SidebarHeader() {
   const session = useStore((s) => s.session);
   const organizations = useStore((s) => s.organizations);
   const syncEnabled = useStore((s) => s.syncEnabled);
+  const switching = useStore((s) => s.switchingVault);
+  const reduceMotion = useReducedMotion();
 
   if (!vault) return null;
 
   const activeOrg =
     organizations.find((o) => o.id === session?.activeOrganizationId) ?? null;
-  const name = syncEnabled && activeOrg ? activeOrg.name : vault.name;
+  // While a switch is in flight, name the vault we're going TO. This is an
+  // optimistic label, and deliberately so: the switch is many round trips, and
+  // showing the vault being left until the very last one is what made switching
+  // feel like it hadn't registered. If the switch fails the store clears the
+  // flag and this snaps back to the truth.
+  const name = switching?.name ?? (syncEnabled && activeOrg ? activeOrg.name : vault.name);
 
   return (
-    <div className="sidebar-header">
+    <div className={`sidebar-header${switching ? " is-switching" : ""}`}>
       <div className="sidebar-header-main">
-        <span className="vault-name" title={name}>
-          {name}
-        </span>
+        {/* Keyed on the name so a switch cross-fades between the two vaults
+            rather than swapping the text in place. */}
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.span
+            key={name}
+            className="vault-name"
+            title={name}
+            initial={reduceMotion ? false : { opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduceMotion ? undefined : { opacity: 0, y: 4 }}
+            transition={{ duration: reduceMotion ? 0 : 0.16, ease: [0.2, 0, 0, 1] }}
+          >
+            {name}
+          </motion.span>
+        </AnimatePresence>
+        {switching && <Spinner size="xs" tone="accent" className="vault-switch-spinner" />}
         <button
           className="icon-btn vault-reveal"
           title={`Open ${vault.path} in your file manager`}
@@ -56,7 +78,12 @@ export function SidebarHeader() {
         </button>
       </div>
       <div className="vault-line" title={vault.path}>
-        <span className="vault-path">{displayPath(vault.path)}</span>
+        {/* The path is the one thing that is genuinely still the OLD vault's
+            while switching — the folder hasn't swapped yet. Say so rather than
+            showing a path that contradicts the name above it. */}
+        <span className="vault-path">
+          {switching ? "Switching…" : displayPath(vault.path)}
+        </span>
       </div>
     </div>
   );

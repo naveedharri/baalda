@@ -21,6 +21,7 @@ import { WebGLGraphRenderer, type RenderNode } from "../lib/graph/webglRenderer"
 import { SimClient } from "../lib/graph/simClient";
 import { useStore } from "../store";
 import { GraphControls } from "./GraphControls";
+import { Spinner } from "./Spinner";
 import "./graph.css";
 
 // ---------------------------------------------------------------------------
@@ -40,13 +41,28 @@ const LABEL_FADE_END = 2.4; // camera.k at which labels are fully opaque (labelS
 const DEFAULT_FONT_FAMILY = "sans-serif";
 const FALLBACK_ACCENT = "#7f73ff";
 
-// Startup "come to life" burst. Deliberately gentle: the graph should ease open,
-// not explode. A big random kick reads as chaos rather than life, because every
-// node scatters in an unrelated direction at once — the settle that follows is
-// then large enough to look like a glitch. A small nudge over a slightly longer
-// window gives the same "it's alive" impression while staying legible.
-const INTRO_MS = 1600; // duration of the light flare + settle
-const INTRO_KICK = 7; // initial random velocity magnitude — a nudge, not a shake
+// The graph opens ALREADY SETTLED. It used to seed positions, kick every node
+// with a random velocity and then animate the whole layout finding its shape on
+// screen — which reads as the view detonating and reassembling itself, not as
+// something coming to life. Watching furniture arrange itself is not an intro;
+// it's a wait you're forced to watch, and it happens every single time you press
+// ⌘G on a graph whose shape you already know.
+//
+// So the settle now happens BEFORE the first frame (`presettle`), and the only
+// motion left on open is a soft fade + a barely-there scale — the "heartbeat".
+// The layout itself is static from frame one.
+// Must match the `graph-heartbeat` keyframes duration in graph.css — the CSS
+// drives the scale pulse, this drives the light pulse, and they have to peak
+// together or the graph reads as two effects rather than one heartbeat.
+const INTRO_MS = 1150;
+
+// Time budget for settling the layout before the first paint. This blocks the
+// UI thread, so it is a budget and not a tick count: small vaults converge in
+// well under it, and a big one stops early with alpha already low enough that
+// the remaining on-screen motion is a drift rather than a rearrangement.
+// ~650 ticks is full convergence at alphaDecay 0.0103 (see simulation.ts).
+const PRESETTLE_BUDGET_MS = 420;
+const PRESETTLE_MAX_TICKS = 700;
 
 // How hard a *data refresh* re-energizes the layout. The first build needs real
 // energy to find a shape from seeded positions; later rebuilds already have a
@@ -92,6 +108,46 @@ const EDGE_REST = "rgba(128,146,196,1)";
 function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * Run the force layout to equilibrium synchronously, before anything is drawn,
+ * so the graph's first frame is its final shape.
+ *
+ * `sim.tick(n)` is d3's own batch form — it advances the layout without
+ * dispatching tick events, which is exactly what a pre-settle wants (our
+ * renderer drives painting from its own rAF loop and must not run yet).
+ *
+ * Ticks are taken in small batches so the elapsed-time check is cheap relative
+ * to the work: `performance.now()` per tick would measure the clock as much as
+ * the physics. When the budget runs out we stop and leave the layout where it
+ * is — alpha is monotonically decreasing, so an early exit means "slightly warm"
+ * (a drift over a second) rather than "unsettled" (a visible rearrangement).
+ */
+/**
+ * The heartbeat envelope, 0 at rest and peaking on each beat. Two Gaussian bumps
+ * at the same instants as the `graph-heartbeat` keyframes: a strong one at 16%
+ * and a weaker one at 40%.
+ *
+ * Gaussians rather than the triangular ramps the keyframes use, because a
+ * brightness change wants softer shoulders than a scale change — a linear light
+ * ramp has a visible corner at the peak where a size ramp does not.
+ */
+function heartbeatEnvelope(t: number): number {
+  const bump = (center: number, width: number) =>
+    Math.exp(-(((t - center) / width) ** 2));
+  return Math.min(1, bump(0.16, 0.075) + 0.55 * bump(0.4, 0.06));
+}
+
+function presettle(sim: Simulation<SimNode, SimLink>): void {
+  const deadline = performance.now() + PRESETTLE_BUDGET_MS;
+  const BATCH = 20;
+  let ticks = 0;
+  while (ticks < PRESETTLE_MAX_TICKS && sim.alpha() > sim.alphaMin()) {
+    sim.tick(BATCH);
+    ticks += BATCH;
+    if (performance.now() >= deadline) break;
+  }
 }
 
 /** Parse "#rgb"/"#rrggbb" or "rgb()/rgba()" into [r,g,b] 0–255; grey on failure. */
@@ -344,6 +400,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   const webglNeedsFitRef = useRef(true);
 
   const { graph, loading, error, refresh } = useGraphData();
+  // Only the Web Worker path (8k+ nodes) can set this. Inline layouts are
+  // pre-settled synchronously before their first frame, so there is no window
+  // in which they'd need to hide; the worker has one, and this covers it.
+  const [settling, setSettling] = useState(false);
 
   // Settings live in BOTH a ref (read from inside the imperative canvas/sim
   // code, which can't see React state closures) and React state (drives the
@@ -441,6 +501,10 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           if (gen !== S.workerGen) return;
           S.workerActive = false;
           S.needsDraw = true;
+          // Settled: restart the entrance clock so the fade begins now rather
+          // than having elapsed invisibly while the worker was still working.
+          S.introStart = performance.now();
+          setSettling(false);
           requestDrawRef.current();
         },
       );
@@ -517,16 +581,18 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const first = !S.introKicked;
     sim.alpha(first ? REHEAT_FIRST : Math.max(sim.alpha(), REHEAT_REFRESH));
 
-    // First time real data lands: light the graph up. Give every node a small
-    // random velocity impulse and start the intro clock so the draw loop paints
-    // the light flare from all nodes, then it all settles.
-    if (!S.introKicked && visNodes.length > 0) {
-      for (const node of visNodes) {
-        const a = Math.random() * Math.PI * 2;
-        const m = Math.random() * INTRO_KICK;
-        node.vx += Math.cos(a) * m;
-        node.vy += Math.sin(a) * m;
-      }
+    // First time real data lands: settle the layout NOW, off-screen, so the
+    // first painted frame is the finished shape. The intro clock then drives a
+    // fade + hairline scale only — the graph does not move.
+    //
+    // Not done for the worker path: that exists precisely because ticking a
+    // 8k+ node layout on this thread would freeze the window, and blocking here
+    // would be the same freeze by another name. The worker settles it off-thread
+    // instead (see `worker.init(..., first)` below).
+    if (first && visNodes.length > 0) {
+      const willUseWorker =
+        !openNode && workerRef.current !== null && visNodes.length > WORKER_THRESHOLD;
+      if (!willUseWorker) presettle(sim);
       S.introKicked = true;
       S.introStart = performance.now();
     }
@@ -558,6 +624,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         .filter((l) => l.source !== undefined && l.target !== undefined);
       S.workerGen = worker.init(nodeSpec, linkSpec, s, 1200, 800, first);
       S.workerActive = true;
+      // A pre-settle is impossible here — blocking the thread for an 8k+ node
+      // layout is exactly the freeze the worker exists to avoid. So the reveal
+      // waits instead: hold the graph hidden through the FIRST settle and fade
+      // it in cool, rather than showing a huge field rearranging itself. Only
+      // the first build; later refreshes are small warm nudges (REHEAT_REFRESH)
+      // that must not blank a graph the user is already looking at.
+      if (first) setSettling(true);
     } else if (worker) {
       // Switched to local or a small enough set: park the worker.
       worker.stop();
@@ -854,14 +927,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const zoomLabelAlpha =
         ls <= 0 ? 0 : clamp((k - start) / (end - start), 0, 1);
 
-      // Startup burst: everything flares with extra light, then eases to rest.
+      // The light half of the heartbeat. The nodes brighten on the same two beats
+      // the CSS scales on, so the brain looks like it pulses rather than like it
+      // was merely animated in. The layout underneath does not move at all.
       const nowT = performance.now();
       const introT =
         S.introStart > 0 ? clamp((nowT - S.introStart) / INTRO_MS, 0, 1) : 1;
       const introEase = 1 - Math.pow(1 - introT, 3); // easeOutCubic
-      // Nodes are brightest at birth, but only modestly so — a 3.4× flare blew
-      // out to near-white and read as a flash rather than a fade-in.
-      const glowBoost = 1 + (1 - introEase) * 1.1;
+      const glowBoost = 1 + heartbeatEnvelope(introT) * 0.8;
 
       const nodeScale = s.nodeSize;
       const time = nowT / 1000;
@@ -1005,27 +1078,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       ctx!.globalCompositeOperation = "source-over";
       ctx!.restore();
 
-      // ---- Startup light flash (screen space, additive) ----
-      if (introT < 1) {
-        ctx!.save();
-        ctx!.globalCompositeOperation = "lighter";
-        const flash = Math.pow(1 - introEase, 2) * 0.4;
-        const cx = width / 2;
-        const cy = height * 0.44;
-        const g = ctx!.createRadialGradient(
-          cx,
-          cy,
-          0,
-          cx,
-          cy,
-          Math.max(width, height) * 0.6,
-        );
-        g.addColorStop(0, `rgba(160,180,235,${flash})`);
-        g.addColorStop(1, "rgba(160,180,235,0)");
-        ctx!.fillStyle = g;
-        ctx!.fillRect(0, 0, width, height);
-        ctx!.restore();
-      }
+      // The full-screen additive light flash that used to fire here is gone. It
+      // was the visual cover for the layout rearranging itself underneath, and
+      // with the layout now settled before the first frame there is nothing to
+      // cover — it just read as a flashbulb. The entrance is the wrapper's fade
+      // (`.graph-intro`) plus `glowBoost` above, and that is deliberately all.
     }
 
     // Global scope: draw every node on the GPU (auto-fit to the viewport for
@@ -1391,7 +1448,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         </button>
       </div>
 
-      <div className="graph-canvas-wrap">
+      {/* The "heartbeat": the settled layout eases up in opacity and by a
+          hairline of scale, once, on open. Done on the wrapper rather than in
+          either canvas so the 2D and WebGL paths get exactly the same entrance,
+          and so it costs one compositor animation instead of per-frame work. */}
+      <div
+        className={`graph-canvas-wrap graph-intro${settling ? " is-settling" : ""}`}
+      >
         <canvas className="graph-canvas" ref={canvasRef} />
         <canvas
           className="graph-canvas"
@@ -1483,6 +1546,17 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         {loading && (
           <div className="graph-state">
             <div className="graph-state-card">Loading graph…</div>
+          </div>
+        )}
+        {settling && !loading && (
+          <div className="graph-state">
+            {/* Big-vault path only. The worker is arranging the layout
+                off-thread; saying so beats revealing thousands of nodes in
+                motion, which is the thing this change exists to remove. */}
+            <div className="graph-state-card graph-settling">
+              <Spinner size="sm" tone="accent" />
+              Arranging {counts.nodes.toLocaleString()} notes…
+            </div>
           </div>
         )}
         {error && !loading && (

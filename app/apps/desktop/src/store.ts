@@ -36,6 +36,7 @@ import {
   writeMentionSound,
 } from "./lib/prefs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
+import { planLanding } from "./lib/vault/landing";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
 
@@ -83,6 +84,27 @@ interface AppStore {
   session: SessionInfo | null;
   serverUrl: string;
   authError: string | null;
+  /**
+   * A sign-in has landed but we're still resolving which vault to open (and
+   * possibly creating it, its folder, and its starter notes — a few seconds).
+   * Until it clears there is no vault, so `App` still renders the welcome
+   * screen; the picker reads this to say so rather than looking like the
+   * sign-in did nothing.
+   */
+  landingVault: boolean;
+  /**
+   * A vault switch is in flight, with the vault we're heading TO. Set before the
+   * first await of `setActiveOrganization` and cleared when it settles, so the
+   * chrome can rename itself to the destination immediately instead of showing
+   * the outgoing vault until the folder finally swaps.
+   */
+  switchingVault: { orgId: string; name: string } | null;
+  /**
+   * The note path currently being opened, if the open hasn't landed yet. Opening
+   * a note in a synced vault registers it server-side first (`openNoteByPath`),
+   * so a click can sit for a moment with nothing on screen acknowledging it.
+   */
+  openingNotePath: string | null;
   organizations: Organization[];
   members: Member[];
   pendingInvitations: Invitation[];
@@ -424,48 +446,65 @@ function forgetLastVault(orgId?: string): void {
  * opened on this device — instead of leaving them on whatever local folder
  * happened to be open. Restores only vaults we're still a member of; falls
  * back to syncing the open local vault when there's nothing to restore.
+ *
+ * The choice itself is `planLanding` (pure, unit-tested in `lib/vault/landing`);
+ * this is only its dispatcher. Signing in must ALWAYS end somewhere — never
+ * back on the signed-out welcome screen — so `createIfNone` is passed by the
+ * explicit auth actions (sign-in / sign-up / Google) but NOT by silent session
+ * restore at launch: "I just signed in" is a good reason to be given a vault,
+ * "the app reopened" is not.
  */
-async function landInLastVault(get: () => AppStore): Promise<void> {
-  const orgs = get().organizations;
-  // An explicit "open this vault" request (a remote vault clicked on the
-  // signed-out welcome screen, which routed through sign-in) wins over every
-  // other heuristic — that's the vault the user just asked for.
-  const requested = takePendingOpenVault();
-  if (requested && orgs.some((o) => o.id === requested)) {
-    await get().setActiveOrganization(requested);
-    return;
-  }
-  // The folder that's already open (App.tsx reopens the last one at launch) is
-  // the strongest signal for "the vault I was last in" — it unifies local
-  // and synced vaults under one recency signal.
-  const openPath = get().vault?.path ?? null;
-  const boundOrgOfOpen = openPath
-    ? (Object.entries(readOrgVaults()).find(([, p]) => p === openPath)?.[0] ?? null)
-    : null;
-
-  // 1) The open folder belongs to a synced vault → make it active + sync.
-  if (openPath && boundOrgOfOpen && orgs.some((o) => o.id === boundOrgOfOpen)) {
-    if (get().session?.activeOrganizationId === boundOrgOfOpen) {
-      await get().enableSyncForVault();
-    } else {
-      await get().setActiveOrganization(boundOrgOfOpen);
+async function landInLastVault(
+  get: () => AppStore,
+  opts: { createIfNone?: boolean } = {},
+): Promise<void> {
+  const action = planLanding({
+    orgIds: get().organizations.map((o) => o.id),
+    requestedOrgId: takePendingOpenVault(),
+    openPath: get().vault?.path ?? null,
+    orgVaults: readOrgVaults(),
+    activeOrganizationId: get().session?.activeOrganizationId ?? null,
+    rememberedOrgId: readLastVault(),
+    createIfNone: opts.createIfNone ?? false,
+  });
+  // Only the two actions that end with a vault on screen raise the flag, and
+  // only while they run: `stay-local`/`nothing` change nothing, so claiming to
+  // be "opening your vault" there would hang a spinner forever.
+  if (action.kind === "stay-local" || action.kind === "nothing") return;
+  useStore.setState({ landingVault: true });
+  try {
+    switch (action.kind) {
+      case "enable-sync":
+        await get().enableSyncForVault();
+        return;
+      case "switch":
+        await get().setActiveOrganization(action.orgId);
+        return;
+      case "create-first-vault":
+        // `createOrganization` routes through the switch path, so the new vault
+        // gets a folder under the vaults root, turns sync on, and the reconcile
+        // seeds welcome content into it. Failure is not fatal — the vault cap
+        // (402) or an offline server just leaves the picker up, where "New vault"
+        // still works — so it must never reject out of the sign-in itself.
+        try {
+          await get().createOrganization(FIRST_VAULT_NAME);
+        } catch (e) {
+          console.warn("[vault] could not create a first vault on sign-in", e);
+        }
+        return;
     }
-    return;
+  } finally {
+    useStore.setState({ landingVault: false });
   }
-
-  // 2) A local (unsynced) folder is open → keep it local. Don't pull the user
-  //    into a different vault just because they happen to be signed in.
-  if (openPath && !boundOrgOfOpen) return;
-
-  // 3) Nothing open → restore the session's active org, else the last vault
-  //    we used on this device (only if we're still a member).
-  const active = get().session?.activeOrganizationId ?? null;
-  const remembered = readLastVault();
-  const target =
-    (active && orgs.some((o) => o.id === active) ? active : null) ??
-    (remembered && orgs.some((o) => o.id === remembered) ? remembered : null);
-  if (target) await get().setActiveOrganization(target);
 }
+
+/**
+ * Name for the vault auto-created on a first sign-in. Deliberately not derived
+ * from the user's name: the display name becomes the folder slug
+ * (`uniqueFolderSlug`), and "Naveed's Vault" lands on disk as `naveed-s-vault`.
+ * Renaming a vault is one click in Vault Settings.
+ */
+const FIRST_VAULT_NAME = "My Vault";
 
 /** Auto-dismiss timer for the member-joined celebration (module-scoped so a
  *  repeat join resets it rather than stacking). */
@@ -559,6 +598,9 @@ export const useStore = create<AppStore>((set, get) => ({
   session: null,
   serverUrl: authManager.getServerUrl(),
   authError: null,
+  landingVault: false,
+  switchingVault: null,
+  openingNotePath: null,
   organizations: [],
   members: [],
   pendingInvitations: [],
@@ -724,33 +766,45 @@ export const useStore = create<AppStore>((set, get) => ({
 
   openNoteByPath: async (path) => {
     const epoch = get().vault?.epoch;
-    const meta = await ipc.getNoteMeta(path);
-    if (!sameVault(get, epoch)) return; // vault switched mid-open — drop it
-    const title = meta?.title ?? path.split("/").pop() ?? path;
-    // Ensure the note is registered server-side BEFORE the editor opens it, so
-    // its doc_id is known and the sync provider connects on first open.
-    // Only markdown notes sync — HTML pages are local files rendered in-app.
-    if (get().syncEnabled && path.toLowerCase().endsWith(".md")) {
-      try {
-        // Pass the local index doc_id so the server adopts the SAME id — the
-        // editor's bridge and the sync provider must key the note identically.
-        await syncManager.registry.registerNote(path, title, meta?.id);
-      } catch (e) {
-        console.warn("[sync] registerNote failed", e);
+    // Name the note being opened before the first await. In a synced vault this
+    // function makes a network call (`registerNote`) before `openNote` is set,
+    // so the row stays unselected and the editor keeps showing the previous note
+    // for the whole round trip — a click that visibly does nothing. The sidebar
+    // row and the editor both watch this and acknowledge the click at once.
+    set({ openingNotePath: path });
+    try {
+      const meta = await ipc.getNoteMeta(path);
+      if (!sameVault(get, epoch)) return; // vault switched mid-open — drop it
+      const title = meta?.title ?? path.split("/").pop() ?? path;
+      // Ensure the note is registered server-side BEFORE the editor opens it, so
+      // its doc_id is known and the sync provider connects on first open.
+      // Only markdown notes sync — HTML pages are local files rendered in-app.
+      if (get().syncEnabled && path.toLowerCase().endsWith(".md")) {
+        try {
+          // Pass the local index doc_id so the server adopts the SAME id — the
+          // editor's bridge and the sync provider must key the note identically.
+          await syncManager.registry.registerNote(path, title, meta?.id);
+        } catch (e) {
+          console.warn("[sync] registerNote failed", e);
+        }
+        if (!sameVault(get, epoch)) return;
       }
-      if (!sameVault(get, epoch)) return;
+      set({
+        openNote: { path, id: meta?.id ?? null, title },
+        noteRemoved: false,
+      });
+      // Tell teammates which note we're now viewing (drives their sidebar dots).
+      // The announced id must be the SERVER doc_id — see `viewingDocId`, which
+      // exists to hold that reasoning and a regression test for it.
+      syncManager.setViewing(
+        viewingDocId(meta?.id, syncManager.registry.getMapping(path)?.docId),
+      );
+      await get().refreshBacklinks();
+    } finally {
+      // Only the newest open clears it: two quick clicks would otherwise have the
+      // first one's completion cancel the second one's indicator.
+      if (get().openingNotePath === path) set({ openingNotePath: null });
     }
-    set({
-      openNote: { path, id: meta?.id ?? null, title },
-      noteRemoved: false,
-    });
-    // Tell teammates which note we're now viewing (drives their sidebar dots).
-    // The announced id must be the SERVER doc_id — see `viewingDocId`, which
-    // exists to hold that reasoning and a regression test for it.
-    syncManager.setViewing(
-      viewingDocId(meta?.id, syncManager.registry.getMapping(path)?.docId),
-    );
-    await get().refreshBacklinks();
   },
 
   refreshBacklinks: async () => {
@@ -873,8 +927,10 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshVault();
         await get().refreshBillingConfig();
-        // Open the vault they last used, rather than making them pick one.
-        await landInLastVault(get);
+        // Open the vault they last used, rather than making them pick one — and
+        // if the account has none yet, make one. Signing in never dead-ends back
+        // on the welcome screen.
+        await landInLastVault(get, { createIfNone: true });
         await get().refreshOrgBilling();
         await get().openWelcomeIfPresent();
       }
@@ -895,8 +951,9 @@ export const useStore = create<AppStore>((set, get) => ({
     if (session) {
       await get().refreshVault();
       await get().refreshBillingConfig();
-      // Open the vault they last used, rather than making them pick one.
-      await landInLastVault(get);
+      // Same as email sign-in: land in a vault, creating the first one if the
+      // account has none.
+      await landInLastVault(get, { createIfNone: true });
       await get().refreshOrgBilling();
       await get().openWelcomeIfPresent();
     }
@@ -911,7 +968,13 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshVault();
         await get().refreshBillingConfig();
+        // A brand-new account has nothing to restore, so this is what actually
+        // creates their first vault and opens it. Sign-up used to skip landing
+        // entirely, which is why signing up from the welcome screen returned you
+        // to the welcome screen.
+        await landInLastVault(get, { createIfNone: true });
         await get().refreshOrgBilling();
+        await get().openWelcomeIfPresent();
       }
     } catch (e) {
       set({ authError: errMsg(e) });
@@ -934,6 +997,7 @@ export const useStore = create<AppStore>((set, get) => ({
     set({
       session: null,
       authStatus: "signed-out",
+      landingVault: false,
       organizations: [],
       members: [],
       pendingInvitations: [],
@@ -1158,92 +1222,124 @@ export const useStore = create<AppStore>((set, get) => ({
     const gen = ++orgSwitchGen;
     const superseded = () => orgSwitchGen !== gen;
 
-    // Re-assert that the vault we're leaving solely owns its open folder,
-    // evicting any other vault still bound to it (this is what heals legacy
-    // state where several vaults collapsed onto one folder). Only do this
-    // when that vault ACTUALLY owns the open folder — if we're leaving a
-    // vault that never got its own folder (still on the pending prompt),
-    // the visible folder belongs to a *different* vault, so touching the
-    // binding here would wrongly steal it (and break Cancel → previous).
-    const currentVaultPath = get().vault?.path ?? null;
-    if (
-      previousOrgId &&
-      currentVaultPath &&
-      previousOrgId !== organizationId &&
-      readOrgVaults()[previousOrgId] === currentVaultPath
-    ) {
-      rememberOrgVault(previousOrgId, currentVaultPath);
-    }
-
-    // Stop syncing the vault we're leaving before anything else. Everything
-    // below awaits the network, and one branch swaps the Rust vault slot
-    // (applyVaultFolder) while the other leaves the old folder on screen with a
-    // different org active — in both cases the old vault's registry, engine and
-    // debounced pull must already be gone. `enableSyncForVault` re-arms sync for
-    // whatever vault we land in.
-    leaveVaultSync();
-    set(vaultScopedSyncReset());
-
-    await authManager.api.setActiveOrganization(organizationId);
-    if (superseded()) return;
-    const session = await authManager.currentSession();
-    if (superseded()) return;
-    set({ session });
-    await get().refreshVault();
-    if (superseded()) return;
-    // Seat usage + plan are per-vault, so refresh on every switch.
-    await get().refreshOrgBilling();
-    if (superseded()) return;
-
-    // Each vault owns its own local folder. If one is already bound, swap
-    // to it. If not, do NOT reuse the folder that's currently open — ask the
-    // user to choose one (or start empty) via the pending-folder prompt.
-    const path = readOrgVaults()[organizationId];
-    if (path) {
-      try {
-        await get().applyVaultFolder(organizationId, path);
-        return;
-      } catch (e) {
-        // The bound folder is unusable (moved, deleted, permissions). Don't
-        // return here: that left the user in a vault with no folder and sync
-        // off, with nothing on screen saying why. Fall through to the
-        // auto-folder path below, which re-creates it under the vaults root.
-        console.warn("[vault] bound folder unusable, re-creating", e);
-      }
-    }
-    const org = get().organizations.find((o) => o.id === organizationId);
-    const orgName = org?.name ?? "New vault";
-
-    // No folder bound yet. Give this vault one automatically and go straight
-    // in, rather than stopping on a "choose a folder" prompt.
-    //
-    // The prompt was a roadblock in the one flow that most needs to be
-    // frictionless: a teammate signing in for the first time doesn't yet have
-    // an opinion about which directory their shared vault lives in — they just
-    // want to be in it. A folder under the vaults root, named after the vault,
-    // is the answer they'd have picked anyway, and relocating it later is one
-    // item in the vault switcher menu.
-    //
-    // The prompt survives as the FALLBACK: if we can't create a folder (a bad
-    // vaults root, permissions), asking beats failing silently.
-    try {
-      const root = await ipc.getVaultsRoot();
-      if (superseded()) return;
-      const slug = uniqueFolderSlug(orgName, readOrgVaults());
-      await get().applyVaultFolder(organizationId, `${root}/${slug}`);
-      return;
-    } catch (e) {
-      console.warn("[vault] auto folder failed; asking instead", e);
-      if (superseded()) return;
-    }
+    // Announce the destination BEFORE the first await. A switch is many round
+    // trips (activate org → re-read session → roster → billing → open the folder
+    // → re-enable sync → reconcile), and until the folder actually swaps, the
+    // sidebar still shows the vault you just left. Clicking a vault and watching
+    // the old one sit there is indistinguishable from the click not registering,
+    // so the chrome reads this and renames itself to the target at once.
     set({
-      syncEnabled: false,
-      pendingVaultFolder: {
+      switchingVault: {
         orgId: organizationId,
-        orgName,
-        previousOrgId: previousOrgId === organizationId ? null : previousOrgId,
+        // Fall back to the locally-cached vault list for one we haven't listed
+        // yet (straight after a join): a generic label beats a blank one.
+        name:
+          get().organizations.find((o) => o.id === organizationId)?.name ??
+          readKnownVaults().find((v) => v.id === organizationId)?.name ??
+          "vault",
       },
     });
+    try {
+      await switchToOrg();
+    } finally {
+      // Only the newest switch may lower the flag. A superseded one landing late
+      // would otherwise declare the switch that replaced it finished.
+      if (!superseded()) set({ switchingVault: null });
+    }
+    return;
+
+    // The switch itself. Inlined as a closure rather than hoisted out of the
+    // store because it reads `get`/`set`/`previousOrgId`/`superseded` throughout;
+    // it exists purely so the `finally` above has a single place to hook, given
+    // the many early returns below.
+    async function switchToOrg(): Promise<void> {
+      // Re-assert that the vault we're leaving solely owns its open folder,
+      // evicting any other vault still bound to it (this is what heals legacy
+      // state where several vaults collapsed onto one folder). Only do this
+      // when that vault ACTUALLY owns the open folder — if we're leaving a
+      // vault that never got its own folder (still on the pending prompt),
+      // the visible folder belongs to a *different* vault, so touching the
+      // binding here would wrongly steal it (and break Cancel → previous).
+      const currentVaultPath = get().vault?.path ?? null;
+      if (
+        previousOrgId &&
+        currentVaultPath &&
+        previousOrgId !== organizationId &&
+        readOrgVaults()[previousOrgId] === currentVaultPath
+      ) {
+        rememberOrgVault(previousOrgId, currentVaultPath);
+      }
+
+      // Stop syncing the vault we're leaving before anything else. Everything
+      // below awaits the network, and one branch swaps the Rust vault slot
+      // (applyVaultFolder) while the other leaves the old folder on screen with a
+      // different org active — in both cases the old vault's registry, engine and
+      // debounced pull must already be gone. `enableSyncForVault` re-arms sync for
+      // whatever vault we land in.
+      leaveVaultSync();
+      set(vaultScopedSyncReset());
+
+      await authManager.api.setActiveOrganization(organizationId);
+      if (superseded()) return;
+      const session = await authManager.currentSession();
+      if (superseded()) return;
+      set({ session });
+      await get().refreshVault();
+      if (superseded()) return;
+      // Seat usage + plan are per-vault, so refresh on every switch.
+      await get().refreshOrgBilling();
+      if (superseded()) return;
+
+      // Each vault owns its own local folder. If one is already bound, swap
+      // to it. If not, do NOT reuse the folder that's currently open — ask the
+      // user to choose one (or start empty) via the pending-folder prompt.
+      const path = readOrgVaults()[organizationId];
+      if (path) {
+        try {
+          await get().applyVaultFolder(organizationId, path);
+          return;
+        } catch (e) {
+          // The bound folder is unusable (moved, deleted, permissions). Don't
+          // return here: that left the user in a vault with no folder and sync
+          // off, with nothing on screen saying why. Fall through to the
+          // auto-folder path below, which re-creates it under the vaults root.
+          console.warn("[vault] bound folder unusable, re-creating", e);
+        }
+      }
+      const org = get().organizations.find((o) => o.id === organizationId);
+      const orgName = org?.name ?? "New vault";
+
+      // No folder bound yet. Give this vault one automatically and go straight
+      // in, rather than stopping on a "choose a folder" prompt.
+      //
+      // The prompt was a roadblock in the one flow that most needs to be
+      // frictionless: a teammate signing in for the first time doesn't yet have
+      // an opinion about which directory their shared vault lives in — they just
+      // want to be in it. A folder under the vaults root, named after the vault,
+      // is the answer they'd have picked anyway, and relocating it later is one
+      // item in the vault switcher menu.
+      //
+      // The prompt survives as the FALLBACK: if we can't create a folder (a bad
+      // vaults root, permissions), asking beats failing silently.
+      try {
+        const root = await ipc.getVaultsRoot();
+        if (superseded()) return;
+        const slug = uniqueFolderSlug(orgName, readOrgVaults());
+        await get().applyVaultFolder(organizationId, `${root}/${slug}`);
+        return;
+      } catch (e) {
+        console.warn("[vault] auto folder failed; asking instead", e);
+        if (superseded()) return;
+      }
+      set({
+        syncEnabled: false,
+        pendingVaultFolder: {
+          orgId: organizationId,
+          orgName,
+          previousOrgId: previousOrgId === organizationId ? null : previousOrgId,
+        },
+      });
+    }
   },
 
   inviteMember: async (email, role) => {

@@ -10,6 +10,7 @@ import {
 } from "../store";
 import { AuthDialog } from "./AccountMenu";
 import { Wordmark } from "./Logo";
+import { Spinner } from "./Spinner";
 
 /**
  * A row in the welcome-screen list: either a plain local folder (a recent vault
@@ -79,6 +80,10 @@ function tidyPath(path: string): string {
 
 export function VaultPicker() {
   const authStatus = useStore((s) => s.authStatus);
+  // Sign-in succeeded and a vault is being resolved/created. There's no vault
+  // yet, so App still renders this screen — and without saying so, a sign-in
+  // that is working looks identical to one that silently did nothing.
+  const landingVault = useStore((s) => s.landingVault);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<RecentVault[]>([]);
@@ -88,6 +93,9 @@ export function VaultPicker() {
   // New-vault flow: null = idle; a string = chosen parent, awaiting a name.
   const [newParent, setNewParent] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  // Which recent-vault card is being opened, by its key. A single boolean would
+  // only tell the list to grey out; the point is to mark the row you clicked.
+  const [opening, setOpening] = useState<string | null>(null);
   // Recents are collapsed to the 3 most recent; "Load more" reveals the rest
   // inside a scroll area locked to the collapsed height so the logo/buttons
   // above never shift (the vault-picker card is vertically centered).
@@ -188,23 +196,28 @@ export function VaultPicker() {
   // (opening its folder + resyncing); if we're signed out, remember it and
   // prompt sign-in — landInLastVault opens it once the session lands.
   async function openEntry(e: PickerEntry) {
-    if (e.kind === "local") {
-      await reopenLocal(e.path);
-      return;
-    }
-    if (authStatus === "signed-in") {
-      setBusy(true);
-      setError(null);
-      try {
-        await useStore.getState().setActiveOrganization(e.orgId);
-      } catch (err) {
-        setError(String(err));
-      } finally {
-        setBusy(false);
+    setOpening(e.key);
+    try {
+      if (e.kind === "local") {
+        await reopenLocal(e.path);
+        return;
       }
-    } else {
-      requestOpenVault(e.orgId);
-      setSignInOpen(true);
+      if (authStatus === "signed-in") {
+        setBusy(true);
+        setError(null);
+        try {
+          await useStore.getState().setActiveOrganization(e.orgId);
+        } catch (err) {
+          setError(String(err));
+        } finally {
+          setBusy(false);
+        }
+      } else {
+        requestOpenVault(e.orgId);
+        setSignInOpen(true);
+      }
+    } finally {
+      setOpening(null);
     }
   }
 
@@ -229,8 +242,10 @@ export function VaultPicker() {
   }
 
   const naming = newParent !== null;
-  // The naming step is showing — hide the recents/hint behind it.
-  const inFlow = naming;
+  // The naming step or the post-sign-in landing is showing — hide the
+  // recents/hint/sign-in behind it. Offering "New vault" while we are already
+  // making one is how you end up with two.
+  const inFlow = naming || landingVault;
 
   // Merge synced (remote) vaults with local recents into one list. Remote
   // vaults come from the locally-cached org list (survives sign-out) and are
@@ -295,7 +310,25 @@ export function VaultPicker() {
           transition={reduceMotion ? undefined : revealTransition(REVEAL_DELAY)}
         >
           <AnimatePresence mode="wait" initial={false}>
-            {naming ? (
+            {landingVault ? (
+              // ---- Signed in, opening (or creating) their vault. This screen
+              //      is still up only because there is no vault yet; say so,
+              //      or a working sign-in is indistinguishable from one that
+              //      dropped the user straight back here. ----
+              <motion.div
+                key="landing"
+                className="picker-landing"
+                initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
+                transition={SPRING}
+              >
+                <Spinner size="sm" tone="accent" />
+                <p className="picker-landing-label" role="status">
+                  Opening your vault…
+                </p>
+              </motion.div>
+            ) : naming ? (
               // ---- Naming step: only reached via "Create inside" an existing
               //      vault, where a nested vault does need its own folder name.
               //      The normal "New vault" flow skips this — the picked folder
@@ -340,10 +373,17 @@ export function VaultPicker() {
                   </button>
                   <button
                     type="submit"
-                    className="primary sm"
+                    className={`primary sm${busy ? " is-busy" : ""}`}
                     disabled={busy || !newName.trim()}
+                    aria-busy={busy || undefined}
                   >
-                    {busy ? "Creating…" : "Create vault"}
+                    {/* Creating a vault writes the folder, opens it, and seeds
+                        ~20 starter notes — comfortably past the point where a
+                        static label reads as a stuck button. */}
+                    <span className="async-btn-label">
+                      {busy ? "Creating…" : "Create vault"}
+                    </span>
+                    {busy && <Spinner size="xs" tone="on-accent" />}
                   </button>
                 </div>
               </motion.form>
@@ -368,14 +408,18 @@ export function VaultPicker() {
                   New vault
                 </motion.button>
                 <motion.button
-                  className="ghost-pill lg"
+                  className={`ghost-pill lg${busy ? " is-busy" : ""}`}
                   disabled={busy}
+                  aria-busy={busy || undefined}
                   onClick={pickExisting}
                   whileHover={reduceMotion ? undefined : { scale: 1.03, y: -1 }}
                   whileTap={reduceMotion ? undefined : { scale: 0.97 }}
                   transition={SPRING}
                 >
-                  {busy ? "Opening…" : "Open existing"}
+                  <span className="async-btn-label">
+                    {busy ? "Opening…" : "Open existing"}
+                  </span>
+                  {busy && <Spinner size="xs" tone="neutral" />}
                 </motion.button>
               </motion.div>
             )}
@@ -402,21 +446,35 @@ export function VaultPicker() {
               }
             >
               {shownRecents.map((e) => (
-                <div className="recent-card" key={e.key}>
+                <div
+                  className={`recent-card${opening === e.key ? " is-opening" : ""}`}
+                  key={e.key}
+                >
                   <button
                     className="recent-open"
                     disabled={busy}
+                    aria-busy={opening === e.key || undefined}
                     onClick={() => void openEntry(e)}
                     title={e.path ?? e.name}
                   >
                     <span className="recent-name">{e.name}</span>
-                    {e.kind === "remote" ? (
+                    {/* The card the user clicked reports for itself. A single
+                        shared `busy` flag only greyed every row out, which says
+                        "the list is disabled" rather than "this one is opening"
+                        — and opening a vault is seconds of work. */}
+                    {opening === e.key ? (
+                      <Spinner size="xs" tone="accent" className="recent-badge" />
+                    ) : e.kind === "remote" ? (
                       <span className="ws-badge synced recent-badge">Remote</span>
                     ) : e.openedAt > 0 ? (
                       <span className="recent-time">{relativeTime(e.openedAt)}</span>
                     ) : null}
                     <span className="recent-path">
-                      {e.path ? tidyPath(e.path) : "Synced · sign in to open"}
+                      {opening === e.key
+                        ? "Opening…"
+                        : e.path
+                          ? tidyPath(e.path)
+                          : "Synced · sign in to open"}
                     </span>
                   </button>
                   {e.kind === "local" && (

@@ -443,6 +443,22 @@ button.primary.hero:hover:not(:disabled) {
   margin-top: var(--sp-1);
 }
 
+/* Post-sign-in landing: shown in place of the two primary actions while the
+   vault is being resolved (and, for a new account, created + seeded). Occupies
+   the same slot so the centered card doesn't jump. */
+.picker-landing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 44px;
+}
+.picker-landing-label {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
 /* ---- Recent vaults list ---- */
 .recent-list {
   display: flex;
@@ -904,35 +920,9 @@ body:has(.sidebar-resizer.dragging) {
 }
 /* Transient outcome pill after an import (menu or drop). Sits at the bottom of
    the sidebar, out of the way, and fades itself out. */
-.filetree-status {
-  position: absolute;
-  left: var(--sp-2);
-  right: var(--sp-2);
-  bottom: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
-  font-size: var(--fs-sm);
-  text-align: center;
-  animation: rise-in var(--t-fast) var(--ease) both;
-  pointer-events: none;
-}
-/* Green = success, red = failure, muted = nothing landed. */
-.filetree-status.success {
-  color: var(--success);
-  border-color: var(--success);
-  background: var(--success-soft);
-}
-.filetree-status.error {
-  color: var(--danger);
-  border-color: var(--danger);
-  background: var(--danger-soft);
-}
-.filetree-status.neutral {
-  color: var(--text-secondary);
-}
+/* The sidebar's private status pill used to live here. It is now the shared
+   toast (see "Toasts" below), so an import result and a failed export speak the
+   same language instead of the sidebar owning its own notification surface. */
 /* Section header: "Notes" label on the left, the tree's action icons on the
    right (create note/folder · fold/unfold). One tidy row, nothing stretches. */
 .filetree-head {
@@ -4403,5 +4393,322 @@ button.secondary:disabled {
   to {
     opacity: 0;
     transform: scale(1.7);
+  }
+}
+
+/* ============================================================
+   Loading states & micro-interactions
+   ------------------------------------------------------------
+   Feedback for asynchronous work, in one place so the same wait looks the same
+   everywhere. Three rules the whole section follows:
+
+   1. A press is acknowledged instantly (`:active`), a *wait* is only labelled
+      once it outlives ~140ms (`useAsyncAction`). Under that, an indicator
+      flashes and reads as a glitch rather than as progress.
+   2. Nothing changes size mid-action. Spinners are laid out beside a label whose
+      width is already reserved, so a control never resizes under the cursor and
+      pulls a different button into the click.
+   3. Every animation has a `prefers-reduced-motion` answer. The information has
+      to survive the motion being switched off.
+   ============================================================ */
+
+/* ---- Spinner (the app's one ring) ---- */
+.spinner {
+  flex: none;
+  display: inline-block;
+  border-radius: 50%;
+  border-style: solid;
+  border-color: color-mix(in srgb, currentColor 22%, transparent);
+  border-top-color: currentColor;
+  animation: btn-spin 0.62s linear infinite;
+}
+.spinner-xs {
+  width: 12px;
+  height: 12px;
+  border-width: 1.7px;
+}
+.spinner-sm {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+.spinner-md {
+  width: 22px;
+  height: 22px;
+  border-width: 2.4px;
+}
+/* `.spinner-inherit` needs no rule — the base above is already currentColor,
+   which is the right answer for a spinner inside a button (a red Delete spins
+   red). The rest exist only where currentColor would be wrong or absent. */
+.spinner-accent {
+  color: var(--accent);
+}
+.spinner-on-accent {
+  border-color: color-mix(in srgb, var(--text-on-accent) 35%, transparent);
+  border-top-color: var(--text-on-accent);
+}
+.spinner-neutral {
+  border-color: var(--border-strong);
+  border-top-color: var(--text-secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Slowed rather than stopped: a frozen ring says "hung", and the one thing
+     this element must never do is imply the app has died. */
+  .spinner {
+    animation-duration: 1.5s;
+  }
+}
+
+/* ---- Success tick: draws itself in, so it reads as "just completed" ---- */
+.checkmark {
+  flex: none;
+  color: var(--success);
+  stroke-dasharray: 26;
+  animation: check-draw 0.26s var(--ease) both;
+}
+.checkmark-xs {
+  width: 13px;
+  height: 13px;
+}
+.checkmark-sm {
+  width: 16px;
+  height: 16px;
+}
+.checkmark-md {
+  width: 20px;
+  height: 20px;
+}
+@keyframes check-draw {
+  from {
+    stroke-dashoffset: 26;
+    opacity: 0.4;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .checkmark {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+
+/* ---- AsyncButton layout ---- */
+/* Applies to any button that can grow a spinner, including the hand-rolled
+   sign-in submit — hence the bare selectors rather than a component class. */
+button:has(> .async-btn-label),
+button.is-busy,
+button.is-done {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+/* A busy button stays interactive-looking rather than greying out: it IS doing
+   what you asked, and the standard 0.55 disabled opacity reads as "rejected". */
+button.is-busy:disabled,
+button.is-done:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+button.is-done:disabled {
+  cursor: default;
+}
+/* `.selbar-icon` and friends are 28px squares; a spinner swapping in for the
+   glyph must not stretch them. */
+.selbar-icon.is-busy,
+.selbar-icon.is-done {
+  gap: 0;
+}
+
+/* ---- Vault switching ---- */
+/* The header renames itself to the destination at once; these two rules are the
+   supporting evidence that the rename is a *pending* claim, not a finished one. */
+.sidebar-header.is-switching .vault-path {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.vault-switch-spinner {
+  margin-left: var(--sp-1);
+}
+/* The tree below still lists the outgoing vault. Fade it and refuse clicks
+   rather than letting someone open a note from a vault they're leaving (the
+   epoch guard would silently drop it, which looks like a dead row). */
+/* A real flex item in BOTH states, never `display: contents` switching to
+   `block`: the tree measures itself with a ResizeObserver, so a wrapper that
+   changes box type mid-switch would resize the tree and make it jump at exactly
+   the moment we're trying to say "nothing here is changing yet". */
+.sidebar-tree-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  transition:
+    opacity var(--t-med) var(--ease),
+    filter var(--t-med) var(--ease);
+}
+.sidebar-tree-wrap.is-switching {
+  opacity: 0.38;
+  pointer-events: none;
+  filter: saturate(0.6);
+}
+
+/* ---- A row whose note is being opened ---- */
+/* Selection is applied optimistically on click, so the row highlights before
+   the server has confirmed the note — the same trick as the vault rename. */
+.tree-row.opening {
+  background: var(--accent-soft);
+}
+.tree-row.opening .tree-label {
+  color: var(--text-primary);
+}
+
+/* ---- Update download progress ---- */
+.update-progress {
+  position: relative;
+  flex: 1;
+  min-width: 80px;
+  max-width: 240px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  overflow: hidden;
+}
+.update-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--t-med) var(--ease);
+}
+/* No content length from the server: sweep instead of lying about a target. */
+.update-progress.indeterminate .update-progress-fill {
+  width: 35%;
+  animation: progress-sweep 1.1s var(--ease) infinite;
+}
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-progress.indeterminate .update-progress-fill {
+    animation-duration: 2.4s;
+  }
+}
+
+/* ---- Banners: the slot animates its own height ---- */
+/* `overflow: hidden` is what makes the height animation possible — without it
+   the banner's content spills out of the collapsing box mid-transition. */
+.banner-slot {
+  overflow: hidden;
+  flex: none;
+}
+
+/* ---- Toasts ---- */
+.toast-viewport {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  /* The viewport itself must not swallow clicks meant for the editor beneath;
+     each toast re-enables them for its own box. */
+  pointer-events: none;
+  max-width: min(380px, calc(100vw - var(--sp-8)));
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+}
+/* A 6px dot rather than a coloured background: the tone is legible at a glance
+   without the toast shouting over the note you're reading. */
+.toast-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+.toast-success .toast-dot {
+  background: var(--success);
+}
+.toast-error .toast-dot {
+  background: var(--danger);
+}
+.toast-error {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+.toast-text {
+  flex: 1;
+  min-width: 0;
+}
+.toast-close {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  transition:
+    color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.toast-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover, color-mix(in srgb, var(--text-primary) 8%, transparent));
+}
+
+/* ---- Press feedback on the controls that had none ---- */
+/* Rule 1 of this section: a click is acknowledged in the same frame it happens,
+   whatever the action goes on to do. `.primary` already did this; these are the
+   controls where pressing produced no physical response at all. */
+.ghost-pill:active:not(:disabled),
+button.secondary:active:not(:disabled),
+.wf-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.icon-btn:active:not(:disabled),
+.selbar-icon:active:not(:disabled),
+.tree-more:active {
+  transform: scale(0.9);
+}
+.icon-btn,
+.selbar-icon,
+.tree-more {
+  transition:
+    color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ghost-pill:active:not(:disabled),
+  button.secondary:active:not(:disabled),
+  .wf-btn:active:not(:disabled),
+  .icon-btn:active:not(:disabled),
+  .selbar-icon:active:not(:disabled),
+  .tree-more:active {
+    transform: none;
   }
 }
