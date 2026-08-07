@@ -274,6 +274,28 @@ async function openFolderAsLocalVault(onDone: () => void): Promise<void> {
 }
 
 /**
+ * Repoint the ACTIVE vault at a different folder on disk. Moved here from the
+ * sidebar header's old "Switch" popover, which was otherwise a duplicate of the
+ * vault switcher above — this was the one thing only it could do.
+ *
+ * Distinct from "Vault folder location" further down, which sets the root that
+ * NEW vaults are created under; this rebinds the vault you're in right now.
+ * Routed through the store so the vault being left is properly retired (scope,
+ * registry maps, debounced pulls) rather than leaking into the new folder.
+ */
+async function changeLocalFolder(onDone: () => void): Promise<void> {
+  try {
+    const v = await ipc.pickVault();
+    if (v) {
+      await useStore.getState().adoptOpenedVault(v, { resync: true });
+      onDone();
+    }
+  } catch {
+    /* picker cancelled/unavailable */
+  }
+}
+
+/**
  * The "On this device" rows: local vaults you can switch to with one click.
  * `limit` caps how many show inline; when there are more, an `onViewAll` link
  * hands off to the full Vaults page (which lists local + synced together).
@@ -556,6 +578,26 @@ function AccountPopover({
         </span>
         <span className="menu-item-label">New vault</span>
       </button>
+
+      {/* Rebind the CURRENT vault to a different folder. Lives here now that the
+          sidebar header is a plain label. */}
+      {openPath && (
+        <button className="menu-item subtle" onClick={() => void changeLocalFolder(onClose)}>
+          <span className="menu-swatch" aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+            </svg>
+          </span>
+          <span className="menu-item-label">Change local folder…</span>
+        </button>
+      )}
 
       {/* Teammates join with the code shared from Vault settings. */}
       {joining ? (
