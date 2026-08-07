@@ -797,6 +797,28 @@ export class VaultRegistry {
       }
       this.baselineVaultId = vaultId;
     }
+    // Restore the path → server-docId join too, under the same collection guard.
+    //
+    // `docs` was written every pass and read back by nobody, so after a relaunch
+    // the ONE link between a file and its server identity was gone until the
+    // server's listing rebuilt it in step 3. For a note the server has since
+    // DELETED that listing never comes, so inbound could not recognise the file
+    // as the deleted doc and the note lingered on disk (and, before the inbound
+    // fix, got re-registered under a new docId).
+    //
+    // Safe to trust for exactly the reason it can't serve as the baseline: it is
+    // rewritten from scratch each pass and maintained by `registerNote` /
+    // `deletePath`, so it describes what this device believes NOW. A note the
+    // user deleted and recreated at the same path carries the new docId here, not
+    // the old one — so a stale tombstone still fails to match, which is what
+    // stops inbound removing a file it can't prove the identity of. Step 3
+    // overwrites these entries from the server and step 4 prunes whatever the
+    // server no longer lists, so nothing survives the pass unconfirmed.
+    if (cfg.serverVaultId === vaultId && cfg.docs) {
+      for (const [rp, docId] of Object.entries(cfg.docs)) {
+        if (typeof docId === "string" && docId) this.setMapping(rp, docId, vaultId);
+      }
+    }
 
     // 1b. First-run seeding. A brand-new vault — nothing on the server AND
     //     an empty local folder — gets welcome/starter content so the vault

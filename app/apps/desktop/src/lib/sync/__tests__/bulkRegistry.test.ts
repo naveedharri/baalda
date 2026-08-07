@@ -15,14 +15,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../ipc", () => ({
   getVaultConfig: vi.fn(async () => null as string | null),
   setVaultConfig: vi.fn(async () => {}),
-  listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [], childrenLoaded: true })),
-  listNoteTitles: vi.fn(async () => [] as Array<{ id: string; path: string; title: string }>),
+  listTree: vi.fn(async () => ({
+    id: "root",
+    name: "",
+    path: "",
+    isDir: true,
+    children: [],
+    childrenLoaded: true,
+  })),
+  listNoteTitles: vi.fn(
+    async () => [] as Array<{ id: string; path: string; title: string }>,
+  ),
   writeNote: vi.fn(async () => {}),
   writeNoteIfMissing: vi.fn(async () => true),
   isVaultMismatch: (e: unknown) =>
     e instanceof Error && e.message.startsWith("vault-mismatch"),
 }));
-vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
+vi.mock("../../vault/seed", () => ({
+  seedWelcomeContent: vi.fn(async () => {}),
+}));
 
 import { ApiError, type ApiClient, type RegisteredNote } from "../../api";
 import * as ipc from "../../ipc";
@@ -30,7 +41,11 @@ import type { TreeNode } from "../../ipc";
 import { VaultRegistry } from "../registry";
 import { REGISTRY_CONCURRENCY } from "../pool";
 import type { SyncProgressSink } from "../progress";
-import type { DocSyncState, SyncProgressPhase, VaultScope } from "../vaultScope";
+import type {
+  DocSyncState,
+  SyncProgressPhase,
+  VaultScope,
+} from "../vaultScope";
 import { reconcileWithTree } from "./helpers/reconcile";
 
 const ORG = "org-1";
@@ -40,7 +55,10 @@ const VAULT = "v-1";
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
 /** A server `notes` row shaped like the real API's snake_case response. */
-const serverNote = (relPath: string, id = `srv-${relPath}`): RegisteredNote => ({
+const serverNote = (
+  relPath: string,
+  id = `srv-${relPath}`,
+): RegisteredNote => ({
   id,
   rel_path: relPath,
   title: null,
@@ -56,7 +74,12 @@ function tree(n: number, folders: string[] = []): TreeNode {
     children: [],
   }));
   for (let i = 0; i < n; i++) {
-    children.push({ id: `n${i}`, name: `Note${i}.md`, path: `Note${i}.md`, isDir: false });
+    children.push({
+      id: `n${i}`,
+      name: `Note${i}.md`,
+      path: `Note${i}.md`,
+      isDir: false,
+    });
   }
   return { id: "root", name: "vault", path: "", isDir: true, children };
 }
@@ -83,11 +106,20 @@ function fakeApi(opts: FakeApiOpts = {}) {
     await tick();
   };
   const api = {
-    listVaults: vi.fn(async () => [{ id: VAULT, name: "v", organization_id: ORG }]),
-    createVault: vi.fn(async () => ({ id: VAULT, name: "v", organization_id: ORG })),
+    listVaults: vi.fn(async () => [
+      { id: VAULT, name: "v", organization_id: ORG },
+    ]),
+    createVault: vi.fn(async () => ({
+      id: VAULT,
+      name: "v",
+      organization_id: ORG,
+    })),
     listFolders: vi.fn(async () => opts.serverFolders ?? []),
     listNotes: vi.fn(async () => opts.serverNotes ?? []),
-    listNoteRegistry: vi.fn(async () => ({ notes: opts.serverNotes ?? [], tombstones: [] })),
+    listNoteRegistry: vi.fn(async () => ({
+      notes: opts.serverNotes ?? [],
+      tombstones: [],
+    })),
     createFolder: vi.fn(async (input: { path: string }) => {
       await enter();
       try {
@@ -158,7 +190,8 @@ function configFile(initial: string | null = null) {
     content = c;
   });
   return {
-    read: () => (content ? (JSON.parse(content) as Record<string, unknown>) : null),
+    read: () =>
+      content ? (JSON.parse(content) as Record<string, unknown>) : null,
     raw: () => content,
   };
 }
@@ -176,7 +209,11 @@ describe("bounded concurrency", () => {
   it("registers 60 notes with at most REGISTRY_CONCURRENCY requests in flight", async () => {
     const { api, state } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(60));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(60),
+    );
 
     expect(state.createdNotes).toHaveLength(60);
     expect(state.maxInFlight).toBeGreaterThan(1); // NOT the old sequential loop
@@ -204,7 +241,15 @@ describe("bounded concurrency", () => {
               name: "B",
               path: "A/B",
               isDir: true,
-              children: [{ id: "abc", name: "C", path: "A/B/C", isDir: true, children: [] }],
+              children: [
+                {
+                  id: "abc",
+                  name: "C",
+                  path: "A/B/C",
+                  isDir: true,
+                  children: [],
+                },
+              ],
             },
           ],
         },
@@ -224,12 +269,18 @@ describe("incremental checkpointing + resume", () => {
     const cfg = configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(60));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(60),
+    );
 
     // 60 notes at a 25-item batch ⇒ several writes. The old code wrote exactly 1.
     expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBeGreaterThan(1);
     expect(reg.checkpointWrites()).toBeGreaterThan(1);
-    expect(Object.keys((cfg.read()!.docs as Record<string, string>) ?? {})).toHaveLength(60);
+    expect(
+      Object.keys((cfg.read()!.docs as Record<string, string>) ?? {}),
+    ).toHaveLength(60);
   });
 
   it("keeps the work a killed run finished — the next run only creates the rest", async () => {
@@ -239,23 +290,36 @@ describe("incremental checkpointing + resume", () => {
     const created: string[] = [];
     const { api } = fakeApi();
     const { source, state } = scopeSource();
-    vi.mocked(api.createNote).mockImplementation(async (input: { relPath: string }) => {
-      await tick();
-      created.push(input.relPath);
-      if (created.length >= 30) state.current = false; // kill -9 stand-in
-      return serverNote(input.relPath);
-    });
+    vi.mocked(api.createNote).mockImplementation(
+      async (input: { relPath: string }) => {
+        await tick();
+        created.push(input.relPath);
+        if (created.length >= 30) state.current = false; // kill -9 stand-in
+        return serverNote(input.relPath);
+      },
+    );
     const reg1 = new VaultRegistry(api, source);
-    await reconcileWithTree(reg1, { organizationId: ORG, vaultName: "v" }, tree(50));
+    await reconcileWithTree(
+      reg1,
+      { organizationId: ORG, vaultName: "v" },
+      tree(50),
+    );
     expect(created.length).toBeGreaterThanOrEqual(30);
     expect(created.length).toBeLessThan(50); // it really did stop early
     expect(cfg.read()!.serverVaultId).toBe(VAULT);
 
     // Run 2 sees the survivors as server rows and creates only the remainder.
-    const alreadyThere = created.map((rel) => ({ id: `srv-${rel}`, rel_path: rel }));
+    const alreadyThere = created.map((rel) => ({
+      id: `srv-${rel}`,
+      rel_path: rel,
+    }));
     const second = fakeApi({ serverNotes: alreadyThere });
     const reg2 = new VaultRegistry(second.api);
-    await reconcileWithTree(reg2, { organizationId: ORG, vaultName: "v" }, tree(50));
+    await reconcileWithTree(
+      reg2,
+      { organizationId: ORG, vaultName: "v" },
+      tree(50),
+    );
 
     expect(second.state.createdNotes).toHaveLength(50 - created.length);
     expect(reg2.allDocIds()).toHaveLength(50);
@@ -265,15 +329,34 @@ describe("incremental checkpointing + resume", () => {
     const cfg = configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(3));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(3),
+    );
     reg.markPushed("srv-Note0.md");
     reg.markPushed("srv-Note1.md");
     await reg.flushCheckpoint();
     expect(cfg.read()!.pushed).toEqual(["srv-Note0.md", "srv-Note1.md"]);
 
     // A fresh registry (relaunch) adopts it, so the upload skips those docs.
-    const reg2 = new VaultRegistry(fakeApi({ serverNotes: [] }).api);
-    await reconcileWithTree(reg2, { organizationId: ORG, vaultName: "v" }, tree(3));
+    // The server still lists the notes, as it would on a real relaunch. An empty
+    // listing here would mean something else entirely — absent with no tombstone
+    // is how a REVOKED share looks, and inbound is meant to stop claiming those
+    // (which drops their push checkpoint along with the mapping).
+    const reg2 = new VaultRegistry(
+      fakeApi({
+        serverNotes: [0, 1, 2].map((i) => ({
+          id: `srv-Note${i}.md`,
+          rel_path: `Note${i}.md`,
+        })),
+      }).api,
+    );
+    await reconcileWithTree(
+      reg2,
+      { organizationId: ORG, vaultName: "v" },
+      tree(3),
+    );
     expect(reg2.isPushed("srv-Note0.md")).toBe(true);
     expect(reg2.isPushed("srv-Note2.md")).toBe(false);
   });
@@ -282,19 +365,33 @@ describe("incremental checkpointing + resume", () => {
     configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(1));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(1),
+    );
     const readsAfterReconcile = vi.mocked(ipc.getVaultConfig).mock.calls.length;
-    const writesAfterReconcile = vi.mocked(ipc.setVaultConfig).mock.calls.length;
+    const writesAfterReconcile = vi.mocked(ipc.setVaultConfig).mock.calls
+      .length;
 
     for (let i = 0; i < 10; i++) {
       await reg.registerNote(`New${i}.md`, `New ${i}`, `doc-new-${i}`);
     }
     // No read-modify-write per note; the batch hasn't even filled yet.
-    expect(vi.mocked(ipc.getVaultConfig).mock.calls.length).toBe(readsAfterReconcile);
-    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(writesAfterReconcile);
+    expect(vi.mocked(ipc.getVaultConfig).mock.calls.length).toBe(
+      readsAfterReconcile,
+    );
+    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(
+      writesAfterReconcile,
+    );
     await reg.flushCheckpoint();
-    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(writesAfterReconcile + 1);
-    expect(reg.getMapping("New9.md")).toEqual({ vaultId: VAULT, docId: "doc-new-9" });
+    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(
+      writesAfterReconcile + 1,
+    );
+    expect(reg.getMapping("New9.md")).toEqual({
+      vaultId: VAULT,
+      docId: "doc-new-9",
+    });
   });
 });
 
@@ -306,24 +403,30 @@ describe("cancellation on a vault switch", () => {
     const reg = new VaultRegistry(api, source);
 
     let seen = 0;
-    vi.mocked(api.createNote).mockImplementation(async (input: { relPath: string }) => {
-      await tick();
-      seen++;
-      if (seen === 10) state.current = false; // the user switched vaults
-      return serverNote(input.relPath);
-    });
+    vi.mocked(api.createNote).mockImplementation(
+      async (input: { relPath: string }) => {
+        await tick();
+        seen++;
+        if (seen === 10) state.current = false; // the user switched vaults
+        return serverNote(input.relPath);
+      },
+    );
 
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(200));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(200),
+    );
 
     // The pool re-checks per item, so it abandons within one in-flight batch.
     expect(seen).toBeLessThan(200);
     expect(seen).toBeLessThanOrEqual(10 + REGISTRY_CONCURRENCY);
     // And nothing from vault A's run is written into the folder now open.
-    const writesAfterStale = vi
-      .mocked(ipc.setVaultConfig)
-      .mock.calls.length;
+    const writesAfterStale = vi.mocked(ipc.setVaultConfig).mock.calls.length;
     await reg.flushCheckpoint();
-    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(writesAfterStale);
+    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(
+      writesAfterStale,
+    );
     expect(apiState.maxInFlight).toBeLessThanOrEqual(REGISTRY_CONCURRENCY);
     // Materialization for the stale vault never ran either.
     expect(vi.mocked(ipc.writeNoteIfMissing)).not.toHaveBeenCalled();
@@ -343,18 +446,24 @@ describe("cancellation on a vault switch", () => {
 
     const nextVault = recordingSink();
     let n = 0;
-    vi.mocked(api.createNote).mockImplementation(async (input: { relPath: string }) => {
-      await tick();
-      if (++n === 3) {
-        // The user switches vaults; the new vault's `enable` immediately claims
-        // the shared registry's progress sink.
-        state.current = false;
-        reg.setProgressSink(nextVault.sink);
-      }
-      return serverNote(input.relPath);
-    });
+    vi.mocked(api.createNote).mockImplementation(
+      async (input: { relPath: string }) => {
+        await tick();
+        if (++n === 3) {
+          // The user switches vaults; the new vault's `enable` immediately claims
+          // the shared registry's progress sink.
+          state.current = false;
+          reg.setProgressSink(nextVault.sink);
+        }
+        return serverNote(input.relPath);
+      },
+    );
 
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(50));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(50),
+    );
 
     // Everything from the switch onward is silent: the in-flight lanes finish
     // their requests but report nothing into the vault now on screen.
@@ -369,7 +478,11 @@ describe("cancellation on a vault switch", () => {
     const cfg = configFile();
     const { api } = fakeApi();
     const reg = new VaultRegistry(api);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(2));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(2),
+    );
     const writes = vi.mocked(ipc.setVaultConfig).mock.calls.length;
     reg.markPushed("srv-Note0.md"); // dirty, batch not full
     reg.reset();
@@ -383,14 +496,20 @@ describe("honest failure reporting", () => {
   it("retries a 5xx and succeeds without recording a failure", async () => {
     const { api, state } = fakeApi({ failNotes: new Map() });
     let attempts = 0;
-    vi.mocked(api.createNote).mockImplementation(async (input: { relPath: string }) => {
-      await tick();
-      attempts++;
-      if (attempts === 1) throw new ApiError(503, "unavailable");
-      return serverNote(input.relPath);
-    });
+    vi.mocked(api.createNote).mockImplementation(
+      async (input: { relPath: string }) => {
+        await tick();
+        attempts++;
+        if (attempts === 1) throw new ApiError(503, "unavailable");
+        return serverNote(input.relPath);
+      },
+    );
     const reg = new VaultRegistry(api);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(1));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(1),
+    );
     expect(attempts).toBe(2);
     expect(reg.hasFailures()).toBe(false);
     expect(reg.getMapping("Note0.md")).not.toBeNull();
@@ -405,13 +524,21 @@ describe("honest failure reporting", () => {
       { id: "local-1", path: "Note1.md", title: "One" },
     ]);
 
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(3));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(3),
+    );
 
     // A 4xx is not retried — one attempt, then reported.
     expect(state.noteAttempts.get("Note1.md")).toBe(1);
     expect(reg.hasFailures()).toBe(true);
     const f = reg.failures()[0];
-    expect(f).toMatchObject({ kind: "note", path: "Note1.md", code: "doc_id_conflict" });
+    expect(f).toMatchObject({
+      kind: "note",
+      path: "Note1.md",
+      code: "doc_id_conflict",
+    });
     // Unmapped on purpose: mapping it would point sync at a doc we can't access.
     expect(reg.getMapping("Note1.md")).toBeNull();
     // The failed doc is reported as `error`, keyed by its docId.
@@ -425,16 +552,24 @@ describe("honest failure reporting", () => {
   it("treats a 402 plan limit as terminal AND stops the rest of the run", async () => {
     const { api } = fakeApi();
     let n = 0;
-    vi.mocked(api.createNote).mockImplementation(async (input: { relPath: string }) => {
-      await tick();
-      n++;
-      if (n === 1) {
-        throw new ApiError(402, "vault limit reached", { code: "vault_limit_reached" });
-      }
-      return serverNote(input.relPath);
-    });
+    vi.mocked(api.createNote).mockImplementation(
+      async (input: { relPath: string }) => {
+        await tick();
+        n++;
+        if (n === 1) {
+          throw new ApiError(402, "vault limit reached", {
+            code: "vault_limit_reached",
+          });
+        }
+        return serverNote(input.relPath);
+      },
+    );
     const reg = new VaultRegistry(api);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(100));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(100),
+    );
 
     expect(reg.limitCode()).toBe("vault_limit_reached");
     expect(reg.failures()[0].code).toBe("vault_limit_reached");
@@ -446,7 +581,11 @@ describe("honest failure reporting", () => {
     const { api } = fakeApi();
     const { sink, phases, counts } = recordingSink();
     const reg = new VaultRegistry(api, undefined, sink);
-    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(5, ["Sub"]));
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(5, ["Sub"]),
+    );
     expect(phases).toContain("registering");
     expect(counts().done).toBe(6); // 5 notes + 1 folder
     expect(counts().failed).toBe(0);
