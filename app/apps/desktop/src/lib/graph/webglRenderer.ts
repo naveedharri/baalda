@@ -45,19 +45,59 @@ void main() {
   vColor = aColor;
 }`;
 
+// Matte-sphere shading, computed per fragment. The disc used to be a flat fill,
+// which is what made the graph look like a field of stickers — every node the
+// same brightness edge to edge, so nothing read as an object with volume.
+//
+// Reconstructing a hemisphere normal from the quad corner is all it takes: with
+// z = sqrt(1 - x² - y²) the shading is real Lambert on a real sphere, evaluated
+// on the GPU at zero cost per node. Same light direction as the 2D canvas path's
+// baked sprites (upper-left, tilted toward the viewer) so the two renderers agree
+// about where the light is.
 const FRAG = `#version 300 es
 precision mediump float;
 in vec2 vCorner;
 in vec3 vColor;
 out vec4 fragColor;
 
+const vec3 LIGHT = normalize(vec3(-0.5, -0.62, 0.6));
+
 void main() {
-  // Solid disc: inside the rim it's opaque, outside is dropped. A small fixed
-  // feather softens the edge without collapsing sub-pixel discs to zero alpha.
-  float d = length(vCorner);
-  if (d > 1.0) discard;
-  float alpha = 1.0 - smoothstep(0.9, 1.0, d);
-  fragColor = vec4(vColor, alpha);
+  float d2 = dot(vCorner, vCorner);
+  if (d2 > 1.0) discard;
+
+  // Hemisphere normal at this pixel.
+  float z = sqrt(max(0.0, 1.0 - d2));
+  vec3 n = vec3(vCorner, z);
+
+  // Lambert, lifted by an ambient floor so the unlit limb stays coloured rather
+  // than going black — a fully dark terminator reads as a hole, not a shadow.
+  float diff = max(0.0, dot(n, LIGHT));
+  float shade = 0.34 + 0.66 * diff;
+
+  // Narrow soft highlight where the light hits square on: the cue that says
+  // "glossy sphere" rather than "gradient".
+  float spec = pow(diff, 22.0) * 0.5;
+
+  // Rim light on the far limb, which is what separates one node from another
+  // when they overlap in a dense cluster.
+  float rim = pow(1.0 - z, 3.0) * 0.22;
+
+  // Hover-dimming is applied by the caller as a multiplier on the fill colour,
+  // and a white specular would ignore it — dimmed nodes would keep a full-bright
+  // glint and stay just as eye-catching as the ones being highlighted, which
+  // defeats the dimming. Tying both additive terms to the fill's own brightness
+  // keeps a dark node's highlight dark. Not physically correct (real specular is
+  // light-coloured, not surface-coloured) but it is the behaviour we want, and it
+  // costs nothing versus threading a per-instance dim attribute through a buffer
+  // that can hold 50k nodes.
+  float intensity = max(vColor.r, max(vColor.g, vColor.b));
+  vec3 lit = vColor * shade + vec3(spec + rim) * intensity;
+
+  // Feather only the outermost pixels, in the same radial space as the normal.
+  float d = sqrt(d2);
+  float alpha = 1.0 - smoothstep(0.94, 1.0, d);
+  fragColor = vec4(lit, alpha);
 }`;
 
 // Edges: one shared program drawing gl.LINES. Each vertex is a world position;
@@ -276,19 +316,41 @@ export class WebGLGraphRenderer {
     gl.clearColor(0.04, 0.04, 0.07, 1); // near-black, matching the graph backdrop
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    // Edges first, under the nodes (faint, additive-ish via low alpha).
-    if (this.lineVertCount > 0) {
+    const drawLines = (
+      vao: WebGLVertexArrayObject,
+      vertCount: number,
+      r: number,
+      g: number,
+      b: number,
+      a: number,
+    ) => {
+      if (vertCount === 0) return;
       gl.useProgram(this.lineProgram);
-      gl.bindVertexArray(this.lineVao);
+      gl.bindVertexArray(vao);
       gl.uniform2f(this.uLineViewport, this.canvas.width, this.canvas.height);
       gl.uniform1f(this.uLineScale, scale);
       gl.uniform2f(this.uLinePan, panX, panY);
-      gl.uniform4f(this.uLineColor, 0.62, 0.68, 0.9, 0.35);
-      gl.drawArrays(gl.LINES, 0, this.lineVertCount);
+      gl.uniform4f(this.uLineColor, r, g, b, a);
+      gl.drawArrays(gl.LINES, 0, vertCount);
       gl.bindVertexArray(null);
-    }
+    };
 
-    // Nodes on top.
+    // Resting edges: quiet threads under everything. The alpha is low because
+    // these overlap in the thousands on a real vault — at 0.35 they accumulated
+    // into a solid pale field that washed the whole view lavender and buried the
+    // nodes. Faint per line is what keeps dense regions reading as *dense*
+    // rather than as a flat wash.
+    drawLines(this.lineVao, this.lineVertCount, 0.42, 0.5, 0.78, 0.12);
+
+    // Hover rays go UNDER the nodes, not over them. Drawn last, they crossed the
+    // hovered node itself — dozens of bright lines converging on top of the very
+    // thing being pointed at, which blew out its centre and hid it. Beneath the
+    // node layer they emerge from behind it instead, which is also what the
+    // geometry actually is: a link starts at the node, not on it.
+    drawLines(this.hlVao, this.hlVertCount, 1.0, 0.86, 0.38, 0.85);
+
+    // Nodes last, so every edge — resting or highlighted — is occluded by the
+    // discs it connects.
     if (this.count > 0) {
       gl.useProgram(this.program);
       gl.bindVertexArray(this.vao);
@@ -297,19 +359,6 @@ export class WebGLGraphRenderer {
       gl.uniform2f(this.uPan, panX, panY);
       gl.uniform1f(this.uMinPx, minPx);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.count);
-      gl.bindVertexArray(null);
-    }
-
-    // Hover highlight edges — bright, drawn last so they sit on top of the
-    // dimmed cloud and read as rays from the hovered node to its neighbors.
-    if (this.hlVertCount > 0) {
-      gl.useProgram(this.lineProgram);
-      gl.bindVertexArray(this.hlVao);
-      gl.uniform2f(this.uLineViewport, this.canvas.width, this.canvas.height);
-      gl.uniform1f(this.uLineScale, scale);
-      gl.uniform2f(this.uLinePan, panX, panY);
-      gl.uniform4f(this.uLineColor, 1.0, 0.92, 0.5, 0.95);
-      gl.drawArrays(gl.LINES, 0, this.hlVertCount);
       gl.bindVertexArray(null);
     }
   }

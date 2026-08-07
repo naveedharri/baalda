@@ -15,23 +15,26 @@ export interface ColorResult {
 }
 
 /**
- * Muted, slightly desaturated hues chosen to stay legible on BOTH a light and a
- * deep-dark canvas. Pure primaries wash out or vibrate against dark bg, so these
- * sit in the mid-luminance / mid-saturation band that reads on either.
+ * Fully saturated hues at mid luminance. These were previously pastel-leaning so
+ * they'd read on a light canvas too — but the graph backdrop is a near-black void
+ * in every theme, and against that, desaturated fills all converge toward the
+ * same washed grey-lilac and folders stop being tellable apart. Deepened and
+ * saturated so each hue holds its own identity on the dark field, which is the
+ * only surface they're ever drawn on.
  */
 export const PALETTE: string[] = [
-  "#7c7cff", // indigo
-  "#25d6bf", // teal
-  "#ffc24d", // amber
-  "#ff5f8f", // rose
-  "#46d96f", // green
-  "#b06bff", // violet
-  "#38c6ff", // cyan
-  "#ff8a3d", // orange
-  "#b6e02a", // lime
-  "#ff6fd0", // pink
-  "#4d8dff", // blue
-  "#9fb0d8", // steel
+  "#6c5cff", // indigo
+  "#00c2a8", // teal
+  "#ffb020", // amber
+  "#ff3d71", // rose
+  "#1fc85c", // green
+  "#9d4edd", // violet
+  "#00aaff", // cyan
+  "#ff6b1a", // orange
+  "#a3d900", // lime
+  "#ff4fc3", // pink
+  "#2f6bff", // blue
+  "#7d90bd", // steel
 ];
 
 /** Clamp to a byte so channel math never overflows the 0–255 range. */
@@ -101,17 +104,29 @@ function assignByFolder(nodes: GraphNode[]): ColorResult {
 }
 
 function assignByDegree(nodes: GraphNode[], accent: string): ColorResult {
-  // Muted base → accent ramp across 4 tiers: {0, low, mid, high}.
-  const base = "#7a8290"; // slate, the "cold"/low end of the ramp
-  const shades = [0, 1, 2, 3].map((i) => lerpHex(base, accent, i / 3));
+  // The ramp runs from a deep cold slate to a colour BEYOND the accent. Ending
+  // exactly on the accent left the top tier the same purple as the app's buttons
+  // and only a shade off the tier below it; overshooting to a hot near-white
+  // gives the hubs somewhere to actually stand out to.
+  const base = "#2f3a52"; // deep slate — cold end, still clearly a colour
+  const hot = lerpHex(accent, "#fff3c4", 0.5); // accent pushed toward warm white
+  const shades = [0, 1, 2, 3].map((i) =>
+    i <= 2 ? lerpHex(base, accent, i / 2) : hot,
+  );
 
   const maxDeg = nodes.reduce((m, n) => Math.max(m, n.linkCount), 0);
 
-  // Tier boundaries over the positive range [1, maxDeg], split into thirds.
-  // tierOf returns 0 for orphans (0 links), else 1..3.
-  const span = Math.max(1, maxDeg - 1);
-  const lowMax = 1 + Math.floor(span / 3);
-  const midMax = 1 + Math.floor((span * 2) / 3);
+  // Tier boundaries on a LOG scale, not linear thirds.
+  //
+  // Link-degree in a real vault is heavy-tailed: on a 3.4k-note vault the top
+  // node had 1259 links while the vast majority had a handful. Linear thirds of
+  // [1, 1259] therefore produced tiers of "1–420 → 3370 nodes", "421–839 → 0",
+  // "840–1259 → 5" — one bucket holding 99.9% of the graph, so almost every node
+  // drew in the same shade and the colouring carried no information at all.
+  // Splitting log(degree) instead puts the boundaries where the nodes are.
+  const logSpan = Math.log(Math.max(2, maxDeg));
+  const lowMax = Math.max(1, Math.round(Math.exp(logSpan / 3)));
+  const midMax = Math.max(lowMax + 1, Math.round(Math.exp((logSpan * 2) / 3)));
 
   const tierOf = (deg: number): number => {
     if (deg <= 0) return 0;

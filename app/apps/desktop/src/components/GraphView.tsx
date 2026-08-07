@@ -438,6 +438,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // visNodes sorted small→large radius, so bigger ("nearer") orbs paint over
     // smaller ones and depth reads correctly. Order only changes on rebuild.
     drawOrder: [] as SimNode[],
+    // One-shot: has the 2D canvas been wiped since the GPU renderer took over?
+    cleared2d: false,
     colorById: new Map<string, string>(),
     camera: { x: 0, y: 0, k: 1 } as Camera,
     hoveredId: null as string | null,
@@ -1092,6 +1094,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     let edgePositions = new Float32Array(0);
     function drawWebGL() {
       if (!webgl || !webglCanvas) return;
+      // Wipe the 2D canvas the first time the GPU renderer paints. Both canvases
+      // are stacked in the same box and the 2D one is never cleared once WebGL
+      // owns the frame, so whatever it last drew just sits there underneath — and
+      // any gap in the GPU layer (the entrance pulse briefly scaling under 1, a
+      // dpr change, a lost context) reveals a stale graph behind the live one.
+      // A canvas resize clears itself, so once is genuinely enough.
+      if (!S.cleared2d && ctx) {
+        ctx.clearRect(0, 0, canvas!.width, canvas!.height);
+        S.cleared2d = true;
+      }
       const fallback = S.colors.nodeFallback;
       const nodeScale = settingsRef.current.nodeSize;
       // Shrink nodes as the graph grows so a bigger vault reads as "smaller
