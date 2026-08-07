@@ -51,7 +51,10 @@ const FALLBACK_ACCENT = "#7f73ff";
 // So the settle now happens BEFORE the first frame (`presettle`), and the only
 // motion left on open is a soft fade + a barely-there scale — the "heartbeat".
 // The layout itself is static from frame one.
-const INTRO_MS = 620; // fade/scale-in only; no node motion
+// Must match the `graph-heartbeat` keyframes duration in graph.css — the CSS
+// drives the scale pulse, this drives the light pulse, and they have to peak
+// together or the graph reads as two effects rather than one heartbeat.
+const INTRO_MS = 1150;
 
 // Time budget for settling the layout before the first paint. This blocks the
 // UI thread, so it is a budget and not a tick count: small vaults converge in
@@ -121,6 +124,21 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  * is — alpha is monotonically decreasing, so an early exit means "slightly warm"
  * (a drift over a second) rather than "unsettled" (a visible rearrangement).
  */
+/**
+ * The heartbeat envelope, 0 at rest and peaking on each beat. Two Gaussian bumps
+ * at the same instants as the `graph-heartbeat` keyframes: a strong one at 16%
+ * and a weaker one at 40%.
+ *
+ * Gaussians rather than the triangular ramps the keyframes use, because a
+ * brightness change wants softer shoulders than a scale change — a linear light
+ * ramp has a visible corner at the peak where a size ramp does not.
+ */
+function heartbeatEnvelope(t: number): number {
+  const bump = (center: number, width: number) =>
+    Math.exp(-(((t - center) / width) ** 2));
+  return Math.min(1, bump(0.16, 0.075) + 0.55 * bump(0.4, 0.06));
+}
+
 function presettle(sim: Simulation<SimNode, SimLink>): void {
   const deadline = performance.now() + PRESETTLE_BUDGET_MS;
   const BATCH = 20;
@@ -909,16 +927,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const zoomLabelAlpha =
         ls <= 0 ? 0 : clamp((k - start) / (end - start), 0, 1);
 
-      // The only per-node part of the entrance: nodes come up a touch brighter
-      // and ease down to their resting glow — a breath, on a layout that is
-      // already static. Nothing here moves anything.
+      // The light half of the heartbeat. The nodes brighten on the same two beats
+      // the CSS scales on, so the brain looks like it pulses rather than like it
+      // was merely animated in. The layout underneath does not move at all.
       const nowT = performance.now();
       const introT =
         S.introStart > 0 ? clamp((nowT - S.introStart) / INTRO_MS, 0, 1) : 1;
       const introEase = 1 - Math.pow(1 - introT, 3); // easeOutCubic
-      // Modest on purpose. This was 2.1× when it had a scattering layout to
-      // dress up; against a settled one that reads as a flashbulb.
-      const glowBoost = 1 + (1 - introEase) * 0.45;
+      const glowBoost = 1 + heartbeatEnvelope(introT) * 0.8;
 
       const nodeScale = s.nodeSize;
       const time = nowT / 1000;

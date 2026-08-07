@@ -434,32 +434,81 @@
    scale so it feels like it comes toward you rather than blinking on. Both are
    compositor-only properties, so this costs nothing per frame and cannot fight
    the render loop for the main thread. */
+/* Input is held off through the beats. Hit-testing maps a click via the canvas's
+   `getBoundingClientRect()`, which compensates the pulse's *translation* but not
+   its internal *scale* — so at the peak a click near the edge can land tens of
+   pixels off and open the wrong note. `step-end` holds `none` until the scale is
+   back to 1 at 54%, then releases. Deliberately on the WRAPPER: putting
+   pointer-events in the shared `.graph-canvas` keyframes would also override the
+   WebGL canvas's inline `pointer-events: none`, and that canvas sits on top — it
+   would swallow every interaction for the rest of the session. */
 .graph-intro {
-  animation: graph-intro 0.62s var(--ease) both;
+  animation: graph-intro-guard 0.62s step-end both;
 }
-@keyframes graph-intro {
+@keyframes graph-intro-guard {
   from {
-    opacity: 0;
-    transform: scale(0.985);
+    pointer-events: none;
   }
   to {
+    pointer-events: auto;
+  }
+}
+
+/* The pulse rides the CANVASES, not the wrapper. The wrapper owns the deep-space
+   backdrop and the vignette, and scaling those would shrink the void away from
+   its own edges and pump the vignette in and out. Only the brain beats; the space
+   it sits in holds still. */
+.graph-intro .graph-canvas {
+  animation: graph-heartbeat 1.15s var(--ease) both;
+  transform-origin: 50% 46%; /* matches the backdrop's optical centre */
+  will-change: transform, opacity;
+}
+/* A real lub-dub: one strong beat, a recoil under rest, then a smaller second
+   beat before settling. A single symmetric pulse reads as a zoom bounce; it's the
+   *asymmetry* of the pair — big, dip, small — that the eye recognises as a
+   heartbeat. `glowBoost` in GraphView.tsx brightens the nodes on the same two
+   peaks, so size and light beat together. That pairing is what sells it as alive;
+   scale alone just looks like a transition. */
+@keyframes graph-heartbeat {
+  0% {
+    opacity: 0;
+    transform: scale(0.965);
+  }
+  8% {
+    opacity: 1;
+  }
+  16% {
+    transform: scale(1.045); /* lub */
+  }
+  28% {
+    transform: scale(0.992); /* recoil, just under rest */
+  }
+  40% {
+    transform: scale(1.024); /* dub */
+  }
+  54% {
+    transform: scale(1);
+  }
+  100% {
     opacity: 1;
     transform: scale(1);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  /* Keep a short fade — an instant hard cut on a full-screen dark surface is its
-     own kind of jolt — but drop the scale entirely. */
-  .graph-intro {
-    animation: graph-fade 0.2s var(--ease) both;
+  /* No pulse. A full-screen surface throbbing is exactly what this setting is
+     asking us not to do — but an instant hard cut is its own jolt, so it keeps
+     the fade. The node glow still breathes; that's light, not motion. */
+  .graph-intro .graph-canvas {
+    animation: graph-fade 0.24s var(--ease) both;
+    will-change: auto;
   }
-  @keyframes graph-fade {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
+}
+@keyframes graph-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 
