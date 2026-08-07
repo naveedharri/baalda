@@ -36,6 +36,16 @@ export interface AppDeps extends ShareDeps {
    * error. Pass an explicit no-op if a test genuinely doesn't care.
    */
   onRegistryChanged: (vaultId: string, originId: string | null) => void;
+  /**
+   * Access changed in a collection → subscribers re-resolve their readable set.
+   *
+   * Narrowed from optional (`ShareDeps`) to **required** here for the same reason,
+   * with sharper teeth: this is the only thing that revokes access on a live
+   * vault-channel socket. An app built without it keeps streaming vault content to
+   * someone whose share — or whose membership — was just taken away, until their
+   * token expires. Inner routers keep it optional for focused unit tests.
+   */
+  onAclChanged: (vaultId: string) => void;
 }
 
 /**
@@ -138,7 +148,13 @@ export function createApp(deps: AppDeps): Hono {
   const billingProvider = deps.billingProvider ?? new PolarBillingProvider();
   app.route(
     "/api",
-    createOrgRoutes({ disconnectDoc: deps.disconnectDoc, billingProvider }),
+    createOrgRoutes({
+      disconnectDoc: deps.disconnectDoc,
+      // Was simply never plumbed here, which is why removing a member left their
+      // vault-channel socket streaming content for up to the token TTL.
+      onAclChanged: deps.onAclChanged,
+      billingProvider,
+    }),
   );
   app.route("/api", createBillingRoutes({ provider: billingProvider }));
   app.route("/api", graphRoutes);

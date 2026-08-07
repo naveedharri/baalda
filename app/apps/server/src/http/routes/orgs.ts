@@ -25,6 +25,20 @@ import type { BillingProvider } from "../../billing/provider.js";
 export interface OrgDeps {
   /** Force-close live sync sockets for a doc (so a purge isn't re-populated). */
   disconnectDoc: (vaultId: string, docId: string) => void;
+  /**
+   * Access in this collection changed — subscribers re-resolve their readable-doc
+   * set on the vault channel.
+   *
+   * Required here, not optional, because `disconnectDoc` only covers HALF of a
+   * removal. It kills per-doc Hocuspocus sockets; the removed member's
+   * **vault-channel** socket is untouched, and there is no `disconnectDoc`
+   * equivalent for it. That connection holds a `readable` set frozen at hello
+   * time, so without this it keeps receiving every doc update in the vault until
+   * the socket drops or their vault token expires (`SYNC_TOKEN_TTL_SECONDS`,
+   * 600s by default). Firing this makes the channel recompute the set — empty for
+   * a non-member with no shares — and drop every doc immediately.
+   */
+  onAclChanged: (vaultId: string) => void;
   /** Billing provider for best-effort subscription cancellation on org delete.
    *  Absent (self-host / billing off) ⇒ deletion just relies on FK cascade. */
   billingProvider?: BillingProvider;
@@ -237,6 +251,12 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       client.release();
     }
 
+    // The whole org is gone, so every subscriber's readable set is now empty and
+    // the channel will drop every doc. Same reason as member removal: the
+    // vault-channel sockets survive `disconnectDoc` and would otherwise keep
+    // streaming content from a deleted vault until their tokens expired.
+    for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
+
     return c.json({ deleted: true, vaults: vaultIds.length, docs: docIds.length });
   });
 
@@ -318,6 +338,11 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     // Membership is gone, so a reconnect now fails at token mint (403). Kick the
     // live sockets AFTER the delete so the auto-reconnect can't re-mint a token.
     for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
+    // …and tell the vault channel, which `disconnectDoc` cannot reach. Also after
+    // the commit, deliberately: the channel answers by re-running
+    // `listReadableDocsInVault`, which has to see the post-delete state to
+    // conclude the removed member may now read nothing.
+    for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
 
     return c.json({ removed: true });
   });

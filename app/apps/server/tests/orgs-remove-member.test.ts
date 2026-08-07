@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
-import { testAppDeps } from "./helpers/app.js";
+import { recordingAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { createOrg, signUp } from "./helpers/auth.js";
+import { seedNote, seedVault } from "./helpers/seed.js";
+import { listReadableDocsInVault } from "../src/permissions/vault-docs.js";
 
-const app = createApp(testAppDeps());
+const rec = recordingAppDeps();
+const app = createApp(rec.deps);
 
 function removeMember(token: string | null, orgId: string, userId: string) {
   const headers: Record<string, string> = {};
@@ -47,6 +50,7 @@ async function shareCount(orgId: string, principalId: string): Promise<number> {
 describe("remove a member from a vault", () => {
   beforeEach(async () => {
     await resetDb();
+    rec.reset();
   });
   afterAll(async () => {
     await pool.end();
@@ -128,5 +132,53 @@ describe("remove a member from a vault", () => {
     expect(await memberCount(org.id, admin2.userId)).toBe(1);
     expect((await removeMember(owner.token, org.id, admin2.userId)).status).toBe(200);
     expect(await memberCount(org.id, admin2.userId)).toBe(0);
+  });
+
+  // Deleting the rows is only half a revocation. `disconnectDoc` closes per-doc
+  // Hocuspocus sockets, but the removed member's VAULT-CHANNEL socket survives
+  // with a `readable` set frozen at connect time — and there is no
+  // `disconnectDoc` equivalent for it. Without an `acl-changed` broadcast that
+  // connection keeps receiving every doc update in the vault until their token
+  // expires (600s by default). The broadcast is the only thing that stops it.
+  describe("revoking access on the live vault channel", () => {
+    it("broadcasts acl-changed for every collection, after the delete", async () => {
+      const owner = await signUp("owner@rm-acl.com");
+      const org = await createOrg(owner, "Acme", "acme-rm-acl");
+      const member = await signUp("member@rm-acl.com");
+      await addMember(org.id, member.userId);
+      const vaultA = await seedVault(org.id, "A");
+      const vaultB = await seedVault(org.id, "B");
+      const note = await seedNote(vaultA, null, "team.md", owner.userId);
+      // The member could read it via the org-wide grant.
+      await pool.query(
+        `INSERT INTO shares
+           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+         VALUES ($1, $2, 'vault', $2, 'org', $2, 'edit')`,
+        [randomUUID(), org.id],
+      );
+      expect(await listReadableDocsInVault(member.userId, vaultA)).toEqual(new Set([note]));
+
+      expect((await removeMember(owner.token, org.id, member.userId)).status).toBe(200);
+
+      expect(rec.aclBroadcasts.sort()).toEqual([vaultA, vaultB].sort());
+      // Fired AFTER the commit, which is what makes it useful: the channel answers
+      // by re-running this resolver, and it has to see the post-delete state.
+      expect(await listReadableDocsInVault(member.userId, vaultA)).toEqual(new Set());
+    });
+
+    it("broadcasts nothing when the removal was refused", async () => {
+      const owner = await signUp("owner@rm-acl2.com");
+      const org = await createOrg(owner, "Acme", "acme-rm-acl2");
+      const member = await signUp("member@rm-acl2.com");
+      await addMember(org.id, member.userId);
+      await seedVault(org.id, "A");
+      const outsider = await signUp("outsider@rm-acl2.com");
+
+      // A non-member can't remove anyone.
+      expect((await removeMember(outsider.token, org.id, member.userId)).status).toBe(404);
+      // Nor can a plain member remove another member.
+      expect((await removeMember(member.token, org.id, owner.userId)).status).toBe(403);
+      expect(rec.aclBroadcasts).toEqual([]);
+    });
   });
 });

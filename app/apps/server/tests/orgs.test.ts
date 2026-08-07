@@ -1,11 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
-import { testAppDeps } from "./helpers/app.js";
+import { recordingAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp } from "./helpers/auth.js";
+import { seedVault } from "./helpers/seed.js";
 
-const app = createApp(testAppDeps());
+const rec = recordingAppDeps();
+const app = createApp(rec.deps);
 
 function getJoinCode(token: string | null) {
   const headers: Record<string, string> = {};
@@ -28,9 +30,7 @@ function join(token: string | null, code: unknown) {
 describe("vault join codes", () => {
   beforeEach(async () => {
     await resetDb();
-  });
-  afterAll(async () => {
-    await pool.end();
+    rec.reset();
   });
 
   it("owner lazily generates an 8-char unambiguous code, stable across calls", async () => {
@@ -96,5 +96,50 @@ describe("vault join codes", () => {
       [org.id, joiner.userId],
     );
     expect(after[0].c).toBe(1);
+  });
+});
+
+describe("deleting a vault revokes access on the live channel", () => {
+  beforeEach(async () => {
+    await resetDb();
+    rec.reset();
+  });
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  it("broadcasts acl-changed for every collection the org owned", async () => {
+    // The org's rows are gone, so every subscriber's readable set is now empty —
+    // but their vault-channel sockets survive `disconnectDoc`, and would keep
+    // streaming content from a deleted vault until their tokens expired.
+    const owner = await signUp("owner@del-acl.com");
+    const org = await createOrg(owner, "Acme", "acme-del-acl");
+    const a = await seedVault(org.id, "A");
+    const b = await seedVault(org.id, "B");
+
+    const res = await app.fetch(
+      new Request(`http://local/api/orgs/${org.id}`, {
+        method: "DELETE",
+        headers: authHeaders(owner),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(rec.aclBroadcasts.sort()).toEqual([a, b].sort());
+  });
+
+  it("broadcasts nothing when a non-owner tries to delete", async () => {
+    const owner = await signUp("owner@del-acl2.com");
+    const org = await createOrg(owner, "Acme", "acme-del-acl2");
+    await seedVault(org.id, "A");
+    const other = await signUp("other@del-acl2.com");
+
+    const res = await app.fetch(
+      new Request(`http://local/api/orgs/${org.id}`, {
+        method: "DELETE",
+        headers: authHeaders(other),
+      }),
+    );
+    expect(res.status).toBe(404); // not a member
+    expect(rec.aclBroadcasts).toEqual([]);
   });
 });

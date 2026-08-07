@@ -620,14 +620,18 @@ class VaultConnection {
       // Vault-wide, like member-joined: audio is addressed to the team, and
       // vault membership is already proven by the token behind every connection.
       //
-      // KNOWN LIMITATION, inherited from this channel rather than introduced
-      // here: membership revocation is TTL-bound. There is no `disconnectDoc`
-      // equivalent for the vault channel, so a just-removed member keeps its
-      // socket — and keeps receiving vault-wide broadcasts — until the socket
+      // KNOWN LIMITATION, narrowed but not gone. Member removal now publishes
+      // `acl-changed`, so a removed member's readable set empties immediately and
+      // every doc is dropped — note CONTENT is no longer TTL-bound.
+      //
+      // What remains is the vault-WIDE frames, which are deliberately not
+      // doc-gated: this one and `member-joined`. The socket itself survives (there
+      // is still no `disconnectDoc` equivalent for the vault channel), so a
+      // just-removed member can still hear audio and see joins until the socket
       // drops or their vault token expires (`SYNC_TOKEN_TTL_SECONDS`, 600s by
-      // default). `member-joined` already behaves this way, but a name is a
-      // smaller leak than live audio. Closing it means force-closing vault
-      // sockets on member removal; tracked as follow-up work, not solved here.
+      // default). Closing that needs a `PS_MEMBER_REMOVED` frame carrying a userId
+      // each connection compares against its own and self-terminates on; tracked
+      // as follow-up work, not solved here.
       //
       // Two gates. Never echo to the speaker — they are hearing themselves live
       // and a loopback would be an echo, not a feature. And only send to clients
