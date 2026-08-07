@@ -291,6 +291,91 @@ describe("inbound delete", () => {
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
   });
 
+  it("trashes a MATERIALIZED note the server deleted, while the path→docId join is live", async () => {
+    // The undeletable-note bug. Nothing is on disk to begin with: the file
+    // arrives via `writeNoteIfMissing`, and Rust's indexer mints a local id for
+    // it that is NOT the server's docId (the mock mirrors that). `registry.byPath`
+    // is the only place the two identities are joined, and inbound wasn't
+    // consulting it — so the tombstone matched nothing, the doc read as "already
+    // gone locally", and the outbound half re-registered the still-present file
+    // under a brand-new docId. The deleted note came back, and deleting THAT just
+    // repeated the cycle.
+    const disk = new FakeDisk();
+    install(disk);
+    const state: ServerState = {
+      notes: [{ id: "srv-1", rel_path: "naveed-test.md" }],
+      tombstones: [],
+    };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    // The premise: materialized under an identity of its own.
+    expect(disk.notes.get("naveed-test.md")).toBe("local-naveed-test.md");
+
+    // Hand the baseline back the way the next pass reads it, then delete the note
+    // server-side — same app session, so the registry still holds the join.
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+      writes[writes.length - 1]?.[0] as never,
+    );
+    state.notes = [];
+    state.tombstones = ["srv-1"];
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.trashed[0]?.from).toBe("naveed-test.md");
+    expect(disk.notes.has("naveed-test.md")).toBe(false);
+    expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
+  });
+
+  it("trashes it across a relaunch too, from the persisted path→docId join", async () => {
+    // The common MCP shape: the note is deleted while the app isn't running, so
+    // the in-memory join is gone by the time anyone reconciles. `config.json`'s
+    // `docs` map was being written every pass and read by nobody, which left the
+    // relaunch with no way to recognise the file as the deleted doc.
+    const disk = new FakeDisk();
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "srv-1", rel_path: "naveed-test.md" }] },
+      then: { notes: [], tombstones: ["srv-1"] },
+    });
+
+    expect(disk.trashed[0]?.from).toBe("naveed-test.md");
+    expect(disk.notes.has("naveed-test.md")).toBe(false);
+    expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+  });
+
+  it("leaves a note the user deleted and recreated at the same path alone", async () => {
+    // The reason inbound cannot just trash on a path match. `docs` is what makes
+    // this safe: it tracks the CURRENT docId at each path, so the recreated note
+    // carries a new id there and the old doc's tombstone finds nothing to remove.
+    const disk = new FakeDisk();
+    install(disk);
+    const state: ServerState = { notes: [{ id: "old", rel_path: "reused.md" }], tombstones: [] };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    // The user deletes it in the app and makes a new note at the same path.
+    await reg.deletePath("reused.md");
+    disk.notes.set("reused.md", "local-new");
+    disk.bodies.set("reused.md", "a completely different note");
+    await reg.registerNote("reused.md", null, "brand-new");
+
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    state.notes = [{ id: "brand-new", rel_path: "reused.md" }];
+    state.tombstones = ["old"];
+
+    const reg2 = new VaultRegistry(fakeApi(state));
+    reg2.setInboundHost(recordingHost().host);
+    await reg2.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.notes.has("reused.md")).toBe(true);
+    expect(ipc.trashNote).not.toHaveBeenCalled();
+  });
+
   it("KEEPS a file whose access was revoked, and stops re-registering it", async () => {
     // The regression that matters most. `GET /api/notes` is ACL-filtered, so a
     // revoked share looks exactly like a delete — and removing files on absence
@@ -340,3 +425,4 @@ describe("inbound delete", () => {
     expect(r.reg.failures().map((f) => f.kind)).toContain("orphan");
   });
 });
+
