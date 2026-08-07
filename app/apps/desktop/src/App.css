@@ -270,6 +270,45 @@ button.primary.hero:hover:not(:disabled) {
   background: radial-gradient(circle, #4aa3ff 0%, transparent 70%);
   opacity: 0.18;
 }
+/* ---- Welcome-screen account chip ----
+   Top-right corner, above the aurora. Deliberately out of the centered column
+   so it never competes with the wordmark or the two primary actions — an
+   account is optional in a local-first app, but it has to be reachable. */
+.picker-account {
+  position: absolute;
+  top: var(--sp-4);
+  right: var(--sp-4);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+}
+.picker-account-id {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  max-width: 260px;
+}
+.picker-account-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The shared .avatar has no intrinsic size; every caller sets its own. */
+.picker-account-id .avatar {
+  width: 22px;
+  height: 22px;
+  font-size: var(--fs-sm);
+  flex: none;
+}
+
 .vault-picker-card {
   position: relative;
   z-index: 1;
@@ -359,6 +398,12 @@ button.primary.hero:hover:not(:disabled) {
 .ghost-pill.lg {
   padding: var(--sp-3) var(--sp-6);
   font-size: var(--fs-lg);
+}
+/* Compact variant for secondary chrome — sits in a corner without competing
+   with whatever the primary action on the screen is. */
+.ghost-pill.sm {
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
 }
 
 /* ---- New-vault naming step ---- */
