@@ -2177,12 +2177,16 @@ function LimitNudge({
   onUpgrade: () => void;
 }) {
   const freeLimits = useStore((s) => s.billingConfig?.freeLimits);
+  // The server is the authority (the 402 carries `limit`, and billingConfig
+  // reports both caps); these are last-resort defaults for a nudge rendered
+  // before either arrived. They differ per kind — one shared number was right
+  // only while the two caps happened to be equal, and would have quietly
+  // claimed a 10-seat vault allows 3.
   const n =
     limit ??
     (kind === "member_limit"
-      ? freeLimits?.membersPerVault
-      : freeLimits?.vaultsPerUser) ??
-    3;
+      ? (freeLimits?.membersPerVault ?? 10)
+      : (freeLimits?.vaultsPerUser ?? 3));
   const message =
     kind === "member_limit"
       ? `Free plan limit reached — this vault allows ${n} member${n === 1 ? "" : "s"}.`

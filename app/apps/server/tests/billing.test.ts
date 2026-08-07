@@ -14,9 +14,32 @@ import type {
   NormalizedBillingEvent,
 } from "../src/billing/provider.js";
 import { testAppDeps } from "./helpers/app.js";
+import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { createOrg, signUp } from "./helpers/auth.js";
+
+// The seat cap is a product decision that moves (3 → 10 when free vaults were
+// opened up to real teams). These suites assert that it is ENFORCED, so they
+// read the configured value rather than restating it — a test that has to be
+// edited every time the number changes tests the number, not the rule.
+const SEAT_CAP = config.freeMaxMembers;
+
+/** Fill an org to exactly `SEAT_CAP` seats. The owner is seat 1; pending
+ *  invitations occupy the rest (they count against the cap, which is the point
+ *  — a free vault can't invite its way past the limit). */
+async function fillSeatsToCap(orgId: string, inviterId: string, tag: string) {
+  const values = Array.from({ length: SEAT_CAP - 1 }, (_, i) => {
+    const n = i + 1;
+    return `('${tag}-inv${n}', $1, '${tag}${n}@x.com', 'member', 'pending', now() + interval '1 day', $2)`;
+  }).join(",\n");
+  if (!values) return;
+  await pool.query(
+    `INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId")
+     VALUES ${values}`,
+    [orgId, inviterId],
+  );
+}
 
 const WEBHOOK_SECRET = "test-polar-webhook-secret";
 
@@ -130,7 +153,10 @@ describe("billing", () => {
       expect(body.plans.map((p) => p.id)).toEqual(["pro-monthly", "pro-yearly"]);
       expect(body.plans.find((p) => p.id === "pro-monthly")!.amount).toBe(1000);
       expect(body.plans.find((p) => p.id === "pro-yearly")!.amount).toBe(9700);
-      expect(body.freeLimits).toEqual({ vaultsPerUser: 3, membersPerVault: 3 });
+      expect(body.freeLimits).toEqual({
+        vaultsPerUser: config.freeMaxVaults,
+        membersPerVault: SEAT_CAP,
+      });
     });
 
     it("all other billing routes 404 when billing is off", async () => {
@@ -153,7 +179,7 @@ describe("billing", () => {
       expect(fourth.id).toBeTruthy();
       expect((await canCreateOrganization(user.userId)).allowed).toBe(true);
 
-      // Add more than FREE_MAX_MEMBERS (3) pending invitations to one vault — still unblocked.
+      // Pending invitations that would matter under a cap — still unblocked here.
       await pool.query(
         `INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId")
          VALUES ('unl-inv1', $1, 'a@x.com', 'member', 'pending', now() + interval '1 day', $2),
@@ -207,7 +233,13 @@ describe("billing", () => {
         [org.id, owner.userId],
       );
       expect(await seatCount(org.id)).toEqual({ members: 1, pendingInvitations: 2 });
-      // members(1)+pending(2) = 3 >= cap 3 → blocked.
+      // Two pending invitations are two seats, but they only BLOCK once the
+      // total reaches the cap — which is the counting rule this test is about.
+      expect((await canAddMember(org.id)).allowed).toBe(SEAT_CAP > 3);
+
+      // Fill the rest of the seats: pending invitations count, so the cap bites
+      // without a single extra person actually joining.
+      await fillSeatsToCap(org.id, owner.userId, "seat");
       expect((await canAddMember(org.id)).allowed).toBe(false);
 
       // An active subscription lifts the cap entirely.
@@ -239,7 +271,7 @@ describe("billing", () => {
         status: "none",
         currentPeriodEnd: null,
         cancelAtPeriodEnd: false,
-        seats: { members: 1, pendingInvitations: 0, limit: 3 },
+        seats: { members: 1, pendingInvitations: 0, limit: SEAT_CAP },
       });
     });
 
@@ -323,19 +355,27 @@ describe("billing", () => {
     it("invite-member → 402 member_limit_reached at the cap (via Better Auth)", async () => {
       const owner = await signUp("im@billing.com");
       const org = await createOrg(owner, "Im", "im-org");
-      // owner(1) + 2 pending = 3 = cap.
-      await pool.query(
-        `INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId")
-         VALUES ('imv1', $1, 'p1@x.com', 'member', 'pending', now() + interval '1 day', $2),
-                ('imv2', $1, 'p2@x.com', 'member', 'pending', now() + interval '1 day', $2)`,
-        [org.id, owner.userId],
-      );
+      await fillSeatsToCap(org.id, owner.userId, "im");
       const res = await req(app, "POST", "/api/auth/organization/invite-member", {
         token: owner.token,
-        body: { email: "p3@x.com", role: "member", organizationId: org.id },
+        body: { email: "one-too-many@x.com", role: "member", organizationId: org.id },
       });
       expect(res.status).toBe(402);
       expect(await res.text()).toContain("member_limit_reached");
+    });
+
+    it("invite-member is allowed on the last free seat", async () => {
+      // The cap must bite at cap+1, not cap — an off-by-one here would charge
+      // people for a seat they were promised.
+      const owner = await signUp("lastseat@billing.com");
+      const org = await createOrg(owner, "Last", "last-seat-org");
+      await fillSeatsToCap(org.id, owner.userId, "ls");
+      await pool.query(`DELETE FROM invitation WHERE id = $1`, [`ls-inv${SEAT_CAP - 1}`]);
+      const res = await req(app, "POST", "/api/auth/organization/invite-member", {
+        token: owner.token,
+        body: { email: "fits@x.com", role: "member", organizationId: org.id },
+      });
+      expect(res.status).toBe(200);
     });
 
     it("join-code redemption → 402 member_limit_reached at the cap", async () => {
@@ -344,18 +384,27 @@ describe("billing", () => {
       // Generate a join code.
       const codeRes = await req(app, "GET", "/api/orgs/join-code", { token: owner.token });
       const { code } = (await codeRes.json()) as { code: string };
-      // Fill to the cap: owner(1) + 2 joiners = 3.
-      const j1 = await signUp("jc1@billing.com");
-      const j2 = await signUp("jc2@billing.com");
-      expect((await req(app, "POST", "/api/orgs/join", { token: j1.token, body: { code } })).status).toBe(200);
-      expect((await req(app, "POST", "/api/orgs/join", { token: j2.token, body: { code } })).status).toBe(200);
-      // 3rd joiner is blocked.
-      const j3 = await signUp("jc3@billing.com");
-      const res = await req(app, "POST", "/api/orgs/join", { token: j3.token, body: { code } });
+      // Fill to the cap with the owner + pending invitations, so this stays a
+      // test about the cap rather than a loop of sign-ups.
+      await fillSeatsToCap(org.id, owner.userId, "jc");
+      const late = await signUp("jc-late@billing.com");
+      const res = await req(app, "POST", "/api/orgs/join", { token: late.token, body: { code } });
       expect(res.status).toBe(402);
       const body = (await res.json()) as { error: string; limit: number };
       expect(body.error).toBe("member_limit_reached");
-      expect(body.limit).toBe(3);
+      expect(body.limit).toBe(SEAT_CAP);
+    });
+
+    it("join-code redemption succeeds while a free seat remains", async () => {
+      const owner = await signUp("jcok@billing.com");
+      const org = await createOrg(owner, "JcOk", "jc-ok-org");
+      const codeRes = await req(app, "GET", "/api/orgs/join-code", { token: owner.token });
+      const { code } = (await codeRes.json()) as { code: string };
+      await fillSeatsToCap(org.id, owner.userId, "jco");
+      await pool.query(`DELETE FROM invitation WHERE id = $1`, [`jco-inv${SEAT_CAP - 1}`]);
+      const joiner = await signUp("jcok-joiner@billing.com");
+      const res = await req(app, "POST", "/api/orgs/join", { token: joiner.token, body: { code } });
+      expect(res.status).toBe(200);
     });
 
     it("a paid vault has no member cap on join-code redemption", async () => {
