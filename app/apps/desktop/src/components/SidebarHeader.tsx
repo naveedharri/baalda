@@ -100,7 +100,13 @@ export function SidebarHeader() {
   return (
     <div className="sidebar-header" ref={rootRef}>
       <div className="sidebar-header-main">
-        <span className="vault-name" title={activeOrg.name}>
+        {/* One name, one place. The local folder used to get its own line here,
+            but a vault's folder is created as `slugify(vault name)`, so that
+            line said the same thing twice on every vault anyone actually has —
+            "BenAI OS" over "benai-os". Where the files live is still a fair
+            question, so the path is the tooltip, and changing it lives in the
+            Switch menu next to it. */}
+        <span className="vault-name" title={vault.path}>
           {activeOrg.name}
         </span>
         <button
@@ -112,13 +118,6 @@ export function SidebarHeader() {
           Switch
         </button>
       </div>
-      <div className="vault-line">
-        {FOLDER_ICON}
-        <span className="vault-line-name" title={vault.path}>
-          {vault.name}
-        </span>
-      </div>
-
       {open && (
         <div className="vault-popover" role="menu">
           <div className="menu-label">Switch vault</div>
