@@ -1546,6 +1546,11 @@ body:has(.sidebar-resizer.dragging) {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   animation: rise-in var(--t-fast) var(--ease) both;
+  /* `placeMenu` flips the menu above its anchor when it won't fit below; this is
+     the last resort for a menu taller than the whole window, which would
+     otherwise run off both edges at once. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .context-menu li {
   padding: var(--sp-2) var(--sp-3);

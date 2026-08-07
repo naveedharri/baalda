@@ -3,7 +3,7 @@
 // shared GraphSettings shape and emits partial patches upward. All visual
 // styling lives in graph.css; this file just emits the agreed class names.
 
-import type { GraphSettings, ColorMode, GraphScope } from "../lib/graph/graphSettings";
+import type { GraphSettings, ColorMode } from "../lib/graph/graphSettings";
 import { SETTING_RANGES } from "../lib/graph/graphSettings";
 import type { LegendEntry } from "../lib/graph/graphColor";
 
@@ -18,7 +18,6 @@ export interface GraphControlsProps {
 type SliderKey = keyof typeof SETTING_RANGES;
 
 const SLIDER_LABELS: Record<SliderKey, string> = {
-  localDepth: "Depth",
   charge: "Repulsion",
   linkDistance: "Link distance",
   linkStrength: "Link force",
@@ -33,11 +32,6 @@ const COLOR_MODES: { mode: ColorMode; label: string }[] = [
   { mode: "folder", label: "Folder" },
   { mode: "degree", label: "Degree" },
   { mode: "uniform", label: "Uniform" },
-];
-
-const SCOPE_MODES: { scope: GraphScope; label: string }[] = [
-  { scope: "local", label: "Local" },
-  { scope: "global", label: "Global" },
 ];
 
 /** Round a slider value for display: integers stay whole, fractional steps
@@ -76,29 +70,9 @@ export function GraphControls(props: GraphControlsProps): React.JSX.Element {
 
   return (
     <div className="graph-controls">
-      <div className="graph-control-group">
-        <div className="graph-control-group-title">Scope</div>
-        <div className="graph-control-row">
-          <label>Show</label>
-          <div className="graph-seg" role="group" aria-label="Graph scope">
-            {SCOPE_MODES.map(({ scope, label }) => (
-              <button
-                key={scope}
-                type="button"
-                className={
-                  "graph-seg-btn" + (settings.scope === scope ? " is-active" : "")
-                }
-                aria-pressed={settings.scope === scope}
-                onClick={() => onChange({ scope })}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-        {settings.scope === "local" && slider("localDepth")}
-      </div>
-
+      {/* No Scope section. The graph is the whole vault, always — a Local/Global
+          toggle meant this panel could be showing one of two different graphs
+          under one name, and the whole-vault view is the one that was wanted. */}
       <div className="graph-control-group">
         <div className="graph-control-group-title">Forces</div>
         {slider("charge")}

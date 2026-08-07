@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   Tree,
   type CursorProps,
@@ -39,6 +46,7 @@ import type { VaultPeer } from "../lib/sync/vaultSyncEngine";
 import { PRESENCE_OFFLINE, ringShowsColor, statusTone } from "../lib/presence/color";
 import { characterSvg } from "./Identity";
 import { ShareDialog, type ShareTarget } from "./ShareDialog";
+import { placeMenu, type Placement } from "../lib/menuPlacement";
 
 interface Dimensions {
   width: number;
@@ -85,6 +93,8 @@ function dirAtClientPoint(x: number, y: number): string {
 interface MenuState {
   x: number;
   y: number;
+  /** Bottom edge to use if the menu has to open upward — see `placeMenu`. */
+  flipY?: number;
   node: NodeApi<TreeNode> | null;
 }
 
@@ -159,6 +169,10 @@ export function FileTree() {
   const [containerRef, dim] = useDimensions();
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  // Resolved once the menu has been measured; null means "not placed yet", which
+  // is also what keeps it invisible for that one frame.
+  const menuRef = useRef<HTMLUListElement | null>(null);
+  const [menuPos, setMenuPos] = useState<Placement | null>(null);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   // Which way the fold toggle points: false → "collapse all", true → "expand all".
   const [treeCollapsed, setTreeCollapsed] = useState(false);
@@ -376,6 +390,27 @@ export function FileTree() {
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
   }, []);
+
+  // Measure the menu, then decide where it actually goes. This has to be a
+  // LAYOUT effect: it runs (and the re-render it schedules runs) before the
+  // browser paints, so the menu is never visibly drawn at the unplaced position.
+  // The `rise-in` animation only translates, so the measured box is the real one.
+  useLayoutEffect(() => {
+    if (!menu) {
+      setMenuPos(null);
+      return;
+    }
+    const el = menuRef.current;
+    if (!el) return;
+    const box = el.getBoundingClientRect();
+    setMenuPos(
+      placeMenu(
+        { x: menu.x, y: menu.y, flipY: menu.flipY },
+        { width: box.width, height: box.height },
+        { width: window.innerWidth, height: window.innerHeight },
+      ),
+    );
+  }, [menu]);
 
   async function refreshAll() {
     await useStore.getState().refreshTree();
@@ -924,7 +959,7 @@ export function FileTree() {
               syncIndex={syncIndex}
               presenceByDoc={presenceByDoc}
               color={itemColors[props.node.data.path]}
-              onMenu={(x, y, node) => setMenu({ x, y, node })}
+              onMenu={(x, y, node, flipY) => setMenu({ x, y, flipY, node })}
               selectMode={selectMode}
               checked={selected.has(props.node.data.path)}
               onToggleCheck={toggleSelect}
@@ -934,7 +969,17 @@ export function FileTree() {
       )}
 
       {menu && (
-        <ul className="context-menu" style={{ left: menu.x, top: menu.y }}>
+        <ul
+          className="context-menu"
+          ref={menuRef}
+          style={
+            menuPos
+              ? { left: menuPos.left, top: menuPos.top, maxHeight: menuPos.maxHeight }
+              : // Rendered off the anchor for the measuring pass only, and hidden
+                // so that pass can't flash on screen at the wrong place.
+                { left: menu.x, top: menu.y, visibility: "hidden" }
+          }
+        >
           <li onClick={() => createUniqueNote(menuDir)}>New note</li>
           <li onClick={() => createUniqueFolder(menuDir)}>New folder</li>
           <li className="menu-sep-item" onClick={() => void importFilesInto(menuDir)}>
@@ -1020,7 +1065,7 @@ interface NodeExtra {
   presenceByDoc: Map<string, VaultPeer[]>;
   /** Item color id (vault-local preference) — tints the type glyph. */
   color: string | undefined;
-  onMenu: (x: number, y: number, node: NodeApi<TreeNode>) => void;
+  onMenu: (x: number, y: number, node: NodeApi<TreeNode>, flipY?: number) => void;
   /** Multi-select: when on, rows show a checkbox and hide per-row actions. */
   selectMode: boolean;
   checked: boolean;
@@ -1341,7 +1386,9 @@ function Node({
             onClick={(e) => {
               e.stopPropagation();
               const r = e.currentTarget.getBoundingClientRect();
-              onMenu(r.left, r.bottom + 4, node);
+              // Below the ⋯ button normally; above it when there's no room, so a
+              // flipped menu never lands on top of the button that opened it.
+              onMenu(r.left, r.bottom + 4, node, r.top - 4);
             }}
           >
             <TreeSvg>

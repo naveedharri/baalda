@@ -34,8 +34,11 @@ import type { GraphNode } from "./buildGraph";
  * the link force pointing at stale/missing refs. Order matters.
  */
 
-export const MIN_RADIUS = 4;
-export const MAX_RADIUS = 24;
+// A wider band than before (was 4..24). The point of sizing by degree is that a
+// hub should be unmistakable next to a leaf, and a 6× span reads as "one of these
+// is a sun and those are pebbles" where 6..24 read as "all roughly the same".
+export const MIN_RADIUS = 3.2;
+export const MAX_RADIUS = 40;
 
 export interface SimNode extends GraphNode {
   x: number;
@@ -62,11 +65,19 @@ export interface SimLink {
   target: string | SimNode;
 }
 
-/** Sublinear growth so hubs stay bounded; clamped to the visual radius band. */
+/**
+ * Radius from degree. Still sublinear — a 1200-link hub cannot be 1200× a leaf —
+ * but on a gentler exponent than √ so the mid-tier actually spreads out.
+ *
+ * `^0.62` rather than `^0.5`: with √, degrees 1 and 9 differ by 3× in radius
+ * while 100 and 900 also differ by 3×, which flattens exactly the range most
+ * notes live in. The higher exponent keeps pulling the low-to-mid range apart
+ * before the clamp catches the true outliers.
+ */
 export function nodeRadius(linkCount: number): number {
   return Math.max(
     MIN_RADIUS,
-    Math.min(MIN_RADIUS + Math.sqrt(linkCount) * 2.2, MAX_RADIUS),
+    Math.min(MIN_RADIUS + Math.pow(Math.max(0, linkCount), 0.62) * 2.4, MAX_RADIUS),
   );
 }
 
@@ -79,8 +90,13 @@ export function nodeRadius(linkCount: number): number {
  */
 export function centerWeight(linkCount: number, maxDegree: number): number {
   const importance = maxDegree > 0 ? linkCount / maxDegree : 0;
-  // Floor so even orphans drift gently inward; exponent < 1 spreads the mid-tier.
-  return 0.12 + Math.pow(importance, 0.7) * 1.4;
+  // Floor so even orphans drift gently inward. The exponent is well under 1
+  // because `importance` is a ratio against the single biggest hub: on a
+  // heavy-tailed vault almost every node scores near 0, so a linear (or worse,
+  // super-linear) curve would give the entire graph the floor weight and only the
+  // one hub any mass at all. 0.45 lifts the middle of the distribution enough
+  // that a moderately-linked note is meaningfully heavier than a leaf.
+  return 0.12 + Math.pow(importance, 0.45) * 1.9;
 }
 
 export function createSimulation(
@@ -129,7 +145,17 @@ export function configureForces(
   // send nodes to infinity (with weak/zero gravity the layout would explode).
   const scaledCharge = Math.max(-6000, settings.charge * chargeScale);
   const charge = sim.force("charge") as ForceManyBody<SimNode>;
-  charge.strength(scaledCharge);
+  // Repulsion PER NODE, scaled by its own size — the solar-system half of the
+  // model. A uniform charge made every node push equally hard, so a hub and a
+  // leaf cleared the same space and the layout had no sense of scale; giving the
+  // big ones a bigger field means they hold open a neighbourhood and the small
+  // ones settle into orbit around them. Area-proportional (r²/rMin², capped) so
+  // it tracks the visual size rather than fighting it.
+  const rMin = MIN_RADIUS;
+  charge.strength((d: SimNode) => {
+    const rel = Math.min(6, ((d.radius || rMin) / rMin) ** 2);
+    return scaledCharge * (0.5 + rel * 0.5);
+  });
   // CRUCIAL for large graphs: cap the RANGE of repulsion so each node only
   // pushes against nearby neighbors, not every node in the vault. Without a
   // cutoff, global many-body repulsion on thousands of nodes evacuates the
@@ -156,7 +182,9 @@ export function configureForces(
 
   // A little extra margin beyond each node's visual radius so nodes keep some
   // breathing room instead of touching — the even, spaced look of a good graph.
+  // Clearance scales with the node too, so a sun keeps its planets at a distance
+  // instead of letting them touch its surface the way a leaf's neighbours do.
   (sim.force("collide") as ForceCollide<SimNode>)
-    .radius((d) => d.radius + 5)
+    .radius((d) => d.radius + 4 + d.radius * 0.35)
     .strength(0.85);
 }

@@ -8,16 +8,22 @@
 /** How node fill colors are derived. */
 export type ColorMode = "folder" | "degree" | "uniform";
 
-/** What the graph draws: the whole vault (`global`) or just the neighborhood of
- *  the currently-open note (`local` — stays small and smooth on any vault, and
- *  re-centers as you move between notes). */
+/**
+ * What the graph draws. **Pinned to `global`** — the graph is the whole vault.
+ *
+ * The `local` mode (the open note's neighborhood, N hops out) is gone from the
+ * UI: two scopes meant the view could show two different things under the same
+ * name, and the one people actually wanted was always the whole vault. The union
+ * type survives so the renderer's non-WebGL fallback branch (which is written
+ * against `scope`) keeps type-checking; nothing sets it to `"local"` any more.
+ */
 export type GraphScope = "local" | "global";
 
 export interface GraphSettings {
   // ---- Scope ----
   /** Draw the open note's local neighborhood, or the whole vault. */
   scope: GraphScope;
-  /** How many link-hops out from the open note the local graph reaches. */
+  /** Vestigial: local scope has no UI. Retained so persisted blobs still parse. */
   localDepth: number;
 
   // ---- Forces (physics) ----
@@ -49,25 +55,29 @@ export interface GraphSettings {
   hideOrphans: boolean;
 }
 
+// Tuned by hand against a real ~3.4k-note vault rather than derived: long links
+// with a soft spring and light gravity let the hubs separate into distinct
+// clusters instead of packing into one ball, and small nodes with `minDegree: 1`
+// keep the field readable at that size. These are the values the graph is
+// actually designed to look right at, so they are the defaults.
 export const DEFAULT_SETTINGS: GraphSettings = {
-  scope: "local",
-  localDepth: 1,
+  scope: "global",
+  localDepth: 1, // vestigial; `scope` is pinned to global
   charge: -10.8,
-  linkDistance: 1.5,
-  linkStrength: 1,
-  gravity: 0.7,
-  nodeSize: 1,
-  edgeThickness: 1,
-  labelScale: 1,
-  colorMode: "folder",
+  linkDistance: 337,
+  linkStrength: 0.44,
+  gravity: 0.21,
+  nodeSize: 0.4,
+  edgeThickness: 1.3,
+  labelScale: 0.25,
+  colorMode: "degree",
   search: "",
-  minDegree: 0,
-  hideOrphans: false,
+  minDegree: 1,
+  hideOrphans: true,
 };
 
 /** Inclusive slider ranges + step for the numeric controls, keyed by setting. */
 export const SETTING_RANGES = {
-  localDepth: { min: 1, max: 3, step: 1 },
   charge: { min: -1500, max: -1, step: 0.2 },
   linkDistance: { min: 1, max: 400, step: 0.5 },
   linkStrength: { min: 0, max: 1, step: 0.02 },
@@ -78,8 +88,10 @@ export const SETTING_RANGES = {
   minDegree: { min: 0, max: 20, step: 1 },
 } as const;
 
-// Bumped to v4 so the new physics defaults take effect over any saved values.
-export const SETTINGS_STORAGE_KEY = "context.graph.settings.v4";
+// Bumped to v5 so the new physics/appearance defaults take effect over any saved
+// values — a persisted v4 blob would otherwise pin every existing install to the
+// old look, which is precisely what re-tuning the defaults is meant to fix.
+export const SETTINGS_STORAGE_KEY = "context.graph.settings.v5";
 
 /** Load persisted settings, merged over defaults (tolerant of missing/old keys). */
 export function loadSettings(): GraphSettings {
@@ -87,7 +99,10 @@ export function loadSettings(): GraphSettings {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<GraphSettings>;
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    // `scope` is forced regardless of what was stored: local mode no longer has
+    // a control, so a saved `"local"` would strand someone in a scope they can't
+    // see the toggle for and can't get out of.
+    return { ...DEFAULT_SETTINGS, ...parsed, scope: "global" };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
