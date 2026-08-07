@@ -118,9 +118,6 @@ interface AppStore {
   voiceSpeakers: VoiceSpeaker[];
   /** True while this user is holding the talk button. */
   broadcasting: boolean;
-  /** True when the vault channel is live, so talking would actually reach
-   *  someone. Mirrors the vault-wide channel, not the open note's socket. */
-  voiceReady: boolean;
   /** Set when the mic couldn't be opened, so the UI can say why once. */
   voiceError: string | null;
   /** Per-item accent colors (vault-local preference), path → color id. */
@@ -576,7 +573,6 @@ export const useStore = create<AppStore>((set, get) => ({
   vaultPresence: [],
   voiceSpeakers: [],
   broadcasting: false,
-  voiceReady: false,
   voiceError: null,
   itemColors: {},
   itemOrder: {},
@@ -778,13 +774,6 @@ export const useStore = create<AppStore>((set, get) => ({
     // Who's talking right now. Nothing is stored — this list empties itself as
     // each transmission finishes playing.
     syncManager.setVoiceListener((speaking) => set({ voiceSpeakers: speaking }));
-    // Push-to-talk rides the vault channel, so its availability tracks that
-    // channel — not the open note's socket, which may not exist at all.
-    syncManager.setVaultStatusListener((status) => {
-      const ready = status === "synced";
-      if (!ready && get().broadcasting) void get().stopBroadcast();
-      set({ voiceReady: ready });
-    });
     // Bulk-sync progress for the open vault. Both of these are already throttled
     // (~10 emissions/second) and batched by `SyncProgressReporter`, so a 500-note
     // run costs ~10 store writes per second rather than one per note.
@@ -944,10 +933,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // Re-entrancy guard: key repeat fires press events continuously while held,
     // and a second capture would open the mic twice and double every chunk.
     if (get().broadcasting || activeBroadcast) return;
-    if (!syncManager.canBroadcastVoice()) {
-      set({ voiceError: "Not connected — nobody would hear you." });
-      return;
-    }
+    // Deliberately NOT gated on the channel being up. Talking to an empty (or
+    // disconnected) vault is a no-op, not an error, and refusing to open the mic
+    // would make the button feel broken exactly when someone wants to speak.
     set({ broadcasting: true, voiceError: null });
     try {
       activeBroadcast = await syncManager.startBroadcast();

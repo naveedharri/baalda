@@ -32,7 +32,6 @@ export function TalkButton() {
   const broadcasting = useStore((s) => s.broadcasting);
   const speakers = useStore((s) => s.voiceSpeakers);
   const voiceError = useStore((s) => s.voiceError);
-  const voiceReady = useStore((s) => s.voiceReady);
   const startBroadcast = useStore((s) => s.startBroadcast);
   const stopBroadcast = useStore((s) => s.stopBroadcast);
   const clearVoiceError = useStore((s) => s.clearVoiceError);
@@ -107,14 +106,13 @@ export function TalkButton() {
       <button
         type="button"
         className={`icon-btn talk-btn${broadcasting ? " live" : ""}`}
-        disabled={!voiceReady}
         aria-pressed={broadcasting}
         aria-label="Push to talk"
-        title={
-          voiceReady
-            ? "Press and hold to talk to everyone in this vault"
-            : "Connect to a synced vault to use push-to-talk"
-        }
+        // Always available. Talking into an empty vault is harmless — the chunks
+        // simply go nowhere — and gating on "is anyone listening" would make the
+        // control flicker in and out with the connection. If someone IS there,
+        // the talking indicator says so.
+        title="Press and hold to talk"
         onPointerDown={(e) => {
           // Primary button only; a right-click shouldn't open the mic.
           if (e.button !== 0) return;

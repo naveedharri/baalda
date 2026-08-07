@@ -757,27 +757,26 @@ export class SyncManager {
     this.onVoiceSpeakers = cb;
   }
 
-  /** True when the vault channel is live, i.e. talking would reach someone. */
-  canBroadcastVoice(): boolean {
-    return this.vaultEngine !== null && this.vaultStatus === "synced";
-  }
-
   /**
    * Open the mic and stream to the vault until the returned handle is stopped.
    *
    * One transmission per press. The stream id is minted here so every chunk of
    * a single press-and-hold groups on the receiving end, and the format rides
    * the opening chunk only.
+   *
+   * Works with no channel at all. `this.vaultEngine` is read per chunk rather
+   * than captured up front, so a transmission that starts offline still lands
+   * the moment the channel comes back mid-press, and one that starts online
+   * survives a drop instead of throwing. Chunks with nowhere to go are simply
+   * dropped — which is what "ephemeral" already means everywhere else here.
    */
   async startBroadcast(): Promise<{ stop: () => Promise<void> }> {
-    if (!this.vaultEngine) throw new Error("not connected to a vault");
-    const engine = this.vaultEngine;
     const streamId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     let lastSeq = -1;
 
     const capture = await startCapture((audio, seq) => {
       lastSeq = seq;
-      engine.sendVoice(
+      this.vaultEngine?.sendVoice(
         { s: streamId, n: seq, ...(seq === 0 ? CAPTURE_FORMAT : {}) },
         audio,
       );
@@ -789,7 +788,7 @@ export class SyncManager {
         // Always send a final marker, even with an empty payload: it's what
         // closes the stream on every listener. Without it a receiver holds the
         // "talking" indicator until its own timeout.
-        engine.sendVoice({ s: streamId, n: lastSeq + 1, f: 1 }, new Uint8Array());
+        this.vaultEngine?.sendVoice({ s: streamId, n: lastSeq + 1, f: 1 }, new Uint8Array());
       },
     };
   }

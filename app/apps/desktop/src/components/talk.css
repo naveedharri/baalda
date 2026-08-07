@@ -9,21 +9,61 @@
   -webkit-user-select: none;
 }
 
-.talk-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 /* Live. The loudest thing in the header on purpose: an open mic the user has
-   forgotten about is the failure mode worth designing against. */
+   forgotten about is the failure mode worth designing against.
+
+   Three layers, all keyed to "broadcasting" rather than mere hover:
+     1. the button holds an accent fill,
+     2. a ring radiates outward and fades — the visual grammar of transmitting,
+     3. the megaphone itself leans and breathes.
+   The ring is a pseudo-element so it can overflow the 28px button without
+   affecting layout in the header row. */
 .talk-btn.live {
   color: var(--accent);
   background: var(--accent-soft);
-  animation: talk-pulse 1.6s ease-in-out infinite;
+  position: relative;
 }
 
 .talk-btn.live:hover {
   color: var(--accent);
+}
+
+.talk-btn.live::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--accent);
+  animation: talk-broadcast 1.4s var(--ease) infinite;
+  pointer-events: none;
+}
+
+.talk-btn.live svg {
+  transform-origin: 60% 60%;
+  animation: talk-shout 1.4s ease-in-out infinite;
+}
+
+/* The ring grows past the button edge and dissolves, so the button reads as
+   emitting rather than merely highlighted. */
+@keyframes talk-broadcast {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+@keyframes talk-shout {
+  0%,
+  100% {
+    transform: rotate(0) scale(1);
+  }
+  50% {
+    transform: rotate(-7deg) scale(1.1);
+  }
 }
 
 /* Transient notices — a mic problem, or who's currently talking. Soft accent
@@ -68,10 +108,14 @@
   }
 }
 
-/* The pulse is decorative; colour alone still says "live". */
+/* Motion is decorative; the accent fill alone still says "live". Drop the ring
+   entirely rather than leaving a static outline sitting around the button. */
 @media (prefers-reduced-motion: reduce) {
-  .talk-btn.live,
+  .talk-btn.live svg,
   .talk-dot {
     animation: none;
+  }
+  .talk-btn.live::after {
+    display: none;
   }
 }
