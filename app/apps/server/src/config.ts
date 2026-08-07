@@ -148,9 +148,13 @@ export const config = {
   polarProductYearlyId: optional("POLAR_PRODUCT_YEARLY_ID"),
   /** Free-tier caps (only enforced when billing is enabled). A user may OWN up
    *  to this many UNSUBSCRIBED vaults; each unsubscribed vault may hold
-   *  up to this many members (incl. pending invitations). */
+   *  up to this many members (incl. pending invitations).
+   *
+   *  Members sit well above vaults on purpose: a free vault should be able to
+   *  hold a real team, so the upgrade prompt arrives when a group outgrows the
+   *  product rather than the moment it stops being a pair. */
   freeMaxVaults: int("FREE_MAX_VAULTS", 3),
-  freeMaxMembers: int("FREE_MAX_MEMBERS", 3),
+  freeMaxMembers: int("FREE_MAX_MEMBERS", 10),
 } as const;
 
 /**
