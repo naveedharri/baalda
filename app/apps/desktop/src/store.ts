@@ -8,6 +8,7 @@ import * as ipc from "./lib/ipc";
 import { bridgeManager } from "./lib/bridge";
 import { readItemColors, writeItemColors } from "./lib/appearance";
 import { readItemOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
+import { loadedFolderPaths, setChildrenAt } from "./lib/tree/lazyTree";
 import {
   ApiError,
   type BillingConfig,
@@ -285,23 +286,6 @@ export function readOrgVaults(): Record<string, string> {
  * A folder name for a vault that won't collide with a folder already bound
  * to another vault under the managed root. Deterministic-ish for the MVP.
  */
-/** Immutably replace one node's `children` (by path) in a lazy-loaded tree. */
-function setChildrenAt(
-  node: ipc.TreeNode,
-  path: string,
-  children: ipc.TreeNode[],
-): ipc.TreeNode {
-  // Filling in a folder's children is also what makes it *loaded* — that flag is
-  // the only thing separating "this folder has no notes" from "nobody has opened
-  // it yet", and the sidebar labels the first case "empty".
-  if (node.path === path) return { ...node, children, childrenLoaded: true };
-  if (!node.children) return node;
-  return {
-    ...node,
-    children: node.children.map((c) => setChildrenAt(c, path, children)),
-  };
-}
-
 function uniqueFolderSlug(name: string, bound: Record<string, string>): string {
   const base = slugify(name);
   const taken = new Set(
@@ -616,9 +600,17 @@ export const useStore = create<AppStore>((set, get) => ({
     // Folders load their children on first expand (see `loadChildren`), so
     // switching a large vault no longer ships/parses the entire node set.
     const vault = get().vault;
+    const epoch = vault?.epoch;
+    // Which folders were already expanded/listed. This refresh runs on every
+    // `file-changed` burst and every sync registry pull — i.e. constantly while
+    // you work — and rebuilding from the top level alone would drop each of
+    // them back to an unloaded placeholder. That is what made the sidebar fold
+    // itself up mid-edit: open a folder, click through its notes, and the
+    // write-triggered refresh emptied it under you.
+    const loaded = loadedFolderPaths(get().tree);
     let children: ipc.TreeNode[];
     try {
-      children = await ipc.listChildren("", vault?.epoch);
+      children = await ipc.listChildren("", epoch);
     } catch (e) {
       // These reads are epoch-pinned, so a vault switch mid-read makes Rust
       // REJECT them. That is the guard working, not a failure — and several call
@@ -629,19 +621,39 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     // A vault switch during the read would otherwise paint the old vault's
     // children under the new vault's name.
-    if (!sameVault(get, vault?.epoch)) return;
-    set({
-      tree: {
-        id: "",
-        name: vault?.name ?? "vault",
-        path: "",
-        isDir: true,
-        children,
-        // The root's own listing IS what we just fetched; only its subfolders
-        // are still placeholders (Rust marks those `childrenLoaded: false`).
-        childrenLoaded: true,
-      },
-    });
+    if (!sameVault(get, epoch)) return;
+    let next: ipc.TreeNode = {
+      id: "",
+      name: vault?.name ?? "vault",
+      path: "",
+      isDir: true,
+      children,
+      // The root's own listing IS what we just fetched; only its subfolders
+      // are still placeholders (Rust marks those `childrenLoaded: false`).
+      childrenLoaded: true,
+    };
+
+    // Re-list the expanded folders rather than carrying their old children
+    // over: this refresh exists to show what changed on disk, and a folder the
+    // user is looking at is the one most likely to have changed. A folder that
+    // has since been deleted or renamed simply drops out.
+    if (loaded.length > 0) {
+      const listings = await Promise.all(
+        loaded.map(async (path) => {
+          try {
+            return { path, kids: await ipc.listChildren(path, epoch) };
+          } catch {
+            return { path, kids: null };
+          }
+        }),
+      );
+      if (!sameVault(get, epoch)) return;
+      for (const { path, kids } of listings) {
+        if (kids) next = setChildrenAt(next, path, kids);
+      }
+    }
+
+    set({ tree: next });
   },
 
   loadChildren: async (path) => {

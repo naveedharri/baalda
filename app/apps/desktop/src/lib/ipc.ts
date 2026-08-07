@@ -5,10 +5,27 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 /** Open an external URL (markdown links) in the user's default browser. */
 export const openExternal = (url: string) => openUrl(url);
+
+/**
+ * Show a vault folder in the OS file manager (Finder / Explorer / xdg).
+ *
+ * `openPath` opens the folder itself — what "open in folder" means to a user —
+ * but it's scoped to `$HOME/**` in `capabilities/default.json`, so a vault on
+ * an external volume is rejected. `revealItemInDir` carries no scope, so it
+ * covers those: the folder is selected in its parent rather than opened, which
+ * beats a button that does nothing.
+ */
+export const openInFileManager = async (path: string): Promise<void> => {
+  try {
+    await openPath(path);
+  } catch {
+    await revealItemInDir(path);
+  }
+};
 
 // ---- Types (mirror the Rust structs, serialized camelCase) ---------------
 

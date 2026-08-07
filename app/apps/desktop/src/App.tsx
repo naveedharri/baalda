@@ -10,6 +10,7 @@ import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
+import { SidebarResizer } from "./components/SidebarResizer";
 import { VaultPicker } from "./components/VaultPicker";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
@@ -18,6 +19,7 @@ import { syncManager } from "./lib/sync/docSession";
 import { checkForUpdate, installUpdate, useUpdateState } from "./lib/updater";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
+import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { useStore } from "./store";
 
 function RemovedBanner() {
@@ -239,6 +241,7 @@ export default function App() {
   const [booting, setBooting] = useState(true);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
 
@@ -452,15 +455,21 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+    >
+      {/* Centered overlay, not a sidebar panel — it searches the whole vault
+          and its button lives in the main header. */}
+      {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
       <aside className="sidebar">
         <SidebarHeader />
-        {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
         <FileTree />
         <div className="sidebar-footer">
           <AccountMenu />
         </div>
       </aside>
+      <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />
 
       <main className="main">
         <MemberJoinedBanner />
