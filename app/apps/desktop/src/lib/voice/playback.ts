@@ -12,9 +12,13 @@
 
 import { ChunkOrderer, pcm16ToFloat } from "./pcm";
 
-/** How far ahead of "now" a fresh stream starts playing. One chunk of slack
- *  absorbs ordinary jitter without adding delay anyone would notice. */
-const LEAD_SECONDS = 0.2;
+/** How far ahead of "now" a fresh stream starts playing — the receiver's half
+ *  of the mouth-to-ear delay.
+ *
+ *  This was one 200 ms chunk of slack. Chunks are 40 ms now, but dropping the
+ *  lead to match would leave nothing to absorb jitter, so it sits at 80 ms: two
+ *  chunks of cushion, and 120 ms less delay than before. */
+const LEAD_SECONDS = 0.08;
 
 /**
  * Past this much scheduled-but-unplayed audio, a stream has fallen behind and
@@ -26,6 +30,9 @@ const MAX_DRIFT_SECONDS = 1.0;
 
 interface Stream {
   orderer: ChunkOrderer;
+  /** Who is transmitting. Streams are keyed by streamId, but the "talking"
+   *  signal is per user, and one user can briefly own two streams. */
+  userId: string;
   /** AudioContext time at which the next chunk should start. */
   cursor: number;
   sampleRate: number;
@@ -39,6 +46,9 @@ export interface VoicePlayerEvents {
 
 export class VoicePlayer {
   private ctx: AudioContext | null = null;
+  /** Shared output bus: every stream mixes into this, never straight into the
+   *  destination. See {@link outputBus}. */
+  private bus: AudioNode | null = null;
   private readonly streams = new Map<string, Stream>();
 
   constructor(private readonly events: VoicePlayerEvents = {}) {}
@@ -66,6 +76,41 @@ export class VoicePlayer {
   }
 
   /**
+   * Where every stream connects, instead of `ctx.destination` directly.
+   *
+   * Two people talking used to sum at unity gain straight into the output.
+   * Capture runs with `autoGainControl`, so each speaker already arrives near
+   * full scale, and the sum of two clipped hard — the overlap didn't just sound
+   * loud, it sounded broken. A limiter costs nothing when one person is talking
+   * (nothing exceeds the threshold) and is the difference between "two voices"
+   * and "distortion" when two are.
+   */
+  private outputBus(ctx: AudioContext): AudioNode {
+    if (!this.bus) {
+      const limiter = ctx.createDynamicsCompressor();
+      // Fast, transparent limiting rather than audible pumping: clamp only the
+      // peaks that would clip, and let go quickly so speech isn't squashed.
+      limiter.threshold.value = -6;
+      limiter.knee.value = 3;
+      limiter.ratio.value = 12;
+      limiter.attack.value = 0.003;
+      limiter.release.value = 0.12;
+      limiter.connect(ctx.destination);
+      this.bus = limiter;
+    }
+    return this.bus;
+  }
+
+  /** Is anyone else still transmitting as this user? Guards the "stopped
+   *  talking" signal — see the note where it's used. */
+  private stillSpeaking(userId: string, exceptStreamId: string): boolean {
+    for (const [id, s] of this.streams) {
+      if (id !== exceptStreamId && s.userId === userId) return true;
+    }
+    return false;
+  }
+
+  /**
    * Accept one inbound chunk.
    *
    * `streamId` groups a transmission, `seq` orders it, `final` closes it. Two
@@ -88,6 +133,7 @@ export class VoicePlayer {
     if (!stream) {
       stream = {
         orderer: new ChunkOrderer(),
+        userId: opts.userId,
         cursor: ctx.currentTime + LEAD_SECONDS,
         sampleRate: opts.sampleRate ?? 16_000,
         live: new Set(),
@@ -110,7 +156,13 @@ export class VoicePlayer {
       setTimeout(
         () => {
           this.streams.delete(id);
-          this.events.onSpeakingChange?.(user, false);
+          // Only if this was their LAST stream. A second press landing before
+          // the first transmission finished playing (or a reconnect minting a
+          // new streamId mid-press) meant the older stream's timer cleared the
+          // indicator for a user who is still talking.
+          if (!this.stillSpeaking(user, id)) {
+            this.events.onSpeakingChange?.(user, false);
+          }
         },
         endsIn * 1000 + 50,
       );
@@ -125,7 +177,7 @@ export class VoicePlayer {
 
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.connect(ctx.destination);
+    src.connect(this.outputBus(ctx));
 
     // Never schedule in the past — a cursor that has fallen behind `currentTime`
     // would make every remaining chunk play immediately and on top of the last.

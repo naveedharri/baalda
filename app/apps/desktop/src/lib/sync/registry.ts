@@ -448,12 +448,27 @@ export class VaultRegistry {
     let vaultId = cfg.serverVaultId ?? null;
     if (vaultId && !inOrg.some((v) => v.id === vaultId)) vaultId = null;
     if (!vaultId) {
-      const vault =
-        inOrg[0] ??
-        (await this.api.createVault({
-          name: input.vaultName,
-          organizationId: input.organizationId,
-        }));
+      let vault = inOrg[0] ?? null;
+      if (!vault) {
+        try {
+          vault = await this.api.createVault({
+            name: input.vaultName,
+            organizationId: input.organizationId,
+          });
+        } catch (e) {
+          // Only owner/admin may create a collection (403 for a plain member).
+          // A member reaching here means the server showed them no collection
+          // in this vault — they have no access to one yet, which is a waiting
+          // state, not a broken client. Letting this throw failed the whole
+          // reconcile, so sync never came on and the only visible remedy made
+          // them a brand-new vault of their own. Report it and stop instead.
+          throw new Error(
+            `No accessible note collection in this vault yet. ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+      }
       vaultId = vault.id;
     }
     if (this.stale()) return { seeded: false };

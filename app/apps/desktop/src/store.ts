@@ -37,6 +37,7 @@ import {
 } from "./lib/prefs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { playJoinChime } from "./lib/celebrate/celebrate";
+import { viewingDocId } from "./lib/presence/viewingDocId";
 
 export interface OpenNote {
   path: string;
@@ -734,7 +735,11 @@ export const useStore = create<AppStore>((set, get) => ({
       noteRemoved: false,
     });
     // Tell teammates which note we're now viewing (drives their sidebar dots).
-    syncManager.setViewing(meta?.id ?? null);
+    // The announced id must be the SERVER doc_id — see `viewingDocId`, which
+    // exists to hold that reasoning and a regression test for it.
+    syncManager.setViewing(
+      viewingDocId(meta?.id, syncManager.registry.getMapping(path)?.docId),
+    );
     await get().refreshBacklinks();
   },
 
@@ -778,6 +783,10 @@ export const useStore = create<AppStore>((set, get) => ({
     // locally in joinVault/acceptInvitation (they connect after the push).
     syncManager.setMemberJoinedListener((name) => {
       void get().refreshVault();
+      // Re-announce so the newcomer sees who is already here. Their own first
+      // announce asks everyone to reply, but nothing made us speak up if that
+      // round was missed, and the roster has no other way to converge.
+      syncManager.announcePresence();
       get().celebrateMemberJoined(name);
     });
     // Live sidebar presence — the vault channel tells us which teammate is
@@ -1044,6 +1053,26 @@ export const useStore = create<AppStore>((set, get) => ({
   turnOnSyncForCurrentVault: async (name) => {
     const vault = get().vault;
     if (!vault) throw new Error("Open a vault first.");
+    // Already a member of an active vault? Then sync is off because enabling it
+    // FAILED, not because there's nowhere to sync to — so retry that vault
+    // instead of creating a new one.
+    //
+    // This guard exists because the alternative is the worst bug in the join
+    // flow: an invited user whose `enableSyncForVault` fell through one of its
+    // stale/error paths sees "Turn on sync", clicks the only affordance
+    // offered, and silently lands in a brand-new empty vault of their own
+    // rather than the one they were invited to. Creating an org must be a
+    // deliberate act, never the recovery path for a failed sync.
+    const activeOrgId = get().session?.activeOrganizationId;
+    if (activeOrgId && get().organizations.some((o) => o.id === activeOrgId)) {
+      await get().enableSyncForVault();
+      if (!get().syncEnabled) {
+        throw new Error(
+          "Couldn't connect to this vault. Check your connection and try again.",
+        );
+      }
+      return;
+    }
     // This binds the folder you're ALREADY in, so every step below has to stay
     // about that folder: a vault switch mid-flight would bind the new org to the
     // folder we left and then reconcile the wrong tree into it. Claim the switch
@@ -1129,10 +1158,14 @@ export const useStore = create<AppStore>((set, get) => ({
     if (path) {
       try {
         await get().applyVaultFolder(organizationId, path);
+        return;
       } catch (e) {
-        console.warn("[vault] folder swap failed", e);
+        // The bound folder is unusable (moved, deleted, permissions). Don't
+        // return here: that left the user in a vault with no folder and sync
+        // off, with nothing on screen saying why. Fall through to the
+        // auto-folder path below, which re-creates it under the vaults root.
+        console.warn("[vault] bound folder unusable, re-creating", e);
       }
-      return;
     }
     const org = get().organizations.find((o) => o.id === organizationId);
     const orgName = org?.name ?? "New vault";
@@ -1186,13 +1219,29 @@ export const useStore = create<AppStore>((set, get) => ({
     const inv = get().userInvitations.find((i) => i.id === invitationId);
     await authManager.api.acceptInvitation(invitationId);
     // Make the joined vault active through the switch path so it gets its
-    // own folder (prompted) rather than adopting the currently-open folder.
-    if (inv?.organizationId) {
-      await get().setActiveOrganization(inv.organizationId);
-    } else {
+    // own folder and turns sync on. Accepting an invitation IS asking to work
+    // in that vault — landing anywhere else is a bug.
+    //
+    // `inv` is the client's cached invitation list, which can be stale or
+    // missing the row entirely (accepted from another surface, refreshed
+    // mid-flight). It used to fall through to a plain roster refresh, which
+    // left the user a member of a vault they were never switched into and with
+    // sync still off — the exact state whose only visible remedy creates a NEW
+    // vault. So when the cache can't say, ask the server which orgs we are now
+    // in and switch to the one we didn't have before.
+    let orgId = inv?.organizationId ?? null;
+    if (!orgId) {
+      const before = new Set(get().organizations.map((o) => o.id));
       const session = await authManager.currentSession();
       set({ session });
       await get().refreshVault();
+      orgId =
+        get().organizations.find((o) => !before.has(o.id))?.id ??
+        session?.activeOrganizationId ??
+        null;
+    }
+    if (orgId) {
+      await get().setActiveOrganization(orgId);
     }
     // The joiner celebrates locally too (they connect after the server push).
     const me = get().session?.user;
@@ -1339,12 +1388,15 @@ export const useStore = create<AppStore>((set, get) => ({
     });
     rememberOrgVault(orgId, v.path);
     rememberLastVault(orgId);
+    // Turn sync on BEFORE the tree reads. Those two awaits were the window in
+    // which another vault switch (or a `vault-opened` event, or StrictMode's
+    // double-open in dev) could make this call stale and skip sync entirely,
+    // leaving a freshly joined vault sitting there not syncing. The staleness
+    // check still guards the call itself — `enableSyncForVault` re-checks the
+    // epoch internally — but it is no longer gated behind work it doesn't need.
+    if (sameVault(get, v.epoch)) await get().enableSyncForVault();
     await get().refreshTree();
     await get().refreshTitles();
-    // Another vault switch during those reads makes the rest of this call stale —
-    // that switch runs its own `enableSyncForVault` for the vault it landed in.
-    if (!sameVault(get, v.epoch)) return;
-    await get().enableSyncForVault();
   },
 
   chooseVaultFolder: async () => {

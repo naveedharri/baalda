@@ -11,8 +11,10 @@ import { pool as defaultPool } from "../db/pool.js";
  *   3. `edit > view > none`. Folder grants inherit to descendants; a file
  *      share can only RAISE permission. No matching grant -> `none`.
  *
- * A plain `member` inherits the vault grant (Open by default) and so gets
- * `edit`; with no grant at all it has no content access (`none`).
+ * A plain `member` inherits the vault grant and so gets `edit` in a vault that
+ * is Shared — which a new vault is, by default (`POST /api/vaults`). With no
+ * grant at all (a vault set to Private, or one created while private-by-default
+ * was the rule) a member has no content access beyond notes it created: `none`.
  *
  * Locks (permission = 'locked') are a DENY overlay resolved AFTER the rules
  * above: when a lock matches the doc or any ancestor folder — for this user

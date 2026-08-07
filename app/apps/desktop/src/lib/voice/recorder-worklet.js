@@ -12,7 +12,10 @@
 // leaving resampling and Int16 conversion to the main thread where they're
 // testable.
 
-const BATCH_MS = 200;
+// Must match VOICE_CHUNK_MS in pcm.ts. This is the single biggest contributor
+// to mouth-to-ear delay: no audio can exist before one full batch is filled, so
+// the value is a hard floor on how fast the first word leaves the machine.
+const BATCH_MS = 40;
 
 class RecorderProcessor extends AudioWorkletProcessor {
   constructor() {
