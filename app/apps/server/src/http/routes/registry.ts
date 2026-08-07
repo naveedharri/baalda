@@ -61,14 +61,44 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "Only vault owner/admin can create vaults" }, 403);
     }
 
+    // Is this the org's FIRST note collection? Asked before the insert, because
+    // the answer decides whether the default access posture applies (below).
+    const { rows: existing } = await pool.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM vaults WHERE organization_id = $1",
+      [organizationId],
+    );
+    const isFirstVault = existing[0]?.n === "0";
+
     const id = randomUUID();
     await pool.query(
       "INSERT INTO vaults (id, organization_id, name) VALUES ($1, $2, $3)",
       [id, organizationId, name],
     );
-    // Private-by-default: a new vault grants NO org-wide access. Members see
-    // only what they create or what an owner/admin explicitly shares with the
-    // team (per-folder/file, or a vault-wide grant) via the Access panel.
+
+    // Shared-with-team by default: a brand-new vault gets an org-wide `edit`
+    // grant, so anyone invited can read and write its notes the moment they
+    // join.
+    //
+    // This replaces an earlier private-by-default posture. That one was right
+    // about solo vaults and wrong about what vaults are FOR: you invited
+    // someone, and they landed on an empty sidebar with no way to ask for
+    // access. Owners can still lock a vault down — Access panel → Private
+    // revokes exactly this row (`setVaultPosture` in AccessPanel.tsx).
+    //
+    // Only on the first collection. The grant is keyed on the ORG (one org can
+    // own several collections and the grant covers all of them), so re-running
+    // it later would resurrect a grant an owner had deliberately revoked —
+    // silently re-opening a vault they had set to Private. A default is only a
+    // default at creation time; after that the owner's choice is the truth.
+    if (isFirstVault) {
+      await pool.query(
+        `INSERT INTO shares
+           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
+         VALUES ($1, $2, 'vault', $2, 'org', $2, 'edit', $3)
+         ON CONFLICT (resource_type, resource_id, principal_type, principal_id) DO NOTHING`,
+        [randomUUID(), organizationId, session.userId],
+      );
+    }
     return c.json({ id, organizationId, name }, 201);
   });
 

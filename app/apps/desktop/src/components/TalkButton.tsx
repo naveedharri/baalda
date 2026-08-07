@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { prewarmCapture } from "../lib/voice/capture";
 import { useStore } from "../store";
 import "./talk.css";
 
@@ -39,6 +40,14 @@ export function TalkButton() {
   // Tracks whether WE started the current press, so a stray pointerup elsewhere
   // in the window can't stop a broadcast we never began.
   const held = useRef(false);
+
+  // Build the AudioContext and register the recorder worklet now, so the first
+  // press only waits on the mic itself. Doing this lazily made the very first
+  // transmission the slowest one, which is the one people judge the feature by.
+  // It opens no microphone and shows no recording indicator.
+  useEffect(() => {
+    prewarmCapture();
+  }, []);
 
   const start = () => {
     if (held.current) return;

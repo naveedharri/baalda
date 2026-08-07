@@ -812,6 +812,20 @@ export class SyncManager {
     this.pushLocalPresence();
   }
 
+  /**
+   * Re-broadcast our presence unprompted.
+   *
+   * The vault channel keeps no shared roster: it is rebuilt only when some
+   * connection's first announce triggers a presence-query round. A member
+   * joining triggers nothing on the clients already connected, so there was no
+   * self-healing path at all — if a newcomer's frames were missed, the gap
+   * lasted the whole session. Calling this on member-joined costs one small
+   * frame and gives the roster a way to converge.
+   */
+  announcePresence(): void {
+    this.pushLocalPresence();
+  }
+
   /** Send our current viewing state over the vault channel. Invisible users
    *  broadcast a null doc so they don't appear on teammates' sidebars. */
   private pushLocalPresence(): void {

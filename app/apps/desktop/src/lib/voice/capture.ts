@@ -56,6 +56,13 @@ export class MicPermissionError extends Error {
  * expectations, not verified behaviour.
  */
 export async function startCapture(onChunk: ChunkSink): Promise<CaptureHandle> {
+  // The context and the worklet module are hoisted out of the press: building an
+  // AudioContext and fetching/compiling/registering the worklet took a chunk of
+  // the delay before the first word went out, and neither depends on the mic.
+  // Only `getUserMedia` genuinely has to wait for the press — that one IS the
+  // privacy property described at the top of this file.
+  const ctx = await sharedCaptureContext();
+
   let stream: MediaStream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -78,21 +85,10 @@ export async function startCapture(onChunk: ChunkSink): Promise<CaptureHandle> {
     );
   }
 
-  const ctx = new AudioContext();
-  // Autoplay policy can hand back a suspended context even for capture.
-  if (ctx.state === "suspended") await ctx.resume();
-
+  // Only the mic is released on stop; the context outlives the transmission.
   const release = () => {
     for (const track of stream.getTracks()) track.stop();
-    void ctx.close().catch(() => {});
   };
-
-  try {
-    await ctx.audioWorklet.addModule(new URL("./recorder-worklet.js", import.meta.url));
-  } catch (err) {
-    release();
-    throw err;
-  }
 
   const source = ctx.createMediaStreamSource(stream);
   const node = new AudioWorkletNode(ctx, "baalda-recorder");
@@ -140,3 +136,46 @@ export async function startCapture(onChunk: ChunkSink): Promise<CaptureHandle> {
 
 /** The transmit format, for the opening chunk's header. */
 export const CAPTURE_FORMAT = { fmt: "pcm16", sr: VOICE_SAMPLE_RATE } as const;
+
+// ---- Shared capture context -------------------------------------------------
+
+let capturePrep: Promise<AudioContext> | null = null;
+
+/**
+ * One AudioContext with the recorder worklet already registered, reused for the
+ * life of the app. Built on first use and never closed.
+ *
+ * Kept apart from the playback context on purpose: this one is fed by the mic
+ * with echo cancellation on, which on macOS switches the device to the
+ * voice-processing IO unit. Sharing it with playback would put every teammate's
+ * audio through that path too.
+ */
+async function sharedCaptureContext(): Promise<AudioContext> {
+  if (!capturePrep) {
+    capturePrep = (async () => {
+      const ctx = new AudioContext();
+      await ctx.audioWorklet.addModule(
+        new URL("./recorder-worklet.js", import.meta.url),
+      );
+      return ctx;
+    })();
+    // A failed prep must not be cached, or every later press reuses the
+    // rejection and the mic can never recover.
+    capturePrep.catch(() => {
+      capturePrep = null;
+    });
+  }
+  const ctx = await capturePrep;
+  // Autoplay policy can suspend an idle context between transmissions.
+  if (ctx.state === "suspended") await ctx.resume();
+  return ctx;
+}
+
+/**
+ * Warm the capture path up before the button is pressed, so the first press
+ * pays only for `getUserMedia`. Safe to call repeatedly; failures are ignored
+ * here and surface properly on the real press.
+ */
+export function prewarmCapture(): void {
+  void sharedCaptureContext().catch(() => {});
+}

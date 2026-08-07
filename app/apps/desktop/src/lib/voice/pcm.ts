@@ -32,11 +32,16 @@
  *  is the usual wideband-voice floor and halves the bytes of 32 kHz. */
 export const VOICE_SAMPLE_RATE = 16_000;
 
-/** How much audio goes in one chunk. The tradeoff is latency vs overhead:
- *  200 ms means ~5 frames/s (~6.4 KB each) and about a fifth of a second of
- *  mouth-to-ear delay from chunking alone, which reads as "instant" for a
- *  walkie-talkie without making the header overhead significant. */
-export const VOICE_CHUNK_MS = 200;
+/** How much audio goes in one chunk, and the batch size the recorder worklet
+ *  fills before it can emit anything (keep `BATCH_MS` in recorder-worklet.js in
+ *  step with this).
+ *
+ *  The tradeoff is latency vs overhead. This was 200 ms, which put a fifth of a
+ *  second of delay in the path before a single byte moved — audible as "it
+ *  didn't start when I pressed it". 40 ms gives ~25 frames/s of ~1.3 KB, so the
+ *  per-chunk header stops being rounding error, but the wire cost is unchanged
+ *  (the same PCM either way) and the press now feels immediate. */
+export const VOICE_CHUNK_MS = 40;
 
 /** Samples per chunk at the transmit rate. */
 export const VOICE_CHUNK_SAMPLES = (VOICE_SAMPLE_RATE * VOICE_CHUNK_MS) / 1000;

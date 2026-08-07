@@ -168,9 +168,13 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   **creator** → edit on their own note; else max of file/folder shares (walk `parent_id` up) — either
   per-user or an org-wide "share with team" grant — plus any vault-wide grant; a `locked` share caps at
   view even for admins. `edit > view > none`; no grant → no sync access (403 at token mint). **New
-  vaults are private by default** (no org-wide grant); existing ones keep their Open grant. Keep this
-  in lockstep with `permissions/vault-docs.ts` (the readable-set dual that gates live sync + registry
-  listings).
+  vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
+  grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
+  owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,
+  which left an invited teammate on an empty sidebar with no way to ask for access.) Vaults that
+  predate the reversal are untouched: no grant means private, and the owner flips it in Access. Keep
+  this in lockstep with `permissions/vault-docs.ts` (the readable-set dual that gates live sync +
+  registry listings).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
   `list_vaults/list_folders/create_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/delete_note`.

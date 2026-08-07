@@ -53,6 +53,20 @@ class FakeAudioContext {
     this.sources.push(s);
     return s;
   }
+  // The output bus every stream mixes through, so two speakers at once can't
+  // clip. Params are plain holders — this fake asserts scheduling, not DSP.
+  createDynamicsCompressor() {
+    this.compressors++;
+    return {
+      threshold: { value: 0 },
+      knee: { value: 0 },
+      ratio: { value: 0 },
+      attack: { value: 0 },
+      release: { value: 0 },
+      connect: () => {},
+    };
+  }
+  compressors = 0;
 }
 
 /** 100 ms of 16 kHz PCM16 = 1600 samples. */
@@ -139,6 +153,50 @@ describe("VoicePlayer", () => {
     // Both scheduled; neither cut the other off.
     expect(ctxOf().started).toHaveLength(2);
     expect(player.isPlaying()).toBe(true);
+  });
+
+  it("routes every stream through one shared limiter, not the destination", () => {
+    // Capture runs with autoGainControl, so each speaker arrives near full
+    // scale and two summed at unity clipped. One limiter, built once and
+    // shared, is what makes an overlap sound like two voices.
+    const player = new VoicePlayer();
+    player.push({ streamId: "a", userId: "ada", seq: 0, audio: pcmChunk() });
+    player.push({ streamId: "b", userId: "grace", seq: 0, audio: pcmChunk() });
+    player.push({ streamId: "a", userId: "ada", seq: 1, audio: pcmChunk() });
+
+    expect(ctxOf().compressors).toBe(1);
+  });
+
+  it("keeps a user marked talking while any of their streams is still live", () => {
+    // A second press before the first transmission finished playing used to let
+    // the older stream's end-timer clear the indicator for someone mid-sentence.
+    const events: Array<[string, boolean]> = [];
+    const player = new VoicePlayer({ onSpeakingChange: (u, s) => events.push([u, s]) });
+
+    player.push({ streamId: "first", userId: "ada", seq: 0, audio: pcmChunk() });
+    player.push({ streamId: "second", userId: "ada", seq: 0, audio: pcmChunk() });
+    // The first transmission ends while the second is still going.
+    player.push({
+      streamId: "first",
+      userId: "ada",
+      seq: 1,
+      audio: pcmChunk(),
+      final: true,
+    });
+    vi.runAllTimers();
+
+    expect(events.filter(([, speaking]) => !speaking)).toHaveLength(0);
+
+    // Once the last one ends, they finally read as stopped.
+    player.push({
+      streamId: "second",
+      userId: "ada",
+      seq: 1,
+      audio: pcmChunk(),
+      final: true,
+    });
+    vi.runAllTimers();
+    expect(events[events.length - 1]).toEqual(["ada", false]);
   });
 
   it("reports speaking start immediately and end only once the audio finishes", () => {

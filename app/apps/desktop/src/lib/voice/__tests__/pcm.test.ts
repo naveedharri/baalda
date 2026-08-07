@@ -4,6 +4,7 @@ import {
   downsampleTo16k,
   floatToPcm16,
   pcm16ToFloat,
+  VOICE_CHUNK_MS,
   VOICE_CHUNK_SAMPLES,
   VOICE_SAMPLE_RATE,
 } from "../pcm";
@@ -63,8 +64,10 @@ describe("downsampleTo16k", () => {
   });
 
   it("produces one chunk's worth of samples from a 48 kHz render quantum run", () => {
-    // 48 kHz is what WebAudio hands us on most machines.
-    const input = new Float32Array(48_000 * (200 / 1000)); // 200 ms
+    // 48 kHz is what WebAudio hands us on most machines. Derive the input
+    // length from VOICE_CHUNK_MS so retuning the chunk size for latency
+    // doesn't turn this into a failure about nothing.
+    const input = new Float32Array((48_000 * VOICE_CHUNK_MS) / 1000);
     expect(downsampleTo16k(input, 48_000)).toHaveLength(VOICE_CHUNK_SAMPLES);
   });
 

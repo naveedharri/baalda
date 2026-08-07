@@ -16,8 +16,8 @@ import { Avatar } from "./Identity";
  * Access — the unified locker. A vault-default posture (Shared · Read-only ·
  * Private) plus a per-folder/note override and a resolved "who can access" list.
  * Built on the shares model:
- *  - Vault posture            = an org grant on the vault (edit=Shared,
- *    view=Read-only) or none (Private, the new default for new vaults).
+ *  - Vault posture            = an org grant on the vault (edit=Shared, the
+ *    default for a new vault; view=Read-only) or none (Private).
  *  - "Shared" on an item      = an org edit grant on the folder/file.
  *  - "Read-only" on an item   = an org view grant (Private vault) or an
  *    org `locked` share (Open vault, where a lock caps the edit baseline).
