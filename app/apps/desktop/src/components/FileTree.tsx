@@ -27,7 +27,10 @@ import {
   type TreeSyncIndex,
 } from "../lib/syncRollup";
 import { embedDroppedFile } from "../lib/attachments";
+import { toast } from "../lib/toast";
 import { deletePaths } from "../lib/vault/mutatePaths";
+import { AsyncButton } from "./AsyncButton";
+import { Spinner } from "./Spinner";
 import { activeNoteEditable, insertIntoActiveNote } from "../lib/editor/activeView";
 import { useStore } from "../store";
 import { shareResourceId } from "../lib/api";
@@ -161,11 +164,6 @@ export function FileTree() {
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   // True while an OS drag hovers the tree, for the drop-target highlight.
   const [dropActive, setDropActive] = useState(false);
-  // Transient status pill shown after an import (from the menu or a drop).
-  const [importStatus, setImportStatus] = useState<
-    { text: string; tone: "success" | "error" | "neutral" } | null
-  >(null);
-  const importStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Multi-select: a mode toggle + the set of picked paths. Kept local to the
   // tree (react-arborist's own selection is left alone) so the bulk-action bar
   // only exists while selecting and doesn't crowd the normal browsing UI.
@@ -376,10 +374,7 @@ export function FileTree() {
   useEffect(() => {
     const close = () => setMenu(null);
     window.addEventListener("click", close);
-    return () => {
-      window.removeEventListener("click", close);
-      if (importStatusTimer.current) clearTimeout(importStatusTimer.current);
-    };
+    return () => window.removeEventListener("click", close);
   }, []);
 
   async function refreshAll() {
@@ -408,12 +403,13 @@ export function FileTree() {
     }
   }
 
-  /** Flash a short-lived status pill (auto-dismisses). */
-  function flashStatus(text: string, tone: "success" | "error" | "neutral" = "success") {
-    setImportStatus({ text, tone });
-    if (importStatusTimer.current) clearTimeout(importStatusTimer.current);
-    importStatusTimer.current = setTimeout(() => setImportStatus(null), 4500);
-  }
+  /**
+   * Announce an outcome. Was a pill local to this component; now the shared
+   * toast, so an import result and (say) an export failure speak the same
+   * language and stack in the same corner instead of the sidebar owning a
+   * private notification surface nothing else could reach.
+   */
+  const flashStatus = toast;
 
   /** Announce an import outcome: green on success, neutral if nothing landed. */
   function announceImport(s: ipc.ImportSummary) {
@@ -550,8 +546,13 @@ export function FileTree() {
       // Pinned so a switch during the dialog can't export the OTHER vault's notes
       // to the destination the user chose for this one.
       await ipc.exportPath(node.data.path, dest, epoch);
+      // Export writes outside the vault, so nothing in the app changes to show it
+      // worked. Silence here read as "the menu item is broken"; a whole folder
+      // export can also take a while, and this is the only sign it finished.
+      flashStatus(`Exported ${basename(node.data.path)}`);
     } catch (e) {
       console.error("export failed", e);
+      flashStatus("Export failed", "error");
     }
   }
 
@@ -856,22 +857,29 @@ export function FileTree() {
             <div className="selbar-actions">
               {canManage && syncEnabled && (
                 <>
-                  <button
+                  {/* One server round trip per selected item, so a lock over a
+                      large selection is a real wait. `replaceLabel` swaps the
+                      padlock for the spinner — an icon button has no room for
+                      both, and a 28px control that grows would push its
+                      neighbours under the cursor mid-click. */}
+                  <AsyncButton
                     className="selbar-icon"
-                    onClick={() => void bulkLock()}
+                    onClick={bulkLock}
+                    replaceLabel
                     title="Lock selected"
                     aria-label="Lock selected"
                   >
                     {ICON_LOCK}
-                  </button>
-                  <button
+                  </AsyncButton>
+                  <AsyncButton
                     className="selbar-icon"
-                    onClick={() => void bulkUnlock()}
+                    onClick={bulkUnlock}
+                    replaceLabel
                     title="Unlock selected"
                     aria-label="Unlock selected"
                   >
                     {ICON_UNLOCK}
-                  </button>
+                  </AsyncButton>
                 </>
               )}
               <button
@@ -998,12 +1006,6 @@ export function FileTree() {
 
       {shareTarget && (
         <ShareDialog target={shareTarget} onClose={() => setShareTarget(null)} />
-      )}
-
-      {importStatus && (
-        <div className={`filetree-status ${importStatus.tone}`} role="status">
-          {importStatus.text}
-        </div>
       )}
     </div>
   );
@@ -1214,6 +1216,10 @@ function Node({
   const isEmpty =
     isDir && node.data.childrenLoaded === true && (node.data.children?.length ?? 0) === 0;
   const isSelected = !isDir && node.data.path === selectedPath;
+  // Subscribed as a boolean rather than by pulling the path and comparing, so a
+  // note opening elsewhere in the tree doesn't re-render every other row — this
+  // component is instantiated once per visible row.
+  const isOpening = useStore((s) => s.openingNotePath === node.data.path);
   const colorValue = itemColorValue(color);
   const peers = peersForNode(node, presenceByDoc);
   // Compose arborist's per-level indent with the row's base inset so every
@@ -1227,7 +1233,12 @@ function Node({
       data-tree-dir={isDir ? node.data.path : parentDir(node.data.path)}
       className={`tree-row${isSelected ? " selected" : ""}${isDir ? " is-dir" : ""}${
         node.willReceiveDrop ? " drop-target" : ""
-      }${node.isDragging ? " dragging" : ""}${checked ? " checked" : ""}`}
+      }${node.isDragging ? " dragging" : ""}${checked ? " checked" : ""}${
+        // Pre-selects the row the instant it's clicked, so the selection doesn't
+        // wait on `getNoteMeta` + `registerNote` to come back from the server.
+        isOpening ? " opening" : ""
+      }`}
+      aria-busy={isOpening || undefined}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1270,13 +1281,22 @@ function Node({
         style={colorValue ? { color: colorValue } : undefined}
         aria-hidden="true"
       >
-        {isDir
-          ? node.isOpen && !isEmpty
-            ? ICON_FOLDER_OPEN
-            : ICON_FOLDER
-          : isHtmlPath(node.data.path)
-            ? ICON_HTML
-            : ICON_FILE}
+        {/* The glyph slot is the row's own status light: while a note is being
+            opened it becomes the spinner. Reusing the slot rather than adding one
+            keeps the label from shifting sideways as the state changes. */}
+        {isOpening ? (
+          <Spinner size="xs" tone="accent" />
+        ) : isDir ? (
+          node.isOpen && !isEmpty ? (
+            ICON_FOLDER_OPEN
+          ) : (
+            ICON_FOLDER
+          )
+        ) : isHtmlPath(node.data.path) ? (
+          ICON_HTML
+        ) : (
+          ICON_FILE
+        )}
       </span>
       {node.isEditing ? (
         <input

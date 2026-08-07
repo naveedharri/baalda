@@ -296,6 +296,9 @@ export function Editor() {
 
   const [peers, setPeers] = useState<Peer[]>([]);
   const [readOnly, setReadOnly] = useState(false);
+  // False from the moment a note starts opening until its CodeMirror view is in
+  // the DOM. Drives the loading skeleton over the (genuinely empty) pane.
+  const [viewMounted, setViewMounted] = useState(false);
   // Editability is held in a Compartment so a lock applied while the note is
   // open can flip the live view read-only without rebuilding it.
   const editableRef = useRef<Compartment | null>(null);
@@ -376,6 +379,11 @@ export function Editor() {
     let view: EditorView | null = null;
     let awareness: Awareness | null = null;
     let onAwarenessChange: (() => void) | null = null;
+    // The editor pane is empty until CodeMirror is constructed below, and
+    // getting there means opening the bridge, hydrating the CRDT from SQLite
+    // and — for a synced note — waiting out the provider's first sync. On a
+    // cold note that is a blank white sheet for long enough to look broken.
+    setViewMounted(false);
 
     const navigate = async (target: string) => {
       try {
@@ -446,6 +454,7 @@ export function Editor() {
 
       view = new EditorView({ state, parent: hostRef.current });
       viewRef.current = view;
+      setViewMounted(true);
       setActiveView(view); // let out-of-tree drops embed into this note
       if (!ro) view.focus();
 
@@ -475,6 +484,7 @@ export function Editor() {
       cancelled = true;
       if (onAwarenessChange && awareness) awareness.off("change", onAwarenessChange);
       setActiveView(null);
+      setViewMounted(false);
       if (view) view.destroy();
       viewRef.current = null;
       editableRef.current = null;
@@ -617,7 +627,33 @@ export function Editor() {
           )}
         </div>
       )}
+      {/* The host must stay mounted whether or not the view exists — the effect
+          above needs `hostRef.current` to attach CodeMirror to — so the skeleton
+          overlays it rather than replacing it. */}
       <div className="editor-host" ref={hostRef} />
+      {!viewMounted && <EditorSkeleton />}
+    </div>
+  );
+}
+
+/**
+ * Placeholder for a note that is still opening.
+ *
+ * Deliberately lines of text rather than a spinner. A spinner says "wait"; a
+ * skeleton says "text is arriving, and roughly this much of it" — and because it
+ * occupies the same column as the real content, the note doesn't visibly jump
+ * when it swaps in. The bars only appear after a beat (`skeleton-in` has a
+ * delay) so a note that opens from the local index in 40ms — the common case —
+ * never flashes one.
+ */
+function EditorSkeleton() {
+  return (
+    <div className="editor-skeleton" role="status" aria-label="Opening note">
+      <span className="skel-line skel-title" />
+      <span className="skel-line" style={{ width: "92%" }} />
+      <span className="skel-line" style={{ width: "78%" }} />
+      <span className="skel-line" style={{ width: "85%" }} />
+      <span className="skel-line" style={{ width: "45%" }} />
     </div>
   );
 }

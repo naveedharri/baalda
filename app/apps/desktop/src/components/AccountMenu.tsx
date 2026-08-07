@@ -15,7 +15,9 @@ import { readOrgVaults, useStore } from "../store";
 import { statusTone } from "../lib/presence/color";
 import { AccessPanel } from "./AccessPanel";
 import { AccountSettings } from "./AccountSettings";
+import { AsyncButton } from "./AsyncButton";
 import { Avatar, SyncBadge } from "./Identity";
+import { Spinner } from "./Spinner";
 import { ThemeToggle } from "./ThemeToggle";
 import { UpgradeDialog } from "./UpgradeDialog";
 
@@ -519,12 +521,16 @@ function AccountPopover({
               <span className="muted" title={inv.organizationId}>
                 Vault invitation · {inv.role}
               </span>
-              <button
+              {/* Accepting is: accept → re-read session → roster → switch into
+                  the vault → bind a folder → reconcile. Easily seconds, and it
+                  used to be a bare fire-and-forget click with no acknowledgement
+                  of any kind. */}
+              <AsyncButton
                 className="primary sm"
-                onClick={() => void useStore.getState().acceptInvitation(inv.id)}
+                onClick={() => useStore.getState().acceptInvitation(inv.id)}
               >
                 Accept
-              </button>
+              </AsyncButton>
             </div>
           ))}
         </div>
@@ -548,6 +554,10 @@ function AccountPopover({
             className={`menu-item${isActive ? " active" : ""}`}
             role="menuitemradio"
             aria-checked={isActive}
+            // Fire-and-forget on purpose: the switch is long and the menu should
+            // not sit open through it. The feedback lives in the sidebar header,
+            // which renames itself to this vault immediately (`switchingVault`)
+            // and spins until the folder has swapped.
             onClick={() => {
               if (!isActive) {
                 void useStore.getState().setActiveOrganization(o.id);
@@ -857,6 +867,7 @@ export function AuthDialog({
             >
               <GoogleGlyph />
               <span>{googleBusy ? "Waiting for your browser…" : "Continue with Google"}</span>
+              {googleBusy && <Spinner size="xs" tone="neutral" />}
             </button>
             {googleBusy && (
               <p className="auth-hint">
@@ -899,8 +910,16 @@ export function AuthDialog({
             minLength={8}
             required
           />
-          <button className="primary" type="submit" disabled={busy || googleBusy}>
-            {busy ? "…" : mode === "sign-in" ? "Sign in" : "Create account"}
+          <button
+            className={`primary${busy ? " is-busy" : ""}`}
+            type="submit"
+            disabled={busy || googleBusy}
+            aria-busy={busy || undefined}
+          >
+            <span className="async-btn-label">
+              {mode === "sign-in" ? "Sign in" : "Create account"}
+            </span>
+            {busy && <Spinner size="xs" tone="on-accent" />}
           </button>
         </form>
 
@@ -915,12 +934,13 @@ export function AuthDialog({
               placeholder="https://api.baalda.com"
               spellCheck={false}
             />
-            <button
+            <AsyncButton
               type="button"
-              onClick={() => void useStore.getState().setServerUrl(urlDraft.trim())}
+              confirm
+              onClick={() => useStore.getState().setServerUrl(urlDraft.trim())}
             >
               Save
-            </button>
+            </AsyncButton>
           </div>
         </details>
       </div>
@@ -1595,35 +1615,35 @@ function VaultsTab() {
                   >
                     Cancel
                   </button>
-                  <button
+                  <AsyncButton
                     className="link-btn danger"
                     disabled={busy}
-                    onClick={() => void deletePermanently(o.id)}
+                    onClick={() => deletePermanently(o.id)}
                   >
                     Delete
-                  </button>
+                  </AsyncButton>
                 </span>
               ) : (
                 <span className="vault-row-actions">
                   {isActive ? (
                     <span className="member-role">Current</span>
                   ) : (
-                    <button
+                    <AsyncButton
                       className="link-btn"
                       disabled={busy}
-                      onClick={() => void switchTo(o.id)}
+                      onClick={() => switchTo(o.id)}
                     >
                       Switch
-                    </button>
+                    </AsyncButton>
                   )}
-                  <button
+                  <AsyncButton
                     className="link-btn"
                     disabled={busy}
                     title="Stop syncing this vault here; server data is kept"
-                    onClick={() => void removeLocal(o.id)}
+                    onClick={() => removeLocal(o.id)}
                   >
                     Remove from device
-                  </button>
+                  </AsyncButton>
                   {canDelete(o.id) && (
                     <button
                       className="link-btn danger"
@@ -1733,26 +1753,26 @@ function VaultsTab() {
                       >
                         Cancel
                       </button>
-                      <button
+                      <AsyncButton
                         className="link-btn danger"
                         disabled={busy}
-                        onClick={() => void deleteLocalFiles(r.path)}
+                        onClick={() => deleteLocalFiles(r.path)}
                       >
                         Delete
-                      </button>
+                      </AsyncButton>
                     </span>
                   ) : (
                     <span className="vault-row-actions">
                       {isCurrent ? (
                         <span className="member-role">Current</span>
                       ) : (
-                        <button
+                        <AsyncButton
                           className="link-btn"
                           disabled={busy}
-                          onClick={() => void switchToLocal(r.path)}
+                          onClick={() => switchToLocal(r.path)}
                         >
                           Switch
-                        </button>
+                        </AsyncButton>
                       )}
                       <button
                         className="link-btn"
@@ -1961,13 +1981,13 @@ function MembersTab({ canManage }: { canManage: boolean }) {
               {canRemove(m) &&
                 (confirmRemoveId === m.userId ? (
                   <>
-                    <button
+                    <AsyncButton
                       className="link-btn danger"
                       disabled={removeBusy}
-                      onClick={() => void doRemove(m.userId)}
+                      onClick={() => doRemove(m.userId)}
                     >
-                      {removeBusy ? "Removing…" : "Confirm"}
-                    </button>
+                      Confirm
+                    </AsyncButton>
                     <button
                       className="link-btn"
                       disabled={removeBusy}
@@ -2099,15 +2119,13 @@ function BillingTab({ canManage }: { canManage: boolean }) {
           )}
           {error && <div className="auth-error">{error}</div>}
           {canManage ? (
-            <button
+            <AsyncButton
               className="secondary billing-action"
               disabled={busy}
-              aria-busy={busy}
-              onClick={() => void manage()}
+              onClick={manage}
             >
-              {busy && <span className="btn-spinner" aria-hidden="true" />}
-              <span>Manage subscription</span>
-            </button>
+              Manage subscription
+            </AsyncButton>
           ) : (
             <div className="muted">Ask an owner or admin to manage the subscription.</div>
           )}
@@ -2424,13 +2442,13 @@ function McpTab() {
                   >
                     {open ? "Hide tools" : `Tools · ${tools.length}`}
                   </button>
-                  <button
+                  <AsyncButton
                     className="link-btn danger"
                     disabled={busy}
-                    onClick={() => void revoke(t.id)}
+                    onClick={() => revoke(t.id)}
                   >
                     Revoke
-                  </button>
+                  </AsyncButton>
                 </div>
                 {open && (
                   <ul className="mcp-tool-list">
@@ -2571,9 +2589,9 @@ function UpdatesTab() {
         <div className="update-detail">
           <div className="subhead">Version {update.version} available</div>
           {update.notes && <div className="muted release-notes">{update.notes}</div>}
-          <button className="primary sm" onClick={() => void installUpdate()}>
+          <AsyncButton className="primary sm" onClick={() => installUpdate()}>
             Install &amp; Restart
-          </button>
+          </AsyncButton>
         </div>
       )}
     </div>

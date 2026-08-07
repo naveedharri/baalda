@@ -111,6 +111,15 @@ when CI cannot ship.
 
 ---
 
+## Interaction design
+
+[[INTERACTIONS]] is the inventory of every action the desktop app can take, how long
+each one realistically takes, and what it shows while it works — plus the eight rules
+that govern that feedback (delayed spinners, optimistic destinations, sticky errors,
+reduced-motion answers). Add a control, add a row.
+
+---
+
 ## Status
 
 See [[STATUS]] for the live build checklist.

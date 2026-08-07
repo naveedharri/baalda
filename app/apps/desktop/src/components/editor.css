@@ -440,3 +440,69 @@
     opacity: 0;
   }
 }
+
+/* ---- Loading skeleton for a note that is still opening ----
+   Overlays the (genuinely empty) `.editor-host` rather than replacing it: the
+   open effect needs `hostRef.current` in the DOM to attach CodeMirror to.
+
+   The padding deliberately mirrors `.cm-content` in `lib/editor/theme.ts`
+   (`--sp-8` top, the same centred 76ch measure) so the skeleton lines sit
+   exactly where the real text lands. Getting this wrong is worse than no
+   skeleton at all — the content appears to jump sideways as it loads. */
+.editor-skeleton {
+  position: absolute;
+  inset: 0;
+  padding: var(--sp-8) max(var(--sp-8), calc((100% - 76ch) / 2));
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  background: var(--bg-surface);
+  pointer-events: none;
+  /* Held back ~180ms. A note served from the local SQLite index opens in tens of
+     milliseconds, and a skeleton that flashes for one frame reads as a rendering
+     fault rather than as loading. */
+  animation: skeleton-in 0.2s var(--ease) 0.18s both;
+}
+/* `.editor-column` is the positioning context for the overlay above. */
+.editor-column {
+  position: relative;
+}
+.skel-line {
+  height: 12px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text-primary) 7%, transparent) 0%,
+    color-mix(in srgb, var(--text-primary) 13%, transparent) 50%,
+    color-mix(in srgb, var(--text-primary) 7%, transparent) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s linear infinite;
+}
+.skel-title {
+  height: 22px;
+  width: 58%;
+  margin-bottom: var(--sp-3);
+}
+@keyframes skeleton-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the shape and the delay, drop the travelling highlight. */
+  .skel-line {
+    animation: none;
+  }
+}
