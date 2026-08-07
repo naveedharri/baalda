@@ -1123,11 +1123,35 @@ export const useStore = create<AppStore>((set, get) => ({
       return;
     }
     const org = get().organizations.find((o) => o.id === organizationId);
+    const orgName = org?.name ?? "New vault";
+
+    // No folder bound yet. Give this vault one automatically and go straight
+    // in, rather than stopping on a "choose a folder" prompt.
+    //
+    // The prompt was a roadblock in the one flow that most needs to be
+    // frictionless: a teammate signing in for the first time doesn't yet have
+    // an opinion about which directory their shared vault lives in — they just
+    // want to be in it. A folder under the vaults root, named after the vault,
+    // is the answer they'd have picked anyway, and relocating it later is one
+    // item in the vault switcher menu.
+    //
+    // The prompt survives as the FALLBACK: if we can't create a folder (a bad
+    // vaults root, permissions), asking beats failing silently.
+    try {
+      const root = await ipc.getVaultsRoot();
+      if (superseded()) return;
+      const slug = uniqueFolderSlug(orgName, readOrgVaults());
+      await get().applyVaultFolder(organizationId, `${root}/${slug}`);
+      return;
+    } catch (e) {
+      console.warn("[vault] auto folder failed; asking instead", e);
+      if (superseded()) return;
+    }
     set({
       syncEnabled: false,
       pendingVaultFolder: {
         orgId: organizationId,
-        orgName: org?.name ?? "New vault",
+        orgName,
         previousOrgId: previousOrgId === organizationId ? null : previousOrgId,
       },
     });

@@ -9,7 +9,6 @@ import {
   useStore,
 } from "../store";
 import { AuthDialog } from "./AccountMenu";
-import { Avatar } from "./Identity";
 import { Wordmark } from "./Logo";
 
 /**
@@ -80,7 +79,6 @@ function tidyPath(path: string): string {
 
 export function VaultPicker() {
   const authStatus = useStore((s) => s.authStatus);
-  const session = useStore((s) => s.session);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<RecentVault[]>([]);
@@ -308,43 +306,6 @@ export function VaultPicker() {
 
   return (
     <div className="vault-picker">
-      {/*
-        Account chip. Until this existed, the ONLY way to sign in from this
-        screen was to click a "Remote" vault card — and those come from a
-        locally-cached org list, so a fresh install had none and therefore no
-        route to an account at all. Signing in required first creating or
-        opening a local vault you didn't want, just to reach the sidebar menu,
-        which is exactly backwards for a teammate whose whole reason for opening
-        the app is to join a shared vault.
-
-        Kept as a quiet corner chip rather than a third button beside "New
-        vault" / "Open existing": an account is optional in a local-first app,
-        so it shouldn't compete with the primary choice. When signed in it shows
-        who you are — this screen previously gave no way to tell.
-      */}
-      <div className="picker-account">
-        {authStatus === "signed-in" && session ? (
-          <span className="picker-account-id" title={session.user.email}>
-            <Avatar label={session.user.name || session.user.email} image={session.user.image} />
-            <span className="picker-account-name">
-              {session.user.name || session.user.email}
-            </span>
-          </span>
-        ) : (
-          <button
-            type="button"
-            className="ghost-pill sm"
-            // "unknown" is the pre-restore state: the session is still being
-            // read from the keychain, so offering sign-in would flash a button
-            // that's about to be replaced by the user's own name.
-            disabled={busy || authStatus === "unknown"}
-            onClick={() => setSignInOpen(true)}
-          >
-            Sign in
-          </button>
-        )}
-      </div>
-
       {/* Ambient aurora — three blurred color fields drifting very slowly. */}
       {!reduceMotion && (
         <div className="aurora" aria-hidden="true">
@@ -575,6 +536,47 @@ export function VaultPicker() {
             }
           >
             A vault is any folder of <code>.md</code> files.
+          </motion.p>
+        )}
+
+        {/*
+          Sign-in lives with the hint text, under the primary actions, because
+          that is where someone looks after deciding the two buttons above
+          aren't what they came for.
+
+          Before this existed the ONLY route to an account from this screen was
+          clicking a "Remote" vault card — and those come from a locally-cached
+          org list, so a fresh install had none and therefore no route at all.
+          Signing in meant first creating a local vault you didn't want, purely
+          to reach the sidebar menu: exactly backwards for a teammate whose
+          whole reason for opening the app is to join a shared vault.
+
+          A quiet link rather than a third button beside "New vault" / "Open
+          existing": an account is optional in a local-first app and shouldn't
+          compete with the primary choice.
+        */}
+        {!inFlow && authStatus !== "signed-in" && (
+          <motion.p
+            className="hint picker-signin"
+            initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={
+              reduceMotion ? undefined : revealTransition(REVEAL_DELAY + 0.36)
+            }
+          >
+            Have an account?{" "}
+            <button
+              type="button"
+              className="linkish"
+              // "unknown" is the pre-restore state — the session is still being
+              // read from the keychain, so offering sign-in would flash a
+              // control that's about to become unnecessary.
+              disabled={busy || authStatus === "unknown"}
+              onClick={() => setSignInOpen(true)}
+            >
+              Sign in
+            </button>{" "}
+            to sync and collaborate.
           </motion.p>
         )}
       </div>
