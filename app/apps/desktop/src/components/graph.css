@@ -422,3 +422,59 @@
   background: var(--bg-hover);
   color: var(--text-primary);
 }
+
+/* ---- Opening the graph ----
+   The layout is settled BEFORE the first frame (`presettle` in GraphView.tsx),
+   so there is nothing to animate positionally — and that's the point. The graph
+   used to seed positions, kick every node with a random velocity and let you
+   watch the whole field find its shape, which reads as the view detonating and
+   reassembling rather than as something arriving. Every ⌘G replayed it.
+
+   What's left is a single settled state easing up: opacity, plus a hairline of
+   scale so it feels like it comes toward you rather than blinking on. Both are
+   compositor-only properties, so this costs nothing per frame and cannot fight
+   the render loop for the main thread. */
+.graph-intro {
+  animation: graph-intro 0.62s var(--ease) both;
+}
+@keyframes graph-intro {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Keep a short fade — an instant hard cut on a full-screen dark surface is its
+     own kind of jolt — but drop the scale entirely. */
+  .graph-intro {
+    animation: graph-fade 0.2s var(--ease) both;
+  }
+  @keyframes graph-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+/* Worker path only (8k+ nodes): the layout is being arranged off-thread and we
+   deliberately do not paint it mid-flight, so hide the canvases until it cools.
+   `visibility` rather than `display: none` — the canvases must keep their real
+   size, or the renderer re-measures to 0×0 and has to rebuild on reveal. */
+.graph-canvas-wrap.is-settling .graph-canvas {
+  visibility: hidden;
+}
+/* Scoped to the settling card only. The base `.graph-state-card` is a COLUMN
+   (the error card stacks a heading over its message), so overriding it globally
+   would lay that out sideways. */
+.graph-state-card.graph-settling {
+  flex-direction: row;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-6);
+}
