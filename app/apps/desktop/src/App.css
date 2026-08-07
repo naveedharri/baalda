@@ -594,9 +594,42 @@ button.primary.hero:hover:not(:disabled) {
    ============================================================ */
 .app {
   display: grid;
-  grid-template-columns: 264px 1fr;
+  /* Width is user-set (see SidebarResizer); the fallback is the default so the
+     layout is correct for one paint before React sets the variable. */
+  grid-template-columns: var(--sidebar-w, 264px) 1fr;
   height: 100%;
   background: var(--bg-app);
+  position: relative;
+}
+
+/* ---- Sidebar resize handle ----
+   Rides on top of the seam rather than taking a grid column of its own, so the
+   two panes stay flush and the hit area can be wider than the seam itself.
+   Purely a cursor affordance: it draws nothing, because a line down the middle
+   of a layout that otherwise floats panes on one canvas is a line too many. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-w, 264px) - 3px);
+  width: 7px;
+  z-index: 40;
+  cursor: col-resize;
+  background: transparent;
+  /* The handle is never text; without this a drag that starts on it can still
+     seed a selection in the panes either side. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+/* While dragging, the pointer owns the window: the resize cursor holds as it
+   passes over the editor, and nothing anywhere can be selected by the sweep. */
+body:has(.sidebar-resizer.dragging) {
+  cursor: col-resize;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* ---- Sidebar rail (sits on the canvas) ---- */
@@ -605,6 +638,9 @@ button.primary.hero:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* A grid item's default `min-width: auto` refuses to shrink past its content,
+     which would let a long note title override the width the user dragged. */
+  min-width: 0;
   padding: 0 var(--sp-1) 0 var(--sp-2);
 }
 .sidebar-header {
@@ -635,6 +671,40 @@ button.primary.hero:hover:not(:disabled) {
 .vault-name.none {
   font-weight: 600;
   color: var(--text-tertiary);
+}
+/* "Open in file manager" — a quiet companion to the title, not a second
+   focal point, so it only gains colour on hover of the header. */
+.vault-reveal {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition:
+    color var(--t-fast) var(--ease),
+    opacity var(--t-fast) var(--ease);
+}
+.vault-reveal svg {
+  width: 15px;
+  height: 15px;
+}
+.sidebar-header:hover .vault-reveal,
+.vault-reveal:focus-visible {
+  opacity: 1;
+}
+.vault-reveal:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+/* Where the vault lives on disk, minus the home prefix. A storage detail, so
+   it sits a size below the rest of the line. A plain end-ellipsis is right
+   here even though it eats the tail: the tail is the vault folder, whose name
+   is already the title directly above. The tooltip has it all. */
+.vault-path {
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* The local folder backing the vault — a quiet storage detail. */
 .vault-line {
@@ -671,9 +741,25 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--text-tertiary);
 }
 
-/* ---- Search ---- */
-.search-panel {
-  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+/* ---- Search ----
+   A centered overlay (see SearchPanel): the field is the whole chrome, and
+   results grow beneath it only once you've typed, so an empty search is just
+   one box on a dimmed window rather than a large hollow card. */
+.search-backdrop {
+  /* A little above centre: centred vertically, then lifted by reserving space
+     at the bottom. The list grows downward, so starting dead centre would push
+     the field below the middle as results arrive. */
+  align-items: center;
+  padding-bottom: 12vh;
+}
+.search-modal {
+  width: 560px;
+  max-width: min(92vw, 560px);
+  background: var(--bg-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: var(--sp-2);
+  animation: rise-in var(--t-med) var(--ease) both;
 }
 .search-field {
   position: relative;
@@ -684,41 +770,50 @@ button.primary.hero:hover:not(:disabled) {
   position: absolute;
   left: var(--sp-3);
   color: var(--text-tertiary);
-  font-size: var(--fs-md);
   pointer-events: none;
   display: inline-flex;
 }
+.search-field .search-icon svg {
+  width: 17px;
+  height: 17px;
+}
+/* Inside the modal the input IS the header — no border or fill of its own, so
+   the panel reads as one surface instead of a box within a box. */
 .search-box {
   width: 100%;
-  background: var(--bg-subtle);
-  border: 1px solid transparent;
-  border-radius: var(--radius-pill);
-  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-8);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-lg);
+  padding: var(--sp-3) var(--sp-8) var(--sp-3) calc(var(--sp-8) + var(--sp-1));
   color: var(--text-primary);
   font: inherit;
-  font-size: var(--fs-md);
+  font-size: var(--fs-lg);
   outline: none;
-  transition:
-    border-color var(--t-fast) var(--ease),
-    box-shadow var(--t-fast) var(--ease),
-    background var(--t-fast) var(--ease);
 }
 .search-box::placeholder {
   color: var(--text-tertiary);
 }
-.search-box:hover {
-  border-color: var(--border-strong);
-}
-.search-box:focus {
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
-  background: var(--bg-surface);
+/* The field is auto-focused on open, so a focus ring here would only ever be
+   decoration — the caret already says where you are. */
+.search-esc {
+  position: absolute;
+  right: var(--sp-3);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  background: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  pointer-events: none;
 }
 .search-results {
   list-style: none;
-  margin: var(--sp-3) 0 0;
-  padding: 0;
-  max-height: 280px;
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) 0 0;
+  border-top: 1px solid var(--border);
+  max-height: min(52vh, 420px);
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -728,13 +823,12 @@ button.primary.hero:hover:not(:disabled) {
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition:
-    background var(--t-fast) var(--ease),
-    box-shadow var(--t-fast) var(--ease);
+  transition: background var(--t-fast) var(--ease);
 }
-.search-result:hover {
-  background: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
+/* One highlight, driven by the keyboard cursor — hover moves that cursor
+   rather than painting a second, competing one. */
+.search-result.active {
+  background: var(--accent-soft);
 }
 .search-title {
   font-size: var(--fs-md);
@@ -844,7 +938,11 @@ button.primary.hero:hover:not(:disabled) {
 .filetree-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  /* Left-anchored, NOT space-between: the buttons sit just after the label so
+     widening the sidebar doesn't drag them across the screen. Their position is
+     fixed relative to the sidebar's left edge, which is the edge that never
+     moves. */
+  justify-content: flex-start;
   gap: var(--sp-2);
   /* Left pad lines the label roughly under the row glyphs (the tree is nudged
      left by sp-2); right pad matches the row's own right inset. */
@@ -853,11 +951,17 @@ button.primary.hero:hover:not(:disabled) {
 }
 .filetree-head .section-label {
   white-space: nowrap;
+  /* The label yields first if the row ever runs short, so the buttons stay
+     inside the sidebar instead of the last one being pushed out past its edge. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .filetree-actions {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
 }
 .filetree-actions .tree-tool {
   flex: 0 0 auto;
@@ -2058,11 +2162,48 @@ button.primary.hero:hover:not(:disabled) {
   /* Break free of the narrow sidebar width so vault names, the settings
      row and the server URL read without truncating or feeling crowded. */
   right: auto;
-  width: 312px;
+  width: 348px;
   max-width: calc(100vw - var(--sp-4));
   /* No scroll — the whole menu fits, so let it size to its content. */
   max-height: none;
   overflow: visible;
+}
+
+/* A denser scale for this menu than the shared `menu-*` defaults, which are
+   tuned for the settings pages that also use them. The popover is wider than
+   the sidebar precisely so names get room; oversized rows spent that room on
+   air instead. Scoped so AccountSettings' tab list keeps the larger scale. */
+.account-popover .menu-item {
+  font-size: var(--fs-sm);
+  padding: 5px var(--sp-2);
+}
+.account-popover .menu-swatch {
+  width: 18px;
+  height: 18px;
+  font-size: 10px;
+}
+.account-popover .menu-icon {
+  width: 14px;
+  height: 14px;
+}
+.account-popover .menu-label {
+  padding: var(--sp-1) var(--sp-2) 2px;
+}
+.account-popover .menu-account {
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
+}
+.account-popover .menu-account .avatar {
+  width: 28px;
+  height: 28px;
+  font-size: var(--fs-xs);
+}
+.account-popover .menu-account .identity-line1 {
+  font-size: var(--fs-sm);
+}
+.account-popover .menu-current,
+.account-popover .ws-badge {
+  font-size: 10px;
+  padding: 1px 6px;
 }
 .sidebar-header {
   position: relative;

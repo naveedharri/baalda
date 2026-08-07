@@ -110,11 +110,6 @@ export function AccountMenu() {
               setSettingsTab(undefined);
               setMembersOpen(true);
             }}
-            onViewAllLocal={() => {
-              setOpen(false);
-              setSettingsTab("vaults");
-              setMembersOpen(true);
-            }}
           />
         )}
         {authOpen && <AuthDialog onClose={() => setAuthOpen(false)} />}
@@ -179,18 +174,14 @@ export function AccountMenu() {
           <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
         </span>
         <span className="identity-meta">
-          <span className="identity-line1">
-            {/* Name the vault that's actually OPEN — a local one wins over a
-                still-set activeOrg once sync is off (opening a local folder
-                disables sync but leaves the account's active org untouched). */}
-            {(syncEnabled && activeOrg ? activeOrg.name : vault?.name) ?? userLabel}
-          </span>
+          {/* This bar is the profile control — it names its person. The vault's
+              name is the sidebar header's job, so repeating it here would just
+              say the same thing twice down one column. When the account has no
+              display name, line 1 is already the email, so line 2 falls back to
+              presence rather than repeating it. */}
+          <span className="identity-line1">{userLabel}</span>
           <span className="identity-line2">
-            {syncEnabled && activeOrg
-              ? userLabel
-              : vault
-                ? "Local · not synced"
-                : "No vault yet"}
+            {session.user.name ? session.user.email : presenceLabel}
           </span>
         </span>
         {hasInvites && <span className="identity-alert" aria-label="Pending invitation" />}
@@ -205,11 +196,6 @@ export function AccountMenu() {
           onOpenMembers={() => {
             setOpen(false);
             setSettingsTab(undefined);
-            setMembersOpen(true);
-          }}
-          onOpenVaults={() => {
-            setOpen(false);
-            setSettingsTab("vaults");
             setMembersOpen(true);
           }}
           onOpenAccount={() => {
@@ -229,10 +215,33 @@ export function AccountMenu() {
   );
 }
 
-// How many vaults of EACH kind (synced, local) the popover shows inline.
-// Anything past this lives on the Vaults settings page — reached via
-// "View all" — so a long account never turns the menu into a scroll trap.
-const POPOVER_VAULT_LIMIT = 2;
+// How many vault rows the popover spends in total, across both kinds. A fixed
+// budget rather than a per-kind cap is what keeps the menu the same height for
+// everyone: whoever has vaults fills it. The rest live on the Vaults settings
+// page, reached from the Vault settings row at the foot of this menu.
+const POPOVER_VAULT_ROWS = 4;
+
+/**
+ * Divide the row budget between synced and local vaults: an even split when
+ * both kinds can fill their half, otherwise the kind that has vaults takes the
+ * space the other one isn't using. Signed out there are no synced vaults, so
+ * local takes all four.
+ *
+ * Deliberately not proportional — someone with 12 synced and 1 local should
+ * still see that 1 local vault, because it's the one the split is there to
+ * protect. It only loses its slot when it doesn't exist.
+ */
+export function splitVaultRows(
+  syncedCount: number,
+  localCount: number,
+  budget = POPOVER_VAULT_ROWS,
+): { synced: number; local: number } {
+  const half = Math.floor(budget / 2);
+  // Each kind is guaranteed its half; local then claims whatever synced left
+  // unused, and synced claims what's still free after that.
+  const local = Math.min(localCount, budget - Math.min(syncedCount, half));
+  return { synced: Math.min(syncedCount, budget - local), local };
+}
 
 /**
  * Recent on-disk folders that aren't bound to a synced vault — i.e. the
@@ -335,21 +344,24 @@ function NewVaultItem({ onDone }: { onDone: () => void }) {
 
 /**
  * The "On this device" rows: local vaults you can switch to with one click.
- * `limit` caps how many show inline; when there are more, an `onViewAll` link
- * hands off to the full Vaults page (which lists local + synced together).
- * The current local vault is always pinned to the top so it never hides
- * behind the cap.
+ * `limit` caps how many show inline; the rest are reached through the Vault
+ * settings row just below, which lists local and synced together — so there's
+ * no "All local vaults (N)" link here spending a row to say what the item
+ * under it already does. The current local vault is always pinned to the top
+ * so it never hides behind the cap.
  */
 function LocalVaultRows({
   onClose,
+  locals,
   limit,
-  onViewAll,
 }: {
   onClose: () => void;
+  /** Passed in rather than fetched here: the caller needs the count anyway to
+   *  divide the row budget, and two `useLocalVaults()` calls would mean two
+   *  IPC round-trips for one list. */
+  locals: RecentVault[];
   limit?: number;
-  onViewAll?: () => void;
 }) {
-  const locals = useLocalVaults();
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
   if (locals.length === 0) return null;
@@ -388,14 +400,6 @@ function LocalVaultRows({
           </button>
         );
       })}
-      {limit && onViewAll && locals.length > limit && (
-        <button className="menu-item subtle" onClick={onViewAll}>
-          <span className="menu-swatch more" aria-hidden="true">
-            …
-          </span>
-          <span className="menu-item-label">All local vaults ({locals.length})</span>
-        </button>
-      )}
     </>
   );
 }
@@ -409,22 +413,19 @@ function SignedOutPopover({
   onClose,
   onSignIn,
   onOpenSettings,
-  onViewAllLocal,
 }: {
   onClose: () => void;
   onSignIn: () => void;
   onOpenSettings: () => void;
-  onViewAllLocal: () => void;
 }) {
   const vault = useStore((s) => s.vault);
+  const locals = useLocalVaults();
+  // Signed out there are no synced vaults, so local vaults get the whole budget.
+  const rows = splitVaultRows(0, locals.length);
   return (
     <div className="account-popover" role="menu">
       <div className="menu-label">Vault</div>
-      <LocalVaultRows
-        onClose={onClose}
-        limit={POPOVER_VAULT_LIMIT}
-        onViewAll={onViewAllLocal}
-      />
+      <LocalVaultRows onClose={onClose} locals={locals} limit={rows.local} />
 
       <NewVaultItem onDone={onClose} />
 
@@ -455,12 +456,10 @@ function SignedOutPopover({
 function AccountPopover({
   onClose,
   onOpenMembers,
-  onOpenVaults,
   onOpenAccount,
 }: {
   onClose: () => void;
   onOpenMembers: () => void;
-  onOpenVaults: () => void;
   onOpenAccount: () => void;
 }) {
   const session = useStore((s) => s.session);
@@ -469,6 +468,7 @@ function AccountPopover({
   const pendingInvitations = useStore((s) => s.pendingInvitations);
   const userInvitations = useStore((s) => s.userInvitations);
   const vault = useStore((s) => s.vault);
+  const locals = useLocalVaults();
 
   const [joining, setJoining] = useState(false);
   const [joinCode, setJoinCode] = useState("");
@@ -476,6 +476,7 @@ function AccountPopover({
   const [busy, setBusy] = useState(false);
 
   if (!session) return null;
+  const rows = splitVaultRows(organizations.length, locals.length);
   const activeOrgId = session.activeOrganizationId;
   const userLabel = session.user.name || session.user.email;
   // "Current" tracks the vault whose folder is actually OPEN right now —
@@ -538,7 +539,7 @@ function AccountPopover({
         ...organizations.filter((o) => o.id === activeOrgId),
         ...organizations.filter((o) => o.id !== activeOrgId),
       ]
-        .slice(0, POPOVER_VAULT_LIMIT)
+        .slice(0, rows.synced)
         .map((o) => {
         const isActive = openPath != null && boundVaults[o.id] === openPath;
         return (
@@ -580,22 +581,7 @@ function AccountPopover({
         );
       })}
 
-      {organizations.length > POPOVER_VAULT_LIMIT && (
-        <button className="menu-item subtle" onClick={onOpenVaults}>
-          <span className="menu-swatch more" aria-hidden="true">
-            …
-          </span>
-          <span className="menu-item-label">
-            All synced vaults ({organizations.length})
-          </span>
-        </button>
-      )}
-
-      <LocalVaultRows
-        onClose={onClose}
-        limit={POPOVER_VAULT_LIMIT}
-        onViewAll={onOpenVaults}
-      />
+      <LocalVaultRows onClose={onClose} locals={locals} limit={rows.local} />
 
       <NewVaultItem onDone={onClose} />
 

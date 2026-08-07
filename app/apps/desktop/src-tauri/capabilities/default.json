@@ -6,6 +6,11 @@
   "permissions": [
     "core:default",
     "opener:default",
+    {
+      "identifier": "opener:allow-open-path",
+      "comment": "Open a vault's folder in the OS file manager. `open_path` enforces a path scope INDEPENDENTLY of this permission — listing the identifier alone leaves that scope empty, which rejects every call as ForbiddenPath. Scoped to the home directory so a webview compromise can't reach /Applications or /usr; vaults kept outside $HOME fall back to reveal_item_in_dir, which is unscoped.",
+      "allow": [{ "path": "$HOME/**" }]
+    },
     "dialog:default",
     "fs:default",
     "updater:default",
