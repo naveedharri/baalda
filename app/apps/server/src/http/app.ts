@@ -23,10 +23,29 @@ export interface AppDeps extends ShareDeps {
   docWriter: DocWriter;
   /** Payment provider. Defaults to Polar; tests inject a fake. */
   billingProvider?: BillingProvider;
-  /** Structure changed (folder/note create/rename/move/delete) → broadcast.
-   *  `originId` identifies the client that made the change (x-baalda-origin), so
-   *  the broadcast can skip it — see `RegistryDeps.onRegistryChanged`. */
-  onRegistryChanged?: (vaultId: string, originId: string | null) => void;
+  /**
+   * Structure changed (folder/note create/rename/move/delete) → broadcast.
+   * `originId` identifies the client that made the change (x-baalda-origin), so
+   * the broadcast can skip it — see `RegistryDeps.onRegistryChanged`.
+   *
+   * **Required**, unlike its counterparts on the inner `RegistryDeps`/`McpDeps`.
+   * This is the one seam where the whole app is constructed, and forgetting it
+   * here is both catastrophic and silent: every write still succeeds, and no
+   * running app ever hears about it — a note exists in Postgres and in nobody's
+   * sidebar until they restart. Making it required turns that into a compile
+   * error. Pass an explicit no-op if a test genuinely doesn't care.
+   */
+  onRegistryChanged: (vaultId: string, originId: string | null) => void;
+  /**
+   * Access changed in a collection → subscribers re-resolve their readable set.
+   *
+   * Narrowed from optional (`ShareDeps`) to **required** here for the same reason,
+   * with sharper teeth: this is the only thing that revokes access on a live
+   * vault-channel socket. An app built without it keeps streaming vault content to
+   * someone whose share — or whose membership — was just taken away, until their
+   * token expires. Inner routers keep it optional for focused unit tests.
+   */
+  onAclChanged: (vaultId: string) => void;
 }
 
 /**
@@ -117,19 +136,35 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", desktopOauthRoutes);
   app.route("/api", syncTokenRoutes);
   app.route("/api", vaultTokenRoutes);
-  app.route("/api", createRegistryRoutes({ onRegistryChanged: deps.onRegistryChanged }));
+  app.route(
+    "/api",
+    createRegistryRoutes({
+      onRegistryChanged: deps.onRegistryChanged,
+      disconnectDoc: deps.disconnectDoc,
+    }),
+  );
   app.route("/api", blobRoutes);
   app.route("/api", createShareRoutes(deps));
   const billingProvider = deps.billingProvider ?? new PolarBillingProvider();
   app.route(
     "/api",
-    createOrgRoutes({ disconnectDoc: deps.disconnectDoc, billingProvider }),
+    createOrgRoutes({
+      disconnectDoc: deps.disconnectDoc,
+      // Was simply never plumbed here, which is why removing a member left their
+      // vault-channel socket streaming content for up to the token TTL.
+      onAclChanged: deps.onAclChanged,
+      billingProvider,
+    }),
   );
   app.route("/api", createBillingRoutes({ provider: billingProvider }));
   app.route("/api", graphRoutes);
   app.route(
     "/api",
-    createMcpRoutes({ docWriter: deps.docWriter, disconnectDoc: deps.disconnectDoc }),
+    createMcpRoutes({
+      docWriter: deps.docWriter,
+      disconnectDoc: deps.disconnectDoc,
+      onRegistryChanged: deps.onRegistryChanged,
+    }),
   );
 
   return app;

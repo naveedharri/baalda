@@ -34,6 +34,12 @@ const fakeRegistry = vi.hoisted(() => {
     setMapListener: vi.fn((cb: (() => void) | null) => {
       reg.mapListener = cb;
     }),
+    // Inbound reconciliation: the manager hands itself over as the host that can
+    // make the editor/doc-store let go of a doc before its file moves.
+    inboundHost: null as unknown,
+    setInboundHost: vi.fn((host: unknown) => {
+      reg.inboundHost = host;
+    }),
     mappedNotes: vi.fn((): Array<{ docId: string; relPath: string }> => []),
     isPushed: vi.fn(() => false),
     markPushed: vi.fn(),

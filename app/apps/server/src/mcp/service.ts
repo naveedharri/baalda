@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole } from "../permissions/lookup.js";
-import {
-  ancestorFolderIds,
-  effectivePermission,
-  isLocked,
-  type Permission,
-} from "../permissions/resolver.js";
+import { effectivePermission, type Permission } from "../permissions/resolver.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
+import { canEditFolder } from "../permissions/http-gates.js";
+import {
+  deleteFolderCascade,
+  findFolder,
+  folderIsEmpty,
+  moveFolder,
+  moveNote,
+  TreeOpError,
+} from "../registry/tree-ops.js";
 import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
 import type { DocWriter } from "./doc-writer.js";
@@ -27,6 +31,18 @@ export interface McpContext {
   docWriter: DocWriter;
   /** Force-close live sync sockets for a doc (used on delete). */
   disconnectDoc: (vaultId: string, docId: string) => void;
+  /**
+   * Announce a folder/note create/delete so connected apps re-pull the tree —
+   * the same broadcast the HTTP registry routes fire.
+   *
+   * Writing the row is only half a write. Without this the note exists in
+   * Postgres and nowhere else anyone can see: no `registry-changed` frame goes
+   * out, every open sidebar keeps showing the old tree, and the note surfaces
+   * only when a client next does a full reconcile — i.e. on restart. MCP is
+   * meant to be indistinguishable from a teammate's edit, and a teammate's
+   * edit announces itself.
+   */
+  onRegistryChanged?: (vaultId: string) => void;
 }
 
 /** A tool tried to touch something it may not, or that doesn't exist. */
@@ -73,24 +89,18 @@ async function folderWritePermission(
   auth: McpAuth,
   folderId: string | null,
 ): Promise<Permission> {
-  if (folderId) {
-    const chain = await ancestorFolderIds(pool, folderId);
-    if (await isLocked(pool, auth.userId, null, chain)) return "none";
-  }
-  if (await isAdmin(auth)) return "edit";
-  if (!folderId) return "none";
-  const { rows } = await pool.query<{ permission: string }>(
-    `WITH RECURSIVE chain AS (
-        SELECT id, parent_id FROM folders WHERE id = $1
-        UNION ALL
-        SELECT f.id, f.parent_id FROM folders f JOIN chain c ON f.id = c.parent_id
-     )
-     SELECT s.permission FROM shares s
-      WHERE s.principal_type = 'user' AND s.principal_id = $2
-        AND s.resource_type = 'folder' AND s.resource_id IN (SELECT id FROM chain)`,
-    [folderId, auth.userId],
-  );
-  return rows.some((r) => r.permission === "edit") ? "edit" : "none";
+  // The vault root has no folder row to resolve against, so it can't go through
+  // `canEditFolder` — and root writes stay admin-only. This is the one place the
+  // two gates legitimately differ, and callers that MOVE things to the root have
+  // to skip this check rather than inherit the admin-only rule (HTTP doesn't
+  // apply it either).
+  if (!folderId) return (await isAdmin(auth)) ? "edit" : "none";
+  // Otherwise defer to the HTTP gate rather than keeping a second implementation.
+  // The copy that used to live here was missing the creator rule, so a member who
+  // made a folder in the app could rename and delete it over HTTP but couldn't
+  // create a note in it over MCP — two doors onto the same data with different
+  // locks. `canEditFolder` also checks membership, which this didn't.
+  return (await canEditFolder(auth.userId, folderId)) ? "edit" : "none";
 }
 
 // ── vaults / folders ────────────────────────────────────────────────────────
@@ -131,17 +141,47 @@ export async function createFolder(
   if ((await folderWritePermission(ctx.auth, parentId)) !== "edit") {
     throw new McpToolError("You do not have edit access to create a folder here");
   }
+  // Adopt an existing row at this path instead of inserting a duplicate, exactly
+  // as `POST /api/folders` does. There is no UNIQUE constraint behind
+  // (vault_id, path), so without this an assistant asking for "Ideas" twice
+  // creates two rows at one path and the desktop's path→id map picks one at
+  // random. Idempotent is also just the right shape for a tool an LLM retries.
+  const existing = await pool.query<{ id: string; name: string }>(
+    "SELECT id, name FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
+    [input.vaultId, input.path],
+  );
+  if (existing.rows[0]) {
+    const row = existing.rows[0];
+    return { folderId: row.id, parentId, name: row.name, path: input.path, adopted: true };
+  }
+
   const id = randomUUID();
   await pool.query(
-    `INSERT INTO folders (id, vault_id, parent_id, name, path, sort)
-     VALUES ($1, $2, $3, $4, $5, 0)`,
-    [id, input.vaultId, parentId, input.name, input.path],
+    // `created_by` matters beyond bookkeeping: it's what `canEditFolder` and
+    // `listVisibleFolders` use to give a non-admin rights over folders they made.
+    // Omitting it (as this did) meant a member who created a folder through an
+    // assistant couldn't see it in their own sidebar or rename it in the app.
+    `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by)
+     VALUES ($1, $2, $3, $4, $5, 0, $6)`,
+    [id, input.vaultId, parentId, input.name, input.path, ctx.auth.userId],
   );
-  return { folderId: id, parentId, name: input.name, path: input.path };
+  ctx.onRegistryChanged?.(input.vaultId);
+  return { folderId: id, parentId, name: input.name, path: input.path, adopted: false };
 }
 
-/** Delete an EMPTY folder (no child folders/notes/files) — avoids orphaning content. */
-export async function deleteFolder(ctx: McpContext, folderId: string) {
+/**
+ * Delete a folder. Empty-only by default; `recursive` also deletes its contents.
+ *
+ * The refusal stays the default deliberately. An assistant that has been getting
+ * "Folder is not empty" as a brake should not start removing subtrees on the same
+ * tool call it always used — destruction has to be asked for, and asking for it
+ * leaves `recursive: true` visible in the tool log.
+ */
+export async function deleteFolder(
+  ctx: McpContext,
+  folderId: string,
+  opts: { recursive?: boolean } = {},
+) {
   const { rows } = await pool.query<{ vault_id: string }>(
     "SELECT vault_id FROM folders WHERE id = $1",
     [folderId],
@@ -152,19 +192,95 @@ export async function deleteFolder(ctx: McpContext, folderId: string) {
   if ((await folderWritePermission(ctx.auth, folderId)) !== "edit") {
     throw new McpToolError("You do not have edit access to delete this folder");
   }
-  const { rows: kids } = await pool.query<{ n: number }>(
-    `SELECT (
-        (SELECT count(*) FROM folders WHERE parent_id = $1)
-      + (SELECT count(*) FROM notes WHERE folder_id = $1 AND deleted_at IS NULL)
-      + (SELECT count(*) FROM files WHERE folder_id = $1)
-     )::int AS n`,
-    [folderId],
-  );
-  if ((kids[0]?.n ?? 0) > 0) {
-    throw new McpToolError("Folder is not empty — delete or move its contents first");
+  if (!opts.recursive) {
+    const { rows: files } = await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM files WHERE folder_id = $1",
+      [folderId],
+    );
+    if (!(await folderIsEmpty(pool, folderId)) || (files[0]?.n ?? 0) > 0) {
+      throw new McpToolError(
+        "Folder is not empty — move its contents first, or pass recursive: true to delete them with it",
+      );
+    }
   }
-  await pool.query("DELETE FROM folders WHERE id = $1", [folderId]);
-  return { deleted: folderId };
+  const { deletedNoteIds } = await deleteFolderCascade(pool, folderId);
+  // Same trailing work as `delete_note`: drop derived index rows and kick anyone
+  // whose editor is still attached to a doc that no longer exists.
+  await purgeNoteIndex(deletedNoteIds);
+  for (const docId of deletedNoteIds) ctx.disconnectDoc(vaultId, docId);
+  ctx.onRegistryChanged?.(vaultId);
+  return { deleted: folderId, deletedNotes: deletedNoteIds.length };
+}
+
+/**
+ * Rename and/or move a folder, taking its whole subtree with it. Every descendant
+ * path is rewritten and every id preserved, so backlinks and edit history survive.
+ */
+export async function moveFolderTool(
+  ctx: McpContext,
+  input: { folderId: string; path?: string; name?: string; parentId?: string | null },
+) {
+  const folder = await findFolder(pool, input.folderId);
+  if (!folder) throw new McpToolError(`Unknown folder: ${input.folderId}`);
+  await requireVaultInScope(ctx.auth, folder.vault_id);
+  if ((await folderWritePermission(ctx.auth, input.folderId)) !== "edit") {
+    throw new McpToolError("You do not have edit access to move this folder");
+  }
+  // Re-parenting must not be a way to change inherited access, so edit on the
+  // destination is required too — but only for a real folder. `parentId: null`
+  // means the vault root, which `folderWritePermission` treats as admin-only;
+  // applying that here would make moving to the root admin-only over MCP while
+  // HTTP allows it for the same user (it short-circuits on null the same way).
+  if (input.parentId != null && (await folderWritePermission(ctx.auth, input.parentId)) !== "edit") {
+    throw new McpToolError("You do not have edit access to the destination folder");
+  }
+  try {
+    const moved = await moveFolder(pool, input.folderId, {
+      path: input.path,
+      name: input.name,
+      parentId: input.parentId,
+    });
+    ctx.onRegistryChanged?.(moved.vaultId);
+    return { folderId: moved.id, name: moved.name, path: moved.path };
+  } catch (err) {
+    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    throw err;
+  }
+}
+
+/** Rename, retitle, and/or move a single note. Its docId never changes. */
+export async function moveNoteTool(
+  ctx: McpContext,
+  input: { docId: string; relPath?: string; title?: string; folderId?: string | null },
+) {
+  const note = await requireEditableNote(ctx.auth, input.docId);
+  // Moving a note INTO a folder inherits that folder's grants, so it needs edit
+  // on the destination as well as on the note. Same null-is-the-root carve-out as
+  // `moveFolderTool`.
+  if (
+    input.folderId != null &&
+    input.folderId !== note.folder_id &&
+    (await folderWritePermission(ctx.auth, input.folderId)) !== "edit"
+  ) {
+    throw new McpToolError("You do not have edit access to the destination folder");
+  }
+  try {
+    const moved = await moveNote(pool, input.docId, {
+      relPath: input.relPath,
+      title: input.title,
+      folderId: input.folderId,
+    });
+    ctx.onRegistryChanged?.(moved.vaultId);
+    return {
+      docId: moved.id,
+      relPath: moved.relPath,
+      title: moved.title,
+      folderId: moved.folderId,
+    };
+  } catch (err) {
+    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    throw err;
+  }
 }
 
 // ── notes (markdown docs) ─────────────────────────────────────────────────────
@@ -281,6 +397,9 @@ export async function createNote(
   if (input.content) {
     await ctx.docWriter.setContent(input.vaultId, docId, input.content);
   }
+  // After the content, so a client that reacts to the announcement by pulling
+  // the note finds it already written rather than briefly empty.
+  ctx.onRegistryChanged?.(input.vaultId);
   return {
     docId,
     vaultId: input.vaultId,
@@ -303,6 +422,22 @@ async function requireEditableNote(auth: McpAuth, docId: string) {
   return note;
 }
 
+/**
+ * Content-only, so deliberately **no** `onRegistryChanged` here or in
+ * `appendNote` — do not "fix" this by adding one.
+ *
+ * A registry broadcast makes every subscriber recompute its readable-doc set and
+ * re-pull the whole folder+note listing. Nothing structural changed, so that work
+ * buys nothing, and an assistant writing 20 notes in a session would trigger 20
+ * full reconciles on every connected app.
+ *
+ * The `updated_at` bump below is the one thing that then goes unannounced: a
+ * client's mirror of the modified time stays stale until its next full reconcile.
+ * The content itself does fan out (the doc-writer publishes it), so what a user
+ * sees is correct. If a live modified time is ever wanted, the instrument is a
+ * doc-scoped frame (`{t:"touched", docId, updatedAt}`) the client applies to one
+ * row — not a whole-tree re-pull.
+ */
 export async function updateNote(ctx: McpContext, docId: string, content: string) {
   const note = await requireEditableNote(ctx.auth, docId);
   await ctx.docWriter.setContent(note.vault_id, docId, content);
@@ -324,6 +459,9 @@ export async function deleteNote(ctx: McpContext, docId: string) {
   // Drop derived index rows and kick any live editors off the now-gone doc.
   await purgeNoteIndex([docId]);
   ctx.disconnectDoc(note.vault_id, docId);
+  // `disconnectDoc` only kicks editors off the doc itself; without this the
+  // note stays listed in every open sidebar.
+  ctx.onRegistryChanged?.(note.vault_id);
   return { deleted: docId };
 }
 

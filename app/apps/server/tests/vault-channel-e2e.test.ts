@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
@@ -111,6 +112,60 @@ describe("VaultChannel end-to-end (spec 05 §3.1)", () => {
 
     await waitFor(() => ws.frames().some((f) => f.docId === docId));
     expect(textFrom(ws.frames().filter((f) => f.docId === docId))).toBe("live!");
+  });
+
+  it("stops streaming to a member who has just been removed", async () => {
+    // The leak this closes, proved end to end rather than by asserting a callback
+    // fired. `disconnectDoc` only kills per-doc Hocuspocus sockets — the
+    // vault-channel socket below survives it, holding a `readable` set frozen at
+    // connect time. Before `acl-changed` was wired into member removal, this
+    // connection kept receiving every doc update in the vault until its token
+    // expired (SYNC_TOKEN_TTL_SECONDS, 600s by default).
+    const org = await seedOrg("Acme", "acme-e2e-revoke");
+    const owner = await seedUser("owner@revoke.com");
+    const member = await seedUser("member@revoke.com");
+    await seedMember(org, owner, "owner");
+    const memberRow = await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const docId = await seedNote(vault, null, "team.md", owner);
+    // Shared with the team, so the member can read it while they're a member.
+    await pool.query(
+      `INSERT INTO shares
+         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ($1, $2, 'vault', $2, 'org', $2, 'edit')`,
+      [randomUUID(), org],
+    );
+
+    const channel = new VaultChannel({ pubsub: new InMemoryPubSub() });
+    const ws = new FakeWs();
+    channel.handleConnection(ws as never);
+    ws.hello(await mintVaultToken({ userId: member, vaultId: vault }));
+    await waitFor(() => ws.controls().some((c) => c.t === "ready"));
+
+    // While still a member, live updates arrive.
+    const before = new Y.Doc();
+    before.getText("content").insert(0, "while a member");
+    await channel.publishDocUpdate(vault, docId, Y.encodeStateAsUpdate(before));
+    before.destroy();
+    await waitFor(() => ws.frames().some((f) => f.docId === docId));
+
+    // Now they're removed — the row goes, and the vault channel is told.
+    await pool.query(`DELETE FROM member WHERE id = $1`, [memberRow]);
+    await channel.publishAclChanged(vault);
+    // The channel answers by re-resolving and dropping every doc it can no longer
+    // read; the token is still perfectly valid, which is the whole point.
+    await waitFor(() => ws.controls().some((c) => c.t === "drop" && c.docId === docId));
+
+    const framesBefore = ws.frames().length;
+    const after = new Y.Doc();
+    after.getText("content").insert(0, "AFTER REMOVAL — must not arrive");
+    await channel.publishDocUpdate(vault, docId, Y.encodeStateAsUpdate(after));
+    after.destroy();
+    await tick();
+    await tick();
+
+    expect(ws.frames().length).toBe(framesBefore);
+    expect(textFrom(ws.frames().filter((f) => f.docId === docId))).not.toContain("AFTER REMOVAL");
   });
 
   it("sends no backfill for a doc the subscriber can't read", async () => {

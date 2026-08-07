@@ -28,11 +28,13 @@ import {
   noteRelPath,
   vaultOrgId,
   type RegisteredFolder,
+  type RegisteredNote,
 } from "../api";
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer } from "./checkpoint";
+import { planInbound } from "./inbound";
 import { REGISTRY_CONCURRENCY, runPool, withRetry } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
@@ -59,6 +61,70 @@ interface VaultSyncConfig {
    * stale entry therefore costs a round trip, never duplicated content.
    */
   pushed?: string[];
+  /**
+   * docId → relPath as of the last AGREED reconciliation, for THIS collection.
+   *
+   * The one piece of memory that makes inbound reconciliation possible: without a
+   * prior agreement, "the server moved this note" and "we have never seen this
+   * note" are indistinguishable, and so are "the server deleted it" and "it's new
+   * here". `docs` can't serve — it's keyed by path (so a rename produces two
+   * entries with no way to tell which is stale) and it's rewritten from scratch
+   * every pass.
+   *
+   * Accumulates rather than mirroring `docs`: a doc whose access was revoked stays
+   * here on purpose, so we keep recognising it as "was ours, now unreadable" and
+   * keep leaving it alone. Dropping it would make the next pass see a brand-new
+   * local note and re-register it — the ghost, back every other pull.
+   */
+  baseline?: Record<string, string>;
+}
+
+/**
+ * A tree that came from `ipc.listTree` — the FULL recursive walk.
+ *
+ * The brand is unforgeable outside this module, so no caller can hand the LAZY
+ * sidebar tree (`store.refreshTree` → `ipc.listChildren`, where unexpanded
+ * folders carry placeholder children) to anything that mutates the disk. That
+ * exact confusion is what once materialized empty files over 428 real notes, and
+ * inbound reconciliation raises the stakes: a short tree would read as "the
+ * server deleted everything I can't see".
+ */
+type FullTree = TreeNode & { readonly __fullTree: unique symbol };
+
+/**
+ * Rust stamps `childrenLoaded: true` on every directory in `list_tree` and
+ * `false`/absent only on `list_children` placeholders, so this is a real check
+ * rather than a formality.
+ */
+function assertFullTree(node: TreeNode): void {
+  if (node.isDir && node.childrenLoaded !== true) {
+    throw new Error(`[registry] partial tree at "${node.path}" — refusing to reconcile`);
+  }
+  for (const child of node.children ?? []) assertFullTree(child);
+}
+
+/**
+ * How the registry asks the layers above it to let go of a doc before its path
+ * moves or disappears.
+ *
+ * Injected rather than imported so this module stays free of the editor and the
+ * background doc store (and unit-testable without either).
+ */
+export interface InboundHost {
+  /**
+   * Resolve only once NOTHING can still write to `docId`'s current path — the
+   * editor's bridge, the background hot bridge, and any in-flight cold apply.
+   *
+   * Without this, a bridge that still holds the OLD path egests after the move and
+   * RECREATES the file. Worse than a stray copy: the watcher then indexes it as a
+   * new file and mints a fresh docId, so the note is resurrected *and* forked into
+   * a second server row.
+   */
+  releaseDoc(docId: string): Promise<void>;
+  /** The file moved: re-point anything showing it (e.g. the open editor). */
+  notePathChanged(docId: string, from: string, to: string): void;
+  /** The file is gone: close anything showing it. */
+  noteRemoved(docId: string, path: string, trashedTo: string | null): void;
 }
 
 export interface ReconcileInput {
@@ -71,7 +137,7 @@ export interface ReconcileInput {
 /** A folder/note that could NOT be registered, after retries. Surfaced so the
  *  vault is never reported fully synced while an arbitrary subset is local-only. */
 export interface RegistryFailure {
-  kind: "folder" | "note" | "materialize";
+  kind: "folder" | "note" | "materialize" | "inbound" | "orphan";
   /** Vault-relative path. */
   path: string;
   /** Intended docId, when known (notes) — phase 3 keys its badge by this. */
@@ -110,6 +176,16 @@ export function flattenTree(root: TreeNode): { folders: TreeNode[]; notes: TreeN
 function parentDir(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? "" : path.slice(0, i);
+}
+
+/**
+ * One folder name per inbound pass, so everything a single remote delete removed
+ * can be found (and put back) together. Supplied by the caller rather than
+ * generated in Rust, which has no date crate and would otherwise scatter a
+ * multi-note delete across timestamps.
+ */
+function trashStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 /** Server error `code` field, when the body carried one. */
@@ -151,6 +227,19 @@ export class VaultRegistry {
   /** docIds whose content this device has confirmed on the server. See
    *  `VaultSyncConfig.pushed` for why this is an optimization, not a guarantee. */
   private pushed = new Set<string>();
+  /** Last agreed docId → relPath (see `VaultSyncConfig.baseline`). */
+  private baselineDocs = new Map<string, string>();
+  /**
+   * The collection `baselineDocs` describes. A baseline recorded against ANOTHER
+   * collection must never decide that a file moved or died, so a mismatch
+   * disables inbound reconciliation for the pass — degrading to the outbound-only
+   * behaviour we had before, never to a guess.
+   */
+  private baselineVaultId: string | null = null;
+  /** Set by `SyncManager`; absent in unit tests, where inbound is a no-op host. */
+  private host: InboundHost | null = null;
+  /** Local note paths the current pass must not re-register (see `InboundPlan.suppress`). */
+  private inboundSuppressed = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
   /** Set when the server refused on a plan limit: the rest of the run is
@@ -215,6 +304,13 @@ export class VaultRegistry {
     this.onMapChanged = cb;
   }
 
+  /** Provide the editor/doc-store coupling inbound reconciliation needs. Without
+   *  a host, inbound still runs but nothing is released — safe only in tests,
+   *  where no bridge is open. */
+  setInboundHost(host: InboundHost | null): void {
+    this.host = host;
+  }
+
   /** Announce a change to the path→docId map. Fired freely (once per adopted or
    *  created note); the listener is responsible for coalescing. */
   private notifyMapChanged(): void {
@@ -236,6 +332,10 @@ export class VaultRegistry {
     this.byDocId.clear();
     this.folderByPath.clear();
     this.pushed.clear();
+    // A surviving baseline is exactly the cross-vault confusion this method
+    // exists to prevent — it would tell vault B that vault A's notes moved.
+    this.baselineDocs.clear();
+    this.baselineVaultId = null;
     this.failed = [];
     this.limitReached = null;
     this.bound = null;
@@ -364,12 +464,188 @@ export class VaultRegistry {
     for (const [rp, m] of this.byPath) docs[rp] = m.docId;
     const folders: Record<string, string> = {};
     for (const [rp, id] of this.folderByPath) folders[rp] = id;
+    const baseline: Record<string, string> = {};
+    for (const [docId, rp] of this.baselineDocs) baseline[docId] = rp;
     return {
       serverVaultId: this.serverVaultId ?? undefined,
       docs,
       folders,
       pushed: [...this.pushed],
+      baseline,
     };
+  }
+
+  /**
+   * Bring local disk into line with the server's structure: create folders that
+   * only exist server-side, apply remote renames/moves, and move remotely-deleted
+   * notes to the vault's trash.
+   *
+   * Every mutation below is guarded, and the guards are the point:
+   *   - a persisted baseline for THIS collection must exist (else we can't tell a
+   *     remote move from a note we've simply never seen);
+   *   - the tree must be the full walk (enforced by the `FullTree` brand);
+   *   - the scope is re-checked immediately before each call, and every IPC is
+   *     epoch-pinned so Rust refuses anything that outlives the vault;
+   *   - the doc is RELEASED first, so no bridge can egest to the old path and
+   *     recreate the file we just moved;
+   *   - and `planInbound` caps how much one pass may change.
+   */
+  private async applyInbound(
+    vaultId: string,
+    args: {
+      folders: TreeNode[];
+      notes: TreeNode[];
+      titles: Array<{ path: string; id: string }>;
+      serverFolders: Array<{ path: string }>;
+      serverNotes: RegisteredNote[];
+      tombstones: string[] | null;
+    },
+  ): Promise<{ changedDisk: boolean; suppress: Set<string> }> {
+    const none = { changedDisk: false, suppress: new Set<string>() };
+    // No baseline for this collection ⇒ no inbound. A first run, a config written
+    // by another vault, or a wiped `.context` all land here, and all of them mean
+    // "we have no idea what moved" — which must degrade to outbound-only, never to
+    // a guess about what to delete.
+    if (this.baselineVaultId !== vaultId) return none;
+
+    const localNotePaths = new Set(args.notes.map((n) => n.path));
+    // Only notes that are BOTH in the tree and in the index have a docId we can
+    // match on. (The index covers `.md`; a `.txt`/`.canvas` note therefore never
+    // gets inbound-renamed or trashed, only materialized — the safe direction.)
+    const local = new Map<string, string>();
+    for (const t of args.titles) {
+      if (localNotePaths.has(t.path)) local.set(t.id, t.path);
+    }
+    const server = new Map<string, string>();
+    for (const n of args.serverNotes) {
+      const rp = noteRelPath(n);
+      if (rp) server.set(noteDocId(n), rp);
+    }
+
+    const plan = planInbound({
+      server,
+      tombstones: args.tombstones ? new Set(args.tombstones) : null,
+      baseline: this.baselineDocs,
+      local,
+      serverFolders: new Set(args.serverFolders.map((f) => f.path)),
+      localFolders: new Set(args.folders.map((f) => f.path)),
+    });
+
+    for (const r of plan.rejected) {
+      this.recordFailure({
+        kind: "inbound",
+        path: r.path,
+        docId: r.docId,
+        reason: r.reason,
+        code: null,
+      });
+    }
+
+    let changedDisk = false;
+
+    // Folders first: a rename or materialize below may need one as a parent.
+    // `ensureFolder` is idempotent, so a folder that already exists costs nothing
+    // and a second pull is a no-op.
+    for (const path of plan.createFolders) {
+      if (this.stopRun()) break;
+      try {
+        await ipc.ensureFolder(path, this.epoch());
+        changedDisk = true;
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) return none;
+        this.recordFailure({
+          kind: "inbound",
+          path,
+          docId: null,
+          reason: reasonOf(e),
+          code: null,
+        });
+      }
+    }
+
+    for (const move of plan.renames) {
+      if (this.stopRun()) break;
+      // Nothing may still hold the old path when we move it.
+      await this.host?.releaseDoc(move.docId);
+      if (this.stale()) return { changedDisk, suppress: plan.suppress };
+      try {
+        // Rust refuses a rename onto an existing file, so this cannot overwrite
+        // content — we lean on that rather than pre-checking and racing.
+        await ipc.renamePath(move.from, move.to, this.epoch());
+        changedDisk = true;
+        this.host?.notePathChanged(move.docId, move.from, move.to);
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+        this.recordFailure({
+          kind: "inbound",
+          path: move.to,
+          docId: move.docId,
+          reason: reasonOf(e),
+          code: null,
+        });
+      }
+    }
+
+    // One stamp per pass, so everything a single remote delete removed lands in
+    // one recoverable folder.
+    const stamp = trashStamp();
+    for (const gone of plan.trash) {
+      if (this.stopRun()) break;
+      // A note whose content this device never confirmed upstream may hold local
+      // edits that exist NOWHERE else, so removing it could lose the only copy.
+      // Read `pushed` before the prune below has a chance to drop it.
+      if (!this.pushed.has(gone.docId) && !(await this.isEmptyOnDisk(gone.path))) {
+        this.recordFailure({
+          kind: "orphan",
+          path: gone.path,
+          docId: gone.docId,
+          reason:
+            "deleted on the server, but this device never confirmed its content — left on disk",
+          code: null,
+        });
+        continue;
+      }
+      await this.host?.releaseDoc(gone.docId);
+      if (this.stale()) return { changedDisk, suppress: plan.suppress };
+      try {
+        const dest = await ipc.trashNote(gone.path, stamp, this.epoch());
+        changedDisk = true;
+        // The file left, so the baseline entry goes with it — otherwise every
+        // later pass would keep trying to trash a path that isn't there.
+        this.baselineDocs.delete(gone.docId);
+        this.host?.noteRemoved(gone.docId, gone.path, dest);
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+        this.recordFailure({
+          kind: "inbound",
+          path: gone.path,
+          docId: gone.docId,
+          reason: reasonOf(e),
+          code: null,
+        });
+      }
+    }
+
+    return { changedDisk, suppress: plan.suppress };
+  }
+
+  /** Is this note empty on disk? Used to decide whether an unconfirmed note is
+   *  safe to remove — an empty file can't be holding the only copy of anything. */
+  private async isEmptyOnDisk(relPath: string): Promise<boolean> {
+    try {
+      const text = await ipc.readNote(relPath, this.epoch());
+      return text.trim().length === 0;
+    } catch {
+      // Unreadable ⇒ treat as non-empty, i.e. refuse to remove it.
+      return false;
+    }
+  }
+
+  /** Read the FULL tree (never the lazy sidebar one) — see {@link FullTree}. */
+  private async readFullTree(): Promise<FullTree> {
+    const tree = await ipc.listTree(this.epoch());
+    assertFullTree(tree);
+    return tree as FullTree;
   }
 
   private async writeConfig(cfg: VaultSyncConfig): Promise<void> {
@@ -425,7 +701,7 @@ export class VaultRegistry {
     this.sink.phase("registering", 0);
     // Epoch-pinned like every other read here: a vault switch mid-walk makes Rust
     // reject it, which `stale()` then turns into a clean drop.
-    const tree = await ipc.listTree(this.epoch());
+    const tree = await this.readFullTree();
     if (this.stale()) return { seeded: false };
     const cfg = await this.loadConfig();
     if (this.stale()) return { seeded: false };
@@ -478,6 +754,18 @@ export class VaultRegistry {
     // Adopt the previous run's content-push checkpoint. This is what makes a
     // killed backfill resume instead of re-walking the whole vault.
     this.pushed = new Set(cfg.pushed ?? []);
+    // Adopt the baseline ONLY if the config we just read describes the collection
+    // we actually resolved. Anything else (a first run, a config from another
+    // vault, a rewritten `.context`) leaves it empty, which disables inbound for
+    // this pass — outbound-only, i.e. exactly the old behaviour.
+    this.baselineDocs = new Map<string, string>();
+    this.baselineVaultId = null;
+    if (cfg.serverVaultId === vaultId && cfg.baseline) {
+      for (const [docId, rp] of Object.entries(cfg.baseline)) {
+        if (typeof rp === "string" && rp) this.baselineDocs.set(docId, rp);
+      }
+      this.baselineVaultId = vaultId;
+    }
 
     // 1b. First-run seeding. A brand-new vault — nothing on the server AND
     //     an empty local folder — gets welcome/starter content so the vault
@@ -497,11 +785,11 @@ export class VaultRegistry {
     ) {
       await seedWelcomeContent(this.epoch());
       if (this.stale()) return { seeded: false };
-      workingTree = await ipc.listTree(this.epoch());
+      workingTree = await this.readFullTree();
       seeded = true;
     }
 
-    await this.syncStructure(vaultId, workingTree);
+    await this.syncStructure(vaultId, workingTree, { inbound: true });
     return { seeded };
   }
 
@@ -519,12 +807,12 @@ export class VaultRegistry {
     if (this.stale()) return;
     if (!this.serverVaultId) return;
     const vaultId = this.serverVaultId;
-    const tree = await ipc.listTree(this.epoch());
+    const tree = await this.readFullTree();
     if (this.stale()) return;
     // The vault id must not have moved on either (a reconcile for another vault
     // could have re-pointed it while we were reading the tree).
     if (this.serverVaultId !== vaultId) return;
-    await this.syncStructure(vaultId, tree);
+    await this.syncStructure(vaultId, tree, { inbound: true });
   }
 
   /**
@@ -537,15 +825,54 @@ export class VaultRegistry {
    * always exists before its children ask for its id), notes go in one flat pool,
    * and every lane re-checks the scope before it picks up an item.
    */
-  private async syncStructure(vaultId: string, workingTree: TreeNode): Promise<void> {
+  private async syncStructure(
+    vaultId: string,
+    workingTree: FullTree,
+    opts: { inbound: boolean },
+  ): Promise<void> {
     if (this.stale()) return;
-    const [serverFolders, serverNotes] = await Promise.all([
+    const [serverFolders, noteRegistry] = await Promise.all([
       this.api.listFolders(vaultId),
-      this.api.listNotes(vaultId),
+      this.api.listNoteRegistry(vaultId),
     ]);
     if (this.stale()) return;
-    const { folders, notes } = flattenTree(workingTree);
+    let serverNotes = noteRegistry.notes;
+    let { folders, notes } = flattenTree(workingTree);
     const checkpoint = this.checkpoint ?? this.newCheckpointer();
+
+    // The local index's docId per note path, read BEFORE any decision so inbound
+    // can match by docId rather than by path (a rename changes the path, which is
+    // exactly why path-matching produced duplicates).
+    let titles = await ipc.listNoteTitles(this.epoch());
+    if (this.stale()) return;
+
+    // 1. Inbound: apply the server's structural changes to disk. Runs first so the
+    //    outbound steps below see a tree that already agrees about paths.
+    if (opts.inbound) {
+      const applied = await this.applyInbound(vaultId, { folders, notes, titles, serverFolders, serverNotes, tombstones: noteRegistry.tombstones });
+      if (this.stale()) return;
+      if (applied.changedDisk) {
+        // One re-read, only when we actually moved something. Without it the steps
+        // below still see the OLD path as a local note missing from the server (so
+        // they re-register it) and the NEW path as server-only (so they materialize
+        // an empty file over it) — the duplicate we just fixed, reintroduced.
+        // Patching the in-memory lists by hand instead is the dual-bookkeeping that
+        // caused this class of bug in the first place.
+        const reread = await this.readFullTree();
+        if (this.stale()) return;
+        ({ folders, notes } = flattenTree(reread));
+        titles = await ipc.listNoteTitles(this.epoch());
+        if (this.stale()) return;
+        // Re-read the server's notes too: `move_note` bumps rows we may have just
+        // raced, and a stale list here would undo the move we just applied.
+        const fresh = await this.api.listNoteRegistry(vaultId);
+        if (this.stale()) return;
+        serverNotes = fresh.notes;
+      }
+      this.inboundSuppressed = applied.suppress;
+    } else {
+      this.inboundSuppressed = new Set();
+    }
 
     // Drop anything belonging to a different collection before we start adding:
     // the maps are written into incrementally from here on (so a mid-run
@@ -573,12 +900,16 @@ export class VaultRegistry {
         resolvedNotePaths.add(rp);
       }
     }
-    const missingNotes = notes.filter((n) => !resolvedNotePaths.has(n.path));
+    // `inboundSuppressed` is what stops the ghost. A note the server has DELETED
+    // (or that we've lost access to) is still on disk, so it looks "missing from
+    // the server" here and used to be re-created — which the server answers 201 to
+    // without clearing `deleted_at`, leaving a sidebar entry that can never sync.
+    const missingNotes = notes.filter(
+      (n) => !resolvedNotePaths.has(n.path) && !this.inboundSuppressed.has(n.path),
+    );
 
     this.sink.phase("registering", missingFolders.length + missingNotes.length);
 
-    const titles = await ipc.listNoteTitles(this.epoch());
-    if (this.stale()) return;
     const titleByPath = new Map(titles.map((t) => [t.path, t.title] as const));
     // The local index already keyed each note by a stable doc_id. Supply it as
     // the server id so a note has ONE identity across the .md file, the local
@@ -733,6 +1064,21 @@ export class VaultRegistry {
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
     );
+
+    // 6. Record what we now agree on, for the NEXT pass to compare against.
+    //
+    //    Accumulative, not a mirror of `byDocId`: entries for docs we've lost
+    //    access to are kept deliberately. They're pruned from `byPath` above, so
+    //    without keeping them here the next pass would see a brand-new local note
+    //    and re-register it — the ghost returning on every other pull. Entries only
+    //    leave when the file leaves (see `applyInbound`).
+    for (const [docId, rp] of this.byDocId) this.baselineDocs.set(docId, rp);
+    this.baselineVaultId = vaultId;
+    // Flushed, not just touched: the baseline is only useful to the NEXT run, so
+    // one that never reaches disk is one inbound reconciliation that silently
+    // can't happen after a relaunch.
+    checkpoint.touch();
+    await checkpoint.flush();
   }
 
   /**

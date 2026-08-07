@@ -8,6 +8,8 @@ import {
   listFolders,
   listNotes,
   listVaults,
+  moveFolderTool,
+  moveNoteTool,
   readNote,
   searchNotes,
   updateNote,
@@ -57,6 +59,29 @@ function optNum(args: Args, key: string): number | undefined {
   const v = args[key];
   if (v === undefined || v === null) return undefined;
   if (typeof v !== "number") throw new McpToolError(`Argument ${key} must be a number`);
+  return v;
+}
+
+function optBool(args: Args, key: string): boolean | undefined {
+  const v = args[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "boolean") throw new McpToolError(`Argument ${key} must be a boolean`);
+  return v;
+}
+
+/**
+ * Like `optStr`, but keeps `null` distinct from absent.
+ *
+ * `optStr` collapses both to `undefined`, which the move tools read as "leave it
+ * where it is" — so with `optStr` alone there is no way to express "move this to
+ * the vault root", and that operation would be unreachable over MCP.
+ */
+function optStrOrNull(args: Args, key: string): string | null | undefined {
+  if (!(key in args)) return undefined;
+  const v = args[key];
+  if (v === null) return null;
+  if (v === undefined) return undefined;
+  if (typeof v !== "string") throw new McpToolError(`Argument ${key} must be a string or null`);
   return v;
 }
 
@@ -220,15 +245,82 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "delete_folder",
-    description: "Delete an empty folder. Move or delete its contents first.",
+    description:
+      "Delete a folder. By default only an empty one — pass recursive to delete its contents with it.",
     inputSchema: {
       type: "object",
-      properties: { folderId: S("Folder id from list_folders") },
+      properties: {
+        folderId: S("Folder id from list_folders"),
+        recursive: {
+          type: "boolean",
+          description:
+            "Also delete the folder's contents: its notes are soft-deleted (history preserved) and its subfolders removed. Default false, which refuses a non-empty folder.",
+        },
+      },
       required: ["folderId"],
       additionalProperties: false,
     },
     annotations: { destructiveHint: true },
-    handler: (ctx, a) => deleteFolder(ctx, reqStr(a, "folderId")),
+    handler: (ctx, a) =>
+      deleteFolder(ctx, reqStr(a, "folderId"), { recursive: optBool(a, "recursive") }),
+  },
+  {
+    name: "move_note",
+    description:
+      "Rename, move, or retitle a note. relPath moves the file, folderId re-parents it (null for the vault root), title changes the display title. The note keeps its docId and its full history, so links and edits survive.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        docId: S("Note docId from list_notes or search_notes"),
+        relPath: S("New vault-relative path ending in .md, e.g. 'Archive/old.md'"),
+        title: S("New display title"),
+        folderId: {
+          // Written inline rather than via S(): this one is nullable, and `null`
+          // is the only way to say "move it to the vault root".
+          type: ["string", "null"],
+          description:
+            "New parent folder id, or null for the vault root. Omit to leave it where it is.",
+        },
+      },
+      required: ["docId"],
+      additionalProperties: false,
+    },
+    annotations: { idempotentHint: true },
+    handler: (ctx, a) =>
+      moveNoteTool(ctx, {
+        docId: reqStr(a, "docId"),
+        relPath: optStr(a, "relPath"),
+        title: optStr(a, "title"),
+        folderId: optStrOrNull(a, "folderId"),
+      }),
+  },
+  {
+    name: "move_folder",
+    description:
+      "Rename or move a folder. Its notes and subfolders move with it: every descendant path is rewritten in place and every docId preserved, so backlinks and edit history survive.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folderId: S("Folder id from list_folders"),
+        path: S("New vault-relative folder path, e.g. 'Archive/Ideas'"),
+        name: S("New folder name (defaults to the last segment of path)"),
+        parentId: {
+          type: ["string", "null"],
+          description:
+            "New parent folder id, or null for the vault root. Omit to leave it where it is.",
+        },
+      },
+      required: ["folderId"],
+      additionalProperties: false,
+    },
+    annotations: { idempotentHint: true },
+    handler: (ctx, a) =>
+      moveFolderTool(ctx, {
+        folderId: reqStr(a, "folderId"),
+        path: optStr(a, "path"),
+        name: optStr(a, "name"),
+        parentId: optStrOrNull(a, "parentId"),
+      }),
   },
 ];
 

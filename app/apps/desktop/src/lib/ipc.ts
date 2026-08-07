@@ -223,6 +223,16 @@ export const createFolder = (parent: string, name: string, expectedEpoch?: Vault
 // opened.
 export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch) =>
   invoke<string>("rename_path", { from, to, expectedEpoch: expectedEpoch ?? null });
+/** Idempotent folder create — safe to call on every reconcile. */
+export const ensureFolder = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("ensure_folder", { path, expectedEpoch: expectedEpoch ?? null });
+/**
+ * Move a note into `.context/trash/<stamp>/…` instead of deleting it, and return
+ * the trash-relative destination. Used for remote deletes, so applying a
+ * teammate's delete is recoverable rather than final.
+ */
+export const trashNote = (path: string, stamp: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string>("trash_note", { path, stamp, expectedEpoch: expectedEpoch ?? null });
 export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_path", { path, expectedEpoch: expectedEpoch ?? null });
 

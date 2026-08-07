@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { listReadableDocsInVault } from "../src/permissions/vault-docs.js";
+import {
+  listDeletedReadableDocsInVault,
+  listReadableDocsInVault,
+} from "../src/permissions/vault-docs.js";
 import { effectivePermission } from "../src/permissions/resolver.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
@@ -56,12 +59,15 @@ async function assertAgrees(userId: string, vaultId: string, docIds: string[]): 
   }
 }
 
+// File-level, not per-describe: a `describe`-scoped afterAll closes the pool as
+// soon as the first block finishes, which would break every block after it.
+afterAll(async () => {
+  await pool.end();
+});
+
 describe("listReadableDocsInVault agrees with effectivePermission (spec 05 §3.1)", () => {
   beforeEach(async () => {
     await resetDb();
-  });
-  afterAll(async () => {
-    await pool.end();
   });
 
   it("matches the resolver across owner / folder-share / file-share / none / lock", async () => {
@@ -154,5 +160,98 @@ describe("listReadableDocsInVault agrees with effectivePermission (spec 05 §3.1
 
     expect(await listReadableDocsInVault(owner, vault)).toEqual(new Set([live]));
     expect(await listReadableDocsInVault(outsider, vault)).toEqual(new Set());
+  });
+});
+
+// The tombstone set is the ONLY thing that lets a client tell "this note was
+// deleted" (remove the local file) from "I lost the share" (keep it). These tests
+// pin the property that makes that safe: the two sets are exact complements over
+// the docs a user may see, and a doc the user can't see appears in NEITHER — so
+// the client's fallback for an unknown doc is always "leave it alone".
+describe("listDeletedReadableDocsInVault", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it("returns exactly the deleted notes an owner could otherwise read", async () => {
+    const org = await seedOrg("Tomb", "tomb-owner");
+    const owner = await seedUser("owner@tomb.com");
+    await seedMember(org, owner, "owner");
+    const vault = await seedVault(org);
+    const live = await seedNote(vault, null, "live.md");
+    const gone = await seedNote(vault, null, "gone.md");
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [gone]);
+
+    expect(await listDeletedReadableDocsInVault(owner, vault)).toEqual(new Set([gone]));
+    // Complementary, never overlapping: a doc is live or dead, never both.
+    expect(await listReadableDocsInVault(owner, vault)).toEqual(new Set([live]));
+  });
+
+  it("never reports a note the caller had no access to", async () => {
+    // This is the whole safety argument. `member` has no grant on the note, so
+    // when it's deleted they get NO tombstone — they fall into the client's
+    // "absent from both lists" branch, which keeps the file. A missed delete is
+    // the acceptable failure; a wrong delete is not.
+    const org = await seedOrg("Tomb2", "tomb-private");
+    const owner = await seedUser("owner@tomb2.com");
+    const member = await seedUser("member@tomb2.com");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const privateNote = await seedNote(vault, null, "secret.md", owner);
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [privateNote]);
+
+    expect(await listDeletedReadableDocsInVault(owner, vault)).toEqual(new Set([privateNote]));
+    expect(await listDeletedReadableDocsInVault(member, vault)).toEqual(new Set());
+  });
+
+  it("reports a tombstone through a folder share, and stops once it's revoked", async () => {
+    // The permission data survives the soft delete (created_by, folder_id and the
+    // shares rows are untouched), so a tombstone resolves exactly as the live note
+    // did. Revoking the share then withholds it — which is correct: an
+    // un-shared-AND-deleted note must not be removed from that user's disk.
+    const org = await seedOrg("Tomb3", "tomb-share");
+    const owner = await seedUser("owner@tomb3.com");
+    const member = await seedUser("member@tomb3.com");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const folder = await seedFolder(vault, null, "Shared", "Shared");
+    const note = await seedNote(vault, folder, "Shared/n.md", owner);
+    const share = await seedShare(org, "folder", folder, member, "view");
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [note]);
+
+    expect(await listDeletedReadableDocsInVault(member, vault)).toEqual(new Set([note]));
+    await pool.query("DELETE FROM shares WHERE id = $1", [share]);
+    expect(await listDeletedReadableDocsInVault(member, vault)).toEqual(new Set());
+  });
+
+  it("returns empty for a non-member and for an unknown vault", async () => {
+    const org = await seedOrg("Tomb4", "tomb-outsider");
+    const owner = await seedUser("owner@tomb4.com");
+    await seedMember(org, owner, "owner");
+    const outsider = await seedUser("out@tomb4.com");
+    const vault = await seedVault(org);
+    const gone = await seedNote(vault, null, "gone.md");
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [gone]);
+
+    expect(await listDeletedReadableDocsInVault(outsider, vault)).toEqual(new Set());
+    expect(await listDeletedReadableDocsInVault(owner, randomUUID())).toEqual(new Set());
+  });
+
+  it("never returns a file id — files have no deleted_at", async () => {
+    const org = await seedOrg("Tomb5", "tomb-files");
+    const owner = await seedUser("owner@tomb5.com");
+    await seedMember(org, owner, "owner");
+    const vault = await seedVault(org);
+    const fileId = randomUUID();
+    await pool.query(
+      "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, NULL, 'a.md')",
+      [fileId, vault],
+    );
+    // The file IS readable...
+    expect(await listReadableDocsInVault(owner, vault)).toEqual(new Set([fileId]));
+    // ...but can never be a tombstone, so the client can't be told to delete it.
+    expect(await listDeletedReadableDocsInVault(owner, vault)).toEqual(new Set());
   });
 });

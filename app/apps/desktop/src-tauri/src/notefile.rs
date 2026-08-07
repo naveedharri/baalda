@@ -103,6 +103,88 @@ pub fn rename_path(vault: &Path, old_rel: &str, new_rel: &str) -> AppResult<Stri
     Ok(new_rel.trim_start_matches('/').to_string())
 }
 
+/// Create a folder if it isn't already there, including missing parents.
+///
+/// Distinct from `create_folder`, which fails when the target exists — that's the
+/// right behaviour for "New Folder" (the user should not silently land in an
+/// existing one) and the wrong behaviour for reconciliation, which runs on every
+/// registry change and must be a no-op the second time. Sniffing
+/// `create_folder`'s error string across the IPC boundary to tell "already there"
+/// from a real failure is how idempotency quietly breaks.
+pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<()> {
+    if crate::vault::rel_path_is_ignored(rel) {
+        return Err(AppError::new("refusing to create a folder in an ignored dir"));
+    }
+    let abs = resolve_in_vault(vault, rel)?;
+    std::fs::create_dir_all(&abs)?;
+    Ok(())
+}
+
+/// Move a note OUT of the note pipeline into `.context/trash/<stamp>/<rel>`
+/// rather than deleting it. Returns the trash-relative destination.
+///
+/// Why `.context` and not the OS trash: `vault::IGNORED_DIRS` keeps `.context` out
+/// of the tree walk, the watcher and the index, so a trashed note is recoverable
+/// by hand but can never be re-registered. A file restored from the OS trash lands
+/// back at its original path, where the watcher indexes it under a FRESH doc_id and
+/// the registry pushes it up as a brand-new note — resurrecting something the team
+/// deliberately deleted. Invisible-to-the-walk is the property doing the work here.
+///
+/// `stamp` comes from the caller: there's no date crate in this binary, and one
+/// stamp per reconciliation pass keeps a multi-note delete together in one folder.
+pub fn trash_note(vault: &Path, rel: &str, stamp: &str) -> AppResult<String> {
+    // The stamp is joined into a path, so it must be exactly one ordinary segment.
+    if stamp.is_empty()
+        || stamp.starts_with('.')
+        || !stamp
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(AppError::new("invalid trash stamp"));
+    }
+    if crate::vault::rel_path_is_ignored(rel) {
+        return Err(AppError::new("refusing to trash a path inside an ignored dir"));
+    }
+    let abs = resolve_in_vault(vault, rel)?;
+    if !abs.exists() {
+        return Err(AppError::new("path does not exist"));
+    }
+    // Folders are hard-deleted server-side with no tombstone, so an inbound folder
+    // delete is undecidable and never attempted. Refuse loudly rather than let a
+    // caller discover that by removing a subtree.
+    if abs.is_dir() {
+        return Err(AppError::new("refusing to trash a directory"));
+    }
+    let dest_rel = unique_trash_dest(vault, &format!(".context/trash/{stamp}/{rel}"))?;
+    let dest = resolve_in_vault(vault, &dest_rel)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Same filesystem by construction (.context lives inside the vault), so this
+    // rename is atomic. A failure propagates and the caller leaves the file alone,
+    // which is the safe outcome.
+    std::fs::rename(&abs, &dest)?;
+    Ok(dest_rel)
+}
+
+/// `x.md` → `x (2).md` when the destination inside this stamp is already taken.
+fn unique_trash_dest(vault: &Path, rel: &str) -> AppResult<String> {
+    if !resolve_in_vault(vault, rel)?.exists() {
+        return Ok(rel.to_string());
+    }
+    let (stem, ext) = match rel.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && !e.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (rel.to_string(), String::new()),
+    };
+    for n in 2..1000 {
+        let candidate = format!("{stem} ({n}){ext}");
+        if !resolve_in_vault(vault, &candidate)?.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(AppError::new("could not find a free name in the trash"))
+}
+
 /// Delete a file or folder (recursively for folders).
 pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
     let abs = resolve_in_vault(vault, rel)?;
@@ -225,5 +307,101 @@ mod tests {
     fn sha_is_stable() {
         assert_eq!(sha256_hex("abc"), sha256_hex("abc"));
         assert_ne!(sha256_hex("abc"), sha256_hex("abd"));
+    }
+
+    // ---- trash / ensure_folder --------------------------------------------
+    //
+    // `trash_note` is how a remote delete is applied locally, so it is the only
+    // inbound operation that takes a file away from the user. It has to be
+    // recoverable, and it must never be talked into touching anything else.
+
+    #[test]
+    fn trash_moves_the_note_into_context_and_leaves_no_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "Notes/bye.md", "real content").unwrap();
+        let dest = trash_note(tmp.path(), "Notes/bye.md", "2026-08-07").unwrap();
+        assert_eq!(dest, ".context/trash/2026-08-07/Notes/bye.md");
+        assert!(!tmp.path().join("Notes/bye.md").exists());
+        // Recoverable: the bytes are still there, just outside the note pipeline
+        // (`.context` is skipped by the walker, watcher and index, which is what
+        // stops a trashed note being re-registered as a ghost).
+        let moved = std::fs::read_to_string(tmp.path().join(dest)).unwrap();
+        assert_eq!(moved, "real content");
+    }
+
+    #[test]
+    fn trash_disambiguates_a_collision_within_one_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "a.md", "first").unwrap();
+        assert_eq!(
+            trash_note(tmp.path(), "a.md", "s1").unwrap(),
+            ".context/trash/s1/a.md"
+        );
+        write_note(tmp.path(), "a.md", "second").unwrap();
+        assert_eq!(
+            trash_note(tmp.path(), "a.md", "s1").unwrap(),
+            ".context/trash/s1/a (2).md"
+        );
+        // Neither copy was overwritten.
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".context/trash/s1/a.md")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn trash_refuses_a_directory() {
+        // Folders are hard-deleted server-side with no tombstone, so an inbound
+        // folder delete is undecidable and never attempted. Fail loudly rather
+        // than let a caller discover that by losing a subtree.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Folder")).unwrap();
+        assert!(trash_note(tmp.path(), "Folder", "s1").is_err());
+        assert!(tmp.path().join("Folder").exists());
+    }
+
+    #[test]
+    fn trash_refuses_a_path_already_inside_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".context")).unwrap();
+        std::fs::write(tmp.path().join(".context/config.json"), "{}").unwrap();
+        assert!(trash_note(tmp.path(), ".context/config.json", "s1").is_err());
+        assert!(tmp.path().join(".context/config.json").exists());
+    }
+
+    #[test]
+    fn trash_rejects_a_stamp_that_is_not_one_plain_segment() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "a.md", "x").unwrap();
+        for bad in ["", "a/b", "../..", ".hidden", "a b"] {
+            assert!(trash_note(tmp.path(), "a.md", bad).is_err(), "stamp {bad:?}");
+        }
+        // Nothing was moved by any of the rejected attempts.
+        assert!(tmp.path().join("a.md").exists());
+    }
+
+    #[test]
+    fn trash_rejects_traversal_and_a_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(trash_note(tmp.path(), "../escape.md", "s1").is_err());
+        assert!(trash_note(tmp.path(), "nope.md", "s1").is_err());
+    }
+
+    #[test]
+    fn ensure_folder_is_idempotent_and_makes_parents() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_folder(tmp.path(), "A/B/C").unwrap();
+        assert!(tmp.path().join("A/B/C").is_dir());
+        // Unlike `create_folder`, a second call is a no-op rather than an error —
+        // reconciliation runs on every registry change.
+        ensure_folder(tmp.path(), "A/B/C").unwrap();
+    }
+
+    #[test]
+    fn ensure_folder_refuses_ignored_dirs_and_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(ensure_folder(tmp.path(), ".context/evil").is_err());
+        assert!(ensure_folder(tmp.path(), "node_modules/x").is_err());
+        assert!(ensure_folder(tmp.path(), "../up").is_err());
     }
 }

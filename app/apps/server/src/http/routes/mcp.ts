@@ -60,6 +60,10 @@ const WWW_AUTHENTICATE = `Bearer resource_metadata="${config.betterAuthUrl}/.wel
 export interface McpDeps {
   docWriter: DocWriter;
   disconnectDoc: (vaultId: string, docId: string) => void;
+  /** Broadcast a folder/note create/delete to connected apps. Same callback the
+   *  registry routes use, so an AI's structural edit lands live exactly like a
+   *  teammate's. */
+  onRegistryChanged?: (vaultId: string, originId: string | null) => void;
 }
 
 /** Pull the MCP token from an Authorization: Bearer header or a ?key=/?token= query. */
@@ -124,6 +128,9 @@ export function createMcpRoutes(deps: McpDeps): Hono {
       auth,
       docWriter: deps.docWriter,
       disconnectDoc: deps.disconnectDoc,
+      // No origin to skip: an MCP client isn't a vault-channel subscriber, so
+      // every connected app should hear about this write.
+      onRegistryChanged: (vaultId) => deps.onRegistryChanged?.(vaultId, null),
     };
 
     // A batch (array) or a single message. Notifications yield no response.

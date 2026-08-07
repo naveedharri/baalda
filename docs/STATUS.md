@@ -107,9 +107,12 @@ De-risk the hardest part before networking.
 - **Milestone:** two teammates in one vault, one holds the talk button, the other hears them
   live with nothing written to disk on either side. ✔ (unit-tested end to end through the relay;
   real-hardware audio between two machines still unverified)
-- **Known limitation:** revocation on the vault channel is TTL-bound (no `disconnectDoc`
-  equivalent), so a removed member can still receive broadcasts until their token expires
-  (≤600s). Pre-existing — `member-joined` behaves the same way — but louder for audio.
+- **Known limitation (narrowed):** note **content** is no longer TTL-bound — member removal and
+  org deletion now publish `acl-changed`, so a removed member's readable set empties at once and
+  every doc is dropped. What remains is the vault-**wide** frames that are deliberately not
+  doc-gated (voice, `member-joined`): the socket itself survives, so a removed member can still
+  hear audio and see joins until it drops or their vault token expires (≤600s). Closing that
+  needs a `PS_MEMBER_REMOVED` frame each connection self-terminates on.
 - Specs: [[05-vault-sync-engine]] (transport), [[04-team-collaboration]] (membership gate)
 
 ### Phase 4: Polish / upgrades _(deferred)_ ⬜
