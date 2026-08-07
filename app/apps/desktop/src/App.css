@@ -1853,10 +1853,6 @@ button.primary.hero:hover:not(:disabled) {
   margin-top: auto;
   border-top: 1px solid var(--border);
   padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-1);
-  /* Push-to-talk sits above the account row; keep them from touching. */
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
 }
 .account-menu {
   position: relative;

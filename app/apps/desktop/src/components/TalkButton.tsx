@@ -2,7 +2,9 @@ import { useEffect, useRef } from "react";
 import { useStore } from "../store";
 import "./talk.css";
 
-const MIC_ICON = (
+// Megaphone — reads as "broadcast to the team" in a way a bare microphone
+// doesn't. A mic glyph says "record me"; this says "everyone hears this".
+const MEGAPHONE_ICON = (
   <svg
     viewBox="0 0 24 24"
     fill="none"
@@ -12,9 +14,8 @@ const MIC_ICON = (
     strokeLinejoin="round"
     aria-hidden="true"
   >
-    <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-    <path d="M19 10v1a7 7 0 0 1-14 0v-1" />
-    <path d="M12 18v4" />
+    <path d="m3 11 18-5v12L3 14v-3z" />
+    <path d="M11.6 16.8a3 3 0 1 1-5.8-1.6" />
   </svg>
 );
 
@@ -34,6 +35,7 @@ export function TalkButton() {
   const voiceReady = useStore((s) => s.voiceReady);
   const startBroadcast = useStore((s) => s.startBroadcast);
   const stopBroadcast = useStore((s) => s.stopBroadcast);
+  const clearVoiceError = useStore((s) => s.clearVoiceError);
 
   // Tracks whether WE started the current press, so a stray pointerup elsewhere
   // in the window can't stop a broadcast we never began.
@@ -72,20 +74,46 @@ export function TalkButton() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const offline = !voiceReady;
-  const listening = speakers.length > 0;
+  // The notice is transient, like the mention toast — it says its piece and
+  // leaves rather than sitting in the chrome as a permanent red mark.
+  useEffect(() => {
+    if (!voiceError) return;
+    const t = window.setTimeout(() => clearVoiceError(), 4000);
+    return () => window.clearTimeout(t);
+  }, [voiceError, clearVoiceError]);
+
+  const speaker = speakers[0];
+  const extra = speakers.length - 1;
 
   return (
-    <div className="talk">
+    <>
+      {voiceError && (
+        <span className="talk-note" role="status">
+          {voiceError}
+        </span>
+      )}
+
+      {speaker && (
+        <span className="talk-note talking" role="status" aria-live="polite">
+          <span
+            className="talk-dot"
+            style={{ background: speaker.color || "var(--accent)" }}
+            aria-hidden="true"
+          />
+          {extra > 0 ? `${speaker.name} +${extra} talking` : `${speaker.name} is talking`}
+        </span>
+      )}
+
       <button
         type="button"
-        className={`talk-btn${broadcasting ? " live" : ""}`}
-        disabled={offline}
+        className={`icon-btn talk-btn${broadcasting ? " live" : ""}`}
+        disabled={!voiceReady}
         aria-pressed={broadcasting}
+        aria-label="Push to talk"
         title={
-          offline
-            ? "Connect to a synced vault to use push-to-talk"
-            : "Hold to talk to everyone in this vault"
+          voiceReady
+            ? "Press and hold to talk to everyone in this vault"
+            : "Connect to a synced vault to use push-to-talk"
         }
         onPointerDown={(e) => {
           // Primary button only; a right-click shouldn't open the mic.
@@ -105,30 +133,8 @@ export function TalkButton() {
           stop();
         }}
       >
-        <span className="talk-icon">{MIC_ICON}</span>
-        <span className="talk-label">{broadcasting ? "On air" : "Hold to talk"}</span>
+        {MEGAPHONE_ICON}
       </button>
-
-      {listening && (
-        <div className="talk-speakers" role="status" aria-live="polite">
-          {speakers.map((s) => (
-            <span key={s.userId} className="talk-speaker">
-              <span
-                className="talk-speaker-dot"
-                style={{ background: s.color || "var(--accent)" }}
-                aria-hidden="true"
-              />
-              {s.name}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {voiceError && !broadcasting && (
-        <p className="talk-error" role="status">
-          {voiceError}
-        </p>
-      )}
-    </div>
+    </>
   );
 }

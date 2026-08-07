@@ -458,7 +458,6 @@ export default function App() {
         {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
         <FileTree />
         <div className="sidebar-footer">
-          <TalkButton />
           <AccountMenu />
         </div>
       </aside>
@@ -470,6 +469,8 @@ export default function App() {
           <span className="note-title">{openNote?.title ?? "No note open"}</span>
           {openNote && !isPreview && <SaveIndicator />}
           {openNote && !isPreview && <SyncIndicator />}
+          {/* Vault-wide, so it sits in the header regardless of the open note. */}
+          <TalkButton />
           <button
             className="icon-btn search-btn"
             title="Search notes (⌘F)"

@@ -180,6 +180,8 @@ interface AppStore {
   startBroadcast: () => Promise<void>;
   /** Stop broadcasting and release the mic (button released). */
   stopBroadcast: () => Promise<void>;
+  /** Dismiss the transient push-to-talk notice. */
+  clearVoiceError: () => void;
   /** A teammate joined — show the celebration (banner + confetti + chime). */
   celebrateMemberJoined: (name: string) => void;
   /** Dismiss the join celebration (auto-fires after a few seconds). */
@@ -970,6 +972,8 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ broadcasting: false });
     if (handle) await handle.stop().catch(() => {});
   },
+
+  clearVoiceError: () => set({ voiceError: null }),
 
   celebrateMemberJoined: (name) => {
     const who = name?.trim() || "A new teammate";
