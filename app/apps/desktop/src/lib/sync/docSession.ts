@@ -39,13 +39,9 @@ import {
 import type { VoiceFrame } from "./vaultProtocol";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
+import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
 
-/** A teammate currently transmitting, for the "talking" indicator. */
-export interface VoiceSpeaker {
-  userId: string;
-  name: string;
-  color: string;
-}
+export type { VoiceSpeaker };
 
 /** Basename of a vault-relative path (for the upload's x-file-name hint). */
 function baseName(relPath: string): string {
@@ -139,14 +135,11 @@ export class SyncManager {
   // Entirely ephemeral: the player holds only what is scheduled to play in the
   // next second or so, and `voiceNames` is a display cache keyed by speaker.
   // Nothing here is written to disk, the CRDT, or the index.
-  private readonly speakingIds = new Set<string>();
-  private readonly voiceNames = new Map<string, { name: string; color: string }>();
+  private readonly voiceRoster = new VoiceRoster((id) => colorForUser(id));
   private onVoiceSpeakers?: (speaking: VoiceSpeaker[]) => void;
   private readonly voicePlayer = new VoicePlayer({
     onSpeakingChange: (userId, speaking) => {
-      if (speaking) this.speakingIds.add(userId);
-      else this.speakingIds.delete(userId);
-      this.emitVoiceSpeakers();
+      if (this.voiceRoster.setSpeaking(userId, speaking)) this.emitVoiceSpeakers();
     },
   });
 
@@ -798,7 +791,7 @@ export class SyncManager {
     const { header, audio } = frame;
     const userId = header.u;
     if (!userId) return;
-    if (header.m) this.voiceNames.set(userId, { name: header.m, color: header.c ?? "" });
+    this.voiceRoster.learn(userId, header.m, header.c);
     this.voicePlayer.push({
       streamId: header.s,
       userId,
@@ -810,13 +803,7 @@ export class SyncManager {
   }
 
   private emitVoiceSpeakers(): void {
-    this.onVoiceSpeakers?.(
-      [...this.speakingIds].map((id) => ({
-        userId: id,
-        name: this.voiceNames.get(id)?.name ?? "Someone",
-        color: this.voiceNames.get(id)?.color || colorForUser(id),
-      })),
-    );
+    this.onVoiceSpeakers?.(this.voiceRoster.list());
   }
 
   /** Record which note this client is now viewing (null = none) and broadcast it. */
@@ -918,8 +905,7 @@ export class SyncManager {
     // hearing a teammate from the previous vault after switching would be a bug
     // with an unpleasant privacy flavour.
     this.voicePlayer.stopAll();
-    this.speakingIds.clear();
-    this.voiceNames.clear();
+    this.voiceRoster.clear();
     this.emitVoiceSpeakers();
     // Kick the durable manifest write FIRST, while this vault's epoch is still the
     // open one: the store's IPC is epoch-pinned, so a write issued after Rust has

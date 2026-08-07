@@ -66,6 +66,44 @@
   }
 }
 
+/* Receiving — a teammate is talking to US. Distinct from `.live` on purpose:
+   sending is a state you chose and must not lose track of (steady fill, ring),
+   receiving is something happening TO you, so it shakes to catch the eye and
+   then stops when they stop. Getting these two confused would be the worst
+   possible outcome, since one of them means your mic is open. */
+.talk-btn.receiving {
+  color: var(--accent);
+}
+
+.talk-btn.receiving svg {
+  transform-origin: 50% 50%;
+  animation: talk-shake 0.6s ease-in-out infinite;
+}
+
+/* A quick side-to-side wobble — a megaphone being rattled, not a slow pulse,
+   which would read as "loading". */
+@keyframes talk-shake {
+  0%,
+  100% {
+    transform: rotate(0) translateX(0);
+  }
+  15% {
+    transform: rotate(-9deg) translateX(-1px);
+  }
+  30% {
+    transform: rotate(8deg) translateX(1px);
+  }
+  45% {
+    transform: rotate(-6deg) translateX(-1px);
+  }
+  60% {
+    transform: rotate(4deg) translateX(1px);
+  }
+  75% {
+    transform: rotate(-2deg) translateX(0);
+  }
+}
+
 /* Transient notices — a mic problem, or who's currently talking. Soft accent
    pill, matching `.ping-toast`; deliberately NOT `--danger`, since neither is
    an error the user must act on and a red mark in the chrome reads as breakage. */
@@ -112,6 +150,7 @@
    entirely rather than leaving a static outline sitting around the button. */
 @media (prefers-reduced-motion: reduce) {
   .talk-btn.live svg,
+  .talk-btn.receiving svg,
   .talk-dot {
     animation: none;
   }

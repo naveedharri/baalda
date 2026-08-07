@@ -83,6 +83,10 @@ export function TalkButton() {
 
   const speaker = speakers[0];
   const extra = speakers.length - 1;
+  // Someone else is transmitting. The button reacts even though it isn't the
+  // control being used — that shake is what tells a listener audio is incoming
+  // and where to look, before they've parsed any text.
+  const receiving = speakers.length > 0 && !broadcasting;
 
   return (
     <>
@@ -105,9 +109,13 @@ export function TalkButton() {
 
       <button
         type="button"
-        className={`icon-btn talk-btn${broadcasting ? " live" : ""}`}
+        className={`icon-btn talk-btn${broadcasting ? " live" : ""}${receiving ? " receiving" : ""}`}
         aria-pressed={broadcasting}
-        aria-label="Push to talk"
+        aria-label={
+          receiving
+            ? `${speaker.name} is talking. Press and hold to talk`
+            : "Push to talk"
+        }
         // Always available. Talking into an empty vault is harmless — the chunks
         // simply go nowhere — and gating on "is anyone listening" would make the
         // control flicker in and out with the connection. If someone IS there,
