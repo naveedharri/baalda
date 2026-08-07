@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
-import { memoryDocWriter } from "./helpers/app.js";
+import { recordingAppDeps } from "./helpers/app.js";
 import {
   seedFolder,
   seedLock,
@@ -20,12 +20,13 @@ import { createMcpToken, listMcpTokens } from "../src/mcp/tokens.js";
  * see only what's shared; tokens can't reach outside their vault).
  */
 
-const mem = memoryDocWriter();
-let disconnected: Array<{ vaultId: string; docId: string }> = [];
-const app = createApp({
-  docWriter: mem,
-  disconnectDoc: (vaultId, docId) => disconnected.push({ vaultId, docId }),
-});
+const rec = recordingAppDeps();
+const app = createApp(rec.deps);
+const mem = rec.docWriter;
+const disconnected = rec.disconnected;
+/** Every `registry-changed` broadcast the MCP routes fire. An MCP write that
+ *  doesn't land here is invisible to every running app until it restarts. */
+const registryBroadcasts = rec.registryBroadcasts;
 
 let rpcId = 0;
 async function rpc(token: string | null, method: string, params?: unknown) {
@@ -73,8 +74,7 @@ async function waitFor<T>(fn: () => Promise<T | null>, tries = 50): Promise<T> {
 describe("MCP server", () => {
   beforeEach(async () => {
     await resetDb();
-    mem.store.clear();
-    disconnected = [];
+    rec.reset();
   });
   afterAll(async () => {
     await pool.end();
@@ -344,5 +344,379 @@ describe("MCP server", () => {
       u,
     ]);
     expect((await rpc(token, "tools/list")).status).toBe(401);
+  });
+
+  // ── live propagation ────────────────────────────────────────────────────────
+  //
+  // An MCP write is meant to be indistinguishable from a teammate's edit. It
+  // used to be indistinguishable only in Postgres: the row was correct and
+  // nothing was announced, so a running app kept showing the old tree until it
+  // restarted and did a full reconcile. Every structural tool must broadcast.
+  describe("structural writes announce themselves", () => {
+    let owner: string;
+    let org: string;
+    let vault: string;
+    let token: string;
+
+    beforeEach(async () => {
+      owner = await seedUser("owner@mcp-live.com");
+      org = await seedOrg("Acme", "acme-mcp-live");
+      await seedMember(org, owner, "owner");
+      vault = await seedVault(org);
+      token = await tokenFor(owner, org);
+      registryBroadcasts.length = 0;
+    });
+
+    it("create_note broadcasts to the vault", async () => {
+      const created = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "Daily/today.md",
+        title: "Today",
+        content: "written by an assistant",
+      });
+      expect(created.isError).toBe(false);
+      expect(registryBroadcasts).toEqual([{ vaultId: vault, originId: null }]);
+    });
+
+    it("broadcasts with a null origin, so no connected app is skipped", async () => {
+      // `originId` exists to skip the client whose own write caused the change.
+      // An MCP client is not a vault-channel subscriber, so skipping anyone
+      // would silently starve a real app of the update.
+      await call(token, "create_folder", { vaultId: vault, name: "Daily", path: "Daily" });
+      expect(registryBroadcasts.every((b) => b.originId === null)).toBe(true);
+    });
+
+    it("create_folder and delete_folder both broadcast", async () => {
+      const folder = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Scratch",
+        path: "Scratch",
+      });
+      expect(folder.isError).toBe(false);
+      expect(registryBroadcasts).toHaveLength(1);
+
+      const removed = await call(token, "delete_folder", {
+        folderId: folder.data.folderId as string,
+      });
+      expect(removed.isError).toBe(false);
+      expect(registryBroadcasts).toHaveLength(2);
+      expect(registryBroadcasts[1]).toEqual({ vaultId: vault, originId: null });
+    });
+
+    it("delete_note broadcasts, so it leaves every sidebar too", async () => {
+      const created = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "bye.md",
+        title: "Bye",
+      });
+      registryBroadcasts.length = 0;
+
+      const deleted = await call(token, "delete_note", {
+        docId: created.data.docId as string,
+      });
+      expect(deleted.isError).toBe(false);
+      // Kicking live editors off the doc is not the same as removing the row
+      // from everyone's tree — the delete has to do both.
+      expect(disconnected).toHaveLength(1);
+      expect(registryBroadcasts).toEqual([{ vaultId: vault, originId: null }]);
+    });
+
+    it("does not broadcast when the write was refused", async () => {
+      const stranger = await seedUser("stranger@mcp-live.com");
+      const otherOrg = await seedOrg("Other", "other-mcp-live");
+      await seedMember(otherOrg, stranger, "owner");
+      const strangerToken = await tokenFor(stranger, otherOrg);
+
+      const res = await call(strangerToken, "create_note", {
+        vaultId: vault,
+        relPath: "intruder.md",
+        title: "Nope",
+      });
+      expect(res.isError).toBe(true);
+      expect(registryBroadcasts).toEqual([]);
+    });
+
+    it("content-only edits do not churn the tree", async () => {
+      // update_note changes no structure, so it must not make every connected
+      // app re-pull the registry on each keystroke an assistant writes.
+      const created = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "essay.md",
+        title: "Essay",
+      });
+      registryBroadcasts.length = 0;
+      await call(token, "update_note", {
+        docId: created.data.docId as string,
+        content: "new body",
+      });
+      expect(registryBroadcasts).toEqual([]);
+    });
+  });
+
+  // ── reorganising ────────────────────────────────────────────────────────────
+  //
+  // An AI could create and delete but never MOVE anything, so it couldn't tidy a
+  // vault the way a teammate can. These tools have to preserve doc_ids (the whole
+  // identity model rests on it) and announce themselves like any other structural
+  // change.
+  describe("move_note / move_folder", () => {
+    let owner: string;
+    let org: string;
+    let vault: string;
+    let token: string;
+
+    beforeEach(async () => {
+      owner = await seedUser("owner@mcp-move.com");
+      org = await seedOrg("Acme", "acme-mcp-move");
+      await seedMember(org, owner, "owner");
+      vault = await seedVault(org);
+      token = await tokenFor(owner, org);
+      registryBroadcasts.length = 0;
+    });
+
+    it("renames a note in place, keeping its docId, and broadcasts", async () => {
+      const created = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "draft.md",
+        title: "Draft",
+        content: "body",
+      });
+      const docId = created.data.docId as string;
+      registryBroadcasts.length = 0;
+
+      const moved = await call(token, "move_note", {
+        docId,
+        relPath: "Archive/final.md",
+        title: "Final",
+      });
+      expect(moved.isError).toBe(false);
+      expect(moved.data).toMatchObject({ docId, relPath: "Archive/final.md", title: "Final" });
+      // Same docId means the CRDT history and every backlink survive the move.
+      expect(mem.store.get(docId)).toBe("body");
+      expect(registryBroadcasts).toEqual([{ vaultId: vault, originId: null }]);
+    });
+
+    it("moves a folder and rewrites every descendant path, preserving docIds", async () => {
+      const folder = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Ideas",
+        path: "Ideas",
+      });
+      const folderId = folder.data.folderId as string;
+      const sub = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Drafts",
+        path: "Ideas/Drafts",
+        parentId: folderId,
+      });
+      const note = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "Ideas/Drafts/deep.md",
+        title: "Deep",
+        folderId: sub.data.folderId as string,
+      });
+      const docId = note.data.docId as string;
+      registryBroadcasts.length = 0;
+
+      const moved = await call(token, "move_folder", {
+        folderId,
+        path: "Archive/Ideas",
+        name: "Ideas",
+      });
+      expect(moved.isError).toBe(false);
+
+      const { rows: folders } = await pool.query<{ path: string }>(
+        "SELECT path FROM folders WHERE vault_id = $1 ORDER BY path",
+        [vault],
+      );
+      expect(folders.map((f) => f.path)).toEqual(["Archive/Ideas", "Archive/Ideas/Drafts"]);
+      const { rows: notes } = await pool.query<{ id: string; rel_path: string }>(
+        "SELECT id, rel_path FROM notes WHERE vault_id = $1",
+        [vault],
+      );
+      expect(notes[0]).toMatchObject({ id: docId, rel_path: "Archive/Ideas/Drafts/deep.md" });
+      expect(registryBroadcasts).toEqual([{ vaultId: vault, originId: null }]);
+    });
+
+    it("moves a note to the vault root when folderId is explicitly null", async () => {
+      // The reason `optStrOrNull` exists: the ordinary optional-string validator
+      // collapses null into undefined ("leave it alone"), which would make
+      // moving anything back to the root impossible to express.
+      const folder = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Box",
+        path: "Box",
+      });
+      const created = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "Box/n.md",
+        title: "N",
+        folderId: folder.data.folderId as string,
+      });
+      const moved = await call(token, "move_note", {
+        docId: created.data.docId as string,
+        relPath: "n.md",
+        folderId: null,
+      });
+      expect(moved.isError).toBe(false);
+      expect(moved.data.folderId).toBeNull();
+    });
+
+    it("refuses to move a folder inside its own descendant", async () => {
+      // Every ACL query walks parent_id with UNION ALL, which never dedupes — so
+      // a cycle wouldn't be a wrong answer, it would hang permission checks for
+      // that subtree indefinitely.
+      const parent = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "P",
+        path: "P",
+      });
+      const parentId = parent.data.folderId as string;
+      const child = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "C",
+        path: "P/C",
+        parentId,
+      });
+      const res = await call(token, "move_folder", {
+        folderId: parentId,
+        parentId: child.data.folderId as string,
+      });
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain("inside itself");
+    });
+
+    it("refuses a move onto an existing folder path, and broadcasts nothing", async () => {
+      await call(token, "create_folder", { vaultId: vault, name: "A", path: "A" });
+      const b = await call(token, "create_folder", { vaultId: vault, name: "B", path: "B" });
+      registryBroadcasts.length = 0;
+      const res = await call(token, "move_folder", {
+        folderId: b.data.folderId as string,
+        path: "A",
+      });
+      expect(res.isError).toBe(true);
+      expect(registryBroadcasts).toEqual([]);
+    });
+
+    it("delete_folder refuses a non-empty folder unless recursive is set", async () => {
+      const folder = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Full",
+        path: "Full",
+      });
+      const folderId = folder.data.folderId as string;
+      const note = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "Full/a.md",
+        title: "A",
+        folderId,
+      });
+      const docId = note.data.docId as string;
+
+      const refused = await call(token, "delete_folder", { folderId });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("recursive");
+
+      registryBroadcasts.length = 0;
+      const ok = await call(token, "delete_folder", { folderId, recursive: true });
+      expect(ok.isError).toBe(false);
+      expect(ok.data.deletedNotes).toBe(1);
+      // Soft-deleted (history kept), editors kicked, and the tree change announced.
+      const { rows } = await pool.query("SELECT deleted_at FROM notes WHERE id = $1", [docId]);
+      expect(rows[0].deleted_at).not.toBeNull();
+      expect(disconnected).toContainEqual({ vaultId: vault, docId });
+      expect(registryBroadcasts).toEqual([{ vaultId: vault, originId: null }]);
+    });
+  });
+
+  // The MCP and HTTP surfaces are two doors onto the same data, so they have to
+  // enforce the same lock. These pin the places where they used to differ.
+  describe("MCP/HTTP gate parity", () => {
+    it("a folder a member creates over MCP is theirs to see and move", async () => {
+      // `created_by` was omitted, so the creator rule in canEditFolder never
+      // fired: a member could make a folder through an assistant and then not
+      // find it in their own sidebar, nor rename it.
+      const member = await seedUser("member@mcp-parity.com");
+      const org = await seedOrg("Acme", "acme-mcp-parity");
+      const ownerId = await seedUser("owner@mcp-parity.com");
+      await seedMember(org, ownerId, "owner");
+      await seedMember(org, member, "member");
+      const vault = await seedVault(org);
+      const parent = await seedFolder(vault, null, "Team", "Team");
+      await seedShare(org, "folder", parent, member, "edit");
+      const token = await tokenFor(member, org);
+
+      const made = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Mine",
+        path: "Team/Mine",
+        parentId: parent,
+      });
+      expect(made.isError).toBe(false);
+      const folderId = made.data.folderId as string;
+      const { rows } = await pool.query("SELECT created_by FROM folders WHERE id = $1", [folderId]);
+      expect(rows[0].created_by).toBe(member);
+
+      // …and the creator rule now lets them move it.
+      const moved = await call(token, "move_folder", { folderId, path: "Team/Ours", name: "Ours" });
+      expect(moved.isError).toBe(false);
+    });
+
+    it("create_folder twice at one path adopts instead of duplicating", async () => {
+      const owner = await seedUser("owner@mcp-dup.com");
+      const org = await seedOrg("Acme", "acme-mcp-dup");
+      await seedMember(org, owner, "owner");
+      const vault = await seedVault(org);
+      const token = await tokenFor(owner, org);
+
+      const first = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Ideas",
+        path: "Ideas",
+      });
+      const second = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Ideas",
+        path: "Ideas",
+      });
+      expect(second.isError).toBe(false);
+      expect(second.data.folderId).toBe(first.data.folderId);
+      const { rows } = await pool.query<{ n: string }>(
+        "SELECT count(*)::text AS n FROM folders WHERE vault_id = $1 AND path = 'Ideas'",
+        [vault],
+      );
+      expect(rows[0].n).toBe("1");
+    });
+
+    it("a member cannot move their private note into a team-shared folder", async () => {
+      // Folder grants inherit down, so allowing this would let one member hand
+      // the whole team edit access to a note only they could read.
+      const owner = await seedUser("owner@mcp-esc.com");
+      const member = await seedUser("member@mcp-esc.com");
+      const org = await seedOrg("Acme", "acme-mcp-esc");
+      await seedMember(org, owner, "owner");
+      await seedMember(org, member, "member");
+      const vault = await seedVault(org);
+      const mine = await seedFolder(vault, null, "Mine", "Mine");
+      await seedShare(org, "folder", mine, member, "edit");
+      // A folder the member can only READ.
+      const teamRead = await seedFolder(vault, null, "Team", "Team");
+      await seedShare(org, "folder", teamRead, member, "view");
+      const token = await tokenFor(member, org);
+
+      const note = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "Mine/secret.md",
+        title: "Secret",
+        folderId: mine,
+      });
+      const res = await call(token, "move_note", {
+        docId: note.data.docId as string,
+        relPath: "Team/secret.md",
+        folderId: teamRead,
+      });
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain("destination");
+    });
   });
 });

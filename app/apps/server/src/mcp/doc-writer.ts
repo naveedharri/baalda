@@ -36,7 +36,35 @@ export interface DocWriter {
   readContent(vaultId: string, docId: string): Promise<string>;
 }
 
-export function createDocWriter(server: Server<SyncContext>): DocWriter {
+/**
+ * Publishes a doc update to background vault subscribers — the same fan-out the
+ * sync server's `onChange` performs for a live document.
+ *
+ * The detached path below needs this explicitly. `publishDocUpdate` is driven
+ * off Hocuspocus's `onChange`, and the detached path deliberately never touches
+ * Hocuspocus, so without this an edit to a note nobody has open is persisted
+ * correctly and announced to no one: every connected app keeps the old text on
+ * disk until its next full reconcile. Since "nobody has this note open" is the
+ * normal case for an AI writing into a vault, that was most MCP edits.
+ *
+ * Returns `void | Promise<void>` so the contract itself is safe: the real
+ * publisher fans out over pub/sub and can REJECT (a Redis blip), and a rejection
+ * nobody awaits is an unhandled rejection — which on Node 22 with no
+ * `unhandledRejection` handler takes the whole process down. Declaring the
+ * promise here means `mutate` below awaits and swallows it once, for every
+ * present and future injection site, instead of depending on each caller to
+ * remember its own `.catch`.
+ */
+export type DocUpdatePublisher = (
+  vaultId: string,
+  docId: string,
+  update: Uint8Array,
+) => void | Promise<void>;
+
+export function createDocWriter(
+  server: Server<SyncContext>,
+  publishUpdate?: DocUpdatePublisher,
+): DocWriter {
   async function mutate(
     vaultId: string,
     docId: string,
@@ -61,7 +89,23 @@ export function createDocWriter(server: Server<SyncContext>): DocWriter {
       doc.transact(() => fn(doc.getText(CONTENT_FIELD)), MCP_ORIGIN);
       doc.off("update", capture);
       if (updates.length > 0) {
-        await appendUpdate(docId, Y.mergeUpdates(updates));
+        const merged = Y.mergeUpdates(updates);
+        await appendUpdate(docId, merged);
+        // Fan out to background subscribers, which the live path gets free from
+        // Hocuspocus's onChange. Best-effort like the re-index: the write is
+        // already durable, and failing it here would turn a delivery problem
+        // into a lost edit.
+        //
+        // `await` inside the try so this covers BOTH failure shapes: a
+        // synchronous throw AND a rejected promise. The catch alone only handled
+        // the first, and the production publisher is async — so the case that
+        // actually happens (pub/sub down) was the one going uncaught, where an
+        // unhandled rejection would take the process with it.
+        try {
+          await publishUpdate?.(vaultId, docId, merged);
+        } catch (err) {
+          console.warn(`[mcp] failed to publish update for ${docId}`, err);
+        }
         // Keep search/graph in sync (best-effort; never fail the write on it).
         await indexDoc(docId).catch(() => {});
       }

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../ipc", () => ({
   getVaultConfig: vi.fn(async () => null),
   setVaultConfig: vi.fn(async () => {}),
-  listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [] })),
+  listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [], childrenLoaded: true })),
   listNoteTitles: vi.fn(async () => []),
   writeNote: vi.fn(async () => {}),
   writeNoteIfMissing: vi.fn(async () => true),
@@ -43,6 +43,7 @@ function fakeApi(opts: {
     listFolders: vi.fn(async () => []),
     createFolder: vi.fn(async (input: { path: string }) => ({ id: `folder-${input.path}` })),
     listNotes: vi.fn(async () => opts.notes ?? []),
+    listNoteRegistry: vi.fn(async () => ({ notes: opts.notes ?? [], tombstones: [] })),
     createNote,
   } as unknown as ApiClient;
   return { api, createVault, createNote };

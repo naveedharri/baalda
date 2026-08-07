@@ -745,6 +745,39 @@ pub async fn rename_path(
     Ok(new_rel)
 }
 
+/// Idempotent folder create, for reconciliation (see `notefile::ensure_folder`).
+#[tauri::command]
+pub async fn ensure_folder(
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    notefile::ensure_folder(&vault, &path)?;
+    Ok(())
+}
+
+/// Move a note into the vault's recoverable trash (see `notefile::trash_note`).
+#[tauri::command]
+pub async fn trash_note(
+    state: State<'_, AppState>,
+    path: String,
+    stamp: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<String> {
+    // Epoch-pinned for the same reason as `delete_path`, and it matters as much:
+    // this is driven by a debounced registry pull that can outlive a vault switch.
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let abs = vault::resolve_in_vault(&vault, &path)?;
+    let dest = notefile::trash_note(&vault, &path, &stamp)?;
+    // Drop the index row rather than renaming it: the doc_id has to be RELEASED so
+    // a file later recreated at this path is indexed as new, instead of reviving a
+    // soft-deleted server row as an unsyncable ghost. (Renaming the row would also
+    // leave a phantom `.context/...` path in FTS results.)
+    index.lock().unwrap().remove_note(&vault, &abs)?;
+    Ok(dest)
+}
+
 #[tauri::command]
 pub async fn delete_path(
     state: State<'_, AppState>,

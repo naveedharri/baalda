@@ -15,7 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../ipc", () => ({
   getVaultConfig: vi.fn(async () => null as string | null),
   setVaultConfig: vi.fn(async () => {}),
-  listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [] })),
+  listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [], childrenLoaded: true })),
   listNoteTitles: vi.fn(async () => [] as Array<{ id: string; path: string; title: string }>),
   writeNote: vi.fn(async () => {}),
   writeNoteIfMissing: vi.fn(async () => true),
@@ -87,6 +87,7 @@ function fakeApi(opts: FakeApiOpts = {}) {
     createVault: vi.fn(async () => ({ id: VAULT, name: "v", organization_id: ORG })),
     listFolders: vi.fn(async () => opts.serverFolders ?? []),
     listNotes: vi.fn(async () => opts.serverNotes ?? []),
+    listNoteRegistry: vi.fn(async () => ({ notes: opts.serverNotes ?? [], tombstones: [] })),
     createFolder: vi.fn(async (input: { path: string }) => {
       await enter();
       try {

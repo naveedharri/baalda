@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../ipc", () => ({
   getVaultConfig: vi.fn(async () => null),
   setVaultConfig: vi.fn(async () => {}),
-  listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [] })),
+  listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [], childrenLoaded: true })),
   listNoteTitles: vi.fn(async () => []),
   writeNote: vi.fn(async () => {}),
   writeNoteIfMissing: vi.fn(async () => true),
@@ -31,23 +31,23 @@ import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
 import { VaultRegistry } from "../registry";
 import { VaultScopeManager } from "../vaultScope";
-import { reconcileWithTree } from "./helpers/reconcile";
+import { fullTree, reconcileWithTree } from "./helpers/reconcile";
 
 const ORG_A = "org-a";
 const ORG_B = "org-b";
 
 function emptyTree(): TreeNode {
-  return { id: "root", name: "vault", path: "", isDir: true, children: [] };
+  return fullTree({ id: "root", name: "vault", path: "", isDir: true, children: [] });
 }
 
 function treeWith(...paths: string[]): TreeNode {
-  return {
+  return fullTree({
     id: "root",
     name: "vault",
     path: "",
     isDir: true,
     children: paths.map((p) => ({ id: p, name: p, path: p, isDir: false })),
-  };
+  });
 }
 
 /** A deferred promise, to hold an async step open across a vault switch. */
@@ -168,6 +168,10 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
         await held.waited;
         return [{ id: "server-only", rel_path: "FromA.md" }];
       }),
+      listNoteRegistry: vi.fn(async () => {
+        await held.waited;
+        return { notes: [{ id: "server-only", rel_path: "FromA.md" }], tombstones: [] };
+      }),
       listFolders: vi.fn(async () => []),
       createFolder,
       createNote,
@@ -203,6 +207,10 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
       ]),
       createVault: vi.fn(),
       listNotes: vi.fn(async () => [{ id: "server-only", rel_path: "FromServer.md" }]),
+      listNoteRegistry: vi.fn(async () => ({
+        notes: [{ id: "server-only", rel_path: "FromServer.md" }],
+        tombstones: [],
+      })),
       listFolders: vi.fn(async () => []),
       createFolder: vi.fn(async (i: { path: string }) => ({ id: `f-${i.path}` })),
       createNote,
@@ -230,6 +238,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
       ]),
       createVault: vi.fn(),
       listNotes: vi.fn(async () => []),
+      listNoteRegistry: vi.fn(async () => ({ notes: [], tombstones: [] })),
       listFolders: vi.fn(async () => []),
       createFolder: vi.fn(),
       createNote: vi.fn(),
@@ -257,6 +266,10 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
       ]),
       createVault: vi.fn(),
       listNotes: vi.fn(async () => [{ id: "n1", rel_path: "Kept.md" }]),
+      listNoteRegistry: vi.fn(async () => ({
+        notes: [{ id: "n1", rel_path: "Kept.md" }],
+        tombstones: [],
+      })),
       listFolders: vi.fn(async () => [{ id: "f1", path: "Docs" }]),
       createFolder: vi.fn(),
       createNote: vi.fn(),

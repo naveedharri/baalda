@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
-import { memoryDocWriter } from "./helpers/app.js";
+import { recordingAppDeps } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { seedNote, seedVault } from "./helpers/seed.js";
 
@@ -14,12 +14,9 @@ import { seedNote, seedVault } from "./helpers/seed.js";
  * A plain 'edit' grant only widens access and must NOT kick sockets.
  */
 
-const mem = memoryDocWriter();
-let disconnected: Array<{ vaultId: string; docId: string }> = [];
-const app = createApp({
-  docWriter: mem,
-  disconnectDoc: (vaultId, docId) => disconnected.push({ vaultId, docId }),
-});
+const rec = recordingAppDeps();
+const app = createApp(rec.deps);
+const disconnected = rec.disconnected;
 
 async function postShare(user: TestUser, body: Record<string, unknown>) {
   return app.fetch(
@@ -40,7 +37,7 @@ describe("POST /shares — realtime read-only enforcement", () => {
 
   beforeEach(async () => {
     await resetDb();
-    disconnected = [];
+    rec.reset();
     owner = await signUp("owner@shares.test");
     orgId = (await createOrg(owner, "Shares Co", "shares-co")).id;
     vault = await seedVault(orgId);

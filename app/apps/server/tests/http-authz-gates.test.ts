@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
+import { testAppDeps } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { seedFolder, seedMember, seedNote, seedVault } from "./helpers/seed.js";
 
@@ -13,16 +14,7 @@ import { seedFolder, seedMember, seedNote, seedVault } from "./helpers/seed.js";
  * — while owner/admin and a note's own creator keep their access.
  */
 
-const app = createApp({
-  disconnectDoc: () => {},
-  docWriter: {
-    async setContent() {},
-    async appendContent() {},
-    async readContent() {
-      return "";
-    },
-  },
-});
+const app = createApp(testAppDeps());
 
 function req(user: TestUser, method: string, path: string, body?: unknown) {
   return app.fetch(

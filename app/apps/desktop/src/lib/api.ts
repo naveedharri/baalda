@@ -750,6 +750,30 @@ export class ApiClient {
     return data.notes ?? [];
   }
 
+  /**
+   * The registry pull's view of a vault: the notes the server will show us, plus
+   * the doc_ids it says are **deleted**.
+   *
+   * `tombstones: null` means the server did not answer the question — an older
+   * server, a proxy that dropped the field, a truncated body. It is NOT the same
+   * as `[]` ("nothing is deleted"), and the reconciler must never infer a delete
+   * from `null`, because the fallback for "I don't know" has to be "leave the
+   * user's files alone".
+   */
+  async listNoteRegistry(
+    vaultId: string,
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null }> {
+    const { data } = await this.request<{ notes: RegisteredNote[]; tombstones?: string[] }>(
+      "GET",
+      "/api/notes",
+      { query: { vaultId } },
+    );
+    return {
+      notes: data.notes ?? [],
+      tombstones: Array.isArray(data.tombstones) ? data.tombstones : null,
+    };
+  }
+
   async createNote(input: {
     vaultId: string;
     relPath: string;

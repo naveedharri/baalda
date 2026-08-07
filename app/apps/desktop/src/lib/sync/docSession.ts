@@ -12,7 +12,7 @@
 
 import { Awareness } from "y-protocols/awareness";
 import type { NoteBridge } from "../bridge";
-import { createTauriBridgeIO } from "../bridge/adapter";
+import { bridgeManager, createTauriBridgeIO } from "../bridge/adapter";
 import type { SessionInfo } from "../api";
 import * as ipc from "../ipc";
 import { api } from "../auth/authManager";
@@ -23,7 +23,7 @@ import { ContentUploader } from "./contentUpload";
 import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
 import { DocSync, type SyncStatus } from "./syncManager";
-import { VaultRegistry } from "./registry";
+import { VaultRegistry, type InboundHost } from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
 import {
   vaultScopes,
@@ -90,7 +90,7 @@ export function shouldReportOpenDocState(state: DocSyncState, confirmed: boolean
   return state === "synced" || !confirmed;
 }
 
-export class SyncManager {
+export class SyncManager implements InboundHost {
   readonly registry = new VaultRegistry(api);
 
   constructor() {
@@ -99,6 +99,9 @@ export class SyncManager {
     // reactively — coalesced — instead of letting the UI read it imperatively
     // during render, which never re-rendered when the mapping changed.
     this.registry.setMapListener(() => this.scheduleRegistryMapPublish());
+    // Inbound reconciliation mutates files the editor and the background doc store
+    // may be holding, so it has to be able to make them let go first.
+    this.registry.setInboundHost(this);
   }
 
   private current: DocSync | null = null;
@@ -114,6 +117,8 @@ export class SyncManager {
   private onPending?: (pending: boolean) => void;
   private onFlushed?: () => void;
   private onRegistryChanged?: () => void;
+  private onNotePathChanged?: (docId: string, from: string, to: string) => void;
+  private onNoteRemoved?: (docId: string, path: string, trashedTo: string | null) => void;
   private onMemberJoined?: (name: string) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
@@ -391,6 +396,47 @@ export class SyncManager {
   /** True while a debounced registry pull is still armed (teardown assertions). */
   hasPendingRegistryPull(): boolean {
     return this.registryPullTimer != null;
+  }
+
+  // ---- InboundHost: letting go of a doc before its path moves --------------
+  //
+  // The registry is about to rename or remove a file. Anything still holding the
+  // OLD path would egest to it afterwards and recreate the file — and because the
+  // watcher already dropped that path from the index, the recreated file is indexed
+  // under a FRESH doc_id, so the note comes back AND forks into a second server
+  // row. There are three independent writers to stop, and missing any one of them
+  // leaves that door open.
+
+  async releaseDoc(docId: string): Promise<void> {
+    // 1. The open editor. Kill the network provider FIRST so no further remote
+    //    update can arrive and re-arm an egest, then flush + destroy the bridge.
+    //    The flush writes any pending bytes to the OLD path, which is what we
+    //    want: for a rename they then travel with the file, and for a trash they
+    //    end up in the trashed copy. Nothing is lost, and nothing is written back
+    //    AFTER the move.
+    if (this.currentDocId === docId) {
+      this.closeCurrent();
+      await bridgeManager.closeCurrent();
+    }
+    // 2 & 3. The background hot bridge and any in-flight cold apply.
+    await this.docStore?.release(docId);
+  }
+
+  notePathChanged(docId: string, from: string, to: string): void {
+    this.onNotePathChanged?.(docId, from, to);
+  }
+
+  noteRemoved(docId: string, path: string, trashedTo: string | null): void {
+    this.onNoteRemoved?.(docId, path, trashedTo);
+  }
+
+  /** Called after an inbound rename lands on disk (store re-points the editor). */
+  setInboundListeners(listeners: {
+    onNotePathChanged?: (docId: string, from: string, to: string) => void;
+    onNoteRemoved?: (docId: string, path: string, trashedTo: string | null) => void;
+  }): void {
+    this.onNotePathChanged = listeners.onNotePathChanged;
+    this.onNoteRemoved = listeners.onNoteRemoved;
   }
 
   /**

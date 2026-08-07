@@ -27,6 +27,7 @@ import {
   type TreeSyncIndex,
 } from "../lib/syncRollup";
 import { embedDroppedFile } from "../lib/attachments";
+import { deletePaths } from "../lib/vault/mutatePaths";
 import { activeNoteEditable, insertIntoActiveNote } from "../lib/editor/activeView";
 import { useStore } from "../store";
 import { shareResourceId } from "../lib/api";
@@ -308,29 +309,27 @@ export function FileTree() {
   }, [selected]);
 
   async function bulkDelete() {
-    // Deepest paths first so a folder's children are gone before the folder.
-    const paths = [...selected].sort(
-      (a, b) => b.split("/").length - a.split("/").length,
-    );
+    const paths = [...selected];
     const store = useStore.getState();
-    // Pinned to the vault this bulk delete was asked for: every lap after the
-    // first runs past an await, and a delete that landed in the vault the user
-    // switched to would destroy a same-named file they never selected.
-    const epoch = store.vault?.epoch;
-    let order = store.itemOrder;
     setBulkProgress({ done: 0, total: paths.length });
-    let done = 0;
-    for (const p of paths) {
-      try {
-        await ipc.deletePath(p, epoch);
-        order = removeFromOrder(order, p);
-        if (openNote && (openNote.path === p || openNote.path.startsWith(p + "/"))) {
-          store.closeNote();
-        }
-      } catch (e) {
-        console.error("bulk delete failed", p, e);
+    // Shared with the single-item delete below. It used to be a hand-copied loop
+    // that removed the files but never told the server, so every deleted note
+    // came back as an empty file on the next registry pull.
+    const { deleted } = await deletePaths(paths, {
+      // Pinned to the vault this bulk delete was asked for: every lap after the
+      // first runs past an await, and a delete that landed in the vault the user
+      // switched to would destroy a same-named file they never selected.
+      epoch: store.vault?.epoch,
+      deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
+      unregister: (p) => syncManager.registry.deletePath(p),
+      onProgress: (done, total) => setBulkProgress({ done, total }),
+    });
+    let order = store.itemOrder;
+    for (const p of deleted) {
+      order = removeFromOrder(order, p);
+      if (openNote && (openNote.path === p || openNote.path.startsWith(p + "/"))) {
+        store.closeNote();
       }
-      setBulkProgress({ done: ++done, total: paths.length });
     }
     store.setItemOrder(order);
     await refreshAll();
@@ -588,7 +587,9 @@ export function FileTree() {
     const newPath = dir ? `${dir}/${newName}` : newName;
     if (newPath === oldPath) return;
     try {
-      await ipc.renamePath(oldPath, newPath);
+      // Epoch-pinned like the bulk move below: this runs across awaits, so a vault
+      // switch mid-rename must be refused by Rust rather than applied over there.
+      await ipc.renamePath(oldPath, newPath, useStore.getState().vault?.epoch);
       // Propagate the rename/move to the server (folder subtree or single note;
       // doc_ids are preserved) so teammates see it live.
       try {
@@ -719,24 +720,21 @@ export function FileTree() {
   }
 
   async function handleDelete(node: NodeApi<TreeNode>) {
-    try {
-      await ipc.deletePath(node.data.path);
-      // Propagate the delete (folder subtree or note) to the server so it
-      // disappears for teammates too.
-      try {
-        await syncManager.registry.deletePath(node.data.path);
-      } catch (e) {
-        console.warn("[sync] deletePath failed", node.data.path, e);
-      }
-      const store = useStore.getState();
-      store.setItemOrder(removeFromOrder(store.itemOrder, node.data.path));
-      if (openNote && (openNote.path === node.data.path || openNote.path.startsWith(node.data.path + "/"))) {
-        useStore.getState().closeNote();
-      }
-      await refreshAll();
-    } catch (e) {
-      console.error("delete failed", e);
+    const store = useStore.getState();
+    // Same helper as `bulkDelete`, including the epoch pin this call was missing:
+    // an unpinned delete that lands after a vault switch destroys a same-named
+    // file in a vault the user wasn't even looking at.
+    const { deleted } = await deletePaths([node.data.path], {
+      epoch: store.vault?.epoch,
+      deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
+      unregister: (p) => syncManager.registry.deletePath(p),
+    });
+    if (deleted.length === 0) return;
+    store.setItemOrder(removeFromOrder(store.itemOrder, node.data.path));
+    if (openNote && (openNote.path === node.data.path || openNote.path.startsWith(node.data.path + "/"))) {
+      store.closeNote();
     }
+    await refreshAll();
   }
 
   const menuDir = menu?.node

@@ -1,0 +1,289 @@
+import type pg from "pg";
+
+/**
+ * Structural operations on a vault's folder/note tree, shared by the
+ * session-authenticated HTTP registry routes and the MCP tools.
+ *
+ * These two entry points used to implement the same moves separately, which is
+ * how they drifted: only one of them guarded re-parenting, only one of them
+ * disconnected live editors, and each had its own copy of the LIKE-escaping.
+ * Anything that must be true of a move regardless of *who* asked for it lives
+ * here — data integrity (no cycles, no cross-vault parents, no path collisions)
+ * and the path-prefix rewrites.
+ *
+ * Authorization deliberately stays OUT. The callers gate differently and both
+ * are right: HTTP resolves the session user against `canEditFolder`/`canEditDoc`,
+ * MCP additionally checks the token's vault scope. Pushing either into these
+ * helpers would force one caller's rules onto the other.
+ */
+
+type Queryable = Pick<pg.Pool, "query">;
+
+/** basename of a `/`-separated vault-relative path. */
+export function basename(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? path : path.slice(i + 1);
+}
+
+/** Escape SQL LIKE metacharacters (\ % _) so a value is matched literally under
+ *  `LIKE … ESCAPE '\'`. Single home: a folder named `100%_done` must not widen a
+ *  subtree rewrite or a cascade delete into unrelated notes. */
+export function likeEscape(s: string): string {
+  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/** A move/rename was refused for an integrity reason (not permissions). */
+export class TreeOpError extends Error {}
+
+/** Rewrite the path prefix of every descendant folder + note of a moved folder.
+ *  `oldPath`/`newPath` are the folder's own paths; children share the prefix. */
+export async function rewriteDescendantPaths(
+  db: Queryable,
+  vaultId: string,
+  oldPath: string,
+  newPath: string,
+): Promise<void> {
+  // Postgres substring is 1-indexed; keep everything AFTER the old prefix. The
+  // $4::int cast is load-bearing: a bare text param would select substring's
+  // REGEX overload (substring(text FROM text)) and silently return NULL.
+  const from = oldPath.length + 1;
+  // $3 is the LIKE prefix with %/_ escaped so a folder path containing SQL
+  // wildcards cannot match (and rewrite) unrelated notes/folders. The substring
+  // offset ($4) is the true prefix length, unaffected by escaping.
+  const prefix = likeEscape(oldPath);
+  await db.query(
+    `UPDATE folders
+        SET path = $2 || substring(path FROM $4::int)
+      WHERE vault_id = $1 AND path LIKE $3 || '/%' ESCAPE '\\'`,
+    [vaultId, newPath, prefix, from],
+  );
+  await db.query(
+    `UPDATE notes
+        SET rel_path = $2 || substring(rel_path FROM $4::int), updated_at = now()
+      WHERE vault_id = $1 AND rel_path LIKE $3 || '/%' ESCAPE '\\'`,
+    [vaultId, newPath, prefix, from],
+  );
+}
+
+export interface FolderRow {
+  id: string;
+  vault_id: string;
+  path: string;
+  parent_id: string | null;
+}
+
+/** Load a folder's identity columns, or null if it doesn't exist. */
+export async function findFolder(db: Queryable, folderId: string): Promise<FolderRow | null> {
+  const { rows } = await db.query<FolderRow>(
+    "SELECT id, vault_id, path, parent_id FROM folders WHERE id = $1",
+    [folderId],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Would making `candidateParentId` the parent of `folderId` create a cycle?
+ *
+ * Every ACL query in the codebase walks `parent_id` with
+ * `WITH RECURSIVE … UNION ALL`, which does not dedupe — so a cycle makes those
+ * walks run forever. One unguarded re-parent (a folder moved under its own
+ * descendant) would therefore wedge every permission check touching that
+ * subtree, indefinitely, for everyone.
+ *
+ * `UNION` (not `UNION ALL`) below on purpose: this guard has to terminate even
+ * when run against a tree that is ALREADY corrupt.
+ */
+async function wouldCycle(
+  db: Queryable,
+  folderId: string,
+  candidateParentId: string,
+): Promise<boolean> {
+  if (candidateParentId === folderId) return true;
+  const { rows } = await db.query<{ id: string }>(
+    `WITH RECURSIVE descendants AS (
+        SELECT id FROM folders WHERE parent_id = $1
+        UNION
+        SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id
+     )
+     SELECT id FROM descendants WHERE id = $2 LIMIT 1`,
+    [folderId, candidateParentId],
+  );
+  return rows.length > 0;
+}
+
+export interface MoveFolderInput {
+  /** `undefined` leaves it unchanged; a string sets it. */
+  path?: string;
+  name?: string;
+  /** `undefined` leaves it unchanged; `null` moves it to the vault root. */
+  parentId?: string | null;
+}
+
+/**
+ * Rename and/or move a folder, rewriting every descendant path in place. Ids are
+ * never touched, so open CRDT docs and backlinks survive the move (the spec
+ * invariant: key by doc_id, never by path).
+ */
+export async function moveFolder(
+  db: Queryable,
+  folderId: string,
+  input: MoveFolderInput,
+): Promise<{ id: string; vaultId: string; name: string; path: string }> {
+  const folder = await findFolder(db, folderId);
+  if (!folder) throw new TreeOpError("Unknown folder");
+
+  const oldPath = folder.path;
+  const newPath = input.path ?? oldPath;
+  const newName = input.name ?? basename(newPath);
+  const newParentId = input.parentId;
+
+  if (newParentId != null) {
+    const parent = await findFolder(db, newParentId);
+    if (!parent) throw new TreeOpError("Unknown destination folder");
+    // A cross-vault parent would put a folder in one vault under a tree in
+    // another, so the subtree's paths and its ACL would resolve in different
+    // collections.
+    if (parent.vault_id !== folder.vault_id) {
+      throw new TreeOpError("Destination folder is in a different vault");
+    }
+    if (await wouldCycle(db, folderId, newParentId)) {
+      throw new TreeOpError("Cannot move a folder inside itself");
+    }
+  }
+
+  if (newPath !== oldPath) {
+    const clash = await db.query(
+      "SELECT 1 FROM folders WHERE vault_id = $1 AND path = $2 AND id <> $3 LIMIT 1",
+      [folder.vault_id, newPath, folderId],
+    );
+    if ((clash.rowCount ?? 0) > 0) {
+      throw new TreeOpError("A folder already exists at that path");
+    }
+  }
+
+  await db.query(
+    `UPDATE folders SET path = $1, name = $2${newParentId === undefined ? "" : ", parent_id = $4"}
+      WHERE id = $3`,
+    newParentId === undefined
+      ? [newPath, newName, folderId]
+      : [newPath, newName, folderId, newParentId],
+  );
+  if (newPath !== oldPath) {
+    await rewriteDescendantPaths(db, folder.vault_id, oldPath, newPath);
+  }
+  return { id: folderId, vaultId: folder.vault_id, name: newName, path: newPath };
+}
+
+export interface NoteRow {
+  id: string;
+  vault_id: string;
+  rel_path: string;
+  title: string | null;
+  folder_id: string | null;
+}
+
+/** Load a live (non-deleted) note's identity columns, or null. */
+export async function findNote(db: Queryable, docId: string): Promise<NoteRow | null> {
+  const { rows } = await db.query<NoteRow>(
+    `SELECT id, vault_id, rel_path, title, folder_id
+       FROM notes WHERE id = $1 AND deleted_at IS NULL`,
+    [docId],
+  );
+  return rows[0] ?? null;
+}
+
+export interface MoveNoteInput {
+  /** `undefined` leaves it unchanged. */
+  relPath?: string;
+  title?: string | null;
+  /** `undefined` leaves it unchanged; `null` moves it to the vault root. */
+  folderId?: string | null;
+}
+
+/** Rename, retitle, and/or move a single note. Its doc_id never changes. */
+export async function moveNote(
+  db: Queryable,
+  docId: string,
+  input: MoveNoteInput,
+): Promise<{ id: string; vaultId: string; relPath: string; title: string | null; folderId: string | null }> {
+  const note = await findNote(db, docId);
+  if (!note) throw new TreeOpError("Unknown note");
+
+  const relPath = input.relPath ?? note.rel_path;
+  const title = input.title === undefined ? note.title : input.title;
+  const folderId = input.folderId === undefined ? note.folder_id : input.folderId;
+
+  if (folderId != null && folderId !== note.folder_id) {
+    const parent = await findFolder(db, folderId);
+    if (!parent) throw new TreeOpError("Unknown destination folder");
+    if (parent.vault_id !== note.vault_id) {
+      throw new TreeOpError("Destination folder is in a different vault");
+    }
+  }
+
+  await db.query(
+    "UPDATE notes SET rel_path = $1, title = $2, folder_id = $3, updated_at = now() WHERE id = $4",
+    [relPath, title, folderId, docId],
+  );
+  return { id: docId, vaultId: note.vault_id, relPath, title, folderId };
+}
+
+/** Does this folder directly contain any live note or subfolder? */
+export async function folderIsEmpty(db: Queryable, folderId: string): Promise<boolean> {
+  const { rows } = await db.query<{ n: string }>(
+    `SELECT (
+        (SELECT count(*) FROM notes WHERE folder_id = $1 AND deleted_at IS NULL)
+      + (SELECT count(*) FROM folders WHERE parent_id = $1)
+     )::text AS n`,
+    [folderId],
+  );
+  return rows[0]?.n === "0";
+}
+
+/**
+ * Delete a folder subtree: soft-delete its notes (they keep their doc_id, so a
+ * teammate with one open loses tree visibility rather than their content), then
+ * remove the folder rows (`ON DELETE CASCADE` clears descendant folders).
+ *
+ * Returns the soft-deleted note ids so the caller can purge their derived index
+ * rows and kick any live editors. Those side effects stay at the call site
+ * because they differ per caller (only MCP disconnected sockets before this).
+ *
+ * The cascade matches on **both** `folder_id` and the path prefix. They can
+ * disagree: `moveNote` lets `relPath` and `folderId` be set independently, so a
+ * note can sit under this folder by one measure and not the other. Matching only
+ * one would leave a note behind whose folder no longer exists.
+ */
+export async function deleteFolderCascade(
+  db: Queryable,
+  folderId: string,
+): Promise<{ vaultId: string; path: string; deletedNoteIds: string[] }> {
+  const folder = await findFolder(db, folderId);
+  if (!folder) throw new TreeOpError("Unknown folder");
+
+  // $2 is an exact path match; $3 is the LIKE prefix with %/_ escaped so a folder
+  // path containing wildcards cannot widen the soft-delete beyond its subtree.
+  // RETURNING id gives us exactly the cascade's victims.
+  const { rows: cascaded } = await db.query<{ id: string }>(
+    `WITH RECURSIVE subtree AS (
+        SELECT id FROM folders WHERE id = $1
+        UNION
+        SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+     )
+     UPDATE notes SET deleted_at = now()
+      WHERE vault_id = $4 AND deleted_at IS NULL
+        AND (
+          folder_id IN (SELECT id FROM subtree)
+          OR rel_path = $2
+          OR rel_path LIKE $3 || '/%' ESCAPE '\\'
+        )
+      RETURNING id`,
+    [folderId, folder.path, likeEscape(folder.path), folder.vault_id],
+  );
+  await db.query("DELETE FROM folders WHERE id = $1", [folderId]);
+  return {
+    vaultId: folder.vault_id,
+    path: folder.path,
+    deletedNoteIds: cascaded.map((n) => n.id),
+  };
+}

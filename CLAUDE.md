@@ -177,7 +177,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   registry listings).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/delete_note`.
+  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/move_note/delete_note`.
+  Structural tools (create/move/delete of folders and notes) broadcast `registry-changed` with a
+  `null` origin, and content writes fan out through `createDocWriter`, so an AI edit lands live on
+  every open app exactly like a teammate's. `delete_folder` refuses a non-empty folder unless
+  `recursive: true`. Move/delete semantics live in `src/registry/tree-ops.ts`, shared with the HTTP
+  registry routes so the two surfaces cannot drift.
   Token = `mcp_…` minted from desktop Vault Settings → MCP; scoped to one (user, vault), gated by
   the **same** per-file ACL. Only a sha256 hash is stored.
 - `index/` — `embedder.ts` is a dependency-free 256-dim hashed bag-of-words (works air-gapped;

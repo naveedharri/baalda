@@ -185,6 +185,32 @@ export class VaultDocStore implements DocUpdateSink {
     await this.enqueueCold(docId, update);
   }
 
+  /**
+   * Awaited teardown of every writer this store has for one doc: settle any
+   * in-flight cold apply, then flush and retire the hot bridge.
+   *
+   * `drop` below is the fire-and-forget version, which is fine for an ACL change
+   * (nothing is about to move the file) and NOT fine before an inbound rename or
+   * trash. Two writers would otherwise race the move: `drop` never awaits
+   * `retire`, and a cold apply resolved its target path when it STARTED, so it can
+   * be mid-`flushEgest` to the old path. Either one lands after the move and
+   * recreates the file we just took away — and the watcher then indexes that file
+   * under a fresh doc_id, forking the note.
+   *
+   * The persisted state vector is deliberately left alone: a rename doesn't change
+   * content, so the manifest entry stays truthful.
+   */
+  async release(docId: string): Promise<void> {
+    await this.coldChains.get(docId)?.catch(() => {});
+    const entry = this.hot.get(docId);
+    if (entry) {
+      this.hot.delete(docId);
+      const i = this.recent.indexOf(docId);
+      if (i !== -1) this.recent.splice(i, 1);
+      await this.retire(entry.bridge);
+    }
+  }
+
   drop(docId: string): void {
     const entry = this.hot.get(docId);
     if (entry) {

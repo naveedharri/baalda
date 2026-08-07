@@ -23,10 +23,19 @@ export interface AppDeps extends ShareDeps {
   docWriter: DocWriter;
   /** Payment provider. Defaults to Polar; tests inject a fake. */
   billingProvider?: BillingProvider;
-  /** Structure changed (folder/note create/rename/move/delete) → broadcast.
-   *  `originId` identifies the client that made the change (x-baalda-origin), so
-   *  the broadcast can skip it — see `RegistryDeps.onRegistryChanged`. */
-  onRegistryChanged?: (vaultId: string, originId: string | null) => void;
+  /**
+   * Structure changed (folder/note create/rename/move/delete) → broadcast.
+   * `originId` identifies the client that made the change (x-baalda-origin), so
+   * the broadcast can skip it — see `RegistryDeps.onRegistryChanged`.
+   *
+   * **Required**, unlike its counterparts on the inner `RegistryDeps`/`McpDeps`.
+   * This is the one seam where the whole app is constructed, and forgetting it
+   * here is both catastrophic and silent: every write still succeeds, and no
+   * running app ever hears about it — a note exists in Postgres and in nobody's
+   * sidebar until they restart. Making it required turns that into a compile
+   * error. Pass an explicit no-op if a test genuinely doesn't care.
+   */
+  onRegistryChanged: (vaultId: string, originId: string | null) => void;
 }
 
 /**
@@ -117,7 +126,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", desktopOauthRoutes);
   app.route("/api", syncTokenRoutes);
   app.route("/api", vaultTokenRoutes);
-  app.route("/api", createRegistryRoutes({ onRegistryChanged: deps.onRegistryChanged }));
+  app.route(
+    "/api",
+    createRegistryRoutes({
+      onRegistryChanged: deps.onRegistryChanged,
+      disconnectDoc: deps.disconnectDoc,
+    }),
+  );
   app.route("/api", blobRoutes);
   app.route("/api", createShareRoutes(deps));
   const billingProvider = deps.billingProvider ?? new PolarBillingProvider();
@@ -129,7 +144,11 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", graphRoutes);
   app.route(
     "/api",
-    createMcpRoutes({ docWriter: deps.docWriter, disconnectDoc: deps.disconnectDoc }),
+    createMcpRoutes({
+      docWriter: deps.docWriter,
+      disconnectDoc: deps.disconnectDoc,
+      onRegistryChanged: deps.onRegistryChanged,
+    }),
   );
 
   return app;

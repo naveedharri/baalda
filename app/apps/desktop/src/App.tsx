@@ -41,6 +41,34 @@ function RemovedBanner() {
 }
 
 /**
+ * A teammate (or an AI) deleted the note that was open, and we applied it here.
+ *
+ * Separate from `RemovedBanner`: that one means "the file vanished from under us"
+ * and can only offer to close the note. This one knows the delete was intentional
+ * and — because inbound deletes move the file rather than unlinking it — can say
+ * where the local copy went, which is the difference between a scare and a note.
+ */
+function DeletedByTeammateBanner() {
+  const trashedTo = useStore((s) => s.noteRemovedByTeammate);
+  if (!trashedTo) return null;
+  return (
+    <div className="banner">
+      <span>
+        A teammate deleted this note. Your copy was moved to <code>{trashedTo}</code>.
+      </span>
+      <div className="banner-actions">
+        <button
+          className="primary"
+          onClick={() => useStore.setState({ noteRemovedByTeammate: null })}
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Celebrates a teammate joining the vault: a soft top banner (auto-fades
  * after a few seconds) plus a one-shot confetti burst over the whole window.
  * The chime is played by the store when the celebration is triggered.
@@ -524,6 +552,7 @@ export default function App() {
           </button>
         </header>
         <RemovedBanner />
+        <DeletedByTeammateBanner />
         <div className="editor-wrap">
           <Editor />
         </div>

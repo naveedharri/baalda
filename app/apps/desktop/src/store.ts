@@ -66,6 +66,15 @@ interface AppStore {
   openNote: OpenNote | null;
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
+  /**
+   * Set when the note that was open was deleted by a TEAMMATE (or an AI) and we
+   * applied that locally: the trash-relative path the local copy was moved to, so
+   * the UI can say where it went. Distinct from `noteRemoved`, which means "the
+   * file vanished from under us" (a Finder delete) and offers no recovery hint.
+   */
+  noteRemovedByTeammate: string | null;
+  /** Follow an inbound rename: re-point the open note (and its descendants). */
+  followNoteRename: (from: string, to: string) => void;
   backlinks: ipc.Backlink[];
   titles: ipc.NoteTitle[];
 
@@ -542,6 +551,7 @@ export const useStore = create<AppStore>((set, get) => ({
   tree: null,
   openNote: null,
   noteRemoved: false,
+  noteRemovedByTeammate: null,
   backlinks: [],
   titles: [],
 
@@ -759,9 +769,29 @@ export const useStore = create<AppStore>((set, get) => ({
 
   setNoteRemoved: (removed) => set({ noteRemoved: removed }),
 
+  /**
+   * A teammate moved the note we have open; the file has already moved on disk.
+   *
+   * Changing `openNote.path` re-runs the editor's effect, which reopens the bridge
+   * at the new path under the SAME docId — and `NoteBridge.hydrate` reads the
+   * persisted CRDT keyed by docId, which the file move never touched, so the
+   * content is intact. Cursor position and undo history are lost; for a move
+   * someone else initiated that's an acceptable trade for not forking the note.
+   */
+  followNoteRename: (from, to) => {
+    const open = get().openNote;
+    if (!open) return;
+    if (open.path === from) {
+      set({ openNote: { ...open, path: to }, noteRemoved: false });
+    } else if (open.path.startsWith(from + "/")) {
+      // The open note sat inside a folder that moved.
+      set({ openNote: { ...open, path: to + open.path.slice(from.length) }, noteRemoved: false });
+    }
+  },
+
   closeNote: () => {
     syncManager.setViewing(null);
-    set({ openNote: null, backlinks: [], noteRemoved: false });
+    set({ openNote: null, backlinks: [], noteRemoved: false, noteRemovedByTeammate: null });
   },
 
   // ---- Auth ----
@@ -777,6 +807,20 @@ export const useStore = create<AppStore>((set, get) => ({
     syncManager.setRegistryListener(() => {
       void get().refreshTree();
       void get().refreshTitles();
+    });
+    // A teammate renamed/moved or deleted a note we have on disk, and the registry
+    // has just applied that to the file. The open editor's bridge was destroyed
+    // before the move, so the view MUST be re-pointed or closed — leaving
+    // CodeMirror bound to a destroyed Y.Doc throws on the next keystroke.
+    syncManager.setInboundListeners({
+      onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
+      onNoteRemoved: (_docId, path, trashedTo) => {
+        const open = get().openNote;
+        if (open && (open.path === path || open.path.startsWith(path + "/"))) {
+          get().closeNote();
+          set({ noteRemovedByTeammate: trashedTo });
+        }
+      },
     });
     // A teammate joined the vault — refresh the roster live (no reload) and
     // celebrate. Fires for everyone already connected; the joiner celebrates

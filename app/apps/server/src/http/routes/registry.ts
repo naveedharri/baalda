@@ -3,11 +3,24 @@ import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
-import { listReadableDocsInVault, listVisibleFolders } from "../../permissions/vault-docs.js";
+import {
+  listDeletedReadableDocsInVault,
+  listReadableDocsInVault,
+  listVisibleFolders,
+} from "../../permissions/vault-docs.js";
 import { purgeNoteIndex } from "../../index/indexer.js";
+import {
+  deleteFolderCascade,
+  moveFolder,
+  moveNote,
+  TreeOpError,
+} from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 
 export interface RegistryDeps {
+  /** Force-close live sync sockets for a doc, so an editor open on a note that
+   *  just got deleted out from under it reconnects and learns it's gone. */
+  disconnectDoc?: (vaultId: string, docId: string) => void;
   /**
    * Called after any change to a vault's folder/note structure (create, rename,
    * move, delete). The vault channel broadcasts a `registry` control frame so
@@ -187,9 +200,6 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await canEditFolder(session.userId, id))) {
       return c.json({ error: "You cannot modify this folder" }, 403);
     }
-    const oldPath: string = row.path;
-    const newPath = typeof body.path === "string" ? body.path : oldPath;
-    const newName = typeof body.name === "string" ? body.name : basename(newPath);
     const newParentId = body.parentId === undefined ? undefined : (body.parentId ?? null);
     // Re-parenting under another folder must not be a way to change inherited
     // access: require edit on the destination parent too (root/null is fine).
@@ -197,16 +207,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "You cannot move this folder there" }, 403);
     }
 
-    await pool.query(
-      `UPDATE folders SET path = $1, name = $2${newParentId === undefined ? "" : ", parent_id = $4"}
-       WHERE id = $3`,
-      newParentId === undefined ? [newPath, newName, id] : [newPath, newName, id, newParentId],
-    );
-    if (newPath !== oldPath) {
-      await rewriteDescendantPaths(row.vault_id, oldPath, newPath);
+    try {
+      const moved = await moveFolder(pool, id, {
+        path: typeof body.path === "string" ? body.path : undefined,
+        name: typeof body.name === "string" ? body.name : undefined,
+        parentId: newParentId,
+      });
+      changed(c, moved.vaultId);
+      return c.json({ id, vaultId: moved.vaultId, name: moved.name, path: moved.path }, 200);
+    } catch (err) {
+      if (err instanceof TreeOpError) return c.json({ error: err.message }, 400);
+      throw err;
     }
-    changed(c, row.vault_id);
-    return c.json({ id, vaultId: row.vault_id, name: newName, path: newPath }, 200);
   });
 
   // Delete a folder subtree: soft-delete its notes (they keep their doc_id so a
@@ -225,19 +237,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await canEditFolder(session.userId, id))) {
       return c.json({ error: "You cannot delete this folder" }, 403);
     }
-    // $2 is an exact match; $3 is the LIKE prefix with %/_ escaped so a folder
-    // path containing wildcards cannot widen the soft-delete beyond its subtree.
-    // RETURNING id gives us exactly the cascade's victims, so their derived
-    // index rows go with them (see the single-note delete below).
-    const { rows: cascaded } = await pool.query<{ id: string }>(
-      `UPDATE notes SET deleted_at = now()
-        WHERE vault_id = $1 AND deleted_at IS NULL
-          AND (rel_path = $2 OR rel_path LIKE $3 || '/%' ESCAPE '\\')
-        RETURNING id`,
-      [row.vault_id, row.path, likeEscape(row.path)],
-    );
-    await pool.query("DELETE FROM folders WHERE id = $1", [id]);
-    await purgeNoteIndex(cascaded.map((n) => n.id));
+    const { deletedNoteIds } = await deleteFolderCascade(pool, id);
+    // Their derived index rows go with them (see the single-note delete below)…
+    await purgeNoteIndex(deletedNoteIds);
+    // …and anyone with one of them open is kicked off the now-gone doc. Without
+    // this a folder delete left live editors happily typing into notes that no
+    // longer exist anywhere in the tree — the single-note delete has always done
+    // it, and there's no reason a cascade should be gentler.
+    for (const docId of deletedNoteIds) deps.disconnectDoc?.(row.vault_id, docId);
     changed(c, row.vault_id);
     return c.json({ ok: true }, 200);
   });
@@ -318,7 +325,19 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // would make the client materialize a note it can't sync). Owner/admin +
     // Open vaults get the full set from the readable-docs resolver.
     const readable = await listReadableDocsInVault(session.userId, vaultId);
-    return c.json({ notes: rows.filter((n) => readable.has(n.id)) });
+    // Tombstones ride along in the SAME response, deliberately. The client's
+    // whole reason for asking is to subtract one set from the other, and two
+    // requests would let a note deleted in between land in neither list (or, on
+    // the other ordering, in both) — forcing the client to invent a precedence
+    // rule. One request, one snapshot, no rule needed.
+    //
+    // Ids only, no path or title: this is the signal that lets a client delete a
+    // local file, so it carries the minimum that can justify that.
+    const tombstones = await listDeletedReadableDocsInVault(session.userId, vaultId);
+    return c.json({
+      notes: rows.filter((n) => readable.has(n.id)),
+      tombstones: [...tombstones],
+    });
   });
 
   // Rename / move a single note (rel_path / folder / title). doc_id unchanged.
@@ -339,15 +358,37 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await canEditDoc(session.userId, id))) {
       return c.json({ error: "You cannot modify this note" }, 403);
     }
-    const relPath = typeof body.relPath === "string" ? body.relPath : row.rel_path;
-    const title = body.title === undefined ? row.title : body.title;
-    const folderId = body.folderId === undefined ? row.folder_id : (body.folderId ?? null);
-    await pool.query(
-      "UPDATE notes SET rel_path = $1, title = $2, folder_id = $3, updated_at = now() WHERE id = $4",
-      [relPath, title, folderId, id],
-    );
-    changed(c, row.vault_id);
-    return c.json({ id, docId: id, vaultId: row.vault_id, relPath, title, folderId }, 200);
+    const folderId = body.folderId === undefined ? undefined : (body.folderId ?? null);
+    // Same rule the folder route has always had, applied here too: moving a note
+    // INTO a folder must not be a way to hand out access to it. Folder grants
+    // inherit down, so without this a member could take a note only they can read
+    // and drop it into a team-shared folder, granting the whole team edit on it.
+    if (folderId != null && !(await canEditFolder(session.userId, folderId))) {
+      return c.json({ error: "You cannot move this note there" }, 403);
+    }
+
+    try {
+      const moved = await moveNote(pool, id, {
+        relPath: typeof body.relPath === "string" ? body.relPath : undefined,
+        title: body.title,
+        folderId,
+      });
+      changed(c, moved.vaultId);
+      return c.json(
+        {
+          id,
+          docId: id,
+          vaultId: moved.vaultId,
+          relPath: moved.relPath,
+          title: moved.title,
+          folderId: moved.folderId,
+        },
+        200,
+      );
+    } catch (err) {
+      if (err instanceof TreeOpError) return c.json({ error: err.message }, 400);
+      throw err;
+    }
   });
 
   // Soft-delete a note (keeps its row/doc_id; excluded from the registry list).
@@ -403,42 +444,3 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
   return registryRoutes;
 }
 
-/** Rewrite the path prefix of every descendant folder + note of a moved folder.
- *  `oldPath`/`newPath` are the folder's own paths; children share the prefix. */
-async function rewriteDescendantPaths(
-  vaultId: string,
-  oldPath: string,
-  newPath: string,
-): Promise<void> {
-  // Postgres substring is 1-indexed; keep everything AFTER the old prefix. The
-  // $4::int cast is load-bearing: a bare text param would select substring's
-  // REGEX overload (substring(text FROM text)) and silently return NULL.
-  const from = oldPath.length + 1;
-  // $3 is the LIKE prefix with %/_ escaped so a folder path containing SQL
-  // wildcards cannot match (and rewrite) unrelated notes/folders. The substring
-  // offset ($4) is the true prefix length, unaffected by escaping.
-  const prefix = likeEscape(oldPath);
-  await pool.query(
-    `UPDATE folders
-        SET path = $2 || substring(path FROM $4::int)
-      WHERE vault_id = $1 AND path LIKE $3 || '/%' ESCAPE '\\'`,
-    [vaultId, newPath, prefix, from],
-  );
-  await pool.query(
-    `UPDATE notes
-        SET rel_path = $2 || substring(rel_path FROM $4::int), updated_at = now()
-      WHERE vault_id = $1 AND rel_path LIKE $3 || '/%' ESCAPE '\\'`,
-    [vaultId, newPath, prefix, from],
-  );
-}
-
-function basename(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i === -1 ? path : path.slice(i + 1);
-}
-
-/** Escape SQL LIKE metacharacters (\ % _) so a value is matched literally under
- *  `LIKE … ESCAPE '\'`. */
-function likeEscape(s: string): string {
-  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-}

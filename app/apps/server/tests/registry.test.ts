@@ -4,6 +4,7 @@ import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { seedFolder, seedMember, seedNote, seedVault } from "./helpers/seed.js";
+import { recordingAppDeps } from "./helpers/app.js";
 import { pool as pgPool } from "../src/db/pool.js";
 
 /**
@@ -12,18 +13,10 @@ import { pool as pgPool } from "../src/db/pool.js";
  * fire onRegistryChanged so the vault channel can broadcast a live tree refresh.
  */
 
-let changed: string[] = [];
-const app = createApp({
-  disconnectDoc: () => {},
-  docWriter: {
-    async setContent() {},
-    async appendContent() {},
-    async readContent() {
-      return "";
-    },
-  },
-  onRegistryChanged: (vaultId) => changed.push(vaultId),
-});
+const rec = recordingAppDeps();
+const app = createApp(rec.deps);
+/** Vault ids of every registry broadcast, in order. */
+const changed = () => rec.registryBroadcasts.map((b) => b.vaultId);
 
 function req(user: TestUser, method: string, path: string, body?: unknown) {
   return app.fetch(
@@ -41,7 +34,7 @@ describe("registry structure sync", () => {
 
   beforeEach(async () => {
     await resetDb();
-    changed = [];
+    rec.reset();
     owner = await signUp("owner@registry.test");
     const org = (await createOrg(owner, "Reg Co", "reg-co")).id;
     vault = await seedVault(org);
@@ -63,7 +56,7 @@ describe("registry structure sync", () => {
       title: "Note",
     });
     expect(n.status).toBe(201);
-    expect(changed).toEqual([vault, vault]);
+    expect(changed()).toEqual([vault, vault]);
   });
 
   it("renaming a folder rewrites its own + descendant paths, keeping doc_ids", async () => {
@@ -85,7 +78,7 @@ describe("registry structure sync", () => {
     const note = await pool.query("SELECT id, rel_path FROM notes WHERE id = $1", [noteId]);
     expect(note.rows[0].rel_path).toBe("Handbook/Sub/deep.md"); // descendant moved
     expect(note.rows[0].id).toBe(noteId); // doc_id preserved
-    expect(changed).toContain(vault);
+    expect(changed()).toContain(vault);
   });
 
   it("renaming a note moves only that note and preserves its doc_id", async () => {
@@ -116,13 +109,43 @@ describe("registry structure sync", () => {
     expect(body.notes.find((x) => x.id === noteId)).toBeUndefined();
   });
 
-  it("soft-deleting a note drops it from the listing", async () => {
+  it("soft-deleting a note drops it from the listing and tombstones it", async () => {
     const noteId = await seedNote(vault, null, "bye.md", owner.userId);
     const res = await req(owner, "DELETE", `/api/notes/${noteId}`);
     expect(res.status).toBe(200);
     const list = await req(owner, "GET", `/api/notes?vaultId=${vault}`);
-    const body = (await list.json()) as { notes: Array<{ id: string }> };
+    const body = (await list.json()) as { notes: Array<{ id: string }>; tombstones: string[] };
     expect(body.notes.find((x) => x.id === noteId)).toBeUndefined();
+    // Dropping it from the listing is only half the message. Absence alone means
+    // "deleted OR you lost access", and the client must remove the local file for
+    // one and keep it for the other — so the delete has to be stated outright.
+    expect(body.tombstones).toEqual([noteId]);
+  });
+
+  it("tombstones every note a folder delete cascaded over", async () => {
+    const folderId = await seedFolder(vault, null, "Old", "Old");
+    const a = await seedNote(vault, folderId, "Old/a.md", owner.userId);
+    const b = await seedNote(vault, folderId, "Old/b.md", owner.userId);
+    expect((await req(owner, "DELETE", `/api/folders/${folderId}`)).status).toBe(200);
+
+    const body = (await (await req(owner, "GET", `/api/notes?vaultId=${vault}`)).json()) as {
+      notes: Array<{ id: string }>;
+      tombstones: string[];
+    };
+    // Folders are hard-deleted with no tombstone of their own, so the notes'
+    // tombstones are the ONLY way a client learns the subtree is gone.
+    expect(body.tombstones.sort()).toEqual([a, b].sort());
+    expect(body.notes).toEqual([]);
+  });
+
+  it("a clean vault reports an empty tombstone list, never a missing field", async () => {
+    await seedNote(vault, null, "here.md", owner.userId);
+    const body = (await (await req(owner, "GET", `/api/notes?vaultId=${vault}`)).json()) as {
+      tombstones: string[];
+    };
+    // The client treats a MISSING field as "this server can't answer" and refuses
+    // to delete anything on that basis, so an empty vault must still send `[]`.
+    expect(body.tombstones).toEqual([]);
   });
 
   it("private-by-default: GET /notes and /folders hide another member's private items", async () => {

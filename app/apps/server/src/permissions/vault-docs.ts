@@ -56,44 +56,38 @@ export async function vaultAccess(
   return { organizationId: row.organization_id, role: row.role, vaultWide };
 }
 
-export async function listReadableDocsInVault(
+/**
+ * One implementation, two questions. `deleted: false` answers "what may this user
+ * read?"; `deleted: true` answers "which of this vault's docs that they'd be
+ * allowed to read are now **gone**?" — the tombstone set the desktop reconciler
+ * needs to tell a delete from a revoke.
+ *
+ * They MUST share one body. The client applies the difference between them by
+ * removing files from disk, so if the two permission algebras ever drifted, the
+ * drift would show up as a note being deleted off someone's disk. A single
+ * predicate swap can't drift.
+ */
+async function listDocsInVault(
   userId: string,
   vaultId: string,
-  db: Queryable = defaultPool,
+  db: Queryable,
+  opts: { deleted: boolean },
 ): Promise<Set<string>> {
-  const org = await db.query<{ organization_id: string; role: string | null }>(
-    `SELECT v.organization_id, m.role
-       FROM vaults v
-       LEFT JOIN member m
-         ON m."organizationId" = v.organization_id AND m."userId" = $2
-      WHERE v.id = $1`,
-    [vaultId, userId],
-  );
-  const row = org.rows[0];
-  if (!row) return new Set(); // unknown vault
+  const access = await vaultAccess(db, userId, vaultId);
+  if (!access) return new Set(); // unknown vault
+  const { organizationId, role, vaultWide } = access;
 
-  let vaultWide = row.role === "owner" || row.role === "admin";
-  if (!vaultWide) {
-    // Vault-scoped grant (spec 04 "Access" model): the org-wide Open/
-    // Read-only default (members only), or a per-user vault grant.
-    const orgClause =
-      row.role !== null ? "principal_type = 'org' OR" : "";
-    const grant = await db.query(
-      `SELECT 1 FROM shares
-        WHERE resource_type = 'vault' AND resource_id = $1
-          AND permission IN ('view', 'edit')
-          AND (${orgClause} (principal_type = 'user' AND principal_id = $2))
-        LIMIT 1`,
-      [row.organization_id, userId],
-    );
-    vaultWide = (grant.rowCount ?? 0) > 0;
-  }
+  // The ONLY difference between the two sets. `files` has no `deleted_at`
+  // column, so a tombstone can never be a file — the UNIONs below drop out.
+  const livePredicate = opts.deleted ? "deleted_at IS NOT NULL" : "deleted_at IS NULL";
 
   if (vaultWide) {
     const { rows } = await db.query<{ id: string }>(
-      `SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
-       UNION
-       SELECT id FROM files WHERE vault_id = $1`,
+      opts.deleted
+        ? `SELECT id FROM notes WHERE vault_id = $1 AND ${livePredicate}`
+        : `SELECT id FROM notes WHERE vault_id = $1 AND ${livePredicate}
+           UNION
+           SELECT id FROM files WHERE vault_id = $1`,
       [vaultId],
     );
     return new Set(rows.map((r) => r.id));
@@ -107,7 +101,16 @@ export async function listReadableDocsInVault(
   // Both the creator branch and the org ($3) branches are gated by membership
   // ($4) so a REMOVED member (session outlives removal) loses read on notes
   // they authored — matching resolver.effectivePermission's creator rule.
-  const isMember = row.role !== null;
+  //
+  // A soft-deleted note keeps `created_by`, `folder_id` and its `shares` rows, so
+  // this resolves a tombstone's permission exactly as it did while the note lived.
+  const isMember = role !== null;
+  const filesUnion = opts.deleted
+    ? ""
+    : `UNION
+     SELECT fi.id FROM files fi
+       WHERE fi.vault_id = $2
+         AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files))`;
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE shared_folders AS (
         SELECT resource_id AS id FROM shares
@@ -131,19 +134,49 @@ export async function listReadableDocsInVault(
            )
      )
      SELECT n.id FROM notes n
-       WHERE n.vault_id = $2 AND n.deleted_at IS NULL
+       WHERE n.vault_id = $2 AND n.${livePredicate}
          AND (
            ($4 AND n.created_by = $1)
            OR n.folder_id IN (SELECT id FROM subtree)
            OR n.id IN (SELECT id FROM shared_files)
          )
-     UNION
-     SELECT fi.id FROM files fi
-       WHERE fi.vault_id = $2
-         AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files))`,
-    [userId, vaultId, row.organization_id, isMember],
+     ${filesUnion}`,
+    [userId, vaultId, organizationId, isMember],
   );
   return new Set(rows.map((r) => r.id));
+}
+
+export async function listReadableDocsInVault(
+  userId: string,
+  vaultId: string,
+  db: Queryable = defaultPool,
+): Promise<Set<string>> {
+  return listDocsInVault(userId, vaultId, db, { deleted: false });
+}
+
+/**
+ * doc_ids in this vault the caller could read but that are now **soft-deleted**.
+ *
+ * Why this exists: "absent from `GET /api/notes`" is ambiguous — it means either
+ * *deleted* or *you lost read access*, because that route is ACL-filtered. The
+ * desktop reconciler has to remove local files for the first and must NOT for the
+ * second (losing a share deliberately leaves the `.md` alone). Absence alone
+ * can't distinguish them, and neither can `effectivePermission`: `locateDoc`
+ * filters `deleted_at IS NULL`, so a deleted doc resolves to "none", exactly like
+ * no access. So deletion has to be *stated*, never inferred.
+ *
+ * Permission-filtered rather than "every deleted id in the vault": the filtered
+ * version's failure mode is the safe one. If a teammate lost the share AND the
+ * note was deleted, the id is withheld, the client falls into its
+ * "absent from both" branch, and it keeps the file. Filtering can only ever
+ * cause a MISSED delete, never a wrong one.
+ */
+export async function listDeletedReadableDocsInVault(
+  userId: string,
+  vaultId: string,
+  db: Queryable = defaultPool,
+): Promise<Set<string>> {
+  return listDocsInVault(userId, vaultId, db, { deleted: true });
 }
 
 export interface VaultFolderRow {
