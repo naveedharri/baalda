@@ -6,6 +6,12 @@ import {
   type DocUpdateSink,
   type WebSocketLike,
 } from "../sync/vaultSyncEngine";
+import {
+  decodeVoiceFrame,
+  encodeVoiceFrame,
+  VOICE_FRAME,
+  type VoiceFrame,
+} from "../sync/vaultProtocol";
 
 // Drives the engine through a fake WebSocket + a mocked token fetch + an
 // in-memory sink. No real socket, DB, or server (spec 05 §3.3).
@@ -517,5 +523,121 @@ describe("VaultSyncEngine — inbound queue", () => {
 
     expect(sink.ready).toBe(true); // hello never precedes the manifest load
     expect((ws!.helloText()!.manifest as Record<string, string>).A).toBe("BQ==");
+  });
+});
+
+describe("VaultSyncEngine voice", () => {
+  /** Bring an engine up to `ready` with a voice listener attached. */
+  async function readyEngine(): Promise<{
+    engine: VaultSyncEngine;
+    ws: FakeWs;
+    heard: VoiceFrame[];
+    sink: MemSink;
+  }> {
+    const sink = new MemSink();
+    const heard: VoiceFrame[] = [];
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onVoice: (f) => heard.push(f),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+    await tick();
+    return { engine, ws: ws!, heard, sink };
+  }
+
+  it("advertises the voice capability in hello", async () => {
+    const { ws } = await readyEngine();
+    expect(ws.helloText()!.caps).toContain("voice");
+  });
+
+  it("surfaces an inbound chunk without routing it through the doc sink", async () => {
+    const { ws, heard, sink } = await readyEngine();
+
+    const frame = encodeVoiceFrame(
+      { s: "tx1", n: 0, u: "ada", m: "Ada", c: "#6366f1", fmt: "pcm16", sr: 16000 },
+      new Uint8Array([1, 2, 3]),
+    );
+    ws.onmessage?.({ data: frame.buffer.slice(0) });
+    await tick();
+
+    expect(heard).toHaveLength(1);
+    expect(heard[0].header.u).toBe("ada");
+    expect(heard[0].header.m).toBe("Ada");
+    expect(heard[0].audio).toEqual(new Uint8Array([1, 2, 3]));
+    // Critically: it must NOT be mistaken for a doc update.
+    expect(sink.applied).toHaveLength(0);
+  });
+
+  it("still routes doc updates correctly alongside voice traffic", async () => {
+    const { ws, heard, sink } = await readyEngine();
+
+    ws.onmessage?.({ data: updateFrame("doc-a", [7, 8]) });
+    ws.onmessage?.({
+      data: encodeVoiceFrame({ s: "tx1", n: 0, u: "ada" }, new Uint8Array([1])).buffer.slice(0),
+    });
+    ws.onmessage?.({ data: updateFrame("doc-b", [9]) });
+    for (let i = 0; i < 10 && sink.applied.length < 2; i++) await tick();
+
+    expect(sink.applied.map((a) => a.docId)).toEqual(["doc-a", "doc-b"]);
+    expect(heard).toHaveLength(1);
+  });
+
+  it("ignores an inbound chunk with no speaker stamped on it", async () => {
+    const { ws, heard } = await readyEngine();
+    // `u` absent — unattributable, so it can't be shown or grouped.
+    ws.onmessage?.({
+      data: encodeVoiceFrame({ s: "tx1", n: 0 }, new Uint8Array([1])).buffer.slice(0),
+    });
+    await tick();
+    expect(heard).toHaveLength(0);
+  });
+
+  it("copies audio off the socket buffer so playback can outlive the callback", async () => {
+    const { ws, heard } = await readyEngine();
+    const frame = encodeVoiceFrame({ s: "tx1", n: 0, u: "ada" }, new Uint8Array([42, 43]));
+    const buf = frame.buffer.slice(0) as ArrayBuffer;
+    ws.onmessage?.({ data: buf });
+    await tick();
+
+    // Scribble over the received buffer the way a reused socket buffer would.
+    new Uint8Array(buf).fill(0);
+    expect(heard[0].audio).toEqual(new Uint8Array([42, 43]));
+  });
+
+  it("sends a chunk once ready and refuses before the channel is live", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+
+    // Not ready yet: dropped rather than queued — late audio is worthless.
+    expect(engine.sendVoice({ s: "tx1", n: 0 }, new Uint8Array([1]))).toBe(false);
+
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+    await tick();
+    expect(engine.sendVoice({ s: "tx1", n: 0, fmt: "pcm16", sr: 16000 }, new Uint8Array([1, 2]))).toBe(
+      true,
+    );
+
+    const binary = ws!.sent.filter((s) => typeof s !== "string") as ArrayBufferView[];
+    expect(binary).toHaveLength(1);
+    const decoded = decodeVoiceFrame(new Uint8Array(binary[0] as Uint8Array));
+    expect(decoded).toBeNull(); // outbound frames carry no `u` — the server stamps it
+    // ...but the raw framing is intact and the server will accept it.
+    expect((binary[0] as Uint8Array)[0]).toBe(VOICE_FRAME);
   });
 });

@@ -6,12 +6,20 @@
   Tauri UI runs in; without them the hardened runtime kills the web process
   on launch. No App Sandbox key — this app reads/writes the user's vault
   anywhere on disk, which the sandbox would forbid.
+
+  audio-input is required for push-to-talk. Under the hardened runtime the mic is
+  refused even after the user grants permission unless this is present, so
+  getUserMedia fails outright instead of prompting. It pairs with
+  NSMicrophoneUsageDescription in Info.plist, which supplies the text of that
+  prompt — macOS terminates the app outright if that string is missing.
 -->
 <plist version="1.0">
 <dict>
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
     <true/>
 </dict>
 </plist>

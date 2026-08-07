@@ -270,6 +270,35 @@ button.primary.hero:hover:not(:disabled) {
   background: radial-gradient(circle, #4aa3ff 0%, transparent 70%);
   opacity: 0.18;
 }
+/* ---- Welcome-screen sign-in line ----
+   Sits with the hint text under the primary actions, in the same quiet register
+   — an account is optional in a local-first app, so this informs rather than
+   competes with "New vault" / "Open existing". */
+.picker-signin {
+  margin-top: var(--sp-2);
+}
+/* A button that reads as a link: keyboard- and screen-reader-correct (it
+   performs an action, so it must not be an anchor) while looking inline. */
+.linkish {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color var(--t-fast) var(--ease);
+}
+.linkish:hover:not(:disabled) {
+  color: var(--accent-hover);
+}
+.linkish:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .vault-picker-card {
   position: relative;
   z-index: 1;
@@ -359,6 +388,12 @@ button.primary.hero:hover:not(:disabled) {
 .ghost-pill.lg {
   padding: var(--sp-3) var(--sp-6);
   font-size: var(--fs-lg);
+}
+/* Compact variant for secondary chrome — sits in a corner without competing
+   with whatever the primary action on the screen is. */
+.ghost-pill.sm {
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
 }
 
 /* ---- New-vault naming step ---- */

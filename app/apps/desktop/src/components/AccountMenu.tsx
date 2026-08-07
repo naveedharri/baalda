@@ -261,16 +261,76 @@ function useLocalVaults(nonce = 0): RecentVault[] {
 }
 
 /** Native-pick a folder and open it as a local vault, then close the menu. */
-async function openFolderAsLocalVault(onDone: () => void): Promise<void> {
-  try {
-    const picked = await ipc.pickFolder();
-    if (picked) {
-      await useStore.getState().openLocalVault(picked);
+/**
+ * "New vault": name it, and it's created under the vaults root.
+ *
+ * Name-only, matching the welcome screen. Asking which folder was a question
+ * with one sensible answer — every vault we create lives under the same root,
+ * and a vault's folder is just `slugify(its name)`. Adopting a folder you
+ * already have is "Open existing" on the welcome screen, which keeps that
+ * folder exactly where it is.
+ *
+ * Inline rather than a dialog: it's one field, and the menu is already open.
+ */
+function NewVaultItem({ onDone }: { onDone: () => void }) {
+  const [naming, setNaming] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const create = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const root = await ipc.getVaultsRoot();
+      const v = await ipc.createVault(root, trimmed);
+      await useStore.getState().adoptOpenedVault(v);
+      setName("");
+      setNaming(false);
       onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
-  } catch {
-    /* picker cancelled/unavailable */
+  };
+
+  if (!naming) {
+    return (
+      <button className="menu-item subtle" onClick={() => setNaming(true)}>
+        <span className="menu-swatch plus" aria-hidden="true">
+          +
+        </span>
+        <span className="menu-item-label">New vault</span>
+      </button>
+    );
   }
+
+  return (
+    <>
+      <div className="menu-create-org">
+        <input
+          autoFocus
+          placeholder="Vault name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void create();
+            if (e.key === "Escape") {
+              setNaming(false);
+              setName("");
+            }
+          }}
+        />
+        <button className="primary sm" disabled={busy || !name.trim()} onClick={() => void create()}>
+          Create
+        </button>
+      </div>
+      {error && <div className="auth-error">{error}</div>}
+    </>
+  );
 }
 
 /**
@@ -366,15 +426,7 @@ function SignedOutPopover({
         onViewAll={onViewAllLocal}
       />
 
-      <button
-        className="menu-item subtle"
-        onClick={() => void openFolderAsLocalVault(onClose)}
-      >
-        <span className="menu-swatch plus" aria-hidden="true">
-          +
-        </span>
-        <span className="menu-item-label">New vault</span>
-      </button>
+      <NewVaultItem onDone={onClose} />
 
       {vault && (
         <button className="menu-item" onClick={onOpenSettings}>
@@ -545,17 +597,7 @@ function AccountPopover({
         onViewAll={onOpenVaults}
       />
 
-      {/* "New vault" = pick a folder; it becomes your (local) vault,
-          then Turn on sync promotes it. Same action as the old "Open a folder". */}
-      <button
-        className="menu-item subtle"
-        onClick={() => void openFolderAsLocalVault(onClose)}
-      >
-        <span className="menu-swatch plus" aria-hidden="true">
-          +
-        </span>
-        <span className="menu-item-label">New vault</span>
-      </button>
+      <NewVaultItem onDone={onClose} />
 
       {/* Teammates join with the code shared from Vault settings. */}
       {joining ? (

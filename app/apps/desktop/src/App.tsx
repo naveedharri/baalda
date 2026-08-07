@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
+import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { Editor } from "./components/Editor";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -468,6 +469,8 @@ export default function App() {
           <span className="note-title">{openNote?.title ?? "No note open"}</span>
           {openNote && !isPreview && <SaveIndicator />}
           {openNote && !isPreview && <SyncIndicator />}
+          {/* Vault-wide, so it sits in the header regardless of the open note. */}
+          <TalkButton />
           <button
             className="icon-btn search-btn"
             title="Search notes (⌘F)"

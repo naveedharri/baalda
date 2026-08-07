@@ -15,9 +15,15 @@ import type { ActivityStatus } from "../prefs";
 import {
   bytesToBase64,
   decodeUpdateFrame,
+  decodeVoiceFrame,
   encodeHello,
   encodePresence,
+  encodeVoiceFrame,
+  isVoiceFrame,
   parseServerControl,
+  CLIENT_CAPS,
+  type VoiceFrame,
+  type VoiceHeader,
 } from "./vaultProtocol";
 
 /** A teammate's live viewing state, surfaced to the UI for sidebar presence. */
@@ -103,6 +109,14 @@ export interface VaultSyncEngineOptions {
    *  these into the sidebar roster. */
   onPresence?: (peer: VaultPeer) => void;
   /**
+   * One inbound push-to-talk chunk from a teammate. Fired synchronously, ahead
+   * of the doc-update queue: audio is only useful while it's current, so it must
+   * not sit behind a backfill drain the way a doc update legitimately can.
+   *
+   * Nothing here is persisted. The engine hands the bytes over and forgets them.
+   */
+  onVoice?: (frame: VoiceFrame) => void;
+  /**
    * Progress of the inbound BACKFILL: `done` applied out of `total` received.
    *
    * Backfill frames only — the server sends at most one per document
@@ -175,6 +189,7 @@ export class VaultSyncEngine {
   private readonly onRegistryChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
+  private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
   private readonly onInboundIdle?: () => void;
   private readonly wsFactory: WsFactory;
@@ -235,6 +250,7 @@ export class VaultSyncEngine {
     this.onRegistryChanged = opts.onRegistryChanged;
     this.onMemberJoined = opts.onMemberJoined;
     this.onPresence = opts.onPresence;
+    this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
     this.onInboundIdle = opts.onInboundIdle;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
@@ -264,6 +280,20 @@ export class VaultSyncEngine {
   private sendPresence(): void {
     if (!this.ws || !this.localPresence) return;
     this.ws.send(encodePresence(this.localPresence));
+  }
+
+  /**
+   * Push one push-to-talk chunk to the vault. Returns false when the channel
+   * isn't live, so the caller can stop capturing rather than talk into a void.
+   *
+   * Dropped outright when not ready: audio is worthless late, so there is no
+   * queue and no retry. That is the deliberate difference from a doc update,
+   * which must survive a disconnect and does.
+   */
+  sendVoice(header: VoiceHeader, audio: Uint8Array): boolean {
+    if (!this.ws || !this.ready) return false;
+    this.ws.send(encodeVoiceFrame(header, audio));
+    return true;
   }
 
   /** Open the connection (idempotent). */
@@ -382,7 +412,15 @@ export class VaultSyncEngine {
     // backfill, and that window is what the download progress measures.
     this.backfilling = true;
     this.ws.send(
-      encodeHello({ token, manifest, priority, origin: this.api.getClientId() }),
+      encodeHello({
+        token,
+        manifest,
+        priority,
+        origin: this.api.getClientId(),
+        // Opt in to the frame types this build understands. Without it the
+        // server withholds them (see `CLIENT_CAPS`).
+        caps: CLIENT_CAPS,
+      }),
     );
   }
 
@@ -442,10 +480,21 @@ export class VaultSyncEngine {
       }
       return;
     }
-    // Binary: an incremental update frame for one doc. Queue it — never apply it
-    // inline (see the `inbound` field comment).
     const bytes = toUint8Array(data);
     if (!bytes) return;
+    // Voice shares the binary path with doc updates; the leading byte separates
+    // them (see `isVoiceFrame`). Delivered straight through rather than queued:
+    // a chunk that waits behind a backfill drain is already too late to play,
+    // and there is nothing to converge — it's ephemeral either way.
+    if (isVoiceFrame(bytes)) {
+      const voice = decodeVoiceFrame(bytes);
+      // Copy off the socket buffer before handing it on: playback outlives this
+      // callback, and a subarray would pin the whole received ArrayBuffer.
+      if (voice) this.onVoice?.({ header: voice.header, audio: new Uint8Array(voice.audio) });
+      return;
+    }
+    // Binary: an incremental update frame for one doc. Queue it — never apply it
+    // inline (see the `inbound` field comment).
     const frame = decodeUpdateFrame(bytes);
     if (!frame) return;
     this.enqueueInbound(frame);

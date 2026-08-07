@@ -1,0 +1,160 @@
+/* Push-to-talk in the main header. Builds on the shared `.icon-btn` (28px ghost
+   button, 18px glyph) rather than introducing a second button size, and borrows
+   the mention toast's soft-accent pill for its transient notices. Tokens only —
+   no hardcoded colors, spacing, radii, or shadows. */
+
+.talk-btn {
+  /* Holding the button is a drag-like gesture; text selection fights it. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Live. The loudest thing in the header on purpose: an open mic the user has
+   forgotten about is the failure mode worth designing against.
+
+   Three layers, all keyed to "broadcasting" rather than mere hover:
+     1. the button holds an accent fill,
+     2. a ring radiates outward and fades — the visual grammar of transmitting,
+     3. the megaphone itself leans and breathes.
+   The ring is a pseudo-element so it can overflow the 28px button without
+   affecting layout in the header row. */
+.talk-btn.live {
+  color: var(--accent);
+  background: var(--accent-soft);
+  position: relative;
+}
+
+.talk-btn.live:hover {
+  color: var(--accent);
+}
+
+.talk-btn.live::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--accent);
+  animation: talk-broadcast 1.4s var(--ease) infinite;
+  pointer-events: none;
+}
+
+.talk-btn.live svg {
+  transform-origin: 60% 60%;
+  animation: talk-shout 1.4s ease-in-out infinite;
+}
+
+/* The ring grows past the button edge and dissolves, so the button reads as
+   emitting rather than merely highlighted. */
+@keyframes talk-broadcast {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+@keyframes talk-shout {
+  0%,
+  100% {
+    transform: rotate(0) scale(1);
+  }
+  50% {
+    transform: rotate(-7deg) scale(1.1);
+  }
+}
+
+/* Receiving — a teammate is talking to US. Distinct from `.live` on purpose:
+   sending is a state you chose and must not lose track of (steady fill, ring),
+   receiving is something happening TO you, so it shakes to catch the eye and
+   then stops when they stop. Getting these two confused would be the worst
+   possible outcome, since one of them means your mic is open. */
+.talk-btn.receiving {
+  color: var(--accent);
+}
+
+.talk-btn.receiving svg {
+  transform-origin: 50% 50%;
+  animation: talk-shake 0.6s ease-in-out infinite;
+}
+
+/* A quick side-to-side wobble — a megaphone being rattled, not a slow pulse,
+   which would read as "loading". */
+@keyframes talk-shake {
+  0%,
+  100% {
+    transform: rotate(0) translateX(0);
+  }
+  15% {
+    transform: rotate(-9deg) translateX(-1px);
+  }
+  30% {
+    transform: rotate(8deg) translateX(1px);
+  }
+  45% {
+    transform: rotate(-6deg) translateX(-1px);
+  }
+  60% {
+    transform: rotate(4deg) translateX(1px);
+  }
+  75% {
+    transform: rotate(-2deg) translateX(0);
+  }
+}
+
+/* Transient notices — a mic problem, or who's currently talking. Soft accent
+   pill, matching `.ping-toast`; deliberately NOT `--danger`, since neither is
+   an error the user must act on and a red mark in the chrome reads as breakage. */
+.talk-note {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  border-radius: var(--radius-pill);
+  padding: 3px var(--sp-3);
+  white-space: nowrap;
+  animation: rise-in var(--t-fast) var(--ease) both;
+}
+
+/* Someone talking is live status, not a passing note — give it the accent. */
+.talk-note.talking {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.talk-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  flex: none;
+  animation: talk-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes talk-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* Motion is decorative; the accent fill alone still says "live". Drop the ring
+   entirely rather than leaving a static outline sitting around the button. */
+@media (prefers-reduced-motion: reduce) {
+  .talk-btn.live svg,
+  .talk-btn.receiving svg,
+  .talk-dot {
+    animation: none;
+  }
+  .talk-btn.live::after {
+    display: none;
+  }
+}

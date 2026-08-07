@@ -19,7 +19,17 @@ export interface HelloFrame {
    * re-pull a structural change we made ourselves.
    */
   origin?: string;
+  /**
+   * Feature flags this build understands. The server withholds any NEW binary
+   * frame type from a client that didn't list it — without that, an older build
+   * would run a voice chunk through {@link decodeUpdateFrame} and apply the
+   * garbage as a doc update. Releases auto-update, so old builds stay live.
+   */
+  caps?: string[];
 }
+
+/** What this build can handle beyond the original protocol. Sent in `hello`. */
+export const CLIENT_CAPS = ["voice"];
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).
  *  `docId` null means the user isn't viewing anything (or left) — clear them. */
@@ -110,6 +120,95 @@ export function decodeUpdateFrame(
   const docId = dec.decode(bytes.subarray(2, 2 + idLen));
   const update = bytes.subarray(2 + idLen);
   return { docId, update };
+}
+
+// ---- Voice broadcast (mirror of the server's framing) --------------------
+//
+//   [0x01 VOICE][headerLen u16 BE][header JSON utf8][audio bytes]
+//
+// Ephemeral by construction: chunks are played as they arrive and dropped. The
+// client never writes them to disk, the CRDT, or the index.
+
+export const VOICE_FRAME = 0x01;
+
+/** Chunk header. Short keys — this rides on every chunk (~10/s while talking). */
+export interface VoiceHeader {
+  /** Transmission id: groups the chunks of one press-and-hold. */
+  s: string;
+  /** Chunk index within the transmission, from 0. */
+  n: number;
+  /** 1 on the final chunk (button released). */
+  f?: 0 | 1;
+  /** Audio encoding, e.g. `"pcm16"`. First chunk only. */
+  fmt?: string;
+  /** Sample rate in Hz. First chunk only. */
+  sr?: number;
+  /** Speaker's user id — inbound only; the server stamps it from the token. */
+  u?: string;
+  /** Speaker's display name. Inbound, first chunk only. */
+  m?: string;
+  /** Speaker's presence colour. Inbound, first chunk only. */
+  c?: string;
+}
+
+export interface VoiceFrame {
+  header: VoiceHeader;
+  audio: Uint8Array;
+}
+
+export function encodeVoiceFrame(header: VoiceHeader, audio: Uint8Array): Uint8Array {
+  const h = enc.encode(JSON.stringify(header));
+  const out = new Uint8Array(3 + h.length + audio.length);
+  out[0] = VOICE_FRAME;
+  out[1] = (h.length >> 8) & 0xff;
+  out[2] = h.length & 0xff;
+  out.set(h, 3);
+  out.set(audio, 3 + h.length);
+  return out;
+}
+
+/** Decode an inbound voice frame; null if it isn't one. Never throws. */
+export function decodeVoiceFrame(bytes: Uint8Array): VoiceFrame | null {
+  if (bytes.length < 3 || bytes[0] !== VOICE_FRAME) return null;
+  const hLen = (bytes[1] << 8) | bytes[2];
+  if (bytes.length < 3 + hLen) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(dec.decode(bytes.subarray(3, 3 + hLen)));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const h = parsed as Record<string, unknown>;
+  if (typeof h.s !== "string" || !h.s) return null;
+  if (typeof h.n !== "number" || !Number.isInteger(h.n) || h.n < 0) return null;
+  // `u` is required inbound: an unattributed chunk can't be shown or grouped.
+  if (typeof h.u !== "string" || !h.u) return null;
+  return {
+    header: {
+      s: h.s,
+      n: h.n,
+      ...(h.f === 1 ? { f: 1 as const } : {}),
+      ...(typeof h.fmt === "string" ? { fmt: h.fmt } : {}),
+      ...(typeof h.sr === "number" ? { sr: h.sr } : {}),
+      u: h.u,
+      ...(typeof h.m === "string" ? { m: h.m } : {}),
+      ...(typeof h.c === "string" ? { c: h.c } : {}),
+    },
+    audio: bytes.subarray(3 + hLen),
+  };
+}
+
+/**
+ * True when a binary frame from the server is voice rather than a doc update.
+ *
+ * The two share the binary path and only the first byte separates them. That is
+ * unambiguous because a doc-update frame opens with `docIdLen` as u16 BE and the
+ * server caps doc ids at 0xff bytes, so its high byte is always 0x00 — never
+ * {@link VOICE_FRAME}. Don't relax that cap without changing this.
+ */
+export function isVoiceFrame(bytes: Uint8Array): boolean {
+  return bytes.length > 0 && bytes[0] === VOICE_FRAME;
 }
 
 /** base64 <-> bytes helpers (browser `atob`/`btoa`, Node `Buffer` fallback). */

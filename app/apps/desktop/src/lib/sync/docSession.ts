@@ -36,6 +36,12 @@ import {
   type VaultPeer,
   type VaultSyncStatus,
 } from "./vaultSyncEngine";
+import type { VoiceFrame } from "./vaultProtocol";
+import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
+import { VoicePlayer } from "../voice/playback";
+import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
+
+export type { VoiceSpeaker };
 
 /** Basename of a vault-relative path (for the upload's x-file-name hint). */
 function baseName(relPath: string): string {
@@ -123,6 +129,19 @@ export class SyncManager {
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
+
+  // ---- push-to-talk voice ----
+  //
+  // Entirely ephemeral: the player holds only what is scheduled to play in the
+  // next second or so, and `voiceNames` is a display cache keyed by speaker.
+  // Nothing here is written to disk, the CRDT, or the index.
+  private readonly voiceRoster = new VoiceRoster((id) => colorForUser(id));
+  private onVoiceSpeakers?: (speaking: VoiceSpeaker[]) => void;
+  private readonly voicePlayer = new VoicePlayer({
+    onSpeakingChange: (userId, speaking) => {
+      if (this.voiceRoster.setSpeaking(userId, speaking)) this.emitVoiceSpeakers();
+    },
+  });
 
   // ---- bulk sync run (phase 2) ----
   //
@@ -721,6 +740,72 @@ export class SyncManager {
     this.onVaultPresence = cb;
   }
 
+  // ---- push-to-talk voice ------------------------------------------------
+
+  /**
+   * UI subscribes here to learn who is currently talking. Fires with the set of
+   * speaking user ids on every change, so the sidebar can light them up.
+   */
+  setVoiceListener(cb: ((speaking: VoiceSpeaker[]) => void) | undefined): void {
+    this.onVoiceSpeakers = cb;
+  }
+
+  /**
+   * Open the mic and stream to the vault until the returned handle is stopped.
+   *
+   * One transmission per press. The stream id is minted here so every chunk of
+   * a single press-and-hold groups on the receiving end, and the format rides
+   * the opening chunk only.
+   *
+   * Works with no channel at all. `this.vaultEngine` is read per chunk rather
+   * than captured up front, so a transmission that starts offline still lands
+   * the moment the channel comes back mid-press, and one that starts online
+   * survives a drop instead of throwing. Chunks with nowhere to go are simply
+   * dropped — which is what "ephemeral" already means everywhere else here.
+   */
+  async startBroadcast(): Promise<{ stop: () => Promise<void> }> {
+    const streamId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let lastSeq = -1;
+
+    const capture = await startCapture((audio, seq) => {
+      lastSeq = seq;
+      this.vaultEngine?.sendVoice(
+        { s: streamId, n: seq, ...(seq === 0 ? CAPTURE_FORMAT : {}) },
+        audio,
+      );
+    });
+
+    return {
+      stop: async () => {
+        await capture.stop();
+        // Always send a final marker, even with an empty payload: it's what
+        // closes the stream on every listener. Without it a receiver holds the
+        // "talking" indicator until its own timeout.
+        this.vaultEngine?.sendVoice({ s: streamId, n: lastSeq + 1, f: 1 }, new Uint8Array());
+      },
+    };
+  }
+
+  /** Route one inbound chunk into the player and keep the speaking roster fresh. */
+  private handleVoice(frame: VoiceFrame): void {
+    const { header, audio } = frame;
+    const userId = header.u;
+    if (!userId) return;
+    this.voiceRoster.learn(userId, header.m, header.c);
+    this.voicePlayer.push({
+      streamId: header.s,
+      userId,
+      seq: header.n,
+      audio,
+      sampleRate: header.sr,
+      final: header.f === 1,
+    });
+  }
+
+  private emitVoiceSpeakers(): void {
+    this.onVoiceSpeakers?.(this.voiceRoster.list());
+  }
+
   /** Record which note this client is now viewing (null = none) and broadcast it. */
   setViewing(docId: string | null): void {
     this.viewingDocId = docId;
@@ -801,6 +886,8 @@ export class SyncManager {
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
+      // A teammate is talking. Play it as it lands; nothing is kept.
+      onVoice: (frame) => this.handleVoice(frame),
       // Inbound backfill progress — the `downloading` half of the run's progress.
       onInboundProgress: (done, total) => this.handleInboundProgress(done, total, scope),
       // …and the edge that ends it.
@@ -814,6 +901,12 @@ export class SyncManager {
   private stopVaultEngine(): void {
     this.vaultEngine?.stop();
     this.vaultEngine = null;
+    // Cut any audio still playing: it belongs to the vault we're leaving, and
+    // hearing a teammate from the previous vault after switching would be a bug
+    // with an unpleasant privacy flavour.
+    this.voicePlayer.stopAll();
+    this.voiceRoster.clear();
+    this.emitVoiceSpeakers();
     // Kick the durable manifest write FIRST, while this vault's epoch is still the
     // open one: the store's IPC is epoch-pinned, so a write issued after Rust has
     // swapped vaults is refused (benignly — the manifest just misses its last
