@@ -509,12 +509,43 @@ export class VaultRegistry {
     if (this.baselineVaultId !== vaultId) return none;
 
     const localNotePaths = new Set(args.notes.map((n) => n.path));
+    // What docId does this device believe each on-disk note has?
+    //
+    // The registry's OWN map answers first, and it has to: a note this device
+    // MATERIALIZED from the server got its file written by `writeNoteIfMissing`,
+    // and Rust's indexer mints a fresh local UUID for any file it hasn't seen
+    // before. That local id never equals the server's `doc_id` — `byPath` is the
+    // only place the two identities are joined (see viewingDocId.ts, which says
+    // the same thing for presence).
+    //
+    // Keying this map on index ids alone therefore made every remote delete of a
+    // materialized note a no-op: `local.get(serverDocId)` came back undefined, the
+    // plan read that as "already gone locally" and suppressed nothing, and the
+    // outbound half below re-registered the still-present file under its LOCAL id
+    // — resurrecting the note on the server as a brand-new row with a brand-new
+    // docId. Deleting it again just repeated the cycle, which is what made a
+    // deleted note look undeletable.
+    //
+    // The index id stays as the fallback for paths the registry doesn't map yet
+    // (a note created locally and not yet registered). One docId per path either
+    // way — `claimed` stops a mapped path also entering under its index id, which
+    // would let one file be both renamed and trashed in a single pass.
+    const local = new Map<string, string>();
+    const claimed = new Set<string>();
+    for (const path of localNotePaths) {
+      const m = this.byPath.get(path);
+      // `byPath` can still hold another collection's entries at this point (they
+      // are pruned after inbound runs), and those ids mean nothing here.
+      if (m && m.vaultId === vaultId) {
+        local.set(m.docId, path);
+        claimed.add(path);
+      }
+    }
     // Only notes that are BOTH in the tree and in the index have a docId we can
     // match on. (The index covers `.md`; a `.txt`/`.canvas` note therefore never
     // gets inbound-renamed or trashed, only materialized — the safe direction.)
-    const local = new Map<string, string>();
     for (const t of args.titles) {
-      if (localNotePaths.has(t.path)) local.set(t.id, t.path);
+      if (localNotePaths.has(t.path) && !claimed.has(t.path)) local.set(t.id, t.path);
     }
     const server = new Map<string, string>();
     for (const n of args.serverNotes) {

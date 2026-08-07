@@ -207,6 +207,9 @@ export function planInbound(input: InboundInput): InboundPlan {
   plan.createFolders.sort(byDepth);
 
   // ---- notes --------------------------------------------------------------
+  // Every note path on disk, for the "we lost this doc's local identity" case
+  // below. `input.local` is docId → path, so its values are exactly that set.
+  const localPaths = new Set(input.local.values());
   const docIds = new Set<string>([...input.baseline.keys(), ...input.server.keys()]);
   for (const docId of docIds) {
     const prev = input.baseline.get(docId);
@@ -245,7 +248,19 @@ export function planInbound(input: InboundInput): InboundPlan {
     if (prev === undefined) continue; // never agreed it was ours — not ours to touch
 
     if (dead) {
-      if (loc === undefined) continue; // already gone locally; the prune tidies the map
+      if (loc === undefined) {
+        // No local doc with this id. Usually that means the file really is gone
+        // and the prune tidies the map — but it ALSO happens when the file is
+        // still sitting at its baseline path under a different local identity
+        // (a materialized note whose registry mapping has since been pruned).
+        // Re-registering that file is what resurrects a deleted note under a new
+        // docId, so suppress the path. Deliberately no trash: without a docId
+        // match we can't prove the file at that path is still this note, and a
+        // wrong guess here deletes someone's work. It stays on disk as a purely
+        // local note the user can remove themselves.
+        if (prev !== undefined && localPaths.has(prev)) plan.suppress.add(prev);
+        continue;
+      }
       // Belt as well as braces: if the trash step is skipped or fails, this still
       // stops the note being re-registered as a ghost.
       plan.suppress.add(loc);

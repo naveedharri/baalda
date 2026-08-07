@@ -388,6 +388,41 @@ export async function createNote(
   if ((await folderWritePermission(ctx.auth, folderId)) !== "edit") {
     throw new McpToolError("You do not have edit access to create a note here");
   }
+  // Adopt the live note already at this path instead of inserting a second row,
+  // exactly as `createFolder` does. A vault-relative path addresses ONE note —
+  // nothing in the schema enforces that, and the desktop's path→docId map just
+  // picks one of a duplicate pair, so the loser becomes a row no client can see
+  // or delete. An LLM retrying a tool call must not be able to create that.
+  const existing = await pool.query<{ id: string; title: string | null; folder_id: string | null }>(
+    `SELECT id, title, folder_id FROM notes
+      WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL
+      ORDER BY created_at ASC LIMIT 1`,
+    [input.vaultId, input.relPath],
+  );
+  if (existing.rows[0]) {
+    const row = existing.rows[0];
+    // Seed content only into an EMPTY note. "Create" must never become a way to
+    // overwrite a note that already says something — that's `update_note`, which
+    // the caller can reach for once `adopted` has told it what happened.
+    let seeded = false;
+    if (input.content) {
+      const current = await ctx.docWriter.readContent(input.vaultId, row.id);
+      if (current.trim().length === 0) {
+        await ctx.docWriter.setContent(input.vaultId, row.id, input.content);
+        seeded = true;
+      }
+    }
+    return {
+      docId: row.id,
+      vaultId: input.vaultId,
+      folderId: row.folder_id,
+      title: row.title ?? relPathStem(input.relPath),
+      relPath: input.relPath,
+      adopted: true,
+      seeded,
+    };
+  }
+
   const docId = randomUUID();
   await pool.query(
     `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by)
@@ -406,6 +441,8 @@ export async function createNote(
     folderId,
     title: input.title ?? relPathStem(input.relPath),
     relPath: input.relPath,
+    adopted: false,
+    seeded: Boolean(input.content),
   };
 }
 

@@ -160,6 +160,55 @@ describe("MCP server", () => {
     expect((await call(token, "read_note", { docId })).isError).toBe(true);
   });
 
+  it("create_note adopts the note already at that path instead of duplicating it", async () => {
+    const owner = await seedUser("owner@mcp-dup.com");
+    const org = await seedOrg("Acme", "acme-mcp-dup");
+    await seedMember(org, owner, "owner");
+    const vault = await seedVault(org);
+    const token = await tokenFor(owner, org);
+
+    const first = await call(token, "create_note", {
+      vaultId: vault,
+      relPath: "naveed-test.md",
+      content: "original",
+    });
+    const docId = first.data.docId as string;
+    expect(first.data.adopted).toBe(false);
+
+    // The retry an assistant makes when it isn't sure the first call landed. A
+    // second row at the same path is unreachable: the desktop's path→docId map
+    // picks one of the pair, so deleting "the" note leaves the other behind and
+    // the file looks undeletable.
+    const again = await call(token, "create_note", {
+      vaultId: vault,
+      relPath: "naveed-test.md",
+      content: "different",
+    });
+    expect(again.isError).toBe(false);
+    expect(again.data.docId).toBe(docId);
+    expect(again.data.adopted).toBe(true);
+    // Adoption is not an overwrite — that's what update_note is for.
+    expect(again.data.seeded).toBe(false);
+    expect(mem.store.get(docId)).toBe("original");
+
+    const { rows } = await pool.query(
+      "SELECT id FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL",
+      [vault, "naveed-test.md"],
+    );
+    expect(rows).toHaveLength(1);
+
+    // Once deleted, the path is free again — adoption only ever matches a LIVE
+    // note, so a delete really does clear the way for a fresh one.
+    await call(token, "delete_note", { docId });
+    const remade = await call(token, "create_note", {
+      vaultId: vault,
+      relPath: "naveed-test.md",
+      content: "fresh",
+    });
+    expect(remade.data.adopted).toBe(false);
+    expect(remade.data.docId).not.toBe(docId);
+  });
+
   it("member: only sees/edits shared content; no root create", async () => {
     const owner = await seedUser("owner@mcp3.com");
     const member = await seedUser("member@mcp3.com");

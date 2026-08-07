@@ -181,6 +181,24 @@ describe("planInbound — deletes", () => {
     expect(p.trash).toEqual([]);
   });
 
+  it("suppresses a tombstoned note whose file is still on disk under another id", () => {
+    // The undeletable-note bug. A note MATERIALIZED from the server has a local
+    // index id Rust minted for the new file, which is not the server's docId; if
+    // the registry mapping that joined the two has since been pruned, the doc
+    // reads as "gone locally" here while the file is very much still there. The
+    // outbound half then re-registered it under a brand-new docId, so a deleted
+    // note came back — and deleting it again just repeated the cycle.
+    const p = plan({
+      baseline: new Map([["server-id", "naveed-test.md"]]),
+      local: new Map([["local-index-id", "naveed-test.md"]]),
+      tombstones: new Set(["server-id"]),
+    });
+    expect([...p.suppress]).toEqual(["naveed-test.md"]);
+    // Suppress only. Without a docId match we cannot prove the file at that path
+    // is still this note, and a wrong guess here deletes someone's work.
+    expect(p.trash).toEqual([]);
+  });
+
   it("trashes deepest paths first", () => {
     const p = plan({
       baseline: new Map([
