@@ -443,6 +443,26 @@ button.primary.hero:hover:not(:disabled) {
   margin-top: var(--sp-1);
 }
 
+/* ---- Join-with-code step (same slot/shell as the naming step) ----
+   A join code is an opaque 8-character string read off someone else's screen,
+   so it gets the mono face and loose tracking that make O/0 and I/1 tellable
+   apart while typing. */
+.join-code-input {
+  font-family: var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.join-code-input::placeholder {
+  letter-spacing: 0.12em;
+  opacity: 0.45;
+}
+/* The step owns its own error line (a bad code is expected, not exceptional),
+   so it sits inside the form rather than in the card-level error slot. */
+.vault-picker-card .error.join-error {
+  margin-top: 0;
+  text-align: left;
+}
+
 /* Post-sign-in landing: shown in place of the two primary actions while the
    vault is being resolved (and, for a new account, created + seeded). Occupies
    the same slot so the centered card doesn't jump. */
@@ -618,6 +638,30 @@ button.primary.hero:hover:not(:disabled) {
   position: relative;
 }
 
+/* ---- Window drag regions ----
+   The window runs without a system title bar (`titleBarStyle: "Overlay"` in
+   tauri.conf.json) so the webview owns the full height. The trade Tauri makes
+   for that is that nothing is draggable by default, so the rows that sit along
+   the top edge opt in with `data-tauri-drag-region`. Text inside them must not
+   select, or a drag reads as a botched selection instead of moving the window. */
+[data-tauri-drag-region] {
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* Bare strip for screens with no header row of their own (the vault picker). */
+.titlebar-drag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Fixed rather than `--titlebar-inset`, which is 0 off macOS and would leave
+     nothing to grab. The picker is vertically centred, so this strip only ever
+     covers empty margin. */
+  height: 28px;
+  z-index: 2;
+}
+
 /* ---- Sidebar resize handle ----
    Rides on top of the seam rather than taking a grid column of its own, so the
    two panes stay flush and the hit area can be wider than the seam itself.
@@ -659,11 +703,15 @@ body:has(.sidebar-resizer.dragging) {
   min-width: 0;
   padding: 0 var(--sp-1) 0 var(--sp-2);
 }
+/* The window has no system title bar of its own (`titleBarStyle: "Overlay"`),
+   so this row starts at y=0 and the macOS traffic lights float over it — hence
+   the inset on top of the normal padding. It doubles as the window's drag
+   handle on this side; see `data-tauri-drag-region` in SidebarHeader.tsx. */
 .sidebar-header {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: var(--sp-4) var(--sp-3) var(--sp-3);
+  padding: calc(var(--sp-4) + var(--titlebar-inset)) var(--sp-3) var(--sp-3);
 }
 .sidebar-header-main {
   display: flex;
@@ -893,8 +941,12 @@ body:has(.sidebar-resizer.dragging) {
   margin-right: calc(-1 * var(--sp-1));
   /* A file tree is never selectable text. Covers react-arborist's own row
      wrapper divs (our rows set this too) so a double-click to rename can't
-     leave stray blue text-selection bands between rows. */
+     leave stray blue text-selection bands between rows — and so a drag that
+     the OS refuses can't fall back to smearing a selection across the rows.
+     Prefixed too: this runs in WKWebView, where the unprefixed property is
+     only honoured on recent versions. */
   user-select: none;
+  -webkit-user-select: none;
 }
 /* react-arborist otherwise widens its scroll area to the longest row so long
    names scroll horizontally. Clip that and pin the inner list + rows to the
@@ -911,12 +963,26 @@ body:has(.sidebar-resizer.dragging) {
   width: 100% !important;
 }
 /* OS files dragged over the tree: a dashed accent frame + soft wash invite the
-   drop. Purely a hint — the actual routing happens on the Tauri drop event. */
+   drop. Purely a hint — the actual routing happens on the Tauri drop event.
+   Only a drag from OUTSIDE the app gets here; dragging a row around inside the
+   sidebar is suppressed in FileTree, or this frame would cover the insertion
+   line the user is aiming with. */
 .filetree.drop-active {
   outline: 2px dashed var(--accent);
   outline-offset: -4px;
   border-radius: var(--radius-md);
   background: var(--accent-soft);
+}
+/* Rows are draggable, so press-and-hold reads as picking one up — the closed
+   hand is the whole feedback that a row is now "in your grip", before it has
+   moved far enough to show a drop cursor. Held for the length of the drag by
+   the container class, since the pointer leaves the source row immediately. */
+.tree-row:active {
+  cursor: grabbing;
+}
+.filetree.row-dragging,
+.filetree.row-dragging * {
+  cursor: grabbing !important;
 }
 /* Transient outcome pill after an import (menu or drop). Sits at the bottom of
    the sidebar, out of the way, and fades itself out. */
@@ -1196,6 +1262,7 @@ body:has(.sidebar-resizer.dragging) {
   color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
+  -webkit-user-select: none;
   transition:
     background var(--t-fast) var(--ease),
     color var(--t-fast) var(--ease);
@@ -1215,9 +1282,14 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--accent-soft-hover);
 }
 /* Folder about to receive a dragged note */
+/* "Release here and it goes inside this folder." Faded in rather than snapped
+   on, so brushing past a folder on the way somewhere else doesn't strobe. */
 .tree-row.drop-target {
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px var(--accent);
+  transition:
+    background 120ms var(--ease),
+    box-shadow 120ms var(--ease);
 }
 
 /* The row wrapper is absolutely positioned by react-window via `top`; since
@@ -1230,12 +1302,15 @@ body:has(.sidebar-resizer.dragging) {
 }
 
 /* The row you've picked up — lift and dim it so the drag reads as tactile. */
+/* The row you picked up: it stays in place and recedes, so the line is the
+   thing your eye follows. Eased out slowly and in quickly — a gentle lift, a
+   clean settle. */
 .tree-row.dragging {
-  opacity: 0.55;
-  transform: scale(0.98);
+  opacity: 0.4;
+  transform: scale(0.985);
   transition:
-    opacity var(--t-fast) var(--ease),
-    transform var(--t-fast) var(--ease);
+    opacity 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Honor reduced-motion: keep the reorder instant, drop the lift animation. */
@@ -1496,15 +1571,35 @@ body:has(.sidebar-resizer.dragging) {
 /* Drag-and-drop insertion line (replaces react-arborist's default blue).
    Fades/grows in so the drop target reads clearly as you drag over it, with a
    soft glow and a leading dot to anchor the eye. */
+/* The insertion line. It lives for the whole drag and is moved by transform
+   from the pointer handler, so it GLIDES from slot to slot on the compositor —
+   the difference between a marker that tracks your hand and one that blinks
+   from place to place. `top: 0` because the transform carries the whole offset;
+   `left` is set inline to match the destination's indent. */
 .drop-cursor {
   position: absolute;
+  top: 0;
   right: var(--sp-2);
   height: 2px;
   border-radius: var(--radius-pill);
   background: var(--accent);
   box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
   pointer-events: none;
-  animation: drop-cursor-in var(--t-fast) var(--ease);
+  opacity: 0;
+  will-change: transform;
+  /* ONLY the transform is animated, and only vertically. `left` is snapped,
+     never transitioned: it runs on the main thread while the transform runs on
+     the compositor, and the two desync under any load — the line then bows out
+     sideways and curves back instead of stepping straight up the list. `left`
+     also changes the line's WIDTH (it is anchored right), so animating it
+     morphs the line's shape mid-move on top of that.
+
+     Short and near-linear on purpose. This marks a slot, and a slot is a
+     discrete thing: it should step from row to row a beat behind your hand,
+     not glide or ease. */
+  transition:
+    transform 90ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 90ms linear;
 }
 .drop-cursor::before {
   content: "";
@@ -1517,19 +1612,10 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--accent);
   transform: translateY(-50%);
 }
-@keyframes drop-cursor-in {
-  from {
-    opacity: 0;
-    transform: scaleX(0.9);
-  }
-  to {
-    opacity: 1;
-    transform: scaleX(1);
-  }
-}
 @media (prefers-reduced-motion: reduce) {
+  /* Snap rather than glide — but keep the fade, which carries no motion. */
   .drop-cursor {
-    animation: none;
+    transition: opacity 110ms var(--ease);
   }
 }
 
@@ -1579,6 +1665,75 @@ body:has(.sidebar-resizer.dragging) {
 .context-menu li.danger:hover {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+/* ---- Sort menu (toolbar popover + the ⋯ menu's sort group) ----
+   A non-clickable group label. Not a heading element: this is a menu, and the
+   label names the radio group below it rather than starting a document section. */
+.context-menu li.menu-heading {
+  padding: var(--sp-1) var(--sp-3) var(--sp-1) calc(var(--sp-3) + 18px);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  cursor: default;
+}
+.context-menu li.menu-heading:hover {
+  background: none;
+}
+/* As a group start inside the ⋯ menu it keeps the rule but not the sep's own
+   padding, which would double up with the heading's tighter one. */
+.context-menu li.menu-heading.menu-sep-item {
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+/* Fixed-width tick gutter, so the two options' labels line up whether or not
+   they carry the check — and so the heading above can align to the same text. */
+.menu-tick {
+  display: inline-block;
+  width: 18px;
+  flex-shrink: 0;
+  color: var(--accent);
+  font-weight: 700;
+}
+.context-menu li.is-on {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+/* Trailing explanatory line — the one place the two-layer arrangement rule is
+   stated in the UI, so it reads as prose, not as another thing to click. */
+.context-menu li.menu-note {
+  margin-top: var(--sp-1);
+  padding-top: calc(var(--sp-2) + 1px);
+  border-top: 1px solid var(--border);
+  max-width: 230px;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  white-space: normal;
+  cursor: default;
+}
+.context-menu li.menu-note:hover {
+  background: none;
+}
+/* The toolbar popover hangs off its button instead of the pointer, so it is
+   absolute within the wrapper rather than fixed like the row menu. */
+.tree-sort-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.context-menu.tree-sort-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  /* Opens down-and-right from the button. The toolbar is left-anchored (it sits
+     just after the "Notes" label, not at the sidebar's right edge), so
+     right-aligning would walk the menu off the sidebar's LEFT edge instead.
+     Overhanging to the right is fine — nothing in the sidebar clips, and a
+     popover laid briefly over the editor is what a popover is. */
+  left: 0;
+  min-width: 210px;
 }
 
 /* Color swatch row inside the ⋯ menu (Finder-tag style) */

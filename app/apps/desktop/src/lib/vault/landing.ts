@@ -37,11 +37,24 @@ export interface LandingInput {
   rememberedOrgId: string | null;
   /** May we create a vault for an account that has none? */
   createIfNone: boolean;
+  /**
+   * The user is part-way through "join a team with a code" on the welcome
+   * screen, which runs sign-in/sign-up first and then comes back for the code.
+   */
+  joiningWithCode?: boolean;
 }
 
 export function planLanding(input: LandingInput): LandingAction {
   const isMember = (id: string | null): id is string =>
     !!id && input.orgIds.includes(id);
+
+  // 0) Mid join-with-code: land NOWHERE. The welcome screen still owns this
+  //    flow and is waiting to ask for the code, and every branch below would
+  //    unmount it — a brand-new account would be handed an auto-created "My
+  //    Vault" (branch 6) and an existing one dropped into an old vault, either
+  //    way burying the step the user explicitly asked for. `joinVault` is this
+  //    flow's landing: it switches into the vault the code names.
+  if (input.joiningWithCode) return { kind: "nothing" };
 
   // 1) An explicit "open this vault" request (a remote vault clicked on the
   //    signed-out welcome screen, which routed through sign-in) wins over every

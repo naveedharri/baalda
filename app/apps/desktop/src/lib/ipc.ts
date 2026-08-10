@@ -68,6 +68,10 @@ export interface TreeNode {
    *  nobody has expanded look identical — which is why an unexpanded folder used
    *  to be labelled "empty" in the sidebar. Absent ⇒ treat as not loaded. */
   childrenLoaded?: boolean;
+  /** Last-modified time in epoch millis (0 when the OS wouldn't say). Drives the
+   *  sidebar's "Recently modified" sort. Absent on nodes synthesized client-side
+   *  before a refresh lands. */
+  modified?: number;
 }
 
 export interface SearchResult {

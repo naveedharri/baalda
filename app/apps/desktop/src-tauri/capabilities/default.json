@@ -5,6 +5,10 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    {
+      "identifier": "core:window:allow-start-dragging",
+      "comment": "The window runs with `titleBarStyle: \"Overlay\"` (tauri.conf.json), so there is no system title bar to drag it by — the two header rows along the top edge carry `data-tauri-drag-region` instead. That attribute calls this command on mousedown, and `core:default` grants only read-only window commands, so without this the rows look draggable and silently do nothing."
+    },
     "opener:default",
     {
       "identifier": "opener:allow-open-path",

@@ -62,9 +62,11 @@
 }
 
 /* ---- Header bar overlay ---- */
+/* `.graph-view` is a full-window overlay, so this floating bar would sit under
+   the macOS traffic lights without the title-bar inset. */
 .graph-header {
   position: absolute;
-  top: var(--sp-4);
+  top: calc(var(--sp-4) + var(--titlebar-inset));
   left: var(--sp-4);
   right: var(--sp-4);
   z-index: 1;

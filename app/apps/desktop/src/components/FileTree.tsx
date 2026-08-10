@@ -8,7 +8,6 @@ import {
 } from "react";
 import {
   Tree,
-  type CursorProps,
   type NodeApi,
   type NodeRendererProps,
   type TreeApi,
@@ -23,9 +22,11 @@ import {
   clearOrderAt,
   computeReorder,
   moveSubtreeOrder,
+  narrowPins,
   removeFromOrder,
   renameInOrder,
 } from "../lib/ordering";
+import { sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
 import { previewKind } from "../lib/preview";
 import {
@@ -90,6 +91,24 @@ function dirAtClientPoint(x: number, y: number): string {
   return row?.dataset.treeDir ?? "";
 }
 
+/**
+ * Where a hand-drag would land if it were released right now: an insertion line
+ * between two rows (`top`/`indent` place it), or inside a folder. `null` means
+ * the pointer is over somewhere nothing may be dropped.
+ */
+type DropAt =
+  | { kind: "line"; destDir: string; index: number; top: number; indent: number }
+  | { kind: "into"; destDir: string }
+  | null;
+
+/** Do two drop targets mean the same thing? Guards a re-render per pointer move. */
+function sameDrop(a: DropAt, b: DropAt): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "into" || b.kind === "into") return a.destDir === b.destDir;
+  return a.destDir === b.destDir && a.index === b.index && a.top === b.top;
+}
+
 interface MenuState {
   x: number;
   y: number;
@@ -123,6 +142,12 @@ const ICON_EXPAND_ALL = (
   <TreeSvg>
     <path d="m7 9 5-5 5 5" />
     <path d="m7 15 5 5 5-5" />
+  </TreeSvg>
+);
+/* Sort menu — descending bars, the conventional "sort" mark. */
+const ICON_SORT = (
+  <TreeSvg>
+    <path d="M4 6h13M4 12h9M4 18h5" />
   </TreeSvg>
 );
 /* Select-mode toggle — a ticked checkbox reads as "pick items". */
@@ -163,6 +188,7 @@ export function FileTree() {
   const members = useStore((s) => s.members);
   const itemColors = useStore((s) => s.itemColors);
   const itemOrder = useStore((s) => s.itemOrder);
+  const treeSort = useStore((s) => s.treeSort);
   const docSyncState = useStore((s) => s.docSyncState);
   const docIdByPath = useStore((s) => s.docIdByPath);
   const titles = useStore((s) => s.titles);
@@ -176,8 +202,15 @@ export function FileTree() {
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   // Which way the fold toggle points: false → "collapse all", true → "expand all".
   const [treeCollapsed, setTreeCollapsed] = useState(false);
+  // The sort popover under the toolbar's sort button.
+  const [sortOpen, setSortOpen] = useState(false);
   // True while an OS drag hovers the tree, for the drop-target highlight.
   const [dropActive, setDropActive] = useState(false);
+  // True while the user is dragging a ROW of this tree (react-arborist's own
+  // HTML5 drag), which is a different thing entirely from an OS file drag —
+  // see the listener below for why the two have to be told apart. Deliberately
+  // a ref and a CSS class rather than React state: see `dragstart` below.
+  const rowDrag = useRef(false);
   // Multi-select: a mode toggle + the set of picked paths. Kept local to the
   // tree (react-arborist's own selection is left alone) so the bulk-action bar
   // only exists while selecting and doesn't crowd the normal browsing UI.
@@ -261,11 +294,14 @@ export function FileTree() {
     return shareTargetForPath(node.data.path, node.data.isDir, node.data.name);
   }
 
-  // Rust returns folders-first/alphabetical; layer the user's manual
-  // arrangement on top so drag-to-reorder sticks.
+  // Two layers, in this order and only this order: sort what nobody arranged,
+  // then pin what somebody did. `applyOrder` leaves unranked items in the order
+  // it received them, so a folder dragged into place keeps its spot while
+  // everything untouched — including that folder's own contents — follows the
+  // sort. Flipping these two would make every sort change wipe the arrangement.
   const data = useMemo<TreeNode[]>(
-    () => applyOrder(tree?.children ?? [], "", itemOrder),
-    [tree, itemOrder],
+    () => applyOrder(sortTree(tree?.children ?? [], treeSort), "", itemOrder),
+    [tree, itemOrder, treeSort],
   );
 
   // Flatten the (arranged) tree so bulk actions can resolve any path — even a
@@ -386,7 +422,10 @@ export function FileTree() {
   }
 
   useEffect(() => {
-    const close = () => setMenu(null);
+    const close = () => {
+      setMenu(null);
+      setSortOpen(false);
+    };
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
   }, []);
@@ -458,6 +497,36 @@ export function FileTree() {
   // drag-drop (the webview never sees an HTML5 drop) and hands us absolute
   // paths + a physical cursor position; we scope it to the tree and route the
   // drop into the folder under the pointer (or the vault root).
+  // An HTML5 drag started anywhere in the app (selecting text in the editor and
+  // dragging it, say) is, at the OS level, a drag session over this same window
+  // — so Tauri reports it as `enter`/`over` exactly like a file from Finder, and
+  // the sidebar would throw up its "drop files here" frame for it. Only a drag
+  // from OUTSIDE should light that, so in-app drags are flagged here and the
+  // listener below skips them. A ref, because that listener is registered once
+  // and closes over its scope. (The tree's own reordering no longer uses HTML5
+  // drag at all — see the pointer-drag block further down.)
+  useEffect(() => {
+    const start = () => {
+      rowDrag.current = true;
+    };
+    const end = () => {
+      rowDrag.current = false;
+    };
+    window.addEventListener("dragstart", start, true);
+    // `dragend` ends a drag that started; the rest are belt-and-braces for one
+    // that never did. A stuck flag would swallow real file drops, so
+    // over-clearing is strictly the safer error — every clear is idempotent.
+    for (const ev of ["dragend", "drop", "mouseup", "pointerup", "blur"]) {
+      window.addEventListener(ev, end, true);
+    }
+    return () => {
+      window.removeEventListener("dragstart", start, true);
+      for (const ev of ["dragend", "drop", "mouseup", "pointerup", "blur"]) {
+        window.removeEventListener(ev, end, true);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -472,6 +541,10 @@ export function FileTree() {
     };
     void (async () => {
       const un = await getCurrentWebview().onDragDropEvent(async (event) => {
+        // Our own row drag, reported to us as if it came from the OS. Ignore it
+        // outright — including the `drop`, whose `paths` are empty anyway, so
+        // reacting could only ever mean flashing the frame or a stray import.
+        if (rowDrag.current) return;
         const p = event.payload;
         if (p.type === "enter" || p.type === "over") {
           setDropActive(insideTree(p.position.x, p.position.y) !== null);
@@ -647,16 +720,7 @@ export function FileTree() {
     void id;
   };
 
-  const onMove = async ({
-    dragIds,
-    parentNode,
-    index,
-  }: {
-    dragIds: string[];
-    parentNode: NodeApi<TreeNode> | null;
-    index: number;
-  }) => {
-    const destDir = parentNode ? parentNode.data.path : "";
+  const applyMove = async (dragIds: string[], destDir: string, index: number) => {
     // dragIds are node ids === current paths. Their paths after the drop only
     // change when the parent folder changes (a reorder keeps the same path).
     const from = dragIds;
@@ -669,12 +733,29 @@ export function FileTree() {
     //    (no disk change, no round-trip). Cross-folder drops snap into place
     //    after the tree refresh below re-materializes the moved paths.
     const store = useStore.getState();
-    const siblings = childrenAt(data, destDir).map((n) => n.path);
+    const destChildren = childrenAt(data, destDir);
+    const siblings = destChildren.map((n) => n.path);
+    // Folder-ness of every path the new order can mention: the destination's own
+    // children, plus the dragged items under their POST-drop paths (on a
+    // cross-folder drop they aren't among the destination's children yet).
+    const dirPaths = new Set<string>([
+      ...destChildren.filter((n) => n.isDir).map((n) => n.path),
+      ...from.flatMap((p, i) => (nodeByPath.get(p)?.isDir ? [to[i]] : [])),
+    ]);
+    const isDir = (p: string) => dirPaths.has(p);
     let order = store.itemOrder;
     for (let i = 0; i < from.length; i++) {
       if (from[i] !== to[i]) order = moveSubtreeOrder(order, from[i], to[i]);
     }
-    order = { ...order, [destDir]: computeReorder(siblings, from, to, index) };
+    order = {
+      ...order,
+      [destDir]: narrowPins(
+        computeReorder(siblings, from, to, index),
+        isDir,
+        to,
+        store.itemOrder[destDir],
+      ),
+    };
     store.setItemOrder(order);
 
     // 2) Apply cross-folder moves on disk (a pure reorder has from === to).
@@ -701,6 +782,236 @@ export function FileTree() {
     }
     if (movedOnDisk) await refreshAll();
   };
+
+  // ---- Reordering by hand (a pointer drag, deliberately not HTML5 DnD) ------
+  //
+  // react-arborist reorders via react-dnd's HTML5 backend, and inside a Tauri
+  // webview that can never complete: wry's `performDragOperation` returns YES
+  // and skips `super` whenever its drag-drop handler claims the event, and
+  // tauri-runtime-wry's handler claims EVERY event unconditionally. So WKWebView
+  // never dispatches `drop` to the page, `onMove` never fires, and a dragged row
+  // just springs back. Turning the window's `dragDropEnabled` off would fix that
+  // and break the thing it exists for — dropping files in from Finder, which
+  // needs real filesystem paths the DataTransfer API will not give us.
+  //
+  // So the tree's own drag is done with pointer events, which nothing intercepts.
+  // The drop still lands in `applyMove`, so the ordering rules (and their tests)
+  // are shared with every other path.
+
+  /** How far the pointer must travel before a press becomes a drag, in px. */
+  const DRAG_THRESHOLD = 4;
+
+  // The armed press: a row is under the finger but hasn't moved far enough yet.
+  const probe = useRef<{ path: string; x: number; y: number } | null>(null);
+  const [drag, setDrag] = useState<{ path: string } | null>(null);
+  // The folder a drop would land INSIDE, when the pointer is over one. This is
+  // the only per-move value that goes through React, and it changes about once
+  // per folder rather than once per pixel.
+  const [dropInto, setDropInto] = useState<string | null>(null);
+  // The insertion line is moved by writing its transform directly. Routing it
+  // through state instead would re-render every row in the tree on every
+  // pointermove — which is what made the drag feel shaky rather than tracked.
+  const lineRef = useRef<HTMLDivElement | null>(null);
+  // These refs are the AUTHORITY during a drag; the state above is only its
+  // render. Pointer events arrive faster than React re-renders, so a ref
+  // assigned at render time would still read `null` on the move right after
+  // the one that started the drag. Written by hand, beside each setState.
+  const dropAtRef = useRef<DropAt>(null);
+  const dragRef = useRef<string | null>(null);
+
+  /** A path may not be dropped into itself or anywhere under itself. */
+  const wouldSwallowItself = (moving: string, destDir: string) =>
+    destDir === moving || destDir.startsWith(moving + "/");
+
+  /**
+   * Resolve a pointer position to a drop. Rows are hit-tested through the DOM
+   * rather than by arithmetic on `rowHeight`, because the list is virtualized
+   * and scrolled — the DOM already knows exactly which row is where.
+   *
+   * A row's top and bottom quarters mean "put it between these two"; a folder's
+   * middle half means "put it inside". Files have no inside, so their middle
+   * band reads as "after this file" — the whole row stays a usable target.
+   *
+   * The folder band is HYSTERETIC: easy to leave (0.28–0.72 to enter) but held
+   * until 0.18–0.82 once you're in it. Without that, a hand resting on the
+   * boundary flickers between "inside this folder" and "above it" several times
+   * a second, which is the single thing that makes a drag feel unreliable.
+   */
+  function planDrop(moving: string, clientX: number, clientY: number): DropAt {
+    const container = containerRef.current;
+    if (!container) return null;
+    const box = container.getBoundingClientRect();
+    if (clientX < box.left || clientX > box.right) return null;
+    if (clientY < box.top) return null;
+
+    // Rows are measured, not hit-tested. `elementFromPoint` looked obvious and
+    // was the bug: a `.tree-row` is only as tall as its content, while the slot
+    // arborist positions it in is `rowHeight` tall, so there is a dead band
+    // between every pair of rows. Sweeping the pointer up the list crossed one
+    // of those on the way to each new row, the hit test came back empty, and
+    // the "nothing under the pointer" branch threw the line to the bottom of
+    // the tree — the line appearing to leap to the end at random.
+    //
+    // Measuring instead means every pixel of the list belongs to exactly one
+    // row, so the target changes once per row and never blinks elsewhere.
+    const rows = Array.from(container.querySelectorAll<HTMLElement>(".tree-row"));
+    const rects = rows.map((el) => el.getBoundingClientRect());
+    if (!rows.length) {
+      return { kind: "line", destDir: "", index: 0, top: 0, indent: 0 };
+    }
+
+    let hit = -1;
+    for (let i = 0; i < rects.length; i++) {
+      if (clientY >= rects[i].top && clientY < rects[i].bottom) {
+        hit = i;
+        break;
+      }
+    }
+    if (hit < 0) {
+      // Genuinely past the last row: append to the vault root. That is the only
+      // drop with no row of its own, and it still has to work.
+      const last = rects[rects.length - 1];
+      if (clientY >= last.bottom) {
+        const roots = childrenAt(data, "");
+        return {
+          kind: "line",
+          destDir: "",
+          index: roots.length,
+          top: last.bottom - box.top,
+          indent: 0,
+        };
+      }
+      // Otherwise the pointer is above the first row or in a dead band between
+      // two: hand it to the nearest row by centre, so the gap belongs to the
+      // row it looks like it belongs to.
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < rects.length; i++) {
+        const d = Math.abs(clientY - (rects[i].top + rects[i].height / 2));
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      }
+      hit = best;
+    }
+
+    const row = rows[hit];
+    const r = rects[hit];
+    const path = row.dataset.treePath ?? "";
+    const isDir = row.dataset.treeIsdir === "1";
+    // Clamped: a pointer in a dead band sits slightly outside the row it was
+    // assigned to, and an unclamped fraction there reads as a wild -0.3 / 1.4.
+    const frac = Math.min(1, Math.max(0, (clientY - r.top) / r.height));
+    const parent = parentDir(path);
+    const siblings = childrenAt(data, parent).map((n) => n.path);
+    const at = siblings.indexOf(path);
+    const lineIndent = r.left - box.left + 16;
+
+    const held = dropAtRef.current;
+    const holding = held?.kind === "into" && held.destDir === path;
+    const lo = holding ? 0.18 : 0.28;
+    if (isDir && frac > lo && frac < 1 - lo) {
+      return wouldSwallowItself(moving, path) ? null : { kind: "into", destDir: path };
+    }
+    const after = frac >= 0.5;
+    if (wouldSwallowItself(moving, parent)) return null;
+    return {
+      kind: "line",
+      destDir: parent,
+      index: at < 0 ? siblings.length : at + (after ? 1 : 0),
+      top: (after ? r.bottom : r.top) - box.top,
+      indent: lineIndent,
+    };
+  }
+
+  /** Arm a press. It only becomes a drag once the pointer actually travels. */
+  function beginProbe(path: string, x: number, y: number) {
+    probe.current = { path, x, y };
+  }
+
+  // One window-level listener pair for the whole tree, live only while a press
+  // is armed or a drag is running. Window scope because the pointer routinely
+  // leaves the row — and often the sidebar — mid-drag.
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      const p = probe.current;
+      if (!p) return;
+      if (!dragRef.current) {
+        if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < DRAG_THRESHOLD) return;
+        if (!nodeByPath.has(p.path)) return;
+        dragRef.current = p.path;
+        setDrag({ path: p.path });
+        containerRef.current?.classList.add("row-dragging");
+      }
+      const next = planDrop(p.path, e.clientX, e.clientY);
+      if (sameDrop(next, dropAtRef.current)) return;
+      const wasInto = dropAtRef.current?.kind === "into" ? dropAtRef.current.destDir : null;
+      dropAtRef.current = next;
+      // The line: moved by hand, so it glides between slots (CSS transitions the
+      // transform) without React touching a single row.
+      const line = lineRef.current;
+      if (line) {
+        if (next?.kind === "line") {
+          line.style.transform = `translateY(${next.top - 1}px)`;
+          line.style.left = `${next.indent}px`;
+          line.style.opacity = "1";
+        } else {
+          line.style.opacity = "0";
+        }
+      }
+      // The folder highlight is the one thing React still owns — it changes per
+      // folder, not per pixel.
+      const nowInto = next?.kind === "into" ? next.destDir : null;
+      if (nowInto !== wasInto) setDropInto(nowInto);
+    };
+    /** Tear the drag down without committing it. */
+    const clear = () => {
+      probe.current = null;
+      dragRef.current = null;
+      dropAtRef.current = null;
+      containerRef.current?.classList.remove("row-dragging");
+      if (lineRef.current) lineRef.current.style.opacity = "0";
+      setDrag(null);
+      setDropInto(null);
+    };
+    const up = () => {
+      const p = probe.current;
+      const plan = dropAtRef.current;
+      const dragging = dragRef.current;
+      clear();
+      // A press that never travelled is a click; the row's own onClick has it.
+      if (!dragging) return;
+      // A press that DID travel is not. If it happens to end over the row it
+      // started on, the browser still fires a click there — which would toggle
+      // the folder you just finished moving. Swallow exactly that one.
+      const swallow = (ev: MouseEvent) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+      };
+      window.addEventListener("click", swallow, true);
+      setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+      if (!p || !plan) return;
+      const index = plan.kind === "into" ? childrenAt(data, plan.destDir).length : plan.index;
+      void applyMove([p.path], plan.destDir, index);
+    };
+    const cancel = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && dragRef.current) clear();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    window.addEventListener("keydown", cancel);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      window.removeEventListener("keydown", cancel);
+    };
+    // `data`/`nodeByPath` are read through the closure and change as the tree
+    // does; re-binding on each is cheaper than the staleness bugs otherwise.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, nodeByPath]);
 
   async function createUniqueNote(dir: string) {
     let name = "Untitled";
@@ -803,6 +1114,8 @@ export function FileTree() {
   }
 
   return (
+    // `row-dragging` is added/removed imperatively by the drag listener above,
+    // never through React — see the comment there.
     <div className={`filetree${dropActive ? " drop-active" : ""}`} ref={containerRef}>
       <div className="filetree-head">
         <span className="section-label">Notes</span>
@@ -843,6 +1156,58 @@ export function FileTree() {
               {ICON_EXPAND_ALL}
             </span>
           </button>
+          {/* Sort lives beside the fold toggle: both answer "how is this list
+              laid out", neither creates anything. The popover is anchored to
+              this button rather than reusing the row context menu, because the
+              choice is vault-wide and belongs to the header, not to a row. */}
+          <div className="tree-sort-wrap" onClick={(e) => e.stopPropagation()}>
+            <button
+              className={`tree-tool${sortOpen ? " on" : ""}`}
+              title={`Sort: ${TREE_SORTS.find((s) => s.id === treeSort)?.label}`}
+              aria-label="Sort notes"
+              aria-haspopup="menu"
+              aria-expanded={sortOpen}
+              // The wrapper swallows this click so the window-level dismiss
+              // can't close the popover we're opening — which also means a row
+              // menu left open would survive it, so close that here.
+              onClick={() => {
+                setMenu(null);
+                setSortOpen((v) => !v);
+              }}
+            >
+              {ICON_SORT}
+            </button>
+            {sortOpen && (
+              <ul className="context-menu tree-sort-menu" role="menu">
+                <li className="menu-heading">Sort notes by</li>
+                {TREE_SORTS.map((s) => (
+                  <li
+                    key={s.id}
+                    role="menuitemradio"
+                    aria-checked={treeSort === s.id}
+                    className={treeSort === s.id ? "is-on" : undefined}
+                    title={s.hint}
+                    onClick={() => {
+                      useStore.getState().setTreeSort(s.id);
+                      setSortOpen(false);
+                    }}
+                  >
+                    <span className="menu-tick" aria-hidden="true">
+                      {treeSort === s.id ? "✓" : ""}
+                    </span>
+                    {s.label}
+                  </li>
+                ))}
+                {/* Says out loud what the two layers do, because the rule is
+                    invisible otherwise: someone who has dragged rows around
+                    needs to know this button won't undo that. */}
+                <li className="menu-note">
+                  Folders and notes you've dragged into place keep their
+                  position.
+                </li>
+              </ul>
+            )}
+          </div>
           <span className="tool-divider" aria-hidden="true" />
           <button
             className={`tree-tool${selectMode ? " on" : ""}`}
@@ -947,13 +1312,22 @@ export function FileTree() {
           onToggle={onToggle}
           onActivate={onActivate}
           onRename={onRename}
-          onMove={onMove}
-          renderCursor={DropCursor}
+          // Arborist's own drag is HTML5-based and cannot complete inside this
+          // webview (see the pointer-drag block above), so it is switched off
+          // entirely rather than left to start drags that die silently — which
+          // is also what stopped a refused drag smearing a text selection
+          // across the rows, and what stopped Tauri mistaking a row drag for a
+          // file drop and throwing up the "drop files here" frame.
+          disableDrag
+          disableDrop
           rowClassName="tree-rowwrap"
         >
           {(props) => (
             <Node
               {...props}
+              dropInto={dropInto}
+              dragging={drag?.path === props.node.data.path}
+              onDragProbe={beginProbe}
               selectedPath={openNote?.path ?? null}
               lock={lockByPath.get(props.node.data.path) ?? null}
               syncIndex={syncIndex}
@@ -967,6 +1341,12 @@ export function FileTree() {
           )}
         </Tree>
       )}
+
+      {/* The insertion line. Mounted for the whole drag and moved by transform
+          (see the pointermove handler) so it glides between slots instead of
+          being torn down and rebuilt at each one. Positioned against
+          `.filetree`, which is the frame of reference `planDrop` measures in. */}
+      {drag && <div className="drop-cursor" ref={lineRef} aria-hidden="true" />}
 
       {menu && (
         <ul
@@ -988,18 +1368,41 @@ export function FileTree() {
           <li onClick={() => void importFolderInto(menuDir)}>Import folder…</li>
           {menu.node && <li onClick={() => void exportNode(menu.node!)}>Export…</li>}
           {menu.node && <li onClick={() => menu.node!.edit()}>Rename</li>}
+          {/* The same vault-wide sort as the header button. A per-folder sort
+              would be a third arrangement layer fighting the other two, so
+              there is one setting and it is reachable from both places. */}
+          <li className="menu-heading menu-sep-item">Sort notes by</li>
+          {TREE_SORTS.map((s) => (
+            <li
+              key={s.id}
+              role="menuitemradio"
+              aria-checked={treeSort === s.id}
+              className={treeSort === s.id ? "is-on" : undefined}
+              title={s.hint}
+              onClick={() => useStore.getState().setTreeSort(s.id)}
+            >
+              <span className="menu-tick" aria-hidden="true">
+                {treeSort === s.id ? "✓" : ""}
+              </span>
+              {s.label}
+            </li>
+          ))}
+          {/* Only offered where there IS an arrangement to drop — this clears
+              the hand-made order for one folder so its contents fall back to
+              the sort above, and leaves every other folder's alone. */}
           {(itemOrder[menuDir]?.length ?? 0) > 0 && (
             <li
+              className="menu-sep-item"
               title={
                 menu.node?.data.isDir
-                  ? "Sort this folder's contents alphabetically"
-                  : "Sort this folder alphabetically"
+                  ? "Forget the drag-and-drop arrangement inside this folder"
+                  : "Forget the drag-and-drop arrangement in this folder"
               }
               onClick={() =>
                 useStore.getState().setItemOrder(clearOrderAt(itemOrder, menuDir))
               }
             >
-              Reset order (A–Z)
+              Reset manual order
             </li>
           )}
           {menu.node && menuTarget && (
@@ -1070,6 +1473,12 @@ interface NodeExtra {
   selectMode: boolean;
   checked: boolean;
   onToggleCheck: (path: string) => void;
+  /** Arms a hand-drag on this row; it only starts once the pointer travels. */
+  onDragProbe: (path: string, x: number, y: number) => void;
+  /** This row is the one being dragged (it lifts and dims). */
+  dragging: boolean;
+  /** The folder a drop would land inside, if the pointer is over one. */
+  dropInto: string | null;
 }
 
 function TreeSvg({ children }: { children: React.ReactNode }) {
@@ -1243,7 +1652,6 @@ function SidebarPresence({ peers }: { peers: VaultPeer[] }) {
 function Node({
   node,
   style,
-  dragHandle,
   selectedPath,
   lock,
   syncIndex,
@@ -1253,6 +1661,9 @@ function Node({
   selectMode,
   checked,
   onToggleCheck,
+  onDragProbe,
+  dragging,
+  dropInto,
 }: NodeRendererProps<TreeNode> & NodeExtra) {
   const isDir = node.data.isDir;
   // Only a folder we have actually listed can be called empty. An unexpanded one
@@ -1273,12 +1684,16 @@ function Node({
   const indent = typeof style.paddingLeft === "number" ? style.paddingLeft : 0;
   return (
     <div
-      ref={dragHandle}
       style={{ ...style, paddingLeft: indent + 20 }}
       data-tree-dir={isDir ? node.data.path : parentDir(node.data.path)}
+      // Read back by `planDrop`, which hit-tests rows through the DOM: the
+      // list is virtualized and scrolled, so the DOM is the only thing that
+      // knows where a row actually is.
+      data-tree-path={node.data.path}
+      data-tree-isdir={isDir ? "1" : "0"}
       className={`tree-row${isSelected ? " selected" : ""}${isDir ? " is-dir" : ""}${
-        node.willReceiveDrop ? " drop-target" : ""
-      }${node.isDragging ? " dragging" : ""}${checked ? " checked" : ""}${
+        dropInto === node.data.path ? " drop-target" : ""
+      }${dragging ? " dragging" : ""}${checked ? " checked" : ""}${
         // Pre-selects the row the instant it's clicked, so the selection doesn't
         // wait on `getNoteMeta` + `registerNote` to come back from the server.
         isOpening ? " opening" : ""
@@ -1294,6 +1709,14 @@ function Node({
         // word/range selection (the stray blue bands between rows). Suppress it
         // only for the multi-click; the first press still drives click + drag.
         if (e.detail > 1) e.preventDefault();
+      }}
+      onPointerDown={(e) => {
+        // Left button only, and never from the row's own controls (⋯, the
+        // select checkbox) — those are buttons, not handles. Selection mode
+        // is for picking rows, not moving them.
+        if (e.button !== 0 || selectMode) return;
+        if ((e.target as HTMLElement).closest("button, input, .tree-check")) return;
+        onDragProbe(node.data.path, e.clientX, e.clientY);
       }}
       onClick={() => {
         if (isDir) node.toggle();
@@ -1404,7 +1827,3 @@ function Node({
   );
 }
 
-/** Drag-and-drop insertion line, in the system accent instead of arborist blue. */
-function DropCursor({ top, left }: CursorProps) {
-  return <div className="drop-cursor" style={{ top: top - 1, left: left + 16 }} />;
-}

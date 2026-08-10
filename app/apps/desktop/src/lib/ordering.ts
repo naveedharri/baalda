@@ -1,6 +1,6 @@
 // Custom sidebar order for folders and notes. Like item colors, order is a
-// local, per-vault preference (Rust always returns folders-first/alphabetical;
-// the user's manual arrangement is layered on top here, client-side). Stored in
+// local, per-vault preference: the user's manual drag-and-drop arrangement,
+// layered client-side on top of the base sort (`lib/tree/sort`). Stored in
 // localStorage keyed by vault path, then by parent path → ordered child paths.
 
 import type { TreeNode } from "./ipc";
@@ -29,8 +29,12 @@ export function writeItemOrder(vaultPath: string, order: ItemOrder): void {
 
 /**
  * Re-sort each folder's children by the saved order. Items with no saved rank
- * keep the incoming order (Rust's folders-first/alphabetical), sorted after the
- * ranked ones — so a freshly-created note lands at the bottom until moved.
+ * keep the incoming order — whatever the base sort produced — and land after
+ * the ranked ones, so a freshly-created note appears at the bottom until moved.
+ *
+ * That "keep the incoming order" rule is what lets the sort and a hand-made
+ * arrangement coexist: run this AFTER `sortTree`, and changing the sort only
+ * rearranges rows nobody pinned. See `lib/tree/sort` for the full argument.
  */
 export function applyOrder(
   nodes: TreeNode[],
@@ -98,6 +102,36 @@ export function computeReorder(
 }
 
 /**
+ * Narrow a freshly computed sibling order down to the group the drop was
+ * actually about, so a drag pins as little as it can get away with.
+ *
+ * `computeReorder` returns the folder's WHOLE child list, and every path in it
+ * becomes a pin — which means dragging one folder would also freeze that
+ * folder's notes at their current positions, and they'd stop following the
+ * "Recently modified" sort forever after. Since folders and notes are separate
+ * groups on screen anyway (folders always above notes), a folders-only drag
+ * only needs to pin folders: the notes stay unranked and keep sorting.
+ *
+ * A drag involving a note keeps the full list — a note CAN be dragged above a
+ * folder, and that arrangement only survives if everything is ranked. Likewise
+ * a folder whose notes are already hand-arranged keeps its full list rather
+ * than silently discarding that arrangement.
+ */
+export function narrowPins(
+  nextOrder: string[],
+  isDir: (path: string) => boolean,
+  /** The dragged items under their POST-drop paths. */
+  draggedPaths: readonly string[],
+  /** This folder's existing saved order, if it has one. */
+  previous: readonly string[] | undefined,
+): string[] {
+  const draggedAllFolders = draggedPaths.length > 0 && draggedPaths.every(isDir);
+  if (!draggedAllFolders) return nextOrder;
+  if (previous?.some((p) => !isDir(p))) return nextOrder;
+  return nextOrder.filter(isDir);
+}
+
+/**
  * Move an item's whole subtree within the order map: re-prefix its own and its
  * descendants' entries from `from` to `to`, and drop every other reference to
  * `from` (e.g. its former parent's list). The caller sets the destination
@@ -134,8 +168,8 @@ export function renameInOrder(order: ItemOrder, oldPath: string, newPath: string
 }
 
 /**
- * Forget the custom arrangement for one folder's children, so it falls back to
- * Rust's folders-first/alphabetical default. Other folders keep their order.
+ * Forget the custom arrangement for one folder's children, so they fall back to
+ * the base sort. Other folders keep their arrangement.
  */
 export function clearOrderAt(order: ItemOrder, parentPath: string): ItemOrder {
   if (!(parentPath in order)) return order;

@@ -6,6 +6,7 @@ import {
   clearOrderAt,
   computeReorder,
   moveSubtreeOrder,
+  narrowPins,
   removeFromOrder,
   renameInOrder,
   type ItemOrder,
@@ -129,5 +130,62 @@ describe("childrenAt", () => {
   });
   it("returns [] for a missing path", () => {
     expect(childrenAt(root, "Nope")).toEqual([]);
+  });
+});
+
+// A pin is permanent: anything named in the saved order stops following the
+// sidebar's sort. So a drop should name as little as it can. The case that
+// matters is the common one — reordering top-level FOLDERS shouldn't quietly
+// freeze that level's notes out of "Recently modified" forever.
+describe("narrowPins", () => {
+  const isDir = (p: string) => p === "A" || p === "B" || p === "C";
+
+  it("pins only the folders when the drag was folders-only", () => {
+    expect(
+      narrowPins(["B", "A", "n1.md", "n2.md"], isDir, ["B"], undefined),
+    ).toEqual(["B", "A"]);
+  });
+
+  it("pins everything when a note was dragged", () => {
+    // A note can legitimately be placed above a folder, and that arrangement
+    // only holds if every sibling is ranked.
+    expect(
+      narrowPins(["n2.md", "A", "B", "n1.md"], isDir, ["n2.md"], undefined),
+    ).toEqual(["n2.md", "A", "B", "n1.md"]);
+  });
+
+  it("pins everything on a mixed drag", () => {
+    expect(narrowPins(["B", "n1.md", "A"], isDir, ["B", "n1.md"], undefined)).toEqual([
+      "B",
+      "n1.md",
+      "A",
+    ]);
+  });
+
+  it("keeps the full list when this folder's notes are ALREADY arranged", () => {
+    // Narrowing here would silently discard the note arrangement the user made
+    // on an earlier drag.
+    expect(
+      narrowPins(["B", "A", "n2.md", "n1.md"], isDir, ["B"], ["A", "B", "n2.md", "n1.md"]),
+    ).toEqual(["B", "A", "n2.md", "n1.md"]);
+  });
+
+  it("narrows when the existing arrangement is folders-only", () => {
+    expect(narrowPins(["B", "A", "n1.md"], isDir, ["B"], ["A", "B"])).toEqual(["B", "A"]);
+  });
+
+  // The point of narrowing, stated as the behaviour it buys: folders stay put,
+  // notes keep sorting — and folders still come first, because they are the
+  // ranked ones and applyOrder puts unranked items after.
+  it("leaves the notes free to re-sort under applyOrder", () => {
+    const pins = narrowPins(["B", "A", "n1.md", "n2.md"], isDir, ["B"], undefined);
+    // Later, "Recently modified" hands the level over with n2 before n1.
+    const sorted = [dir("A", []), dir("B", []), file("n2.md"), file("n1.md")];
+    expect(applyOrder(sorted, "", { "": pins }).map((n) => n.path)).toEqual([
+      "B",
+      "A",
+      "n2.md",
+      "n1.md",
+    ]);
   });
 });
