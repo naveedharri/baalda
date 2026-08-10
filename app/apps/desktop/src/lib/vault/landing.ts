@@ -17,8 +17,6 @@ export type LandingAction =
   | { kind: "switch"; orgId: string }
   /** A local-only folder is open; leave the user in it. */
   | { kind: "stay-local" }
-  /** The account has no vaults — create its first one and open that. */
-  | { kind: "create-first-vault" }
   /** Nothing to do (and nothing we're allowed to invent). */
   | { kind: "nothing" };
 
@@ -35,8 +33,6 @@ export interface LandingInput {
   activeOrganizationId: string | null;
   /** The last vault used on this device. */
   rememberedOrgId: string | null;
-  /** May we create a vault for an account that has none? */
-  createIfNone: boolean;
   /**
    * The user is part-way through "join a team with a code" on the welcome
    * screen, which runs sign-in/sign-up first and then comes back for the code.
@@ -105,11 +101,16 @@ export function planLanding(input: LandingInput): LandingAction {
   //    than none. The first, matching that single-vault auto-activation.
   if (input.orgIds.length > 0) return { kind: "switch", orgId: input.orgIds[0] };
 
-  // 6) Signed in with no vaults at all — a brand-new account. Nothing can be
-  //    restored, so make the vault the account obviously needs. Only when the
-  //    screen is genuinely empty: creating a vault swaps the open folder for a
-  //    new one, which is never right while the user is looking at files.
-  return input.createIfNone && !input.openPath
-    ? { kind: "create-first-vault" }
-    : { kind: "nothing" };
+  // 6) Signed in with no vaults at all. Land NOWHERE, which means the welcome
+  //    screen — "New vault", "Open existing" and "Join a team" are all there,
+  //    so it is a real destination, not a dead end.
+  //
+  //    This used to auto-create a vault called "My Vault" whenever the caller
+  //    was an explicit sign-in/sign-up. That reads as the app inventing a vault
+  //    behind your back: delete every vault you have, and the next sign-in
+  //    silently conjures one and drops you inside it — the deletion looks like
+  //    it failed, and the phantom then persists in the welcome screen's cached
+  //    vault list. Making a vault is a decision with a name attached, so it
+  //    belongs to the button the user presses.
+  return { kind: "nothing" };
 }

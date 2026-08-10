@@ -24,9 +24,40 @@
 // localhost:3010 meant a fresh install could only ever report "Load failed"
 // until the user found Server settings on their own. Self-hosters override it
 // there; nothing here is pinned at build time beyond this default.
-export const DEFAULT_SERVER_URL = import.meta.env.DEV
-  ? "http://localhost:3010"
-  : "https://api.baalda.com";
+/** The managed instance. Named so the dev guard below can recognise it. */
+export const PRODUCTION_SERVER_URL = "https://api.baalda.com";
+export const LOCAL_SERVER_URL = "http://localhost:3010";
+
+/** Explicit opt-out of everything below: `VITE_SERVER_URL=… pnpm dev:desktop`. */
+const ENV_SERVER_URL =
+  (import.meta.env.VITE_SERVER_URL as string | undefined)?.trim() || null;
+
+export const DEFAULT_SERVER_URL =
+  ENV_SERVER_URL ?? (import.meta.env.DEV ? LOCAL_SERVER_URL : PRODUCTION_SERVER_URL);
+
+/**
+ * The server to actually talk to, given whatever URL was persisted in the app
+ * config (Settings → Connection writes it, and it survives across launches).
+ *
+ * A dev build IGNORES a persisted production URL. That combination is not a
+ * preference, it's an accident with real consequences: `pnpm dev:desktop`
+ * pointed at the managed instance reads and WRITES real users' vaults, and
+ * because the URL is persisted per-device it silently stays that way across
+ * every later launch — you only notice when local changes fail to appear in
+ * a local Postgres that was never being used.
+ *
+ * Any OTHER persisted URL is honoured, so switching a dev build to a staging or
+ * LAN server from Settings still works; only "dev build → production" is
+ * refused, and `VITE_SERVER_URL=https://api.baalda.com` re-enables even that.
+ */
+export function resolveServerUrl(persisted: string | null | undefined): string {
+  const clean = stripTrailingSlash((persisted ?? "").trim());
+  if (!clean) return DEFAULT_SERVER_URL;
+  if (import.meta.env.DEV && !ENV_SERVER_URL && clean === PRODUCTION_SERVER_URL) {
+    return DEFAULT_SERVER_URL;
+  }
+  return clean;
+}
 
 // ---- Types (mirror the server's JSON) -------------------------------------
 
