@@ -40,6 +40,7 @@ import {
 import type { TreeSort } from "./lib/tree/sort";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
+import { planTurnOnSync } from "./lib/vault/turnOnSync";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
 
@@ -209,7 +210,7 @@ interface AppStore {
   /**
    * Run the post-sign-in landing on demand, for a flow that deliberately
    * suppressed it and then fell through (abandoning "join a team" after the
-   * sign-up it required). Same rules as signing in, `createIfNone` included.
+   * sign-up it required). Same rules as signing in.
    */
   landAfterAuth: () => Promise<void>;
   setServerUrl: (url: string) => Promise<void>;
@@ -382,17 +383,36 @@ function forgetOrgVault(orgId: string): void {
 // folder to reopen + resync) instead of only local folders. Refreshed on every
 // refreshVault and — deliberately — KEPT across sign-out (that's the whole
 // point: you can pick a synced vault to sign back into).
+// Namespaced by server: vault ids and names belong to ONE instance, so a cache
+// shared across servers shows the managed instance's vaults while the app is
+// pointed at localhost (offering to open vaults that don't exist there, under
+// ids that will never resolve). The un-suffixed key is read once as a fallback
+// so an existing install doesn't lose its list on upgrade.
 const KNOWN_VAULTS_KEY = "context.knownVaults";
+const knownVaultsKey = (serverUrl: string) => `${KNOWN_VAULTS_KEY}:${serverUrl}`;
 
 export interface KnownVault {
   id: string;
   name: string;
 }
 
-export function readKnownVaults(): KnownVault[] {
+export function readKnownVaults(serverUrl = authManager.getServerUrl()): KnownVault[] {
+  const parse = (raw: string | null): KnownVault[] | null => {
+    try {
+      const v = JSON.parse(raw ?? "");
+      return Array.isArray(v) ? (v as KnownVault[]) : null;
+    } catch {
+      return null;
+    }
+  };
   try {
-    const raw = JSON.parse(localStorage.getItem(KNOWN_VAULTS_KEY) ?? "[]");
-    return Array.isArray(raw) ? (raw as KnownVault[]) : [];
+    return (
+      parse(localStorage.getItem(knownVaultsKey(serverUrl))) ??
+      // Pre-namespacing installs kept one list; adopt it rather than showing an
+      // empty welcome screen on the upgrade launch.
+      parse(localStorage.getItem(KNOWN_VAULTS_KEY)) ??
+      []
+    );
   } catch {
     return [];
   }
@@ -400,7 +420,7 @@ export function readKnownVaults(): KnownVault[] {
 
 function writeKnownVaults(list: KnownVault[]): void {
   try {
-    localStorage.setItem(KNOWN_VAULTS_KEY, JSON.stringify(list));
+    localStorage.setItem(knownVaultsKey(authManager.getServerUrl()), JSON.stringify(list));
   } catch {
     /* quota/unavailable — the cache is a convenience only */
   }
@@ -472,16 +492,12 @@ function forgetLastVault(orgId?: string): void {
  * back to syncing the open local vault when there's nothing to restore.
  *
  * The choice itself is `planLanding` (pure, unit-tested in `lib/vault/landing`);
- * this is only its dispatcher. Signing in must ALWAYS end somewhere — never
- * back on the signed-out welcome screen — so `createIfNone` is passed by the
- * explicit auth actions (sign-in / sign-up / Google) but NOT by silent session
- * restore at launch: "I just signed in" is a good reason to be given a vault,
- * "the app reopened" is not.
+ * this is only its dispatcher. An account with no vaults lands on the welcome
+ * screen — it offers "New vault", "Open existing" and "Join a team", so it is a
+ * destination rather than a dead end, and the app never invents a vault the
+ * user didn't ask for.
  */
-async function landInLastVault(
-  get: () => AppStore,
-  opts: { createIfNone?: boolean } = {},
-): Promise<void> {
+async function landInLastVault(get: () => AppStore): Promise<void> {
   const action = planLanding({
     orgIds: get().organizations.map((o) => o.id),
     // Consumed even when the join flow is about to override it: the join
@@ -492,7 +508,6 @@ async function landInLastVault(
     orgVaults: readOrgVaults(),
     activeOrganizationId: get().session?.activeOrganizationId ?? null,
     rememberedOrgId: readLastVault(),
-    createIfNone: opts.createIfNone ?? false,
   });
   // Only the two actions that end with a vault on screen raise the flag, and
   // only while they run: `stay-local`/`nothing` change nothing, so claiming to
@@ -507,31 +522,11 @@ async function landInLastVault(
       case "switch":
         await get().setActiveOrganization(action.orgId);
         return;
-      case "create-first-vault":
-        // `createOrganization` routes through the switch path, so the new vault
-        // gets a folder under the vaults root, turns sync on, and the reconcile
-        // seeds welcome content into it. Failure is not fatal — the vault cap
-        // (402) or an offline server just leaves the picker up, where "New vault"
-        // still works — so it must never reject out of the sign-in itself.
-        try {
-          await get().createOrganization(FIRST_VAULT_NAME);
-        } catch (e) {
-          console.warn("[vault] could not create a first vault on sign-in", e);
-        }
-        return;
     }
   } finally {
     useStore.setState({ landingVault: false });
   }
 }
-
-/**
- * Name for the vault auto-created on a first sign-in. Deliberately not derived
- * from the user's name: the display name becomes the folder slug
- * (`uniqueFolderSlug`), and "Naveed's Vault" lands on disk as `naveed-s-vault`.
- * Renaming a vault is one click in Vault Settings.
- */
-const FIRST_VAULT_NAME = "My Vault";
 
 /** Auto-dismiss timer for the member-joined celebration (module-scoped so a
  *  repeat join resets it rather than stacking). */
@@ -967,7 +962,7 @@ export const useStore = create<AppStore>((set, get) => ({
         // Open the vault they last used, rather than making them pick one — and
         // if the account has none yet, make one. Signing in never dead-ends back
         // on the welcome screen.
-        await landInLastVault(get, { createIfNone: true });
+        await landInLastVault(get);
         await get().refreshOrgBilling();
         await get().openWelcomeIfPresent();
       }
@@ -990,7 +985,7 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().refreshBillingConfig();
       // Same as email sign-in: land in a vault, creating the first one if the
       // account has none.
-      await landInLastVault(get, { createIfNone: true });
+      await landInLastVault(get);
       await get().refreshOrgBilling();
       await get().openWelcomeIfPresent();
     }
@@ -1009,7 +1004,7 @@ export const useStore = create<AppStore>((set, get) => ({
         // creates their first vault and opens it. Sign-up used to skip landing
         // entirely, which is why signing up from the welcome screen returned you
         // to the welcome screen.
-        await landInLastVault(get, { createIfNone: true });
+        await landInLastVault(get);
         await get().refreshOrgBilling();
         await get().openWelcomeIfPresent();
       }
@@ -1059,7 +1054,7 @@ export const useStore = create<AppStore>((set, get) => ({
   landAfterAuth: async () => {
     // Callers reach here only after disarming whatever suppressed the landing
     // in the first place — otherwise planLanding still answers "nothing".
-    await landInLastVault(get, { createIfNone: true });
+    await landInLastVault(get);
     await get().openWelcomeIfPresent();
   },
 
@@ -1205,24 +1200,31 @@ export const useStore = create<AppStore>((set, get) => ({
   turnOnSyncForCurrentVault: async (name) => {
     const vault = get().vault;
     if (!vault) throw new Error("Open a vault first.");
-    // Already a member of an active vault? Then sync is off because enabling it
-    // FAILED, not because there's nowhere to sync to — so retry that vault
-    // instead of creating a new one.
-    //
-    // This guard exists because the alternative is the worst bug in the join
-    // flow: an invited user whose `enableSyncForVault` fell through one of its
-    // stale/error paths sees "Turn on sync", clicks the only affordance
-    // offered, and silently lands in a brand-new empty vault of their own
-    // rather than the one they were invited to. Creating an org must be a
-    // deliberate act, never the recovery path for a failed sync.
-    const activeOrgId = get().session?.activeOrganizationId;
-    if (activeOrgId && get().organizations.some((o) => o.id === activeOrgId)) {
+    // Which vault this folder belongs to (if any) decides what happens — NOT
+    // whether the account happens to have an active vault. See `planTurnOnSync`
+    // for why: `activeOrganizationId` survives opening a plain local folder, so
+    // an account-level test matched from the second vault onward and folded
+    // every new folder into the first vault.
+    const plan = planTurnOnSync({
+      openPath: vault.path,
+      activeOrganizationId: get().session?.activeOrganizationId ?? null,
+      orgIds: get().organizations.map((o) => o.id),
+      orgVaults: readOrgVaults(),
+    });
+    if (plan.kind === "retry-active") {
       await get().enableSyncForVault();
       if (!get().syncEnabled) {
         throw new Error(
           "Couldn't connect to this vault. Check your connection and try again.",
         );
       }
+      return;
+    }
+    if (plan.kind === "switch") {
+      // The folder is another vault's. Activating that vault re-opens this same
+      // folder and syncs it, which is what the user asked for; creating a vault
+      // here would steal the folder from the one that already owns it.
+      await get().setActiveOrganization(plan.orgId);
       return;
     }
     // This binds the folder you're ALREADY in, so every step below has to stay

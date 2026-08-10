@@ -81,6 +81,10 @@ function tidyPath(path: string): string {
 
 export function VaultPicker() {
   const authStatus = useStore((s) => s.authStatus);
+  // The live vault list. Signed in, this is the truth and the cache below is
+  // only its mirror; signed out it is empty and the cache is all we have.
+  const organizations = useStore((s) => s.organizations);
+  const serverUrl = useStore((s) => s.serverUrl);
   // Sign-in succeeded and a vault is being resolved/created. There's no vault
   // yet, so App still renders this screen — and without saying so, a sign-in
   // that is working looks identical to one that silently did nothing.
@@ -115,6 +119,13 @@ export function VaultPicker() {
   const reduceMotion = useReducedMotion();
 
   // Surface recently opened vaults as one-tap "reopen" affordances.
+  //
+  // Re-read whenever the vault set changes, NOT just on mount. Deleting your
+  // last vaults leaves this screen mounted the whole time (App renders it as
+  // soon as `vault` goes null), so a mount-only load left the deleted vaults
+  // listed until the app was reloaded — the deletion looked like it hadn't
+  // worked. `organizations` and `authStatus` are the store's account-level
+  // signals; both change on delete, sign-out and server switch.
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -128,7 +139,7 @@ export function VaultPicker() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [organizations, authStatus]);
 
   // If this screen goes away mid-join (a vault opened by some other route),
   // the landing suppression must not outlive it. A *successful* join disarms
@@ -327,7 +338,14 @@ export function VaultPicker() {
   // Local recents backing a synced vault are folded into the remote row (by
   // path) so nothing shows twice.
   const entries = useMemo<PickerEntry[]>(() => {
-    const known = readKnownVaults();
+    // Signed in, the store's list is authoritative — reading the cache here
+    // would resurrect a vault deleted moments ago, because the cache is only
+    // rewritten by the next `refreshVault`. Signed out, the cache is the point:
+    // it is what lets this screen still offer your synced vaults.
+    const known =
+      authStatus === "signed-in"
+        ? organizations.map((o) => ({ id: o.id, name: o.name }))
+        : readKnownVaults(serverUrl);
     const orgVaults = readOrgVaults();
     const boundPaths = new Set(Object.values(orgVaults));
     const remote: PickerEntry[] = known.map((w) => ({
@@ -347,7 +365,7 @@ export function VaultPicker() {
         openedAt: r.openedAt,
       }));
     return [...remote, ...local];
-  }, [recents]);
+  }, [recents, organizations, authStatus, serverUrl]);
 
   // Show the 3 most recent by default; the rest hide behind "Load more".
   const RECENT_LIMIT = 3;

@@ -5,7 +5,13 @@
 // Session tokens are captured from Better Auth's `set-auth-token` header and
 // stored ONLY in the OS keychain — never localStorage/plaintext.
 
-import { ApiClient, DEFAULT_SERVER_URL, type AuthUser, type SessionInfo } from "../api";
+import {
+  ApiClient,
+  DEFAULT_SERVER_URL,
+  resolveServerUrl,
+  type AuthUser,
+  type SessionInfo,
+} from "../api";
 import * as ipc from "../ipc";
 
 /**
@@ -55,11 +61,12 @@ export class AuthManager {
    */
   async init(): Promise<SessionInfo | null> {
     try {
-      const url = await ipc.getServerUrl();
-      if (url) {
-        this.serverUrl = stripSlash(url);
-        this.api.setBaseUrl(this.serverUrl);
-      }
+      // `resolveServerUrl` — not the raw persisted value — so a dev build that
+      // was once pointed at the managed instance doesn't silently keep talking
+      // to production on every later launch.
+      const url = resolveServerUrl(await ipc.getServerUrl());
+      this.serverUrl = stripSlash(url);
+      this.api.setBaseUrl(this.serverUrl);
     } catch {
       /* config unavailable — fall back to the default URL */
     }

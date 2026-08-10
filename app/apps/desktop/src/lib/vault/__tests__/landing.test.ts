@@ -13,7 +13,6 @@ const base: LandingInput = {
   orgVaults: {},
   activeOrganizationId: null,
   rememberedOrgId: null,
-  createIfNone: false,
 };
 const plan = (over: Partial<LandingInput>) => planLanding({ ...base, ...over });
 
@@ -73,7 +72,6 @@ describe("planLanding — a folder is already open", () => {
         orgVaults: { a: "/v/a" },
         activeOrganizationId: "a",
         rememberedOrgId: "b",
-        createIfNone: true,
       }),
     ).toEqual({ kind: "stay-local" });
   });
@@ -122,18 +120,21 @@ describe("planLanding — nothing open", () => {
 });
 
 describe("planLanding — an account with no vaults", () => {
-  it("creates the first vault when the caller allows it", () => {
-    expect(plan({ createIfNone: true })).toEqual({ kind: "create-first-vault" });
+  it("lands on the welcome screen rather than inventing a vault", () => {
+    // Regression: this used to answer `create-first-vault` for an explicit
+    // sign-in, so deleting every vault and signing in again silently conjured
+    // "My Vault" and dropped the user inside it — the deletion looked like it
+    // had failed. The welcome screen offers New vault / Open existing / Join a
+    // team, so landing there is a destination, not a dead end.
+    expect(plan({})).toEqual({ kind: "nothing" });
   });
 
   it("does nothing on a silent session restore at launch", () => {
-    // `createIfNone` is false there on purpose: "I just signed in" earns a
-    // vault, "the app reopened" does not.
-    expect(plan({ createIfNone: false })).toEqual({ kind: "nothing" });
+    expect(plan({})).toEqual({ kind: "nothing" });
   });
 
   it("never creates a vault while a local folder is open", () => {
-    expect(plan({ openPath: "/somewhere/local", createIfNone: true })).toEqual({
+    expect(plan({ openPath: "/somewhere/local" })).toEqual({
       kind: "stay-local",
     });
   });
@@ -142,13 +143,13 @@ describe("planLanding — an account with no vaults", () => {
     // Falls through the restore chain with no vault to restore. Creating one
     // here would swap out the files the user is looking at.
     expect(
-      plan({ openPath: "/v/gone", orgVaults: { gone: "/v/gone" }, createIfNone: true }),
+      plan({ openPath: "/v/gone", orgVaults: { gone: "/v/gone" } }),
     ).toEqual({ kind: "nothing" });
   });
 
   it("never creates a vault when the user asked for one they're a member of", () => {
     expect(
-      plan({ orgIds: ["a"], requestedOrgId: "a", createIfNone: true }),
+      plan({ orgIds: ["a"], requestedOrgId: "a" }),
     ).toEqual({ kind: "switch", orgId: "a" });
   });
 });
@@ -160,7 +161,7 @@ describe("planLanding — an account with no vaults", () => {
 // route is for and who would be handed an auto-created "My Vault" instead.
 describe("planLanding — mid join-with-code", () => {
   it("does nothing for a brand-new account that would otherwise get one made", () => {
-    expect(plan({ joiningWithCode: true, createIfNone: true })).toEqual({
+    expect(plan({ joiningWithCode: true })).toEqual({
       kind: "nothing",
     });
   });
@@ -172,7 +173,6 @@ describe("planLanding — mid join-with-code", () => {
         orgIds: ["a", "b"],
         activeOrganizationId: "a",
         rememberedOrgId: "b",
-        createIfNone: true,
       }),
     ).toEqual({ kind: "nothing" });
   });
