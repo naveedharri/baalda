@@ -574,7 +574,12 @@ export default function App() {
       <main className="main">
         <MemberJoinedBanner />
         <UpdateBanner />
-        <header className="main-header">
+        {/* Sits flush against the top of the window now that there's no system
+            title bar above it (`titleBarStyle: "Overlay"`), which is where the
+            reclaimed ~28px comes from — and that makes it the strip you'd expect
+            to drag the window by. "deep" hands the whole row over as a drag
+            region; Tauri exempts the buttons on the right, so they still click. */}
+        <header className="main-header" data-tauri-drag-region="deep">
           <span className="note-title">{openNote?.title ?? "No note open"}</span>
           {openNote && !isPreview && <SaveIndicator />}
           {openNote && !isPreview && <SyncIndicator />}

@@ -21,6 +21,21 @@ pub struct TreeNode {
     /// fetched yet" — both are `children: []` — and every unexpanded folder is
     /// labelled "empty". Always true for files and for [`list_tree`]'s output.
     pub children_loaded: bool,
+    /// Last-modified time, milliseconds since the Unix epoch; 0 when the OS
+    /// won't say. Feeds the sidebar's "Recently modified" sort, which is the
+    /// default arrangement — so this is read for every entry, one extra stat
+    /// per `read_dir` entry.
+    pub modified: u64,
+}
+
+/// A directory entry's mtime in epoch millis, or 0 if it can't be read (a
+/// broken symlink, a racing delete). 0 sorts last under "recent", which is
+/// where an entry we know nothing about belongs.
+fn modified_millis(meta: Option<std::fs::Metadata>) -> u64 {
+    meta.and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Walk the vault into a nested tree. Skips dotfolders, `.git`, `.context/`,
@@ -41,6 +56,7 @@ pub fn list_tree(vault: &Path) -> AppResult<TreeNode> {
         is_dir: true,
         children: Some(children),
         children_loaded: true,
+        modified: modified_millis(std::fs::metadata(vault).ok()),
     })
 }
 
@@ -96,6 +112,7 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
                 is_dir: true,
                 children: Some(Vec::new()), // lazy marker: expandable, not yet loaded
                 children_loaded: false,
+                modified: modified_millis(entry.metadata().ok()),
             });
         } else if file_type.is_file() {
             if !is_allowed_file(&name) {
@@ -108,6 +125,7 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
                 is_dir: false,
                 children: None,
                 children_loaded: true,
+                modified: modified_millis(entry.metadata().ok()),
             });
         }
     }
@@ -158,6 +176,7 @@ fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
                 is_dir: true,
                 children: Some(children),
                 children_loaded: true,
+                modified: modified_millis(entry.metadata().ok()),
             });
         } else if file_type.is_file() {
             // Only surface allowed file types (notes/images/PDFs); skip code,
@@ -172,6 +191,7 @@ fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
                 is_dir: false,
                 children: None,
                 children_loaded: true,
+                modified: modified_millis(entry.metadata().ok()),
             });
         }
     }
@@ -245,6 +265,34 @@ mod tests {
             .map(|n| n.name.as_str())
             .collect();
         assert!(inner.contains(&"attachments"));
+    }
+
+    /// The sidebar's default arrangement is "recently modified first", which it
+    /// can only do if every entry carries an mtime. Both listings must supply
+    /// it: the lazy one is what the sidebar actually renders after a folder is
+    /// expanded, so a 0 there would silently sort a whole folder to the bottom.
+    #[test]
+    fn both_listings_report_a_modified_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Notes")).unwrap();
+        fs::write(root.join("Notes/a.md"), b"# A").unwrap();
+        fs::write(root.join("top.md"), b"# T").unwrap();
+
+        let tree = list_tree(root).unwrap();
+        assert!(tree.modified > 0, "the vault root itself");
+        let walk = |ns: &Vec<TreeNode>| {
+            for n in ns {
+                assert!(n.modified > 0, "{} has no mtime", n.path);
+            }
+        };
+        let children = tree.children.as_ref().unwrap();
+        walk(children);
+        walk(children.iter().find(|n| n.name == "Notes").unwrap().children.as_ref().unwrap());
+
+        for n in list_children(root, "").unwrap() {
+            assert!(n.modified > 0, "lazy listing: {} has no mtime", n.path);
+        }
     }
 
     /// `children: []` means two different things depending on which call produced

@@ -152,3 +152,34 @@ describe("planLanding — an account with no vaults", () => {
     ).toEqual({ kind: "switch", orgId: "a" });
   });
 });
+
+// "Join a team" on the welcome screen runs sign-in/sign-up FIRST and then comes
+// back for the code, so the auth that just happened must not land the user
+// anywhere. Every case below would otherwise unmount the screen still holding
+// the flow — most damagingly the brand-new account, which is exactly who this
+// route is for and who would be handed an auto-created "My Vault" instead.
+describe("planLanding — mid join-with-code", () => {
+  it("does nothing for a brand-new account that would otherwise get one made", () => {
+    expect(plan({ joiningWithCode: true, createIfNone: true })).toEqual({
+      kind: "nothing",
+    });
+  });
+
+  it("does nothing for an existing account with vaults to restore", () => {
+    expect(
+      plan({
+        joiningWithCode: true,
+        orgIds: ["a", "b"],
+        activeOrganizationId: "a",
+        rememberedOrgId: "b",
+        createIfNone: true,
+      }),
+    ).toEqual({ kind: "nothing" });
+  });
+
+  it("outranks even an explicit open-this-vault request", () => {
+    expect(
+      plan({ joiningWithCode: true, orgIds: ["a"], requestedOrgId: "a" }),
+    ).toEqual({ kind: "nothing" });
+  });
+});

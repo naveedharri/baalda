@@ -15,25 +15,32 @@ export interface ColorResult {
 }
 
 /**
- * Fully saturated hues at mid luminance. These were previously pastel-leaning so
- * they'd read on a light canvas too — but the graph backdrop is a near-black void
- * in every theme, and against that, desaturated fills all converge toward the
- * same washed grey-lilac and folders stop being tellable apart. Deepened and
- * saturated so each hue holds its own identity on the dark field, which is the
- * only surface they're ever drawn on.
+ * Categorical palette for folder coloring: **Observable 10** (d3's `schemeObservable10`,
+ * the modern successor to Tableau 10), hue order preserved, with two changes for
+ * the near-black void this is the only palette ever drawn on:
+ *   - every hue is lifted toward its brighter, more saturated form, because a
+ *     palette designed for white paper loses most of its separation once the
+ *     surround goes black — the darker members converge toward the background
+ *     instead of toward each other;
+ *   - Observable 10's brown (#9c6b4e) and grey (#9498a0) are replaced by cyan
+ *     and lime. Both read as "unlit" rather than as a category on a dark field;
+ *     a folder should never look switched off.
+ * Ten hues is also about the ceiling for a categorical scale before neighbours
+ * stop being tellable apart, so the tail is two spares rather than an ambition
+ * to color thirty folders distinctly.
  */
 export const PALETTE: string[] = [
-  "#6c5cff", // indigo
-  "#00c2a8", // teal
-  "#ffb020", // amber
-  "#ff3d71", // rose
-  "#1fc85c", // green
-  "#9d4edd", // violet
-  "#00aaff", // cyan
-  "#ff6b1a", // orange
-  "#a3d900", // lime
-  "#ff4fc3", // pink
-  "#2f6bff", // blue
+  "#5b8ff9", // blue
+  "#f6c445", // amber
+  "#ff8360", // coral
+  "#4fd6b8", // teal
+  "#4ad66d", // green
+  "#ff8ab7", // pink
+  "#b47cff", // violet
+  "#9fd0ff", // sky
+  "#22d3ee", // cyan     (Observable's brown — too dark on black)
+  "#c3e64b", // lime     (Observable's grey — reads as disabled)
+  "#ff5c8a", // rose
   "#7d90bd", // steel
 ];
 
@@ -103,16 +110,32 @@ function assignByFolder(nodes: GraphNode[]): ColorResult {
   return { colorById, legend };
 }
 
-function assignByDegree(nodes: GraphNode[], accent: string): ColorResult {
-  // The ramp runs from a deep cold slate to a colour BEYOND the accent. Ending
-  // exactly on the accent left the top tier the same purple as the app's buttons
-  // and only a shade off the tier below it; overshooting to a hot near-white
-  // gives the hubs somewhere to actually stand out to.
-  const base = "#2f3a52"; // deep slate — cold end, still clearly a colour
-  const hot = lerpHex(accent, "#fff3c4", 0.5); // accent pushed toward warm white
-  const shades = [0, 1, 2, 3].map((i) =>
-    i <= 2 ? lerpHex(base, accent, i / 2) : hot,
-  );
+/**
+ * The degree ramp: four samples of **plasma**, the perceptually-uniform
+ * colormap that data-viz guidance singles out (with inferno) as the sequential
+ * scale built for dark backgrounds — it never touches a dark end, so no tier
+ * sinks into the void.
+ *
+ * It replaces a ramp that ran deep-slate → accent → warm white. Everything below
+ * the top tier came out a dim blue-grey barely separable from the background:
+ * on a heavy-tailed vault that is 99% of the graph, so the graph read as dull
+ * and flat *because the colouring made it dull and flat*. Plasma spends its
+ * whole range on saturated hue AND rising lightness, so degree is legible twice
+ * over — by colour and by brightness — and every node is unmistakably lit.
+ */
+// Truncated at both ends: plasma's own floor (#0d0887, a near-black indigo)
+// would put the lowest tier straight back into the void, and its ceiling
+// (#f0f921) is a green-yellow that fights the amber in the folder palette.
+// Every entry clears 3:1 against the backdrop — see the contrast test.
+const DEGREE_RAMP = [
+  "#b12a90", // plasma 0.40 — magenta
+  "#d8576b", // plasma 0.50 — rose
+  "#ed7953", // plasma 0.65 — orange
+  "#fdca26", // plasma 0.85 — gold
+];
+
+function assignByDegree(nodes: GraphNode[]): ColorResult {
+  const shades = DEGREE_RAMP;
 
   const maxDeg = nodes.reduce((m, n) => Math.max(m, n.linkCount), 0);
 
@@ -172,7 +195,7 @@ export function assignColors(
     case "folder":
       return assignByFolder(nodes);
     case "degree":
-      return assignByDegree(nodes, accent);
+      return assignByDegree(nodes);
     case "uniform":
     default: {
       const colorById = new Map<string, string>();

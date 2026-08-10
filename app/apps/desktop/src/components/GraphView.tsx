@@ -6,6 +6,11 @@ import {
   configureForces,
   nodeRadius,
   centerWeight,
+  layoutScale,
+  IDLE_ALPHA,
+  DRAG_ALPHA,
+  REARRANGE_ALPHA,
+  type FlowForce,
   type SimNode,
   type SimLink,
 } from "../lib/graph/simulation";
@@ -41,28 +46,62 @@ const LABEL_FADE_END = 2.4; // camera.k at which labels are fully opaque (labelS
 const DEFAULT_FONT_FAMILY = "sans-serif";
 const FALLBACK_ACCENT = "#7f73ff";
 
-// The graph opens ALREADY SETTLED. It used to seed positions, kick every node
-// with a random velocity and then animate the whole layout finding its shape on
-// screen — which reads as the view detonating and reassembling itself, not as
-// something coming to life. Watching furniture arrange itself is not an intro;
-// it's a wait you're forced to watch, and it happens every single time you press
-// ⌘G on a graph whose shape you already know.
-//
-// So the settle now happens BEFORE the first frame (`presettle`), and the only
-// motion left on open is a soft fade + a barely-there scale — the "heartbeat".
-// The layout itself is static from frame one.
+// The graph opens IN MOTION, but never out of shape, and the motion is never the
+// physics. Three attempts got here:
+//   - It used to seed positions, kick every node and animate the whole layout
+//     finding its shape on screen. That reads as the view detonating and
+//     reassembling itself, every time you press ⌘G on a graph you already know.
+//   - Then it settled the layout fully before the first frame — and arrived as a
+//     photograph. A converged force layout is motionless (the forces cancel), so
+//     it stayed a photograph until you grabbed a node and woke the sim up.
+//   - Then it stopped the settle early so the tail end played out live. That is
+//     motion, but it is the WRONG motion: a force layout doing real work at a
+//     working alpha buzzes, because d3 integrates with a plain explicit step and
+//     a stiff spring system overshoots.
+// So the layout is settled before the first paint, the physics is kept at a
+// whisper (IDLE_ALPHA / DRAG_ALPHA), and every bit of movement you see comes
+// from the flow field in simulation.ts — one smooth velocity field the whole
+// graph floats in. Alive on frame one, alive at rest, and laminar throughout.
 // Must match the `graph-heartbeat` keyframes duration in graph.css — the CSS
 // drives the scale pulse, this drives the light pulse, and they have to peak
 // together or the graph reads as two effects rather than one heartbeat.
 const INTRO_MS = 1150;
 
+// ---- The entrance heartbeat -------------------------------------------------
+// The graph arrives with more current in it than it will keep, pulsing on a slow
+// beat, and comes down to its resting drift over the better part of half a
+// minute. A single short burst reads as a loading animation finishing; a long
+// exponential settle reads as something calming down, which is the difference
+// between "it played its intro" and "it's alive".
+//
+// BEAT_PERIOD_S is the same 1.15s as INTRO_MS, so the extra motion, the CSS
+// scale pulse and the glow all swell on the same beat rather than three times
+// out of step.
+const BEAT_PERIOD_S = INTRO_MS / 1000;
+// Peak multiplier on the resting drift speed at t = 0.
+const INTRO_GAIN = 5;
+// e-folding time of the decay: strong for a few seconds, clearly settling by
+// ten, indistinguishable from rest by the time INTRO_SECONDS is up.
+const INTRO_TAU_S = 6;
+const INTRO_SECONDS = 26;
+
 // Time budget for settling the layout before the first paint. This blocks the
 // UI thread, so it is a budget and not a tick count: small vaults converge in
-// well under it, and a big one stops early with alpha already low enough that
-// the remaining on-screen motion is a drift rather than a rearrangement.
-// ~650 ticks is full convergence at alphaDecay 0.0103 (see simulation.ts).
+// well under it, and a big one stops early.
+// ~650 ticks is full convergence at alphaDecay 0.0103 (see simulation.ts);
+// PRESETTLE_TARGET_ALPHA is reached in ~315, so a normal vault arrives settled
+// well inside the budget.
 const PRESETTLE_BUDGET_MS = 420;
 const PRESETTLE_MAX_TICKS = 700;
+// Low enough that the layout is done moving on its own by the first frame. The
+// entrance is the flow's job now, not the settle's.
+const PRESETTLE_TARGET_ALPHA = 0.04;
+
+// Below this alpha the layout is done moving into place, so the auto-fit camera
+// locks — a couple of seconds after open, or immediately after a refresh. Without the lock the ambient drift keeps nudging the
+// bounding box and the whole viewport breathes its zoom by a percent or two,
+// which reads as the picture wobbling rather than the nodes drifting.
+const FIT_LOCK_ALPHA = 0.02;
 
 // How hard a *data refresh* re-energizes the layout. The first build needs real
 // energy to find a shape from seeded positions; later rebuilds already have a
@@ -71,7 +110,15 @@ const PRESETTLE_MAX_TICKS = 700;
 // `file-changed` event (a whole storm of them while a vault syncs) threw the
 // entire layout back to maximum energy and it visibly flew apart and re-settled.
 const REHEAT_FIRST = 1;
-const REHEAT_REFRESH = 0.22;
+const REHEAT_REFRESH = 0.1;
+
+// Smallest a node may be drawn on screen, in CSS px of radius. Applied in
+// quadrature by the shader (see webglRenderer's VERT), so it is a lift for the
+// leaves rather than a ceiling everything piles up against.
+const MIN_NODE_PX = 2.1;
+// Baseline strength of the additive halo around each node, before the
+// node-count falloff applied at draw time.
+const GLOW_BASE = 1.3;
 
 // Fallback cap for the global scope on the 2D canvas, which only stays smooth
 // up to a few hundred nodes. The GPU (WebGL) renderer draws the whole vault, so
@@ -111,8 +158,12 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 }
 
 /**
- * Run the force layout to equilibrium synchronously, before anything is drawn,
- * so the graph's first frame is its final shape.
+ * Advance the force layout synchronously, before anything is drawn, so the
+ * graph's first frame is already essentially its final shape — the user never
+ * watches it assemble from a seed spiral.
+ *
+ * It runs to PRESETTLE_TARGET_ALPHA rather than all the way to alphaMin purely
+ * to bound the cost; by that point the layout has stopped visibly moving.
  *
  * `sim.tick(n)` is d3's own batch form — it advances the layout without
  * dispatching tick events, which is exactly what a pre-settle wants (our
@@ -121,8 +172,8 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  * Ticks are taken in small batches so the elapsed-time check is cheap relative
  * to the work: `performance.now()` per tick would measure the clock as much as
  * the physics. When the budget runs out we stop and leave the layout where it
- * is — alpha is monotonically decreasing, so an early exit means "slightly warm"
- * (a drift over a second) rather than "unsettled" (a visible rearrangement).
+ * is — alpha is monotonically decreasing, so an early exit just means a little
+ * more of the settle happens on screen.
  */
 /**
  * The heartbeat envelope, 0 at rest and peaking on each beat. Two Gaussian bumps
@@ -139,11 +190,42 @@ function heartbeatEnvelope(t: number): number {
   return Math.min(1, bump(0.16, 0.075) + 0.55 * bump(0.4, 0.06));
 }
 
+/**
+ * Where we are in the current beat, 0..1, for a clock in seconds. Feeding this
+ * to `heartbeatEnvelope` gives a continuous pulse train rather than the single
+ * beat the original one-shot intro played.
+ */
+function beatPhase(seconds: number): number {
+  return (seconds % BEAT_PERIOD_S) / BEAT_PERIOD_S;
+}
+
+/**
+ * Strength of the entrance, 0 at rest and 1 at the instant the data lands. The
+ * decay is exponential — it fades fastest when it is strongest, which is what
+ * makes the calming-down read as natural rather than as a timer running out.
+ */
+function introStrength(seconds: number): number {
+  if (seconds < 0 || seconds >= INTRO_SECONDS) return 0;
+  return Math.exp(-seconds / INTRO_TAU_S);
+}
+
+/**
+ * Multiplier on the resting drift speed: extra current on arrival, pulsing on
+ * the beat, easing down to exactly 1. The floor term (0.45) is what keeps the
+ * graph moving *between* beats — a pure pulse train would freeze in the gaps.
+ */
+function introEnergy(seconds: number): number {
+  const s = introStrength(seconds);
+  if (s <= 0) return 1;
+  const beat = heartbeatEnvelope(beatPhase(seconds));
+  return 1 + INTRO_GAIN * s * (0.45 + 0.55 * beat);
+}
+
 function presettle(sim: Simulation<SimNode, SimLink>): void {
   const deadline = performance.now() + PRESETTLE_BUDGET_MS;
   const BATCH = 20;
   let ticks = 0;
-  while (ticks < PRESETTLE_MAX_TICKS && sim.alpha() > sim.alphaMin()) {
+  while (ticks < PRESETTLE_MAX_TICKS && sim.alpha() > PRESETTLE_TARGET_ALPHA) {
     sim.tick(BATCH);
     ticks += BATCH;
     if (performance.now() >= deadline) break;
@@ -421,9 +503,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
   openNotePathRef.current = openNotePath;
 
   // One d3 simulation for the component's whole life (survives re-renders and
-  // StrictMode remounts because refs persist).
+  // StrictMode remounts because refs persist). It is deliberately never allowed
+  // to go cold: the alpha target floors at IDLE_ALPHA so the restoring forces
+  // stay awake under the perpetual drift (see simulation.ts).
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
-  if (!simRef.current) simRef.current = createSimulation(settingsRef.current);
+  if (!simRef.current) {
+    simRef.current = createSimulation(settingsRef.current).alphaTarget(IDLE_ALPHA);
+  }
 
   const graphRef = useRef<Graph | null>(null);
 
@@ -603,6 +689,12 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     S.visEdges = links; // now resolved in place by forceLink
     S.drawOrder = [...visNodes].sort((a, b) => a.radius - b.radius);
 
+    // Size the flow to the layout we just built (its own radius sets both the
+    // drift speed and the wavelength) so the motion looks the same whether this
+    // vault is 40 notes or 5000. Measured after the pre-settle, when positions
+    // mean something.
+    (sim.force("flow") as FlowForce).scale(layoutScale(visNodes));
+
     // Large global graphs: run the force layout in a Web Worker so the UI thread
     // never blocks. The worker owns its own copy and streams positions back into
     // these same node objects (loop() skips the main-thread tick while active).
@@ -690,7 +782,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           S.workerActive = true;
         } else {
           configureForces(sim, next);
-          sim.alpha(Math.max(sim.alpha(), 0.3));
+          sim.alpha(Math.max(sim.alpha(), REARRANGE_ALPHA));
         }
         requestDrawRef.current();
         return;
@@ -767,6 +859,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const sim = simRef.current!;
+    const flow = sim.force("flow") as FlowForce;
 
     // GPU renderer for the global scope (best-effort; if WebGL2 is unavailable
     // we simply never switch to it). Its own canvas — a canvas can hold only one
@@ -866,6 +959,14 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       attributeFilter: ["data-theme"],
     });
 
+    // Seconds since this graph's data landed — the entrance clock, shared by the
+    // extra drift, the glow swell and the CSS pulse. Clamped to the end of the
+    // entrance when there isn't one, so callers never see a non-finite phase.
+    const introSeconds = () =>
+      S.introStart > 0
+        ? (performance.now() - S.introStart) / 1000
+        : INTRO_SECONDS;
+
     function screenToWorld(sx: number, sy: number) {
       return {
         x: (sx - width / 2 - S.camera.x) / S.camera.k,
@@ -952,7 +1053,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       ctx!.globalCompositeOperation = "source-over";
       const edgeWidth = s.edgeThickness / k;
       ctx!.strokeStyle = EDGE_REST;
-      ctx!.globalAlpha = hovered ? 0.03 : 0.1 * (0.5 + 0.5 * introEase);
+      // Matched to the GPU path's edge alpha so the WebGL-unavailable fallback
+      // doesn't look like a different, dimmer product.
+      ctx!.globalAlpha = hovered ? 0.05 : 0.18 * (0.5 + 0.5 * introEase);
       ctx!.lineWidth = edgeWidth;
       ctx!.beginPath();
       for (const e of S.visEdges) {
@@ -1087,9 +1190,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // (`.graph-intro`) plus `glowBoost` above, and that is deliberately all.
     }
 
-    // Global scope: draw every node on the GPU (auto-fit to the viewport for
-    // now; pan/zoom/hover come next). Rebuilds the instance buffer each frame —
-    // fine for this first cut.
+    // Global scope: draw every node on the GPU. The instance buffer is rebuilt
+    // every frame (the layout is always drifting), so the RenderNode wrappers
+    // are POOLED and mutated in place — allocating a few thousand objects plus
+    // their color arrays 60 times a second would hand the GC a steady diet for
+    // as long as the graph is open.
     const webglNodes: RenderNode[] = [];
     let edgePositions = new Float32Array(0);
     function drawWebGL() {
@@ -1107,10 +1212,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const fallback = S.colors.nodeFallback;
       const nodeScale = settingsRef.current.nodeSize;
       // Shrink nodes as the graph grows so a bigger vault reads as "smaller
-      // dots, more space" rather than a compacted pile. ~1 for a few hundred
-      // nodes, ~0.2 at 50k. The layout also spreads (repulsion scales with n),
-      // so together the graph expands and keeps breathing room.
-      const countScale = Math.min(1, 40 / Math.sqrt(Math.max(1, S.visNodes.length)));
+      // dots, more space" rather than a compacted pile. The layout also spreads
+      // (repulsion scales with n), so together the graph expands and keeps
+      // breathing room. The constant is generous — it used to kick in at a few
+      // hundred notes and stack on top of the on-screen minimum, which between
+      // them squashed every node in a mid-size vault to the same floor size and
+      // erased the hub-vs-leaf hierarchy entirely.
+      const countScale = Math.min(1, 60 / Math.sqrt(Math.max(1, S.visNodes.length)));
       // Hover: light up the hovered node + its direct neighbors, dim the rest,
       // so you can see a note's connections at a glance.
       const hoveredId = S.hoveredId;
@@ -1118,19 +1226,25 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         hoveredId && graphRef.current
           ? neighborhoodIds(graphRef.current, hoveredId, 1)
           : null;
-      webglNodes.length = 0;
+      webglNodes.length = S.visNodes.length;
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const n of S.visNodes) {
+      for (let i = 0; i < S.visNodes.length; i++) {
+        const n = S.visNodes[i];
         const c = getRgb(S.colorById.get(n.id) ?? fallback);
         const dim = hlSet && !hlSet.has(n.id) ? 0.16 : 1;
         const big =
           n.id === hoveredId ? 2.4 : hlSet && hlSet.has(n.id) ? 1.8 : 1;
-        webglNodes.push({
-          x: n.x,
-          y: n.y,
-          r: n.radius * nodeScale * countScale * big,
-          color: [(c[0] / 255) * dim, (c[1] / 255) * dim, (c[2] / 255) * dim],
-        });
+        let rn = webglNodes[i];
+        if (!rn) {
+          rn = { x: 0, y: 0, r: 0, color: [0, 0, 0] };
+          webglNodes[i] = rn;
+        }
+        rn.x = n.x;
+        rn.y = n.y;
+        rn.r = n.radius * nodeScale * countScale * big;
+        rn.color[0] = (c[0] / 255) * dim;
+        rn.color[1] = (c[1] / 255) * dim;
+        rn.color[2] = (c[2] / 255) * dim;
         if (n.x < minX) minX = n.x;
         if (n.y < minY) minY = n.y;
         if (n.x > maxX) maxX = n.x;
@@ -1186,9 +1300,28 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         cam.k * dpr,
         (width / 2 + cam.x) * dpr,
         (height / 2 + cam.y) * dpr,
-        // Small floor so nodes can shrink to give space at the whole-graph
-        // overview (they grow back as you zoom in); avoids the compacted pile.
-        1.5 * dpr,
+        // Floor on a node's on-screen radius. The shader applies it in
+        // quadrature, not as a hard clamp, so this lifts the leaves to a
+        // legible dot without flattening the hubs down onto them.
+        MIN_NODE_PX * dpr,
+        performance.now() / 1000,
+        // Halos are additive, so they SUM: a glow that looks right on 200 nodes
+        // turns a 50k-node cluster into one white blob. Dial it back as the
+        // field fills up. Tuned against rendered frames at 800 / 3.4k nodes —
+        // the ceiling is where a sparse graph reads as luminous without the
+        // halos merging, the floor is where a huge one still shows some light.
+        //
+        // The entrance rides on top: the whole field brightens on each beat and
+        // the swell fades out with the extra motion, so the light and the
+        // movement are one heartbeat rather than two effects.
+        clamp(
+          GLOW_BASE *
+            (60 / Math.sqrt(Math.max(1, S.visNodes.length))) *
+            (1 + 0.5 * introStrength(introSeconds()) * heartbeatEnvelope(beatPhase(introSeconds()))),
+          0.3,
+          2.2,
+        ),
+        dpr,
       );
       diagRef.current =
         `webgl ✓ · nodes ${webglNodes.length} · buf ${webglCanvas.width}×${webglCanvas.height} · ` +
@@ -1199,8 +1332,6 @@ export function GraphView({ onClose }: { onClose: () => void }) {
 
     // Single frame clock. The loop stays alive the whole time the graph is
     // mounted so the lighting keeps breathing and the scene feels alive at rest.
-    // Physics is the expensive part, so we tick it ONLY while the sim is warm
-    // (or during the intro) — idle frames are a cheap repaint of a still layout.
     function loop() {
       S.rafId = null;
       const introActive =
@@ -1212,8 +1343,22 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (S.useWorker) {
         active = S.workerActive || introActive;
       } else {
-        active = sim.alpha() > sim.alphaMin() || introActive;
-        if (active) sim.tick();
+        // The inline sim is never idle. The flow force means there is always
+        // new motion to integrate, so we tick (and therefore repaint) every
+        // frame the view is open — that is what makes the graph live from the
+        // moment it appears instead of a still image you have to poke first.
+        // Only the worker path (8k+ nodes) still settles and stops: perpetually
+        // re-uploading an instance buffer that large every frame is exactly the
+        // cost the worker exists to avoid.
+        active = true;
+        flow.energy(introEnergy(introSeconds()));
+        sim.tick();
+        // Once the layout stops visibly moving into place, stop chasing it with
+        // the camera — otherwise the drift breathes the bounding box and the
+        // auto-fit turns that into a wobble of the whole view.
+        if (webglNeedsFitRef.current && sim.alpha() <= FIT_LOCK_ALPHA) {
+          webglNeedsFitRef.current = false;
+        }
       }
       if (settingsRef.current.scope === "global" && webgl) {
         // Only rebuild + re-upload + redraw while the layout is moving (or on an
@@ -1269,7 +1414,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           const i = S.indexById.get(hit.id);
           if (i !== undefined) workerRef.current?.fix(i, hit.x, hit.y);
         } else {
-          sim.alphaTarget(0.3);
+          sim.alphaTarget(DRAG_ALPHA);
         }
         S.drag = {
           type: "node",
@@ -1350,20 +1495,22 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         if (S.useWorker) {
           if (wi !== undefined) workerRef.current?.release(wi);
         } else {
-          sim.alphaTarget(0); // stop feeding energy; let it cool naturally
+          // Stop feeding drag energy and let it cool — but only back down to the
+          // idle floor, never to zero: a graph that cools to zero is a graph
+          // that stops moving.
+          sim.alphaTarget(IDLE_ALPHA);
         }
         if (!drag.moved) {
           // A click, not a drag: open the note.
           const path = drag.node.path;
           useStore.getState().openNoteByPath(path).then(onClose);
-        } else if (S.useWorker) {
-          // A real drag: gentle reheat so the displaced node drifts home calmly.
-          if (wi !== undefined) workerRef.current?.reheat(0.25);
-          requestDrawRef.current();
         } else {
-          // A real drag: a gentle reheat so the displaced node drifts home
-          // slowly and calmly (low energy = slow return, not a snap-back).
-          sim.alpha(Math.max(sim.alpha(), 0.25));
+          // A real drag: NO reheat. Dropping a node used to kick the layout back
+          // up to alpha 0.25, and that reheat was the visible "boing" — the
+          // whole neighbourhood re-solving at a step size big enough to
+          // overshoot. Cooling straight to the idle floor instead lets the
+          // displaced node be carried home by the ambient flow over several
+          // seconds, which is the same journey without the buzz.
           requestDrawRef.current();
         }
       }

@@ -35,7 +35,15 @@ export function SidebarHeader() {
   const name = switching?.name ?? (syncEnabled && activeOrg ? activeOrg.name : vault.name);
 
   return (
-    <div className={`sidebar-header${switching ? " is-switching" : ""}`}>
+    // Drag region: the window has no system title bar to grab (see
+    // `titleBarStyle: "Overlay"` in tauri.conf.json), and this row occupies the
+    // strip the macOS traffic lights float over. "deep" makes the whole subtree
+    // draggable — padding, name and path alike — while Tauri still lets real
+    // controls through, so the reveal-folder button below keeps working.
+    <div
+      className={`sidebar-header${switching ? " is-switching" : ""}`}
+      data-tauri-drag-region="deep"
+    >
       <div className="sidebar-header-main">
         {/* Keyed on the name so a switch cross-fades between the two vaults
             rather than swapping the text in place. */}

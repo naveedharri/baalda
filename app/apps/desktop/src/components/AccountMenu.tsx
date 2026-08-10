@@ -716,19 +716,25 @@ function MenuIcon({ children }: { children: React.ReactNode }) {
  * caller needs to act on a *successful* sign-in (vs. a cancel), it passes
  * `onSignedIn` — fired instead of `onClose` when the session arrives, so the
  * two outcomes stay distinguishable.
+ *
+ * `initialMode` picks which tab opens first. It defaults to sign-in, but the
+ * welcome screen's "Join a team" route opens on sign-up: someone holding a
+ * teammate's join code is usually here for the first time.
  */
 export function AuthDialog({
   onClose,
   onSignedIn,
+  initialMode = "sign-in",
 }: {
   onClose: () => void;
   onSignedIn?: () => void;
+  initialMode?: "sign-in" | "sign-up";
 }) {
   const authStatus = useStore((s) => s.authStatus);
   const authError = useStore((s) => s.authError);
   const serverUrl = useStore((s) => s.serverUrl);
 
-  const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
+  const [mode, setMode] = useState<"sign-in" | "sign-up">(initialMode);
   const [name, setName] = useState("");
   // Dev-only prefill of the local test account; production builds ship empty fields.
   const [email, setEmail] = useState(import.meta.env.DEV ? "test@context.local" : "");

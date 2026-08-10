@@ -81,6 +81,13 @@
   --sp-8: 32px;
   --sp-10: 40px;
 
+  /* Height to keep clear at the very top of the window for system window
+     controls. Zero everywhere the OS still draws its own title bar above the
+     webview; only macOS runs `titleBarStyle: "Overlay"`, where the webview owns
+     the full height and the traffic lights float over our top-left corner.
+     `[data-platform]` is stamped on <html> by `lib/platform.ts`. */
+  --titlebar-inset: 0px;
+
   /* Typography */
   --font-body: "Open Sauce Two", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: "Radio Canada Big", "Open Sauce Two", -apple-system, sans-serif;
@@ -104,6 +111,14 @@
   /* How the editor's selection layer blends over content (see theme.ts
      .cm-selectionLayer): darken on light, lighten on dark. */
   --selection-blend: multiply;
+}
+
+/* Traffic lights are ~12px tall centred around y≈19, so 28px clears them —
+   the same strip macOS would have reserved for itself before we took the
+   title bar over. Deliberately outside the theme blocks: it's a property of
+   the host OS, not of light/dark. */
+:root[data-platform="macos"] {
+  --titlebar-inset: 28px;
 }
 
 /* ---- Dark theme tokens (shared by explicit toggle + system fallback) ---- */

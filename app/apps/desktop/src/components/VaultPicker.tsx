@@ -5,6 +5,7 @@ import * as ipc from "../lib/ipc";
 import {
   readKnownVaults,
   readOrgVaults,
+  requestJoinWithCode,
   requestOpenVault,
   useStore,
 } from "../store";
@@ -90,6 +91,15 @@ export function VaultPicker() {
   // When a signed-out user clicks a remote vault we open the sign-in modal;
   // the vault to land in afterwards is stashed via requestOpenVault().
   const [signInOpen, setSignInOpen] = useState(false);
+  // Why the sign-in modal is up. "open" is the remote-vault-card route (land in
+  // that vault); "join" is the join-code route, which comes back HERE for the
+  // code instead of landing anywhere.
+  const [signInFor, setSignInFor] = useState<"open" | "join">("open");
+  // Join-with-code step: true = the code form is showing (we already have a
+  // session). null/false = idle.
+  const [joining, setJoining] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
+  const [joinError, setJoinError] = useState<string | null>(null);
   // New-vault flow: null = idle; a string = chosen parent, awaiting a name.
   const [newParent, setNewParent] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
@@ -119,6 +129,11 @@ export function VaultPicker() {
       alive = false;
     };
   }, []);
+
+  // If this screen goes away mid-join (a vault opened by some other route),
+  // the landing suppression must not outlive it. A *successful* join disarms
+  // it in the store before switching in, so this only catches abandonment.
+  useEffect(() => () => requestJoinWithCode(false), []);
 
   async function openVault(vault: VaultInfo | null) {
     if (!vault) return;
@@ -179,6 +194,63 @@ export function VaultPicker() {
     setError(null);
   }
 
+  // "Join a team": redeem a code a teammate shared, without first inventing a
+  // vault of your own.
+  //
+  // The code alone can't do anything — joining is a server action, so it needs
+  // an account. Signed out, we therefore run sign-up/sign-in first and come back
+  // here for the code. `requestJoinWithCode` is what keeps that round trip from
+  // ending somewhere else: it suppresses the post-auth landing, which would
+  // otherwise hand a brand-new account an auto-created "My Vault" and drop the
+  // user into it. That was the whole detour this replaces — create a vault you
+  // didn't want, then hunt for the code box in Vault settings.
+  function startJoin() {
+    setError(null);
+    setJoinError(null);
+    setJoinCode("");
+    requestJoinWithCode(true);
+    if (authStatus === "signed-in") {
+      setJoining(true);
+    } else {
+      setSignInFor("join");
+      setSignInOpen(true);
+    }
+  }
+
+  function cancelJoin() {
+    requestJoinWithCode(false);
+    setJoining(false);
+    setJoinCode("");
+    setJoinError(null);
+    // Backing out AFTER the sign-up this route required would otherwise leave a
+    // signed-in account holding nothing at all — the one state this screen has
+    // no good answer for, since its three buttons all assume you still have a
+    // choice to make. So run the landing the sign-in skipped, which makes the
+    // first vault. Only for an empty account: someone who already has vaults
+    // sees them listed right here, and yanking them into one they didn't click
+    // would be its own surprise.
+    const s = useStore.getState();
+    if (s.authStatus === "signed-in" && s.organizations.length === 0) {
+      void s.landAfterAuth();
+    }
+  }
+
+  async function confirmJoin() {
+    const code = joinCode.trim();
+    if (!code) return;
+    setBusy(true);
+    setJoinError(null);
+    try {
+      // On success the store switches into the joined vault, which binds it a
+      // folder and unmounts this screen — so there's nothing to do here after.
+      await useStore.getState().joinVault(code);
+    } catch (e) {
+      setJoinError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function reopenLocal(path: string) {
     setBusy(true);
     setError(null);
@@ -214,6 +286,7 @@ export function VaultPicker() {
         }
       } else {
         requestOpenVault(e.orgId);
+        setSignInFor("open");
         setSignInOpen(true);
       }
     } finally {
@@ -242,10 +315,11 @@ export function VaultPicker() {
   }
 
   const naming = newParent !== null;
-  // The naming step or the post-sign-in landing is showing — hide the
-  // recents/hint/sign-in behind it. Offering "New vault" while we are already
-  // making one is how you end up with two.
-  const inFlow = naming || landingVault;
+  // A step that owns the screen is showing (naming a new vault, entering a join
+  // code, or the post-sign-in landing) — hide the recents/hint/sign-in behind
+  // it. Offering "New vault" while we are already making one is how you end up
+  // with two.
+  const inFlow = naming || joining || landingVault;
 
   // Merge synced (remote) vaults with local recents into one list. Remote
   // vaults come from the locally-cached org list (survives sign-out) and are
@@ -282,6 +356,10 @@ export function VaultPicker() {
 
   return (
     <div className="vault-picker">
+      {/* The main app is draggable by its two header rows; this screen has no
+          chrome of its own, so without a strip here the window couldn't be
+          moved at all before a vault is open. */}
+      <div className="titlebar-drag" data-tauri-drag-region />
       {/* Ambient aurora — three blurred color fields drifting very slowly. */}
       {!reduceMotion && (
         <div className="aurora" aria-hidden="true">
@@ -328,6 +406,68 @@ export function VaultPicker() {
                   Opening your vault…
                 </p>
               </motion.div>
+            ) : joining ? (
+              // ---- Join step: the account exists (we forced sign-in first if
+              //      it didn't), so all that's left is the code. Redeeming it
+              //      switches straight into the team's vault — no vault of your
+              //      own required, which is the entire point of this route. ----
+              <motion.form
+                key="joining"
+                className="new-vault-form"
+                initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
+                transition={SPRING}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void confirmJoin();
+                }}
+              >
+                <label className="new-vault-label">Enter your team's join code</label>
+                {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+                <input
+                  className="new-vault-input join-code-input"
+                  autoFocus
+                  value={joinCode}
+                  disabled={busy}
+                  // Codes are generated uppercase; typing them lowercase is not
+                  // a mistake worth an error message.
+                  onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") cancelJoin();
+                  }}
+                  placeholder="K7MPX2RA"
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+                <p className="new-vault-loc">
+                  Ask a teammate for it — Vault settings → Members.
+                </p>
+                {joinError && <p className="error join-error">{joinError}</p>}
+                <div className="new-vault-buttons">
+                  <button
+                    type="button"
+                    className="ghost-pill"
+                    disabled={busy}
+                    onClick={cancelJoin}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className={`primary sm${busy ? " is-busy" : ""}`}
+                    disabled={busy || !joinCode.trim()}
+                    aria-busy={busy || undefined}
+                  >
+                    {/* Joining is a round trip plus a full vault switch — folder,
+                        registry reconcile, first pull. Seconds, not a blink. */}
+                    <span className="async-btn-label">
+                      {busy ? "Joining…" : "Join team"}
+                    </span>
+                    {busy && <Spinner size="xs" tone="on-accent" />}
+                  </button>
+                </div>
+              </motion.form>
             ) : naming ? (
               // ---- Naming step: only reached via "Create inside" an existing
               //      vault, where a nested vault does need its own folder name.
@@ -420,6 +560,25 @@ export function VaultPicker() {
                     {busy ? "Opening…" : "Open existing"}
                   </span>
                   {busy && <Spinner size="xs" tone="neutral" />}
+                </motion.button>
+                {/*
+                  Third peer action: create / open / JOIN. It sits up here with
+                  the other two rather than down in the quiet register with the
+                  sign-in link, because for the person it's aimed at — a
+                  teammate who was handed a code — it IS the primary action.
+                  Reaching a team used to mean making a vault you didn't want
+                  and then finding the code box in Vault settings, which reads
+                  as "this app is for solo notes, and teams are a setting".
+                */}
+                <motion.button
+                  className="ghost-pill lg"
+                  disabled={busy}
+                  onClick={startJoin}
+                  whileHover={reduceMotion ? undefined : { scale: 1.03, y: -1 }}
+                  whileTap={reduceMotion ? undefined : { scale: 0.97 }}
+                  transition={SPRING}
+                >
+                  Join a team
                 </motion.button>
               </motion.div>
             )}
@@ -549,7 +708,10 @@ export function VaultPicker() {
               // read from the keychain, so offering sign-in would flash a
               // control that's about to become unnecessary.
               disabled={busy || authStatus === "unknown"}
-              onClick={() => setSignInOpen(true)}
+              onClick={() => {
+                setSignInFor("open");
+                setSignInOpen(true);
+              }}
             >
               Sign in
             </button>{" "}
@@ -560,13 +722,22 @@ export function VaultPicker() {
 
       {signInOpen && (
         <AuthDialog
-          // Success: keep the pending open target — the store's post-sign-in
-          // landing opens exactly that vault. Just dismiss the modal.
-          onSignedIn={() => setSignInOpen(false)}
-          // Cancel: drop the pending target so a later sign-in from elsewhere
-          // doesn't surprise-open this vault.
+          // Someone arriving with a join code most likely has no account yet.
+          initialMode={signInFor === "join" ? "sign-up" : "sign-in"}
+          // Success: for the "open" route, keep the pending open target — the
+          // store's post-sign-in landing opens exactly that vault, so just
+          // dismiss. For the "join" route the landing was suppressed on
+          // purpose, and this screen is still up: show the code step.
+          onSignedIn={() => {
+            setSignInOpen(false);
+            if (signInFor === "join") setJoining(true);
+          }}
+          // Cancel: drop whichever intent sent us here, so a later sign-in from
+          // elsewhere doesn't surprise-open a vault or strand itself waiting on
+          // a code that is never coming.
           onClose={() => {
-            requestOpenVault(null);
+            if (signInFor === "join") cancelJoin();
+            else requestOpenVault(null);
             setSignInOpen(false);
           }}
         />

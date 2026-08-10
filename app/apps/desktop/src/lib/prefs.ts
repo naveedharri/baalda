@@ -4,6 +4,8 @@
 // avatar) are NOT here — those are server-backed via Better Auth so they follow
 // the account across devices; see `ApiClient.updateUser`.
 
+import type { TreeSort } from "./tree/sort";
+
 export type ActivityStatus = "online" | "away" | "busy" | "invisible";
 
 export const ACTIVITY_STATUSES: Array<{
@@ -55,6 +57,36 @@ export function writeMentionSound(enabled: boolean): void {
     localStorage.setItem(MENTION_SOUND_KEY, enabled ? "on" : "off");
   } catch {
     /* localStorage unavailable — preference stays in-memory only */
+  }
+}
+
+// ---- Sidebar sort -----------------------------------------------------------
+
+const TREE_SORT_KEY = "context.treeSort";
+
+/**
+ * How the sidebar arranges what the user hasn't arranged by hand. Device-level
+ * rather than per-vault (unlike item order/colors, which describe one vault's
+ * contents): this is a habit about how you read a sidebar, and having it flip
+ * as you switch vaults would be its own surprise.
+ *
+ * Defaults to "recent" — a second brain is mostly read from the top, and the
+ * note you want is nearly always one you touched lately.
+ */
+export function readTreeSort(): TreeSort {
+  try {
+    const v = localStorage.getItem(TREE_SORT_KEY);
+    return v === "name" || v === "recent" ? v : "recent";
+  } catch {
+    return "recent";
+  }
+}
+
+export function writeTreeSort(sort: TreeSort): void {
+  try {
+    localStorage.setItem(TREE_SORT_KEY, sort);
+  } catch {
+    /* localStorage unavailable — the sort stays in-memory only */
   }
 }
 

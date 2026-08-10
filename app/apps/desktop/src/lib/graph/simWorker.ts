@@ -11,6 +11,8 @@
 import {
   createSimulation,
   configureForces,
+  DRAG_ALPHA,
+  REARRANGE_ALPHA,
   type SimNode,
   type SimLink,
 } from "./simulation";
@@ -159,7 +161,7 @@ onmessage = (e: MessageEvent<InMsg>) => {
     case "settings":
       if (sim) {
         configureForces(sim, msg.settings);
-        sim.alpha(Math.max(sim.alpha(), 0.3));
+        sim.alpha(Math.max(sim.alpha(), REARRANGE_ALPHA));
         start();
       }
       break;
@@ -174,7 +176,8 @@ onmessage = (e: MessageEvent<InMsg>) => {
       if (n && sim) {
         n.fx = msg.x;
         n.fy = msg.y;
-        sim.alphaTarget(0.3);
+        // Same calm step size as the main-thread sim — see DRAG_ALPHA.
+        sim.alphaTarget(DRAG_ALPHA);
         start();
       }
       break;

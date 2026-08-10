@@ -66,6 +66,219 @@ export interface SimLink {
 }
 
 /**
+ * Velocity retained per tick — the complement of `.velocityDecay(0.7)` below.
+ * The flow force needs it to convert "how fast a node should drift" into the
+ * per-tick pull that produces that speed once damping is applied.
+ */
+const VELOCITY_RETAINED = 0.3;
+
+/**
+ * Floor the alpha never falls below while the graph is on screen.
+ *
+ * A d3 layout that reaches equilibrium is *motionless*, and alpha alone can't
+ * change that: at equilibrium the forces cancel, so a "hot" settled graph looks
+ * exactly like a cold one. What keeps it alive is the flow force below; this
+ * floor keeps the restoring forces (link/gravity) barely awake alongside it so
+ * the drift stays a drift and never becomes a deformation of the layout.
+ *
+ * Deliberately TINY. The alpha-scaled forces are the shaky ones at rest:
+ * many-body is a Barnes–Hut approximation, so a node crossing a quadtree cell
+ * boundary gets a small discontinuous kick, and at any meaningful alpha those
+ * kicks are what read as vibration. At 0.012 they are a whisper and the smooth
+ * flow field is what you actually see.
+ */
+export const IDLE_ALPHA = 0.012;
+
+/**
+ * Alpha held while a node is being dragged, and the ceiling for any other live
+ * disturbance (a settings change, a data refresh).
+ *
+ * This number IS the smoothness of the whole view, and it used to be 0.3.
+ * d3 integrates with a plain explicit step, so alpha is effectively the step
+ * size on a stiff system of springs and inverse-square repulsion: past a point
+ * every correction overshoots, the next one over-corrects back, and the graph
+ * buzzes. Measured over the three seconds after a drag, the mean frame-to-frame
+ * direction change of a node goes 18.7° at alpha 0.3 → 5.6° at 0.12 → 2.7° at
+ * 0.06, and outright reversals (the thing seen as vibration) go 9.7% → 1.8% →
+ * 0.5% of frames. 0.06 is where the motion stops reading as shake and starts
+ * reading as weight, while the neighbours still visibly give way — collision is
+ * not alpha-scaled, so a dragged node keeps shouldering its neighbours aside
+ * exactly as hard as before.
+ */
+export const DRAG_ALPHA = 0.06;
+
+/**
+ * Alpha for a change that genuinely needs the layout to rearrange — a physics
+ * slider, or new notes arriving. Higher than a drag because something structural
+ * actually has to move, still far below the old 0.3.
+ */
+export const REARRANGE_ALPHA = 0.15;
+
+/**
+ * Resting drift speed, as a fraction of the layout's own radius per second.
+ * Relative rather than absolute so a 40-note vault and a 5000-note one drift by
+ * the same amount *on screen* — the camera fits the graph, so a fixed
+ * world-unit speed would be obvious on one and invisible on the other.
+ */
+const FLOW_SPEED_FRACTION = 0.017;
+
+/**
+ * The flow asks for a velocity; the layout's own springs pull some of it back
+ * on the same tick, so a node never reaches the asked-for speed. This is the
+ * measured shortfall on settled layouts (see the drift tests), applied so that
+ * FLOW_SPEED_FRACTION means what it says on screen rather than four times less.
+ */
+const FLOW_SPRING_LOSS = 1.9;
+
+/** How hard a node is pulled toward the local flow velocity, per tick. */
+const FLOW_RELAX = 0.12;
+
+/**
+ * Fraction of the field velocity a node actually reaches in steady state.
+ * From v' = (v(1−F) + V·F)·d  ⇒  v = dFV / (1 − d(1−F)).
+ */
+const FLOW_GAIN =
+  (VELOCITY_RETAINED * FLOW_RELAX) /
+  (1 - VELOCITY_RETAINED * (1 - FLOW_RELAX));
+
+/**
+ * Three long plane waves whose curl makes up the flow. `wavelength` is in units
+ * of the layout radius — all of them are BIGGER than the gaps between nodes, on
+ * purpose: that is what makes neighbours move together instead of shouldering
+ * into each other. `period` is the time (seconds) for the wave to reverse, which
+ * is also what bounds how far a node can travel before it is carried back.
+ */
+const FLOW_WAVES = [
+  { angle: 0.35, wavelength: 1.4, period: 12, amp: 1.0 },
+  { angle: 2.31, wavelength: 0.9, period: 17, amp: 0.55 },
+  { angle: 4.19, wavelength: 0.6, period: 8, amp: 0.3 },
+];
+/**
+ * Typical magnitude of the summed waves. RMS, not the sum of the amplitudes:
+ * the waves are at different phases and angles, so they never all peak at once
+ * and adding them up would over-state the speed by better than a factor of two.
+ */
+const FLOW_AMP_NORM = Math.sqrt(
+  FLOW_WAVES.reduce((s, w) => s + w.amp * w.amp, 0) / 2,
+);
+/** Mass factor for the lightest nodes — the ones the drift speed is quoted for. */
+const FLOW_MASS_BIAS = 0.35;
+const LEAF_MASS = 1 / (1 + FLOW_MASS_BIAS * 0.12);
+const TAU = Math.PI * 2;
+const TICKS_PER_SECOND = 60;
+
+export interface FlowForce {
+  (alpha: number): void;
+  initialize(nodes: SimNode[]): void;
+  /** Layout radius in world units — sets both wavelength and speed. 0 disables. */
+  scale(rms: number): FlowForce;
+  /** Multiplier on the drift speed. 1 at rest; higher during the entrance. */
+  energy(multiplier: number): FlowForce;
+}
+
+/**
+ * The "alive" force: a slow, perpetual current the whole graph floats in.
+ *
+ * WHY it exists: everything else here converges. Once the layout settles, a
+ * force graph is a still photograph — which is what the graph used to open as,
+ * and it read as broken until you grabbed a node and woke it up. This force
+ * never converges and never scales with alpha, so the field keeps drifting at
+ * rest while the real forces continue to hold the shape.
+ *
+ * WHY a field and not per-node wander: the first version gave every node its own
+ * phase, which meant adjacent nodes routinely drifted in opposite directions —
+ * so the link springs and the collision force spent every tick correcting them
+ * and the whole graph vibrated. Here the velocity is read from ONE smooth
+ * spatial field, so a cluster moves almost as a body and there is nothing for
+ * the other forces to fight. It is the curl of a scalar potential, which makes
+ * it divergence-free: the flow shears and swirls but never compresses nodes
+ * into each other. That is the laminar part.
+ *
+ * Bounded by construction: each wave reverses on its own period, so a node is
+ * carried out and then carried back rather than wandering off.
+ *
+ * The pull is a relaxation toward the field velocity, not a shove: it doubles as
+ * a smoother, bleeding off any high-frequency jitter a node picked up elsewhere.
+ */
+export function createFlow(): FlowForce {
+  let nodes: SimNode[] = [];
+  let layout = 0;
+  let energy = 1;
+  let tick = 0;
+  const force = (() => {
+    tick += 1;
+    if (layout <= 0 || nodes.length === 0) return;
+    const seconds = tick / TICKS_PER_SECOND;
+    // World units per tick a light node should actually travel at energy 1,
+    // converted into the field velocity that produces it.
+    const speed =
+      ((FLOW_SPEED_FRACTION * layout * energy) / TICKS_PER_SECOND) *
+      (FLOW_SPRING_LOSS / (FLOW_GAIN * FLOW_AMP_NORM * LEAF_MASS));
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.fx != null || n.fy != null) continue; // pinned (dragged) — leave alone
+      let vx = 0;
+      let vy = 0;
+      for (let w = 0; w < FLOW_WAVES.length; w++) {
+        const { angle, wavelength, period, amp } = FLOW_WAVES[w];
+        const ca = Math.cos(angle);
+        const sa = Math.sin(angle);
+        const k = TAU / (wavelength * layout);
+        const phase = k * (n.x * ca + n.y * sa) + (TAU * seconds) / period;
+        // v = curl(ψ) for ψ = (amp/k)·sin(phase): perpendicular to the wave
+        // vector, constant along it — a sheet of fluid sliding past its
+        // neighbour rather than a scatter of independent wanderers.
+        const c = Math.cos(phase) * amp;
+        vx += sa * c;
+        vy += -ca * c;
+      }
+      // Heavier nodes are less carried: a hub holds its place while the leaves
+      // around it drift, which is what makes the motion read as orbital rather
+      // than as the whole picture sliding sideways.
+      const m = speed * (1 / (1 + FLOW_MASS_BIAS * (n.weight ?? 0.12)));
+      n.vx += (vx * m - n.vx) * FLOW_RELAX;
+      n.vy += (vy * m - n.vy) * FLOW_RELAX;
+    }
+  }) as unknown as FlowForce;
+  force.initialize = (n: SimNode[]) => {
+    nodes = n;
+  };
+  force.scale = (rms: number) => {
+    layout = rms;
+    return force;
+  };
+  force.energy = (multiplier: number) => {
+    energy = multiplier;
+    return force;
+  };
+  return force;
+}
+
+/**
+ * The layout's own radius: RMS distance from its centroid. Everything
+ * scale-relative (flow speed, flow wavelength) is measured against this, so the
+ * graph behaves identically whether it holds 40 notes or 5000.
+ */
+export function layoutScale(nodes: SimNode[]): number {
+  if (nodes.length === 0) return 0;
+  let cx = 0;
+  let cy = 0;
+  for (const n of nodes) {
+    cx += n.x;
+    cy += n.y;
+  }
+  cx /= nodes.length;
+  cy /= nodes.length;
+  let sum = 0;
+  for (const n of nodes) {
+    const dx = n.x - cx;
+    const dy = n.y - cy;
+    sum += dx * dx + dy * dy;
+  }
+  return Math.sqrt(sum / nodes.length);
+}
+
+/**
  * Radius from degree. Still sublinear — a 1200-link hub cannot be 1200× a leaf —
  * but on a gentler exponent than √ so the mid-tier actually spreads out.
  *
@@ -114,11 +327,15 @@ export function createSimulation(
     .force("x", forceX<SimNode>(0))
     .force("y", forceY<SimNode>(0))
     .force("collide", forceCollide<SimNode>())
+    // The one force that never converges — see createFlow(). Starts disabled;
+    // the renderer sizes it to the layout on every rebuild.
+    .force("flow", createFlow())
     // Slow, calm cooling (~650 ticks to settle). Stretched 1.5x vs the baseline
     // 0.0155 so the (now more damped) motion still reaches equilibrium.
     .alphaDecay(0.0103)
     // Damping: 0.70 — heavy friction so nodes drift back slowly and calmly after
     // a drag (~2x slower again vs 0.52; steady velocity ∝ (1-vd)/vd).
+    // Keep VELOCITY_RETAINED (= 1 - this) in step: the drift force inverts it.
     .velocityDecay(0.7)
     // CRUCIAL: renderer ticks manually inside its own rAF loop.
     .stop();
@@ -184,7 +401,12 @@ export function configureForces(
   // breathing room instead of touching — the even, spaced look of a good graph.
   // Clearance scales with the node too, so a sun keeps its planets at a distance
   // instead of letting them touch its surface the way a leaf's neighbours do.
+  // Strength is deliberately short of 1: collision is the one force d3 does NOT
+  // scale by alpha, so at rest it is the loudest thing in the sim. Resolving an
+  // overlap in one hard step made settled neighbours trade tiny corrections
+  // every tick, which is felt as vibration; easing them apart over several ticks
+  // reads as weight instead.
   (sim.force("collide") as ForceCollide<SimNode>)
     .radius((d) => d.radius + 4 + d.radius * 0.35)
-    .strength(0.85);
+    .strength(0.7);
 }

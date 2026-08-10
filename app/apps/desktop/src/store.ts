@@ -32,9 +32,12 @@ import {
   type ActivityStatus,
   readActivityStatus,
   readMentionSound,
+  readTreeSort,
   writeActivityStatus,
   writeMentionSound,
+  writeTreeSort,
 } from "./lib/prefs";
+import type { TreeSort } from "./lib/tree/sort";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { playJoinChime } from "./lib/celebrate/celebrate";
@@ -172,6 +175,9 @@ interface AppStore {
   activityStatus: ActivityStatus;
   /** Whether the mention chime plays when someone pings you. */
   mentionSound: boolean;
+  /** How the sidebar arranges everything the user hasn't arranged by hand.
+   *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
+  treeSort: TreeSort;
   /** Set briefly when a teammate joins the vault, to drive the celebration
    *  banner + confetti. `at` changes each time so a repeat join re-triggers it. */
   memberJoined: { name: string; at: number } | null;
@@ -179,6 +185,7 @@ interface AppStore {
   setVault: (v: ipc.VaultInfo | null) => void;
   setItemColor: (path: string, colorId: string | null) => void;
   setItemOrder: (order: ItemOrder) => void;
+  setTreeSort: (sort: TreeSort) => void;
   refreshTree: () => Promise<void>;
   /** Lazily load one folder's immediate children into the sidebar tree. */
   loadChildren: (path: string) => Promise<void>;
@@ -199,6 +206,12 @@ interface AppStore {
   signInWithGoogle: () => Promise<void>;
   signUp: (name: string, email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /**
+   * Run the post-sign-in landing on demand, for a flow that deliberately
+   * suppressed it and then fell through (abandoning "join a team" after the
+   * sign-up it required). Same rules as signing in, `createIfNone` included.
+   */
+  landAfterAuth: () => Promise<void>;
   setServerUrl: (url: string) => Promise<void>;
 
   // Account profile & preferences
@@ -406,6 +419,17 @@ function takePendingOpenVault(): string | null {
   return id;
 }
 
+// A "join a team with a code" flow started from the welcome screen, which runs
+// sign-in/sign-up first. While it's armed the post-auth landing must put the
+// user NOWHERE: a brand-new account would otherwise be handed an auto-created
+// "My Vault" (and an existing account dropped into an old one), unmounting the
+// welcome screen and burying the code step the user explicitly asked for. The
+// landing is `joinVault` itself — it switches into the vault the code names.
+let joiningWithCode = false;
+export function requestJoinWithCode(on: boolean): void {
+  joiningWithCode = on;
+}
+
 // The vault the user was last actually working in (folder + org resolved
 // together). The server session carries an `activeOrganizationId`, but it can be
 // null (fresh session, 2+ orgs) and it doesn't know which *folder* to open — so
@@ -460,7 +484,10 @@ async function landInLastVault(
 ): Promise<void> {
   const action = planLanding({
     orgIds: get().organizations.map((o) => o.id),
+    // Consumed even when the join flow is about to override it: the join
+    // supersedes whatever open-request was pending.
     requestedOrgId: takePendingOpenVault(),
+    joiningWithCode,
     openPath: get().vault?.path ?? null,
     orgVaults: readOrgVaults(),
     activeOrganizationId: get().session?.activeOrganizationId ?? null,
@@ -618,6 +645,7 @@ export const useStore = create<AppStore>((set, get) => ({
   orgBilling: null,
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
+  treeSort: readTreeSort(),
   memberJoined: null,
 
   setVault: (v) => {
@@ -646,6 +674,15 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!vault) return;
     writeItemOrder(vault.path, order);
     set({ itemOrder: order });
+  },
+
+  setTreeSort: (sort) => {
+    // Deliberately does NOT touch `itemOrder`: the sort is the layer beneath a
+    // hand-made arrangement, so switching it rearranges only what the user
+    // never arranged. Unlike the vault-scoped prefs above it needs no open
+    // vault — it's a device preference.
+    writeTreeSort(sort);
+    set({ treeSort: sort });
   },
 
   refreshTree: async () => {
@@ -1019,6 +1056,13 @@ export const useStore = create<AppStore>((set, get) => ({
     });
   },
 
+  landAfterAuth: async () => {
+    // Callers reach here only after disarming whatever suppressed the landing
+    // in the first place — otherwise planLanding still answers "nothing".
+    await landInLastVault(get, { createIfNone: true });
+    await get().openWelcomeIfPresent();
+  },
+
   setServerUrl: async (url) => {
     set({ authError: null });
     const session = await authManager.setServerUrl(url);
@@ -1390,6 +1434,10 @@ export const useStore = create<AppStore>((set, get) => ({
 
   joinVault: async (code) => {
     const joined = await authManager.api.joinVault(code.trim());
+    // The code was good, so the welcome screen's join flow is over: disarm the
+    // landing suppression before switching in (it's module state, and leaving it
+    // armed would silently strand the NEXT sign-in on the welcome screen).
+    requestJoinWithCode(false);
     await get().setActiveOrganization(joined.organizationId);
     // The joiner sees the celebration too (their vault channel connects after
     // the server broadcast, so they'd otherwise miss the live push).
