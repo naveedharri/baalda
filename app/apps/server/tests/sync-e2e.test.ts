@@ -7,7 +7,13 @@ import { createSyncServer, disconnectDoc, type SyncContext } from "../src/sync/h
 import { formatDocName } from "../src/sync/doc-name.js";
 import { mintSyncToken } from "../src/tokens/sync-token.js";
 import { countUpdates } from "../src/yjs/persistence.js";
+import { createDocWriter } from "../src/mcp/doc-writer.js";
+import { createApp } from "../src/http/app.js";
+import { recordVersion } from "../src/versions/capture.js";
 import { pool } from "../src/db/pool.js";
+import { testAppDeps } from "./helpers/app.js";
+import { authHeaders, signUp } from "./helpers/auth.js";
+import { seedMember, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
 import { resetDb } from "./helpers/db.js";
 
 const PORT = 3987;
@@ -15,6 +21,8 @@ const URL = `ws://127.0.0.1:${PORT}`;
 const VAULT = "vault-e2e";
 
 let server: Server<SyncContext>;
+/** Every `onDocEdited` notification the sync server made, in order. */
+let edits: Array<{ vaultId: string; docId: string; userId: string | null }>;
 
 function waitFor(cond: () => boolean, timeoutMs = 8000, label = "condition"): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -34,12 +42,17 @@ interface Client {
   text: Y.Text;
 }
 
-async function connect(docId: string, readOnly: boolean): Promise<Client> {
-  const token = await mintSyncToken({ docId, vaultId: VAULT, readOnly });
+async function connect(
+  docId: string,
+  readOnly: boolean,
+  userId?: string,
+  vaultId: string = VAULT,
+): Promise<Client> {
+  const token = await mintSyncToken({ docId, vaultId, readOnly, userId });
   const doc = new Y.Doc();
   const provider = new HocuspocusProvider({
     url: URL,
-    name: formatDocName(VAULT, docId),
+    name: formatDocName(vaultId, docId),
     token,
     document: doc,
     WebSocketPolyfill: WebSocket as unknown as typeof globalThis.WebSocket,
@@ -51,7 +64,10 @@ async function connect(docId: string, readOnly: boolean): Promise<Client> {
 describe("end-to-end Yjs sync through the server (spec 03 §3, 04 §4)", () => {
   beforeAll(async () => {
     await resetDb();
-    server = createSyncServer(PORT);
+    edits = [];
+    server = createSyncServer(PORT, undefined, (vaultId, docId, userId) =>
+      edits.push({ vaultId, docId, userId }),
+    );
     await server.listen();
   });
   afterAll(async () => {
@@ -60,6 +76,7 @@ describe("end-to-end Yjs sync through the server (spec 03 §3, 04 §4)", () => {
   });
   beforeEach(async () => {
     await resetDb();
+    edits = [];
   });
 
   it("two edit clients converge on one doc", async () => {
@@ -120,6 +137,103 @@ describe("end-to-end Yjs sync through the server (spec 03 §3, 04 §4)", () => {
     ).catch(() => {});
     // Best-effort: it should no longer report a live synced connection soon after.
     c.provider.disconnect();
+    c.provider.destroy();
+  });
+
+  // ── attribution (versioning / "last edited by") ─────────────────────────────
+
+  it("attributes a client edit to the token's userId", async () => {
+    const docId = "e2e-attrib-client";
+    const c = await connect(docId, false, "user-abc");
+    c.text.insert(0, "typed by a human");
+
+    await waitFor(() => edits.some((e) => e.docId === docId), 8000, "onDocEdited fired");
+    const mine = edits.filter((e) => e.docId === docId);
+    expect(mine[0].vaultId).toBe(VAULT);
+    expect(mine[0].userId).toBe("user-abc");
+
+    c.provider.destroy();
+  });
+
+  it("a pre-attribution token (no userId claim) still syncs, anonymously", async () => {
+    // Tokens minted before the claim existed are in flight for up to the TTL.
+    // They must verify and connect — just without a name attached.
+    const docId = "e2e-attrib-legacy";
+    const c = await connect(docId, false);
+    c.text.insert(0, "anonymous edit");
+
+    await waitFor(() => edits.some((e) => e.docId === docId), 8000, "onDocEdited fired");
+    expect(edits.find((e) => e.docId === docId)?.userId).toBeNull();
+
+    c.provider.destroy();
+  });
+
+  it("a doc-writer LIVE write reaches onChange with its actor (object origin)", async () => {
+    // The load-bearing one. The live path tags its transaction with a Hocuspocus
+    // `LocalTransactionOrigin` object; if Hocuspocus only string-compared origins
+    // (as `LOAD_ORIGIN` is), the context — and with it the whole attribution
+    // chain for MCP/AI and revert writes — would never arrive.
+    const docId = "e2e-attrib-local-origin";
+    const c = await connect(docId, false, "human");
+    await waitFor(() => c.provider.isSynced);
+
+    const writer = createDocWriter(server);
+    await writer.setContent(VAULT, docId, "written by the assistant", {
+      userId: "assistant-user",
+    });
+
+    // Reached the connected editor as an ordinary remote update…
+    await waitFor(
+      () => c.text.toString() === "written by the assistant",
+      8000,
+      "live write broadcast",
+    );
+    // …and was attributed to the actor, not to the connected human.
+    await waitFor(
+      () => edits.some((e) => e.docId === docId && e.userId === "assistant-user"),
+      8000,
+      "actor attribution",
+    );
+
+    c.provider.destroy();
+  });
+
+  it("a version revert over HTTP lands live in a connected editor", async () => {
+    // The whole point of reverting FORWARD through the doc writer: the client
+    // needs no revert protocol at all — the restored text arrives as an ordinary
+    // remote update and yCollab applies it like a teammate's keystroke.
+    const owner = await signUp("e2e-revert@t.com");
+    const org = await seedOrg("Acme", "acme-e2e-rv");
+    await seedMember(org, owner.userId, "owner");
+    const vaultId = await seedVault(org);
+    const docId = await seedNote(vaultId, null, "n.md", owner.userId);
+
+    const app = createApp(testAppDeps({ docWriter: createDocWriter(server) }));
+    const c = await connect(docId, false, owner.userId, vaultId);
+    c.text.insert(0, "text the user regrets");
+    await waitFor(() => c.text.toString() === "text the user regrets");
+
+    const versionId = await recordVersion({
+      vaultId,
+      docId,
+      content: "the good version",
+      cause: "idle",
+      authorId: owner.userId,
+    });
+
+    const res = await app.fetch(
+      new Request(`http://local/api/notes/${docId}/versions/${versionId}/revert`, {
+        method: "POST",
+        headers: authHeaders(owner),
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    await waitFor(
+      () => c.text.toString() === "the good version",
+      8000,
+      "revert reached the editor",
+    );
     c.provider.destroy();
   });
 });

@@ -13,6 +13,7 @@ import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { graphRoutes } from "./routes/graph.js";
 import { createMcpRoutes } from "./routes/mcp.js";
+import { createVersionRoutes } from "./routes/versions.js";
 import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
 import type { BillingProvider } from "../billing/provider.js";
@@ -79,6 +80,7 @@ function allowedOrigins(): string[] {
  *  - /api/sync-token → mint per-doc sync JWTs
  *  - /api/{vaults,folders,notes,files} → registry
  *  - /api/vaults/:id/blobs, /api/blobs/:id → attachment blob store
+ *  - /api/notes/:id/versions, /api/vaults/:id/checkpoints → version history
  *  - /api/shares → folder/file ACL management
  *  - /api/orgs/join-code, /api/orgs/join → vault join codes
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
@@ -144,6 +146,13 @@ export function createApp(deps: AppDeps): Hono {
     }),
   );
   app.route("/api", blobRoutes);
+  app.route(
+    "/api",
+    createVersionRoutes({
+      docWriter: deps.docWriter,
+      onRegistryChanged: deps.onRegistryChanged,
+    }),
+  );
   app.route("/api", createShareRoutes(deps));
   const billingProvider = deps.billingProvider ?? new PolarBillingProvider();
   app.route(

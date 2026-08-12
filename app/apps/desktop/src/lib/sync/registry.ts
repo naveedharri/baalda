@@ -25,8 +25,10 @@ import {
   ApiClient,
   ApiError,
   noteDocId,
+  noteLastEdited,
   noteRelPath,
   vaultOrgId,
+  type NoteLastEdited,
   type RegisteredFolder,
   type RegisteredNote,
 } from "../api";
@@ -282,6 +284,19 @@ export class VaultRegistry {
    */
   private onMapChanged: (() => void) | null = null;
 
+  /**
+   * Notified with the {docId → last-edit} map every time a pull tells us who
+   * last touched each note.
+   *
+   * Liveness rides the registry re-pull rather than a protocol frame of its own:
+   * the server already fires `registry-changed` when it stamps an edit, and that
+   * pull is coalesced (120ms/250ms), so "edited by X just now" converges on the
+   * same round trip that moves/renames use. Owned for the process lifetime like
+   * {@link onMapChanged} — a vault switch must *publish* an empty map, not go
+   * silent.
+   */
+  private onNoteMeta: ((meta: Record<string, NoteLastEdited>) => void) | null = null;
+
   constructor(
     private readonly api: ApiClient,
     /** Where the current VaultScope comes from; injectable for tests. */
@@ -304,6 +319,11 @@ export class VaultRegistry {
     this.onMapChanged = cb;
   }
 
+  /** Subscribe to per-note last-edit metadata (see {@link onNoteMeta}). */
+  setNoteMetaListener(cb: ((meta: Record<string, NoteLastEdited>) => void) | null): void {
+    this.onNoteMeta = cb;
+  }
+
   /** Provide the editor/doc-store coupling inbound reconciliation needs. Without
    *  a host, inbound still runs but nothing is released — safe only in tests,
    *  where no bridge is open. */
@@ -315,6 +335,23 @@ export class VaultRegistry {
    *  created note); the listener is responsible for coalescing. */
   private notifyMapChanged(): void {
     this.onMapChanged?.();
+  }
+
+  /**
+   * Publish the last-edit stamps carried by a registry pull, keyed by **docId**
+   * (the sidebar joins it back to a row through the path→docId map). Notes the
+   * server has no stamp for are simply absent, so the whole map replaces the
+   * previous one rather than merging into it.
+   */
+  private publishNoteMeta(serverNotes: RegisteredNote[]): void {
+    const cb = this.onNoteMeta;
+    if (!cb) return;
+    const meta: Record<string, NoteLastEdited> = {};
+    for (const n of serverNotes) {
+      const edited = noteLastEdited(n);
+      if (edited) meta[noteDocId(n)] = edited;
+    }
+    cb(meta);
   }
 
   /**
@@ -926,6 +963,11 @@ export class VaultRegistry {
     } else {
       this.inboundSuppressed = new Set();
     }
+
+    // Published from the FINAL note list (the inbound branch above may have
+    // re-read it), so the "edited by" tags reflect the same rows the rest of this
+    // pass reconciles against.
+    this.publishNoteMeta(serverNotes);
 
     // Drop anything belonging to a different collection before we start adding:
     // the maps are written into incrementally from here on (so a mid-run

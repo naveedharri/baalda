@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createAvatar } from "@dicebear/core";
 import { notionists } from "@dicebear/collection";
 import { PRESENCE_PALETTE } from "../lib/presence/color";
+import { CheckMark } from "./Spinner";
 import type { SyncProgress } from "../lib/sync/vaultScope";
 
 /* ============================================================
@@ -101,6 +102,10 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
  * socket can be perfectly "synced" while 380 of 500 notes have never reached the
  * server, and reporting "Synced · just now" there is precisely the lie this
  * progress exists to kill.
+ *
+ * `noteOpen: false` puts the pill in vault-wide mode: `status` belongs to a
+ * socket that doesn't exist, so the label is derived from `progress` alone —
+ * counter while running, "Synced" once done, the failure count on error.
  */
 export function syncBadgeLabel(args: {
   status: string;
@@ -110,21 +115,35 @@ export function syncBadgeLabel(args: {
   enabled?: boolean;
   /** The open vault's bulk sync run, when one is in flight. */
   progress?: SyncProgress | null;
+  /** False when the pill stands for the vault, not an open note. */
+  noteOpen?: boolean;
 }): string {
-  const { status, pending, lastSyncedAt, now, enabled, progress } = args;
+  const { status, pending, lastSyncedAt, now, enabled, progress, noteOpen } = args;
   // A grant fact about the open note outranks everything else: there is no point
   // reporting upload progress on a doc we are not allowed to write.
-  if (status === "no-access") return "No access";
-  if (status === "read-only") return "Read-only";
+  if (noteOpen !== false) {
+    if (status === "no-access") return "No access";
+    if (status === "read-only") return "Read-only";
+  }
   if (progress && isSyncRunActive(progress)) {
-    return progress.total > 0
-      ? `Syncing ${progress.done}/${progress.total}`
-      : "Syncing…";
+    if (progress.total <= 0) return "Syncing…";
+    // Name the direction: a freshly invited teammate watching their vault arrive
+    // should read "Downloading", not a generic "Syncing".
+    const verb =
+      progress.phase === "downloading"
+        ? "Downloading"
+        : progress.phase === "uploading"
+          ? "Uploading"
+          : "Syncing";
+    return `${verb} ${progress.done}/${progress.total}`;
   }
   // A run that finished with failures must not read "Synced". `failed` is the
   // number of notes that are still only on this device.
   if (progress?.phase === "error") {
     return progress.failed > 0 ? `${progress.failed} not synced` : "Sync incomplete";
+  }
+  if (noteOpen === false) {
+    return progress?.phase === "done" ? "Synced" : "Syncing…";
   }
   if (status === "synced") {
     if (pending) return "Saving…";
@@ -143,11 +162,18 @@ export function syncBadgeLabel(args: {
 export function syncBadgeTone(args: {
   status: string;
   progress?: SyncProgress | null;
+  /** False when the pill stands for the vault, not an open note. */
+  noteOpen?: boolean;
 }): string {
-  const { status, progress } = args;
-  if (status === "no-access" || status === "read-only") return status;
+  const { status, progress, noteOpen } = args;
+  if (noteOpen !== false && (status === "no-access" || status === "read-only")) {
+    return status;
+  }
   if (isSyncRunActive(progress)) return "connecting";
   if (progress?.phase === "error") return "error";
+  if (noteOpen === false) {
+    return progress?.phase === "done" ? "synced" : "connecting";
+  }
   return status;
 }
 
@@ -167,6 +193,7 @@ export function SyncBadge({
   lastSyncedAt,
   pending,
   progress,
+  noteOpen,
 }: {
   status: string;
   enabled?: boolean;
@@ -177,6 +204,9 @@ export function SyncBadge({
   /** The open vault's bulk sync run — turns the pill into "Syncing 128/500"
    *  with a determinate bar. Omit for a pill that only tracks the connection. */
   progress?: SyncProgress | null;
+  /** False when the pill stands for the vault, not an open note: socket-derived
+   *  states are skipped and the label comes from `progress` alone. */
+  noteOpen?: boolean;
 }) {
   const running = isSyncRunActive(progress);
   // Only tick the relative clock once we're settled (synced, nothing pending, no
@@ -184,13 +214,26 @@ export function SyncBadge({
   const now = useNowTick(
     status === "synced" && !pending && lastSyncedAt != null && !running,
   );
-  const label = syncBadgeLabel({ status, pending, lastSyncedAt, now, enabled, progress });
-  const tone = syncBadgeTone({ status, progress });
+  const label = syncBadgeLabel({
+    status,
+    pending,
+    lastSyncedAt,
+    now,
+    enabled,
+    progress,
+    noteOpen,
+  });
+  const tone = syncBadgeTone({ status, progress, noteOpen });
   // A determinate fill whenever the run knows its own size; the pre-existing
   // indeterminate slide covers "working, size unknown" (connecting, saving).
   const percent = running ? syncRunPercent(progress) : null;
+  // Hover answers "how far along?" in the same shape as the folder tooltips.
+  const title =
+    running && progress && percent != null
+      ? `${progress.done} of ${progress.total} notes · ${percent}%`
+      : undefined;
   return (
-    <span className={`sync-badge ${tone}${pending ? " pending" : ""}`}>
+    <span className={`sync-badge ${tone}${pending ? " pending" : ""}`} title={title}>
       {tone === "connecting" || (tone === "synced" && pending) ? (
         <span
           className={`sync-progress${percent != null ? " determinate" : ""}`}
@@ -215,6 +258,10 @@ export function SyncBadge({
           <rect x="4" y="11" width="16" height="10" rx="2" />
           <path d="M8 11V7a4 4 0 0 1 8 0v4" />
         </svg>
+      ) : tone === "synced" ? (
+        // Settled and safe reads as a tick, not just a green dot — the same
+        // "this completed" glyph AsyncButton uses.
+        <CheckMark size="xs" />
       ) : (
         <span className="sync-dot" aria-hidden="true" />
       )}

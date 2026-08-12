@@ -257,6 +257,25 @@ jobs:
           echo "notarize=$want" >> "$GITHUB_OUTPUT"
           echo "Notarization: $want"
 
+      # The GitHub release body doubles as the in-app "what's new": the updater
+      # feeds it back as latest.json's `notes`, and the desktop shows those
+      # one-liners in the post-update banner. Keep docs/RELEASE_NOTES.md fresh
+      # alongside every version bump; the fallback keeps releases shippable if
+      # it's ever missing.
+      - name: Release notes
+        id: relnotes
+        shell: bash
+        run: |
+          {
+            echo 'body<<RELNOTES_EOF'
+            if [ -f docs/RELEASE_NOTES.md ]; then
+              cat docs/RELEASE_NOTES.md
+            else
+              echo 'See the assets below to download and install this version.'
+            fi
+            echo 'RELNOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       # Two steps rather than one with conditional env, deliberately. Blanking
       # APPLE_ID/PASSWORD/TEAM_ID does not reliably disable notarization — a GitHub
       # expression yields an EMPTY STRING, not an unset variable, and "set but
@@ -286,7 +305,7 @@ jobs:
           projectPath: app/apps/desktop
           tagName: v__VERSION__
           releaseName: 'Baalda v__VERSION__'
-          releaseBody: 'See the assets below to download and install this version.'
+          releaseBody: ${{ steps.relnotes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
@@ -311,7 +330,7 @@ jobs:
           projectPath: app/apps/desktop
           tagName: v__VERSION__
           releaseName: 'Baalda v__VERSION__'
-          releaseBody: 'See the assets below to download and install this version.'
+          releaseBody: ${{ steps.relnotes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type McpToolInfo, type McpTokenRow, type Member } from "../lib/api";
+import {
+  type McpToolInfo,
+  type McpTokenRow,
+  type Member,
+  type VaultCheckpoint,
+} from "../lib/api";
+import { toast } from "../lib/toast";
+import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
 import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import { classifyLimitError, type LimitKind, limitFromError } from "../lib/billing";
@@ -961,13 +968,20 @@ type SettingsTab =
   | "billing"
   | "access"
   | "mcp"
+  | "versioning"
   | "import-export"
   | "appearance"
   | "updates";
 
 // Sections that only make sense once the vault is synced to an org. On a
 // local vault they're shown but locked, with a "Turn on sync" gate.
-const TEAM_TABS = new Set<SettingsTab>(["members", "billing", "access", "mcp"]);
+const TEAM_TABS = new Set<SettingsTab>([
+  "members",
+  "billing",
+  "access",
+  "mcp",
+  "versioning",
+]);
 
 /** General tab: name, folder, and sync state (incl. the Turn-on-sync CTA). */
 const GENERAL_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
@@ -1022,6 +1036,17 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
       <MenuIcon>
         <path d="M4 17l6-6-6-6" />
         <path d="M12 19h8" />
+      </MenuIcon>
+    ),
+  },
+  {
+    id: "versioning",
+    label: "Versioning",
+    icon: (
+      <MenuIcon>
+        <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+        <path d="M3 4v4h4" />
+        <path d="M12 8v4l3 2" />
       </MenuIcon>
     ),
   },
@@ -1198,6 +1223,11 @@ function VaultSettingsDialog({
             <AccessPanel canManage={canManage} />
           ) : tab === "mcp" ? (
             <McpTab />
+          ) : tab === "versioning" ? (
+            <VersioningTab
+              canManage={canManage}
+              isOwner={myMember?.role === "owner"}
+            />
           ) : tab === "import-export" ? (
             <ImportExportTab />
           ) : tab === "updates" ? (
@@ -2221,6 +2251,173 @@ function LimitNudge({
       <button className="link-btn" onClick={onUpgrade}>
         Upgrade →
       </button>
+    </div>
+  );
+}
+
+/**
+ * Versioning: the vault-wide safety net. Lists the vault's checkpoints (max 5 —
+ * a daily automatic one plus manual ones), lets owners/admins take one on
+ * demand, and lets the OWNER roll the whole vault back to one. Per-note history
+ * lives in the editor's version panel; this page is for the blast-radius case
+ * ("the reorg went wrong, put everything back").
+ */
+function VersioningTab({
+  canManage,
+  isOwner,
+}: {
+  canManage: boolean;
+  isOwner: boolean;
+}) {
+  const checkpoints = useStore((s) => s.checkpoints);
+  const [label, setLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<VaultCheckpoint | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    void useStore.getState().refreshCheckpoints();
+    const id = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const create = async () => {
+    setError(null);
+    try {
+      await useStore.getState().createCheckpoint(label);
+      setLabel("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const remove = async (id: string) => {
+    setError(null);
+    try {
+      await useStore.getState().deleteCheckpoint(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const revert = async (cp: VaultCheckpoint) => {
+    setError(null);
+    try {
+      const result = await useStore.getState().revertVaultToCheckpoint(cp.id);
+      setConfirming(null);
+      toast(
+        `Vault reverted — ${result.docsChanged} notes changed, ` +
+          `${result.docsRestored} restored, ${result.docsDeleted} removed`,
+        "success",
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="versioning-tab">
+      <div className="muted">
+        A checkpoint captures every note in this vault — content and folder
+        structure. One is taken automatically each day the vault changes; the
+        vault keeps its 5 most recent. Reverting rolls every member's vault back
+        and broadcasts live.
+      </div>
+      <div className="menu-sep" />
+      {canManage && (
+        <>
+          <div className="subhead">Create checkpoint</div>
+          <div className="row invite-bar">
+            <input
+              type="text"
+              placeholder="Label (optional) — e.g. Before the big reorg"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+            />
+            <AsyncButton className="primary sm" onClick={create}>
+              Create
+            </AsyncButton>
+          </div>
+          <div className="menu-sep" />
+        </>
+      )}
+      <div className="subhead">Checkpoints</div>
+      {error && <div className="auth-error">{error}</div>}
+      {checkpoints == null ? (
+        <div className="muted perm-empty">Loading…</div>
+      ) : checkpoints.length === 0 ? (
+        <div className="muted perm-empty">
+          No checkpoints yet. One is captured automatically within a day of the
+          vault changing{canManage ? ", or create one above" : ""}.
+        </div>
+      ) : (
+        <ul className="checkpoint-list">
+          {checkpoints.map((cp) => (
+            <li key={cp.id} className="checkpoint-row">
+              <span className="checkpoint-main">
+                <span className="checkpoint-title">
+                  {checkpointTitle(cp.label, cp.kind, cp.createdAt, now)}
+                </span>
+                <span className="checkpoint-sub">
+                  {agoFromIso(cp.createdAt, now)} · {noteCountLabel(cp.noteCount)}
+                  {cp.createdByName ? ` · by ${cp.createdByName}` : ""}
+                </span>
+              </span>
+              {isOwner && (
+                <button className="link-btn" onClick={() => setConfirming(cp)}>
+                  Revert
+                </button>
+              )}
+              {canManage && (
+                <AsyncButton className="link-btn danger" onClick={() => remove(cp.id)}>
+                  Delete
+                </AsyncButton>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!isOwner && (
+        <div className="muted checkpoint-note">
+          Only the vault owner can revert to a checkpoint.
+        </div>
+      )}
+      {confirming && (
+        <div className="modal-backdrop" onClick={() => setConfirming(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Revert the entire vault?</h2>
+            </div>
+            <p className="muted">
+              Every note goes back to{" "}
+              <strong>
+                {checkpointTitle(
+                  confirming.label,
+                  confirming.kind,
+                  confirming.createdAt,
+                  now,
+                )}
+              </strong>{" "}
+              ({agoFromIso(confirming.createdAt, now)}) — content, names and
+              folders — for every member, live. Notes created since then are
+              moved to trash. Attachments are not reverted. A checkpoint of the
+              current state is taken first, so this can be undone.
+            </p>
+            <div className="banner-actions">
+              <button className="secondary" onClick={() => setConfirming(null)}>
+                Cancel
+              </button>
+              <AsyncButton
+                className="primary danger"
+                spinnerTone="on-accent"
+                onClick={() => revert(confirming)}
+              >
+                Revert vault
+              </AsyncButton>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

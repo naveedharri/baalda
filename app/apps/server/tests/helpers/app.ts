@@ -1,19 +1,43 @@
 import type { AppDeps } from "../../src/http/app.js";
-import type { DocWriter } from "../../src/mcp/doc-writer.js";
+import type { DocActor, DocWriter } from "../../src/mcp/doc-writer.js";
+
+/** One recorded write, so a test can assert WHO the server said wrote it. */
+export interface RecordedWrite {
+  vaultId: string;
+  docId: string;
+  content: string;
+  actor: DocActor | undefined;
+}
+
+export type MemoryDocWriter = DocWriter & {
+  store: Map<string, string>;
+  /** Every setContent/appendContent, in order. */
+  writes: RecordedWrite[];
+};
 
 /** A DocWriter that records writes in memory — for tests that don't run sync. */
-export function memoryDocWriter(): DocWriter & { store: Map<string, string> } {
+export function memoryDocWriter(): MemoryDocWriter {
   const store = new Map<string, string>();
+  const writes: RecordedWrite[] = [];
   return {
     store,
-    async setContent(_vaultId, docId, content) {
+    writes,
+    async setContent(vaultId, docId, content, actor) {
       store.set(docId, content);
+      writes.push({ vaultId, docId, content, actor });
     },
-    async appendContent(_vaultId, docId, text) {
-      store.set(docId, (store.get(docId) ?? "") + text);
+    async appendContent(vaultId, docId, text, actor) {
+      const next = (store.get(docId) ?? "") + text;
+      store.set(docId, next);
+      writes.push({ vaultId, docId, content: next, actor });
     },
     async readContent(_vaultId, docId) {
       return store.get(docId) ?? "";
+    },
+    // Mirrors production: null = the store has never seen this doc's content,
+    // which capture paths must treat as "skip", never as "empty note".
+    async peekContent(_vaultId, docId) {
+      return store.get(docId) ?? null;
     },
   };
 }
@@ -45,7 +69,7 @@ export interface RecordingAppDeps {
   aclBroadcasts: string[];
   /** Docs whose live sync sockets were force-closed. */
   disconnected: Array<{ vaultId: string; docId: string }>;
-  docWriter: DocWriter & { store: Map<string, string> };
+  docWriter: MemoryDocWriter;
   /** Clear all recordings (call from `beforeEach`). */
   reset(): void;
 }
@@ -71,6 +95,7 @@ export function recordingAppDeps(overrides: Partial<AppDeps> = {}): RecordingApp
       aclBroadcasts.length = 0;
       disconnected.length = 0;
       docWriter.store.clear();
+      docWriter.writes.length = 0;
     },
     deps: {
       docWriter,

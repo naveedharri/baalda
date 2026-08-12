@@ -1,0 +1,5 @@
+- Version history for every note — open the clock icon to browse, preview and revert past versions
+- Vault checkpoints in Settings → Versioning — automatic daily snapshots plus manual ones, with owner-only full-vault revert
+- See who last edited a note in the presence menu, and "edited … ago" at a glance
+- Persistent sync indicator in the header — live download/upload progress that settles to a checkmark
+- Updates now install themselves; this banner is the new way you hear about them

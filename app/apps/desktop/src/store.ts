@@ -14,10 +14,14 @@ import {
   type BillingConfig,
   type Invitation,
   type Member,
+  type NoteLastEdited,
+  type NoteVersion,
   type OrgBilling,
   type Organization,
   type SessionInfo,
   type Share,
+  type VaultCheckpoint,
+  type VaultRevertResult,
 } from "./lib/api";
 import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
@@ -147,6 +151,21 @@ interface AppStore {
   docIdByPath: Record<string, string>;
   /** Locks (read-only overlays) in the synced vault — drives tree badges. */
   locks: Share[];
+  /**
+   * Who last edited each note's CONTENT, keyed by **docId** (never by path, and
+   * dropped on every vault switch — two vaults both have a `Welcome.md`).
+   * Refreshed by the registry pull; empty when sync is off.
+   */
+  noteLastEdited: Record<string, NoteLastEdited>;
+  /** The note whose version panel is open (docId), or null when it's closed. */
+  versionPanelDocId: string | null;
+  /** The open panel's versions, newest first. `null` = still loading. */
+  noteVersions: NoteVersion[] | null;
+  /** The version being hovered/previewed in the editor overlay (read-only). */
+  versionPreview: { versionId: number; content: string } | null;
+  /** The active vault's checkpoints, newest first. `null` = unknown (not synced,
+   *  or not fetched yet). */
+  checkpoints: VaultCheckpoint[] | null;
   /** Live "who's viewing what" roster (teammates only) — drives the sidebar
    *  presence dots on notes/folders. Empty when sync is off or disconnected. */
   vaultPresence: VaultPeer[];
@@ -292,6 +311,22 @@ interface AppStore {
     principalId: string | null,
   ) => Promise<void>;
   removeLock: (shareId: string) => Promise<void>;
+
+  // Versioning (per-note history + vault checkpoints)
+  /** Open the history panel for a note and load its versions. */
+  openVersionPanel: (docId: string) => Promise<void>;
+  closeVersionPanel: () => void;
+  /** Load one version's markdown for the read-only editor overlay. */
+  previewVersion: (versionId: number) => Promise<void>;
+  clearVersionPreview: () => void;
+  /** Restore a version (forward CRDT edit server-side); refreshes the list. */
+  revertToVersion: (versionId: number) => Promise<void>;
+  refreshCheckpoints: () => Promise<void>;
+  /** Take a manual checkpoint of the active vault (owner/admin). */
+  createCheckpoint: (label?: string) => Promise<void>;
+  deleteCheckpoint: (id: string) => Promise<void>;
+  /** Roll the whole vault back to a checkpoint (owner only). */
+  revertVaultToCheckpoint: (id: string) => Promise<VaultRevertResult>;
 
   // Billing
   /** Re-probe server billing capability (on start/sign-in/server change). */
@@ -592,6 +627,11 @@ function sameVault(get: () => AppStore, epoch: number | null | undefined): boole
  * previous vault's results; `docIdByPath` is keyed by path, which two vaults
  * share outright (both have a `Welcome.md`); and a stale `syncProgress` would
  * report the vault we left as still uploading.
+ *
+ * The versioning fields are here for exactly the same reason: `noteLastEdited`
+ * is docId-keyed, and a version list / checkpoint list belongs to ONE vault —
+ * showing the previous vault's history against the new vault's notes would offer
+ * a revert that writes the wrong content into the wrong note.
  */
 function vaultScopedSyncReset() {
   // A fresh object each call: handing out one shared `{}`/`[]` would let any
@@ -604,6 +644,11 @@ function vaultScopedSyncReset() {
     docSyncState: {} as Record<string, DocSyncState>,
     docIdByPath: {} as Record<string, string>,
     locks: [] as Share[],
+    noteLastEdited: {} as Record<string, NoteLastEdited>,
+    versionPanelDocId: null,
+    noteVersions: null,
+    versionPreview: null,
+    checkpoints: null,
   } satisfies Partial<AppStore>;
 }
 
@@ -933,6 +978,10 @@ export const useStore = create<AppStore>((set, get) => ({
     // The path→docId index the sidebar needs to attach a docId-keyed sync state
     // to a path-keyed row. Coalesced by SyncManager on the same ~10/second budget.
     syncManager.setRegistryMapListener((map) => get().setDocIdByPath(map));
+    // Who last edited each note, from the same registry pull — drives the
+    // "edited by" tag on sidebar rows. Replaced wholesale, never merged: a note
+    // can lose its stamp (restored from a checkpoint, access revoked).
+    syncManager.setNoteMetaListener((meta) => set({ noteLastEdited: meta }));
     try {
       const session = await authManager.init();
       set({ serverUrl: authManager.getServerUrl() });
@@ -1661,6 +1710,113 @@ export const useStore = create<AppStore>((set, get) => ({
     await get().refreshLocks();
   },
 
+  // ---- Versioning ----
+
+  openVersionPanel: async (docId) => {
+    // Clear first so the panel never shows the previous note's history while the
+    // new one loads (they are the same shape, so a stale list looks plausible).
+    set({ versionPanelDocId: docId, noteVersions: null, versionPreview: null });
+    if (!get().syncEnabled) {
+      // Versions live on the server; a local vault has none. The panel says so.
+      set({ noteVersions: [] });
+      return;
+    }
+    try {
+      const versions = await authManager.api.listNoteVersions(docId);
+      // A different note (or no note) is open now — that panel owns the state.
+      if (get().versionPanelDocId !== docId) return;
+      set({ noteVersions: versions });
+    } catch (e) {
+      console.warn("[versions] list failed", e);
+      if (get().versionPanelDocId !== docId) return;
+      set({ noteVersions: [] });
+    }
+  },
+
+  closeVersionPanel: () =>
+    set({ versionPanelDocId: null, noteVersions: null, versionPreview: null }),
+
+  previewVersion: async (versionId) => {
+    const docId = get().versionPanelDocId;
+    if (!docId) return;
+    try {
+      const version = await authManager.api.getNoteVersion(docId, versionId);
+      // Hover previews race each other constantly; only the newest hover may
+      // paint, and only while its own panel is still open.
+      if (get().versionPanelDocId !== docId) return;
+      set({ versionPreview: { versionId, content: version.content } });
+    } catch (e) {
+      console.warn("[versions] preview failed", e);
+      if (get().versionPreview?.versionId === versionId) set({ versionPreview: null });
+    }
+  },
+
+  clearVersionPreview: () => set({ versionPreview: null }),
+
+  revertToVersion: async (versionId) => {
+    const docId = get().versionPanelDocId;
+    if (!docId) throw new Error("No note is open.");
+    // Leave the read-only overlay before the write lands, so the editor the user
+    // is looking at is the live one that's about to change.
+    set({ versionPreview: null });
+    await authManager.api.revertNoteToVersion(docId, versionId);
+    // The revert usually captures a pre-revert version of its own, so the list
+    // the user is looking at is already out of date.
+    try {
+      const versions = await authManager.api.listNoteVersions(docId);
+      if (get().versionPanelDocId !== docId) return;
+      set({ noteVersions: versions });
+    } catch (e) {
+      console.warn("[versions] refresh after revert failed", e);
+    }
+  },
+
+  refreshCheckpoints: async () => {
+    const vaultId = syncManager.registry.vaultId;
+    if (!vaultId || !get().syncEnabled) {
+      // `null`, not `[]`: a local vault has no checkpoints to *have*, which the
+      // tab renders as a sync gate rather than "no checkpoints yet".
+      set({ checkpoints: null });
+      return;
+    }
+    try {
+      const checkpoints = await authManager.api.listCheckpoints(vaultId);
+      // Checkpoints are per-vault; publishing another vault's set would offer a
+      // revert that rewrites the wrong notes.
+      if (syncManager.registry.vaultId !== vaultId) return;
+      set({ checkpoints });
+    } catch (e) {
+      console.warn("[checkpoints] refresh failed", e);
+      if (syncManager.registry.vaultId !== vaultId) return;
+      set({ checkpoints: [] });
+    }
+  },
+
+  createCheckpoint: async (label) => {
+    const vaultId = requireSyncedVaultId(get);
+    await authManager.api.createCheckpoint(vaultId, label?.trim() || undefined);
+    await get().refreshCheckpoints();
+  },
+
+  deleteCheckpoint: async (id) => {
+    const vaultId = requireSyncedVaultId(get);
+    await authManager.api.deleteCheckpoint(vaultId, id);
+    await get().refreshCheckpoints();
+  },
+
+  revertVaultToCheckpoint: async (id) => {
+    const vaultId = requireSyncedVaultId(get);
+    const result = await authManager.api.revertToCheckpoint(vaultId, id);
+    // The revert took a pre-revert checkpoint, so the list has grown.
+    await get().refreshCheckpoints();
+    // Structure changed server-side (notes restored, re-pathed, tombstoned). The
+    // server broadcasts `registry-changed` to everyone including us, but pulling
+    // here means the vault we just reverted converges on this device without
+    // waiting for that round trip.
+    syncManager.handleRegistryChanged();
+    return result;
+  },
+
   // ---- Billing ----
 
   refreshBillingConfig: async () => {
@@ -1778,6 +1934,19 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 }));
+
+/**
+ * The server note-collection id for the open vault, for the checkpoint calls
+ * that cannot be a no-op. Throws (rather than returning null) because every
+ * caller is a user-initiated write whose failure must be visible.
+ */
+function requireSyncedVaultId(get: () => AppStore): string {
+  const vaultId = syncManager.registry.vaultId;
+  if (!vaultId || !get().syncEnabled) {
+    throw new Error("Turn on sync for this vault to use checkpoints.");
+  }
+  return vaultId;
+}
 
 function errMsg(e: unknown): string {
   if (e instanceof ApiError) return e.message;

@@ -1847,7 +1847,210 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--bg-surface);
   border-top-left-radius: var(--radius-xl);
   box-shadow: var(--shadow-md);
+  /* Plain `hidden`, NOT `clip`: clip triggered a WKWebView compositing bug
+     that blanked sibling layers (the sidebar footer vanished when a synced
+     note's editor layers came up). Programmatic focus-scroll into the
+     off-screen version panel is prevented at the source instead — the panel
+     focuses with preventScroll and skips its mount-time scrollIntoView. */
   overflow: hidden;
+  /* Anchors the version-history panel, which slides in over the editor. */
+  position: relative;
+}
+
+/* ============================================================
+   Version history panel — slides in from the right, OVER the
+   editor rather than beside it: the list is read against the
+   note (hover previews in place), so the note must stay put.
+   ============================================================ */
+.version-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(320px, 85vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  z-index: 120; /* over the editor + backlinks, under overlays/modals (200+) */
+  outline: none;
+}
+.version-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
+}
+.version-panel-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.version-panel-title strong {
+  font-size: var(--fs-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.version-panel-hint {
+  margin: 0;
+  padding: 0 var(--sp-4) var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.version-panel-empty {
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.version-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-2);
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.version-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+}
+.version-row.active {
+  background: var(--bg-hover);
+}
+/* Current-buffer pseudo-row: an accent dot where the others carry a face. */
+.version-dot {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.version-dot::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.version-avatar {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.version-avatar svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.version-row-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.version-row-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.version-row-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.version-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--success-soft);
+  color: var(--success);
+}
+/* Revert whispers in like .tree-more: an answer for the row you're on. */
+.version-revert {
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.version-row:hover .version-revert,
+.version-row.active .version-revert {
+  opacity: 1;
+}
+.version-revert:disabled {
+  opacity: 0.45;
+}
+
+/* Settings → Versioning: the vault checkpoint list. */
+.checkpoint-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.checkpoint-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.checkpoint-row:last-child {
+  border-bottom: none;
+}
+.checkpoint-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-right: auto;
+}
+.checkpoint-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.checkpoint-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+.checkpoint-note {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-xs);
+}
+
+/* Post-auto-update "what's new" banner. */
+.updated-banner-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.updated-banner-notes {
+  margin: 0;
+  padding-left: var(--sp-5);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .main-header {
   display: flex;

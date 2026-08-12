@@ -10,6 +10,15 @@ export interface SyncTokenClaims {
   docId: string;
   vaultId: string;
   readOnly: boolean;
+  /**
+   * Who the token was minted for — the attribution source for "last edited by".
+   *
+   * Optional, and `verifySyncToken` must keep it optional: tokens minted before
+   * this claim existed are still in flight (TTL ~10 min), and a client holding
+   * one has to keep syncing, just anonymously. Rejecting them would drop every
+   * open editor at deploy time to learn a name.
+   */
+  userId?: string;
 }
 
 const secret = new TextEncoder().encode(config.jwtSecret);
@@ -24,6 +33,7 @@ export async function mintSyncToken(
     docId: claims.docId,
     vaultId: claims.vaultId,
     readOnly: claims.readOnly,
+    ...(claims.userId ? { userId: claims.userId } : {}),
   })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -49,6 +59,8 @@ export async function verifySyncToken(token: string): Promise<SyncTokenClaims> {
     docId: payload.docId,
     vaultId: payload.vaultId,
     readOnly: payload.readOnly,
+    // Absent on tokens minted before attribution existed — anonymous, not invalid.
+    userId: typeof payload.userId === "string" ? payload.userId : undefined,
   };
 }
 

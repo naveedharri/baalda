@@ -21,6 +21,7 @@ import { HtmlView } from "./HtmlView";
 import { FilePreview } from "./FilePreview";
 import { previewKind } from "../lib/preview";
 import { relativeAgo, characterSvg } from "./Identity";
+import { agoFromIso, lastEditedTooltip } from "./versionFormat";
 
 interface Peer {
   id: string;
@@ -138,6 +139,35 @@ function PresenceAvatar({
 }
 
 /**
+ * "Recent activity" section of the roster popover: who last touched this note
+ * (stamped server-side, so it covers teammates and AI writes alike). Lives
+ * INSIDE the presence dropdown rather than as its own chrome: presence answers
+ * "who is here now", this answers "who was here", and stacking them in one
+ * popover keeps history visibly subordinate — smaller, dimmer faces.
+ */
+function RosterRecent({ notePath, now }: { notePath: string; now: number }) {
+  const docId = syncManager.registry.getMapping(notePath)?.docId ?? null;
+  const name = useStore((s) => (docId ? (s.noteLastEdited[docId]?.name ?? null) : null));
+  const at = useStore((s) => (docId ? (s.noteLastEdited[docId]?.at ?? null) : null));
+  const svg = useMemo(() => (name ? characterSvg(name) : null), [name]);
+  if (!svg || !at) return null;
+  return (
+    <>
+      <div className="peer-roster-title roster-recent-title">Recent activity</div>
+      <div className="roster-recent-row" title={lastEditedTooltip(name, at, now)}>
+        <span
+          className="roster-recent-avatar"
+          aria-hidden="true"
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+        <span className="roster-recent-name">{name}</span>
+        <span className="roster-recent-when">edited {agoFromIso(at, now)}</span>
+      </div>
+    </>
+  );
+}
+
+/**
  * "Who's in this note" avatar stack (spec 04 §5). Avatars overlap; anything past
  * MAX_AVATARS collapses into a "+N" chip. The roster popover opens on hover/focus
  * of the stack; a click (or keyboard activation) opens it too, for touch and
@@ -246,10 +276,13 @@ function PeerRoster({
   peers,
   selfId,
   onPing,
+  notePath,
 }: {
   peers: Peer[];
   selfId: string | null;
   onPing: (peer: Peer) => void;
+  /** When set, the popover ends with the note's "Recent activity" section. */
+  notePath?: string | null;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -270,6 +303,7 @@ function PeerRoster({
           onPing={onPing}
         />
       ))}
+      {notePath && <RosterRecent notePath={notePath} now={now} />}
     </div>
   );
 }
@@ -292,6 +326,11 @@ export function Editor() {
   const session = useStore((s) => s.session);
   const tree = useStore((s) => s.tree);
   const syncStatus = useStore((s) => s.syncStatus);
+  // A version the user is hovering in the history panel, rendered over the live
+  // editor. The live view stays mounted and synced underneath — this is a look,
+  // not a mode.
+  const versionPreview = useStore((s) => s.versionPreview);
+  const noteVersions = useStore((s) => s.noteVersions);
   const notePath = openNote?.path ?? null;
 
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -302,6 +341,7 @@ export function Editor() {
   // Editability is held in a Compartment so a lock applied while the note is
   // open can flip the live view read-only without rebuilding it.
   const editableRef = useRef<Compartment | null>(null);
+  const previewHostRef = useRef<HTMLDivElement | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
   // told apart from a click on the controls themselves.
@@ -524,6 +564,30 @@ export function Editor() {
     if (!readOnly) view.focus();
   }, [readOnly]);
 
+  // Hover preview of a past version: a SECOND, throwaway CodeMirror over the
+  // host. It is deliberately not the live view reconfigured — that view is bound
+  // to the Y.Text, and pushing old text through it would be an edit, i.e. the
+  // exact "replace state backwards" mistake the revert path exists to avoid.
+  // This one is read-only, unbound, and destroyed the moment the pointer leaves.
+  const previewVersionId = versionPreview?.versionId ?? null;
+  const previewContent = versionPreview?.content ?? null;
+  useEffect(() => {
+    if (previewContent == null || !previewHostRef.current || notePath == null) return;
+    const state = createEditorState({
+      doc: previewContent,
+      collab: false,
+      getTitles: () => useStore.getState().titles,
+      onNavigate: () => {},
+      resolveAsset: makeResolveAsset(
+        useStore.getState().vault?.path ?? null,
+        notePath,
+      ),
+      extraExtensions: [EditorState.readOnly.of(true), EditorView.editable.of(false)],
+    });
+    const view = new EditorView({ state, parent: previewHostRef.current });
+    return () => view.destroy();
+  }, [previewVersionId, previewContent, notePath]);
+
   if (notePath == null) {
     return (
       <div className="editor-empty">
@@ -554,6 +618,12 @@ export function Editor() {
   };
 
   const showToolbar = peers.length > 0;
+  // "from 2h ago" for the pill. The panel holds the metadata; the preview state
+  // carries only the id + text, so look the timestamp back up here.
+  const previewedAt =
+    previewVersionId != null
+      ? (noteVersions?.find((v) => v.id === previewVersionId)?.createdAt ?? null)
+      : null;
 
   return (
     <div className="editor-column">
@@ -615,7 +685,12 @@ export function Editor() {
                   }
                 />
                 {rosterOpen && (
-                  <PeerRoster peers={peers} selfId={myId} onPing={sendPing} />
+                  <PeerRoster
+                    peers={peers}
+                    selfId={myId}
+                    onPing={sendPing}
+                    notePath={notePath}
+                  />
                 )}
               </div>
               {pingFrom && (
@@ -629,8 +704,20 @@ export function Editor() {
       )}
       {/* The host must stay mounted whether or not the view exists — the effect
           above needs `hostRef.current` to attach CodeMirror to — so the skeleton
-          overlays it rather than replacing it. */}
-      <div className="editor-host" ref={hostRef} />
+          overlays it rather than replacing it. The wrapper is the positioning
+          context for the version-preview overlay, which covers the live text
+          without unmounting it. */}
+      <div className="editor-host-wrap">
+        <div className="editor-host" ref={hostRef} />
+        {previewContent != null && (
+          <div className="version-preview">
+            <div className="version-preview-host" ref={previewHostRef} />
+            <span className="version-preview-pill" role="status">
+              Viewing version from {agoFromIso(previewedAt, Date.now())} — read-only
+            </span>
+          </div>
+        )}
+      </div>
       {!viewMounted && <EditorSkeleton />}
     </div>
   );
