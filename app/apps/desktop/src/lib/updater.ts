@@ -112,3 +112,93 @@ export async function installUpdate(): Promise<void> {
 export function currentVersion(): Promise<string> {
   return getVersion();
 }
+
+// ---------------------------------------------------------------------------
+// Silent auto-update + the post-restart "Updated to vX" banner.
+//
+// The handoff problem: by the time the new version is running, the Update
+// object (and its release notes) died with the old process. So the stash below
+// is written just before download/relaunch, and read back on the next boot —
+// if the running version matches the stashed one, the update landed and the
+// banner shows its notes; if not (install failed, or a newer hop), it's stale
+// and dropped.
+// ---------------------------------------------------------------------------
+
+const JUST_UPDATED_KEY = "context.justUpdated";
+
+interface JustUpdated {
+  version: string;
+  notes: string | null;
+}
+
+/**
+ * Fully automatic update: check, and when a newer version exists, download +
+ * install + relaunch without asking. Callers should treat this as fire-and-
+ * forget from launch; every failure lands in the shared state's `error` phase
+ * (surfaced only in Settings → Updates — an offline launch is not an event).
+ */
+export async function autoUpdate(): Promise<void> {
+  const found = await checkForUpdate();
+  if (!found || !pending) return;
+  try {
+    localStorage.setItem(
+      JUST_UPDATED_KEY,
+      JSON.stringify({ version: pending.version, notes: pending.body ?? null }),
+    );
+  } catch {
+    // Storage full/blocked: the update still proceeds, only the banner is lost.
+  }
+  await installUpdate();
+}
+
+/**
+ * The update we just restarted into, if that is what happened — else null.
+ * Non-destructive: the banner clears the stash on dismiss via
+ * {@link clearJustUpdated}, so an un-dismissed banner survives a quit.
+ */
+export async function justUpdatedTo(): Promise<JustUpdated | null> {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(JUST_UPDATED_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    const stash = JSON.parse(raw) as JustUpdated;
+    if (!stash?.version) throw new Error("bad stash");
+    const running = await getVersion();
+    if (running === stash.version) return stash;
+    // Stale: the install never landed, or we've since hopped past it.
+    clearJustUpdated();
+    return null;
+  } catch {
+    clearJustUpdated();
+    return null;
+  }
+}
+
+/** Forget the just-updated stash (the banner was dismissed). */
+export function clearJustUpdated(): void {
+  try {
+    localStorage.removeItem(JUST_UPDATED_KEY);
+  } catch {
+    // Nothing to do — worst case the banner shows once more.
+  }
+}
+
+/**
+ * Release notes → the banner's one-liners. Keeps markdown bullet lines (and
+ * plain lines) as-is minus the bullet, drops headings/blanks and the historic
+ * placeholder body, and caps the list so a long release stays a glance.
+ */
+export function releaseNoteLines(notes: string | null | undefined, max = 6): string[] {
+  if (!notes) return [];
+  return notes
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .filter((line) => !line.startsWith("See the assets below"))
+    .map((line) => line.replace(/^[-*•]\s+/, ""))
+    .slice(0, max);
+}

@@ -48,6 +48,8 @@ syncTokenRoutes.post("/sync-token", async (c) => {
   }
 
   const readOnly = permission === "view";
-  const token = await mintSyncToken({ docId, vaultId, readOnly });
+  // userId travels in the token so the sync server can attribute the edits that
+  // arrive on this connection ("last edited by" + version authorship).
+  const token = await mintSyncToken({ docId, vaultId, readOnly, userId: session.userId });
   return c.json({ token, docId, vaultId, readOnly, permission });
 });

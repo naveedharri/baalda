@@ -67,10 +67,10 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         now,
         progress: run({ phase: "uploading", done: 128, total: 500 }),
       }),
-    ).toBe("Syncing 128/500");
+    ).toBe("Uploading 128/500");
   });
 
-  it("counts the registering and downloading phases too", () => {
+  it("counts the registering and downloading phases too, named by direction", () => {
     expect(
       syncBadgeLabel({
         status: "connecting",
@@ -78,13 +78,14 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         progress: run({ phase: "registering", done: 3, total: 40 }),
       }),
     ).toBe("Syncing 3/40");
+    // A freshly invited teammate watching their vault arrive reads "Downloading".
     expect(
       syncBadgeLabel({
         status: "synced",
         now,
         progress: run({ phase: "downloading", done: 9, total: 10 }),
       }),
-    ).toBe("Syncing 9/10");
+    ).toBe("Downloading 9/10");
   });
 
   it("falls back to the indeterminate label when the run has no total yet", () => {
@@ -155,6 +156,71 @@ describe("syncBadgeLabel with a bulk sync run", () => {
     for (const phase of ["registering", "uploading", "downloading"] as const) {
       expect(isSyncRunActive(run({ phase }))).toBe(true);
     }
+  });
+
+  it("stays honest with no note open: the label comes from the run alone", () => {
+    // The header pill is now mounted vault-wide. With no note open, `status`
+    // belongs to a socket that doesn't exist — it must never leak into the label.
+    expect(
+      syncBadgeLabel({
+        status: "offline",
+        now,
+        noteOpen: false,
+        progress: run({ phase: "downloading", done: 128, total: 500 }),
+      }),
+    ).toBe("Downloading 128/500");
+    expect(
+      syncBadgeLabel({
+        status: "offline",
+        now,
+        noteOpen: false,
+        progress: run({ phase: "done", done: 500, total: 500 }),
+      }),
+    ).toBe("Synced");
+    expect(
+      syncBadgeLabel({
+        status: "synced",
+        now,
+        noteOpen: false,
+        progress: run({ phase: "error", done: 480, total: 500, failed: 20 }),
+      }),
+    ).toBe("20 not synced");
+    // Stale grant facts from the last open note don't apply either.
+    expect(
+      syncBadgeLabel({
+        status: "no-access",
+        now,
+        noteOpen: false,
+        progress: run({ phase: "uploading", done: 1, total: 9 }),
+      }),
+    ).toBe("Uploading 1/9");
+  });
+
+  it("keeps the vault-wide tone consistent with the vault-wide words", () => {
+    expect(
+      syncBadgeTone({
+        status: "offline",
+        noteOpen: false,
+        progress: run({ done: 1, total: 9 }),
+      }),
+    ).toBe("connecting");
+    expect(
+      syncBadgeTone({ status: "offline", noteOpen: false, progress: run({ phase: "done" }) }),
+    ).toBe("synced");
+    expect(
+      syncBadgeTone({
+        status: "synced",
+        noteOpen: false,
+        progress: run({ phase: "error", failed: 3 }),
+      }),
+    ).toBe("error");
+    expect(
+      syncBadgeTone({
+        status: "no-access",
+        noteOpen: false,
+        progress: run({ done: 1, total: 9 }),
+      }),
+    ).toBe("connecting");
   });
 
   it("floors the bar's percentage and clamps it", () => {

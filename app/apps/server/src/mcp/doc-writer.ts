@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { Server } from "@hocuspocus/server";
+import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
 import { formatDocName } from "../sync/doc-name.js";
 import type { SyncContext } from "../sync/hocuspocus.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
@@ -27,14 +27,48 @@ const CONTENT_FIELD = "content";
 /** Transaction origin tag for edits that originate from the MCP server. */
 export const MCP_ORIGIN = "mcp";
 
+/** Who is behind a server-side write, for attribution (versions, last-edited). */
+export interface DocActor {
+  userId?: string | null;
+}
+
 export interface DocWriter {
   /** Replace the whole note body. */
-  setContent(vaultId: string, docId: string, content: string): Promise<void>;
+  setContent(
+    vaultId: string,
+    docId: string,
+    content: string,
+    actor?: DocActor,
+  ): Promise<void>;
   /** Append text to the end of the note body. */
-  appendContent(vaultId: string, docId: string, text: string): Promise<void>;
+  appendContent(
+    vaultId: string,
+    docId: string,
+    text: string,
+    actor?: DocActor,
+  ): Promise<void>;
   /** Read the current note body (from the live doc if open, else from storage). */
   readContent(vaultId: string, docId: string): Promise<string>;
+  /**
+   * Like {@link readContent}, but `null` when the doc has NO live session and NO
+   * persisted CRDT state — i.e. the server has never seen this note's content
+   * (typical for a freshly-synced vault whose bulk upload is still running).
+   * Callers that snapshot content MUST use this: treating "not uploaded yet" as
+   * "empty note" is how a checkpoint ends up bulldozing real text with "".
+   */
+  peekContent(vaultId: string, docId: string): Promise<string | null>;
 }
+
+/**
+ * Called after a DETACHED write (no client connected), with the writer's
+ * identity. The live path needs no equivalent: it goes through Hocuspocus, whose
+ * `onChange` already reports the editor via the transaction origin's context.
+ */
+export type DocWrittenHook = (
+  vaultId: string,
+  docId: string,
+  userId: string | null,
+) => void;
 
 /**
  * Publishes a doc update to background vault subscribers — the same fan-out the
@@ -64,16 +98,29 @@ export type DocUpdatePublisher = (
 export function createDocWriter(
   server: Server<SyncContext>,
   publishUpdate?: DocUpdatePublisher,
+  onDocWritten?: DocWrittenHook,
 ): DocWriter {
   async function mutate(
     vaultId: string,
     docId: string,
     fn: (text: Y.Text) => void,
+    actor?: DocActor,
   ): Promise<void> {
+    const userId = actor?.userId ?? null;
     const live = server.hocuspocus.documents.get(formatDocName(vaultId, docId));
     if (live) {
       // Live path: the sync server's onChange persists + broadcasts for us.
-      live.transact(() => fn(live.getText(CONTENT_FIELD)), MCP_ORIGIN);
+      //
+      // The origin is a Hocuspocus `LocalTransactionOrigin` object rather than
+      // the old bare `MCP_ORIGIN` string, because that is the ONLY channel that
+      // carries an identity into `onChange`: Hocuspocus resolves
+      // `origin.source === "local" ? origin.context : {}`, so a string origin is
+      // permanently anonymous. `skipStoreHooks` stays unset — this write must
+      // persist exactly like a human's.
+      live.transact(() => fn(live.getText(CONTENT_FIELD)), {
+        source: "local",
+        context: { source: MCP_ORIGIN, userId },
+      } satisfies LocalTransactionOrigin);
       return;
     }
 
@@ -108,36 +155,62 @@ export function createDocWriter(
         }
         // Keep search/graph in sync (best-effort; never fail the write on it).
         await indexDoc(docId).catch(() => {});
+        // Attribution + version capture, the detached counterpart of the sync
+        // server's `onDocEdited`. Best-effort for the same reason the publish
+        // above is: the write is already durable.
+        try {
+          onDocWritten?.(vaultId, docId, userId);
+        } catch (err) {
+          console.warn(`[mcp] onDocWritten hook failed for ${docId}`, err);
+        }
       }
     } finally {
       doc.destroy();
     }
   }
 
+  // A plain closure, NOT a method using `this`: call sites hand these functions
+  // around detached (`readContent: docWriter.readContent`), where `this` dies.
+  async function peekContent(vaultId: string, docId: string): Promise<string | null> {
+    const live = server.hocuspocus.documents.get(formatDocName(vaultId, docId));
+    if (live) return live.getText(CONTENT_FIELD).toString();
+    const state = await loadDocState(docId);
+    // No state is NOT an empty note: it is a note whose content has never
+    // reached this server. The distinction is load-bearing for checkpoints.
+    if (!state) return null;
+    const doc = new Y.Doc();
+    try {
+      Y.applyUpdate(doc, state);
+      return doc.getText(CONTENT_FIELD).toString();
+    } finally {
+      doc.destroy();
+    }
+  }
+
   return {
-    setContent: (vaultId, docId, content) =>
-      mutate(vaultId, docId, (text) => {
-        if (text.length > 0) text.delete(0, text.length);
-        if (content) text.insert(0, content);
-      }),
+    setContent: (vaultId, docId, content, actor) =>
+      mutate(
+        vaultId,
+        docId,
+        (text) => {
+          if (text.length > 0) text.delete(0, text.length);
+          if (content) text.insert(0, content);
+        },
+        actor,
+      ),
 
-    appendContent: (vaultId, docId, appended) =>
-      mutate(vaultId, docId, (text) => {
-        text.insert(text.length, appended);
-      }),
+    appendContent: (vaultId, docId, appended, actor) =>
+      mutate(
+        vaultId,
+        docId,
+        (text) => {
+          text.insert(text.length, appended);
+        },
+        actor,
+      ),
 
-    async readContent(vaultId, docId) {
-      const live = server.hocuspocus.documents.get(formatDocName(vaultId, docId));
-      if (live) return live.getText(CONTENT_FIELD).toString();
-      const state = await loadDocState(docId);
-      if (!state) return "";
-      const doc = new Y.Doc();
-      try {
-        Y.applyUpdate(doc, state);
-        return doc.getText(CONTENT_FIELD).toString();
-      } finally {
-        doc.destroy();
-      }
-    },
+    readContent: async (vaultId, docId) => (await peekContent(vaultId, docId)) ?? "",
+
+    peekContent,
   };
 }

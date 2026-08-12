@@ -26,6 +26,15 @@ export interface SyncContext {
   docId: string;
   vaultId: string;
   readOnly: boolean;
+  /**
+   * The authenticated editor on this connection, from the sync token's `userId`
+   * claim — `null` for a token minted before the claim existed (still valid,
+   * just anonymous).
+   *
+   * Also the shape server-side writers put in a `LocalTransactionOrigin`'s
+   * `context`, so `onChange` can read one field regardless of who wrote.
+   */
+  userId: string | null;
 }
 
 /**
@@ -39,9 +48,23 @@ export type DocChangedHook = (
   update: Uint8Array,
 ) => void;
 
+/**
+ * Notified after each persisted doc change WITH the editor's identity, so the
+ * versioning layer can stamp "last edited by" and arm its idle capture.
+ *
+ * `userId` is null when the writer is unattributable (a pre-attribution token,
+ * or a server-side write with no actor). Best-effort, like {@link DocChangedHook}.
+ */
+export type DocEditedHook = (
+  vaultId: string,
+  docId: string,
+  userId: string | null,
+) => void;
+
 export function createSyncServer(
   port: number = config.hocuspocusPort,
   onDocChanged?: DocChangedHook,
+  onDocEdited?: DocEditedHook,
 ): Server<SyncContext> {
   return new Server<SyncContext>({
     name: "context-sync",
@@ -88,6 +111,7 @@ export function createSyncServer(
         docId: parsed.docId,
         vaultId: parsed.vaultId,
         readOnly: claims.readOnly,
+        userId: claims.userId ?? null,
       };
       return context;
     },
@@ -147,6 +171,19 @@ export function createSyncServer(
           onDocChanged(parsed.vaultId, parsed.docId, data.update);
         } catch (err) {
           console.error("onDocChanged hook failed:", err);
+        }
+      }
+      // Attribution. Hocuspocus resolves `data.context` for us: the CONNECTION's
+      // context for a client edit, and a `LocalTransactionOrigin`'s `context` for
+      // a server-side write (the doc writer's live path) — both of which carry
+      // `userId`. Anything else (a plain string origin, a Redis-replicated
+      // update) lands as `{}`, i.e. anonymous.
+      if (onDocEdited) {
+        try {
+          const editorId = (data.context as Partial<SyncContext> | undefined)?.userId ?? null;
+          onDocEdited(parsed.vaultId, parsed.docId, editorId);
+        } catch (err) {
+          console.error("onDocEdited hook failed:", err);
         }
       }
     },

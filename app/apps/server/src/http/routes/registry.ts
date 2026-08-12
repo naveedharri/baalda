@@ -316,9 +316,17 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!org || !(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    // last_edited_* rides this pull deliberately: the file rows that show
+    // "edited by X" are already re-fetched on every `registry` frame, so
+    // attribution stays live without a second endpoint or a new wire frame.
     const { rows } = await pool.query(
-      `SELECT id, vault_id, folder_id, title, rel_path, doc_id, created_by, created_at, updated_at
-         FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path`,
+      `SELECT n.id, n.vault_id, n.folder_id, n.title, n.rel_path, n.doc_id, n.created_by,
+              n.created_at, n.updated_at,
+              n.last_edited_by, u.name AS last_edited_by_name, n.last_edited_at
+         FROM notes n
+         LEFT JOIN "user" u ON u.id = n.last_edited_by
+        WHERE n.vault_id = $1 AND n.deleted_at IS NULL
+        ORDER BY n.rel_path`,
       [vaultId],
     );
     // Private-by-default: hide notes the caller can't read (leaks title/path and

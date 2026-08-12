@@ -13,7 +13,7 @@
 import { Awareness } from "y-protocols/awareness";
 import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO } from "../bridge/adapter";
-import type { SessionInfo } from "../api";
+import type { NoteLastEdited, SessionInfo } from "../api";
 import * as ipc from "../ipc";
 import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
@@ -99,6 +99,9 @@ export class SyncManager implements InboundHost {
     // reactively — coalesced — instead of letting the UI read it imperatively
     // during render, which never re-rendered when the mapping changed.
     this.registry.setMapListener(() => this.scheduleRegistryMapPublish());
+    // Who last edited each note, refreshed by the same registry pull. Not
+    // coalesced like the map above: it fires once per pull, not once per note.
+    this.registry.setNoteMetaListener((meta) => this.publishNoteMeta(meta));
     // Inbound reconciliation mutates files the editor and the background doc store
     // may be holding, so it has to be able to make them let go first.
     this.registry.setInboundHost(this);
@@ -122,6 +125,8 @@ export class SyncManager implements InboundHost {
   private onMemberJoined?: (name: string) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
+  /** Mirrors the registry's {docId → last-edit} stamps to the UI. */
+  private onNoteMeta?: (meta: Record<string, NoteLastEdited>) => void;
   private mapPublishTimer: ReturnType<typeof setTimeout> | null = null;
   private registryPullTimer: ReturnType<typeof setTimeout> | null = null;
   private attachments: AttachmentSync | null = null;
@@ -348,6 +353,27 @@ export class SyncManager implements InboundHost {
       for (const { docId, relPath } of this.registry.mappedNotes()) map[relPath] = docId;
     }
     cb(map);
+  }
+
+  /**
+   * UI subscribes here for the open vault's {docId → last-edit} stamps
+   * (`store.noteLastEdited`) — who last changed each note's *content*, and when.
+   *
+   * Refreshed by the registry pull, which the server already triggers when it
+   * stamps an edit, so the sidebar's "edited by" tags converge on the existing
+   * `registry-changed` round trip rather than a channel of their own.
+   */
+  setNoteMetaListener(cb: ((meta: Record<string, NoteLastEdited>) => void) | undefined): void {
+    this.onNoteMeta = cb;
+  }
+
+  /**
+   * Push per-note last-edit stamps out. Same scope gate as
+   * {@link publishRegistryMap}: a pull that lands after a vault switch describes
+   * the vault we left, and an empty map is the honest answer there.
+   */
+  private publishNoteMeta(meta: Record<string, NoteLastEdited>): void {
+    this.onNoteMeta?.(this.scope?.isCurrent() ? meta : {});
   }
 
   /**
@@ -769,8 +795,9 @@ export class SyncManager implements InboundHost {
     vaultScopes.end();
     // Now that no scope is current, this publishes an EMPTY path→docId map (and
     // clears the coalescing timer, so nothing from the vault we left arrives
-    // 100ms into the next one).
+    // 100ms into the next one). The last-edit stamps go the same way.
     this.publishRegistryMap();
+    this.publishNoteMeta({});
   }
 
   /** UI subscribes here for the vault-wide background-sync indicator. */

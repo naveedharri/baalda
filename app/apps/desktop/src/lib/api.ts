@@ -118,6 +118,23 @@ export interface RegisteredNote {
   title: string | null;
   relPath?: string;
   rel_path?: string;
+  /** Who last *edited* the note's content (never a rename/move), server-stamped
+   *  from the authenticated editor — a teammate or an AI over MCP. Null until
+   *  the note has been edited at least once since versioning shipped. */
+  lastEditedBy?: string | null;
+  last_edited_by?: string | null;
+  lastEditedByName?: string | null;
+  last_edited_by_name?: string | null;
+  lastEditedAt?: string | null;
+  last_edited_at?: string | null;
+}
+
+/** The normalized "last edited by" fact for one note (see {@link noteLastEdited}). */
+export interface NoteLastEdited {
+  userId: string | null;
+  name: string | null;
+  /** ISO timestamp from the server. */
+  at: string;
 }
 
 export interface RegisteredFolder {
@@ -198,6 +215,57 @@ export interface BlobMeta {
   filename?: string | null;
   /** True when the upload deduped to an existing row (server-set). */
   deduped?: boolean;
+}
+
+// ---- Versioning (per-note history + vault checkpoints) --------------------
+
+/**
+ * One stored state of a note. Content is deliberately absent — the list is
+ * fetched constantly (every panel open) and a version is the full markdown, so
+ * the body only travels when someone actually previews or reverts
+ * ({@link NoteVersionDetail}).
+ *
+ * `id` is a JS number (the server narrows its BIGSERIAL), `size` is bytes.
+ */
+export interface NoteVersion {
+  id: number;
+  createdAt: string;
+  /** `idle` = captured at the end of an edit session; `pre-revert` = the state
+   *  that was replaced, captured so a revert is itself undoable. */
+  cause: "idle" | "pre-revert";
+  authorId: string | null;
+  authorName: string | null;
+  sha256: string;
+  size: number;
+}
+
+export interface NoteVersionDetail extends NoteVersion {
+  content: string;
+}
+
+/** A vault-wide snapshot (structure + content of every note at one moment). */
+export interface VaultCheckpoint {
+  id: string;
+  kind: "auto" | "manual";
+  label: string | null;
+  createdAt: string;
+  createdBy: string | null;
+  createdByName: string | null;
+  noteCount: number;
+}
+
+/** What a whole-vault revert did. Attachments/blobs are never touched. */
+export interface VaultRevertResult {
+  ok: true;
+  docsChanged: number;
+  docsRestored: number;
+  docsDeleted: number;
+  foldersCreated: number;
+  /** Notes kept as-is because the snapshot was empty while the live note had
+   *  text — the revert's data-loss firewall refusing to bulldoze content. */
+  docsKeptOverEmpty?: number;
+  /** The auto checkpoint taken just before the revert — this is the undo. */
+  preRevertCheckpointId: string;
 }
 
 export interface SyncTokenResponse {
@@ -834,6 +902,80 @@ export class ApiClient {
     await this.request<unknown>("DELETE", `/api/notes/${encodeURIComponent(id)}`);
   }
 
+  // ---- Versioning ---------------------------------------------------------
+
+  /** A note's stored versions, newest first (no content). Needs `view`. */
+  async listNoteVersions(docId: string): Promise<NoteVersion[]> {
+    const { data } = await this.request<{ versions: NoteVersion[] }>(
+      "GET",
+      `/api/notes/${encodeURIComponent(docId)}/versions`,
+    );
+    return data.versions ?? [];
+  }
+
+  /** One version *with* its markdown — the preview/revert payload. */
+  async getNoteVersion(docId: string, versionId: number): Promise<NoteVersionDetail> {
+    const { data } = await this.request<NoteVersionDetail>(
+      "GET",
+      `/api/notes/${encodeURIComponent(docId)}/versions/${encodeURIComponent(String(versionId))}`,
+    );
+    return data;
+  }
+
+  /**
+   * Restore a version as a forward CRDT edit (never a backwards state merge, which
+   * would resurrect deleted text). The server captures the pre-revert state first
+   * unless the live text already matches the newest stored version — that's when
+   * `preRevertVersionId` comes back null. Needs `edit`; a locked share 403s.
+   */
+  async revertNoteToVersion(
+    docId: string,
+    versionId: number,
+  ): Promise<{ ok: true; preRevertVersionId: number | null }> {
+    const { data } = await this.request<{ ok: true; preRevertVersionId: number | null }>(
+      "POST",
+      `/api/notes/${encodeURIComponent(docId)}/versions/${encodeURIComponent(String(versionId))}/revert`,
+    );
+    return data;
+  }
+
+  /** A note collection's checkpoints, newest first (any vault member). */
+  async listCheckpoints(vaultId: string): Promise<VaultCheckpoint[]> {
+    const { data } = await this.request<{ checkpoints: VaultCheckpoint[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/checkpoints`,
+    );
+    return data.checkpoints ?? [];
+  }
+
+  /** Take a manual checkpoint (owner/admin). Throws ApiError(409) while another
+   *  checkpoint/revert holds the vault's lock. */
+  async createCheckpoint(vaultId: string, label?: string): Promise<VaultCheckpoint> {
+    const { data } = await this.request<VaultCheckpoint>(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/checkpoints`,
+      { body: label ? { label } : {} },
+    );
+    return data;
+  }
+
+  async deleteCheckpoint(vaultId: string, checkpointId: string): Promise<void> {
+    await this.request<unknown>(
+      "DELETE",
+      `/api/vaults/${encodeURIComponent(vaultId)}/checkpoints/${encodeURIComponent(checkpointId)}`,
+    );
+  }
+
+  /** Revert the whole vault to a checkpoint (**owner only**; admins 403).
+   *  Synchronous and convergent — re-running it lands in the same place. */
+  async revertToCheckpoint(vaultId: string, checkpointId: string): Promise<VaultRevertResult> {
+    const { data } = await this.request<VaultRevertResult>(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/checkpoints/${encodeURIComponent(checkpointId)}/revert`,
+    );
+    return data;
+  }
+
   // ---- Shares -------------------------------------------------------------
 
   async listShares(
@@ -988,6 +1130,20 @@ export function noteVaultId(n: RegisteredNote): string | undefined {
 }
 export function noteRelPath(n: RegisteredNote): string | undefined {
   return n.relPath ?? n.rel_path;
+}
+/**
+ * The note's last-edit stamp, or null when it has never been edited (or the
+ * server predates versioning). Null is the honest answer — a row with no
+ * `last_edited_at` must show no "edited by" tag rather than a bare avatar.
+ */
+export function noteLastEdited(n: RegisteredNote): NoteLastEdited | null {
+  const at = n.lastEditedAt ?? n.last_edited_at ?? null;
+  if (!at) return null;
+  return {
+    userId: n.lastEditedBy ?? n.last_edited_by ?? null,
+    name: n.lastEditedByName ?? n.last_edited_by_name ?? null,
+    at,
+  };
 }
 export function vaultOrgId(v: Vault): string | undefined {
   return v.organizationId ?? v.organization_id;

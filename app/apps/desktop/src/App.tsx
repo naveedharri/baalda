@@ -15,11 +15,18 @@ import { SidebarHeader } from "./components/SidebarHeader";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { Toasts } from "./components/Toasts";
 import { VaultPicker } from "./components/VaultPicker";
+import { VersionPanel } from "./components/VersionPanel";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import { syncManager } from "./lib/sync/docSession";
-import { checkForUpdate, installUpdate, useUpdateState } from "./lib/updater";
+import {
+  autoUpdate,
+  clearJustUpdated,
+  justUpdatedTo,
+  releaseNoteLines,
+  useUpdateState,
+} from "./lib/updater";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
@@ -239,32 +246,11 @@ function VaultFolderPrompt() {
  * only surface when the user checks manually from Settings → Updates.
  */
 function UpdateBanner() {
-  const [dismissed, setDismissed] = useState(false);
   const update = useUpdateState();
 
-  if (update.phase === "available" && dismissed) {
-    return null;
-  }
-
-  if (update.phase === "available") {
-    return (
-      <Banner show className="update-banner">
-        <span>
-          A new version of {BRAND_NAME} (<strong>{update.version}</strong>) is
-          available.
-        </span>
-        <div className="banner-actions">
-          <AsyncButton className="primary" onClick={() => installUpdate()}>
-            Install &amp; Restart
-          </AsyncButton>
-          <button className="secondary" onClick={() => setDismissed(true)}>
-            Later
-          </button>
-        </div>
-      </Banner>
-    );
-  }
-
+  // Updates apply themselves (see autoUpdate at launch) — the only live chrome
+  // is the progress strip while the new bytes come down, and the app restarts
+  // on its own when they're in. The post-restart story is UpdatedBanner's.
   if (update.phase === "downloading" || update.phase === "installing") {
     const pct =
       update.phase === "downloading" && update.total > 0
@@ -300,21 +286,78 @@ function UpdateBanner() {
   return null;
 }
 
+/**
+ * "You're on the new version" — shown on the first launch after a silent
+ * auto-update, with the release's one-liners. Stays until crossed out (the
+ * stash survives a quit), so an update never lands completely unannounced.
+ */
+function UpdatedBanner() {
+  const [updated, setUpdated] = useState<{ version: string; notes: string[] } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void justUpdatedTo().then((stash) => {
+      if (cancelled || !stash) return;
+      setUpdated({ version: stash.version, notes: releaseNoteLines(stash.notes) });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Banner show={updated != null} className="updated-banner" role="status">
+      <div className="updated-banner-body">
+        <span>
+          🎉 {BRAND_NAME} updated to <strong>v{updated?.version}</strong>
+        </span>
+        {updated != null && updated.notes.length > 0 && (
+          <ul className="updated-banner-notes">
+            {updated.notes.map((line, i) => (
+              <li key={i}>{line}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="banner-actions">
+        <button
+          className="icon-btn"
+          aria-label="Dismiss"
+          title="Dismiss"
+          onClick={() => {
+            clearJustUpdated();
+            setUpdated(null);
+          }}
+        >
+          ✕
+        </button>
+      </div>
+    </Banner>
+  );
+}
+
 function SaveIndicator() {
   // The CRDT bridge autosaves to disk on a debounce, so the note is always
   // being persisted; there is no "unsaved" state to surface anymore.
   return <span className="save-indicator saved">Auto-saved</span>;
 }
 
-function SyncIndicator() {
+function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
   // Per-note sync status (offline / connecting / synced / read-only) PLUS the
   // vault's bulk-run progress, so a vault that is still uploading 380 of its 500
   // notes says so instead of claiming "Synced · just now" off a live socket.
+  // With no note open the pill goes vault-wide: it appears whenever a bulk run
+  // has something to report and stays put afterwards ("Synced ✓" / "N not
+  // synced"), so a fresh hydration is never invisible.
   const status = useStore((s) => s.syncStatus);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   const pending = useStore((s) => s.syncPending);
   const progress = useStore((s) => s.syncProgress);
+  // "idle" is the reporter's pre-start value — nothing to report yet.
+  if (!noteOpen && (progress == null || progress.phase === "idle")) return null;
   return (
     <SyncBadge
       status={status}
@@ -322,6 +365,7 @@ function SyncIndicator() {
       lastSyncedAt={lastSyncedAt}
       pending={pending}
       progress={progress}
+      noteOpen={noteOpen}
     />
   );
 }
@@ -330,6 +374,13 @@ export default function App() {
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
   const switchingVault = useStore((s) => s.switchingVault);
+  // Version history is a synced-vault feature: it needs the note's docId on the
+  // server. No mapping (local vault, unregistered note) → no history button.
+  const versionDocId = useStore((s) => {
+    const path = s.openNote?.path;
+    return path && s.syncEnabled ? (s.docIdByPath[path] ?? null) : null;
+  });
+  const versionPanelOpen = useStore((s) => s.versionPanelDocId != null);
   // An open image/PDF preview isn't a synced note — hide the save/sync chrome.
   const isPreview = openNote != null && previewKind(openNote.path) != null;
   const [booting, setBooting] = useState(true);
@@ -338,6 +389,12 @@ export default function App() {
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
+
+  // The history panel is about ONE note; switching notes under it would leave a
+  // list of versions that no longer belong to what's in the editor.
+  useEffect(() => {
+    useStore.getState().closeVersionPanel();
+  }, [openNote?.path]);
 
   // Auto-reopen the last vault on launch, then restore the session (spec 04 §7)
   // and enable sync. Vault first so `enableSyncForVault` (called inside initAuth)
@@ -381,10 +438,12 @@ export default function App() {
       } finally {
         setBooting(false);
       }
-      // Check for app updates once on launch. Failures (e.g. offline, or a
-      // non-bundled dev build) are swallowed by the updater store — the banner
-      // only appears when an update is genuinely available.
-      void checkForUpdate();
+      // Self-update on launch, silently: found → download → install → relaunch,
+      // no click required (notes are autosaved continuously, so a restart loses
+      // nothing). The user hears about it AFTER the fact, via the "Updated to
+      // vX" banner on the next boot. Failures (offline, non-bundled dev build)
+      // are swallowed by the updater store — surfaced only in Settings → Updates.
+      void autoUpdate();
     })();
   }, []);
 
@@ -566,7 +625,12 @@ export default function App() {
           <FileTree />
         </div>
         <div className="sidebar-footer">
-          <AccountMenu />
+          {/* Boundary so a crash here degrades to a visible fallback instead of
+              silently emptying the corner — the identity bar must never just
+              vanish. */}
+          <ErrorBoundary label="Account">
+            <AccountMenu />
+          </ErrorBoundary>
         </div>
       </aside>
       <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />
@@ -574,6 +638,7 @@ export default function App() {
       <main className="main">
         <MemberJoinedBanner />
         <UpdateBanner />
+        <UpdatedBanner />
         {/* Sits flush against the top of the window now that there's no system
             title bar above it (`titleBarStyle: "Overlay"`), which is where the
             reclaimed ~28px comes from — and that makes it the strip you'd expect
@@ -582,9 +647,35 @@ export default function App() {
         <header className="main-header" data-tauri-drag-region="deep">
           <span className="note-title">{openNote?.title ?? "No note open"}</span>
           {openNote && !isPreview && <SaveIndicator />}
-          {openNote && !isPreview && <SyncIndicator />}
+          <SyncIndicator noteOpen={openNote != null && !isPreview} />
           {/* Vault-wide, so it sits in the header regardless of the open note. */}
           <TalkButton />
+          {versionDocId && !isPreview && (
+            <button
+              className={`icon-btn history-btn${versionPanelOpen ? " active" : ""}`}
+              title="Version history"
+              aria-label="Version history"
+              aria-pressed={versionPanelOpen}
+              onClick={() => {
+                if (versionPanelOpen) useStore.getState().closeVersionPanel();
+                else void useStore.getState().openVersionPanel(versionDocId);
+              }}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+                <path d="M3 4v4h4" />
+                <path d="M12 8v4l3 2" />
+              </svg>
+            </button>
+          )}
           <button
             className="icon-btn search-btn"
             title="Search notes (⌘F)"
@@ -634,6 +725,8 @@ export default function App() {
           <Editor />
         </div>
         <BacklinksPanel />
+        {/* Slides in over the editor from the right; anchored to .main. */}
+        <VersionPanel />
       </main>
 
       {graphOpen && (

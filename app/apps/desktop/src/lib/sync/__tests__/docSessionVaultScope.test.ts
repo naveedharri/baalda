@@ -34,6 +34,8 @@ const fakeRegistry = vi.hoisted(() => {
     setMapListener: vi.fn((cb: (() => void) | null) => {
       reg.mapListener = cb;
     }),
+    // Versioning: the manager also mirrors {docId → last-edit} out of the pull.
+    setNoteMetaListener: vi.fn(),
     // Inbound reconciliation: the manager hands itself over as the host that can
     // make the editor/doc-store let go of a doc before its file moves.
     inboundHost: null as unknown,

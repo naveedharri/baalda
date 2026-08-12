@@ -408,7 +408,9 @@ export async function createNote(
     if (input.content) {
       const current = await ctx.docWriter.readContent(input.vaultId, row.id);
       if (current.trim().length === 0) {
-        await ctx.docWriter.setContent(input.vaultId, row.id, input.content);
+        await ctx.docWriter.setContent(input.vaultId, row.id, input.content, {
+          userId: ctx.auth.userId,
+        });
         seeded = true;
       }
     }
@@ -430,7 +432,9 @@ export async function createNote(
     [docId, input.vaultId, folderId, input.title ?? null, input.relPath, ctx.auth.userId],
   );
   if (input.content) {
-    await ctx.docWriter.setContent(input.vaultId, docId, input.content);
+    await ctx.docWriter.setContent(input.vaultId, docId, input.content, {
+      userId: ctx.auth.userId,
+    });
   }
   // After the content, so a client that reacts to the announcement by pulling
   // the note finds it already written rather than briefly empty.
@@ -477,14 +481,16 @@ async function requireEditableNote(auth: McpAuth, docId: string) {
  */
 export async function updateNote(ctx: McpContext, docId: string, content: string) {
   const note = await requireEditableNote(ctx.auth, docId);
-  await ctx.docWriter.setContent(note.vault_id, docId, content);
+  // The actor rides along so the edit is attributed to the MCP token's user —
+  // an AI write shows up as "edited by <that user>" like any teammate's.
+  await ctx.docWriter.setContent(note.vault_id, docId, content, { userId: ctx.auth.userId });
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
   return { docId, bytes: content.length };
 }
 
 export async function appendNote(ctx: McpContext, docId: string, text: string) {
   const note = await requireEditableNote(ctx.auth, docId);
-  await ctx.docWriter.appendContent(note.vault_id, docId, text);
+  await ctx.docWriter.appendContent(note.vault_id, docId, text, { userId: ctx.auth.userId });
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
   return { docId, appended: text.length };
 }

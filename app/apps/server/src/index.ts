@@ -9,6 +9,8 @@ import { VaultChannel } from "./sync/vault-channel.js";
 import { setMemberJoinedPublisher } from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
+import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
+import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
 
 /**
  * Entry point. Runs two listeners in one Node process:
@@ -44,11 +46,45 @@ async function main() {
     void vaultChannel.publishMemberJoined(vaultId, name).catch(broadcastFailed("member-joined"));
   });
 
+  // Version capture is created below (it needs the doc writer, which needs the
+  // sync server, which needs this hook) — hence the late binding. Every edit,
+  // however it arrived, ends up in exactly one place.
+  let versionCapture: VersionCapture | null = null;
+  const noteEdited = (vaultId: string, docId: string, userId: string | null) =>
+    versionCapture?.touch(vaultId, docId, userId);
+
   // Every persisted doc change is fanned out to background vault subscribers.
-  const sync = createSyncServer(config.hocuspocusPort, (vaultId, docId, update) => {
-    void vaultChannel.publishDocUpdate(vaultId, docId, update).catch(broadcastFailed("doc-update"));
-  });
+  const sync = createSyncServer(
+    config.hocuspocusPort,
+    (vaultId, docId, update) => {
+      void vaultChannel
+        .publishDocUpdate(vaultId, docId, update)
+        .catch(broadcastFailed("doc-update"));
+    },
+    noteEdited,
+  );
   await sync.listen();
+
+  const onRegistryChanged = (vaultId: string, originId: string | null) =>
+    void vaultChannel
+      .publishRegistryChanged(vaultId, originId)
+      .catch(broadcastFailed("registry-changed"));
+
+  // The detached write path never reaches Hocuspocus, so it reports edits here.
+  const docWriter = createDocWriter(
+    sync,
+    (vaultId, docId, update) => vaultChannel.publishDocUpdate(vaultId, docId, update),
+    noteEdited,
+  );
+
+  versionCapture = createVersionCapture({
+    docWriter,
+    onRegistryChanged,
+    idleMs: config.versionIdleMs,
+    // Activity-triggered daily checkpoint — no scheduler, and the freshness
+    // test runs under a per-vault advisory lock so instances don't stampede.
+    dailyCheckpoint: (vaultId) => maybeDailyCheckpoint({ vaultId, docWriter }),
+  });
 
   const app = createApp({
     disconnectDoc: (vaultId, docId) => disconnectDoc(sync, vaultId, docId),
@@ -58,10 +94,7 @@ async function main() {
     // Folder/note create/rename/move/delete → subscribers re-pull the registry.
     // Coalesced per vault inside the channel, and skipped for the client whose
     // own write caused it (`originId`).
-    onRegistryChanged: (vaultId, originId) =>
-      void vaultChannel
-        .publishRegistryChanged(vaultId, originId)
-        .catch(broadcastFailed("registry-changed")),
+    onRegistryChanged,
     // MCP tools write notes through the same sync server, so AI edits persist,
     // re-index, and broadcast exactly like a human edit — to open editors via
     // Hocuspocus when the doc is live, and to background subscribers via this
@@ -70,9 +103,7 @@ async function main() {
     //
     // Returned, not `void`ed: `DocUpdatePublisher` accepts a promise so the
     // doc-writer awaits and swallows a rejection on our behalf.
-    docWriter: createDocWriter(sync, (vaultId, docId, update) =>
-      vaultChannel.publishDocUpdate(vaultId, docId, update),
-    ),
+    docWriter,
   });
 
   const httpServer = serve({ fetch: app.fetch, port: config.port }, (info) => {
@@ -96,6 +127,7 @@ async function main() {
 
   const shutdown = async () => {
     console.log("Shutting down…");
+    versionCapture?.stop();
     syncWss.close();
     vaultWss.close();
     await pubsub.close();

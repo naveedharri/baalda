@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
-import { verifySyncToken } from "../src/tokens/sync-token.js";
+import { mintSyncToken, verifySyncToken } from "../src/tokens/sync-token.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, signUp } from "./helpers/auth.js";
@@ -51,6 +51,19 @@ describe("POST /api/sync-token (spec 03 §7)", () => {
     expect(claims.docId).toBe(doc);
     expect(claims.vaultId).toBe(vault);
     expect(claims.readOnly).toBe(false);
+    // Attribution: the sync server reads this to stamp "last edited by" and to
+    // author auto-captured versions.
+    expect(claims.userId).toBe(owner.userId);
+  });
+
+  it("verifies a token minted WITHOUT a userId claim as anonymous", async () => {
+    // Tokens minted before attribution existed stay in flight for the whole TTL.
+    // They must keep syncing — nameless, not rejected — or a deploy drops every
+    // open editor just to learn who is typing.
+    const token = await mintSyncToken({ docId: "d", vaultId: "v", readOnly: false });
+    const claims = await verifySyncToken(token);
+    expect(claims.userId).toBeUndefined();
+    expect(claims.docId).toBe("d");
   });
 
   it("view grant -> 200 readOnly:true", async () => {
