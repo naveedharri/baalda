@@ -13,6 +13,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useSyncExternalStore } from "react";
 
+import { bridgeManager } from "./bridge";
+
 export type UpdateState =
   | { phase: "idle" }
   | { phase: "checking" }
@@ -100,6 +102,14 @@ export async function installUpdate(): Promise<void> {
           break;
       }
     });
+    // The background poll can land this relaunch mid-session with a note open,
+    // so flush the bridge's debounced disk write first — same rule as the ⌘R
+    // reload path. A no-op when nothing is open (the launch-time update).
+    try {
+      await bridgeManager.currentBridge()?.flushEgest();
+    } catch (e) {
+      console.error("flush before update relaunch failed", e);
+    }
     // New bytes are in place; restart into them. On macOS this quits and
     // relaunches; on Windows the installer hands off to the new process.
     await relaunch();
@@ -134,10 +144,21 @@ interface JustUpdated {
 /**
  * Fully automatic update: check, and when a newer version exists, download +
  * install + relaunch without asking. Callers should treat this as fire-and-
- * forget from launch; every failure lands in the shared state's `error` phase
- * (surfaced only in Settings → Updates — an offline launch is not an event).
+ * forget from launch AND from the background poll; every failure lands in the
+ * shared state's `error` phase (surfaced only in Settings → Updates — an
+ * offline launch is not an event).
  */
 export async function autoUpdate(): Promise<void> {
+  // Re-entrancy guard for the background poll: a tick that fires while a
+  // check/download/install is already in flight must not start a second one
+  // (two concurrent downloadAndInstall calls race on the same staged bundle).
+  if (
+    state.phase === "checking" ||
+    state.phase === "downloading" ||
+    state.phase === "installing"
+  ) {
+    return;
+  }
   const found = await checkForUpdate();
   if (!found || !pending) return;
   try {
