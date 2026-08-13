@@ -198,6 +198,7 @@ function VaultFolderPrompt() {
           Choose the local folder this vault syncs to. Each vault keeps its own
           folder — separate from your other vaults.
         </p>
+        {pending.reason && <p className="error">{pending.reason}</p>}
         <div className="vault-folder-actions">
           {/* Both of these open a vault: a native picker, then a full vault open
               + reconcile. Easily a second or two, so each reports for itself. */}

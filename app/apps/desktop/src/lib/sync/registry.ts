@@ -47,6 +47,14 @@ export interface DocMapping {
 }
 
 interface VaultSyncConfig {
+  /**
+   * The vault (Better Auth org) this folder was last reconciled under. The
+   * org→folder binding itself lives in webview localStorage (`context.orgVaults`),
+   * which can be lost (reinstall, cleared storage, another device); this field is
+   * what lets `store.setActiveOrganization` REDISCOVER the folder instead of
+   * auto-creating a duplicate under the vaults root.
+   */
+  organizationId?: string;
   serverVaultId?: string;
   /** relPath → server docId (notes). */
   docs?: Record<string, string>;
@@ -222,6 +230,8 @@ function reasonOf(err: unknown): string {
 
 export class VaultRegistry {
   private serverVaultId: string | null = null;
+  /** The org this registry is reconciling under (see `VaultSyncConfig.organizationId`). */
+  private organizationId: string | null = null;
   private byPath = new Map<string, DocMapping>();
   /** Reverse of byPath: docId → relPath, for the vault sync engine (spec 05). */
   private byDocId = new Map<string, string>();
@@ -365,6 +375,7 @@ export class VaultRegistry {
     this.checkpoint?.dispose();
     this.checkpoint = null;
     this.serverVaultId = null;
+    this.organizationId = null;
     this.byPath.clear();
     this.byDocId.clear();
     this.folderByPath.clear();
@@ -504,6 +515,7 @@ export class VaultRegistry {
     const baseline: Record<string, string> = {};
     for (const [docId, rp] of this.baselineDocs) baseline[docId] = rp;
     return {
+      organizationId: this.organizationId ?? undefined,
       serverVaultId: this.serverVaultId ?? undefined,
       docs,
       folders,
@@ -763,6 +775,7 @@ export class VaultRegistry {
     // user to switch vaults; each `stale()` checkpoint drops the rest of the work
     // instead of applying it to whatever vault is now open.
     this.bound = this.scopes.current();
+    this.organizationId = input.organizationId;
     this.failed = [];
     this.limitReached = null;
     this.newCheckpointer();
