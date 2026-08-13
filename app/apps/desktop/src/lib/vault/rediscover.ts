@@ -35,6 +35,16 @@ interface ConfigIdentity {
   serverVaultId: string | null;
 }
 
+/**
+ * The vault (org) a folder's raw `.context/config.json` says it belongs to, or
+ * null when the folder was never synced (or the config predates the stamp).
+ * This is the on-disk truth the localStorage caches mirror — callers use it to
+ * classify a folder when the caches have been lost or evicted.
+ */
+export function configOrgId(raw: string | null): string | null {
+  return identityOf(raw)?.organizationId ?? null;
+}
+
 function identityOf(raw: string | null): ConfigIdentity | null {
   if (!raw) return null;
   try {

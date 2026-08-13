@@ -142,6 +142,10 @@ export interface ReconcileInput {
   organizationId: string;
   /** Display name for a newly created server vault. */
   vaultName: string;
+  /** True only when the user JUST created this vault. Gates first-run seeding:
+   *  without it an empty vault stays empty — adopting an existing folder,
+   *  joining a team vault, or reopening one must never invent content. */
+  seedIfEmpty?: boolean;
 }
 
 /** A folder/note that could NOT be registered, after retries. Surfaced so the
@@ -870,18 +874,23 @@ export class VaultRegistry {
       }
     }
 
-    // 1b. First-run seeding. A brand-new vault — nothing on the server AND
-    //     an empty local folder — gets welcome/starter content so the vault
-    //     isn't an empty void. We seed BEFORE flattening so the files register
-    //     as ordinary server docs in steps 2–4. Skipped when the server already
-    //     has notes (joining/rejoining a populated vault) or the folder
-    //     already has content — those paths adopt/materialize instead.
+    // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —
+    //     with nothing on the server AND an empty local folder — gets
+    //     welcome/starter content so the vault isn't an empty void. We seed
+    //     BEFORE flattening so the files register as ordinary server docs in
+    //     steps 2–4. Skipped when the server already has notes (joining/
+    //     rejoining a populated vault) or the folder already has content —
+    //     those paths adopt/materialize instead. And skipped WITHOUT the
+    //     caller's explicit creation intent: turning on sync for a folder the
+    //     user opened, or joining an empty team vault, must never invent
+    //     content in it.
     const serverNotes = await this.api.listNotes(vaultId);
     if (this.stale()) return { seeded: false };
     let workingTree = tree;
     let seeded = false;
     const localFlat = flattenTree(tree);
     if (
+      input.seedIfEmpty === true &&
       serverNotes.length === 0 &&
       localFlat.notes.length === 0 &&
       localFlat.folders.length === 0

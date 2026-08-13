@@ -156,12 +156,26 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
 });
 
 describe("VaultRegistry.reconcile — seeding and materialization rules", () => {
-  it("seeds welcome content ONLY when both the server vault and local folder are empty", async () => {
+  it("seeds welcome content ONLY for a just-created vault (seedIfEmpty) with empty server + folder", async () => {
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "fresh", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    const { seeded } = await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "fresh", seedIfEmpty: true },
+      emptyTree(),
+    );
+    expect(seeded).toBe(true);
+    expect(seedWelcomeContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not seed without creation intent, even when server and folder are both empty", async () => {
+    // Turning on sync for an opened folder, or joining an empty team vault,
+    // must never invent content — only the "New vault" flows pass seedIfEmpty.
     const { api } = fakeApi({ vaults: [{ id: "v1", name: "fresh", organization_id: ORG }] });
     const reg = new VaultRegistry(api);
     const { seeded } = await reconcileWithTree(reg, { organizationId: ORG, vaultName: "fresh" }, emptyTree());
-    expect(seeded).toBe(true);
-    expect(seedWelcomeContent).toHaveBeenCalledTimes(1);
+    expect(seeded).toBe(false);
+    expect(seedWelcomeContent).not.toHaveBeenCalled();
   });
 
   it("does not seed when the local folder already has content", async () => {
@@ -176,7 +190,11 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
       isDir: true,
       children: [{ id: "a", name: "Mine.md", path: "Mine.md", isDir: false }],
     };
-    const { seeded } = await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, tree);
+    const { seeded } = await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "laptop", seedIfEmpty: true },
+      tree,
+    );
     expect(seeded).toBe(false);
     expect(seedWelcomeContent).not.toHaveBeenCalled();
     // The local-only note was registered on the server instead.

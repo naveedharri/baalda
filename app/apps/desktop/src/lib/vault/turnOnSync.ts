@@ -38,6 +38,15 @@ export type TurnOnSyncAction =
    * is the same defect in a different disguise.
    */
   | { kind: "switch"; orgId: string }
+  /**
+   * The folder's own `.context/config.json` says it belongs to a vault this
+   * account is NOT a member of — a teammate's vault, or one synced under a
+   * different account on this machine. Adopting it would create a fresh vault
+   * under the wrong account and upload every note into it (the registry
+   * discards a foreign `serverVaultId` and backfills from scratch), i.e. a
+   * silent full duplication. Refuse; the caller says why.
+   */
+  | { kind: "blocked-foreign"; orgId: string }
   /** The folder belongs to no vault — this is a genuinely new vault. */
   | { kind: "create-vault" };
 
@@ -50,6 +59,15 @@ export interface TurnOnSyncInput {
   orgIds: readonly string[];
   /** Persisted { orgId → local folder } bindings. */
   orgVaults: Readonly<Record<string, string>>;
+  /**
+   * The vault the folder's own `.context/config.json` is stamped for (see
+   * `configOrgId`), or null. This is the on-disk dual of `orgVaults`: the
+   * binding is per-device localStorage and easy to lose, while the stamp
+   * travels with the folder — so it both heals a lost binding (stamped for a
+   * vault we're in → switch) and unmasks a foreign folder (stamped for one
+   * we're not → block) that the binding alone would happily re-adopt.
+   */
+  stampedOrgId?: string | null;
 }
 
 export function planTurnOnSync(input: TurnOnSyncInput): TurnOnSyncAction {
@@ -66,6 +84,21 @@ export function planTurnOnSync(input: TurnOnSyncInput): TurnOnSyncAction {
       ? { kind: "retry-active", orgId: boundOrg }
       : { kind: "switch", orgId: boundOrg };
   }
+
+  // No usable binding — ask the folder itself. Stamped for a vault we're in:
+  // the binding was lost (cleared storage, eviction), not the membership, so
+  // switch to that vault rather than minting a duplicate.
+  const stamped = input.stampedOrgId ?? null;
+  if (stamped && input.orgIds.includes(stamped)) {
+    return stamped === input.activeOrganizationId
+      ? { kind: "retry-active", orgId: stamped }
+      : { kind: "switch", orgId: stamped };
+  }
+
+  // Stamped for a vault this account can't see: refuse to adopt. (This also
+  // catches a vault the account deleted server-side — inconvenient, but the
+  // safe default; the folder can be re-adopted by copying the notes out.)
+  if (stamped) return { kind: "blocked-foreign", orgId: stamped };
 
   return { kind: "create-vault" };
 }
