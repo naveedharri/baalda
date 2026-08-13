@@ -536,22 +536,93 @@ pub async fn export_path(
     import_export::export_path(&vault, &rel, &dest)
 }
 
-/// Open a vault's folder within the managed root: ensure it exists, repoint
-/// `<root>/current` at it, then open it as the active vault. The folder may live
-/// anywhere (a legacy folder bound before the root existed), but `current`
-/// always tracks it.
+/// Open a vault's folder, repoint `<root>/current` at it, then make it the
+/// active vault. The folder may live anywhere (a legacy folder bound before the
+/// root existed), but `current` always tracks it.
+///
+/// `create` gates the mkdir: only the paths that deliberately mint a NEW folder
+/// (auto-folder on switch, "start empty") pass true. Reopening a REMEMBERED
+/// binding must not create — `create_dir_all` here used to silently resurrect a
+/// folder the user had moved/renamed in Finder, and the registry then
+/// re-materialized the whole vault into the empty ghost (a duplicate copy).
 #[tauri::command]
 pub async fn open_vault_in_root(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
+    create: Option<bool>,
 ) -> AppResult<VaultInfo> {
     let folder = PathBuf::from(&path);
-    std::fs::create_dir_all(&folder)?;
+    if create.unwrap_or(false) {
+        std::fs::create_dir_all(&folder)?;
+    } else if !folder.is_dir() {
+        return Err(AppError::new(format!("vault folder not found: {path}")));
+    }
     if let Some(root) = read_config(&app).vaults_root {
         repoint_current(Path::new(&root), &folder);
     }
     open_vault_inner(&app, &state, folder)
+}
+
+/// Forget the launch auto-reopen target (recents are untouched). Called when
+/// the user deliberately lands on the welcome screen — closing the vault,
+/// signing out, removing the open vault from this device — so a reload or
+/// relaunch respects that choice instead of reopening the folder they just
+/// left. The next vault open re-arms it (`remember_recent`).
+#[tauri::command]
+pub fn clear_last_vault(app: AppHandle) -> AppResult<()> {
+    let mut cfg = read_config(&app);
+    cfg.last_vault = None;
+    write_config(&app, &cfg)
+}
+
+/// Does this absolute path exist as a directory? Lets the vault-switch flow tell
+/// "bound folder moved/deleted" (rediscover it) from "folder present but failed
+/// to open" (surface the error) without attempting the open.
+#[tauri::command]
+pub fn folder_exists(path: String) -> AppResult<bool> {
+    Ok(Path::new(&path).is_dir())
+}
+
+/// Read a folder's `.context/config.json` WITHOUT opening it as the active vault
+/// (contrast `get_vault_config`, which is epoch-pinned to the open one). This is
+/// the discovery probe behind `store.setActiveOrganization`'s rediscovery pass:
+/// it identifies a folder as an existing local copy of a vault so the switch can
+/// reopen it instead of auto-creating a duplicate under the vaults root.
+/// Best-effort by design — a missing folder, a non-vault folder, or an
+/// unreadable config all return None so one bad candidate can't abort a scan.
+#[tauri::command]
+pub fn peek_vault_config(path: String) -> AppResult<Option<String>> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Ok(None);
+    }
+    Ok(std::fs::read_to_string(p.join(".context").join("config.json")).ok())
+}
+
+/// Immediate subdirectories of the managed vaults root (absolute paths), for the
+/// rediscovery candidate list — auto-created folders may have aged out of the
+/// recents list. Skips dotfiles and symlinks (which also excludes `current`).
+#[tauri::command]
+pub fn list_vaults_root_dirs(app: AppHandle) -> AppResult<Vec<String>> {
+    let Some(root) = read_config(&app).vaults_root else {
+        return Ok(Vec::new());
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            out.push(entry.path().to_string_lossy().to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// Point `<root>/current` at `target`. Best-effort: it never clobbers a real
@@ -976,6 +1047,61 @@ pub async fn read_external_file(path: String) -> AppResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rediscovery probe must identify a vault folder without opening it,
+    /// and must answer None (never an error) for everything that isn't one —
+    /// a scan over recents can't have one bad candidate abort the whole pass.
+    #[test]
+    fn peek_vault_config_reads_without_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("my-vault");
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+        std::fs::write(
+            vault.join(".context").join("config.json"),
+            r#"{"organizationId":"org-1"}"#,
+        )
+        .unwrap();
+
+        // A vault folder: raw config comes back.
+        let got = peek_vault_config(vault.to_string_lossy().to_string()).unwrap();
+        assert_eq!(got.as_deref(), Some(r#"{"organizationId":"org-1"}"#));
+
+        // A plain folder (no .context): None.
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(
+            peek_vault_config(plain.to_string_lossy().to_string()).unwrap(),
+            None
+        );
+
+        // A path that doesn't exist / isn't a directory: None, not an error.
+        let missing = dir.path().join("gone");
+        assert_eq!(
+            peek_vault_config(missing.to_string_lossy().to_string()).unwrap(),
+            None
+        );
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(
+            peek_vault_config(file.to_string_lossy().to_string()).unwrap(),
+            None
+        );
+    }
+
+    /// `folder_exists` is what tells "bound folder moved" (rediscover) from
+    /// "folder present but failed to open" (prompt) — a file must not count.
+    #[test]
+    fn folder_exists_is_directories_only() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(folder_exists(dir.path().to_string_lossy().to_string()).unwrap());
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "x").unwrap();
+        assert!(!folder_exists(file.to_string_lossy().to_string()).unwrap());
+        assert!(!folder_exists(
+            dir.path().join("gone").to_string_lossy().to_string()
+        )
+        .unwrap());
+    }
 
     /// A config.json written before the `workspace_root` → `vaults_root` rename
     /// must still load, so upgrading users keep their managed-root path instead

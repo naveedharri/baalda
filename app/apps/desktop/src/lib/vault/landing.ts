@@ -34,6 +34,13 @@ export interface LandingInput {
   /** The last vault used on this device. */
   rememberedOrgId: string | null;
   /**
+   * The vault the open folder's own `.context/config.json` is stamped for
+   * (`configOrgId`), or null. The on-disk dual of `orgVaults`: it survives the
+   * lost/evicted localStorage binding, so a synced folder still lands in its
+   * own vault after sign-in instead of silently staying "local".
+   */
+  stampedOrgId?: string | null;
+  /**
    * The user is part-way through "join a team with a code" on the welcome
    * screen, which runs sign-in/sign-up first and then comes back for the code.
    */
@@ -67,16 +74,31 @@ export function planLanding(input: LandingInput): LandingAction {
       null)
     : null;
 
-  // 2) The open folder belongs to a synced vault → make it active + sync.
-  if (input.openPath && isMember(boundOrgOfOpen)) {
-    return input.activeOrganizationId === boundOrgOfOpen
+  // 2) The open folder belongs to a synced vault → make it active + sync. The
+  //    binding is the primary signal; the folder's own config stamp is its
+  //    backup for when the binding was lost (cleared storage, eviction) — the
+  //    folder still knows whose it is, and the user who just signed into that
+  //    account expects it to sync, not to sit there labeled "local".
+  const ownerOrgOfOpen = input.openPath
+    ? isMember(boundOrgOfOpen)
+      ? boundOrgOfOpen
+      : isMember(input.stampedOrgId ?? null)
+        ? (input.stampedOrgId as string)
+        : null
+    : null;
+  if (input.openPath && ownerOrgOfOpen) {
+    return input.activeOrganizationId === ownerOrgOfOpen
       ? { kind: "enable-sync" }
-      : { kind: "switch", orgId: boundOrgOfOpen };
+      : { kind: "switch", orgId: ownerOrgOfOpen };
   }
 
   // 3) A local (unsynced) folder is open → keep it local. Don't pull the user
   //    into a different vault just because they happen to be signed in; "Turn
   //    on sync" is the affordance for adopting the folder they're in.
+  //
+  //    A folder stamped for a vault this account can't see also stays put —
+  //    it's another account's vault, and syncing it anywhere from here would
+  //    duplicate it (the enable-sync guard in the store refuses it too).
   //
   //    Note the condition is "bound to nothing", not "not bound to a vault we're
   //    in": a folder bound to a vault we've been REMOVED from deliberately falls

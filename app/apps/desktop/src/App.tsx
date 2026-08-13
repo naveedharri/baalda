@@ -186,6 +186,14 @@ function VaultFolderPrompt() {
   return (
     <div className="modal-backdrop vault-folder-backdrop">
       <div className="modal vault-folder-prompt" onClick={(e) => e.stopPropagation()}>
+        <button
+          className="icon-btn wf-close"
+          disabled={busy}
+          aria-label="Close"
+          onClick={run(() => useStore.getState().cancelVaultFolder())}
+        >
+          ✕
+        </button>
         <div className="wf-badge" aria-hidden="true">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
             <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.6.8l.9 1.2a2 2 0 0 0 1.6.8H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -194,10 +202,19 @@ function VaultFolderPrompt() {
         <h2 className="wf-title">
           Set up <strong>{pending.orgName}</strong>
         </h2>
-        <p className="wf-desc">
-          Choose the local folder this vault syncs to. Each vault keeps its own
-          folder — separate from your other vaults.
-        </p>
+        {/* When there's a reason (folder moved / failed to open) it replaces the
+            generic pitch — both at once read as a wall of text. */}
+        {pending.reason ? (
+          <div className="wf-notice" role="alert">
+            <p>{pending.reason.text}</p>
+            {pending.reason.path && <code>{pending.reason.path}</code>}
+          </div>
+        ) : (
+          <p className="wf-desc">
+            Choose the local folder this vault syncs to. Each vault keeps its
+            own folder — separate from your other vaults.
+          </p>
+        )}
         <div className="vault-folder-actions">
           {/* Both of these open a vault: a native picker, then a full vault open
               + reconcile. Easily a second or two, so each reports for itself. */}
@@ -225,15 +242,6 @@ function VaultFolderPrompt() {
           </AsyncButton>
         </div>
         {error && <p className="error">{error}</p>}
-        {pending.previousOrgId && (
-          <button
-            className="link-btn"
-            disabled={busy}
-            onClick={run(() => useStore.getState().cancelVaultFolder())}
-          >
-            Cancel
-          </button>
-        )}
       </div>
     </div>
   );

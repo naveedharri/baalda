@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
@@ -12,15 +12,34 @@ import {
 import { AuthDialog } from "./AccountMenu";
 import { Wordmark } from "./Logo";
 import { Spinner } from "./Spinner";
+import { configOrgId } from "../lib/vault/rediscover";
 
 /**
- * A row in the welcome-screen list: either a plain local folder (a recent vault
- * on disk) or a synced *remote* vault (an org). Remote rows carry the org id
- * so a click can reopen + resync them — prompting sign-in first if signed out.
+ * A row in the welcome-screen list: either a local folder (a recent vault on
+ * disk) or a synced *remote* vault (an org). Remote rows carry the org id so a
+ * click can reopen + resync them — prompting sign-in first if signed out.
+ *
+ * A local row additionally knows whether its folder IS some vault's synced
+ * folder (`syncedOrgId`, read from the folder's own `.context/config.json`).
+ * The localStorage caches that used to be the only classification signal are
+ * per-device and easy to lose — which left a synced folder listed as if it
+ * were plain local, openable (and editable) with no hint that it syncs.
  */
 type PickerEntry =
-  | { kind: "local"; key: string; name: string; path: string; openedAt: number }
+  | {
+      kind: "local";
+      key: string;
+      name: string;
+      path: string;
+      openedAt: number;
+      syncedOrgId: string | null;
+    }
   | { kind: "remote"; key: string; name: string; path: string | null; orgId: string };
+
+/** Is this row a synced vault (as opposed to a local-only folder)? */
+function isSyncedEntry(e: PickerEntry): boolean {
+  return e.kind === "remote" || e.syncedOrgId !== null;
+}
 
 // Springs tuned for small UI: snappy but soft-landing (no rubber-banding).
 const SPRING = { type: "spring", stiffness: 300, damping: 24 } as const;
@@ -110,12 +129,13 @@ export function VaultPicker() {
   // Which recent-vault card is being opened, by its key. A single boolean would
   // only tell the list to grey out; the point is to mark the row you clicked.
   const [opening, setOpening] = useState<string | null>(null);
-  // Recents are collapsed to the 3 most recent; "Load more" reveals the rest
-  // inside a scroll area locked to the collapsed height so the logo/buttons
-  // above never shift (the vault-picker card is vertically centered).
-  const [showAllRecents, setShowAllRecents] = useState(false);
-  const recentScrollRef = useRef<HTMLDivElement>(null);
-  const [lockedHeight, setLockedHeight] = useState<number | null>(null);
+  // Recents are collapsed to the 3 most recent; "Show all" opens a MODAL with
+  // the full list. Expanding in place was tried twice and both ways lost:
+  // locked to the collapsed height it looked like the button did nothing
+  // (macOS overlay scrollbars are invisible until you scroll), and growing the
+  // box reflowed the vertically-centered card, shoving the wordmark and action
+  // buttons upward. A modal reveals everything and moves nothing.
+  const [showAllVaults, setShowAllVaults] = useState(false);
   const reduceMotion = useReducedMotion();
 
   // Surface recently opened vaults as one-tap "reopen" affordances.
@@ -141,16 +161,41 @@ export function VaultPicker() {
     };
   }, [organizations, authStatus]);
 
+  // { path → the vault (org) that folder's own `.context/config.json` is
+  // stamped for }. The on-disk truth behind the row tags: the localStorage
+  // caches (org list, org→folder bindings) are per-device and easy to lose,
+  // and every cache miss used to demote a synced folder to a plain "recent" —
+  // openable signed-out with no hint that its edits sync somewhere.
+  const [stamps, setStamps] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const peeked = await Promise.all(
+        recents.map(async (r) => {
+          const raw = await ipc.peekVaultConfig(r.path).catch(() => null);
+          return [r.path, configOrgId(raw)] as const;
+        }),
+      );
+      if (!alive) return;
+      const next: Record<string, string> = {};
+      for (const [path, orgId] of peeked) if (orgId) next[path] = orgId;
+      setStamps(next);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [recents]);
+
   // If this screen goes away mid-join (a vault opened by some other route),
   // the landing suppression must not outlive it. A *successful* join disarms
   // it in the store before switching in, so this only catches abandonment.
   useEffect(() => () => requestJoinWithCode(false), []);
 
-  async function openVault(vault: VaultInfo | null) {
+  async function openVault(vault: VaultInfo | null, opts?: { seed?: boolean }) {
     if (!vault) return;
     // Rust already opened it (these are the picker/create commands), so the store
     // retires the previous vault's sync and reloads view state from the new one.
-    await useStore.getState().adoptOpenedVault(vault);
+    await useStore.getState().adoptOpenedVault(vault, opts);
   }
 
   // "Open existing": native folder picker → open the chosen vault.
@@ -191,7 +236,9 @@ export function VaultPicker() {
     setError(null);
     try {
       const vault = await ipc.createVault(newParent, newName.trim());
-      await openVault(vault);
+      // Creating a vault is the one flow that seeds starter content; "Open
+      // existing" above adopts the picked folder untouched.
+      await openVault(vault, { seed: true });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -274,29 +321,43 @@ export function VaultPicker() {
     }
   }
 
-  // Open a vault row. Local folders open in place. A remote (synced)
-  // vault needs a session: if we still have one, switch straight to it
+  // Open a vault row. Local-only folders open in place. A synced vault —
+  // whether a cached remote row or a local folder whose own config says it
+  // syncs — needs a session: if we still have one, switch straight to it
   // (opening its folder + resyncing); if we're signed out, remember it and
-  // prompt sign-in — landInLastVault opens it once the session lands.
+  // prompt sign-in — landInLastVault opens it once the session lands. Opening
+  // a synced folder *without* a session would edit it silently offline under a
+  // "local" label; the escape hatch for deliberate offline work is "Open
+  // existing", not a click that looks like any other.
   async function openEntry(e: PickerEntry) {
     setOpening(e.key);
     try {
-      if (e.kind === "local") {
+      if (e.kind === "local" && !e.syncedOrgId) {
         await reopenLocal(e.path);
         return;
       }
+      const orgId = e.kind === "remote" ? e.orgId : (e.syncedOrgId as string);
       if (authStatus === "signed-in") {
         setBusy(true);
         setError(null);
         try {
-          await useStore.getState().setActiveOrganization(e.orgId);
+          if (!organizations.some((o) => o.id === orgId)) {
+            // A stamped folder whose vault this account can't see. Switching
+            // would 403, and adopting it would duplicate another account's
+            // vault — say why instead.
+            setError(
+              `"${e.name}" was synced under a different account. Sign in with that account to open it.`,
+            );
+            return;
+          }
+          await useStore.getState().setActiveOrganization(orgId);
         } catch (err) {
           setError(String(err));
         } finally {
           setBusy(false);
         }
       } else {
-        requestOpenVault(e.orgId);
+        requestOpenVault(orgId);
         setSignInFor("open");
         setSignInOpen(true);
       }
@@ -314,17 +375,6 @@ export function VaultPicker() {
     }
   }
 
-  // Freeze the scroll box at the collapsed 3-card height before revealing the
-  // rest, so the list scrolls internally instead of growing the (centered) card.
-  function expandRecents() {
-    setLockedHeight(recentScrollRef.current?.offsetHeight ?? null);
-    setShowAllRecents(true);
-  }
-  function collapseRecents() {
-    setShowAllRecents(false);
-    setLockedHeight(null);
-  }
-
   const naming = newParent !== null;
   // A step that owns the screen is showing (naming a new vault, entering a join
   // code, or the post-sign-in landing) — hide the recents/hint/sign-in behind
@@ -334,9 +384,12 @@ export function VaultPicker() {
 
   // Merge synced (remote) vaults with local recents into one list. Remote
   // vaults come from the locally-cached org list (survives sign-out) and are
-  // shown first; their bound folder — if any — comes from the org→folder map.
-  // Local recents backing a synced vault are folded into the remote row (by
-  // path) so nothing shows twice.
+  // shown first; their bound folder — if any — comes from the org→folder map,
+  // healed by the folders' own config stamps when the map is missing. Local
+  // recents backing a synced vault are folded into the remote row (by path)
+  // so nothing shows twice; the ones left over carry their own stamp so a
+  // synced folder is *tagged* as synced even when its vault isn't in the
+  // cached list at all (other account, cleared cache, other server).
   const entries = useMemo<PickerEntry[]>(() => {
     // Signed in, the store's list is authoritative — reading the cache here
     // would resurrect a vault deleted moments ago, because the cache is only
@@ -347,30 +400,106 @@ export function VaultPicker() {
         ? organizations.map((o) => ({ id: o.id, name: o.name }))
         : readKnownVaults(serverUrl);
     const orgVaults = readOrgVaults();
-    const boundPaths = new Set(Object.values(orgVaults));
+    // Fallback folder per org from the folders' own stamps — recents are
+    // newest-first, so the first stamped match wins (the one most recently
+    // opened, i.e. the copy the user actually uses).
+    const stampedPathByOrg: Record<string, string> = {};
+    for (const r of recents) {
+      const org = stamps[r.path];
+      if (org && !(org in stampedPathByOrg)) stampedPathByOrg[org] = r.path;
+    }
     const remote: PickerEntry[] = known.map((w) => ({
       kind: "remote",
       key: `org:${w.id}`,
       name: w.name,
-      path: orgVaults[w.id] ?? null,
+      path: orgVaults[w.id] ?? stampedPathByOrg[w.id] ?? null,
       orgId: w.id,
     }));
+    const consumed = new Set(remote.map((r) => r.path).filter(Boolean));
     const local: PickerEntry[] = recents
-      .filter((r) => !boundPaths.has(r.path))
+      .filter((r) => !consumed.has(r.path))
       .map((r) => ({
         kind: "local",
         key: r.path,
         name: r.name,
         path: r.path,
         openedAt: r.openedAt,
+        syncedOrgId: stamps[r.path] ?? null,
       }));
     return [...remote, ...local];
-  }, [recents, organizations, authStatus, serverUrl]);
+  }, [recents, stamps, organizations, authStatus, serverUrl]);
 
-  // Show the 3 most recent by default; the rest hide behind "Load more".
+  // Show the 3 most recent by default; the rest live in the "Show all" modal.
   const RECENT_LIMIT = 3;
-  const shownRecents = showAllRecents ? entries : entries.slice(0, RECENT_LIMIT);
+  const shownRecents = entries.slice(0, RECENT_LIMIT);
   const hiddenRecents = entries.length - RECENT_LIMIT;
+
+  // One vault row (used by both the inline recents and the "Show all" modal).
+  // Every row carries a truthful state tag (docs' vault states): "Remote" =
+  // synced, no local folder here yet; "Synced" = synced with a folder on this
+  // device; "Local" = a plain folder that syncs nowhere. The tag comes from
+  // the folder's own config (via `stamps`), not just the localStorage caches,
+  // so signing out can't demote a synced vault to an untagged "recent".
+  const renderEntry = (e: PickerEntry) => {
+    const synced = isSyncedEntry(e);
+    const tag = e.kind === "remote" && !e.path ? "Remote" : synced ? "Synced" : "Local";
+    return (
+      <div
+        className={`recent-card${e.kind === "local" ? " removable" : ""}${
+          opening === e.key ? " is-opening" : ""
+        }`}
+        key={e.key}
+      >
+        <button
+          className="recent-open"
+          disabled={busy}
+          aria-busy={opening === e.key || undefined}
+          onClick={() => void openEntry(e)}
+          title={e.path ?? e.name}
+        >
+          <span className="recent-name">{e.name}</span>
+          {/* The card the user clicked reports for itself. A single shared `busy`
+              flag only greyed every row out, which says "the list is disabled"
+              rather than "this one is opening" — and opening a vault is seconds
+              of work. */}
+          {opening === e.key ? (
+            <Spinner size="xs" tone="accent" className="recent-badge" />
+          ) : (
+            <span className="recent-meta recent-badge">
+              {e.kind === "local" && e.openedAt > 0 && (
+                <span className="recent-time">{relativeTime(e.openedAt)}</span>
+              )}
+              <span className={`ws-badge ${synced ? "synced" : "local"}`}>{tag}</span>
+            </span>
+          )}
+          <span className="recent-path">
+            {opening === e.key
+              ? "Opening…"
+              : e.path
+                ? synced && authStatus !== "signed-in"
+                  ? `${tidyPath(e.path)} · sign in to open`
+                  : tidyPath(e.path)
+                : "Synced · sign in to open"}
+          </span>
+        </button>
+        {/* The remove × overlays the row's top-right corner on hover (the tag
+            fades out while it shows) instead of sitting in the flow — in flow
+            it reserved a column on local rows only, pushing their tag out of
+            line with the synced rows'. */}
+        {e.kind === "local" && (
+          <button
+            className="recent-remove"
+            aria-label={`Remove ${e.name} from recents`}
+            title="Remove from recents"
+            disabled={busy}
+            onClick={() => forget(e.path)}
+          >
+            ×
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="vault-picker">
@@ -615,66 +744,14 @@ export function VaultPicker() {
             }
           >
             <p className="recent-heading">Recent vaults</p>
-            <div
-              ref={recentScrollRef}
-              className={`recent-scroll${showAllRecents ? " expanded" : ""}`}
-              style={
-                showAllRecents && lockedHeight ? { height: lockedHeight } : undefined
-              }
-            >
-              {shownRecents.map((e) => (
-                <div
-                  className={`recent-card${opening === e.key ? " is-opening" : ""}`}
-                  key={e.key}
-                >
-                  <button
-                    className="recent-open"
-                    disabled={busy}
-                    aria-busy={opening === e.key || undefined}
-                    onClick={() => void openEntry(e)}
-                    title={e.path ?? e.name}
-                  >
-                    <span className="recent-name">{e.name}</span>
-                    {/* The card the user clicked reports for itself. A single
-                        shared `busy` flag only greyed every row out, which says
-                        "the list is disabled" rather than "this one is opening"
-                        — and opening a vault is seconds of work. */}
-                    {opening === e.key ? (
-                      <Spinner size="xs" tone="accent" className="recent-badge" />
-                    ) : e.kind === "remote" ? (
-                      <span className="ws-badge synced recent-badge">Remote</span>
-                    ) : e.openedAt > 0 ? (
-                      <span className="recent-time">{relativeTime(e.openedAt)}</span>
-                    ) : null}
-                    <span className="recent-path">
-                      {opening === e.key
-                        ? "Opening…"
-                        : e.path
-                          ? tidyPath(e.path)
-                          : "Synced · sign in to open"}
-                    </span>
-                  </button>
-                  {e.kind === "local" && (
-                    <button
-                      className="recent-remove"
-                      aria-label={`Remove ${e.name} from recents`}
-                      title="Remove from recents"
-                      disabled={busy}
-                      onClick={() => forget(e.path)}
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
+            <div className="recent-scroll">{shownRecents.map(renderEntry)}</div>
             {hiddenRecents > 0 && (
               <button
                 className="recent-more"
                 disabled={busy}
-                onClick={showAllRecents ? collapseRecents : expandRecents}
+                onClick={() => setShowAllVaults(true)}
               >
-                {showAllRecents ? "Show less" : `Load more (${hiddenRecents})`}
+                {`Show all (${entries.length})`}
               </button>
             )}
           </motion.div>
@@ -737,6 +814,50 @@ export function VaultPicker() {
           </motion.p>
         )}
       </div>
+
+      {/* Every vault in one scrollable list, grouped by what they ARE: synced
+          vaults (they live on the server; a session opens them) versus plain
+          local folders that exist only on this device. One flat list read as
+          "everything here is on this device", which is exactly wrong for the
+          synced half. A modal on purpose: revealing the list in place reflowed
+          the centered card (see the showAllVaults comment above). Rows are the
+          same recent-cards as the inline list, so opening/removing behaves
+          identically. */}
+      {showAllVaults && (
+        <div className="modal-backdrop" onClick={() => setShowAllVaults(false)}>
+          <div
+            className="modal vault-list-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <span>
+                All vaults <span className="muted">({entries.length})</span>
+              </span>
+              <button
+                className="icon-btn"
+                aria-label="Close"
+                onClick={() => setShowAllVaults(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="vault-list-scroll">
+              {entries.some(isSyncedEntry) && (
+                <>
+                  <p className="vault-list-section">Synced vaults</p>
+                  {entries.filter(isSyncedEntry).map(renderEntry)}
+                </>
+              )}
+              {entries.some((e) => !isSyncedEntry(e)) && (
+                <>
+                  <p className="vault-list-section">On this device only</p>
+                  {entries.filter((e) => !isSyncedEntry(e)).map(renderEntry)}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {signInOpen && (
         <AuthDialog

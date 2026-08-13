@@ -22,6 +22,7 @@ import {
   type Share,
   type VaultCheckpoint,
   type VaultRevertResult,
+  vaultOrgId,
 } from "./lib/api";
 import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
@@ -45,6 +46,7 @@ import type { TreeSort } from "./lib/tree/sort";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { planTurnOnSync } from "./lib/vault/turnOnSync";
+import { configOrgId, rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
 
@@ -67,6 +69,13 @@ export interface PendingVaultFolder {
   orgName: string;
   /** Where to switch back to if the user cancels (null if there's nowhere). */
   previousOrgId: string | null;
+  /** Why the prompt appeared, when it wasn't a plain "new vault needs a folder"
+   *  (e.g. the vault's bound folder exists but failed to open). The folder path
+   *  is kept separate so the UI can typeset it on its own line. */
+  reason?: { text: string; path: string | null } | null;
+  /** The vault was JUST created, so the folder it lands in may receive
+   *  first-run starter content if empty. Never set for existing vaults. */
+  seedIfEmpty?: boolean;
 }
 
 interface AppStore {
@@ -256,7 +265,12 @@ interface AppStore {
   /** Promote the currently-open local folder into a synced vault, adopting
    *  the files already in it (no new empty folder). This is "Turn on sync". */
   turnOnSyncForCurrentVault: (name?: string) => Promise<void>;
-  setActiveOrganization: (organizationId: string) => Promise<void>;
+  /** `seedIfEmpty` marks a switch into a vault the user JUST created, the only
+   *  case where an empty vault should receive first-run starter content. */
+  setActiveOrganization: (
+    organizationId: string,
+    opts?: { seedIfEmpty?: boolean },
+  ) => Promise<void>;
   inviteMember: (email: string, role: "member" | "admin") => Promise<void>;
   /** Remove a member from the active vault (owner/admin), then refresh. */
   removeMember: (userId: string) => Promise<void>;
@@ -284,17 +298,25 @@ interface AppStore {
 
   // Resolving a vault's local folder (when none is bound yet)
   /** Bind `path` to `orgId`, open it, and enable sync. */
-  applyVaultFolder: (orgId: string, path: string) => Promise<void>;
+  /** Open `path` as `orgId`'s folder and bind them. `create` gates the mkdir —
+   *  only paths that deliberately mint a NEW folder pass true; reopening a
+   *  remembered binding must not resurrect a folder the user moved away. */
+  applyVaultFolder: (
+    orgId: string,
+    path: string,
+    opts?: { create?: boolean; seedIfEmpty?: boolean },
+  ) => Promise<void>;
   /**
    * Adopt a vault Rust has ALREADY opened (the native-picker commands open as
    * part of picking). Retires the previous vault's sync, swaps view state, and
    * reloads the tree. `resync: true` re-enables sync on the new folder for the
-   * active vault (the sidebar "Switch" flow); otherwise the folder stays local
-   * and gets first-run seeding if it's empty.
+   * active vault (the sidebar "Switch" flow). `seed: true` writes first-run
+   * starter content when the folder is empty — passed ONLY by the "New vault"
+   * flows; opening an existing folder must leave it exactly as picked.
    */
   adoptOpenedVault: (
     info: ipc.VaultInfo,
-    opts?: { resync?: boolean },
+    opts?: { resync?: boolean; seed?: boolean },
   ) => Promise<void>;
   /** Native-pick a folder for the pending vault. */
   chooseVaultFolder: () => Promise<void>;
@@ -344,7 +366,9 @@ interface AppStore {
   patchDocSyncState: (patch: Record<string, DocSyncState | null>) => void;
   /** Replace the path→docId index (the registry mirror; `{}` = nothing synced). */
   setDocIdByPath: (map: Record<string, string>) => void;
-  enableSyncForVault: () => Promise<void>;
+  /** `seedIfEmpty` flows to the registry reconcile — true only when enabling
+   *  sync for a vault the user just created (see `setActiveOrganization`). */
+  enableSyncForVault: (opts?: { seedIfEmpty?: boolean }) => Promise<void>;
 }
 
 // Slug derivation for local folder naming reuses the org slug rules.
@@ -399,6 +423,60 @@ function rememberOrgVault(orgId: string, vaultPath: string): void {
   } catch {
     /* quota/unavailable — mapping is a convenience only */
   }
+}
+
+/**
+ * Best-effort search for a vault's EXISTING local folder, for when the
+ * localStorage binding is missing or its path is gone: peek the recents list
+ * and the vaults-root subfolders for a `.context/config.json` that identifies
+ * a folder as this vault (matching rules: `lib/vault/rediscover.ts`). This is
+ * what lets a vault heal in place after a lost binding instead of getting a
+ * duplicate copy materialized under the vaults root.
+ */
+async function findExistingVaultFolder(orgId: string): Promise<string | null> {
+  const [recents, rootDirs] = await Promise.all([
+    ipc
+      .getRecentVaults()
+      .then((rs) => rs.map((r) => r.path))
+      .catch(() => [] as string[]),
+    ipc.listVaultsRootDirs().catch(() => [] as string[]),
+  ]);
+  const paths = [...new Set([...recents, ...rootDirs])];
+  const candidates = await Promise.all(
+    paths.map(async (path) => ({
+      path,
+      config: await ipc.peekVaultConfig(path).catch(() => null),
+    })),
+  );
+  // The vault's collection ids, so folders whose config predates the
+  // `organizationId` stamp (pre-rediscovery installs) are still recognized.
+  let collectionIds: ReadonlySet<string> = new Set<string>();
+  try {
+    const vaults = await authManager.api.listVaults();
+    collectionIds = new Set(
+      vaults.filter((v) => vaultOrgId(v) === orgId).map((v) => v.id),
+    );
+  } catch {
+    // Offline / server error — the stamped (pass-1) match still works.
+  }
+  return rediscoverVaultFolder({
+    orgId,
+    candidates,
+    orgVaults: readOrgVaults(),
+    collectionIds,
+  });
+}
+
+/**
+ * The vault (org) that `path`'s own `.context/config.json` is stamped for, or
+ * null for a never-synced folder. The on-disk dual of `readOrgVaults`: the
+ * localStorage binding is per-device and easy to lose, while the stamp travels
+ * with the folder — so it's what classifies a folder truthfully after a lost
+ * binding, and what unmasks a folder that belongs to a different account.
+ */
+async function peekStampedOrgId(path: string): Promise<string | null> {
+  const raw = await ipc.peekVaultConfig(path).catch(() => null);
+  return configOrgId(raw);
 }
 
 /** Drop a vault's remembered local folder (used when removing/deleting it). */
@@ -533,16 +611,20 @@ function forgetLastVault(orgId?: string): void {
  * user didn't ask for.
  */
 async function landInLastVault(get: () => AppStore): Promise<void> {
+  const openPath = get().vault?.path ?? null;
   const action = planLanding({
     orgIds: get().organizations.map((o) => o.id),
     // Consumed even when the join flow is about to override it: the join
     // supersedes whatever open-request was pending.
     requestedOrgId: takePendingOpenVault(),
     joiningWithCode,
-    openPath: get().vault?.path ?? null,
+    openPath,
     orgVaults: readOrgVaults(),
     activeOrganizationId: get().session?.activeOrganizationId ?? null,
     rememberedOrgId: readLastVault(),
+    // The open folder's own stamp, so a synced folder whose localStorage
+    // binding was lost still lands in its vault instead of staying "local".
+    stampedOrgId: openPath ? await peekStampedOrgId(openPath) : null,
   });
   // Only the two actions that end with a vault on screen raise the flag, and
   // only while they run: `stay-local`/`nothing` change nothing, so claiming to
@@ -815,10 +897,11 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   seedLocalVaultIfEmpty: async () => {
-    // First-run welcome content for an empty, local-only vault (opened while
-    // signed out, or a folder opened directly without sync). When signed in,
-    // the sync reconcile seeds instead — so the notes register on the server —
-    // hence the syncEnabled guard here to avoid seeding twice.
+    // First-run welcome content for an empty, local-only vault. Reached ONLY
+    // from the "New vault" flows (via `adoptOpenedVault({ seed: true })`) —
+    // "Open existing" must leave the picked folder exactly as it is, empty or
+    // not. When the new vault is synced, the reconcile seeds instead — so the
+    // notes register on the server — hence the syncEnabled guard here.
     if (get().syncEnabled) return;
     const epoch = get().vault?.epoch;
     const tree = get().tree;
@@ -1098,6 +1181,11 @@ export const useStore = create<AppStore>((set, get) => ({
       itemColors: readItemColors(undefined),
       itemOrder: readItemOrder(undefined),
     });
+    // Welcome is now the state a reload should restore (same rule as
+    // closeLocalVault) — don't let the launch reopen undo the sign-out landing.
+    void ipc.clearLastVault().catch(() => {
+  /* best-effort — worst case the next launch reopens the vault */
+});
   },
 
   landAfterAuth: async () => {
@@ -1243,7 +1331,9 @@ export const useStore = create<AppStore>((set, get) => ({
     );
     // Route through the switch path so a brand-new vault prompts for its
     // own folder instead of adopting whatever folder is currently open.
-    await get().setActiveOrganization(org.id);
+    // `seedIfEmpty` marks this as vault CREATION — the one flow where an
+    // empty folder earns first-run starter content.
+    await get().setActiveOrganization(org.id, { seedIfEmpty: true });
   },
 
   turnOnSyncForCurrentVault: async (name) => {
@@ -1259,7 +1349,19 @@ export const useStore = create<AppStore>((set, get) => ({
       activeOrganizationId: get().session?.activeOrganizationId ?? null,
       orgIds: get().organizations.map((o) => o.id),
       orgVaults: readOrgVaults(),
+      // The folder's own stamp: heals a lost binding (switch back to the vault
+      // this folder already is) and blocks adopting another account's folder.
+      stampedOrgId: await peekStampedOrgId(vault.path),
     });
+    if (plan.kind === "blocked-foreign") {
+      // Creating a vault here would upload every note in this folder into a
+      // fresh vault under the WRONG account — the exact duplication this plan
+      // exists to prevent. The dialog surfaces this message as-is.
+      throw new Error(
+        "This folder already belongs to a synced vault that this account can't access. " +
+          "Sign in with the account it was synced with to open it.",
+      );
+    }
     if (plan.kind === "retry-active") {
       await get().enableSyncForVault();
       if (!get().syncEnabled) {
@@ -1291,6 +1393,13 @@ export const useStore = create<AppStore>((set, get) => ({
     const org = await createWithUniqueSlug(name?.trim() || vault.name, (input) =>
       authManager.api.createOrganization(input),
     );
+    // Bind the folder the moment the org exists — before the awaits below, each
+    // of which can throw or go stale. This used to sit after all four, so a
+    // hiccup in that window left an org on the server bound to NOTHING; the
+    // next launch then auto-created an empty folder for it under the vaults
+    // root while the user's real notes sat unsynced in this one. The binding
+    // itself can't go stale: the org was created FOR `vault.path`.
+    rememberOrgVault(org.id, vault.path);
     if (stale()) return;
     await authManager.api.setActiveOrganization(org.id);
     if (stale()) return;
@@ -1299,14 +1408,13 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ session });
     await get().refreshVault();
     if (stale()) return;
-    rememberOrgVault(org.id, vault.path);
     rememberLastVault(org.id);
     await get().enableSyncForVault();
     if (stale()) return;
     await get().refreshOrgBilling();
   },
 
-  setActiveOrganization: async (organizationId) => {
+  setActiveOrganization: async (organizationId, opts = {}) => {
     const previousOrgId = get().session?.activeOrganizationId ?? null;
     // Claim the switch. Everything below awaits the network, so a second switch
     // (impatient double-click, or a join/accept-invite firing while this one is in
@@ -1385,27 +1493,92 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().refreshOrgBilling();
       if (superseded()) return;
 
-      // Each vault owns its own local folder. If one is already bound, swap
-      // to it. If not, do NOT reuse the folder that's currently open — ask the
-      // user to choose one (or start empty) via the pending-folder prompt.
-      const path = readOrgVaults()[organizationId];
-      if (path) {
-        try {
-          await get().applyVaultFolder(organizationId, path);
-          return;
-        } catch (e) {
-          // The bound folder is unusable (moved, deleted, permissions). Don't
-          // return here: that left the user in a vault with no folder and sync
-          // off, with nothing on screen saying why. Fall through to the
-          // auto-folder path below, which re-creates it under the vaults root.
-          console.warn("[vault] bound folder unusable, re-creating", e);
-        }
-      }
+      // Each vault owns its own local folder. If one is already bound and still
+      // on disk, swap to it. If not, do NOT reuse the folder that's currently
+      // open — rediscover this vault's existing folder, or mint one.
       const org = get().organizations.find((o) => o.id === organizationId);
       const orgName = org?.name ?? "New vault";
+      const askForFolder = (reason: PendingVaultFolder["reason"]) => {
+        set({
+          syncEnabled: false,
+          pendingVaultFolder: {
+            orgId: organizationId,
+            orgName,
+            previousOrgId: previousOrgId === organizationId ? null : previousOrgId,
+            reason,
+            seedIfEmpty: opts.seedIfEmpty,
+          },
+        });
+      };
 
-      // No folder bound yet. Give this vault one automatically and go straight
-      // in, rather than stopping on a "choose a folder" prompt.
+      const bound = readOrgVaults()[organizationId];
+      if (bound && (await ipc.folderExists(bound).catch(() => false))) {
+        if (superseded()) return;
+        try {
+          await get().applyVaultFolder(organizationId, bound);
+          return;
+        } catch (e) {
+          // The folder is present but wouldn't open (locked index, permissions,
+          // transient I/O). This used to fall through to the auto-folder path,
+          // which minted a full duplicate copy of the vault under the vaults
+          // root AND re-pointed the binding at it — a hiccup made permanent.
+          // Ask instead; the binding stays on the user's real folder.
+          console.warn("[vault] bound folder failed to open", e);
+          if (superseded()) return;
+          askForFolder({
+            text: `This vault's folder couldn't be opened: ${e instanceof Error ? e.message : String(e)}`,
+            path: bound,
+          });
+          return;
+        }
+      }
+      if (superseded()) return;
+
+      // No binding, or the bound path is gone (folder moved/renamed in Finder,
+      // cleared webview storage, another device). Before minting a folder, look
+      // for an existing local copy of this vault, so it heals in place instead
+      // of getting a duplicate materialized under the vaults root.
+      let found: string | null = null;
+      try {
+        found = await findExistingVaultFolder(organizationId);
+      } catch (e) {
+        console.warn("[vault] folder rediscovery failed", e);
+      }
+      if (superseded()) return;
+      if (found) {
+        try {
+          await get().applyVaultFolder(organizationId, found);
+          return;
+        } catch (e) {
+          // Same reasoning as the bound branch: this folder IS the vault's
+          // local copy, so creating a twin next to it is never the answer.
+          console.warn("[vault] rediscovered folder failed to open", e);
+          if (superseded()) return;
+          askForFolder({
+            text: `This vault's folder couldn't be opened: ${e instanceof Error ? e.message : String(e)}`,
+            path: found,
+          });
+          return;
+        }
+      }
+
+      // A binding existed, its folder is gone, and nothing else on this machine
+      // matched: the user moved or renamed the folder while the app couldn't
+      // watch it (its new path has never been opened, so rediscovery can't see
+      // it). Minting a fresh folder here would materialize a full copy of the
+      // vault while the user's real notes sit in the moved folder — the exact
+      // surprise-duplicate this flow used to produce. Ask for the new location.
+      if (bound) {
+        askForFolder({
+          text: "This vault's folder is no longer there — it may have been moved or renamed.",
+          path: bound,
+        });
+        return;
+      }
+
+      // Genuinely nothing local — this device has never had a folder for the
+      // vault. Give it one automatically and go straight in, rather than
+      // stopping on a "choose a folder" prompt.
       //
       // The prompt was a roadblock in the one flow that most needs to be
       // frictionless: a teammate signing in for the first time doesn't yet have
@@ -1420,20 +1593,16 @@ export const useStore = create<AppStore>((set, get) => ({
         const root = await ipc.getVaultsRoot();
         if (superseded()) return;
         const slug = uniqueFolderSlug(orgName, readOrgVaults());
-        await get().applyVaultFolder(organizationId, `${root}/${slug}`);
+        await get().applyVaultFolder(organizationId, `${root}/${slug}`, {
+          create: true,
+          seedIfEmpty: opts.seedIfEmpty,
+        });
         return;
       } catch (e) {
         console.warn("[vault] auto folder failed; asking instead", e);
         if (superseded()) return;
       }
-      set({
-        syncEnabled: false,
-        pendingVaultFolder: {
-          orgId: organizationId,
-          orgName,
-          previousOrgId: previousOrgId === organizationId ? null : previousOrgId,
-        },
-      });
+      askForFolder(null);
     }
   },
 
@@ -1518,6 +1687,10 @@ export const useStore = create<AppStore>((set, get) => ({
           ...vaultScopedSyncReset(),
           pendingVaultFolder: null,
         });
+        // Same rule as closeLocalVault: welcome is now the state to restore.
+        void ipc.clearLastVault().catch(() => {
+  /* best-effort — worst case the next launch reopens the vault */
+});
       }
     }
     await get().refreshVault();
@@ -1556,8 +1729,10 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!sameVault(get, info.epoch)) return;
     if (opts.resync && get().session?.activeOrganizationId) {
       await get().enableSyncForVault();
-    } else {
-      // Give a brand-new empty folder its first-run welcome content.
+    } else if (opts.seed) {
+      // Give a brand-new empty folder its first-run welcome content. Only the
+      // "New vault" flows pass `seed` — a folder the user picked via "Open
+      // existing" is theirs as-is, even when it's empty.
       await get().seedLocalVaultIfEmpty();
     }
   },
@@ -1609,13 +1784,19 @@ export const useStore = create<AppStore>((set, get) => ({
       ...vaultScopedSyncReset(),
       pendingVaultFolder: null,
     });
+    // The welcome screen is now the state to restore: without this, a reload
+    // auto-reopens the folder the user just closed (App.tsx's launch reopen
+    // reads `last_vault`, which still pointed here).
+    void ipc.clearLastVault().catch(() => {
+  /* best-effort — worst case the next launch reopens the vault */
+});
   },
 
-  applyVaultFolder: async (orgId, path) => {
+  applyVaultFolder: async (orgId, path, opts) => {
     // Same ordering rule as openLocalVault: retire the previous vault's sync
     // (scope, timers, registry maps) before Rust points at the new folder.
     leaveVaultSync();
-    const v = await ipc.openVaultInRoot(path);
+    const v = await ipc.openVaultInRoot(path, { create: opts?.create ?? false });
     enterVaultScope(v, orgId);
     get().closeNote();
     set({
@@ -1633,7 +1814,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // leaving a freshly joined vault sitting there not syncing. The staleness
     // check still guards the call itself — `enableSyncForVault` re-checks the
     // epoch internally — but it is no longer gated behind work it doesn't need.
-    if (sameVault(get, v.epoch)) await get().enableSyncForVault();
+    if (sameVault(get, v.epoch)) {
+      await get().enableSyncForVault({ seedIfEmpty: opts?.seedIfEmpty });
+    }
     await get().refreshTree();
     await get().refreshTitles();
   },
@@ -1649,6 +1832,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // a vault that is no longer the one being resolved. Same guard as
     // `startEmptyVault`, which has a far shorter window.
     if (get().pendingVaultFolder?.orgId !== pending.orgId) return;
+    // Deliberately no `seedIfEmpty` passthrough: the user native-picked an
+    // EXISTING folder of their own, and a picked folder is adopted exactly as
+    // it is (same rule as "Open existing") — even for a just-created vault.
     await get().applyVaultFolder(pending.orgId, picked);
   },
 
@@ -1660,7 +1846,10 @@ export const useStore = create<AppStore>((set, get) => ({
     // superseded vault would point the Rust slot at the wrong folder.
     if (get().pendingVaultFolder?.orgId !== pending.orgId) return;
     const slug = uniqueFolderSlug(pending.orgName, readOrgVaults());
-    await get().applyVaultFolder(pending.orgId, `${root}/${slug}`);
+    await get().applyVaultFolder(pending.orgId, `${root}/${slug}`, {
+      create: true,
+      seedIfEmpty: pending.seedIfEmpty,
+    });
   },
 
   cancelVaultFolder: async () => {
@@ -1877,7 +2066,7 @@ export const useStore = create<AppStore>((set, get) => ({
   // renamed, or belonging to the vault we just left).
   setDocIdByPath: (map) => set({ docIdByPath: map }),
 
-  enableSyncForVault: async () => {
+  enableSyncForVault: async (opts = {}) => {
     const { session, vault } = get();
     if (!session || !vault) {
       set({ syncEnabled: false });
@@ -1896,6 +2085,23 @@ export const useStore = create<AppStore>((set, get) => ({
     const epoch = vault.epoch;
     const stale = () => !sameVault(get, epoch) || get().session?.activeOrganizationId !== orgId;
 
+    // Backstop for every enable path: a folder stamped for a DIFFERENT vault
+    // must never be reconciled into this one. The registry discards a foreign
+    // `serverVaultId` (registry.ts step 1a) and then backfills the whole tree
+    // into a collection of the active org — i.e. it would silently duplicate
+    // another vault's (possibly another account's) notes here. The planners
+    // (`planTurnOnSync`, `planLanding`) already avoid routing such folders
+    // this way; this guard covers every remaining caller.
+    const stamped = await peekStampedOrgId(vault.path);
+    if (stale()) return;
+    if (stamped && stamped !== orgId) {
+      set({ syncEnabled: false });
+      console.warn(
+        `[sync] not enabled: folder is stamped for vault ${stamped}, not active vault ${orgId}`,
+      );
+      return;
+    }
+
     // No tree is passed: `store.tree` is the sidebar's LAZY tree (top level only,
     // unexpanded folders hold an empty `children` placeholder), and reconcile
     // needs every note in the vault. It reads the full tree itself.
@@ -1904,6 +2110,7 @@ export const useStore = create<AppStore>((set, get) => ({
       name: vault.name,
       path: vault.path,
       epoch,
+      seedIfEmpty: opts.seedIfEmpty,
     });
     // `syncManager.enable` already dropped its own work if the scope went stale;
     // this guard keeps the STORE from claiming sync is on for the wrong vault.

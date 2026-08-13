@@ -143,6 +143,9 @@ export interface ImportSummary {
 export const pickVault = () => invoke<VaultInfo | null>("pick_vault");
 export const openVault = (path: string) => invoke<VaultInfo>("open_vault", { path });
 export const getLastVault = () => invoke<VaultInfo | null>("get_last_vault");
+/** Forget the launch auto-reopen target so a reload/relaunch lands on the
+ *  welcome screen (recents keep listing the vault; the next open re-arms it). */
+export const clearLastVault = () => invoke<void>("clear_last_vault");
 
 /** A recently opened vault (newest first); `openedAt` is epoch-ms (0 if unknown). */
 export interface RecentVault {
@@ -183,9 +186,23 @@ export const pickFiles = () => invoke<string[] | null>("pick_files");
 /** Native save-file dialog; returns the chosen absolute path (null if cancelled). */
 export const saveFile = (defaultName: string) =>
   invoke<string | null>("save_file", { defaultName });
-/** Ensure `path` exists, repoint `<root>/current` to it, and open it as vault. */
-export const openVaultInRoot = (path: string) =>
-  invoke<VaultInfo>("open_vault_in_root", { path });
+/** Open `path` as the active vault and repoint `<root>/current` to it.
+ *  Pass `create: true` ONLY when deliberately minting a new folder (auto-folder
+ *  on switch, "start empty") — reopening a remembered binding must not mkdir,
+ *  or a folder the user moved in Finder gets silently resurrected empty and the
+ *  registry materializes a duplicate copy of the vault into it. */
+export const openVaultInRoot = (path: string, opts?: { create?: boolean }) =>
+  invoke<VaultInfo>("open_vault_in_root", { path, create: opts?.create ?? false });
+/** Does this absolute path exist as a directory? */
+export const folderExists = (path: string) =>
+  invoke<boolean>("folder_exists", { path });
+/** Raw `.context/config.json` of an arbitrary folder WITHOUT opening it (null if
+ *  the folder isn't a vault). Rediscovery probe — see `setActiveOrganization`. */
+export const peekVaultConfig = (path: string) =>
+  invoke<string | null>("peek_vault_config", { path });
+/** Immediate subdirectories of the managed vaults root (absolute paths). */
+export const listVaultsRootDirs = () =>
+  invoke<string[]>("list_vaults_root_dirs");
 
 // ---- Tree + files ---------------------------------------------------------
 

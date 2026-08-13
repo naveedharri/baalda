@@ -19,6 +19,7 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { readOrgVaults, useStore } from "../store";
+import { configOrgId } from "../lib/vault/rediscover";
 import { statusTone } from "../lib/presence/color";
 import { AccessPanel } from "./AccessPanel";
 import { AccountSettings } from "./AccountSettings";
@@ -52,7 +53,35 @@ export function AccountMenu() {
   // Which settings tab the vault page should open on (View all → Vaults).
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
   const [accountOpen, setAccountOpen] = useState(false);
+  // Signed out with a folder open: is that folder actually a SYNCED vault
+  // (its `.context/config.json` is stamped with a vault id)? Labeling it
+  // "Local · not synced" is factually wrong — the edits made here will merge
+  // into the vault on the next sign-in — and it hides that signing in is the
+  // way to bring it back online. Peeked from disk because the localStorage
+  // caches may be gone while the folder still knows whose it is.
+  const [openFolderSynced, setOpenFolderSynced] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  const signedOut = authStatus !== "signed-in" || !session;
+  const vaultPath = vault?.path ?? null;
+  useEffect(() => {
+    if (!signedOut || !vaultPath) {
+      setOpenFolderSynced(false);
+      return;
+    }
+    let alive = true;
+    void ipc
+      .peekVaultConfig(vaultPath)
+      .then((raw) => {
+        if (alive) setOpenFolderSynced(configOrgId(raw) !== null);
+      })
+      .catch(() => {
+        if (alive) setOpenFolderSynced(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [signedOut, vaultPath]);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
@@ -82,7 +111,13 @@ export function AccountMenu() {
           onClick={() => setOpen((v) => !v)}
           aria-haspopup="menu"
           aria-expanded={open}
-          title={vault ? `${vault.name} · Local` : "Sign in to sync & collaborate"}
+          title={
+            vault
+              ? openFolderSynced
+                ? `${vault.name} · Synced vault, signed out`
+                : `${vault.name} · Local`
+              : "Sign in to sync & collaborate"
+          }
         >
           <span className="identity-avatar signed-out" aria-hidden="true">
             <svg
@@ -100,7 +135,14 @@ export function AccountMenu() {
           <span className="identity-meta">
             <span className="identity-line1">{vault?.name ?? "Sign in"}</span>
             <span className="identity-line2">
-              {vault ? "Local · not synced" : "Sync & collaborate"}
+              {vault
+                ? openFolderSynced
+                  ? // A synced vault whose session is gone, not a local one —
+                    // edits still merge on the next sign-in, and sign-in (not
+                    // "turn on sync") is how it comes back online.
+                    "Synced · signed out"
+                  : "Local · not synced"
+                : "Sync & collaborate"}
             </span>
           </span>
           <span className="identity-chevron" aria-hidden="true">
@@ -304,7 +346,9 @@ function NewVaultItem({ onDone }: { onDone: () => void }) {
     try {
       const root = await ipc.getVaultsRoot();
       const v = await ipc.createVault(root, trimmed);
-      await useStore.getState().adoptOpenedVault(v);
+      // `seed`: a just-created vault gets first-run starter content (adopting
+      // an existing folder never does).
+      await useStore.getState().adoptOpenedVault(v, { seed: true });
       setName("");
       setNaming(false);
       onDone();
@@ -433,7 +477,8 @@ function SignedOutPopover({
   const rows = splitVaultRows(0, locals.length);
   return (
     <div className="account-popover" role="menu">
-      <div className="menu-label">Vault</div>
+      {vault && <HomeButton onClose={onClose} />}
+      <div className="menu-label">Remote vaults</div>
       <LocalVaultRows onClose={onClose} locals={locals} limit={rows.local} />
 
       <NewVaultItem onDone={onClose} />
@@ -544,7 +589,8 @@ function AccountPopover({
       )}
 
       <div className="menu-sep" />
-      <div className="menu-label">Vault</div>
+      {vault && <HomeButton onClose={onClose} />}
+      <div className="menu-label">Remote vaults</div>
 
       {/* Active vault pinned to the top — it's the one you're working in.
           Only the first few show here; the rest live in Vault settings. */}
@@ -698,6 +744,30 @@ function GoogleGlyph() {
         d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.47.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.02 2.33C4.68 5.16 6.66 3.58 9 3.58z"
       />
     </svg>
+  );
+}
+
+/**
+ * Close the open vault and return to the welcome (home) screen. A full menu
+ * row like its siblings (a corner icon on the section label read as cramped) —
+ * before this, the welcome screen was unreachable once any vault was open.
+ */
+function HomeButton({ onClose }: { onClose: () => void }) {
+  return (
+    <button
+      className="menu-item"
+      onClick={() => {
+        useStore.getState().closeLocalVault();
+        onClose();
+      }}
+    >
+      <MenuIcon>
+        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+        <path d="M9 22V12h6v10" />
+      </MenuIcon>
+      <span className="menu-item-label">Home</span>
+      <span className="menu-hint">Close vault</span>
+    </button>
   );
 }
 

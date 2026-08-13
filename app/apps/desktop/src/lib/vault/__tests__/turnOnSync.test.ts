@@ -83,6 +83,60 @@ describe("planTurnOnSync", () => {
     expect(new Set(Object.values(orgVaults)).size).toBe(3);
   });
 
+  it("switches to the stamped vault when the binding was lost", () => {
+    // The localStorage binding is gone (cleared storage / eviction) but the
+    // folder's own config still says whose it is — heal, don't duplicate.
+    expect(
+      planTurnOnSync({
+        openPath: "/vaults/team",
+        activeOrganizationId: "org-b",
+        orgIds: ["org-a", "org-b"],
+        orgVaults: { "org-b": "/vaults/b" },
+        stampedOrgId: "org-a",
+      }),
+    ).toEqual({ kind: "switch", orgId: "org-a" });
+  });
+
+  it("retries the active vault when the stamp names it and the binding was lost", () => {
+    expect(
+      planTurnOnSync({
+        openPath: "/vaults/team",
+        activeOrganizationId: "org-a",
+        orgIds: ["org-a"],
+        orgVaults: {},
+        stampedOrgId: "org-a",
+      }),
+    ).toEqual({ kind: "retry-active", orgId: "org-a" });
+  });
+
+  it("blocks adopting a folder stamped for a vault we can't see", () => {
+    // Another account's synced folder: creating a vault here would upload a
+    // full duplicate of it under the wrong account.
+    expect(
+      planTurnOnSync({
+        openPath: "/vaults/foreign",
+        activeOrganizationId: "org-b",
+        orgIds: ["org-b"],
+        orgVaults: { "org-b": "/vaults/b" },
+        stampedOrgId: "org-x",
+      }),
+    ).toEqual({ kind: "blocked-foreign", orgId: "org-x" });
+  });
+
+  it("prefers a live binding over the folder's stamp", () => {
+    // Both signals present and disagreeing: the binding reflects an explicit,
+    // newer decision on this device.
+    expect(
+      planTurnOnSync({
+        openPath: "/vaults/a",
+        activeOrganizationId: "org-b",
+        orgIds: ["org-a", "org-b"],
+        orgVaults: { "org-a": "/vaults/a" },
+        stampedOrgId: "org-x",
+      }),
+    ).toEqual({ kind: "switch", orgId: "org-a" });
+  });
+
   it("still retries after a failed sync on the vault just created", () => {
     // Immediately after the create above: same folder, now bound and active.
     expect(

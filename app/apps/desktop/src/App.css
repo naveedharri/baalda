@@ -496,19 +496,41 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--text-tertiary);
   margin: 0 0 var(--sp-1) var(--sp-1);
 }
-/* Holds the recent cards. Collapsed it just stacks the 3 shown; once
-   "Load more" expands it, JS locks its height to that same collapsed footprint
-   and it scrolls internally — so the wordmark and action buttons above never
-   move (the whole card is vertically centered). */
+/* Holds the 3 collapsed recent cards; the full list lives in the "Show all"
+   modal (.vault-list-modal), so this box never changes size and the centered
+   card never reflows. */
 .recent-scroll {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
 }
-.recent-scroll.expanded {
+/* "Show all" modal: every vault in one scrollable list. Reuses the standard
+   modal shell, widened — vault paths are long and the 420px default truncated
+   them into ambiguity. */
+.vault-list-modal {
+  width: 620px;
+}
+.vault-list-modal .vault-list-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: min(440px, 60vh);
   overflow-y: auto;
   padding-right: 2px; /* breathing room beside the scrollbar */
   scrollbar-width: thin;
+}
+/* Group heading inside the "All vaults" modal: synced vaults vs folders that
+   exist only on this device. Same quiet register as .recent-heading. */
+.vault-list-section {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  margin: var(--sp-2) 0 var(--sp-1) var(--sp-1);
+}
+.vault-list-section:first-child {
+  margin-top: 0;
 }
 /* "Load more (N)" — a quiet full-width reveal under the collapsed list. */
 .recent-more {
@@ -534,6 +556,7 @@ button.primary.hero:hover:not(:disabled) {
   cursor: default;
 }
 .recent-card {
+  position: relative; /* anchors the overlaid remove × */
   display: flex;
   align-items: center;
   background: var(--bg-surface);
@@ -597,15 +620,31 @@ button.primary.hero:hover:not(:disabled) {
   justify-self: end;
   align-self: center;
 }
+/* Top-right slot content: "3h ago" + the state tag side by side. Local rows
+   show both; synced rows only the tag. */
+.recent-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+/* The remove × overlays the row's top-right corner and only shows on hover
+   (the tag fades out while it's up — see .removable below). In flow it
+   reserved a column on local rows only, so their tags sat left of the synced
+   rows'. Absolute needs a positioned parent: .recent-card. */
 .recent-remove {
-  flex-shrink: 0;
-  align-self: stretch;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 34px;
+  display: grid;
+  place-items: center;
   background: none;
   border: none;
   color: var(--text-tertiary);
   font-size: var(--fs-lg);
   line-height: 1;
-  padding: 0 var(--sp-3);
+  padding: 0;
   cursor: pointer;
   opacity: 0;
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
@@ -613,6 +652,16 @@ button.primary.hero:hover:not(:disabled) {
     opacity var(--t-fast) var(--ease),
     color var(--t-fast) var(--ease),
     background var(--t-fast) var(--ease);
+}
+/* Trade the tag for the × while it's showing — they share the same corner,
+   and showing both would stack them. (:has covers the keyboard path; on a
+   WebKit too old for it the × merely overlaps the tag while focused.) */
+.recent-card.removable:hover .recent-meta,
+.recent-card.removable:has(.recent-remove:focus-visible) .recent-meta {
+  opacity: 0;
+}
+.recent-meta {
+  transition: opacity var(--t-fast) var(--ease);
 }
 .recent-card:hover .recent-remove {
   opacity: 1;
@@ -2451,7 +2500,7 @@ body:has(.sidebar-resizer.dragging) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 3px;
 }
 .identity-line1 {
   font-size: var(--fs-md);
@@ -2778,7 +2827,9 @@ body:has(.sidebar-resizer.dragging) {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
-  padding: var(--sp-5) var(--sp-8);
+  /* The page is fixed over the whole window, so on macOS (title bar overlay)
+     the header must clear the traffic lights floating in the top-left. */
+  padding: calc(var(--sp-5) + var(--titlebar-inset)) var(--sp-8) var(--sp-5);
   border-bottom: 1px solid var(--border);
 }
 .settings-title {
@@ -4205,10 +4256,16 @@ body:has(.sidebar-resizer.dragging) {
    generic modal-header/hero-button treatment: an accent folder badge, tight
    type hierarchy, and two calm buttons (gradient primary + outlined ghost). */
 .vault-folder-prompt {
+  position: relative;
   width: 400px;
   padding: var(--sp-6) var(--sp-6) var(--sp-5);
   text-align: center;
   border: 1px solid var(--border);
+}
+.wf-close {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
 }
 .wf-badge {
   width: 46px;
@@ -4238,6 +4295,31 @@ body:has(.sidebar-resizer.dragging) {
   color: var(--text-secondary);
   font-size: var(--fs-md);
   line-height: var(--lh-body);
+}
+/* "Why am I seeing this" callout (folder moved / failed to open): a calm
+   left-aligned well with the folder path typeset on its own line, so a long
+   absolute path doesn't shred the sentence around it. */
+.wf-notice {
+  margin: 0 0 var(--sp-6);
+  padding: var(--sp-3) var(--sp-4);
+  text-align: left;
+  background: var(--warning-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.wf-notice p {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.wf-notice code {
+  display: block;
+  margin-top: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  word-break: break-all;
 }
 .vault-folder-actions {
   display: flex;
@@ -4297,9 +4379,6 @@ body:has(.sidebar-resizer.dragging) {
 }
 .vault-folder-prompt .error {
   margin: var(--sp-4) 0 0;
-}
-.vault-folder-prompt .link-btn {
-  margin-top: var(--sp-4);
 }
 button.secondary {
   background: var(--bg-subtle);

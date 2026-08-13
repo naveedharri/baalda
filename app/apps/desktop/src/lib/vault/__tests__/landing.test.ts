@@ -62,6 +62,45 @@ describe("planLanding — a folder is already open", () => {
     ).toEqual({ kind: "switch", orgId: "b" });
   });
 
+  it("enables sync via the folder's own stamp when the binding was lost", () => {
+    // Cleared localStorage: no binding, but the folder's config still names
+    // its vault. Signing back in must resume syncing it, not label it local.
+    expect(
+      plan({
+        orgIds: ["a"],
+        openPath: "/v/a",
+        orgVaults: {},
+        activeOrganizationId: "a",
+        stampedOrgId: "a",
+      }),
+    ).toEqual({ kind: "enable-sync" });
+  });
+
+  it("switches via the folder's stamp when it names a non-active vault", () => {
+    expect(
+      plan({
+        orgIds: ["a", "b"],
+        openPath: "/v/b",
+        orgVaults: {},
+        activeOrganizationId: "a",
+        stampedOrgId: "b",
+      }),
+    ).toEqual({ kind: "switch", orgId: "b" });
+  });
+
+  it("keeps a folder stamped for a vault we can't see local (another account's)", () => {
+    // Syncing it anywhere from this account would duplicate it.
+    expect(
+      plan({
+        orgIds: ["a"],
+        openPath: "/v/foreign",
+        orgVaults: {},
+        activeOrganizationId: "a",
+        stampedOrgId: "org-x",
+      }),
+    ).toEqual({ kind: "stay-local" });
+  });
+
   it("keeps a local-only folder local rather than pulling the user elsewhere", () => {
     // The whole point of a local-first app: being signed in must not relocate
     // you. "Turn on sync" is the affordance for adopting this folder.

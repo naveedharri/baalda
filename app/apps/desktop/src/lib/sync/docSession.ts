@@ -76,6 +76,10 @@ export interface VaultTarget {
   path: string;
   /** Rust `vault_epoch` this folder was opened under (`ipc.VaultInfo.epoch`). */
   epoch: number | null;
+  /** True only when the vault was JUST created by the user — permits the
+   *  reconcile to write first-run starter content into an empty vault.
+   *  Enabling sync on an adopted/joined/reopened vault never seeds. */
+  seedIfEmpty?: boolean;
 }
 
 /**
@@ -570,6 +574,7 @@ export class SyncManager implements InboundHost {
       const { seeded } = await this.registry.reconcile({
         organizationId: session.activeOrganizationId,
         vaultName: vault.name,
+        seedIfEmpty: vault.seedIfEmpty,
       });
       // The user may have switched vaults during the reconcile. Bringing sync up
       // now would start the engine for the OLD vault id while the NEW vault's

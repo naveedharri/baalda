@@ -47,6 +47,14 @@ export interface DocMapping {
 }
 
 interface VaultSyncConfig {
+  /**
+   * The vault (Better Auth org) this folder was last reconciled under. The
+   * org→folder binding itself lives in webview localStorage (`context.orgVaults`),
+   * which can be lost (reinstall, cleared storage, another device); this field is
+   * what lets `store.setActiveOrganization` REDISCOVER the folder instead of
+   * auto-creating a duplicate under the vaults root.
+   */
+  organizationId?: string;
   serverVaultId?: string;
   /** relPath → server docId (notes). */
   docs?: Record<string, string>;
@@ -134,6 +142,10 @@ export interface ReconcileInput {
   organizationId: string;
   /** Display name for a newly created server vault. */
   vaultName: string;
+  /** True only when the user JUST created this vault. Gates first-run seeding:
+   *  without it an empty vault stays empty — adopting an existing folder,
+   *  joining a team vault, or reopening one must never invent content. */
+  seedIfEmpty?: boolean;
 }
 
 /** A folder/note that could NOT be registered, after retries. Surfaced so the
@@ -222,6 +234,8 @@ function reasonOf(err: unknown): string {
 
 export class VaultRegistry {
   private serverVaultId: string | null = null;
+  /** The org this registry is reconciling under (see `VaultSyncConfig.organizationId`). */
+  private organizationId: string | null = null;
   private byPath = new Map<string, DocMapping>();
   /** Reverse of byPath: docId → relPath, for the vault sync engine (spec 05). */
   private byDocId = new Map<string, string>();
@@ -365,6 +379,7 @@ export class VaultRegistry {
     this.checkpoint?.dispose();
     this.checkpoint = null;
     this.serverVaultId = null;
+    this.organizationId = null;
     this.byPath.clear();
     this.byDocId.clear();
     this.folderByPath.clear();
@@ -504,6 +519,7 @@ export class VaultRegistry {
     const baseline: Record<string, string> = {};
     for (const [docId, rp] of this.baselineDocs) baseline[docId] = rp;
     return {
+      organizationId: this.organizationId ?? undefined,
       serverVaultId: this.serverVaultId ?? undefined,
       docs,
       folders,
@@ -763,6 +779,7 @@ export class VaultRegistry {
     // user to switch vaults; each `stale()` checkpoint drops the rest of the work
     // instead of applying it to whatever vault is now open.
     this.bound = this.scopes.current();
+    this.organizationId = input.organizationId;
     this.failed = [];
     this.limitReached = null;
     this.newCheckpointer();
@@ -857,18 +874,23 @@ export class VaultRegistry {
       }
     }
 
-    // 1b. First-run seeding. A brand-new vault — nothing on the server AND
-    //     an empty local folder — gets welcome/starter content so the vault
-    //     isn't an empty void. We seed BEFORE flattening so the files register
-    //     as ordinary server docs in steps 2–4. Skipped when the server already
-    //     has notes (joining/rejoining a populated vault) or the folder
-    //     already has content — those paths adopt/materialize instead.
+    // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —
+    //     with nothing on the server AND an empty local folder — gets
+    //     welcome/starter content so the vault isn't an empty void. We seed
+    //     BEFORE flattening so the files register as ordinary server docs in
+    //     steps 2–4. Skipped when the server already has notes (joining/
+    //     rejoining a populated vault) or the folder already has content —
+    //     those paths adopt/materialize instead. And skipped WITHOUT the
+    //     caller's explicit creation intent: turning on sync for a folder the
+    //     user opened, or joining an empty team vault, must never invent
+    //     content in it.
     const serverNotes = await this.api.listNotes(vaultId);
     if (this.stale()) return { seeded: false };
     let workingTree = tree;
     let seeded = false;
     const localFlat = flattenTree(tree);
     if (
+      input.seedIfEmpty === true &&
       serverNotes.length === 0 &&
       localFlat.notes.length === 0 &&
       localFlat.folders.length === 0
