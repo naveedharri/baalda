@@ -32,6 +32,10 @@ import { previewKind } from "./lib/preview";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { useStore } from "./store";
 
+/** How often a running app re-checks for a new release (it also checks at
+ *  launch). The check is one GET of the release's static `latest.json`. */
+const UPDATE_POLL_MS = 30 * 60 * 1000;
+
 /**
  * Every banner in the app slides down out of the chrome it belongs to and
  * collapses its own height on the way out.
@@ -446,12 +450,21 @@ export default function App() {
       } finally {
         setBooting(false);
       }
-      // Self-update on launch, silently: found → download → install → relaunch,
-      // no click required (notes are autosaved continuously, so a restart loses
+      // Self-update, silently: found → download → install → relaunch, no click
+      // required (notes are autosaved continuously, and the updater flushes the
+      // open note's pending write before relaunching, so a restart loses
       // nothing). The user hears about it AFTER the fact, via the "Updated to
       // vX" banner on the next boot. Failures (offline, non-bundled dev build)
       // are swallowed by the updater store — surfaced only in Settings → Updates.
+      //
+      // Checked at launch AND on a background poll: a long-running app used to
+      // learn about a release only when it happened to restart, so updates
+      // reached users days late. `autoUpdate` skips a tick that fires while a
+      // previous check/download is still in flight. App-lifetime interval —
+      // never cleared, and the launch guard above keeps it single in dev
+      // StrictMode.
       void autoUpdate();
+      setInterval(() => void autoUpdate(), UPDATE_POLL_MS);
     })();
   }, []);
 
