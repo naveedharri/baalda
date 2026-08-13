@@ -496,16 +496,18 @@ button.primary.hero:hover:not(:disabled) {
   color: var(--text-tertiary);
   margin: 0 0 var(--sp-1) var(--sp-1);
 }
-/* Holds the recent cards. Collapsed it just stacks the 3 shown; once
-   "Load more" expands it, JS locks its height to that same collapsed footprint
-   and it scrolls internally — so the wordmark and action buttons above never
-   move (the whole card is vertically centered). */
+/* Holds the recent cards. Collapsed it just stacks the 3 shown; "Load more"
+   grows it to the cap below so the revealed cards are actually VISIBLE (an
+   expansion locked to the collapsed height looked like the button did nothing
+   — macOS overlay scrollbars don't show until you scroll), and anything past
+   the cap scrolls internally. */
 .recent-scroll {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
 }
 .recent-scroll.expanded {
+  max-height: min(340px, 44vh);
   overflow-y: auto;
   padding-right: 2px; /* breathing room beside the scrollbar */
   scrollbar-width: thin;

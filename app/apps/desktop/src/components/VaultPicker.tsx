@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
@@ -110,12 +110,12 @@ export function VaultPicker() {
   // Which recent-vault card is being opened, by its key. A single boolean would
   // only tell the list to grey out; the point is to mark the row you clicked.
   const [opening, setOpening] = useState<string | null>(null);
-  // Recents are collapsed to the 3 most recent; "Load more" reveals the rest
-  // inside a scroll area locked to the collapsed height so the logo/buttons
-  // above never shift (the vault-picker card is vertically centered).
+  // Recents are collapsed to the 3 most recent; "Load more" grows the list to
+  // a capped height (App.css `.recent-scroll.expanded`) and scrolls internally
+  // past the cap. It used to expand INSIDE a box locked to the collapsed
+  // height, which read as the button doing nothing — macOS overlay scrollbars
+  // are invisible until you scroll, so nothing on screen changed.
   const [showAllRecents, setShowAllRecents] = useState(false);
-  const recentScrollRef = useRef<HTMLDivElement>(null);
-  const [lockedHeight, setLockedHeight] = useState<number | null>(null);
   const reduceMotion = useReducedMotion();
 
   // Surface recently opened vaults as one-tap "reopen" affordances.
@@ -314,15 +314,11 @@ export function VaultPicker() {
     }
   }
 
-  // Freeze the scroll box at the collapsed 3-card height before revealing the
-  // rest, so the list scrolls internally instead of growing the (centered) card.
   function expandRecents() {
-    setLockedHeight(recentScrollRef.current?.offsetHeight ?? null);
     setShowAllRecents(true);
   }
   function collapseRecents() {
     setShowAllRecents(false);
-    setLockedHeight(null);
   }
 
   const naming = newParent !== null;
@@ -615,13 +611,7 @@ export function VaultPicker() {
             }
           >
             <p className="recent-heading">Recent vaults</p>
-            <div
-              ref={recentScrollRef}
-              className={`recent-scroll${showAllRecents ? " expanded" : ""}`}
-              style={
-                showAllRecents && lockedHeight ? { height: lockedHeight } : undefined
-              }
-            >
+            <div className={`recent-scroll${showAllRecents ? " expanded" : ""}`}>
               {shownRecents.map((e) => (
                 <div
                   className={`recent-card${opening === e.key ? " is-opening" : ""}`}

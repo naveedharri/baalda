@@ -143,6 +143,9 @@ export interface ImportSummary {
 export const pickVault = () => invoke<VaultInfo | null>("pick_vault");
 export const openVault = (path: string) => invoke<VaultInfo>("open_vault", { path });
 export const getLastVault = () => invoke<VaultInfo | null>("get_last_vault");
+/** Forget the launch auto-reopen target so a reload/relaunch lands on the
+ *  welcome screen (recents keep listing the vault; the next open re-arms it). */
+export const clearLastVault = () => invoke<void>("clear_last_vault");
 
 /** A recently opened vault (newest first); `openedAt` is epoch-ms (0 if unknown). */
 export interface RecentVault {

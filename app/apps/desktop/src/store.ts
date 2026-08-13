@@ -1152,6 +1152,11 @@ export const useStore = create<AppStore>((set, get) => ({
       itemColors: readItemColors(undefined),
       itemOrder: readItemOrder(undefined),
     });
+    // Welcome is now the state a reload should restore (same rule as
+    // closeLocalVault) — don't let the launch reopen undo the sign-out landing.
+    void ipc.clearLastVault().catch(() => {
+  /* best-effort — worst case the next launch reopens the vault */
+});
   },
 
   landAfterAuth: async () => {
@@ -1636,6 +1641,10 @@ export const useStore = create<AppStore>((set, get) => ({
           ...vaultScopedSyncReset(),
           pendingVaultFolder: null,
         });
+        // Same rule as closeLocalVault: welcome is now the state to restore.
+        void ipc.clearLastVault().catch(() => {
+  /* best-effort — worst case the next launch reopens the vault */
+});
       }
     }
     await get().refreshVault();
@@ -1727,6 +1736,12 @@ export const useStore = create<AppStore>((set, get) => ({
       ...vaultScopedSyncReset(),
       pendingVaultFolder: null,
     });
+    // The welcome screen is now the state to restore: without this, a reload
+    // auto-reopens the folder the user just closed (App.tsx's launch reopen
+    // reads `last_vault`, which still pointed here).
+    void ipc.clearLastVault().catch(() => {
+  /* best-effort — worst case the next launch reopens the vault */
+});
   },
 
   applyVaultFolder: async (orgId, path, opts) => {

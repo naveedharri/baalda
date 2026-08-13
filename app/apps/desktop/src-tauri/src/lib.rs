@@ -37,6 +37,7 @@ pub fn run() {
             commands::pick_vault,
             commands::open_vault,
             commands::get_last_vault,
+            commands::clear_last_vault,
             commands::get_recent_vaults,
             commands::remove_recent_vault,
             commands::delete_vault,

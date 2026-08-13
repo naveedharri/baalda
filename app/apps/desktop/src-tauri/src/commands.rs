@@ -564,6 +564,18 @@ pub async fn open_vault_in_root(
     open_vault_inner(&app, &state, folder)
 }
 
+/// Forget the launch auto-reopen target (recents are untouched). Called when
+/// the user deliberately lands on the welcome screen — closing the vault,
+/// signing out, removing the open vault from this device — so a reload or
+/// relaunch respects that choice instead of reopening the folder they just
+/// left. The next vault open re-arms it (`remember_recent`).
+#[tauri::command]
+pub fn clear_last_vault(app: AppHandle) -> AppResult<()> {
+    let mut cfg = read_config(&app);
+    cfg.last_vault = None;
+    write_config(&app, &cfg)
+}
+
 /// Does this absolute path exist as a directory? Lets the vault-switch flow tell
 /// "bound folder moved/deleted" (rediscover it) from "folder present but failed
 /// to open" (surface the error) without attempting the open.
