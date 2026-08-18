@@ -274,6 +274,8 @@ interface AppStore {
   inviteMember: (email: string, role: "member" | "admin") => Promise<void>;
   /** Remove a member from the active vault (owner/admin), then refresh. */
   removeMember: (userId: string) => Promise<void>;
+  /** Change a member's role in the active vault (owner/admin), then refresh. */
+  updateMemberRole: (userId: string, role: "member" | "admin") => Promise<void>;
   acceptInvitation: (invitationId: string) => Promise<void>;
   joinVault: (code: string) => Promise<void>;
   /** Detach a vault from THIS device (forget its folder, stop syncing it).
@@ -1616,6 +1618,13 @@ export const useStore = create<AppStore>((set, get) => ({
     const activeOrgId = get().session?.activeOrganizationId;
     if (!activeOrgId) throw new Error("No active vault");
     await authManager.api.removeMember(activeOrgId, userId);
+    await get().refreshVault();
+  },
+
+  updateMemberRole: async (userId, role) => {
+    const activeOrgId = get().session?.activeOrganizationId;
+    if (!activeOrgId) throw new Error("No active vault");
+    await authManager.api.updateMemberRole(activeOrgId, userId, role);
     await get().refreshVault();
   },
 

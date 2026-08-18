@@ -1785,6 +1785,92 @@ body:has(.sidebar-resizer.dragging) {
   min-width: 210px;
 }
 
+/* ---- Role picker (Members tab) ----
+   Button-anchored like the sort popover. Right-aligned because it sits at the
+   row's right edge; opening left keeps it over the dialog, not off its side. */
+.role-select-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.context-menu.role-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 150px;
+}
+.context-menu.role-menu li {
+  text-transform: capitalize;
+}
+.role-caret {
+  color: var(--text-tertiary);
+  font-size: 0.75em;
+  line-height: 1;
+}
+/* Pill variant: keeps the badge's shape and role-colored text but sits on a
+   bordered surface chip — visibly a control, unlike the static tinted badge
+   on rows the caller can't change. (Scoped under the wrap so these beat the
+   .member-role.admin/.owner background rules that appear later in the file.) */
+.role-select-wrap .member-role.role-trigger {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: inherit;
+  transition:
+    border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.role-select-wrap .member-role.role-trigger .role-caret {
+  color: var(--text-tertiary);
+  font-size: 0.8em;
+}
+.role-select-wrap .member-role.role-trigger:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.role-select-wrap .member-role.role-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.role-select-wrap .member-role.role-trigger:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+/* Field variant: dressed like the settings inputs beside it (invite bar). */
+.role-field-trigger {
+  background: var(--bg-subtle);
+  border: 1px solid transparent;
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  font: inherit;
+  font-size: var(--fs-md);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  white-space: nowrap;
+  text-transform: capitalize;
+  transition:
+    border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.role-field-trigger:hover {
+  border-color: var(--border-strong);
+}
+.role-field-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+  background: var(--bg-surface);
+}
+
 /* Color swatch row inside the ⋯ menu (Finder-tag style) */
 .context-menu li.menu-swatches {
   display: flex;

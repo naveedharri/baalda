@@ -711,6 +711,24 @@ export class ApiClient {
     );
   }
 
+  /**
+   * Change a member's role (owner/admin). Same authz shape as removeMember:
+   * an admin may only change plain members; nobody touches the owner or
+   * themselves. The server force-closes the member's live sync sockets so the
+   * new role applies immediately, not at token expiry.
+   */
+  async updateMemberRole(
+    organizationId: string,
+    userId: string,
+    role: "member" | "admin",
+  ): Promise<void> {
+    await this.request<{ updated: boolean }>(
+      "PATCH",
+      `/api/orgs/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`,
+      { body: { role } },
+    );
+  }
+
   // ---- MCP tokens ---------------------------------------------------------
 
   /** The MCP endpoint URL for this server (what an AI client connects to). */

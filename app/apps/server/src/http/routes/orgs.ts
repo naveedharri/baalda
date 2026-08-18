@@ -347,5 +347,77 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     return c.json({ removed: true });
   });
 
+  // Change a member's role (owner/admin). Same authz shape as removal: owner
+  // may set any non-owner (but not themselves) to member/admin; an admin may
+  // only touch plain members (promoting one to admin is allowed — admins can
+  // already *invite* admins). `owner` is never grantable here; ownership
+  // transfer is a different, deliberate operation we don't support yet.
+  orgRoutes.patch("/orgs/:orgId/members/:userId", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+
+    const orgId = c.req.param("orgId");
+    const targetUserId = c.req.param("userId");
+
+    const callerRole = await orgRole(orgId, session.userId);
+    if (!callerRole) return c.json({ error: "Unknown vault" }, 404);
+    if (callerRole !== "owner" && callerRole !== "admin") {
+      return c.json({ error: "Only the vault owner or an admin can change roles" }, 403);
+    }
+    if (targetUserId === session.userId) {
+      return c.json({ error: "You can't change your own role" }, 400);
+    }
+
+    const targetRole = await orgRole(orgId, targetUserId);
+    if (!targetRole) return c.json({ error: "That person isn't a member of this vault" }, 404);
+    if (targetRole === "owner") {
+      return c.json({ error: "The vault owner's role can't be changed" }, 403);
+    }
+    if (targetRole === "admin" && callerRole !== "owner") {
+      return c.json({ error: "Only the owner can change an admin's role" }, 403);
+    }
+
+    const body = await c.req.json().catch(() => null);
+    const role = body && typeof body.role === "string" ? body.role : null;
+    if (role !== "member" && role !== "admin") {
+      return c.json({ error: "Role must be 'member' or 'admin'" }, 400);
+    }
+    // No-op guard before any side effects, so repeated clicks don't churn
+    // sockets for a change that changes nothing.
+    if (role === targetRole) return c.json({ updated: false, role });
+
+    // Snapshot the org's docs BEFORE flipping the role so we can kick the
+    // member's live sockets afterwards (same rationale as removal above).
+    const vaults = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [orgId],
+    );
+    const vaultIds = vaults.rows.map((r) => r.id);
+    const docs = vaultIds.length
+      ? await pool.query<{ id: string; vault_id: string }>(
+          `SELECT id, vault_id FROM notes WHERE vault_id = ANY($1)
+           UNION ALL
+           SELECT id, vault_id FROM files WHERE vault_id = ANY($1)`,
+          [vaultIds],
+        )
+      : { rows: [] as Array<{ id: string; vault_id: string }> };
+
+    await pool.query(`UPDATE member SET role = $1 WHERE "organizationId" = $2 AND "userId" = $3`, [
+      role,
+      orgId,
+      targetUserId,
+    ]);
+
+    // A role change flips effective permissions in BOTH directions, but the
+    // `readOnly` flag is baked into the sync token and only checked at connect
+    // time — a demoted admin keeps edit sockets, a promoted member keeps
+    // read-only ones. Kick every live socket AFTER the update so reconnects
+    // mint tokens against the new role, then tell the vault channels.
+    for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
+    for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
+
+    return c.json({ updated: true, role });
+  });
+
   return orgRoutes;
 }
