@@ -83,6 +83,16 @@ export async function checkForUpdate(): Promise<boolean> {
 export async function installUpdate(): Promise<void> {
   const update = pending;
   if (!update) return;
+  // Stash the version/notes now — the Update object dies with this process, and
+  // the next boot reads the stash back to show the "Updated to vX" banner.
+  try {
+    localStorage.setItem(
+      JUST_UPDATED_KEY,
+      JSON.stringify({ version: update.version, notes: update.body ?? null }),
+    );
+  } catch {
+    // Storage full/blocked: the update still proceeds, only the banner is lost.
+  }
   let total = 0;
   let downloaded = 0;
   try {
@@ -102,9 +112,9 @@ export async function installUpdate(): Promise<void> {
           break;
       }
     });
-    // The background poll can land this relaunch mid-session with a note open,
-    // so flush the bridge's debounced disk write first — same rule as the ⌘R
-    // reload path. A no-op when nothing is open (the launch-time update).
+    // The user clicks Install & Restart mid-session with a note open, so flush
+    // the bridge's debounced disk write first — same rule as the ⌘R reload
+    // path. A no-op when nothing is open.
     try {
       await bridgeManager.currentBridge()?.flushEgest();
     } catch (e) {
@@ -124,14 +134,14 @@ export function currentVersion(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Silent auto-update + the post-restart "Updated to vX" banner.
+// The post-restart "Updated to vX" banner.
 //
 // The handoff problem: by the time the new version is running, the Update
-// object (and its release notes) died with the old process. So the stash below
-// is written just before download/relaunch, and read back on the next boot —
-// if the running version matches the stashed one, the update landed and the
-// banner shows its notes; if not (install failed, or a newer hop), it's stale
-// and dropped.
+// object (and its release notes) died with the old process. So installUpdate
+// writes the stash just before download/relaunch, and it's read back on the
+// next boot — if the running version matches the stashed one, the update
+// landed and the banner shows its notes; if not (install failed, or a newer
+// hop), it's stale and dropped.
 // ---------------------------------------------------------------------------
 
 const JUST_UPDATED_KEY = "context.justUpdated";
@@ -142,16 +152,18 @@ interface JustUpdated {
 }
 
 /**
- * Fully automatic update: check, and when a newer version exists, download +
- * install + relaunch without asking. Callers should treat this as fire-and-
- * forget from launch AND from the background poll; every failure lands in the
- * shared state's `error` phase (surfaced only in Settings → Updates — an
- * offline launch is not an event).
+ * Background check, no install: when a newer version exists it lands the shared
+ * state in `available`, which App's UpdateBanner renders as "Install & Restart".
+ * The install itself is always a user click (the banner or Settings → Updates) —
+ * a mid-session relaunch the user didn't ask for proved too disruptive. Callers
+ * treat this as fire-and-forget from launch AND from the poll; every failure
+ * lands in the `error` phase (surfaced only in Settings → Updates — an offline
+ * launch is not an event).
  */
-export async function autoUpdate(): Promise<void> {
-  // Re-entrancy guard for the background poll: a tick that fires while a
-  // check/download/install is already in flight must not start a second one
-  // (two concurrent downloadAndInstall calls race on the same staged bundle).
+export async function backgroundUpdateCheck(): Promise<void> {
+  // Skip a tick that fires while a check or a user-initiated download/install
+  // is in flight. An `available` state is NOT skipped: re-checking keeps a
+  // long-running app's banner current if an even newer version ships.
   if (
     state.phase === "checking" ||
     state.phase === "downloading" ||
@@ -159,17 +171,7 @@ export async function autoUpdate(): Promise<void> {
   ) {
     return;
   }
-  const found = await checkForUpdate();
-  if (!found || !pending) return;
-  try {
-    localStorage.setItem(
-      JUST_UPDATED_KEY,
-      JSON.stringify({ version: pending.version, notes: pending.body ?? null }),
-    );
-  } catch {
-    // Storage full/blocked: the update still proceeds, only the banner is lost.
-  }
-  await installUpdate();
+  await checkForUpdate();
 }
 
 /**
