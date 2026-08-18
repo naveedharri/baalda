@@ -328,14 +328,17 @@ function UpdateBanner() {
 }
 
 /**
- * "You're on the new version" — shown on the first launch after an update,
- * with the release's one-liners. Stays until crossed out (the stash survives
- * a quit), so an update never lands completely unannounced.
+ * "What's New" — a centered modal shown on the first launch after an update,
+ * with the release's one-liners and a one-shot confetti burst. A modal rather
+ * than a banner: the old top strip pushed the whole page down, which read as
+ * the content jumping. Stays until dismissed (the stash survives a quit), so
+ * an update never lands completely unannounced.
  */
-function UpdatedBanner() {
+function WhatsNewModal() {
   const [updated, setUpdated] = useState<{ version: string; notes: string[] } | null>(
     null,
   );
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -348,34 +351,88 @@ function UpdatedBanner() {
     };
   }, []);
 
+  const open = updated != null;
+
+  useEffect(() => {
+    if (!open || !canvasRef.current) return;
+    return runConfetti(canvasRef.current);
+  }, [open]);
+
+  const close = () => {
+    clearJustUpdated();
+    setUpdated(null);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  if (!updated) return null;
   return (
-    <Banner show={updated != null} className="updated-banner" role="status">
-      <div className="updated-banner-body">
-        <span>
-          🎉 {BRAND_NAME} updated to <strong>v{updated?.version}</strong>
-        </span>
-        {updated != null && updated.notes.length > 0 && (
-          <ul className="updated-banner-notes">
-            {updated.notes.map((line, i) => (
-              <li key={i}>{line}</li>
-            ))}
-          </ul>
-        )}
-      </div>
-      <div className="banner-actions">
-        <button
-          className="icon-btn"
-          aria-label="Dismiss"
-          title="Dismiss"
-          onClick={() => {
-            clearJustUpdated();
-            setUpdated(null);
-          }}
+    <>
+      <canvas ref={canvasRef} className="celebrate-confetti" aria-hidden="true" />
+      <div className="modal-backdrop" onClick={close}>
+        <div
+          className="modal whats-new"
+          role="dialog"
+          aria-label="What's new"
+          onClick={(e) => e.stopPropagation()}
         >
-          ✕
-        </button>
+          <div className="whats-new-hero">
+            <div className="whats-new-glyph" aria-hidden="true">
+              <svg
+                width="26"
+                height="26"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
+                <path d="M19 15l.7 1.8L21.5 17.5l-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7L19 15z" />
+              </svg>
+            </div>
+            <h2 className="whats-new-title">What&rsquo;s New</h2>
+            <span className="whats-new-version">v{updated.version}</span>
+            <p className="whats-new-sub">
+              {BRAND_NAME} just updated itself — here&rsquo;s what changed.
+            </p>
+          </div>
+          {updated.notes.length > 0 && (
+            <ul className="whats-new-notes">
+              {updated.notes.map((line, i) => (
+                <li key={i} style={{ animationDelay: `${120 + i * 70}ms` }}>
+                  <svg
+                    width="15"
+                    height="15"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                  <span>{line}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button className="primary whats-new-cta" autoFocus onClick={close}>
+            Nice — let&rsquo;s go
+          </button>
+        </div>
       </div>
-    </Banner>
+    </>
   );
 }
 
@@ -686,7 +743,7 @@ export default function App() {
   
         <main className="main">
           <MemberJoinedBanner />
-          <UpdatedBanner />
+          <WhatsNewModal />
           {/* Sits flush against the top of the window now that there's no system
               title bar above it (`titleBarStyle: "Overlay"`), which is where the
               reclaimed ~28px comes from — and that makes it the strip you'd expect
