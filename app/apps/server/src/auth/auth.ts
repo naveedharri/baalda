@@ -137,6 +137,16 @@ export const auth = betterAuth({
           const name = data.user.name?.trim() || data.user.email;
           await announceMemberJoined(data.organization.id, name);
         },
+        // Role changes must go through PATCH /api/orgs/:orgId/members/:userId,
+        // which enforces our stricter matrix (an admin may not touch another
+        // admin) and force-closes live sockets so the new role applies now.
+        // Better Auth's own update-member-role endpoint does neither, so it's
+        // closed off entirely.
+        beforeUpdateMemberRole: async () => {
+          throw new APIError("FORBIDDEN", {
+            message: "role_change_not_supported_here",
+          });
+        },
       },
     }),
     // OAuth 2.1 authorization server for MCP clients (spec: MCP integration).

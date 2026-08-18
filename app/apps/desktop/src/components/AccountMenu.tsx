@@ -24,6 +24,8 @@ import { statusTone } from "../lib/presence/color";
 import { AccessPanel } from "./AccessPanel";
 import { AccountSettings } from "./AccountSettings";
 import { AsyncButton } from "./AsyncButton";
+import { canActOnMember } from "./memberRoles";
+import { RoleSelect } from "./RoleSelect";
 import { Avatar, SyncBadge } from "./Identity";
 import { Spinner } from "./Spinner";
 import { ThemeToggle } from "./ThemeToggle";
@@ -1954,15 +1956,22 @@ function MembersTab({ canManage }: { canManage: boolean }) {
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
 
+  // Role changes: no confirm step (reversible, unlike remove), one busy row
+  // at a time so a slow server can't interleave two changes.
+  const [roleBusyId, setRoleBusyId] = useState<string | null>(null);
+  const [roleError, setRoleError] = useState<string | null>(null);
+
   // The caller's own role in this vault, so we mirror the server's rules and
-  // only show a Remove button where it would actually succeed: owners can remove
-  // anyone but themselves and the (single) owner; admins can remove plain members.
+  // only offer Remove / role changes where they would actually succeed
+  // (see memberRoles.ts for the shared matrix).
   const myRole = members.find((m) => m.userId === session?.user.id)?.role;
-  const canRemove = (m: Member): boolean =>
-    canManage &&
-    m.userId !== session?.user.id &&
-    m.role !== "owner" &&
-    (myRole === "owner" || m.role === "member");
+  const canAct = (m: Member): boolean =>
+    canActOnMember({
+      canManage,
+      myUserId: session?.user.id,
+      myRole,
+      target: { userId: m.userId, role: m.role },
+    });
 
   const doRemove = async (userId: string) => {
     setRemoveBusy(true);
@@ -1974,6 +1983,18 @@ function MembersTab({ canManage }: { canManage: boolean }) {
       setRemoveError(e instanceof Error ? e.message : String(e));
     } finally {
       setRemoveBusy(false);
+    }
+  };
+
+  const doChangeRole = async (userId: string, role: "member" | "admin") => {
+    setRoleBusyId(userId);
+    setRoleError(null);
+    try {
+      await useStore.getState().updateMemberRole(userId, role);
+    } catch (e) {
+      setRoleError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRoleBusyId(null);
     }
   };
 
@@ -2051,13 +2072,12 @@ function MembersTab({ canManage }: { canManage: boolean }) {
               if (e.key === "Enter") void invite();
             }}
           />
-          <select
+          <RoleSelect
+            variant="field"
             value={inviteRole}
-            onChange={(e) => setInviteRole(e.target.value as "member" | "admin")}
-          >
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-          </select>
+            onSelect={setInviteRole}
+            ariaLabel="Invite role"
+          />
           <button className="primary" disabled={busy} onClick={() => void invite()}>
             Invite
           </button>
@@ -2083,8 +2103,18 @@ function MembersTab({ canManage }: { canManage: boolean }) {
                 {label}
                 {m.userId === session?.user.id && <span className="muted"> (you)</span>}
               </span>
-              <span className={`member-role ${m.role}`}>{m.role}</span>
-              {canRemove(m) &&
+              {canAct(m) && (m.role === "member" || m.role === "admin") ? (
+                <RoleSelect
+                  variant="pill"
+                  value={m.role}
+                  disabled={roleBusyId !== null}
+                  ariaLabel={`Change role of ${label}`}
+                  onSelect={(r) => void doChangeRole(m.userId, r)}
+                />
+              ) : (
+                <span className={`member-role ${m.role}`}>{m.role}</span>
+              )}
+              {canAct(m) &&
                 (confirmRemoveId === m.userId ? (
                   <>
                     <AsyncButton
@@ -2118,6 +2148,7 @@ function MembersTab({ canManage }: { canManage: boolean }) {
         })}
       </ul>
       {removeError && <div className="auth-error">{removeError}</div>}
+      {roleError && <div className="auth-error">{roleError}</div>}
 
       {pendingInvitations.length > 0 && (
         <>
