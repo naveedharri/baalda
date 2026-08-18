@@ -21,8 +21,9 @@ import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import { syncManager } from "./lib/sync/docSession";
 import {
-  autoUpdate,
+  backgroundUpdateCheck,
   clearJustUpdated,
+  installUpdate,
   justUpdatedTo,
   releaseNoteLines,
   useUpdateState,
@@ -33,8 +34,10 @@ import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { useStore } from "./store";
 
 /** How often a running app re-checks for a new release (it also checks at
- *  launch). The check is one GET of the release's static `latest.json`. */
-const UPDATE_POLL_MS = 30 * 60 * 1000;
+ *  launch). The check is one cheap GET of the release's static `latest.json`
+ *  off GitHub's CDN; 15 minutes keeps a long-running app reasonably current
+ *  without pinging GitHub all day. */
+const UPDATE_POLL_MS = 15 * 60 * 1000;
 
 /**
  * Every banner in the app slides down out of the chrome it belongs to and
@@ -258,18 +261,44 @@ function VaultFolderPrompt() {
  * only surface when the user checks manually from Settings → Updates.
  */
 function UpdateBanner() {
+  // Dismissal is per-version: "Later" on v0.1.27 must not also swallow the
+  // v0.1.28 banner when the background poll finds it hours later.
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const update = useUpdateState();
 
-  // Updates apply themselves (see autoUpdate at launch) — the only live chrome
-  // is the progress strip while the new bytes come down, and the app restarts
-  // on its own when they're in. The post-restart story is UpdatedBanner's.
+  if (update.phase === "available") {
+    if (update.version === dismissedVersion) return null;
+    return (
+      <Banner show className="update-banner global-banner">
+        <span>
+          A new version of {BRAND_NAME} (<strong>v{update.version}</strong>) is
+          available.
+        </span>
+        <div className="banner-actions">
+          <AsyncButton className="primary" onClick={() => installUpdate()}>
+            Install &amp; Restart
+          </AsyncButton>
+          <button
+            className="secondary"
+            onClick={() => setDismissedVersion(update.version)}
+          >
+            Later
+          </button>
+        </div>
+      </Banner>
+    );
+  }
+
+  // Once the user clicks Install & Restart the banner becomes the progress
+  // strip while the new bytes come down, and the app restarts when they're in.
+  // The post-restart story is UpdatedBanner's.
   if (update.phase === "downloading" || update.phase === "installing") {
     const pct =
       update.phase === "downloading" && update.total > 0
         ? Math.round((update.downloaded / update.total) * 100)
         : null;
     return (
-      <Banner show className="update-banner" role="status">
+      <Banner show className="update-banner global-banner" role="status">
         <span>
           {update.phase === "installing"
             ? "Installing update — the app will restart…"
@@ -299,9 +328,9 @@ function UpdateBanner() {
 }
 
 /**
- * "You're on the new version" — shown on the first launch after a silent
- * auto-update, with the release's one-liners. Stays until crossed out (the
- * stash survives a quit), so an update never lands completely unannounced.
+ * "You're on the new version" — shown on the first launch after an update,
+ * with the release's one-liners. Stays until crossed out (the stash survives
+ * a quit), so an update never lands completely unannounced.
  */
 function UpdatedBanner() {
   const [updated, setUpdated] = useState<{ version: string; notes: string[] } | null>(
@@ -450,21 +479,15 @@ export default function App() {
       } finally {
         setBooting(false);
       }
-      // Self-update, silently: found → download → install → relaunch, no click
-      // required (notes are autosaved continuously, and the updater flushes the
-      // open note's pending write before relaunching, so a restart loses
-      // nothing). The user hears about it AFTER the fact, via the "Updated to
-      // vX" banner on the next boot. Failures (offline, non-bundled dev build)
-      // are swallowed by the updater store — surfaced only in Settings → Updates.
-      //
-      // Checked at launch AND on a background poll: a long-running app used to
-      // learn about a release only when it happened to restart, so updates
-      // reached users days late. `autoUpdate` skips a tick that fires while a
-      // previous check/download is still in flight. App-lifetime interval —
+      // Check for updates at launch AND on a background poll, but never install
+      // uninvited: a found release only raises the UpdateBanner, and the
+      // download/relaunch waits for the user's "Install & Restart" click.
+      // Failures (offline, non-bundled dev build) are swallowed by the updater
+      // store — surfaced only in Settings → Updates. App-lifetime interval —
       // never cleared, and the launch guard above keeps it single in dev
       // StrictMode.
-      void autoUpdate();
-      setInterval(() => void autoUpdate(), UPDATE_POLL_MS);
+      void backgroundUpdateCheck();
+      setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
     })();
   }, []);
 
@@ -621,66 +644,91 @@ export default function App() {
     // that has no local folder yet (e.g. clicked from the welcome screen) asks
     // the user to choose/create one before its folder opens.
     return (
-      <>
+      <div className="app-shell">
+        <UpdateBanner />
         <VaultPicker />
         <VaultFolderPrompt />
-      </>
+      </div>
     );
   }
 
   return (
-    <div
-      className="app"
-      style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-    >
-      {/* Centered overlay, not a sidebar panel — it searches the whole vault
-          and its button lives in the main header. */}
-      {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
-      <aside className="sidebar">
-        <SidebarHeader />
-        {/* The tree still lists the OUTGOING vault's files until the folder
-            swaps, so a switch fades it and stops taking clicks — opening a note
-            from a vault you're leaving would be cancelled by the epoch guard
-            anyway, and a row that highlights then does nothing reads as a bug. */}
-        <div className={`sidebar-tree-wrap${switchingVault ? " is-switching" : ""}`}>
-          <FileTree />
-        </div>
-        <div className="sidebar-footer">
-          {/* Boundary so a crash here degrades to a visible fallback instead of
-              silently emptying the corner — the identity bar must never just
-              vanish. */}
-          <ErrorBoundary label="Account">
-            <AccountMenu />
-          </ErrorBoundary>
-        </div>
-      </aside>
-      <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />
-
-      <main className="main">
-        <MemberJoinedBanner />
-        <UpdateBanner />
-        <UpdatedBanner />
-        {/* Sits flush against the top of the window now that there's no system
-            title bar above it (`titleBarStyle: "Overlay"`), which is where the
-            reclaimed ~28px comes from — and that makes it the strip you'd expect
-            to drag the window by. "deep" hands the whole row over as a drag
-            region; Tauri exempts the buttons on the right, so they still click. */}
-        <header className="main-header" data-tauri-drag-region="deep">
-          <span className="note-title">{openNote?.title ?? "No note open"}</span>
-          {openNote && !isPreview && <SaveIndicator />}
-          <SyncIndicator noteOpen={openNote != null && !isPreview} />
-          {/* Vault-wide, so it sits in the header regardless of the open note. */}
-          <TalkButton />
-          {versionDocId && !isPreview && (
+    <div className="app-shell">
+      {/* Window-global, above the sidebar+main split: a new release must be
+          visible the moment the poll finds it, whatever is on screen. */}
+      <UpdateBanner />
+      <div
+        className="app"
+        style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+      >
+        {/* Centered overlay, not a sidebar panel — it searches the whole vault
+            and its button lives in the main header. */}
+        {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
+        <aside className="sidebar">
+          <SidebarHeader />
+          {/* The tree still lists the OUTGOING vault's files until the folder
+              swaps, so a switch fades it and stops taking clicks — opening a note
+              from a vault you're leaving would be cancelled by the epoch guard
+              anyway, and a row that highlights then does nothing reads as a bug. */}
+          <div className={`sidebar-tree-wrap${switchingVault ? " is-switching" : ""}`}>
+            <FileTree />
+          </div>
+          <div className="sidebar-footer">
+            {/* Boundary so a crash here degrades to a visible fallback instead of
+                silently emptying the corner — the identity bar must never just
+                vanish. */}
+            <ErrorBoundary label="Account">
+              <AccountMenu />
+            </ErrorBoundary>
+          </div>
+        </aside>
+        <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />
+  
+        <main className="main">
+          <MemberJoinedBanner />
+          <UpdatedBanner />
+          {/* Sits flush against the top of the window now that there's no system
+              title bar above it (`titleBarStyle: "Overlay"`), which is where the
+              reclaimed ~28px comes from — and that makes it the strip you'd expect
+              to drag the window by. "deep" hands the whole row over as a drag
+              region; Tauri exempts the buttons on the right, so they still click. */}
+          <header className="main-header" data-tauri-drag-region="deep">
+            <span className="note-title">{openNote?.title ?? "No note open"}</span>
+            {openNote && !isPreview && <SaveIndicator />}
+            <SyncIndicator noteOpen={openNote != null && !isPreview} />
+            {/* Vault-wide, so it sits in the header regardless of the open note. */}
+            <TalkButton />
+            {versionDocId && !isPreview && (
+              <button
+                className={`icon-btn history-btn${versionPanelOpen ? " active" : ""}`}
+                title="Version history"
+                aria-label="Version history"
+                aria-pressed={versionPanelOpen}
+                onClick={() => {
+                  if (versionPanelOpen) useStore.getState().closeVersionPanel();
+                  else void useStore.getState().openVersionPanel(versionDocId);
+                }}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+                  <path d="M3 4v4h4" />
+                  <path d="M12 8v4l3 2" />
+                </svg>
+              </button>
+            )}
             <button
-              className={`icon-btn history-btn${versionPanelOpen ? " active" : ""}`}
-              title="Version history"
-              aria-label="Version history"
-              aria-pressed={versionPanelOpen}
-              onClick={() => {
-                if (versionPanelOpen) useStore.getState().closeVersionPanel();
-                else void useStore.getState().openVersionPanel(versionDocId);
-              }}
+              className="icon-btn search-btn"
+              title="Search notes (⌘F)"
+              aria-label="Search notes"
+              onClick={() => setSearchOpen((v) => !v)}
             >
               <svg
                 viewBox="0 0 24 24"
@@ -691,77 +739,57 @@ export default function App() {
                 strokeLinejoin="round"
                 aria-hidden="true"
               >
-                <path d="M3 12a9 9 0 1 0 2.6-6.4" />
-                <path d="M3 4v4h4" />
-                <path d="M12 8v4l3 2" />
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
               </svg>
             </button>
-          )}
-          <button
-            className="icon-btn search-btn"
-            title="Search notes (⌘F)"
-            aria-label="Search notes"
-            onClick={() => setSearchOpen((v) => !v)}
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
+            <button
+              className="icon-btn graph-btn"
+              title="Graph view (⌘G)"
+              aria-label="Open graph view"
+              onClick={() => setGraphOpen(true)}
             >
-              <circle cx="11" cy="11" r="7" />
-              <path d="m20 20-3.5-3.5" />
-            </svg>
-          </button>
-          <button
-            className="icon-btn graph-btn"
-            title="Graph view (⌘G)"
-            aria-label="Open graph view"
-            onClick={() => setGraphOpen(true)}
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="5.5" cy="6" r="2.5" />
+                <circle cx="18" cy="4.5" r="2" />
+                <circle cx="12.5" cy="13" r="2.5" />
+                <circle cx="6" cy="19" r="2" />
+                <circle cx="19.5" cy="18.5" r="2.5" />
+                <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
+              </svg>
+            </button>
+          </header>
+          <RemovedBanner />
+          <DeletedByTeammateBanner />
+          <div className="editor-wrap">
+            <Editor />
+          </div>
+          <BacklinksPanel />
+          {/* Slides in over the editor from the right; anchored to .main. */}
+          <VersionPanel />
+        </main>
+  
+        {graphOpen && (
+          <ErrorBoundary
+            label="Graph view"
+            resetKeys={[graphOpen]}
+            onError={() => setGraphOpen(false)}
           >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="5.5" cy="6" r="2.5" />
-              <circle cx="18" cy="4.5" r="2" />
-              <circle cx="12.5" cy="13" r="2.5" />
-              <circle cx="6" cy="19" r="2" />
-              <circle cx="19.5" cy="18.5" r="2.5" />
-              <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
-            </svg>
-          </button>
-        </header>
-        <RemovedBanner />
-        <DeletedByTeammateBanner />
-        <div className="editor-wrap">
-          <Editor />
-        </div>
-        <BacklinksPanel />
-        {/* Slides in over the editor from the right; anchored to .main. */}
-        <VersionPanel />
-      </main>
-
-      {graphOpen && (
-        <ErrorBoundary
-          label="Graph view"
-          resetKeys={[graphOpen]}
-          onError={() => setGraphOpen(false)}
-        >
-          <GraphView onClose={() => setGraphOpen(false)} />
-        </ErrorBoundary>
-      )}
-      <VaultFolderPrompt />
-      {/* Last child so it layers over everything without a z-index race. */}
-      <Toasts />
+            <GraphView onClose={() => setGraphOpen(false)} />
+          </ErrorBoundary>
+        )}
+        <VaultFolderPrompt />
+        {/* Last child so it layers over everything without a z-index race. */}
+        <Toasts />
+      </div>
     </div>
   );
 }

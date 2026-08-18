@@ -677,6 +677,21 @@ button.primary.hero:hover:not(:disabled) {
 /* ============================================================
    App shell — canvas + floating editor sheet
    ============================================================ */
+/* Column wrapper so the window-global update banner can slide in ABOVE the
+   sidebar+main grid (and above the vault picker) and push it down, instead of
+   living inside one pane. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.app-shell > .app,
+.app-shell > .vault-picker {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+
 .app {
   display: grid;
   /* Width is user-set (see SidebarResizer); the fallback is the default so the
@@ -2286,6 +2301,19 @@ body:has(.sidebar-resizer.dragging) {
    it reads as informational rather than a warning. */
 .update-banner {
   background: var(--accent-soft, var(--warning-soft));
+}
+
+/* The update banner sits at the very top of the WINDOW (see .app-shell), so it
+   trades the floating-card look for a flush full-width strip. Content is
+   centered and the side padding is wide enough that nothing lands under the
+   macOS traffic lights, which float over the top-left corner when the strip
+   becomes the topmost thing on screen. */
+.global-banner {
+  margin: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  justify-content: center;
+  padding: var(--sp-3) 96px;
 }
 
 /* Member-joined celebration: same banner shape, an accent tint, and a gentle
