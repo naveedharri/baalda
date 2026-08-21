@@ -1280,6 +1280,7 @@ function VaultSettingsDialog({
           {tab === "general" ? (
             <GeneralTab
               isSynced={isSynced}
+              canManage={canManage}
               activeOrgName={activeOrg?.name ?? null}
               onRequestSignIn={onRequestSignIn}
             />
@@ -1296,10 +1297,7 @@ function VaultSettingsDialog({
           ) : tab === "mcp" ? (
             <McpTab />
           ) : tab === "versioning" ? (
-            <VersioningTab
-              canManage={canManage}
-              isOwner={myMember?.role === "owner"}
-            />
+            <VersioningTab canManage={canManage} />
           ) : tab === "import-export" ? (
             <ImportExportTab />
           ) : tab === "updates" ? (
@@ -1320,10 +1318,13 @@ function VaultSettingsDialog({
  */
 function GeneralTab({
   isSynced,
+  canManage,
   activeOrgName,
   onRequestSignIn,
 }: {
   isSynced: boolean;
+  /** Owner/admin — the only roles that may flip a vault-wide latch. */
+  canManage: boolean;
   activeOrgName: string | null;
   onRequestSignIn?: () => void;
 }) {
@@ -1439,6 +1440,8 @@ function GeneralTab({
         </>
       )}
 
+      {isSynced && <FreezeRootRow canManage={canManage} />}
+
       <div className="menu-sep" />
       <div className="subhead">Folder on disk</div>
       <div className="join-code-row">
@@ -1448,6 +1451,70 @@ function GeneralTab({
       </div>
 
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
+    </>
+  );
+}
+
+/**
+ * The "Freeze vault root" latch.
+ *
+ * A vault's top level is the one place where a stray note or folder is most
+ * visible and least recoverable — everyone sees it, and nobody is sure whose it
+ * is. Once a team has agreed the top-level shape, this closes it: new notes and
+ * folders have to go inside an existing folder.
+ *
+ * Deliberately applies to EVERYONE, owners and admins included, because the
+ * accidental root folder is almost always created by someone who does have
+ * permission. Only an owner/admin can lift it; everyone else sees the switch in
+ * its real state, disabled, so the rule is visible rather than mysterious.
+ */
+function FreezeRootRow({ canManage }: { canManage: boolean }) {
+  const rootFrozen = useStore((s) => s.rootFrozen);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const flip = async (next: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await useStore.getState().setRootFrozen(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="menu-sep" />
+      <div className="subhead">Vault structure</div>
+      <label className="menu-row toggle-row">
+        <span className="menu-row-label">
+          Freeze vault root
+          <span className="field-hint">
+            Stops anything new being created at the top level of this vault —
+            new notes and folders have to go inside an existing folder. Applies
+            to everyone, including you; only an owner or admin can turn it off.
+            Nothing already at the root is moved, renamed, or hidden.
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={rootFrozen}
+          disabled={!canManage || busy}
+          title={canManage ? undefined : "Only an owner or admin can change this"}
+          onChange={(e) => void flip(e.target.checked)}
+        />
+      </label>
+      {!canManage && (
+        <div className="muted">
+          {rootFrozen
+            ? "This vault's root is frozen. Ask an owner or admin to unfreeze it."
+            : "Only an owner or admin can freeze this vault's root."}
+        </div>
+      )}
+      {error && <div className="auth-error">{error}</div>}
     </>
   );
 }
@@ -2358,18 +2425,16 @@ function LimitNudge({
 
 /**
  * Versioning: the vault-wide safety net. Lists the vault's checkpoints (max 5 —
- * a daily automatic one plus manual ones), lets owners/admins take one on
- * demand, and lets the OWNER roll the whole vault back to one. Per-note history
- * lives in the editor's version panel; this page is for the blast-radius case
- * ("the reorg went wrong, put everything back").
+ * a daily automatic one plus manual ones), and lets an owner OR admin take one
+ * and roll the whole vault back to it. Per-note history lives in the editor's
+ * version panel; this page is for the blast-radius case ("the reorg went wrong,
+ * put everything back").
+ *
+ * Revert used to be owner-only. It is the recovery half of an action admins
+ * could already take (create/delete a checkpoint), so a team whose owner was
+ * away could take checkpoints and not use them.
  */
-function VersioningTab({
-  canManage,
-  isOwner,
-}: {
-  canManage: boolean;
-  isOwner: boolean;
-}) {
+function VersioningTab({ canManage }: { canManage: boolean }) {
   const checkpoints = useStore((s) => s.checkpoints);
   const [label, setLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -2464,7 +2529,7 @@ function VersioningTab({
                   {cp.createdByName ? ` · by ${cp.createdByName}` : ""}
                 </span>
               </span>
-              {isOwner && (
+              {canManage && (
                 <button className="link-btn" onClick={() => setConfirming(cp)}>
                   Revert
                 </button>
@@ -2478,9 +2543,9 @@ function VersioningTab({
           ))}
         </ul>
       )}
-      {!isOwner && (
+      {!canManage && (
         <div className="muted checkpoint-note">
-          Only the vault owner can revert to a checkpoint.
+          Only a vault owner or admin can revert to a checkpoint.
         </div>
       )}
       {confirming && (

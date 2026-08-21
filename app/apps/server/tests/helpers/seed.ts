@@ -129,3 +129,34 @@ export async function seedLock(
   );
   return id;
 }
+
+/**
+ * A `denied` row — the per-member "No access" block. Unlike a lock (which caps
+ * at view) this removes access outright, and it outranks every allow rule.
+ *
+ * Upserts, like `POST /api/shares` does: there is one row per
+ * (resource, principal), so denying someone who already has a lock or a grant
+ * REPLACES it rather than adding a second row.
+ */
+export async function seedDeny(
+  organizationId: string,
+  resourceType: "folder" | "file",
+  resourceId: string,
+  userId: string,
+): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO shares
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+     VALUES ($1, $2, $3, $4, 'user', $5, 'denied')
+     ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+     DO UPDATE SET permission = 'denied'`,
+    [id, organizationId, resourceType, resourceId, userId],
+  );
+  return id;
+}
+
+/** Close a vault's root to new folders/notes (the General settings latch). */
+export async function freezeVaultRoot(vaultId: string, frozen = true): Promise<void> {
+  await pool.query("UPDATE vaults SET root_frozen = $2 WHERE id = $1", [vaultId, frozen]);
+}

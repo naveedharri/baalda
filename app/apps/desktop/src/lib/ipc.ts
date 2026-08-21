@@ -27,6 +27,32 @@ export const openInFileManager = async (path: string): Promise<void> => {
   }
 };
 
+/**
+ * Reveal one note or folder in the OS file manager — selected in its parent,
+ * which is what "Reveal in Finder" means everywhere else.
+ *
+ * The reverse fallback order from {@link openInFileManager}: `revealItemInDir`
+ * is the right verb here and carries no path scope, so it works for a vault on
+ * an external volume too. `openPath` is the backstop for a platform where
+ * revealing isn't wired up — opening a folder still beats a dead menu item, and
+ * for a file the OS opens it in its default app.
+ */
+export const revealInFileManager = async (path: string): Promise<void> => {
+  try {
+    await revealItemInDir(path);
+  } catch {
+    await openPath(path);
+  }
+};
+
+/** What to call "reveal in the file manager" on this platform. */
+export function revealLabel(): string {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  if (/Mac|iPhone|iPad/i.test(ua)) return "Reveal in Finder";
+  if (/Win/i.test(ua)) return "Show in Explorer";
+  return "Show in file manager";
+}
+
 // ---- Types (mirror the Rust structs, serialized camelCase) ---------------
 
 export interface VaultInfo {

@@ -49,6 +49,10 @@ import { characterSvg } from "./Identity";
 import { ShareDialog, type ShareTarget } from "./ShareDialog";
 import { placeMenu, type Placement } from "../lib/menuPlacement";
 
+/** Tooltip on every root-create affordance while the vault's root is frozen. */
+const ROOT_FROZEN_HINT =
+  "This vault's root is frozen — new notes and folders go inside a folder.";
+
 interface Dimensions {
   width: number;
   height: number;
@@ -187,6 +191,7 @@ export function FileTree() {
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
   const itemColors = useStore((s) => s.itemColors);
+  const rootFrozen = useStore((s) => s.rootFrozen);
   const itemOrder = useStore((s) => s.itemOrder);
   const treeSort = useStore((s) => s.treeSort);
   const docSyncState = useStore((s) => s.docSyncState);
@@ -609,6 +614,7 @@ export function FileTree() {
   /** Pick files and import them into `dir` (vault-relative; "" = root). */
   async function importFilesInto(dir: string) {
     setMenu(null);
+    if (rootBlocked(dir)) return;
     try {
       // Captured BEFORE the native picker — the longest await in the app, and
       // `dir` came from the tree that was on screen when it opened.
@@ -628,6 +634,7 @@ export function FileTree() {
   /** Pick a folder and import it into `dir`. */
   async function importFolderInto(dir: string) {
     setMenu(null);
+    if (rootBlocked(dir)) return;
     try {
       const epoch = useStore.getState().vault?.epoch; // before the dialog
       const src = await ipc.pickFolder();
@@ -639,6 +646,26 @@ export function FileTree() {
     } catch (e) {
       console.error("import folder failed", e);
       flashStatus("Import failed", "error");
+    }
+  }
+
+  /**
+   * Show one note/folder in the OS file manager.
+   *
+   * Notes really are files on disk — that's the product — so being able to get
+   * to one from the sidebar is the shortest bridge between the app and the rest
+   * of the machine. The absolute path is the vault root joined with the
+   * vault-relative path the tree already knows.
+   */
+  async function revealNode(node: NodeApi<TreeNode>) {
+    setMenu(null);
+    const root = useStore.getState().vault?.path;
+    if (!root) return;
+    try {
+      await ipc.revealInFileManager(`${root}/${node.data.path}`);
+    } catch (e) {
+      console.error("reveal failed", e);
+      toast("Couldn't open that in the file manager", "error");
     }
   }
 
@@ -724,6 +751,16 @@ export function FileTree() {
     // dragIds are node ids === current paths. Their paths after the drop only
     // change when the parent folder changes (a reorder keeps the same path).
     const from = dragIds;
+    // Dragging something OUT to a frozen root is a root create by another name.
+    // Reordering things already at the root is fine — the shape doesn't change.
+    if (
+      destDir === "" &&
+      rootFrozen &&
+      dragIds.some((p) => p.includes("/"))
+    ) {
+      toast("This vault's root is frozen — drop this inside a folder.", "error");
+      return;
+    }
     const to = from.map((p) => {
       const dest = destDir ? `${destDir}/${basename(p)}` : basename(p);
       return dest;
@@ -1013,7 +1050,24 @@ export function FileTree() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, nodeByPath]);
 
+  /**
+   * Refuse a create/import at the vault root when the root is frozen.
+   *
+   * Client-side first, purely so the user gets a sentence instead of a failed
+   * write — the server enforces the same latch and is the authority. Only the
+   * root is affected; anything nested is untouched.
+   */
+  function rootBlocked(dir: string): boolean {
+    if (dir !== "" || !rootFrozen) return false;
+    toast(
+      "This vault's root is frozen — create this inside a folder instead.",
+      "error",
+    );
+    return true;
+  }
+
   async function createUniqueNote(dir: string) {
+    if (rootBlocked(dir)) return;
     let name = "Untitled";
     for (let i = 0; i < 50; i++) {
       const candidate = i === 0 ? name : `${name} ${i}`;
@@ -1045,6 +1099,7 @@ export function FileTree() {
   }
 
   async function createUniqueFolder(dir: string) {
+    if (rootBlocked(dir)) return;
     let name = "New Folder";
     for (let i = 0; i < 50; i++) {
       const candidate = i === 0 ? name : `${name} ${i}`;
@@ -1122,16 +1177,18 @@ export function FileTree() {
         <div className="filetree-actions">
           <button
             className="tree-tool"
-            title="New note"
+            title={rootFrozen ? ROOT_FROZEN_HINT : "New note"}
             aria-label="New note"
+            disabled={rootFrozen}
             onClick={() => createUniqueNote("")}
           >
             {ICON_NEW_NOTE}
           </button>
           <button
             className="tree-tool"
-            title="New folder"
+            title={rootFrozen ? ROOT_FROZEN_HINT : "New folder"}
             aria-label="New folder"
+            disabled={rootFrozen}
             onClick={() => createUniqueFolder("")}
           >
             {ICON_NEW_FOLDER}
@@ -1367,6 +1424,9 @@ export function FileTree() {
           </li>
           <li onClick={() => void importFolderInto(menuDir)}>Import folder…</li>
           {menu.node && <li onClick={() => void exportNode(menu.node!)}>Export…</li>}
+          {menu.node && (
+            <li onClick={() => void revealNode(menu.node!)}>{ipc.revealLabel()}</li>
+          )}
           {menu.node && <li onClick={() => menu.node!.edit()}>Rename</li>}
           {/* The same vault-wide sort as the header button. A per-folder sort
               would be a third arrangement layer fighting the other two, so

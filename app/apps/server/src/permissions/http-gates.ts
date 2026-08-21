@@ -5,6 +5,7 @@ import {
   ancestorFolderIds,
   buildAccessContext,
   effectivePermission,
+  isDenied,
   isLocked,
   resolveAccessForUser,
 } from "./resolver.js";
@@ -68,8 +69,10 @@ export async function canEditFolder(
   const role = await orgRole(row.organization_id, userId, db);
   if (role === null) return false; // not a member of the vault
 
-  // Deny overlay first: a lock caps everyone at view (no edits at all).
+  // Overlays first, both of which outrank the role below: a per-member deny
+  // removes the folder outright, and a lock caps everyone at view (no edits).
   const chain = await ancestorFolderIds(db, folderId);
+  if (await isDenied(db, userId, null, chain)) return false;
   if (await isLocked(db, userId, null, chain)) return false;
 
   if (role === "owner" || role === "admin") return true;

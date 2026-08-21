@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Baalda",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "identifier": "com.baalda.context",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -53,6 +53,11 @@
       "endpoints": [
         "https://github.com/naveedharri/baalda/releases/latest/download/latest.json"
       ]
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["baalda"]
+      }
     }
   }
 }

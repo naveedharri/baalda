@@ -20,16 +20,39 @@ use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Single-instance FIRST, and only on desktop. Without it, clicking a
+    // `baalda://` link on Windows/Linux spawns a SECOND copy of the app with
+    // the URL as an argv entry — two windows, two vault locks, one confused
+    // user. With it the running instance is handed the URL and the duplicate
+    // exits. On macOS the OS already routes links to the running app; the
+    // plugin is harmless there and keeps one code path.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}));
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
+        // `baalda://` links. A teammate pastes one into chat; clicking it hands
+        // the URL to this app, which resolves it against the *recipient's* own
+        // account and access — the link carries ids, never content or a grant.
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             // Updater is desktop-only; register it here so mobile builds skip it.
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+            // Dev/Linux need a runtime registration: on macOS and Windows the
+            // scheme comes from the bundle, which `tauri dev` never builds, so
+            // without this a link is unopenable in development.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register_all();
+            }
             Ok(())
         })
         .manage(AppState::default())

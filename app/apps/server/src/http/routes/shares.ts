@@ -87,20 +87,33 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       (resourceType !== "folder" && resourceType !== "file" && resourceType !== "vault") ||
       typeof resourceId !== "string" ||
       (principalType !== "user" && principalType !== "org") ||
-      (permission !== "view" && permission !== "edit" && permission !== "locked")
+      (permission !== "view" &&
+        permission !== "edit" &&
+        permission !== "locked" &&
+        permission !== "denied")
     ) {
       return c.json(
         {
           error:
-            "resourceType(folder|file|vault), resourceId, principalType(user|org), permission(view|edit|locked) required",
+            "resourceType(folder|file|vault), resourceId, principalType(user|org), permission(view|edit|locked|denied) required",
         },
         400,
       );
     }
     // An org-wide edit/view grant on a folder/file is "Share with team" (spec:
     // private-by-default). On a vault resource it's the "Open"/"Read-only"
-    // posture. Both are allowed; locks (deny
-    // overlays) may also be org-wide.
+    // posture. Both are allowed; locks (cap overlays) may also be org-wide.
+    //
+    // `denied` is the per-member "No access" and is deliberately narrower: only
+    // principal_type 'user', and never on the vault resource. An org-wide deny
+    // is just "no org grant" (the Private posture) said twice, and a vault-level
+    // deny would be a way to lock the owner out of their own vault.
+    if (permission === "denied" && (principalType !== "user" || resourceType === "vault")) {
+      return c.json(
+        { error: "denied applies to one member on a folder or file" },
+        400,
+      );
+    }
 
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
@@ -178,11 +191,12 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // reconnect so open sessions come back with fresh (now read-only) sync
     // tokens, same as revocation does. This covers a lock, a per-user edit→view
     // change, and a vault Open→Read-only posture flip (all land as
-    // view/locked). An 'edit' grant only widens access, so it needs no kick;
+    // view/locked) — and a `denied`, which has to eject the member outright.
+    // An 'edit' grant only widens access, so it needs no kick;
     // the onAclChanged push below lets background subscribers pick it up.
     // Reconnect re-mints each client's own permission, so a peer who still has
     // edit gets edit back — this only tightens editors that should go read-only.
-    if (permission === "locked" || permission === "view") {
+    if (permission === "locked" || permission === "view" || permission === "denied") {
       const docs = await docsForResource(resourceType, resourceId);
       for (const d of docs) {
         deps.disconnectDoc(d.vaultId, d.docId);
@@ -286,7 +300,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
 
     const members = await Promise.all(
       memberRows.map(async (m) => {
-        const { permission, capped } = await resolveAccessForUser(ctx, m.user_id, m.role);
+        const { permission, capped, denied } = await resolveAccessForUser(ctx, m.user_id, m.role);
         return {
           userId: m.user_id,
           name: m.name,
@@ -294,6 +308,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           role: m.role,
           permission,
           capped,
+          denied: denied ?? false,
         };
       }),
     );

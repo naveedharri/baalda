@@ -16,7 +16,11 @@ import { pool as defaultPool } from "../db/pool.js";
  * grant at all (a vault set to Private, or one created while private-by-default
  * was the rule) a member has no content access beyond notes it created: `none`.
  *
- * Locks (permission = 'locked') are a DENY overlay resolved AFTER the rules
+ * Denies (permission = 'denied', per-user) are resolved BEFORE everything:
+ * a match on the doc or any ancestor folder is `none`, full stop — see
+ * {@link isDenied}.
+ *
+ * Locks (permission = 'locked') are a cap overlay resolved AFTER the rules
  * above: when a lock matches the doc or any ancestor folder — for this user
  * (principal_type 'user') or the whole vault (principal_type 'org') — the
  * result is capped at `view`. Owners/admins are capped too (the point of a
@@ -196,6 +200,41 @@ export async function isLocked(
   return rows.length > 0;
 }
 
+/**
+ * True when a `denied` row shuts this user out of the resource — the file
+ * itself or any ancestor folder.
+ *
+ * A deny is stronger than a lock: a lock caps at `view`, a deny returns
+ * `none`. It is resolved LAST, after every allow rule, so it beats the
+ * vault-wide Open grant, an explicit per-user grant, an admin's blanket edit,
+ * and the "creator of the note" escape hatch. That is the whole point — the
+ * Access panel's per-member **No access** has to mean it even for content the
+ * member wrote, or "make this private from Sam" would silently do nothing on
+ * exactly the notes Sam cares about.
+ *
+ * Always principal_type 'user'. An org-wide deny would be indistinguishable
+ * from having no org grant at all, which is what Private already is.
+ */
+export async function isDenied(
+  db: Queryable,
+  userId: string,
+  docId: string | null,
+  folderIds: string[],
+): Promise<boolean> {
+  const { rows } = await db.query<{ ok: number }>(
+    `SELECT 1 AS ok FROM shares
+      WHERE permission = 'denied'
+        AND principal_type = 'user' AND principal_id = $1
+        AND (
+          ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
+          OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
+        )
+      LIMIT 1`,
+    [userId, docId, folderIds],
+  );
+  return rows.length > 0;
+}
+
 export async function effectivePermission(
   userId: string,
   docId: string,
@@ -205,6 +244,9 @@ export async function effectivePermission(
   if (!loc) return "none";
 
   const folderIds = await ancestorFolderIds(db, loc.folderId);
+
+  // Deny first and unconditionally: it outranks role, grant and authorship.
+  if (await isDenied(db, userId, docId, folderIds)) return "none";
 
   const role = await memberRole(db, loc.organizationId, userId);
   let granted: Permission;
@@ -253,6 +295,9 @@ export interface ResolvedAccess {
   permission: Permission;
   /** True when a lock reduced an otherwise-`edit` member down to `view`. */
   capped: boolean;
+  /** True when the `none` came from an explicit per-member deny, not from an
+   *  absent grant — the UI says "No access · blocked" rather than "not shared". */
+  denied?: boolean;
 }
 
 export async function buildAccessContext(
@@ -292,6 +337,9 @@ export async function resolveAccessForUser(
   role: string | null,
   db: Queryable = defaultPool,
 ): Promise<ResolvedAccess> {
+  if (await isDenied(db, userId, ctx.docId, ctx.folderIds)) {
+    return { permission: "none", capped: false, denied: true };
+  }
   const granted: Permission =
     role === "owner" || role === "admin"
       ? "edit"

@@ -6,7 +6,12 @@
 import { create } from "zustand";
 import * as ipc from "./lib/ipc";
 import { bridgeManager } from "./lib/bridge";
-import { readItemColors, writeItemColors } from "./lib/appearance";
+import {
+  colorsAdopted,
+  markColorsAdopted,
+  readItemColors,
+  writeItemColors,
+} from "./lib/appearance";
 import { readItemOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
 import { loadedFolderPaths, setChildrenAt } from "./lib/tree/lazyTree";
 import {
@@ -23,6 +28,7 @@ import {
   type VaultCheckpoint,
   type VaultRevertResult,
   vaultOrgId,
+  vaultRootFrozen,
 } from "./lib/api";
 import { authManager } from "./lib/auth/authManager";
 import { syncManager } from "./lib/sync/docSession";
@@ -49,6 +55,8 @@ import { planTurnOnSync } from "./lib/vault/turnOnSync";
 import { configOrgId, rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
+import { toast } from "./lib/toast";
+import { parseNoteLink } from "./lib/shareLink";
 
 export interface OpenNote {
   path: string;
@@ -191,6 +199,14 @@ interface AppStore {
   itemOrder: ItemOrder;
   /** Set when the active vault still needs a local folder chosen. */
   pendingVaultFolder: PendingVaultFolder | null;
+  /**
+   * True when this vault's ROOT is closed to new folders and notes.
+   *
+   * A structural latch, not a permission: it applies to everyone (owners
+   * included), and only an owner/admin can lift it. Always false on a local
+   * vault, which has no server row to hold it.
+   */
+  rootFrozen: boolean;
 
   // ---- Billing (subscription) ----
   /** Server billing capability; null until first probed. `enabled === false`
@@ -213,6 +229,12 @@ interface AppStore {
 
   setVault: (v: ipc.VaultInfo | null) => void;
   setItemColor: (path: string, colorId: string | null) => void;
+  /** Replace the item-color map with the vault's server-side one (sync pull). */
+  applyVaultColors: (colors: Record<string, string>) => void;
+  /** Re-read the active vault's `rootFrozen` latch from the server. */
+  refreshVaultSettings: () => Promise<void>;
+  /** Flip the root-freeze latch (owner/admin; throws on refusal). */
+  setRootFrozen: (frozen: boolean) => Promise<void>;
   setItemOrder: (order: ItemOrder) => void;
   setTreeSort: (sort: TreeSort) => void;
   refreshTree: () => Promise<void>;
@@ -225,6 +247,12 @@ interface AppStore {
   openWelcomeIfPresent: () => Promise<void>;
 
   openNoteByPath: (path: string) => Promise<void>;
+  /**
+   * Follow a `baalda://note/<orgId>/<docId>` link: switch to that vault if
+   * needed, then open the note. Never grants anything — the recipient's own
+   * membership and ACL decide whether the note is there to open.
+   */
+  openNoteLink: (url: string) => Promise<void>;
   refreshBacklinks: () => Promise<void>;
   setNoteRemoved: (removed: boolean) => void;
   closeNote: () => void;
@@ -717,6 +745,24 @@ function sameVault(get: () => AppStore, epoch: number | null | undefined): boole
  * showing the previous vault's history against the new vault's notes would offer
  * a revert that writes the wrong content into the wrong note.
  */
+/**
+ * Poll the registry for a docId's local path.
+ *
+ * A shared link can land while the target vault is still reconciling — on a
+ * cold start, or right after the switch the link itself triggered. Giving up
+ * immediately would make links look broken exactly when they're most likely to
+ * be used (someone opening one for the first time).
+ */
+async function waitForDocPath(docId: string, timeoutMs = 20_000): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const path = syncManager.registry.pathForDocId(docId);
+    if (path) return path;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
 function vaultScopedSyncReset() {
   // A fresh object each call: handing out one shared `{}`/`[]` would let any
   // future in-place mutation of `docSyncState`/`locks` leak into every later reset.
@@ -733,6 +779,8 @@ function vaultScopedSyncReset() {
     noteVersions: null,
     versionPreview: null,
     checkpoints: null,
+    // A latch belongs to the vault it was read from; a local vault has none.
+    rootFrozen: false,
   } satisfies Partial<AppStore>;
 }
 
@@ -765,6 +813,7 @@ export const useStore = create<AppStore>((set, get) => ({
   itemColors: {},
   itemOrder: {},
   pendingVaultFolder: null,
+  rootFrozen: false,
   billingConfig: null,
   orgBilling: null,
   activityStatus: readActivityStatus(),
@@ -789,8 +838,41 @@ export const useStore = create<AppStore>((set, get) => ({
     const next = { ...get().itemColors };
     if (colorId) next[path] = colorId;
     else delete next[path];
+    // Optimistic: paint immediately and mirror to localStorage, then hand the
+    // color to the server so every member and device gets it. A synced vault
+    // re-publishes the authoritative map on the next pull, which corrects this
+    // if the write was refused (a read-only member recoloring, say).
     writeItemColors(vault.path, next);
     set({ itemColors: next });
+    void syncManager.setItemColor(path, colorId).catch(() => {
+      toast("Couldn't save that color for the team", "error");
+    });
+  },
+
+  /**
+   * Apply the vault's server-side colors. Whole-map replacement — a color a
+   * teammate cleared has no row, and merging would keep it here forever.
+   *
+   * The one exception is the first pull after a vault gains sync: colors set on
+   * this machine while it was local are pushed up rather than thrown away.
+   */
+  applyVaultColors: (colors) => {
+    const vault = get().vault;
+    if (!vault) return;
+    if (!colorsAdopted(vault.path)) {
+      markColorsAdopted(vault.path);
+      const orphans = Object.entries(get().itemColors).filter(([p]) => !(p in colors));
+      if (orphans.length > 0) {
+        colors = { ...colors, ...Object.fromEntries(orphans) };
+        for (const [p, id] of orphans) {
+          void syncManager.setItemColor(p, id).catch(() => {
+            /* best-effort adoption — the local mirror still has it */
+          });
+        }
+      }
+    }
+    writeItemColors(vault.path, colors);
+    set({ itemColors: colors });
   },
 
   setItemOrder: (order) => {
@@ -969,6 +1051,40 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
+  openNoteLink: async (url) => {
+    const target = parseNoteLink(url);
+    if (!target) return;
+    if (get().authStatus !== "signed-in") {
+      toast("Sign in to open this shared note", "error");
+      return;
+    }
+    if (!get().organizations.some((o) => o.id === target.orgId)) {
+      // The roster can simply be stale — someone shares a link the moment after
+      // inviting you, which is the most likely first use of one. Re-read it
+      // before refusing.
+      await get().refreshVault();
+    }
+    if (!get().organizations.some((o) => o.id === target.orgId)) {
+      // Deliberately the same message whether the vault doesn't exist or the
+      // user simply isn't in it — a link must not be a way to probe which
+      // vaults exist.
+      toast("That note is in a vault you don't have access to", "error");
+      return;
+    }
+    if (get().session?.activeOrganizationId !== target.orgId) {
+      await get().setActiveOrganization(target.orgId);
+    }
+    // The path→docId map arrives with the registry pull, which a vault switch
+    // has only just started. Wait for the note to show up rather than reporting
+    // "not found" during the seconds it takes to reconcile.
+    const path = await waitForDocPath(target.docId);
+    if (!path) {
+      toast("Couldn't open that note — you may not have access to it", "error");
+      return;
+    }
+    await get().openNoteByPath(path);
+  },
+
   refreshBacklinks: async () => {
     const note = get().openNote;
     if (!note?.id) {
@@ -1023,6 +1139,9 @@ export const useStore = create<AppStore>((set, get) => ({
     syncManager.setRegistryListener(() => {
       void get().refreshTree();
       void get().refreshTitles();
+      // The root-freeze latch rides the same signal the server already sends
+      // when it changes, so a teammate flipping it reaches this app live.
+      void get().refreshVaultSettings();
     });
     // A teammate renamed/moved or deleted a note we have on disk, and the registry
     // has just applied that to the file. The open editor's bridge was destroyed
@@ -1067,6 +1186,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // "edited by" tag on sidebar rows. Replaced wholesale, never merged: a note
     // can lose its stamp (restored from a checkpoint, access revoked).
     syncManager.setNoteMetaListener((meta) => set({ noteLastEdited: meta }));
+    // Folder/note colors, from the same pull — a vault-wide fact, so the whole
+    // team sees the arrangement one person set up.
+    syncManager.setColorListener((colors) => get().applyVaultColors(colors));
     try {
       const session = await authManager.init();
       set({ serverUrl: authManager.getServerUrl() });
@@ -1869,6 +1991,37 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
+  // ---- Vault settings ----
+
+  refreshVaultSettings: async () => {
+    const vaultId = syncManager.registry.vaultId;
+    if (!vaultId || !get().syncEnabled) {
+      set({ rootFrozen: false });
+      return;
+    }
+    const epoch = get().vault?.epoch;
+    try {
+      const vaults = await authManager.api.listVaults();
+      // Same staleness guard as `refreshLocks`: a late answer must not describe
+      // the vault we already left.
+      if (!sameVault(get, epoch) || syncManager.registry.vaultId !== vaultId) return;
+      const mine = vaults.find((v) => v.id === vaultId);
+      set({ rootFrozen: mine ? vaultRootFrozen(mine) : false });
+    } catch {
+      // An older server has no such field; the safe reading is "not frozen".
+      if (sameVault(get, epoch)) set({ rootFrozen: false });
+    }
+  },
+
+  setRootFrozen: async (frozen) => {
+    const vaultId = syncManager.registry.vaultId;
+    if (!vaultId) throw new Error("This vault isn't synced yet.");
+    const { rootFrozen } = await authManager.api.updateVaultSettings(vaultId, {
+      rootFrozen: frozen,
+    });
+    set({ rootFrozen });
+  },
+
   // ---- Locks ----
 
   refreshLocks: async () => {
@@ -2138,6 +2291,8 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().refreshTitles();
       if (stale()) return;
       await get().refreshLocks();
+      if (stale()) return;
+      await get().refreshVaultSettings();
       if (stale()) return;
       // A brand-new vault was just seeded with welcome content — greet the
       // user with the welcome note if nothing else is open.

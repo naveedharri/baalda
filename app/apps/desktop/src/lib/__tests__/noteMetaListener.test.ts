@@ -32,6 +32,8 @@ const fakeRegistry = vi.hoisted(() => {
         reg.noteMetaListener = cb;
       },
     ),
+    // Item colors ride the same pull; this suite doesn't exercise them.
+    setColorListener: vi.fn(),
     setInboundHost: vi.fn(),
     mappedNotes: vi.fn((): Array<{ docId: string; relPath: string }> => []),
     isPushed: vi.fn(() => false),

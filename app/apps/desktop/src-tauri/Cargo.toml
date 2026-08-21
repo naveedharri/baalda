@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.1.29"
+version = "0.1.30"
 description = "Baalda — local-first markdown app"
 authors = ["Baalda"]
 license = "Apache-2.0"
@@ -37,10 +37,14 @@ trash = "5"
 # OS keychain for session tokens (spec 04 §7). apple-native uses the macOS
 # Security framework; swap/add features for other platforms later.
 keyring = { version = "3", features = ["apple-native"] }
+tauri-plugin-deep-link = "2.4.9"
 
 # The updater is desktop-only — gate it so mobile targets don't try to build it.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 
 [dev-dependencies]
 tempfile = "3"

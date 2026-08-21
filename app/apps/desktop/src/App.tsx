@@ -30,6 +30,8 @@ import {
 } from "./lib/updater";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
+import { ShareNoteButton } from "./components/ShareNoteButton";
+import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { useStore } from "./store";
 
@@ -494,6 +496,11 @@ export default function App() {
     useStore.getState().closeVersionPanel();
   }, [openNote?.path]);
 
+  // `baalda://` links, from a teammate's chat window into this app. Mounted for
+  // the app's whole life (not gated on a vault being open) because the very
+  // first thing a link may have to do is switch vaults.
+  useEffect(() => listenForNoteLinks(), []);
+
   // Auto-reopen the last vault on launch, then restore the session (spec 04 §7)
   // and enable sync. Vault first so `enableSyncForVault` (called inside initAuth)
   // sees the loaded tree.
@@ -755,6 +762,9 @@ export default function App() {
             <SyncIndicator noteOpen={openNote != null && !isPreview} />
             {/* Vault-wide, so it sits in the header regardless of the open note. */}
             <TalkButton />
+            {/* Same gate as history: a link is a doc_id, so it only exists for a
+                note the server knows about. */}
+            {versionDocId && !isPreview && <ShareNoteButton docId={versionDocId} />}
             {versionDocId && !isPreview && (
               <button
                 className={`icon-btn history-btn${versionPanelOpen ? " active" : ""}`}

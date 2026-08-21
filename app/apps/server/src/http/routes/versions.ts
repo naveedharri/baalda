@@ -23,7 +23,7 @@ import { getSession } from "../session.js";
  *   GET    /api/vaults/:vaultId/checkpoints           list (member)
  *   POST   /api/vaults/:vaultId/checkpoints           create (owner/admin)
  *   DELETE /api/vaults/:vaultId/checkpoints/:id       delete (owner/admin)
- *   POST   /api/vaults/:vaultId/checkpoints/:id/revert  revert the vault (owner)
+ *   POST   /api/vaults/:vaultId/checkpoints/:id/revert  revert the vault (owner/admin)
  *
  * Gates mirror the rest of the app: per-doc `effectivePermission` for note
  * versions (so a `locked` share caps at view and a revert 403s), org role for
@@ -235,9 +235,13 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const vaultId = c.req.param("vaultId");
     const role = await vaultRole(vaultId, session.userId);
     if (role === undefined) return c.json({ error: "Unknown vault" }, 404);
-    // Owner only: this rewrites every note in the vault at once.
-    if (role !== "owner") {
-      return c.json({ error: "Only the vault owner can revert a vault" }, 403);
+    // Owner/admin: this rewrites every note in the vault at once, so it stays
+    // a privileged action — but it matches who can *create* and *delete* a
+    // checkpoint. Admins already run the vault's structure and access; leaving
+    // the one recovery action owner-only meant a team whose owner was away
+    // could take checkpoints and not use them.
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Only a vault owner or admin can revert a vault" }, 403);
     }
     const checkpointId = c.req.param("id");
     const { rows } = await pool.query<{ id: string }>(

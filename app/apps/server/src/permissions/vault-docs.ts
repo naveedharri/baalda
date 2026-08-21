@@ -18,8 +18,9 @@ type Queryable = Pick<pg.Pool, "query">;
  *   - otherwise             -> docs reachable via a **user** share (view/edit)
  *     on the doc itself or any ancestor folder (folder grants inherit down).
  *
- * `locked` is a deny-overlay that only caps edit->view; it never grants read, so
- * it's absent here.
+ * `locked` is a cap overlay that only takes edit->view; it never grants read, so
+ * it's absent here. `denied` (per-member "No access") IS here: it removes read,
+ * so every set below subtracts it last — see `deniedDocsInVault`.
  *
  * Read = view OR edit, so the channel streams content to view-only grantees too.
  */
@@ -57,6 +58,71 @@ export async function vaultAccess(
 }
 
 /**
+ * doc_ids in this vault the user is explicitly SHUT OUT of — the per-member
+ * deny (`shares.permission = 'denied'`) folded down through folder inheritance.
+ *
+ * Subtracted from every readable/visible set below rather than woven into their
+ * WHERE clauses on purpose: a deny has to beat the owner/admin branch, the
+ * vault-wide grant branch AND the created_by branch, and those are three
+ * different queries. One subtraction at the end can't be forgotten in one of
+ * them.
+ */
+async function deniedDocsInVault(
+  db: Queryable,
+  userId: string,
+  vaultId: string,
+): Promise<Set<string>> {
+  const { rows } = await db.query<{ id: string }>(
+    `WITH RECURSIVE denied_seed AS (
+        SELECT resource_id AS id FROM shares
+         WHERE resource_type = 'folder' AND permission = 'denied'
+           AND principal_type = 'user' AND principal_id = $1
+     ),
+     denied_subtree AS (
+        SELECT id, parent_id FROM folders WHERE id IN (SELECT id FROM denied_seed)
+        UNION ALL
+        SELECT f.id, f.parent_id FROM folders f JOIN denied_subtree d ON f.parent_id = d.id
+     ),
+     denied_files AS (
+        SELECT resource_id AS id FROM shares
+         WHERE resource_type = 'file' AND permission = 'denied'
+           AND principal_type = 'user' AND principal_id = $1
+     )
+     SELECT n.id FROM notes n
+       WHERE n.vault_id = $2
+         AND (n.folder_id IN (SELECT id FROM denied_subtree) OR n.id IN (SELECT id FROM denied_files))
+     UNION
+     SELECT fi.id FROM files fi
+       WHERE fi.vault_id = $2
+         AND (fi.folder_id IN (SELECT id FROM denied_subtree) OR fi.id IN (SELECT id FROM denied_files))`,
+    [userId, vaultId],
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
+/** Folder ids this user is denied, including everything below them. */
+async function deniedFolderIds(
+  db: Queryable,
+  userId: string,
+): Promise<Set<string>> {
+  const { rows } = await db.query<{ id: string }>(
+    `WITH RECURSIVE denied_seed AS (
+        SELECT resource_id AS id FROM shares
+         WHERE resource_type = 'folder' AND permission = 'denied'
+           AND principal_type = 'user' AND principal_id = $1
+     ),
+     denied_subtree AS (
+        SELECT id, parent_id FROM folders WHERE id IN (SELECT id FROM denied_seed)
+        UNION ALL
+        SELECT f.id, f.parent_id FROM folders f JOIN denied_subtree d ON f.parent_id = d.id
+     )
+     SELECT DISTINCT id FROM denied_subtree`,
+    [userId],
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
  * One implementation, two questions. `deleted: false` answers "what may this user
  * read?"; `deleted: true` answers "which of this vault's docs that they'd be
  * allowed to read are now **gone**?" — the tombstone set the desktop reconciler
@@ -90,7 +156,7 @@ async function listDocsInVault(
            SELECT id FROM files WHERE vault_id = $1`,
       [vaultId],
     );
-    return new Set(rows.map((r) => r.id));
+    return subtract(new Set(rows.map((r) => r.id)), await deniedDocsInVault(db, userId, vaultId));
   }
 
   // Non-privileged (private-by-default): readable docs are the union of
@@ -143,7 +209,13 @@ async function listDocsInVault(
      ${filesUnion}`,
     [userId, vaultId, organizationId, isMember],
   );
-  return new Set(rows.map((r) => r.id));
+  return subtract(new Set(rows.map((r) => r.id)), await deniedDocsInVault(db, userId, vaultId));
+}
+
+/** `a` minus `b`, in place on `a`. */
+function subtract(a: Set<string>, b: Set<string>): Set<string> {
+  for (const id of b) a.delete(id);
+  return a;
 }
 
 export async function listReadableDocsInVault(
@@ -187,6 +259,9 @@ export interface VaultFolderRow {
   path: string;
   sort: number;
   created_by: string | null;
+  /** Palette id from the client's `lib/appearance`, or null. Vault-wide, so a
+   *  folder tinted on one machine is tinted for the whole team. */
+  color: string | null;
 }
 
 /**
@@ -204,10 +279,11 @@ export async function listVisibleFolders(
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return [];
   const all = await db.query<VaultFolderRow>(
-    "SELECT id, vault_id, parent_id, name, path, sort, created_by FROM folders WHERE vault_id = $1 ORDER BY sort, path",
+    "SELECT id, vault_id, parent_id, name, path, sort, created_by, color FROM folders WHERE vault_id = $1 ORDER BY sort, path",
     [vaultId],
   );
-  if (access.vaultWide) return all.rows;
+  const denied = await deniedFolderIds(db, userId);
+  if (access.vaultWide) return all.rows.filter((f) => !denied.has(f.id));
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   const isMember = access.role !== null;
@@ -243,5 +319,5 @@ export async function listVisibleFolders(
     [userId, vaultId, access.organizationId, isMember, [...readable]],
   );
   const visible = new Set(visibleIds.map((r) => r.id));
-  return all.rows.filter((f) => visible.has(f.id));
+  return all.rows.filter((f) => visible.has(f.id) && !denied.has(f.id));
 }

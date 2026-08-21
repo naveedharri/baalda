@@ -1,6 +1,10 @@
-// Per-item accent colors for folders and notes. Colors are a local, per-vault
-// preference (like Finder tags): stored next to the vault choice in
-// localStorage, keyed by vault-relative path, applied to the tree glyphs.
+// Per-item accent colors for folders and notes, applied to the tree glyphs.
+//
+// On a SYNCED vault the color lives on the server row (`folders.color` /
+// `notes.color`) and arrives with the registry pull, so a folder you tint is
+// tinted for the whole team on every machine. localStorage is still written
+// underneath as the offline mirror and as the whole story for a local vault —
+// keyed by vault-relative path, which is all a local vault has.
 
 export interface ItemColor {
   id: string;
@@ -43,5 +47,31 @@ export function writeItemColors(vaultPath: string, colors: Record<string, string
     localStorage.setItem(STORE_PREFIX + vaultPath, JSON.stringify(colors));
   } catch {
     /* quota/unavailable — colors are a convenience only */
+  }
+}
+
+/**
+ * Have this vault's pre-sync local colors been handed to the server yet?
+ *
+ * Colors were a per-machine preference before they synced. The first pull after
+ * a vault gains sync pushes whatever is in localStorage up, once — the flag is
+ * what stops a color a teammate deliberately CLEARED from being re-uploaded by
+ * this machine on every subsequent pull.
+ */
+const ADOPTED_PREFIX = "context.itemColors.adopted:";
+
+export function colorsAdopted(vaultPath: string): boolean {
+  try {
+    return localStorage.getItem(ADOPTED_PREFIX + vaultPath) === "1";
+  } catch {
+    return true; // no storage → never try to adopt
+  }
+}
+
+export function markColorsAdopted(vaultPath: string): void {
+  try {
+    localStorage.setItem(ADOPTED_PREFIX + vaultPath, "1");
+  } catch {
+    /* quota/unavailable — worst case we re-adopt next launch */
   }
 }

@@ -106,6 +106,9 @@ export class SyncManager implements InboundHost {
     // Who last edited each note, refreshed by the same registry pull. Not
     // coalesced like the map above: it fires once per pull, not once per note.
     this.registry.setNoteMetaListener((meta) => this.publishNoteMeta(meta));
+    // Item colors are a vault-wide fact and ride the same pull (see
+    // `VaultRegistry.publishColors`).
+    this.registry.setColorListener((colors) => this.publishColors(colors));
     // Inbound reconciliation mutates files the editor and the background doc store
     // may be holding, so it has to be able to make them let go first.
     this.registry.setInboundHost(this);
@@ -131,6 +134,8 @@ export class SyncManager implements InboundHost {
   private onRegistryMap?: (map: Record<string, string>) => void;
   /** Mirrors the registry's {docId → last-edit} stamps to the UI. */
   private onNoteMeta?: (meta: Record<string, NoteLastEdited>) => void;
+  /** Mirrors the vault's shared {relPath → color id} map to the UI. */
+  private onColors?: (colors: Record<string, string>) => void;
   private mapPublishTimer: ReturnType<typeof setTimeout> | null = null;
   private registryPullTimer: ReturnType<typeof setTimeout> | null = null;
   private attachments: AttachmentSync | null = null;
@@ -378,6 +383,29 @@ export class SyncManager implements InboundHost {
    */
   private publishNoteMeta(meta: Record<string, NoteLastEdited>): void {
     this.onNoteMeta?.(this.scope?.isCurrent() ? meta : {});
+  }
+
+  /**
+   * UI subscribes here for the vault's shared item colors, keyed by
+   * vault-relative path (`store.itemColors`).
+   */
+  setColorListener(cb: ((colors: Record<string, string>) => void) | undefined): void {
+    this.onColors = cb;
+  }
+
+  /** Same scope gate as {@link publishNoteMeta}. */
+  private publishColors(colors: Record<string, string>): void {
+    if (this.scope?.isCurrent()) this.onColors?.(colors);
+  }
+
+  /**
+   * Persist an item color to the server so every member sees it. Silently does
+   * nothing on a local (unsynced) vault — the store has already written the
+   * local copy, which is the whole behaviour there.
+   */
+  async setItemColor(relPath: string, colorId: string | null): Promise<void> {
+    if (!this.enabled) return;
+    await this.registry.setColor(relPath, colorId);
   }
 
   /**
@@ -803,6 +831,7 @@ export class SyncManager implements InboundHost {
     // 100ms into the next one). The last-edit stamps go the same way.
     this.publishRegistryMap();
     this.publishNoteMeta({});
+    this.onColors?.({});
   }
 
   /** UI subscribes here for the vault-wide background-sync indicator. */

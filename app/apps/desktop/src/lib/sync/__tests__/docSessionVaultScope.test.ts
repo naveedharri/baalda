@@ -36,6 +36,8 @@ const fakeRegistry = vi.hoisted(() => {
     }),
     // Versioning: the manager also mirrors {docId → last-edit} out of the pull.
     setNoteMetaListener: vi.fn(),
+    // …and the vault's shared item colors, from that same pull.
+    setColorListener: vi.fn(),
     // Inbound reconciliation: the manager hands itself over as the host that can
     // make the editor/doc-store let go of a doc before its file moves.
     inboundHost: null as unknown,

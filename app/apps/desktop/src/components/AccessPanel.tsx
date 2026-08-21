@@ -7,10 +7,17 @@ import {
   sharePrincipalType,
 } from "../lib/api";
 import type { TreeNode } from "../lib/ipc";
+import {
+  ancestorPaths,
+  folderChildrenLoaded,
+  visibleAccessRows,
+  type AccessRow,
+} from "../lib/accessTree";
 import { lockScopesByPath, resourceIdsByPath } from "../lib/locks";
 import { syncManager } from "../lib/sync/docSession";
 import { useStore } from "../store";
 import { Avatar } from "./Identity";
+import { Spinner } from "./Spinner";
 
 /**
  * Access — the unified locker. A vault-default posture (Shared · Read-only ·
@@ -32,17 +39,13 @@ type Mode = "open" | "readonly" | "private";
 // only ever RAISE permission and a member already has edit under Open, "view"
 // must be a per-user LOCK (a cap), not a view grant — a view grant would leave
 // the member on edit. "default" clears the override (falls back to Open / the
-// folder's inherited setting). One row per (resource, user): grant OR lock.
-type MemberChoice = "default" | "view" | "edit";
+// folder's inherited setting). "none" is the deny: the only per-member row that
+// SUBTRACTS, and the only way to keep one person out of a folder in a vault
+// everyone else can read. One row per (resource, user): grant, lock, or deny.
+type MemberChoice = "default" | "none" | "view" | "edit";
 
-interface Resource {
-  key: string;
-  kind: "folder" | "file";
-  id: string;
-  path: string;
-  name: string;
-  depth: number;
-}
+/** One row in the item list (see `lib/accessTree`). */
+type Resource = AccessRow;
 
 const ICON = {
   folder: (
@@ -71,6 +74,17 @@ const ICON = {
   shield: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
+    </svg>
+  ),
+  chevron: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  ),
+  block: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M5.6 5.6l12.8 12.8" />
     </svg>
   ),
   spark: (
@@ -138,7 +152,17 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const tree = useStore((s) => s.tree);
   const syncEnabled = useStore((s) => s.syncEnabled);
 
-  const [selectedKey, setSelectedKey] = useState<string>("");
+  /**
+   * The item whose access is being edited. Held as the row itself, not just its
+   * key, so collapsing a folder doesn't blank the detail pane out from under
+   * someone who is halfway through configuring a note inside it.
+   */
+  const [selected, setSelected] = useState<Resource | null>(null);
+  const selectedKey = selected?.key ?? "";
+  /** Folder paths currently open in the list. */
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  /** Folder paths whose children are being fetched from Rust right now. */
+  const [expanding, setExpanding] = useState<Set<string>>(() => new Set());
   const [shares, setShares] = useState<Share[]>([]);
   const [access, setAccess] = useState<ResolvedMemberAccess[] | null>(null);
   const [wsShares, setWsShares] = useState<Share[]>([]);
@@ -172,30 +196,64 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   );
   const wsPosture: Mode = wsGrant ? (wsGrant.permission === "edit" ? "open" : "readonly") : "private";
 
-  // Flatten every synced folder + note into an indented list.
-  const resources = useMemo<Resource[]>(() => {
-    const out: Resource[] = [];
-    const walk = (n: TreeNode, depth: number) => {
-      if (n.isDir) {
-        const id = syncManager.registry.getFolderId(n.path);
-        if (id) out.push({ key: `folder:${id}`, kind: "folder", id, path: n.path, name: baseName(n.path), depth });
-      } else {
-        const m = syncManager.registry.getMapping(n.path);
-        if (m) out.push({ key: `file:${m.docId}`, kind: "file", id: m.docId, path: n.path, name: baseName(n.path, true), depth });
-      }
-      n.children?.forEach((c) => walk(c, depth + 1));
-    };
-    tree?.children?.forEach((c) => walk(c, 0));
-    return out;
-  }, [tree]);
+  /**
+   * The rows currently on screen: the vault tree, indented, with a collapsed
+   * folder's contents left out. The rule that makes it work — an un-listed
+   * folder is expandable, not empty — lives in `lib/accessTree` where a test
+   * can hold it.
+   */
+  const resources = useMemo<Resource[]>(
+    () =>
+      visibleAccessRows(tree, expanded, {
+        folderId: (path) => syncManager.registry.getFolderId(path),
+        docId: (path) => syncManager.registry.getMapping(path)?.docId ?? null,
+      }),
+    [tree, expanded],
+  );
+
+  /**
+   * Open/close a folder, pulling its children off disk the first time.
+   *
+   * `loadChildren` is the same lazy listing the sidebar uses, so expanding here
+   * populates the sidebar too — one tree, one cache, no second code path that
+   * could show a different vault.
+   */
+  const toggleFolder = async (path: string, loaded: boolean) => {
+    const next = new Set(expanded);
+    if (next.has(path)) {
+      next.delete(path);
+      setExpanded(next);
+      return;
+    }
+    next.add(path);
+    setExpanded(next);
+    if (loaded) return;
+    setExpanding((prev) => new Set(prev).add(path));
+    try {
+      await useStore.getState().loadChildren(path);
+    } catch {
+      /* a failed listing just leaves the folder looking empty */
+    } finally {
+      setExpanding((prev) => {
+        const s2 = new Set(prev);
+        s2.delete(path);
+        return s2;
+      });
+    }
+  };
+
+  /** Reveal a path in the list by opening every folder above it. */
+  const revealPath = (path: string) => {
+    const above = ancestorPaths(path);
+    if (above.length === 0) return;
+    setExpanded((prev) => new Set([...prev, ...above]));
+  };
 
   const lockMap = useMemo(() => buildLockMap(tree, locks), [tree, locks]);
   const directScopes = useMemo(
     () => lockScopesByPath(tree, locks, session?.user.id),
     [tree, locks, session?.user.id],
   );
-
-  const selected = resources.find((r) => r.key === selectedKey) ?? null;
 
   const memberByUser = (userId: string) => members.find((m) => m.userId === userId);
   const displayName = (userId: string, fallback?: string | null) => {
@@ -354,6 +412,14 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   };
 
   const memberChoice = (userId: string): MemberChoice => {
+    // Deny first — it's the row that outranks every other, here as on the server.
+    const denied = shares.find(
+      (s) =>
+        sharePrincipalType(s) === "user" &&
+        sharePrincipalId(s) === userId &&
+        s.permission === "denied",
+    );
+    if (denied) return "none";
     // A per-user lock reads back as read-only ("view"); an edit grant as "edit".
     // A legacy view grant also maps to "view" (it will be rewritten as a lock
     // the next time the member is set, so it actually takes effect).
@@ -362,7 +428,11 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     );
     if (lock) return "view";
     const grant = shares.find(
-      (s) => sharePrincipalType(s) === "user" && sharePrincipalId(s) === userId && s.permission !== "locked",
+      (s) =>
+        sharePrincipalType(s) === "user" &&
+        sharePrincipalId(s) === userId &&
+        s.permission !== "locked" &&
+        s.permission !== "denied",
     );
     if (grant?.permission === "edit") return "edit";
     if (grant?.permission === "view") return "view";
@@ -376,11 +446,23 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       // unique (resource, principal) key means only one can exist at a time.
       for (const s of shares) {
         if (sharePrincipalType(s) === "user" && sharePrincipalId(s) === userId) {
+          // Locks go through the store so the sidebar's badge cache stays in
+          // step; grants and denies are plain share rows.
           if (s.permission === "locked") await useStore.getState().removeLock(s.id);
           else await authManager.api.revokeShare(s.id);
         }
       }
-      if (choice === "edit") {
+      if (choice === "none") {
+        // The one subtractive row. It beats the vault's Open grant, an admin's
+        // blanket edit, and even "you created this note" — which is the point:
+        // "not for Sam" has to mean it on the notes Sam wrote too.
+        await authManager.api.createShare({
+          resourceType: selected.kind,
+          resourceId: selected.id,
+          principalId: userId,
+          permission: "denied",
+        });
+      } else if (choice === "edit") {
         await authManager.api.createShare({
           resourceType: selected.kind,
           resourceId: selected.id,
@@ -411,8 +493,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
       {canManage && orgId && (
         <div className="access-ws">
-          <div className="access-seclabel">This vault, by default</div>
-          <div className="access-seg" aria-disabled={busy}>
+          <div className="access-seclabel">
+            This vault, by default
+            {busy && (
+              <span className="access-applying">
+                <Spinner size="xs" /> Applying…
+              </span>
+            )}
+          </div>
+          <div className={`access-seg${busy ? " busy" : ""}`} aria-busy={busy} aria-disabled={busy}>
             {(["open", "readonly", "private"] as Mode[]).map((m) => (
               <button
                 key={m}
@@ -456,13 +545,34 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                 const affected = everyone
                   ? members.map((m) => m.userId)
                   : [...(lk?.users ?? [])];
+                const isOpen = expanded.has(r.path);
                 return (
-                  <li key={r.key}>
+                  // The twisty is a SIBLING of the row button, not a child.
+                  // Opening a folder and selecting it are different intents, and
+                  // an interactive element nested inside a button is both wrong
+                  // for assistive tech and unreachable by keyboard.
+                  <li
+                    key={r.key}
+                    className="access-item"
+                    style={{ paddingLeft: `${10 + r.depth * 16}px` }}
+                  >
+                    {r.kind === "folder" && r.expandable ? (
+                      <button
+                        type="button"
+                        className={`access-twisty${isOpen ? " open" : ""}`}
+                        aria-label={isOpen ? `Collapse ${r.name}` : `Expand ${r.name}`}
+                        aria-expanded={isOpen}
+                        onClick={() => void toggleFolder(r.path, folderChildrenLoaded(tree, r.path))}
+                      >
+                        {expanding.has(r.path) ? <Spinner size="xs" /> : ICON.chevron}
+                      </button>
+                    ) : (
+                      <span className="access-twisty spacer" aria-hidden="true" />
+                    )}
                     <button
                       type="button"
                       className={`access-row${r.key === selectedKey ? " sel" : ""}`}
-                      style={{ paddingLeft: `${10 + r.depth * 16}px` }}
-                      onClick={() => setSelectedKey(r.key)}
+                      onClick={() => setSelected(r)}
                     >
                       <span className="access-glyph">{r.kind === "folder" ? ICON.folder : ICON.note}</span>
                       <span className="access-rname">{r.name}</span>
@@ -533,7 +643,13 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                     Access is managed by <strong>{inheritSourceRes?.name ?? inheritSource}</strong> — this{" "}
                     {selected.kind === "folder" ? "folder" : "note"} is read-only.{" "}
                     {inheritSourceRes && (
-                      <button className="access-jump" onClick={() => setSelectedKey(inheritSourceRes.key)}>
+                      <button
+                        className="access-jump"
+                        onClick={() => {
+                          revealPath(inheritSourceRes.path);
+                          setSelected(inheritSourceRes);
+                        }}
+                      >
                         Open {inheritSourceRes.name} ›
                       </button>
                     )}
@@ -552,8 +668,21 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
               <div className="access-seclabel">
                 {selected.kind === "folder" ? "Access for this folder & everything inside" : "Access mode"}
+                {/* Applying a mode is several round trips (revoke the old rows,
+                    write the new one, re-resolve every member) and it kicks live
+                    sockets, so it is genuinely slow. Saying so is the difference
+                    between "working" and "broken". */}
+                {busy && (
+                  <span className="access-applying">
+                    <Spinner size="xs" /> Applying…
+                  </span>
+                )}
               </div>
-              <div className="access-seg" aria-disabled={!canManage || inheritedOrgLock}>
+              <div
+                className={`access-seg${busy ? " busy" : ""}`}
+                aria-busy={busy}
+                aria-disabled={!canManage || inheritedOrgLock}
+              >
                 {(["open", "readonly", "private"] as Mode[]).map((m) => (
                   <button
                     key={m}
@@ -586,7 +715,12 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
               )}
 
               <div className="access-seclabel">
-                Who can access{loading ? " · resolving…" : ""}
+                Who can access
+                {loading && (
+                  <span className="access-applying">
+                    <Spinner size="xs" /> Resolving…
+                  </span>
+                )}
               </div>
 
               {!canManage ? (
@@ -621,7 +755,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                           </div>
                           <div className="access-prole">{sourceLabel(m, choice)}</div>
                         </div>
-                        {canManage && m.role !== "owner" && !everyoneReadonly ? (
+                        {canManage && m.role !== "owner" ? (
                           <select
                             className="access-choice"
                             value={choice}
@@ -629,8 +763,13 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                             onChange={(e) => setMember(m.userId, e.target.value as MemberChoice)}
                           >
                             <option value="default">Default</option>
-                            <option value="view">Can view (read-only)</option>
-                            <option value="edit">Can edit</option>
+                            {/* An Everyone/parent lock already holds everyone at
+                                read-only, so offering "can view"/"can edit" here
+                                would promise something the lock overrides. "No
+                                access" still works — a deny outranks a lock. */}
+                            {!everyoneReadonly && <option value="view">Can view (read-only)</option>}
+                            {!everyoneReadonly && <option value="edit">Can edit</option>}
+                            <option value="none">No access (blocked)</option>
                           </select>
                         ) : (
                           <span className={`access-lv ${levelCls(m.permission)}`}>{levelLabel(m.permission)}</span>
@@ -660,10 +799,6 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
 // --- small pure helpers ------------------------------------------------------
 
-function baseName(path: string, stripMd = false): string {
-  const last = path.split("/").pop() ?? path;
-  return stripMd ? last.replace(/\.md$/i, "") : last;
-}
 
 function levelLabel(p: "edit" | "view" | "none"): string {
   return p === "edit" ? "Full access" : p === "view" ? "Can view" : "No access";
@@ -679,6 +814,7 @@ function claudeCls(p: "edit" | "view" | "none"): string {
 }
 
 function sourceLabel(m: ResolvedMemberAccess, choice: MemberChoice): string {
+  if (choice === "none" || m.denied) return "Blocked · no access";
   if (m.permission === "none") return "No access";
   if (m.capped) return "Read-only · locked";
   if (m.role === "owner") return "Owner · full access";

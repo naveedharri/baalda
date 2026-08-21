@@ -115,6 +115,35 @@ De-risk the hardest part before networking.
   needs a `PS_MEMBER_REMOVED` frame each connection self-terminates on.
 - Specs: [[05-vault-sync-engine]] (transport), [[04-team-collaboration]] (membership gate)
 
+### Access & vault shape ✔ (v0.1.30)
+Six changes that together make a vault something a team can actually govern.
+- [x] **Access panel is a real tree.** Folders expand in place and pull their contents in on demand
+  (the sidebar loads folders lazily, so a flat list could only ever show what someone had already
+  clicked elsewhere) — which is what made the notes *inside* a folder reachable for the first time.
+  Row-building lives in `lib/accessTree.ts` so the "an un-listed folder is expandable, not empty"
+  rule is pinned by a test.
+- [x] **Per-member "No access".** A new `shares.permission = 'denied'` row (migration 018) — the
+  only row in the model that SUBTRACTS. Resolved before every allow rule, so it beats the vault-wide
+  Open grant, an admin's blanket edit, and "you created this note". Mirrored in the readable-set
+  dual, so a denied doc leaves the tree and stops syncing. See [[04-team-collaboration]] §3.
+- [x] **Permission writes narrate themselves.** Applying a mode is several round trips plus a socket
+  kick; the panel now says "Applying…" instead of looking stuck.
+- [x] **Reveal in Finder** on any note/folder — notes really are files on disk, so the shortest
+  bridge to the rest of the machine belongs in the context menu.
+- [x] **Freeze vault root** (General settings). A structural latch, not a permission: once the top
+  level is settled, nothing new lands beside it — for everyone, owners included, because the
+  accidental root folder is nearly always created by someone who does have permission. Only
+  owner/admin lifts it. Enforced on the HTTP registry AND the MCP tools; re-registering a root item
+  that predates the latch still works, so freezing can't break sync.
+- [x] **Shareable note links.** `baalda://note/<vault>/<doc>` via `tauri-plugin-deep-link`
+  (+ single-instance, so a click on Windows/Linux doesn't spawn a second app). The link carries
+  **identity, not access** — ids only, resolved against whoever opens it — and is keyed by `doc_id`,
+  so it survives every rename and move.
+- [x] **Vault revert is owner *or admin*.** It's the recovery half of an action admins could already
+  take; owner-only left a team whose owner was away able to take checkpoints and not use them.
+- [x] **Item colors sync.** `folders.color` / `notes.color` ride the registry pull, keyed by id so a
+  rename keeps the tint. Colors set before a vault gained sync are adopted upward once.
+
 ### Phase 4: Polish / upgrades _(deferred)_ ⬜
 - [ ] Structural rich-text CRDT (y-prosemirror / `Y.XmlFragment`) for full WYSIWYG.
 - [ ] Vector / hybrid search (Orama) for semantic + AI retrieval.

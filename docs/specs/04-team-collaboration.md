@@ -84,7 +84,7 @@ shares (
   resource_id    TEXT,   -- folder id or file/doc id (org id for the 'vault' grant)
   principal_type TEXT,   -- 'user' (MVP) | 'team' (later)
   principal_id   TEXT,
-  permission     TEXT,   -- 'view' | 'edit'
+  permission     TEXT,   -- 'view' | 'edit' | 'locked' (cap) | 'denied' (block)
   created_by     TEXT,
   created_at     TIMESTAMPTZ,
   UNIQUE(resource_type, resource_id, principal_type, principal_id)
@@ -96,12 +96,25 @@ shares (
 > `org_id` column — is the vault (organization) id, never the `vaults` note-collection row.
 
 **Effective permission** for a user on a file:
+0. A **`denied`** row for this user on the file or any containing folder → `none`, full stop.
 1. Vault `owner`/`admin` → `edit` on everything in the vault.
 2. A note's **creator** → `edit` on their own note.
 3. Else take the **max** of: any `share` on the file itself, any `share` on a containing folder
    (walk `parent_id` up), and any vault-wide grant — each either **per-user** or an org-wide
    **"share with team"** grant.
 4. `edit > view > none`. No matching grant → **no sync access**.
+5. A **`locked`** row matching the file or an ancestor caps the result at `view` (owners/admins
+   included).
+
+**Two overlays, deliberately different.** `locked` is a *cap* — it takes edit down to view and
+never removes read. `denied` is a *block* — the Access panel's per-member "No access", the only
+row in the model that subtracts. It is resolved **first** so it beats every allow rule above it,
+including the owner/admin branch and the creator escape hatch; without that, "keep this folder
+away from Sam" would silently do nothing on the notes Sam happens to have written. It is always
+`principal_type = 'user'` and never on the `vault` resource: an org-wide deny is just the Private
+posture said twice, and a vault-level deny would be a way to lock an owner out of their own vault.
+The readable-set dual (`permissions/vault-docs.ts`) subtracts the same set, so a denied doc leaves
+the tree and stops syncing rather than merely failing to resolve.
 
 **Private by default:** a new vault grants nothing org-wide, so members see only what they create
 or what's shared with them / the team. (Owner sets the whole vault to Shared/Read-only, or shares
