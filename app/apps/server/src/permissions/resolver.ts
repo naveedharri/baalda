@@ -16,9 +16,9 @@ import { pool as defaultPool } from "../db/pool.js";
  * grant at all (a vault set to Private, or one created while private-by-default
  * was the rule) a member has no content access beyond notes it created: `none`.
  *
- * Denies (permission = 'denied', per-user) are resolved BEFORE everything:
- * a match on the doc or any ancestor folder is `none`, full stop — see
- * {@link isDenied}.
+ * Denies (permission = 'denied') come in two flavours, both resolved BEFORE
+ * the rules above: a per-USER deny is `none`, full stop; an ORG deny (the item
+ * set to Private) only stops the team's grants reaching it. See {@link isDenied}.
  *
  * Locks (permission = 'locked') are a cap overlay resolved AFTER the rules
  * above: when a lock matches the doc or any ancestor folder — for this user
@@ -134,12 +134,18 @@ async function sharePermission(
   folderIds: string[],
   organizationId: string,
   isMember: boolean,
+  /** False when an org deny covers this resource — see {@link isDenied}. */
+  orgGrantsApply = true,
 ): Promise<Permission> {
   // Team (org-wide) grants apply ONLY to actual vault members — never to
   // outsiders who merely know a doc id. They can target a specific folder/file
   // ("Share with team", private-by-default) or the whole vault (Open/
   // Read-only). Per-user grants are inherently scoped, so they need no gate.
-  const orgGrantClause = isMember
+  //
+  // `orgGrantsApply` is how an item set to Private overrides a vault that is
+  // Shared: the org branch drops out for that resource, so the vault-wide grant
+  // stops reaching it while explicit personal grants still do.
+  const orgGrantClause = isMember && orgGrantsApply
     ? `OR (principal_type = 'org' AND principal_id = $4 AND (
             ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
             OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
@@ -201,36 +207,43 @@ export async function isLocked(
 }
 
 /**
- * True when a `denied` row shuts this user out of the resource — the file
- * itself or any ancestor folder.
+ * True when a `denied` row covers the resource — the file itself or any
+ * ancestor folder — for `principal`.
  *
- * A deny is stronger than a lock: a lock caps at `view`, a deny returns
- * `none`. It is resolved LAST, after every allow rule, so it beats the
- * vault-wide Open grant, an explicit per-user grant, an admin's blanket edit,
- * and the "creator of the note" escape hatch. That is the whole point — the
- * Access panel's per-member **No access** has to mean it even for content the
- * member wrote, or "make this private from Sam" would silently do nothing on
- * exactly the notes Sam cares about.
+ * There are two kinds, and the difference is the whole design:
  *
- * Always principal_type 'user'. An org-wide deny would be indistinguishable
- * from having no org grant at all, which is what Private already is.
+ * - **user deny** (`principal_type 'user'`) — the Access panel's per-member
+ *   *Private*. Absolute: resolved before every allow rule, so it beats the
+ *   vault-wide grant, an explicit per-user grant, an admin's blanket edit and
+ *   the "creator of the note" escape hatch. That last one is the point —
+ *   "keep this away from Sam" has to mean it on the notes Sam wrote.
+ *
+ * - **org deny** (`principal_type 'org'`) — the *item* set to Private. It says
+ *   "this folder is not shared with the team", and it exists because clearing
+ *   an item's own rows could never achieve that: a vault-wide Open grant still
+ *   reached the item, so Private silently snapped back to Shared. It suppresses
+ *   ORG-scoped grants only (see `sharePermission`), leaving the creator, anyone
+ *   with an explicit personal share, and owners/admins — which is exactly
+ *   "only you and people you share it with", and is what keeps an owner from
+ *   making a folder nobody, including themselves, can ever reach again.
  */
 export async function isDenied(
   db: Queryable,
-  userId: string,
+  principalType: "user" | "org",
+  principalId: string,
   docId: string | null,
   folderIds: string[],
 ): Promise<boolean> {
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM shares
       WHERE permission = 'denied'
-        AND principal_type = 'user' AND principal_id = $1
+        AND principal_type = $4 AND principal_id = $1
         AND (
           ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
           OR (resource_type = 'folder' AND resource_id = ANY($3::text[]))
         )
       LIMIT 1`,
-    [userId, docId, folderIds],
+    [principalId, docId, folderIds, principalType],
   );
   return rows.length > 0;
 }
@@ -245,8 +258,11 @@ export async function effectivePermission(
 
   const folderIds = await ancestorFolderIds(db, loc.folderId);
 
-  // Deny first and unconditionally: it outranks role, grant and authorship.
-  if (await isDenied(db, userId, docId, folderIds)) return "none";
+  // A per-member deny is first and unconditional: it outranks role, grant and
+  // authorship.
+  if (await isDenied(db, "user", userId, docId, folderIds)) return "none";
+  // An item set to Private only removes the TEAM's reach (see isDenied).
+  const orgGrantsApply = !(await isDenied(db, "org", loc.organizationId, docId, folderIds));
 
   const role = await memberRole(db, loc.organizationId, userId);
   let granted: Permission;
@@ -267,6 +283,7 @@ export async function effectivePermission(
       folderIds,
       loc.organizationId,
       role !== null, // isMember — gates the org-wide grant
+      orgGrantsApply,
     );
   }
 
@@ -337,9 +354,16 @@ export async function resolveAccessForUser(
   role: string | null,
   db: Queryable = defaultPool,
 ): Promise<ResolvedAccess> {
-  if (await isDenied(db, userId, ctx.docId, ctx.folderIds)) {
+  if (await isDenied(db, "user", userId, ctx.docId, ctx.folderIds)) {
     return { permission: "none", capped: false, denied: true };
   }
+  const orgGrantsApply = !(await isDenied(
+    db,
+    "org",
+    ctx.organizationId,
+    ctx.docId,
+    ctx.folderIds,
+  ));
   const granted: Permission =
     role === "owner" || role === "admin"
       ? "edit"
@@ -350,6 +374,7 @@ export async function resolveAccessForUser(
           ctx.folderIds,
           ctx.organizationId,
           role !== null, // isMember — gates the org-wide grant
+          orgGrantsApply,
         );
 
   if (granted === "none") return { permission: "none", capped: false };

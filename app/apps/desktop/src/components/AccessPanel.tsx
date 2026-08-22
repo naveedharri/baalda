@@ -17,6 +17,7 @@ import { lockScopesByPath, resourceIdsByPath } from "../lib/locks";
 import { syncManager } from "../lib/sync/docSession";
 import { useStore } from "../store";
 import { Avatar } from "./Identity";
+import { MenuSelect, type MenuSelectOption } from "./MenuSelect";
 import { Spinner } from "./Spinner";
 
 /**
@@ -39,9 +40,11 @@ type Mode = "open" | "readonly" | "private";
 // only ever RAISE permission and a member already has edit under Open, "view"
 // must be a per-user LOCK (a cap), not a view grant — a view grant would leave
 // the member on edit. "default" clears the override (falls back to Open / the
-// folder's inherited setting). "none" is the deny: the only per-member row that
-// SUBTRACTS, and the only way to keep one person out of a folder in a vault
-// everyone else can read. One row per (resource, user): grant, lock, or deny.
+// folder's inherited setting). "none" is the deny — shown as **Private** — the
+// only per-member row that SUBTRACTS, and the only way to keep one person out of
+// a folder in a vault everyone else can read. It applies to owners and admins
+// too, which is what makes a restriction testable from the seat that set it.
+// One row per (resource, user): grant, lock, or deny.
 type MemberChoice = "default" | "none" | "view" | "edit";
 
 /** One row in the item list (see `lib/accessTree`). */
@@ -93,6 +96,30 @@ const ICON = {
     </svg>
   ),
 };
+
+/**
+ * The per-member picker's options.
+ *
+ * Owners are configurable like anyone else — the only row that isn't is *your
+ * own*, because a Private on yourself would take the item out of your tree and
+ * with it the row you'd need to undo it. Every other rule here is about not
+ * promising something the model won't honour.
+ */
+function memberOptions(everyoneReadonly: boolean): MenuSelectOption<MemberChoice>[] {
+  return [
+    { value: "default", label: "Default", hint: "Whatever this item's mode gives them" },
+    // An Everyone/parent lock already holds everyone at read-only, so offering
+    // "can view"/"can edit" would promise something the lock overrides.
+    // Private still works — a per-member block outranks a lock.
+    ...(everyoneReadonly
+      ? []
+      : ([
+          { value: "view", label: "Can view", hint: "Read-only" },
+          { value: "edit", label: "Can edit", hint: "Read & write" },
+        ] as MenuSelectOption<MemberChoice>[])),
+    { value: "none", label: "Private", hint: "Hidden from this person" },
+  ];
+}
 
 const MODE_LABEL: Record<Mode, string> = {
   open: "Open",
@@ -149,6 +176,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
   const locks = useStore((s) => s.locks);
+  const denies = useStore((s) => s.denies);
   const tree = useStore((s) => s.tree);
   const syncEnabled = useStore((s) => s.syncEnabled);
 
@@ -250,6 +278,32 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   };
 
   const lockMap = useMemo(() => buildLockMap(tree, locks), [tree, locks]);
+  /**
+   * Vault-relative paths carrying an ORG deny — an item set to Private.
+   *
+   * Read from the vault-wide overlay rather than the selected resource's own
+   * shares, because Private inherits: a note inside a Private folder is private
+   * too, and the panel has to be able to say which folder is deciding that.
+   */
+  const privatePaths = useMemo(() => {
+    const idToPath = resourceIdsByPath(tree);
+    const out = new Set<string>();
+    for (const d of denies) {
+      if (sharePrincipalType(d) !== "org") continue;
+      const path = idToPath.get(shareResId(d));
+      if (path) out.add(path);
+    }
+    return out;
+  }, [tree, denies]);
+  /** The nearest ANCESTOR of `path` that is Private, or null. */
+  const privateSourcePath = (path: string): string | null => {
+    const parts = path.split("/");
+    for (let i = parts.length - 1; i > 0; i--) {
+      const ancestor = parts.slice(0, i).join("/");
+      if (privatePaths.has(ancestor)) return ancestor;
+    }
+    return null;
+  };
   const directScopes = useMemo(
     () => lockScopesByPath(tree, locks, session?.user.id),
     [tree, locks, session?.user.id],
@@ -306,15 +360,23 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const ownOrgLock = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "locked");
   const ownOrgView = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "view");
   const ownOrgEdit = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "edit");
+  const ownOrgDeny = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "denied");
   const inheritedOrgLock = !!effLock?.org && !ownOrgLock;
-  // Resolve the resource's team mode: a direct lock/view → read-only; a direct
-  // edit grant → shared/open; nothing direct → inherit the vault posture.
+  // Private inherited from a parent folder: the nearest ancestor with an org
+  // deny governs this item, exactly as an ancestor lock does.
+  const privateSource = selected && !ownOrgDeny ? privateSourcePath(selected.path) : null;
+  // Resolve the resource's team mode. Private is checked FIRST because it is
+  // the only mode that can override an inherited grant — which is the whole
+  // reason it exists: with a Shared vault, clearing an item's own rows left the
+  // vault-wide grant reaching it, so Private silently snapped back to Shared.
   const generalMode: Mode =
-    ownOrgLock || inheritedOrgLock || ownOrgView
-      ? "readonly"
-      : ownOrgEdit
-        ? "open"
-        : wsPosture;
+    ownOrgDeny || privateSource
+      ? "private"
+      : ownOrgLock || inheritedOrgLock || ownOrgView
+        ? "readonly"
+        : ownOrgEdit
+          ? "open"
+          : wsPosture;
   // When an Everyone/org lock (direct or inherited) already makes the resource
   // read-only for all, a per-member "read-only" lock is redundant and makes
   // Unlock misleading — so the per-person controls are suppressed in favour of
@@ -334,6 +396,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const inheritSourceRes = inheritSource
     ? resources.find((r) => r.path === inheritSource)
     : null;
+  const privateSourceRes = privateSource
+    ? (resources.find((r) => r.path === privateSource) ?? null)
+    : null;
 
   // --- writes ---------------------------------------------------------------
 
@@ -352,7 +417,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     }
   };
 
-  /** Clear every DIRECT org row (grant or lock) on the selected resource. */
+  /** Clear every DIRECT org row on the selected resource — grant, lock, or the
+   *  Private deny. One row per (resource, principal), so the new mode's row can
+   *  only be written once the old one is gone. */
   const clearResourceOrgRows = async () => {
     if (!selected) return;
     for (const s of shares) {
@@ -368,10 +435,24 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   // edit at view); a plain org view grant when the vault is Private (there
   // is no baseline edit to cap, and a grant is what GIVES the team read).
   const setGeneral = (mode: Mode) => {
-    if (!selected || mode === generalMode || inheritedOrgLock) return;
+    if (!selected || mode === generalMode || inheritedOrgLock || privateSource) return;
     void run(async () => {
       await clearResourceOrgRows();
-      if (mode === "open") {
+      if (mode === "private") {
+        // An explicit org DENY, not merely the absence of a grant. Clearing the
+        // rows was the old behaviour and it could not work: in a Shared vault
+        // the vault-wide grant still reached the item, so the segment snapped
+        // straight back to Shared. The deny removes the team's reach and
+        // nothing else — the creator, anyone shared with by name, and
+        // owners/admins keep it, which is what "only you and people you share
+        // it with" says on the button.
+        await authManager.api.createShare({
+          resourceType: selected.kind,
+          resourceId: selected.id,
+          principalType: "org",
+          permission: "denied",
+        });
+      } else if (mode === "open") {
         await authManager.api.createShare({
           resourceType: selected.kind,
           resourceId: selected.id,
@@ -390,7 +471,6 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
           await useStore.getState().createLock(selected.kind, selected.id, null);
         }
       }
-      // "private" = just the cleared state (no team row).
     });
   };
 
@@ -546,6 +626,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                   ? members.map((m) => m.userId)
                   : [...(lk?.users ?? [])];
                 const isOpen = expanded.has(r.path);
+                // Private wins the badge: it's the strongest statement a row
+                // can make, and an item can be Private *and* sit under a lock.
+                const isPrivate = privatePaths.has(r.path) || !!privateSourcePath(r.path);
                 return (
                   // The twisty is a SIBLING of the row button, not a child.
                   // Opening a folder and selecting it are different intents, and
@@ -577,7 +660,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                       <span className="access-glyph">{r.kind === "folder" ? ICON.folder : ICON.note}</span>
                       <span className="access-rname">{r.name}</span>
                       <span className="access-rright">
-                        {readOnly && affected.length > 0 && (
+                        {!isPrivate && readOnly && affected.length > 0 && (
                           <span className="access-avstack" aria-hidden="true">
                             {affected.slice(0, 3).map((uid) => (
                               <span className="access-av-wrap locked" key={uid}>
@@ -588,25 +671,29 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                         )}
                         <span
                           className={`access-badge ${
-                            readOnly ? "ro" : wsPosture === "private" ? "priv" : "open"
+                            isPrivate ? "priv" : readOnly ? "ro" : wsPosture === "private" ? "priv" : "open"
                           }`}
                         >
-                          {readOnly
-                            ? ICON.lock
-                            : wsPosture === "private"
-                              ? ICON.shield
-                              : wsPosture === "readonly"
-                                ? ICON.lock
-                                : ICON.open}
-                          {readOnly
-                            ? everyone
-                              ? "Read-only"
-                              : "Restricted"
-                            : wsPosture === "private"
-                              ? "Private"
-                              : wsPosture === "readonly"
+                          {isPrivate
+                            ? ICON.shield
+                            : readOnly
+                              ? ICON.lock
+                              : wsPosture === "private"
+                                ? ICON.shield
+                                : wsPosture === "readonly"
+                                  ? ICON.lock
+                                  : ICON.open}
+                          {isPrivate
+                            ? "Private"
+                            : readOnly
+                              ? everyone
                                 ? "Read-only"
-                                : "Shared"}
+                                : "Restricted"
+                              : wsPosture === "private"
+                                ? "Private"
+                                : wsPosture === "readonly"
+                                  ? "Read-only"
+                                  : "Shared"}
                         </span>
                       </span>
                     </button>
@@ -656,6 +743,25 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                   </span>
                 </div>
               )}
+              {privateSourceRes && (
+                <div className="access-banner">
+                  <span className="access-bico">{ICON.shield}</span>
+                  <span>
+                    <strong>{privateSourceRes.name}</strong> is private, so this{" "}
+                    {selected.kind === "folder" ? "folder" : "note"} is too — the team can't
+                    reach it.{" "}
+                    <button
+                      className="access-jump"
+                      onClick={() => {
+                        revealPath(privateSourceRes.path);
+                        setSelected(privateSourceRes);
+                      }}
+                    >
+                      Open {privateSourceRes.name} ›
+                    </button>
+                  </span>
+                </div>
+              )}
               {!inheritSource && generalMode === "readonly" && (
                 <div className="access-banner">
                   <span className="access-bico">{ICON.lock}</span>
@@ -689,7 +795,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                     type="button"
                     className={`access-segbtn${generalMode === m ? " active" : ""}`}
                     data-mode={m}
-                    disabled={!canManage || inheritedOrgLock || busy}
+                    disabled={!canManage || inheritedOrgLock || !!privateSource || busy}
                     onClick={() => setGeneral(m)}
                   >
                     <span className="access-st-top">
@@ -706,11 +812,11 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                   </button>
                 ))}
               </div>
-              {generalMode === "private" && wsPosture !== "private" && (
+              {generalMode === "private" && !privateSource && (
                 <div className="access-hint">
-                  This vault is <strong>{MODE_LABEL[wsPosture]}</strong>, so everything is
-                  visible to the team by default. To make individual items private, set the whole
-                  vault to <strong>Private</strong> above, then share the folders you want.
+                  The team can't reach this {selected.kind === "folder" ? "folder" : "note"}
+                  {wsPosture !== "private" && <> — even though the vault is <strong>{MODE_LABEL[wsPosture]}</strong></>}.
+                  You, anyone you share it with by name below, and vault admins still can.
                 </div>
               )}
 
@@ -755,22 +861,16 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                           </div>
                           <div className="access-prole">{sourceLabel(m, choice)}</div>
                         </div>
-                        {canManage && m.role !== "owner" ? (
-                          <select
-                            className="access-choice"
+                        {canManage && m.userId !== session?.user.id ? (
+                          <MenuSelect
                             value={choice}
+                            options={memberOptions(everyoneReadonly)}
+                            onSelect={(next) => setMember(m.userId, next)}
                             disabled={busy}
-                            onChange={(e) => setMember(m.userId, e.target.value as MemberChoice)}
-                          >
-                            <option value="default">Default</option>
-                            {/* An Everyone/parent lock already holds everyone at
-                                read-only, so offering "can view"/"can edit" here
-                                would promise something the lock overrides. "No
-                                access" still works — a deny outranks a lock. */}
-                            {!everyoneReadonly && <option value="view">Can view (read-only)</option>}
-                            {!everyoneReadonly && <option value="edit">Can edit</option>}
-                            <option value="none">No access (blocked)</option>
-                          </select>
+                            ariaLabel={`Access for ${m.name || m.email || m.userId}`}
+                            triggerClassName="access-choice-trigger"
+                            menuClassName="access-choice-menu"
+                          />
                         ) : (
                           <span className={`access-lv ${levelCls(m.permission)}`}>{levelLabel(m.permission)}</span>
                         )}
@@ -781,8 +881,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                   {otherMembers === 0 && (
                     <p className="access-hint">
                       You're the only member. Invite teammates in <strong>Members</strong>, then
-                      each one gets a per-person control here — <strong>Can edit</strong> or{" "}
-                      <strong>Can view (read-only)</strong> — so you can lock this{" "}
+                      each one gets a per-person control here — <strong>Can edit</strong>,{" "}
+                      <strong>Can view</strong>, or <strong>Private</strong> — so you can lock this{" "}
                       {selected.kind === "folder" ? "folder" : "note"} for some people while others
                       keep editing.
                     </p>
@@ -814,7 +914,7 @@ function claudeCls(p: "edit" | "view" | "none"): string {
 }
 
 function sourceLabel(m: ResolvedMemberAccess, choice: MemberChoice): string {
-  if (choice === "none" || m.denied) return "Blocked · no access";
+  if (choice === "none" || m.denied) return "Private · hidden from them";
   if (m.permission === "none") return "No access";
   if (m.capped) return "Read-only · locked";
   if (m.role === "owner") return "Owner · full access";

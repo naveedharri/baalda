@@ -71,8 +71,11 @@ export async function canEditFolder(
 
   // Overlays first, both of which outrank the role below: a per-member deny
   // removes the folder outright, and a lock caps everyone at view (no edits).
+  // An ORG deny (item set to Private) is deliberately NOT checked here — it
+  // removes the team's reach, not the owner's, and `resolveAccessForUser`
+  // below already applies it to everyone it should.
   const chain = await ancestorFolderIds(db, folderId);
-  if (await isDenied(db, userId, null, chain)) return false;
+  if (await isDenied(db, "user", userId, null, chain)) return false;
   if (await isLocked(db, userId, null, chain)) return false;
 
   if (role === "owner" || role === "admin") return true;

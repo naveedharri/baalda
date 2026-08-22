@@ -156,6 +156,28 @@ export async function seedDeny(
   return id;
 }
 
+/**
+ * An ORG-scoped `denied` row — the item set to **Private**. Unlike the
+ * per-member deny above it takes the item out of the *team's* reach only: the
+ * creator, anyone with a personal share, and owners/admins keep it.
+ */
+export async function seedItemPrivate(
+  organizationId: string,
+  resourceType: "folder" | "file",
+  resourceId: string,
+): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO shares
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+     VALUES ($1, $2, $3, $4, 'org', $2, 'denied')
+     ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+     DO UPDATE SET permission = 'denied'`,
+    [id, organizationId, resourceType, resourceId],
+  );
+  return id;
+}
+
 /** Close a vault's root to new folders/notes (the General settings latch). */
 export async function freezeVaultRoot(vaultId: string, frozen = true): Promise<void> {
   await pool.query("UPDATE vaults SET root_frozen = $2 WHERE id = $1", [vaultId, frozen]);

@@ -122,10 +122,13 @@ Six changes that together make a vault something a team can actually govern.
   clicked elsewhere) — which is what made the notes *inside* a folder reachable for the first time.
   Row-building lives in `lib/accessTree.ts` so the "an un-listed folder is expandable, not empty"
   rule is pinned by a test.
-- [x] **Per-member "No access".** A new `shares.permission = 'denied'` row (migration 018) — the
-  only row in the model that SUBTRACTS. Resolved before every allow rule, so it beats the vault-wide
-  Open grant, an admin's blanket edit, and "you created this note". Mirrored in the readable-set
-  dual, so a denied doc leaves the tree and stops syncing. See [[04-team-collaboration]] §3.
+- [x] **Private, at two scales.** A new `shares.permission = 'denied'` row (migration 018) — the
+  only row in the model that SUBTRACTS. Per-**member** (`principal_type 'user'`) it blocks one
+  person and beats everything, authorship included. Per-**item** (`principal_type 'org'`) it takes
+  a folder or note out of the *team's* reach while sparing the creator, explicit grantees and
+  owners/admins — which is what finally made item-Private work at all: clearing an item's own
+  grants left the vault-wide grant still reaching it, so Private snapped straight back to Shared.
+  Both are mirrored in the readable-set dual. See [[04-team-collaboration]] §3.
 - [x] **Permission writes narrate themselves.** Applying a mode is several round trips plus a socket
   kick; the panel now says "Applying…" instead of looking stuck.
 - [x] **Reveal in Finder** on any note/folder — notes really are files on disk, so the shortest
@@ -135,6 +138,13 @@ Six changes that together make a vault something a team can actually govern.
   accidental root folder is nearly always created by someone who does have permission. Only
   owner/admin lifts it. Enforced on the HTTP registry AND the MCP tools; re-registering a root item
   that predates the latch still works, so freezing can't break sync.
+- [x] **One popover select, everywhere.** The Access panel's per-member picker was the last native
+  `<select>` in the product; it now uses the Members page's popover (`MenuSelect`, which `RoleSelect`
+  is also a wrapper over). The Freeze-root checkbox became an animated `Switch` — a setting like
+  that is a decision, and a knob that slides confirms it landed.
+- [x] **Account menu leads with Home.** The popover's top row was a second copy of the identity
+  card that its own trigger already shows permanently in the sidebar footer. Home takes that row
+  instead; it was previously below the fold on an account with several vaults.
 - [x] **Shareable note links.** `baalda://note/<vault>/<doc>` via `tauri-plugin-deep-link`
   (+ single-instance, so a click on Windows/Linux doesn't spawn a second app). The link carries
   **identity, not access** — ids only, resolved against whoever opens it — and is keyed by `doc_id`,

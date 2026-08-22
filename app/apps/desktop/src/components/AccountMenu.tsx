@@ -27,6 +27,7 @@ import { AsyncButton } from "./AsyncButton";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
 import { Avatar, SyncBadge } from "./Identity";
+import { Switch } from "./Switch";
 import { Spinner } from "./Spinner";
 import { ThemeToggle } from "./ThemeToggle";
 import { UpgradeDialog } from "./UpgradeDialog";
@@ -534,7 +535,6 @@ function AccountPopover({
   if (!session) return null;
   const rows = splitVaultRows(organizations.length, locals.length);
   const activeOrgId = session.activeOrganizationId;
-  const userLabel = session.user.name || session.user.email;
   // "Current" tracks the vault whose folder is actually OPEN right now —
   // not merely the account's active org. After signing in you can be viewing a
   // local folder while an org is active; only one row may read "Current".
@@ -558,14 +558,14 @@ function AccountPopover({
   };
 
   return (
+    // No identity card at the top. The trigger this popover opens from IS the
+    // identity card — name, email and avatar, permanently on screen in the
+    // sidebar footer — so repeating it here spent the most valuable row in the
+    // menu saying something the user was already looking at. Home takes that
+    // row instead: it's the one destination, and it was previously buried
+    // below the fold on an account with several vaults.
     <div className="account-popover" role="menu">
-      <div className="menu-account">
-        <Avatar label={userLabel} image={session.user.image} />
-        <span className="identity-meta">
-          <span className="identity-line1">{session.user.name || "—"}</span>
-          <span className="identity-line2">{session.user.email}</span>
-        </span>
-      </div>
+      {vault && <HomeButton onClose={onClose} />}
 
       {userInvitations.length > 0 && (
         <div className="invite-inbox">
@@ -591,7 +591,6 @@ function AccountPopover({
       )}
 
       <div className="menu-sep" />
-      {vault && <HomeButton onClose={onClose} />}
       <div className="menu-label">Remote vaults</div>
 
       {/* Active vault pinned to the top — it's the one you're working in.
@@ -1499,12 +1498,12 @@ function FreezeRootRow({ canManage }: { canManage: boolean }) {
             Nothing already at the root is moved, renamed, or hidden.
           </span>
         </span>
-        <input
-          type="checkbox"
+        <Switch
           checked={rootFrozen}
           disabled={!canManage || busy}
+          ariaLabel="Freeze vault root"
           title={canManage ? undefined : "Only an owner or admin can change this"}
-          onChange={(e) => void flip(e.target.checked)}
+          onChange={(next) => void flip(next)}
         />
       </label>
       {!canManage && (

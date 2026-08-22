@@ -169,6 +169,15 @@ interface AppStore {
   /** Locks (read-only overlays) in the synced vault — drives tree badges. */
   locks: Share[];
   /**
+   * Private overlays (`denied` shares) in the synced vault.
+   *
+   * Split from `locks` deliberately: they arrive on the same request but mean
+   * something different, and rendering one as the other would padlock a folder
+   * that isn't read-only. Org-principal rows are "this item is not shared with
+   * the team"; user-principal rows are "this person is blocked".
+   */
+  denies: Share[];
+  /**
    * Who last edited each note's CONTENT, keyed by **docId** (never by path, and
    * dropped on every vault switch — two vaults both have a `Welcome.md`).
    * Refreshed by the registry pull; empty when sync is off.
@@ -774,6 +783,7 @@ function vaultScopedSyncReset() {
     docSyncState: {} as Record<string, DocSyncState>,
     docIdByPath: {} as Record<string, string>,
     locks: [] as Share[],
+    denies: [] as Share[],
     noteLastEdited: {} as Record<string, NoteLastEdited>,
     versionPanelDocId: null,
     noteVersions: null,
@@ -2027,20 +2037,27 @@ export const useStore = create<AppStore>((set, get) => ({
   refreshLocks: async () => {
     const vaultId = syncManager.registry.vaultId;
     if (!vaultId || !get().syncEnabled) {
-      set({ locks: [] });
+      set({ locks: [], denies: [] });
       return;
     }
     const epoch = get().vault?.epoch;
     try {
-      const locks = await authManager.api.listVaultLocks(vaultId);
+      const overlay = await authManager.api.listVaultLocks(vaultId);
       // Locks are per-vault; publishing another vault's set would badge the
       // wrong rows in the sidebar.
       if (!sameVault(get, epoch) || syncManager.registry.vaultId !== vaultId) return;
-      set({ locks });
+      // The endpoint returns both overlay kinds. They MUST stay apart here:
+      // everything downstream of `locks` (badges, tooltips, the read-only cap)
+      // assumes every row is a lock, and a Private row rendered as a lock would
+      // put a padlock on a folder that is not read-only at all.
+      set({
+        locks: overlay.filter((s) => s.permission === "locked"),
+        denies: overlay.filter((s) => s.permission === "denied"),
+      });
     } catch (e) {
       console.warn("[locks] refresh failed", e);
       if (!sameVault(get, epoch)) return;
-      set({ locks: [] });
+      set({ locks: [], denies: [] });
     }
   },
 

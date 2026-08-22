@@ -104,15 +104,17 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // private-by-default). On a vault resource it's the "Open"/"Read-only"
     // posture. Both are allowed; locks (cap overlays) may also be org-wide.
     //
-    // `denied` is the per-member "No access" and is deliberately narrower: only
-    // principal_type 'user', and never on the vault resource. An org-wide deny
-    // is just "no org grant" (the Private posture) said twice, and a vault-level
-    // deny would be a way to lock the owner out of their own vault.
-    if (permission === "denied" && (principalType !== "user" || resourceType === "vault")) {
-      return c.json(
-        { error: "denied applies to one member on a folder or file" },
-        400,
-      );
+    // `denied` comes in two shapes, both on a folder or file and never on the
+    // vault resource (a vault-level deny is the Private posture, and would be a
+    // way to lock an owner out of their own vault):
+    //   - principal 'user' — the per-member Private: an absolute block.
+    //   - principal 'org'  — the ITEM set to Private: it takes the item out of
+    //     the team's reach. This is the row that makes item-Private possible at
+    //     all; clearing an item's own grants could never achieve it, because a
+    //     vault-wide Open grant still reached the item and the UI snapped back
+    //     to Shared.
+    if (permission === "denied" && resourceType === "vault") {
+      return c.json({ error: "denied applies to a folder or a file" }, 400);
     }
 
     const gate = await canManage(session.userId, resourceType, resourceId);
@@ -212,8 +214,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     );
   });
 
-  // List every lock in a note collection. Any member of the vault may read
-  // these — the client renders lock badges in the tree from this.
+  // Every access OVERLAY row in a note collection: `locked` (read-only cap) and
+  // `denied` (Private). Any member may read these — the client renders the
+  // tree's lock badges and the Access panel's inherited-Private state from
+  // them, and both need the whole vault's set, not one resource's.
+  //
+  // Still mounted at `/locks`: the shape is a superset and the client splits by
+  // permission, so an older client that only understands `locked` is unaffected
+  // by the extra rows only if it filters — which it does.
   app.get("/vaults/:vaultId/locks", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -232,7 +240,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       `SELECT s.id, s.resource_type, s.resource_id, s.principal_type, s.principal_id,
               s.permission, s.created_by, s.created_at
          FROM shares s
-        WHERE s.permission = 'locked'
+        WHERE s.permission IN ('locked', 'denied')
           AND (
             (s.resource_type = 'folder' AND s.resource_id IN
                (SELECT id FROM folders WHERE vault_id = $1))

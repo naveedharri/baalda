@@ -30,7 +30,21 @@ export async function vaultAccess(
   db: Queryable,
   userId: string,
   vaultId: string,
-): Promise<{ organizationId: string; role: string | null; vaultWide: boolean } | null> {
+): Promise<{
+  organizationId: string;
+  role: string | null;
+  vaultWide: boolean;
+  /**
+   * WHERE the vault-wide reach came from, or null when there is none.
+   *
+   * Load-bearing for the item-Private rule: an item set to Private takes it
+   * out of the TEAM's reach only, so a member whose access is the org-wide
+   * grant loses it while an owner/admin or someone holding a personal
+   * vault grant keeps it. Collapsing all three into one boolean is what made
+   * that impossible to express.
+   */
+  vaultWideVia: "role" | "org" | "user" | null;
+} | null> {
   const org = await db.query<{ organization_id: string; role: string | null }>(
     `SELECT v.organization_id, m.role
        FROM vaults v
@@ -41,42 +55,51 @@ export async function vaultAccess(
   );
   const row = org.rows[0];
   if (!row) return null;
-  let vaultWide = row.role === "owner" || row.role === "admin";
-  if (!vaultWide) {
-    const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
-    const grant = await db.query(
-      `SELECT 1 FROM shares
-        WHERE resource_type = 'vault' AND resource_id = $1
-          AND permission IN ('view', 'edit')
-          AND (${orgClause} (principal_type = 'user' AND principal_id = $2))
-        LIMIT 1`,
-      [row.organization_id, userId],
-    );
-    vaultWide = (grant.rowCount ?? 0) > 0;
+  const base = { organizationId: row.organization_id, role: row.role };
+  if (row.role === "owner" || row.role === "admin") {
+    return { ...base, vaultWide: true, vaultWideVia: "role" };
   }
-  return { organizationId: row.organization_id, role: row.role, vaultWide };
+  const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
+  const grant = await db.query<{ principal_type: string }>(
+    `SELECT principal_type FROM shares
+      WHERE resource_type = 'vault' AND resource_id = $1
+        AND permission IN ('view', 'edit')
+        AND (${orgClause} (principal_type = 'user' AND principal_id = $2))
+      ORDER BY principal_type = 'user' DESC
+      LIMIT 1`,
+    [row.organization_id, userId],
+  );
+  const via = grant.rows[0]?.principal_type;
+  return {
+    ...base,
+    vaultWide: via !== undefined,
+    vaultWideVia: via === "user" ? "user" : via === "org" ? "org" : null,
+  };
 }
 
 /**
- * doc_ids in this vault the user is explicitly SHUT OUT of — the per-member
- * deny (`shares.permission = 'denied'`) folded down through folder inheritance.
+ * doc_ids in this vault covered by a `denied` row for `principalId`, folded
+ * down through folder inheritance.
  *
- * Subtracted from every readable/visible set below rather than woven into their
- * WHERE clauses on purpose: a deny has to beat the owner/admin branch, the
- * vault-wide grant branch AND the created_by branch, and those are three
- * different queries. One subtraction at the end can't be forgotten in one of
- * them.
+ * Two callers, matching the resolver's two kinds of deny ([[resolver]]):
+ *   - `'user'` — the per-member Private. Subtracted from EVERY set below,
+ *     because it has to beat the owner/admin branch, the vault-wide grant
+ *     branch and the created_by branch, which are three different queries.
+ *     One subtraction at the end can't be forgotten in one of them.
+ *   - `'org'`  — the item set to Private. Subtracted only from what the TEAM
+ *     could otherwise reach, so the creator and explicit grantees keep it.
  */
 async function deniedDocsInVault(
   db: Queryable,
-  userId: string,
+  principalType: "user" | "org",
+  principalId: string,
   vaultId: string,
 ): Promise<Set<string>> {
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE denied_seed AS (
         SELECT resource_id AS id FROM shares
          WHERE resource_type = 'folder' AND permission = 'denied'
-           AND principal_type = 'user' AND principal_id = $1
+           AND principal_type = $3 AND principal_id = $1
      ),
      denied_subtree AS (
         SELECT id, parent_id FROM folders WHERE id IN (SELECT id FROM denied_seed)
@@ -86,7 +109,7 @@ async function deniedDocsInVault(
      denied_files AS (
         SELECT resource_id AS id FROM shares
          WHERE resource_type = 'file' AND permission = 'denied'
-           AND principal_type = 'user' AND principal_id = $1
+           AND principal_type = $3 AND principal_id = $1
      )
      SELECT n.id FROM notes n
        WHERE n.vault_id = $2
@@ -95,21 +118,22 @@ async function deniedDocsInVault(
      SELECT fi.id FROM files fi
        WHERE fi.vault_id = $2
          AND (fi.folder_id IN (SELECT id FROM denied_subtree) OR fi.id IN (SELECT id FROM denied_files))`,
-    [userId, vaultId],
+    [principalId, vaultId, principalType],
   );
   return new Set(rows.map((r) => r.id));
 }
 
-/** Folder ids this user is denied, including everything below them. */
+/** Folder ids denied to `principalId`, including everything below them. */
 async function deniedFolderIds(
   db: Queryable,
-  userId: string,
+  principalType: "user" | "org",
+  principalId: string,
 ): Promise<Set<string>> {
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE denied_seed AS (
         SELECT resource_id AS id FROM shares
          WHERE resource_type = 'folder' AND permission = 'denied'
-           AND principal_type = 'user' AND principal_id = $1
+           AND principal_type = $2 AND principal_id = $1
      ),
      denied_subtree AS (
         SELECT id, parent_id FROM folders WHERE id IN (SELECT id FROM denied_seed)
@@ -117,7 +141,7 @@ async function deniedFolderIds(
         SELECT f.id, f.parent_id FROM folders f JOIN denied_subtree d ON f.parent_id = d.id
      )
      SELECT DISTINCT id FROM denied_subtree`,
-    [userId],
+    [principalId, principalType],
   );
   return new Set(rows.map((r) => r.id));
 }
@@ -141,23 +165,11 @@ async function listDocsInVault(
 ): Promise<Set<string>> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return new Set(); // unknown vault
-  const { organizationId, role, vaultWide } = access;
+  const { organizationId, role, vaultWide, vaultWideVia } = access;
 
   // The ONLY difference between the two sets. `files` has no `deleted_at`
   // column, so a tombstone can never be a file — the UNIONs below drop out.
   const livePredicate = opts.deleted ? "deleted_at IS NOT NULL" : "deleted_at IS NULL";
-
-  if (vaultWide) {
-    const { rows } = await db.query<{ id: string }>(
-      opts.deleted
-        ? `SELECT id FROM notes WHERE vault_id = $1 AND ${livePredicate}`
-        : `SELECT id FROM notes WHERE vault_id = $1 AND ${livePredicate}
-           UNION
-           SELECT id FROM files WHERE vault_id = $1`,
-      [vaultId],
-    );
-    return subtract(new Set(rows.map((r) => r.id)), await deniedDocsInVault(db, userId, vaultId));
-  }
 
   // Non-privileged (private-by-default): readable docs are the union of
   //   - notes the user created (created_by) — ONLY while still a member;
@@ -168,6 +180,12 @@ async function listDocsInVault(
   // ($4) so a REMOVED member (session outlives removal) loses read on notes
   // they authored — matching resolver.effectivePermission's creator rule.
   //
+  // `orgGrants` ($5) is run BOTH ways when an item is set to Private: once
+  // normally, and once with the team's grants switched off, which yields
+  // exactly the docs this user reaches personally (created, or shared to them
+  // by name). Subtracting `orgDenied` minus that personal set is what makes
+  // Private mean "not the team" rather than "not anyone".
+  //
   // A soft-deleted note keeps `created_by`, `folder_id` and its `shares` rows, so
   // this resolves a tombstone's permission exactly as it did while the note lived.
   const isMember = role !== null;
@@ -177,39 +195,71 @@ async function listDocsInVault(
      SELECT fi.id FROM files fi
        WHERE fi.vault_id = $2
          AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files))`;
-  const { rows } = await db.query<{ id: string }>(
-    `WITH RECURSIVE shared_folders AS (
-        SELECT resource_id AS id FROM shares
-         WHERE resource_type = 'folder' AND permission IN ('view', 'edit')
+  const scopedDocs = async (orgGrants: boolean): Promise<Set<string>> => {
+    const { rows } = await db.query<{ id: string }>(
+      `WITH RECURSIVE shared_folders AS (
+          SELECT resource_id AS id FROM shares
+           WHERE resource_type = 'folder' AND permission IN ('view', 'edit')
+             AND (
+               (principal_type = 'user' AND principal_id = $1)
+               OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
+             )
+       ),
+       subtree AS (
+          SELECT id FROM folders WHERE id IN (SELECT id FROM shared_folders)
+          UNION ALL
+          SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+       ),
+       shared_files AS (
+          SELECT resource_id AS id FROM shares
+           WHERE resource_type = 'file' AND permission IN ('view', 'edit')
+             AND (
+               (principal_type = 'user' AND principal_id = $1)
+               OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
+             )
+       )
+       SELECT n.id FROM notes n
+         WHERE n.vault_id = $2 AND n.${livePredicate}
            AND (
-             (principal_type = 'user' AND principal_id = $1)
-             OR ($4 AND principal_type = 'org' AND principal_id = $3)
+             ($4 AND n.created_by = $1)
+             OR n.folder_id IN (SELECT id FROM subtree)
+             OR n.id IN (SELECT id FROM shared_files)
            )
-     ),
-     subtree AS (
-        SELECT id FROM folders WHERE id IN (SELECT id FROM shared_folders)
-        UNION ALL
-        SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
-     ),
-     shared_files AS (
-        SELECT resource_id AS id FROM shares
-         WHERE resource_type = 'file' AND permission IN ('view', 'edit')
-           AND (
-             (principal_type = 'user' AND principal_id = $1)
-             OR ($4 AND principal_type = 'org' AND principal_id = $3)
-           )
-     )
-     SELECT n.id FROM notes n
-       WHERE n.vault_id = $2 AND n.${livePredicate}
-         AND (
-           ($4 AND n.created_by = $1)
-           OR n.folder_id IN (SELECT id FROM subtree)
-           OR n.id IN (SELECT id FROM shared_files)
-         )
-     ${filesUnion}`,
-    [userId, vaultId, organizationId, isMember],
-  );
-  return subtract(new Set(rows.map((r) => r.id)), await deniedDocsInVault(db, userId, vaultId));
+       ${filesUnion}`,
+      [userId, vaultId, organizationId, isMember, orgGrants],
+    );
+    return new Set(rows.map((r) => r.id));
+  };
+
+  // A per-member deny always applies; an org deny (item Private) only takes the
+  // TEAM's reach away, so it is skipped for an owner/admin and for someone
+  // holding a personal vault grant.
+  const userDenied = await deniedDocsInVault(db, "user", userId, vaultId);
+  const orgDenied =
+    vaultWideVia === "role" || vaultWideVia === "user"
+      ? new Set<string>()
+      : await deniedDocsInVault(db, "org", organizationId, vaultId);
+
+  let reachable: Set<string>;
+  if (vaultWide) {
+    const { rows } = await db.query<{ id: string }>(
+      opts.deleted
+        ? `SELECT id FROM notes WHERE vault_id = $1 AND ${livePredicate}`
+        : `SELECT id FROM notes WHERE vault_id = $1 AND ${livePredicate}
+           UNION
+           SELECT id FROM files WHERE vault_id = $1`,
+      [vaultId],
+    );
+    reachable = new Set(rows.map((r) => r.id));
+  } else {
+    reachable = await scopedDocs(true);
+  }
+
+  if (orgDenied.size > 0) {
+    const personal = await scopedDocs(false);
+    for (const id of orgDenied) if (!personal.has(id)) reachable.delete(id);
+  }
+  return subtract(reachable, userDenied);
 }
 
 /** `a` minus `b`, in place on `a`. */
@@ -282,8 +332,21 @@ export async function listVisibleFolders(
     "SELECT id, vault_id, parent_id, name, path, sort, created_by, color FROM folders WHERE vault_id = $1 ORDER BY sort, path",
     [vaultId],
   );
-  const denied = await deniedFolderIds(db, userId);
-  if (access.vaultWide) return all.rows.filter((f) => !denied.has(f.id));
+  // A per-member deny hides the folder from that person outright. An org deny
+  // (item Private) hides it from the TEAM — so it does not apply to an
+  // owner/admin or to someone with a personal vault grant, and a folder the
+  // user created themselves stays visible either way (that's "only you").
+  const userDenied = await deniedFolderIds(db, "user", userId);
+  const orgDenied =
+    access.vaultWideVia === "role" || access.vaultWideVia === "user"
+      ? new Set<string>()
+      : await deniedFolderIds(db, "org", access.organizationId);
+  const mine = new Set(
+    all.rows.filter((f) => f.created_by === userId).map((f) => f.id),
+  );
+  // A per-member deny wins even over authorship; an org deny does not.
+  const hidden = (id: string) => userDenied.has(id) || (orgDenied.has(id) && !mine.has(id));
+  if (access.vaultWide) return all.rows.filter((f) => !hidden(f.id));
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   const isMember = access.role !== null;
@@ -319,5 +382,5 @@ export async function listVisibleFolders(
     [userId, vaultId, access.organizationId, isMember, [...readable]],
   );
   const visible = new Set(visibleIds.map((r) => r.id));
-  return all.rows.filter((f) => visible.has(f.id) && !denied.has(f.id));
+  return all.rows.filter((f) => visible.has(f.id) && !hidden(f.id));
 }

@@ -1069,6 +1069,12 @@ export class ApiClient {
   }
 
   /** All locks in a vault (readable by any vault member — drives lock badges). */
+  /**
+   * Every access OVERLAY row in a note collection: `locked` (the read-only cap)
+   * and `denied` (Private). One request because both are read for the same
+   * reason — badging the tree and resolving what an item inherits — and both
+   * need the whole vault's set, which a per-resource read can't give.
+   */
   async listVaultLocks(vaultId: string): Promise<Share[]> {
     const { data } = await this.request<{ locks: Share[] }>(
       "GET",

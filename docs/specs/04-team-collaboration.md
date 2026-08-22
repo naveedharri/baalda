@@ -96,7 +96,9 @@ shares (
 > `org_id` column — is the vault (organization) id, never the `vaults` note-collection row.
 
 **Effective permission** for a user on a file:
-0. A **`denied`** row for this user on the file or any containing folder → `none`, full stop.
+0. A **`denied`** row for this *user* on the file or any containing folder → `none`, full stop.
+   A `denied` row for the *org* (the item set to Private) instead switches OFF the org-scoped
+   branch of step 3 for that resource.
 1. Vault `owner`/`admin` → `edit` on everything in the vault.
 2. A note's **creator** → `edit` on their own note.
 3. Else take the **max** of: any `share` on the file itself, any `share` on a containing folder
@@ -107,14 +109,28 @@ shares (
    included).
 
 **Two overlays, deliberately different.** `locked` is a *cap* — it takes edit down to view and
-never removes read. `denied` is a *block* — the Access panel's per-member "No access", the only
-row in the model that subtracts. It is resolved **first** so it beats every allow rule above it,
-including the owner/admin branch and the creator escape hatch; without that, "keep this folder
-away from Sam" would silently do nothing on the notes Sam happens to have written. It is always
-`principal_type = 'user'` and never on the `vault` resource: an org-wide deny is just the Private
-posture said twice, and a vault-level deny would be a way to lock an owner out of their own vault.
-The readable-set dual (`permissions/vault-docs.ts`) subtracts the same set, so a denied doc leaves
-the tree and stops syncing rather than merely failing to resolve.
+never removes read. `denied` is a *block*: the only row in the model that subtracts. It comes in
+two flavours, distinguished by `principal_type`, and never applies to the `vault` resource (a
+vault-level deny is what the Private posture already is, and would be a way to lock an owner out
+of their own vault).
+
+| | `denied` + `principal_type='user'` | `denied` + `principal_type='org'` |
+|---|---|---|
+| UI | per-member **Private** | the item set to **Private** |
+| Means | "this person is blocked" | "this item is not shared with the team" |
+| Beats | everything: role, vault grant, explicit share, authorship | org-scoped grants only, incl. the vault-wide one |
+| Spares | nobody | the creator, per-user grantees, owners/admins |
+
+The user deny has to beat authorship, or "keep this away from Sam" would silently do nothing on
+exactly the notes Sam wrote. The org deny exists because **clearing an item's own grants could
+never express item-Private**: in a Shared vault the vault-wide grant still reached the item, so the
+segment snapped straight back to Shared. Sparing owners/admins is what stops someone creating a
+folder that nobody — themselves included — can ever reach again.
+
+The readable-set dual (`permissions/vault-docs.ts`) subtracts both sets under the same rules, so a
+denied doc leaves the tree and stops syncing rather than merely failing to resolve. `vaultAccess`
+reports `vaultWideVia` (`role` / `org` / `user`) precisely so the org deny can skip the first and
+the third.
 
 **Private by default:** a new vault grants nothing org-wide, so members see only what they create
 or what's shared with them / the team. (Owner sets the whole vault to Shared/Read-only, or shares
