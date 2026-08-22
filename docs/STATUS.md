@@ -125,16 +125,17 @@ Six changes that together make a vault something a team can actually govern.
 - [x] **Private, at two scales.** A new `shares.permission = 'denied'` row (migration 018) — the
   only row in the model that SUBTRACTS. Per-**member** (`principal_type 'user'`) it blocks one
   person and beats everything, authorship included. Per-**item** (`principal_type 'org'`) it takes
-  a folder or note out of the team's reach, leaving only the creator and people shared with by
-  name — which is what finally made item-Private work at all: clearing an item's own grants left
+  a folder or note out of the team's reach, leaving only the people shared with by name — which is what finally made item-Private work at all: clearing an item's own grants left
   the vault-wide grant still reaching it, so Private snapped straight back to Shared. Both are
   mirrored in the readable-set dual. See [[04-team-collaboration]] §3.
 - [x] **Access settings apply to the person setting them.** The owner/admin and note-creator
   branches were shortcuts that ran *before* any grant was consulted, so a vault set to Read-only
   still let its owner edit and a folder set to Private still showed up for them — the one person
   who couldn't check their own restriction was the one who made it. Both shortcuts are now skipped
-  under item-Private and under a Read-only vault, so the posture is a ceiling for everyone and a
-  folder marked Shared is still the way to lift someone back out. Management stays role-gated
+  under item-Private and under a Read-only vault, so the posture is a ceiling for everyone; a
+  folder marked Shared, or naming yourself in the per-member list, is the way back out. The panel's
+  "who can access" list now resolves through the same branches as the enforcer — the two disagreed
+  on a member's own note, and a list that contradicts what it describes is worse than no list. Management stays role-gated
   (`canManage`) so an owner can always undo what they applied to themselves. Note this governs
   **sync, not disk**: losing access has never deleted anyone's local `.md` files, so the items stay
   in your own sidebar — they just go read-only/no-access and leave every teammate's vault.

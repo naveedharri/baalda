@@ -173,7 +173,11 @@ async function listDocsInVault(
      SELECT fi.id FROM files fi
        WHERE fi.vault_id = $2
          AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files))`;
-  const scopedDocs = async (orgGrants: boolean): Promise<Set<string>> => {
+  // `creatorCounts` exists for the rescue call below: under item-Private,
+  // authorship no longer keeps a doc, so the "reaches it personally" set is
+  // per-user shares ONLY. The normal call keeps it — a member still reads the
+  // notes they wrote.
+  const scopedDocs = async (orgGrants: boolean, creatorCounts = true): Promise<Set<string>> => {
     const { rows } = await db.query<{ id: string }>(
       `WITH RECURSIVE shared_folders AS (
           SELECT resource_id AS id FROM shares
@@ -199,21 +203,22 @@ async function listDocsInVault(
        SELECT n.id FROM notes n
          WHERE n.vault_id = $2 AND n.${livePredicate}
            AND (
-             ($4 AND n.created_by = $1)
+             ($4 AND $6 AND n.created_by = $1)
              OR n.folder_id IN (SELECT id FROM subtree)
              OR n.id IN (SELECT id FROM shared_files)
            )
        ${filesUnion}`,
-      [userId, vaultId, organizationId, isMember, orgGrants],
+      [userId, vaultId, organizationId, isMember, orgGrants, creatorCounts],
     );
     return new Set(rows.map((r) => r.id));
   };
 
   // Both denies apply to everyone, owners and admins included — see
   // [[resolver]] for why a restriction its author is exempt from is not one.
-  // The org deny is rescued only by `personal` below (what this user created or
-  // was shared by name), which is what "only you and people you share it with"
-  // means once it is a set rather than a sentence.
+  // The org deny is rescued only by an explicit per-user share (`personal`
+  // below, which deliberately does NOT count authorship): Private means
+  // "nobody until you name them", and in a vault you set up yourself you wrote
+  // nearly everything.
   const userDenied = await deniedDocsInVault(db, "user", userId, vaultId);
   const orgDenied = await deniedDocsInVault(db, "org", organizationId, vaultId);
 
@@ -233,7 +238,7 @@ async function listDocsInVault(
   }
 
   if (orgDenied.size > 0) {
-    const personal = await scopedDocs(false);
+    const personal = await scopedDocs(false, false);
     for (const id of orgDenied) if (!personal.has(id)) reachable.delete(id);
   }
   return subtract(reachable, userDenied);
@@ -315,11 +320,8 @@ export async function listVisibleFolders(
   // user created themselves stays visible either way (that's "only you").
   const userDenied = await deniedFolderIds(db, "user", userId);
   const orgDenied = await deniedFolderIds(db, "org", access.organizationId);
-  const mine = new Set(
-    all.rows.filter((f) => f.created_by === userId).map((f) => f.id),
-  );
-  // A per-member deny wins even over authorship; an org deny does not.
-  const hidden = (id: string) => userDenied.has(id) || (orgDenied.has(id) && !mine.has(id));
+  // Neither deny is undone by authorship — see `listDocsInVault`.
+  const hidden = (id: string) => userDenied.has(id) || orgDenied.has(id);
   if (access.vaultWide) return all.rows.filter((f) => !hidden(f.id));
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);

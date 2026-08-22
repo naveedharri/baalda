@@ -575,7 +575,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       <p className="access-intro">
         Choose what the team can reach. Set the whole vault below, then override any folder or
         note — <strong>Shared</strong> (read &amp; write), <strong>Read-only</strong>, or{" "}
-        <strong>Private</strong> (just you). Folder settings flow down to everything inside.
+        <strong>Private</strong> (nobody until you name them — you included). Folder settings flow
+        down to everything inside.
       </p>
 
       {canManage && orgId && (
@@ -814,16 +815,22 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                         ? "The whole team can read & write."
                         : m === "readonly"
                           ? "The team can read, not edit. Claude reads only."
-                          : "Only you and people you share it with."}
+                          : "Nobody reaches it — including you — until you add them below."}
                     </span>
                   </button>
                 ))}
               </div>
               {generalMode === "private" && !privateSource && (
                 <div className="access-hint">
-                  The team can't reach this {selected.kind === "folder" ? "folder" : "note"}
-                  {wsPosture !== "private" && <> — even though the vault is <strong>{MODE_LABEL[wsPosture]}</strong></>}.
-                  You, anyone you share it with by name below, and vault admins still can.
+                  Nobody reaches this {selected.kind === "folder" ? "folder" : "note"}
+                  {wsPosture !== "private" && (
+                    <> — the vault being <strong>{MODE_LABEL[wsPosture]}</strong> doesn't override it</>
+                  )}
+                  . Not the team, not vault admins, and not you: add someone below by name to give
+                  them access, yourself included.{" "}
+                  <strong>Your local files are untouched</strong> — this stops the{" "}
+                  {selected.kind === "folder" ? "folder" : "note"} syncing and takes it out of every
+                  teammate's vault, but never deletes anything off a disk.
                 </div>
               )}
 
@@ -866,7 +873,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                             {m.name || m.email || m.userId}
                             {m.userId === session?.user.id && <span className="access-you"> (you)</span>}
                           </div>
-                          <div className="access-prole">{sourceLabel(m, choice)}</div>
+                          <div className="access-prole">
+                            {sourceLabel(m, choice, m.userId === session?.user.id)}
+                          </div>
                         </div>
                         {canManage && m.userId !== session?.user.id ? (
                           <MenuSelect
@@ -920,8 +929,10 @@ function claudeCls(p: "edit" | "view" | "none"): string {
   return p === "edit" ? "can" : p === "view" ? "view" : "no";
 }
 
-function sourceLabel(m: ResolvedMemberAccess, choice: MemberChoice): string {
-  if (choice === "none" || m.denied) return "Private · hidden from them";
+function sourceLabel(m: ResolvedMemberAccess, choice: MemberChoice, isYou = false): string {
+  if (choice === "none" || m.denied) {
+    return isYou ? "Private · hidden from you too" : "Private · hidden from them";
+  }
   if (m.permission === "none") return "No access";
   if (m.capped) return "Read-only · locked";
   if (m.role === "owner") return "Owner · full access";

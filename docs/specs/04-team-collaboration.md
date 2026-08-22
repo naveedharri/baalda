@@ -112,7 +112,10 @@ shares (
 
 **Nothing in the Access panel exempts the person setting it.** Steps 2 and 3 are conveniences, not
 entitlements, and step 1 is what stops them swallowing a restriction: an owner who marks a folder
-Private loses it too, and a Read-only vault is read-only for its owner. A setting its author can't
+Private loses it too — including notes they wrote, since in a vault you set up yourself you wrote
+nearly everything and sparing the author makes Private unobservable exactly where it is used. A
+Read-only vault is likewise read-only for its owner. Naming yourself in the per-member list is the
+way back in. A setting its author can't
 observe is one they have to take on trust, which is not a thing to ship in an access panel. The
 safety net is that *management* is gated separately — `canManage` (`http/routes/shares.ts`) asks
 for owner/admin and never for effective permission — so an owner can always lift what they set.
@@ -135,8 +138,8 @@ of their own vault).
 |---|---|---|
 | UI | per-member **Private** | the item set to **Private** |
 | Means | "this person is blocked" | "this item is not shared with the team" |
-| Beats | everything: role, vault grant, explicit share, authorship | every org-scoped grant, plus the owner/admin shortcut |
-| Spares | nobody | the creator, and per-user grantees |
+| Beats | everything: role, vault grant, explicit share, authorship | every org-scoped grant, plus the owner/admin **and creator** shortcuts |
+| Spares | nobody | only an explicit per-user grant |
 
 The user deny has to beat authorship, or "keep this away from Sam" would silently do nothing on
 exactly the notes Sam wrote. The org deny exists because **clearing an item's own grants could

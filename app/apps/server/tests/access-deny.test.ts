@@ -265,7 +265,7 @@ describe("item set to Private (org deny)", () => {
     expect(await effectivePermission(member, doc)).toBe("none");
   });
 
-  it("leaves the creator and explicit grantees alone — and nobody else, owners included", async () => {
+  it("leaves explicit grantees alone — and nobody else, the author and owners included", async () => {
     const org = await seedOrg("Acme", "priv-keeps");
     const owner = await seedUser("o@a.com");
     const admin = await seedUser("a@a.com");
@@ -285,14 +285,37 @@ describe("item set to Private (org deny)", () => {
 
     await seedItemPrivate(org, "folder", folder);
 
-    expect(await effectivePermission(author, doc)).toBe("edit"); // "only you"
-    expect(await effectivePermission(invited, doc)).toBe("view"); // "…and people you share it with"
+    expect(await effectivePermission(invited, doc)).toBe("view"); // named in the list
     expect(await effectivePermission(outsider, doc)).toBe("none");
-    // Role is not an exemption. A restriction its author can't observe is one
-    // they have to take on trust, which is not a thing to ship in an access
-    // panel — so Private reaches owners and admins like everyone else.
+    // Neither role nor authorship is an exemption. A restriction its author
+    // can't observe is one they have to take on trust, and in a vault you set
+    // up yourself you wrote nearly everything — so sparing the author would
+    // make Private unobservable exactly where it's used.
     expect(await effectivePermission(owner, doc)).toBe("none");
     expect(await effectivePermission(admin, doc)).toBe("none");
+    expect(await effectivePermission(author, doc)).toBe("none");
+  });
+
+  it("reports the same answer in the panel as the enforcer gives", async () => {
+    // `resolveAccessForUser` renders "who can access"; `effectivePermission`
+    // decides the sync token. They disagreed once — the panel said No access on
+    // a member's own note while the enforcer handed out edit — which is worse
+    // than either answer alone, because it makes the panel untrustworthy.
+    const org = await seedOrg("Acme", "priv-agree");
+    const author = await seedUser("w@a.com");
+    await seedMember(org, author, "member");
+    const vault = await seedVault(org);
+    const doc = await seedNote(vault, null, "mine.md", author);
+
+    const check = async (expected: string) => {
+      const ctx = await buildAccessContext("file", doc);
+      const resolved = await resolveAccessForUser(ctx!, author, "member");
+      expect(resolved.permission).toBe(expected);
+      expect(await effectivePermission(author, doc)).toBe(expected);
+    };
+    await check("edit"); // their own note, private-by-default vault
+    await seedItemPrivate(org, "file", doc);
+    await check("none"); // …and Private takes it from them too
   });
 
   it("still lets an owner lift a Private they applied to themselves", async () => {
@@ -341,9 +364,9 @@ describe("item set to Private (org deny)", () => {
     }
   });
 
-  it("keeps a member's OWN notes inside a Private folder readable", async () => {
-    // "Only you" has to survive the set-based dual too, or a member's own note
-    // would vanish off their disk the moment the folder went Private.
+  it("takes a member's OWN notes too, and gives them back on an explicit share", async () => {
+    // The set-based dual has to drop authorship exactly where the resolver
+    // does, or a Private folder would keep syncing its author's own notes.
     const org = await seedOrg("Acme", "priv-mine");
     const author = await seedUser("w@a.com");
     await seedMember(org, author, "member");
@@ -355,9 +378,16 @@ describe("item set to Private (org deny)", () => {
 
     await seedItemPrivate(org, "folder", folder);
 
-    const docs = await listReadableDocsInVault(author, vault);
-    expect(docs.has(mine)).toBe(true);
+    let docs = await listReadableDocsInVault(author, vault);
+    expect(docs.has(mine)).toBe(false);
     expect(docs.has(theirs)).toBe(false);
+
+    // Naming yourself in the list is the way back in — the same row a teammate
+    // would get.
+    await seedShare(org, "folder", folder, author, "edit");
+    docs = await listReadableDocsInVault(author, vault);
+    expect(docs.has(mine)).toBe(true);
+    expect(docs.has(theirs)).toBe(true);
   });
 
   it("is overridden for one person by an explicit share, and a personal block wins back", async () => {

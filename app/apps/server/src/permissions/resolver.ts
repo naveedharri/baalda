@@ -313,13 +313,23 @@ export async function effectivePermission(
   const readOnlyVault = (await vaultBaseline(db, loc.organizationId)) === "view";
   let granted: Permission;
   if (itemPrivate) {
-    // Private = "only me and people I share it with". The creator keeps it and
-    // explicit per-user grants still apply; everything org-scoped — including
-    // an admin's blanket edit — does not.
-    granted =
-      role !== null && loc.createdBy && loc.createdBy === userId
-        ? "edit"
-        : await sharePermission(db, userId, docId, folderIds, loc.organizationId, false, false);
+    // Private = "nobody, until you name them". ONLY explicit per-user grants
+    // survive — not the org grant, not the admin shortcut, and not authorship.
+    //
+    // Authorship is the one that had to go last and is the one that matters:
+    // in a vault you set up yourself you wrote nearly everything, so a Private
+    // that spares the author is a Private you can never observe, and "it works,
+    // trust me" is not a thing to ship in an access panel. Naming yourself in
+    // the list below is how you get back in.
+    granted = await sharePermission(
+      db,
+      userId,
+      docId,
+      folderIds,
+      loc.organizationId,
+      false,
+      false,
+    );
   } else if (readOnlyVault) {
     granted = await sharePermission(
       db,
@@ -368,6 +378,16 @@ export interface AccessContext {
   organizationId: string;
   docId: string | null;
   folderIds: string[];
+  /**
+   * Creator of the note this context describes (null for a folder, or a file).
+   *
+   * Carried so the "who can access" list applies the same creator rule the
+   * enforcer does. Without it the panel reported `none` for a member's own
+   * note in a Private vault while `effectivePermission` handed them `edit` —
+   * the panel and the thing it describes disagreeing, which is worse than
+   * either answer alone.
+   */
+  createdBy: string | null;
 }
 
 export interface ResolvedAccess {
@@ -391,6 +411,7 @@ export async function buildAccessContext(
       organizationId: loc.organizationId,
       docId: resourceId,
       folderIds: await ancestorFolderIds(db, loc.folderId),
+      createdBy: loc.createdBy,
     };
   }
   // folder: resolve its owning vault (organization), then walk itself + ancestors.
@@ -406,6 +427,7 @@ export async function buildAccessContext(
     organizationId: org,
     docId: null,
     folderIds: await ancestorFolderIds(db, resourceId),
+    createdBy: null, // folders have no creator column in the ACL context
   };
 }
 
@@ -420,23 +442,35 @@ export async function resolveAccessForUser(
     return { permission: "none", capped: false, denied: true };
   }
   const itemPrivate = await isDenied(db, "org", ctx.organizationId, ctx.docId, ctx.folderIds);
+  // Mirrors `effectivePermission` branch for branch. They MUST agree: this one
+  // renders the "who can access" list, and a list that disagrees with the
+  // enforcer is worse than no list.
   const readOnlyVault = (await vaultBaseline(db, ctx.organizationId)) === "view";
-  const granted: Permission =
-    itemPrivate
-      ? // Private: only explicit per-user grants survive. (The creator rule
-        // needs a doc, which a folder context doesn't have — that branch lives
-        // in `effectivePermission`.)
-        await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false)
-      : !readOnlyVault && (role === "owner" || role === "admin")
+  const isCreator = role !== null && !!ctx.createdBy && ctx.createdBy === userId;
+  const granted: Permission = itemPrivate
+    ? // Private: only explicit per-user grants survive — authorship included.
+      await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false)
+    : readOnlyVault
+      ? await sharePermission(
+          db,
+          userId,
+          ctx.docId,
+          ctx.folderIds,
+          ctx.organizationId,
+          role !== null,
+        )
+      : role === "owner" || role === "admin"
         ? "edit"
-        : await sharePermission(
-            db,
-            userId,
-            ctx.docId,
-            ctx.folderIds,
-            ctx.organizationId,
-            role !== null, // isMember — gates the org-wide grant
-          );
+        : isCreator
+          ? "edit"
+          : await sharePermission(
+              db,
+              userId,
+              ctx.docId,
+              ctx.folderIds,
+              ctx.organizationId,
+              role !== null, // isMember — gates the org-wide grant
+            );
 
   if (granted === "none") return { permission: "none", capped: false, denied: itemPrivate };
 
