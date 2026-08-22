@@ -1819,10 +1819,10 @@ body:has(.sidebar-resizer.dragging) {
   display: inline-flex;
   flex-shrink: 0;
 }
+/* Positioning is done in JS (`MenuSelect` → `placeMenu`) in viewport
+   coordinates, so the menu can flip above its trigger and can't be clipped by a
+   scrolling ancestor. Only the sizing belongs here. */
 .context-menu.role-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
   min-width: 150px;
 }
 .context-menu.role-menu li {
@@ -3316,12 +3316,15 @@ body:has(.sidebar-resizer.dragging) {
 }
 
 /* --- master list --- */
+/* No scroll of its own. The settings page already scrolls, and a second scroll
+   region nested inside it is what sliced rows in half at the top edge — you
+   could never tell whether a row was cut off or simply short. The list grows to
+   its content and the page carries it; folders start collapsed, so what's on
+   screen by default is the vault's top level, not everything in it. */
 .access-master {
   background: var(--bg-subtle);
   border-radius: var(--radius-lg);
   padding: var(--sp-2);
-  max-height: 360px;
-  overflow-y: auto;
 }
 .access-list {
   list-style: none;
@@ -3838,8 +3841,6 @@ body:has(.sidebar-resizer.dragging) {
    turn "Can view" into "Can View". Specificity matches `.context-menu.role-menu`
    so it actually overrides it. */
 .context-menu.role-menu.access-choice-menu {
-  right: 0;
-  left: auto;
   min-width: 232px;
 }
 .context-menu.role-menu.access-choice-menu li {
