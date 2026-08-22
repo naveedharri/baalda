@@ -127,6 +127,13 @@ disappears either.
 > since the ex-reader can open it in any editor forever. The server keeps the content, so this is
 > a de-sync, not a delete.
 >
+> Restoring access brings the file back: the note reappears in the registry listing, the
+> reconciler re-materialises it and the content hydrates on open. A permission toggle is never a
+> one-way door. And because a Private item leaves the disk, the Access panel reads the vault's
+> structure from `GET /api/vaults/:id/access-tree` (owner/admin, ids and paths only, deliberately
+> unfiltered) rather than from the local folder — otherwise making something Private would remove
+> the only row you could un-Private it from.
+>
 > Three rails, all in `lib/sync/inbound.ts`: it only fires when the server actually **answered**
 > about deletions (`tombstones !== null` — absence proves nothing otherwise); the file goes to a
 > recoverable **trash** folder rather than being destroyed; and the executor **refuses** any doc

@@ -143,6 +143,12 @@ export interface NoteLastEdited {
   at: string;
 }
 
+/** Flat structure listing that powers the Access panel (see `listAccessTree`). */
+export interface AccessTreeResponse {
+  folders: Array<{ id: string; path: string; color: string | null }>;
+  notes: Array<{ id: string; relPath: string }>;
+}
+
 export interface RegisteredFolder {
   id: string;
   vaultId?: string;
@@ -846,6 +852,24 @@ export class ApiClient {
       { body: input },
     );
     return data;
+  }
+
+  /**
+   * The vault's whole structure for the Access panel - ids and paths only, not
+   * ACL-filtered. Owner/admin only (403 otherwise).
+   *
+   * Separate from {@link listFolders}/{@link listNotes} on purpose: those feed
+   * the reconciler and MUST stay filtered, or the client would materialise notes
+   * it has no right to sync. This one exists so an item you have made Private is
+   * still administrable - it has left your disk, and the panel used to draw its
+   * list from your disk.
+   */
+  async listAccessTree(vaultId: string): Promise<AccessTreeResponse> {
+    const { data } = await this.request<AccessTreeResponse>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/access-tree`,
+    );
+    return { folders: data.folders ?? [], notes: data.notes ?? [] };
   }
 
   async listFolders(vaultId: string): Promise<RegisteredFolder[]> {

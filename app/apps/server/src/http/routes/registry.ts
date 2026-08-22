@@ -194,6 +194,51 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     return c.json({ id: rows[0].id, name: rows[0].name, rootFrozen: rows[0].root_frozen }, 200);
   });
 
+  /**
+   * The vault's WHOLE structure, unfiltered — folders and notes, ids and paths,
+   * no content. Owner/admin only.
+   *
+   * Every other listing here is ACL-filtered, which is right for sync and fatal
+   * for administration: the moment an item is set to Private it leaves
+   * `GET /api/notes`, its file leaves the manager's disk, and the Access panel —
+   * which was drawing its list from that disk — lost the only row you could
+   * un-Private it from. A restriction you cannot see is a restriction you cannot
+   * lift.
+   *
+   * Deliberately a separate endpoint rather than a flag on the sync listings.
+   * Those feed the reconciler, and an unfiltered response reaching it would have
+   * the client materialise notes it has no right to sync. The two must not be
+   * one call with a mode switch.
+   */
+  registryRoutes.get("/vaults/:vaultId/access-tree", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    const role = await orgRole(org, session.userId);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
+    }
+    const [folders, notes] = await Promise.all([
+      pool.query<{ id: string; path: string; color: string | null }>(
+        "SELECT id, path, color FROM folders WHERE vault_id = $1 ORDER BY path",
+        [vaultId],
+      ),
+      // Paths and titles only. This bypasses the ACL, so it carries the minimum
+      // that lets someone administer the tree and nothing that would let them
+      // read a note they've shut themselves out of.
+      pool.query<{ id: string; rel_path: string }>(
+        "SELECT id, rel_path FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path",
+        [vaultId],
+      ),
+    ]);
+    return c.json({
+      folders: folders.rows.map((f) => ({ id: f.id, path: f.path, color: f.color })),
+      notes: notes.rows.map((n) => ({ id: n.id, relPath: n.rel_path })),
+    });
+  });
+
   // ── folders ──────────────────────────────────────────────────────────────
   registryRoutes.post("/folders", async (c) => {
     const session = await getSession(c);

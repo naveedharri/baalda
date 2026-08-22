@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   accessRowName,
   ancestorPaths,
+  entriesFromServer,
+  entriesFromTree,
   folderChildrenLoaded,
-  visibleAccessRows,
+  rowsFromEntries,
 } from "../accessTree";
 import type { TreeNode } from "../ipc";
 
@@ -23,12 +25,6 @@ const file = (path: string): TreeNode => ({
   isDir: false,
 });
 
-/** Everything registered — the ordinary synced vault. */
-const allRegistered = {
-  folderId: (p: string) => `folder-${p}`,
-  docId: (p: string) => `doc-${p}`,
-};
-
 const root = (children: TreeNode[]): TreeNode => ({
   id: "",
   name: "vault",
@@ -38,66 +34,84 @@ const root = (children: TreeNode[]): TreeNode => ({
   childrenLoaded: true,
 });
 
+/** Everything registered — the ordinary synced vault. */
+const allRegistered = {
+  folderId: (p: string) => `folder-${p}`,
+  docId: (p: string) => `doc-${p}`,
+};
+
+/** The server's structure listing for the tree used across these tests. */
+const serverTree = {
+  folders: [
+    { id: "f-docs", path: "Docs" },
+    { id: "f-specs", path: "Docs/Specs" },
+  ],
+  notes: [
+    { id: "d-spec", relPath: "Docs/spec.md" },
+    { id: "d-deep", relPath: "Docs/Specs/deep.md" },
+    { id: "d-readme", relPath: "readme.md" },
+  ],
+};
+
 describe("Access panel item tree", () => {
-  const tree = root([
-    dir("Docs", [file("Docs/spec.md"), dir("Docs/Specs", [file("Docs/Specs/deep.md")])]),
-    file("readme.md"),
-  ]);
+  const entries = entriesFromServer(serverTree);
 
   it("shows only top-level rows when nothing is expanded", () => {
-    const rows = visibleAccessRows(tree, new Set(), allRegistered);
+    const rows = rowsFromEntries(entries, new Set());
     expect(rows.map((r) => r.path)).toEqual(["Docs", "readme.md"]);
     expect(rows[0].expandable).toBe(true);
     expect(rows[1].expandable).toBe(false);
   });
 
-  it("reveals a folder's contents when it is expanded, indented one level", () => {
-    const rows = visibleAccessRows(tree, new Set(["Docs"]), allRegistered);
+  it("reveals a folder's contents when expanded, indented one level", () => {
+    const rows = rowsFromEntries(entries, new Set(["Docs"]));
     expect(rows.map((r) => r.path)).toEqual([
       "Docs",
-      "Docs/spec.md",
       "Docs/Specs",
+      "Docs/spec.md",
       "readme.md",
     ]);
     expect(rows.find((r) => r.path === "Docs/spec.md")?.depth).toBe(1);
-    // Its own children stay hidden until IT is expanded too.
-    const deeper = visibleAccessRows(tree, new Set(["Docs", "Docs/Specs"]), allRegistered);
+
+    const deeper = rowsFromEntries(entries, new Set(["Docs", "Docs/Specs"]));
     expect(deeper.map((r) => r.path)).toContain("Docs/Specs/deep.md");
     expect(deeper.find((r) => r.path === "Docs/Specs/deep.md")?.depth).toBe(2);
   });
 
-  it("treats an un-listed folder as expandable, not empty", () => {
-    // The regression this whole tree exists for: the sidebar loads folders
-    // lazily, so a folder nobody has clicked arrives with no children. Calling
-    // that "empty" is what made the notes inside it unreachable here.
-    const lazy = root([dir("Unopened", undefined, false)]);
-    const rows = visibleAccessRows(lazy, new Set(), allRegistered);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].expandable).toBe(true);
-    expect(folderChildrenLoaded(lazy, "Unopened")).toBe(false);
+  it("lists an item the caller has shut themselves out of", () => {
+    // The whole reason the panel reads the SERVER's structure. A Private item
+    // leaves the local disk, and this list is where you go to change your mind —
+    // sourcing it from the disk removed the row exactly when it was needed.
+    const rows = rowsFromEntries(entries, new Set());
+    expect(rows.map((r) => r.path)).toContain("Docs");
+    // Nothing about the row depends on the file existing locally.
+    expect(rows.find((r) => r.path === "readme.md")?.id).toBe("d-readme");
   });
 
-  it("offers no twisty for a folder known to be empty", () => {
-    const empty = root([dir("Empty", [])]);
-    expect(visibleAccessRows(empty, new Set(), allRegistered)[0].expandable).toBe(false);
-    expect(folderChildrenLoaded(empty, "Empty")).toBe(true);
+  it("offers no twisty for a folder with nothing inside it", () => {
+    const rows = rowsFromEntries(
+      entriesFromServer({ folders: [{ id: "f", path: "Empty" }], notes: [] }),
+      new Set(),
+    );
+    expect(rows[0].expandable).toBe(false);
   });
 
-  it("skips unregistered rows but still walks through them", () => {
-    // A folder with no server id can't hold a share, yet the registered notes
-    // beneath it must stay reachable.
-    const rows = visibleAccessRows(tree, new Set(["Docs"]), {
-      folderId: (p) => (p === "Docs" ? null : `folder-${p}`),
-      docId: (p) => `doc-${p}`,
-    });
-    expect(rows.map((r) => r.path)).toEqual(["Docs/spec.md", "Docs/Specs", "readme.md"]);
+  it("sorts folders before notes at each level", () => {
+    const rows = rowsFromEntries(
+      entriesFromServer({
+        folders: [{ id: "f", path: "Zebra" }],
+        notes: [{ id: "d", relPath: "apple.md" }],
+      }),
+      new Set(),
+    );
+    expect(rows.map((r) => r.path)).toEqual(["Zebra", "apple.md"]);
   });
 
   it("keys rows by server id and strips .md from note names", () => {
-    const rows = visibleAccessRows(tree, new Set(["Docs"]), allRegistered);
-    expect(rows.find((r) => r.path === "Docs")?.key).toBe("folder:folder-Docs");
+    const rows = rowsFromEntries(entries, new Set(["Docs"]));
+    expect(rows.find((r) => r.path === "Docs")?.key).toBe("folder:f-docs");
     const note = rows.find((r) => r.path === "Docs/spec.md");
-    expect(note?.key).toBe("file:doc-Docs/spec.md");
+    expect(note?.key).toBe("file:d-spec");
     expect(note?.name).toBe("spec");
   });
 
@@ -108,6 +122,59 @@ describe("Access panel item tree", () => {
   });
 
   it("returns nothing for an empty vault", () => {
-    expect(visibleAccessRows(null, new Set(), allRegistered)).toEqual([]);
+    expect(rowsFromEntries([], new Set())).toEqual([]);
+  });
+});
+
+describe("Access panel fallback to the local tree", () => {
+  // Used only while the server listing is in flight or was refused. It carries
+  // the lazy-loading rule the server source doesn't need.
+  const tree = root([
+    dir("Docs", [file("Docs/spec.md"), dir("Docs/Specs", [file("Docs/Specs/deep.md")])]),
+    file("readme.md"),
+  ]);
+
+  it("treats an un-listed folder as expandable, not empty", () => {
+    // The sidebar loads folders lazily, so a folder nobody has clicked arrives
+    // with no children. Calling that "empty" hid every note inside it.
+    const lazy = root([dir("Unopened", undefined, false)]);
+    const rows = rowsFromEntries(entriesFromTree(lazy, allRegistered), new Set());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].expandable).toBe(true);
+    expect(folderChildrenLoaded(lazy, "Unopened")).toBe(false);
+  });
+
+  it("offers no twisty for a folder known to be empty", () => {
+    const empty = root([dir("Empty", [])]);
+    const rows = rowsFromEntries(entriesFromTree(empty, allRegistered), new Set());
+    expect(rows[0].expandable).toBe(false);
+    expect(folderChildrenLoaded(empty, "Empty")).toBe(true);
+  });
+
+  it("skips unregistered rows but still walks through them", () => {
+    // A folder with no server id can't hold a share, yet the registered notes
+    // beneath it must stay reachable.
+    const rows = rowsFromEntries(
+      entriesFromTree(tree, {
+        folderId: (p) => (p === "Docs" ? null : `folder-${p}`),
+        docId: (p) => `doc-${p}`,
+      }),
+      new Set(["Docs"]),
+    );
+    expect(rows.map((r) => r.path)).toEqual(["Docs/Specs", "Docs/spec.md", "readme.md"]);
+  });
+
+  it("produces the same shape as the server source", () => {
+    const fromDisk = rowsFromEntries(entriesFromTree(tree, allRegistered), new Set(["Docs"]));
+    expect(fromDisk.map((r) => r.path)).toEqual([
+      "Docs",
+      "Docs/Specs",
+      "Docs/spec.md",
+      "readme.md",
+    ]);
+  });
+
+  it("returns nothing for an empty vault", () => {
+    expect(entriesFromTree(null, allRegistered)).toEqual([]);
   });
 });

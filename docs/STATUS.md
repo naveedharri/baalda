@@ -144,7 +144,15 @@ Six changes that together make a vault something a team can actually govern.
   upstream, so a permission change can't take work that exists nowhere else. Revocations are capped
   separately from deletions and more loosely — a whole shared folder leaving at once is ordinary,
   a mass delete rarely is. An ACL change now also triggers the registry re-pull that carries this
-  out, so it lands in seconds instead of waiting for a restart. Management stays role-gated
+  out, so it lands in seconds instead of waiting for a restart. Restoring access re-materialises
+  the file and it hydrates on open — a permission toggle is never a one-way door.
+- [x] **The Access list reads the server's structure, not this machine's disk.** New owner/admin
+  endpoint `GET /api/vaults/:id/access-tree` (ids and paths, no content, deliberately not ACL
+  filtered). Every other listing is filtered, which is right for sync and fatal for administration:
+  once Private removed the file, the panel — which drew its rows from the disk — lost the only row
+  the restriction could be lifted from. Kept as a separate endpoint rather than a flag on the sync
+  listings, because an unfiltered response reaching the reconciler would have it materialise notes
+  it has no right to sync. Management stays role-gated
   (`canManage`) so an owner can always undo what they applied to themselves. Note this governs
   **sync, not disk**: losing access has never deleted anyone's local `.md` files, so the items stay
   in your own sidebar — they just go read-only/no-access and leave every teammate's vault.

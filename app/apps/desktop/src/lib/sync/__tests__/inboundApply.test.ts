@@ -397,6 +397,43 @@ describe("inbound delete", () => {
     expect(r.reg.hasFailures()).toBe(false);
   });
 
+  it("brings a revoked note BACK when access is restored", async () => {
+    // The round trip that makes the removal safe to do at all. Private takes the
+    // file; setting the item back to Shared or Read-only has to return it, or a
+    // permission toggle would be a one-way door. The server kept the content, so
+    // the file is re-materialised empty and hydrates on open.
+    const disk = new FakeDisk();
+    disk.notes.set("shared.md", "d1");
+    install(disk);
+
+    // Pass 1: agreed it is ours.
+    const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "shared.md" }] }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const carry = () => {
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+        writes[writes.length - 1]?.[0] as never,
+      );
+    };
+    carry();
+
+    // Pass 2: access revoked — gone from the listing, no tombstone.
+    const reg2 = new VaultRegistry(fakeApi({ notes: [], tombstones: [] }));
+    reg2.setInboundHost(recordingHost().host);
+    await reg2.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.notes.has("shared.md")).toBe(false);
+    carry();
+
+    // Pass 3: access restored — the server lists it again.
+    vi.mocked(ipc.writeNoteIfMissing).mockClear();
+    const reg3 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "shared.md" }] }));
+    reg3.setInboundHost(recordingHost().host);
+    await reg3.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("shared.md", "", null);
+    expect(disk.notes.has("shared.md")).toBe(true);
+  });
+
   it("refuses to trash when the server reports no tombstones field", async () => {
     // `null` means "this server cannot answer", which must never be read as
     // "nothing is deleted" and certainly not as "everything is".

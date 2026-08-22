@@ -6,11 +6,15 @@ import {
   sharePrincipalId,
   sharePrincipalType,
 } from "../lib/api";
+import type { AccessTreeResponse } from "../lib/api";
 import type { TreeNode } from "../lib/ipc";
 import {
   ancestorPaths,
+  entriesFromServer,
+  entriesFromTree,
   folderChildrenLoaded,
-  visibleAccessRows,
+  rowsFromEntries,
+  type AccessEntry,
   type AccessRow,
 } from "../lib/accessTree";
 import { lockScopesByPath, resourceIdsByPath } from "../lib/locks";
@@ -191,6 +195,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   /** Folder paths whose children are being fetched from Rust right now. */
   const [expanding, setExpanding] = useState<Set<string>>(() => new Set());
+  /** The vault's full structure, unfiltered by the ACL (owner/admin only). */
+  const [serverTree, setServerTree] = useState<AccessTreeResponse | null>(null);
   const [shares, setShares] = useState<Share[]>([]);
   const [access, setAccess] = useState<ResolvedMemberAccess[] | null>(null);
   const [wsShares, setWsShares] = useState<Share[]>([]);
@@ -206,12 +212,27 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const reloadVault = async () => {
     if (!canManage || !orgId) {
       setWsShares([]);
+      setServerTree(null);
       return;
     }
     try {
       setWsShares(await authManager.api.listVaultShares(orgId));
     } catch {
       setWsShares([]);
+    }
+    // The structure listing is what keeps a Private item administrable, so it is
+    // re-read after every write: setting something Private removes its file, and
+    // the row you would undo that from has to survive it.
+    const vaultId = syncManager.registry.vaultId;
+    if (!vaultId) {
+      setServerTree(null);
+      return;
+    }
+    try {
+      setServerTree(await authManager.api.listAccessTree(vaultId));
+    } catch {
+      // Older server, or a caller who can't manage — fall back to the local tree.
+      setServerTree(null);
     }
   };
   useEffect(() => {
@@ -225,18 +246,28 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const wsPosture: Mode = wsGrant ? (wsGrant.permission === "edit" ? "open" : "readonly") : "private";
 
   /**
-   * The rows currently on screen: the vault tree, indented, with a collapsed
-   * folder's contents left out. The rule that makes it work — an un-listed
-   * folder is expandable, not empty — lives in `lib/accessTree` where a test
-   * can hold it.
+   * The rows currently on screen: the vault's structure, indented, with a
+   * collapsed folder's contents left out.
+   *
+   * Sourced from the SERVER, not from this machine's disk. An item set to
+   * Private leaves the disk, and this panel is where you'd go to change your
+   * mind — drawing the list from the disk meant the row you needed disappeared
+   * the moment you needed it. The local tree is the fallback while that listing
+   * is in flight or if it was refused.
    */
-  const resources = useMemo<Resource[]>(
+  const entries = useMemo<AccessEntry[]>(
     () =>
-      visibleAccessRows(tree, expanded, {
-        folderId: (path) => syncManager.registry.getFolderId(path),
-        docId: (path) => syncManager.registry.getMapping(path)?.docId ?? null,
-      }),
-    [tree, expanded],
+      serverTree
+        ? entriesFromServer(serverTree)
+        : entriesFromTree(tree, {
+            folderId: (path) => syncManager.registry.getFolderId(path),
+            docId: (path) => syncManager.registry.getMapping(path)?.docId ?? null,
+          }),
+    [serverTree, tree],
+  );
+  const resources = useMemo<Resource[]>(
+    () => rowsFromEntries(entries, expanded),
+    [entries, expanded],
   );
 
   /**
@@ -255,7 +286,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     }
     next.add(path);
     setExpanded(next);
-    if (loaded) return;
+    // The server listing is complete, so nothing has to be fetched to expand.
+    // Only the local fallback loads lazily.
+    if (serverTree || loaded) return;
     setExpanding((prev) => new Set(prev).add(path));
     try {
       await useStore.getState().loadChildren(path);

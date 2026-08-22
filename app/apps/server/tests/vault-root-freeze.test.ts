@@ -20,6 +20,12 @@ import { recordingAppDeps } from "./helpers/app.js";
 const rec = recordingAppDeps();
 const app = createApp(rec.deps);
 
+// File-level, not per-describe: a describe-scoped `afterAll` closes the pool the
+// moment the FIRST block finishes, and every later block then fails on a dead one.
+afterAll(async () => {
+  await pool.end();
+});
+
 function req(user: TestUser, method: string, path: string, body?: unknown) {
   return app.fetch(
     new Request(`http://local${path}`, {
@@ -44,9 +50,6 @@ describe("frozen vault root", () => {
     org = (await createOrg(owner, "Freeze Co", "freeze-co")).id;
     await seedMember(org, member.userId, "member");
     vault = await seedVault(org);
-  });
-  afterAll(async () => {
-    await pool.end();
   });
 
   it("owner/admin can flip the latch; a member can only read it", async () => {
@@ -185,5 +188,87 @@ describe("frozen vault root", () => {
       folderId: null,
     });
     expect(rename.status).toBe(200);
+  });
+});
+
+/**
+ * The Access panel's structure listing.
+ *
+ * Every other listing is ACL-filtered, which is right for sync and fatal for
+ * administration: an item set to Private leaves `GET /api/notes`, its file
+ * leaves the manager's disk, and the panel — which drew its rows from that disk
+ * — lost the only row the restriction could be lifted from. A restriction you
+ * cannot see is one you cannot undo.
+ */
+describe("access-tree listing", () => {
+  let owner: TestUser;
+  let member: TestUser;
+  let org: string;
+  let vault: string;
+
+  beforeEach(async () => {
+    await resetDb();
+    rec.reset();
+    owner = await signUp("owner@atree.test");
+    member = await signUp("member@atree.test");
+    org = (await createOrg(owner, "Tree Co", "tree-co")).id;
+    await seedMember(org, member.userId, "member");
+    vault = await seedVault(org);
+  });
+
+  it("still lists a folder and note the caller has shut themselves out of", async () => {
+    const folder = await req(owner, "POST", "/api/folders", {
+      vaultId: vault,
+      name: "HR",
+      path: "HR",
+    });
+    const folderId = (await folder.json()).id as string;
+    const note = await req(owner, "POST", "/api/notes", {
+      vaultId: vault,
+      relPath: "HR/pay.md",
+      folderId,
+    });
+    const docId = (await note.json()).id as string;
+
+    // Private, applied by the owner to themselves.
+    expect(
+      (
+        await req(owner, "POST", "/api/shares", {
+          resourceType: "folder",
+          resourceId: folderId,
+          principalType: "org",
+          permission: "denied",
+        })
+      ).status,
+    ).toBe(201);
+
+    // The sync listing correctly hides it…
+    const synced = await req(owner, "GET", `/api/notes?vaultId=${vault}`);
+    const syncedIds = ((await synced.json()).notes as Array<{ id: string }>).map((n) => n.id);
+    expect(syncedIds).not.toContain(docId);
+
+    // …and the management listing still shows it, which is what makes it undoable.
+    const tree = await req(owner, "GET", `/api/vaults/${vault}/access-tree`);
+    expect(tree.status).toBe(200);
+    const body = (await tree.json()) as {
+      folders: Array<{ path: string }>;
+      notes: Array<{ id: string; relPath: string }>;
+    };
+    expect(body.folders.map((f) => f.path)).toContain("HR");
+    expect(body.notes.map((n) => n.id)).toContain(docId);
+  });
+
+  it("carries no note content — paths and ids only", async () => {
+    await req(owner, "POST", "/api/notes", { vaultId: vault, relPath: "n.md", title: "Secret" });
+    const body = await (await req(owner, "GET", `/api/vaults/${vault}/access-tree`)).text();
+    expect(body).toContain("n.md");
+    // It bypasses the ACL, so it must carry the minimum that lets someone
+    // administer the tree and nothing that would let them READ a note.
+    expect(body).not.toContain("Secret");
+  });
+
+  it("is owner/admin only", async () => {
+    expect((await req(member, "GET", `/api/vaults/${vault}/access-tree`)).status).toBe(403);
+    expect((await req(owner, "GET", "/api/vaults/nope/access-tree")).status).toBe(404);
   });
 });
