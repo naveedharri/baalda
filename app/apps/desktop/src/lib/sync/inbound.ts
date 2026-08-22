@@ -52,6 +52,19 @@ export interface InboundRename {
 export interface InboundTrash {
   docId: string;
   path: string;
+  /**
+   * Why the file is leaving.
+   *
+   * `deleted` — the server tombstoned it: someone deleted the note.
+   * `revoked` — it left the caller's readable set: access was taken away.
+   *
+   * They execute identically (release the doc, move it to the vault trash) but
+   * carry different risk, so they get separate safety caps and separate
+   * wording when one is refused. A wrong `deleted` is a server bug destroying
+   * work; a mass `revoked` is a routine admin action that happens to look the
+   * same from here.
+   */
+  reason: "deleted" | "revoked";
 }
 
 export interface InboundRejection {
@@ -68,8 +81,9 @@ export interface InboundPlan {
   trash: InboundTrash[];
   /**
    * Docs that vanished from the server listing WITHOUT a tombstone — i.e. access
-   * was revoked (or the server didn't answer). Their files stay exactly where
-   * they are; this only stops us treating them as ours.
+   * was revoked. This stops us treating them as ours; the file itself leaves via
+   * a `revoked` entry in {@link trash}, which is gated on the server having
+   * answered about deletions at all.
    */
   revoked: Set<string>;
   /**
@@ -162,6 +176,20 @@ export function isSafeFolderPath(path: string): boolean {
  */
 function trashCap(mapped: number): number {
   return Math.max(5, Math.ceil(mapped * 0.2));
+}
+/**
+ * Revocation gets a more generous budget than deletion.
+ *
+ * Losing a whole shared folder at once is an ordinary thing for an admin to do,
+ * so the deletion cap (20%) would refuse the common case. The looser limit is
+ * affordable because the blast radius is smaller: the server still holds every
+ * one of these docs by definition, and the files land in the vault's trash.
+ * It is still a limit, because a truncated `GET /api/notes` looks exactly like
+ * a mass revoke from here — and when it trips we keep the files, which is the
+ * safe direction.
+ */
+function revokeCap(mapped: number): number {
+  return Math.max(20, Math.ceil(mapped * 0.5));
 }
 function renameCap(mapped: number): number {
   return Math.max(20, Math.ceil(mapped * 0.3));
@@ -264,15 +292,28 @@ export function planInbound(input: InboundInput): InboundPlan {
       // Belt as well as braces: if the trash step is skipped or fails, this still
       // stops the note being re-registered as a ghost.
       plan.suppress.add(loc);
-      pushTrash(plan, docId, loc);
+      pushTrash(plan, docId, loc, "deleted");
       continue;
     }
 
-    // Absent from BOTH lists ⇒ we lost access (or the server didn't answer).
-    // Keep the file, exactly as the vault channel's `drop` frame does — losing a
-    // share must never cost someone their local copy — but stop claiming it.
+    // Absent from BOTH lists ⇒ we lost access.
     plan.revoked.add(docId);
     if (loc !== undefined) plan.suppress.add(loc);
+    // …and the local copy goes with it. A revocation that leaves a full,
+    // readable `.md` on the ex-reader's disk is cosmetic: they can open it in
+    // any editor forever. The server keeps the content (this only ever runs for
+    // a doc we previously AGREED was server-owned — `prev !== undefined` above),
+    // the file moves to the vault's recoverable trash rather than being
+    // destroyed, and the executor still refuses any doc whose content this
+    // device never confirmed upstream.
+    //
+    // Gated on the server having actually ANSWERED about deletions. A `null`
+    // tombstone list means "I don't know", and absence is then uninformative —
+    // it could equally be a truncated response. Removing files on the strength
+    // of a maybe is precisely the mistake this module exists to avoid.
+    if (loc !== undefined && input.tombstones !== null) {
+      pushTrash(plan, docId, loc, "revoked");
+    }
   }
 
   // Trash deepest-first, so a folder's contents leave before anything prunes it.
@@ -291,26 +332,39 @@ function pushRename(plan: InboundPlan, docId: string, from: string, to: string):
   plan.renames.push({ docId, from, to });
 }
 
-function pushTrash(plan: InboundPlan, docId: string, path: string): void {
+function pushTrash(
+  plan: InboundPlan,
+  docId: string,
+  path: string,
+  reason: InboundTrash["reason"],
+): void {
   if (!isSafeNotePath(path)) {
     plan.rejected.push({ kind: "trash", path, docId, reason: "unsafe local path" });
     return;
   }
-  plan.trash.push({ docId, path });
+  plan.trash.push({ docId, path, reason });
 }
 
 function applyBreakers(plan: InboundPlan, mapped: number): void {
-  const tCap = trashCap(mapped);
-  if (plan.trash.length > tCap) {
-    for (const t of plan.trash) {
+  // Each reason is capped against its own budget, and independently: a mass
+  // revoke must not blow away the allowance for a legitimate single delete
+  // riding in the same pass.
+  const caps: Array<[InboundTrash["reason"], number, string]> = [
+    ["deleted", trashCap(mapped), "deletions"],
+    ["revoked", revokeCap(mapped), "access removals"],
+  ];
+  for (const [reason, cap, label] of caps) {
+    const group = plan.trash.filter((t) => t.reason === reason);
+    if (group.length <= cap) continue;
+    for (const t of group) {
       plan.rejected.push({
         kind: "trash",
         path: t.path,
         docId: t.docId,
-        reason: `refused: ${plan.trash.length} deletions in one pass exceeds the ${tCap} safety limit`,
+        reason: `refused: ${group.length} ${label} in one pass exceeds the ${cap} safety limit`,
       });
     }
-    plan.trash = [];
+    plan.trash = plan.trash.filter((t) => t.reason !== reason);
   }
   const rCap = renameCap(mapped);
   if (plan.renames.length > rCap) {

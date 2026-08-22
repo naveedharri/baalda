@@ -376,10 +376,11 @@ describe("inbound delete", () => {
     expect(ipc.trashNote).not.toHaveBeenCalled();
   });
 
-  it("KEEPS a file whose access was revoked, and stops re-registering it", async () => {
-    // The regression that matters most. `GET /api/notes` is ACL-filtered, so a
-    // revoked share looks exactly like a delete — and removing files on absence
-    // would mean un-sharing a note destroys a teammate's local copy.
+  it("REMOVES a file whose access was revoked, and stops re-registering it", async () => {
+    // `GET /api/notes` is ACL-filtered, so a revoked share looks like a delete;
+    // the tombstone set is what tells them apart. Both end with the file in the
+    // vault's recoverable trash — a revocation that leaves a readable `.md`
+    // behind is cosmetic, since the ex-reader can open it in any editor forever.
     const disk = new FakeDisk();
     disk.notes.set("shared.md", "d1");
     const r = await twoPasses({
@@ -388,8 +389,10 @@ describe("inbound delete", () => {
       then: { notes: [], tombstones: [] },
     });
 
-    expect(disk.notes.has("shared.md")).toBe(true);
-    expect(ipc.trashNote).not.toHaveBeenCalled();
+    expect(disk.notes.has("shared.md")).toBe(false);
+    expect(ipc.trashNote).toHaveBeenCalledWith("shared.md", expect.any(String), null);
+    // And it is NOT re-registered on the way out, which would resurrect it as an
+    // unsyncable ghost.
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
     expect(r.reg.hasFailures()).toBe(false);
   });

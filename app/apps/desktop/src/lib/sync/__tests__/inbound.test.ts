@@ -4,9 +4,12 @@ import { isSafeFolderPath, isSafeNotePath, planInbound } from "../inbound";
 /**
  * `planInbound` decides whether to move or delete files on someone's disk, so it
  * is written as a pure function and tested as a table. Every rule gets a case,
- * and the two that matter most get their own names:
+ * and the ones that matter most get their own names:
  *   - a note the server RENAMED must move, not duplicate;
- *   - a note that merely left the listing (a revoked share) must NOT be touched.
+ *   - a note that left the listing (access revoked) must be removed, because a
+ *     revocation that leaves a readable copy behind is cosmetic;
+ *   - …unless the server didn't answer about deletions, where absence proves
+ *     nothing and the file must be left alone.
  */
 
 const empty = {
@@ -132,24 +135,39 @@ describe("planInbound — deletes", () => {
       local: new Map([["d1", "bye.md"]]),
       tombstones: new Set(["d1"]),
     });
-    expect(p.trash).toEqual([{ docId: "d1", path: "bye.md" }]);
+    expect(p.trash).toEqual([{ docId: "d1", path: "bye.md", reason: "deleted" }]);
     // Suppressed as well, so even if the trash step is skipped the note is not
     // re-registered as an unsyncable ghost.
     expect([...p.suppress]).toEqual(["bye.md"]);
   });
 
-  it("KEEPS the file when a note merely left the listing (revoked share)", () => {
-    // The test the whole tombstone design exists for. `GET /api/notes` is
-    // ACL-filtered, so losing a share looks exactly like a delete. Removing files
-    // on absence would mean an unshare destroys a teammate's local notes.
+  it("removes the file when a note left the listing (access revoked)", () => {
+    // `GET /api/notes` is ACL-filtered, so losing access looks like a delete —
+    // hence the tombstone set, which says which of the two it was. Both end in
+    // the vault's trash, but they are tagged differently because they carry
+    // different risk and get different safety caps.
     const p = plan({
       baseline: new Map([["d1", "shared.md"]]),
       local: new Map([["d1", "shared.md"]]),
       tombstones: new Set(),
     });
+    expect(p.trash).toEqual([{ docId: "d1", path: "shared.md", reason: "revoked" }]);
+    expect([...p.revoked]).toEqual(["d1"]);
+    // Suppressed too, so the outbound half can't re-register it on the way out.
+    expect([...p.suppress]).toEqual(["shared.md"]);
+  });
+
+  it("does NOT remove a revoked file when the server didn't answer about deletions", () => {
+    // `null` tombstones means "I don't know". Absence proves nothing then — it
+    // could equally be a truncated response — and removing files on the strength
+    // of a maybe is the one thing this module must never do.
+    const p = plan({
+      baseline: new Map([["d1", "shared.md"]]),
+      local: new Map([["d1", "shared.md"]]),
+      tombstones: null,
+    });
     expect(p.trash).toEqual([]);
     expect([...p.revoked]).toEqual(["d1"]);
-    // Still suppressed: keep the file, stop claiming it.
     expect([...p.suppress]).toEqual(["shared.md"]);
   });
 
@@ -218,14 +236,23 @@ describe("planInbound — deletes", () => {
 });
 
 describe("planInbound — circuit breakers", () => {
-  function manyDocs(n: number, dead: boolean) {
+  /**
+   * `dead: true` builds a vault whose docs are all ABSENT from the server
+   * listing (the delete/revoke shape); `false` builds one where every doc moved
+   * (the rename shape). `keep` lists docIds to leave in the listing untouched,
+   * so a case can isolate a few deletions without the remaining 97 reading as
+   * mass revocations.
+   */
+  function manyDocs(n: number, dead: boolean, keep: string[] = []) {
     const baseline = new Map<string, string>();
     const local = new Map<string, string>();
     const server = new Map<string, string>();
+    const kept = new Set(keep);
     for (let i = 0; i < n; i++) {
       baseline.set(`d${i}`, `n${i}.md`);
       local.set(`d${i}`, `n${i}.md`);
       if (!dead) server.set(`d${i}`, `moved-${i}.md`);
+      else if (kept.has(`d${i}`)) server.set(`d${i}`, `n${i}.md`);
     }
     return { baseline, local, server };
   }
@@ -243,17 +270,47 @@ describe("planInbound — circuit breakers", () => {
     expect(p.trash).toEqual([]);
     expect(p.rejected).toHaveLength(100);
     expect(p.rejected[0].reason).toContain("safety limit");
+    expect(p.rejected[0].reason).toContain("deletions");
   });
 
   it("allows a small delete under the limit", () => {
-    const { baseline, local } = manyDocs(100, true);
+    const survivors = Array.from({ length: 97 }, (_, i) => `d${i + 3}`);
+    const { baseline, local, server } = manyDocs(100, true, survivors);
     const p = plan({
       baseline,
       local,
-      tombstones: new Set(["d1", "d2", "d3"]),
+      server,
+      tombstones: new Set(["d0", "d1", "d2"]),
     });
     expect(p.trash).toHaveLength(3);
     expect(p.rejected).toEqual([]);
+  });
+
+  it("caps deletions and revocations against separate budgets", () => {
+    // Revocation gets the looser cap: losing a whole shared folder is an
+    // ordinary admin action, while a mass DELETE is far more likely to be a bug.
+    // They must not consume each other's allowance either — a mass revoke can't
+    // be allowed to refuse one legitimate delete riding along with it.
+    const { baseline, local, server } = manyDocs(100, true, ["d99"]);
+    const p = plan({ baseline, local, server, tombstones: new Set(["d0"]) });
+
+    // 99 revocations against a cap of 50 → the whole revoked group is refused…
+    expect(p.trash).toEqual([{ docId: "d0", path: "n0.md", reason: "deleted" }]);
+    expect(p.rejected).toHaveLength(98);
+    expect(p.rejected[0].reason).toContain("access removals");
+
+    // …while 40 of them (under the cap) go through, alongside the delete.
+    const keep = Array.from({ length: 59 }, (_, i) => `d${i + 41}`);
+    const partial = manyDocs(100, true, keep);
+    const q = plan({
+      baseline: partial.baseline,
+      local: partial.local,
+      server: partial.server,
+      tombstones: new Set(["d0"]),
+    });
+    expect(q.trash.filter((t) => t.reason === "revoked")).toHaveLength(40);
+    expect(q.trash.filter((t) => t.reason === "deleted")).toHaveLength(1);
+    expect(q.rejected).toEqual([]);
   });
 
   it("allows up to five deletes even in a tiny vault", () => {

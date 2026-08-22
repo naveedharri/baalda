@@ -262,18 +262,23 @@ export async function listReadableDocsInVault(
  * doc_ids in this vault the caller could read but that are now **soft-deleted**.
  *
  * Why this exists: "absent from `GET /api/notes`" is ambiguous — it means either
- * *deleted* or *you lost read access*, because that route is ACL-filtered. The
- * desktop reconciler has to remove local files for the first and must NOT for the
- * second (losing a share deliberately leaves the `.md` alone). Absence alone
- * can't distinguish them, and neither can `effectivePermission`: `locateDoc`
- * filters `deleted_at IS NULL`, so a deleted doc resolves to "none", exactly like
- * no access. So deletion has to be *stated*, never inferred.
+ * *deleted* or *you lost read access*, because that route is ACL-filtered.
+ * Absence alone can't distinguish them, and neither can `effectivePermission`:
+ * `locateDoc` filters `deleted_at IS NULL`, so a deleted doc resolves to "none",
+ * exactly like no access. So deletion has to be *stated*, never inferred.
+ *
+ * Both outcomes now remove the local file (a revocation that leaves a readable
+ * `.md` on the ex-reader's disk is cosmetic), but they remain distinct: the
+ * client caps them against separate budgets and reports them differently, and
+ * an unanswered tombstone question still means "change nothing" — see
+ * `lib/sync/inbound.ts`.
  *
  * Permission-filtered rather than "every deleted id in the vault": the filtered
  * version's failure mode is the safe one. If a teammate lost the share AND the
- * note was deleted, the id is withheld, the client falls into its
- * "absent from both" branch, and it keeps the file. Filtering can only ever
- * cause a MISSED delete, never a wrong one.
+ * note was deleted, the id is withheld and the client falls into its
+ * "absent from both" branch, which removes the file as a revocation instead of
+ * as a delete — the same outcome by the gentler route (a larger safety budget,
+ * and it never fires at all if this endpoint couldn't answer).
  */
 export async function listDeletedReadableDocsInVault(
   userId: string,

@@ -591,8 +591,9 @@ export class VaultRegistry {
 
   /**
    * Bring local disk into line with the server's structure: create folders that
-   * only exist server-side, apply remote renames/moves, and move remotely-deleted
-   * notes to the vault's trash.
+   * only exist server-side, apply remote renames/moves, and move notes to the
+   * vault's trash when the server says they were deleted OR when they left this
+   * user's readable set (access revoked — see `InboundTrash.reason`).
    *
    * Every mutation below is guarded, and the guards are the point:
    *   - a persisted baseline for THIS collection must exist (else we can't tell a
@@ -738,14 +739,19 @@ export class VaultRegistry {
       if (this.stopRun()) break;
       // A note whose content this device never confirmed upstream may hold local
       // edits that exist NOWHERE else, so removing it could lose the only copy.
-      // Read `pushed` before the prune below has a chance to drop it.
+      // Read `pushed` before the prune below has a chance to drop it. This
+      // matters most for `revoked`: access can be taken away mid-edit, and the
+      // one thing a permission change must never do is destroy work that only
+      // exists here.
       if (!this.pushed.has(gone.docId) && !(await this.isEmptyOnDisk(gone.path))) {
         this.recordFailure({
           kind: "orphan",
           path: gone.path,
           docId: gone.docId,
           reason:
-            "deleted on the server, but this device never confirmed its content — left on disk",
+            gone.reason === "revoked"
+              ? "access was removed, but this device never confirmed its content upstream — left on disk"
+              : "deleted on the server, but this device never confirmed its content — left on disk",
           code: null,
         });
         continue;

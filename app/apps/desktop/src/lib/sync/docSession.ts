@@ -1000,7 +1000,17 @@ export class SyncManager implements InboundHost {
       // An ACL change in this vault may have flipped the open note's grant
       // (view↔edit, lock/unlock). Re-mint its token so the editor becomes
       // read-only/editable live — no reopen (spec 04 §4).
-      onAclChanged: () => this.current?.refreshAccess(),
+      onAclChanged: () => {
+        // Two things follow from "the ACL moved". The open note re-mints its
+        // token so a view<->edit flip lands live...
+        this.current?.refreshAccess();
+        // ...and the registry gets re-pulled, because the readable SET may have
+        // changed too. That pull is what removes a note this user just lost
+        // access to from their disk, and without it the removal would wait for
+        // the next structural change or an app restart - long enough to look
+        // like the revocation hadn't worked.
+        this.handleRegistryChanged();
+      },
       // A teammate changed the folder/note structure — re-pull + refresh tree.
       onRegistryChanged: () => this.handleRegistryChanged(),
       // A new teammate joined the vault — refresh roster + celebrate.

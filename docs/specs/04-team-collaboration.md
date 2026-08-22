@@ -122,11 +122,17 @@ for owner/admin and never for effective permission — so an owner can always li
 The desktop's Access list is built from the local folder, so the row to lift it from never
 disappears either.
 
-> **A restriction governs sync, not someone's disk.** Losing access never deletes local `.md`
-> files (that's the whole point of `listDeletedReadableDocsInVault` — absence has to be
-> distinguishable from deletion). So an owner who makes everything Private still sees the files in
-> their own sidebar; what changes is that the notes go read-only or no-access, stop syncing, and
-> leave every teammate's vault.
+> **A restriction reaches the disk.** Losing access moves the local `.md` into the vault's trash
+> on every device that had it — a revocation that leaves a full, readable copy behind is cosmetic,
+> since the ex-reader can open it in any editor forever. The server keeps the content, so this is
+> a de-sync, not a delete.
+>
+> Three rails, all in `lib/sync/inbound.ts`: it only fires when the server actually **answered**
+> about deletions (`tombstones !== null` — absence proves nothing otherwise); the file goes to a
+> recoverable **trash** folder rather than being destroyed; and the executor **refuses** any doc
+> whose content this device never confirmed upstream, so a permission change can't take work that
+> exists nowhere else. Revocations are capped separately from deletions, more loosely, because a
+> whole shared folder leaving at once is ordinary while a mass delete rarely is.
 
 **Two overlays, deliberately different.** `locked` is a *cap* — it takes edit down to view and
 never removes read. `denied` is a *block*: the only row in the model that subtracts. It comes in

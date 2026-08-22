@@ -135,7 +135,16 @@ Six changes that together make a vault something a team can actually govern.
   under item-Private and under a Read-only vault, so the posture is a ceiling for everyone; a
   folder marked Shared, or naming yourself in the per-member list, is the way back out. The panel's
   "who can access" list now resolves through the same branches as the enforcer — the two disagreed
-  on a member's own note, and a list that contradicts what it describes is worse than no list. Management stays role-gated
+  on a member's own note, and a list that contradicts what it describes is worse than no list.
+- [x] **Losing access de-syncs the file.** A revocation used to leave the `.md` on the ex-reader's
+  disk, which made it cosmetic — they could open the note in any editor forever. It now moves to
+  the vault's trash on every device that had it, alongside the existing tombstone path, with three
+  rails: it only fires when the server actually answered about deletions (`tombstones !== null`),
+  it trashes rather than destroys, and it refuses any doc whose content this device never confirmed
+  upstream, so a permission change can't take work that exists nowhere else. Revocations are capped
+  separately from deletions and more loosely — a whole shared folder leaving at once is ordinary,
+  a mass delete rarely is. An ACL change now also triggers the registry re-pull that carries this
+  out, so it lands in seconds instead of waiting for a restart. Management stays role-gated
   (`canManage`) so an owner can always undo what they applied to themselves. Note this governs
   **sync, not disk**: losing access has never deleted anyone's local `.md` files, so the items stay
   in your own sidebar — they just go read-only/no-access and leave every teammate's vault.
