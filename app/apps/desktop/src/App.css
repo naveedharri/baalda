@@ -1825,6 +1825,13 @@ body:has(.sidebar-resizer.dragging) {
 .context-menu.role-menu {
   min-width: 150px;
 }
+/* Portalled to <body>, so it is no longer nested inside whatever opened it and
+   has to out-rank those layers by hand: the settings page is 200 and a modal
+   backdrop is 300. A popover always belongs above the surface it was opened
+   from. */
+.context-menu.menu-portal {
+  z-index: 400;
+}
 .context-menu.role-menu li {
   text-transform: capitalize;
 }

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { placeMenu, type Placement } from "../lib/menuPlacement";
 
 /**
@@ -11,12 +12,20 @@ import { placeMenu, type Placement } from "../lib/menuPlacement";
  * a `.context-menu` of menuitemradio rows — so both places stay one control
  * rather than two that drift.
  *
- * The menu is positioned in VIEWPORT coordinates (`position: fixed`) through the
- * same `placeMenu` the file tree uses, rather than being absolutely parked under
- * the trigger. Parking it there meant the last row of a list opened a menu that
- * ran off the bottom of the window — and the last row is exactly where a member
- * list puts the person you most recently added. Fixed positioning also lifts it
- * out of any scrolling ancestor, so it can't be clipped by one.
+ * The menu is positioned in VIEWPORT coordinates through the same `placeMenu`
+ * the file tree uses, rather than being absolutely parked under the trigger.
+ * Parking it there meant the last row of a list opened a menu that ran off the
+ * bottom of the window — and the last row is exactly where a member list puts
+ * the person you most recently added.
+ *
+ * It is also PORTALLED to `document.body`, which `position: fixed` alone does
+ * not achieve. Any ancestor with a transform becomes the containing block for
+ * fixed descendants and clips them with its own overflow — and the settings
+ * page has one by accident: `.settings-content` animates in with
+ * `animation-fill-mode: both`, so its final keyframe's `transform: translateY(0)`
+ * stays applied forever. The menu was landing inside that card's coordinate
+ * space and being sliced by its scrollbar. A portal is immune to that whatever
+ * gets styled above it later.
  *
  * Self-contained dismissal (outside-mousedown + Escape), unlike FileTree's menu
  * which owns a window-level dismiss of its own.
@@ -59,8 +68,11 @@ export function MenuSelect<T extends string>({
   useEffect(() => {
     if (!open) return;
     const onMouseDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-      if (menuRef.current && menuRef.current.contains(e.target as Node)) return;
+      const target = e.target as Node;
+      // The menu is portalled, so it is NOT inside the wrap — both have to be
+      // checked or clicking the menu would dismiss it before the click landed.
+      if (wrapRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
@@ -130,11 +142,13 @@ export function MenuSelect<T extends string>({
           ▾
         </span>
       </button>
-      {open && (
+      {open &&
+        createPortal(
         <ul
           ref={menuRef}
-          className={`context-menu role-menu${menuClassName ? ` ${menuClassName}` : ""}`}
+          className={`context-menu role-menu menu-portal${menuClassName ? ` ${menuClassName}` : ""}`}
           role="menu"
+          onClick={(e) => e.stopPropagation()}
           style={
             pos
               ? { position: "fixed", left: pos.left, top: pos.top, right: "auto", maxHeight: pos.maxHeight }
@@ -163,7 +177,8 @@ export function MenuSelect<T extends string>({
               </span>
             </li>
           ))}
-        </ul>
+        </ul>,
+        document.body,
       )}
     </div>
   );
