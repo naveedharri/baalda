@@ -346,7 +346,9 @@ function WhatsNewModal() {
     let cancelled = false;
     void justUpdatedTo().then((stash) => {
       if (cancelled || !stash) return;
-      setUpdated({ version: stash.version, notes: releaseNoteLines(stash.notes) });
+      // A wider cap than the banner's: this is a dialog with room, and a
+      // release that changed ten things should say so rather than stop at six.
+      setUpdated({ version: stash.version, notes: releaseNoteLines(stash.notes, 12) });
     });
     return () => {
       cancelled = true;
