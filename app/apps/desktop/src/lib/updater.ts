@@ -214,6 +214,10 @@ export function clearJustUpdated(): void {
  * Release notes → the banner's one-liners. Keeps markdown bullet lines (and
  * plain lines) as-is minus the bullet, drops headings/blanks and the historic
  * placeholder body, and caps the list so a long release stays a glance.
+ *
+ * `**bold**` is unwrapped rather than rendered: the same text is the GitHub
+ * release body, where emphasis reads well, and these lines land in a plain
+ * `<span>` where the asterisks would just be litter.
  */
 export function releaseNoteLines(notes: string | null | undefined, max = 6): string[] {
   if (!notes) return [];
@@ -223,5 +227,6 @@ export function releaseNoteLines(notes: string | null | undefined, max = 6): str
     .filter((line) => line.length > 0 && !line.startsWith("#"))
     .filter((line) => !line.startsWith("See the assets below"))
     .map((line) => line.replace(/^[-*•]\s+/, ""))
+    .map((line) => line.replace(/\*\*(.+?)\*\*/g, "$1"))
     .slice(0, max);
 }

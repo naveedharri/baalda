@@ -82,10 +82,27 @@ export const auth = betterAuth({
     // Identity is the email: signing in with Google links to an existing
     // email+password account with the same address (and vice-versa) instead of
     // forking a second account. Google is trusted because it returns a verified
-    // email, so the auto-link is safe.
+    // email, so we know the person signing in really owns the address.
     accountLinking: {
       enabled: true,
       trustedProviders: ["google"],
+      // Better Auth defaults this to TRUE, which quietly made the linking above
+      // dead code for every account we have. It refuses to link unless the
+      // *local* row already has `emailVerified`, and nothing here ever sets it:
+      // `requireEmailVerification` is false (no email round-trip in the MVP), so
+      // every password sign-up lands with `emailVerified = false` — permanently.
+      // The symptom is `account_not_linked` on the Google callback for anyone
+      // who first signed up with a password; only users created THROUGH Google
+      // could use Google, because they had nothing to link.
+      //
+      // The check exists to stop this: with no verification at sign-up, someone
+      // can register an address they don't own, and linking then joins the real
+      // owner to the squatter's account instead of locking them out. We accept
+      // that here because the squat is already possible without linking, and
+      // because Google having verified the address is the strongest signal we
+      // have. The real fix is email verification at sign-up — until that ships,
+      // this is a knowingly-taken trade, not an oversight.
+      requireLocalEmailVerified: false,
     },
     // Desktop OAuth runs the Google consent in the system browser while the app
     // (a Tauri webview) initiated /sign-in/social from a *different* cookie jar,

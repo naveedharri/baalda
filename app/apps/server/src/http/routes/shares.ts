@@ -87,20 +87,35 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       (resourceType !== "folder" && resourceType !== "file" && resourceType !== "vault") ||
       typeof resourceId !== "string" ||
       (principalType !== "user" && principalType !== "org") ||
-      (permission !== "view" && permission !== "edit" && permission !== "locked")
+      (permission !== "view" &&
+        permission !== "edit" &&
+        permission !== "locked" &&
+        permission !== "denied")
     ) {
       return c.json(
         {
           error:
-            "resourceType(folder|file|vault), resourceId, principalType(user|org), permission(view|edit|locked) required",
+            "resourceType(folder|file|vault), resourceId, principalType(user|org), permission(view|edit|locked|denied) required",
         },
         400,
       );
     }
     // An org-wide edit/view grant on a folder/file is "Share with team" (spec:
     // private-by-default). On a vault resource it's the "Open"/"Read-only"
-    // posture. Both are allowed; locks (deny
-    // overlays) may also be org-wide.
+    // posture. Both are allowed; locks (cap overlays) may also be org-wide.
+    //
+    // `denied` comes in two shapes, both on a folder or file and never on the
+    // vault resource (a vault-level deny is the Private posture, and would be a
+    // way to lock an owner out of their own vault):
+    //   - principal 'user' — the per-member Private: an absolute block.
+    //   - principal 'org'  — the ITEM set to Private: it takes the item out of
+    //     the team's reach. This is the row that makes item-Private possible at
+    //     all; clearing an item's own grants could never achieve it, because a
+    //     vault-wide Open grant still reached the item and the UI snapped back
+    //     to Shared.
+    if (permission === "denied" && resourceType === "vault") {
+      return c.json({ error: "denied applies to a folder or a file" }, 400);
+    }
 
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
@@ -178,11 +193,12 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // reconnect so open sessions come back with fresh (now read-only) sync
     // tokens, same as revocation does. This covers a lock, a per-user edit→view
     // change, and a vault Open→Read-only posture flip (all land as
-    // view/locked). An 'edit' grant only widens access, so it needs no kick;
+    // view/locked) — and a `denied`, which has to eject the member outright.
+    // An 'edit' grant only widens access, so it needs no kick;
     // the onAclChanged push below lets background subscribers pick it up.
     // Reconnect re-mints each client's own permission, so a peer who still has
     // edit gets edit back — this only tightens editors that should go read-only.
-    if (permission === "locked" || permission === "view") {
+    if (permission === "locked" || permission === "view" || permission === "denied") {
       const docs = await docsForResource(resourceType, resourceId);
       for (const d of docs) {
         deps.disconnectDoc(d.vaultId, d.docId);
@@ -198,8 +214,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     );
   });
 
-  // List every lock in a note collection. Any member of the vault may read
-  // these — the client renders lock badges in the tree from this.
+  // Every access OVERLAY row in a note collection: `locked` (read-only cap) and
+  // `denied` (Private). Any member may read these — the client renders the
+  // tree's lock badges and the Access panel's inherited-Private state from
+  // them, and both need the whole vault's set, not one resource's.
+  //
+  // Still mounted at `/locks`: the shape is a superset and the client splits by
+  // permission, so an older client that only understands `locked` is unaffected
+  // by the extra rows only if it filters — which it does.
   app.get("/vaults/:vaultId/locks", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -218,7 +240,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       `SELECT s.id, s.resource_type, s.resource_id, s.principal_type, s.principal_id,
               s.permission, s.created_by, s.created_at
          FROM shares s
-        WHERE s.permission = 'locked'
+        WHERE s.permission IN ('locked', 'denied')
           AND (
             (s.resource_type = 'folder' AND s.resource_id IN
                (SELECT id FROM folders WHERE vault_id = $1))
@@ -286,7 +308,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
 
     const members = await Promise.all(
       memberRows.map(async (m) => {
-        const { permission, capped } = await resolveAccessForUser(ctx, m.user_id, m.role);
+        const { permission, capped, denied } = await resolveAccessForUser(ctx, m.user_id, m.role);
         return {
           userId: m.user_id,
           name: m.name,
@@ -294,6 +316,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           role: m.role,
           permission,
           capped,
+          denied: denied ?? false,
         };
       }),
     );

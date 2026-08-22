@@ -75,3 +75,33 @@ describe("auth + organizations", () => {
     expect(check.rows[0]?.role).toBe("member");
   });
 });
+
+/**
+ * Account linking between Google and an existing email+password account.
+ *
+ * This is a config assertion rather than a flow test, because the failure it
+ * guards against was a silent DEFAULT, not a bug in our code: Better Auth's
+ * `requireLocalEmailVerified` defaults to true, which made `accountLinking`
+ * dead for every account this server can create. `requireEmailVerification` is
+ * off (no email round-trip in the MVP), so every password sign-up has
+ * `emailVerified = false` forever — and the Google callback answered
+ * `account_not_linked` to anyone who had signed up with a password. Only users
+ * created THROUGH Google could use Google, because they had nothing to link.
+ *
+ * A flow test would need a live Google consent round-trip. Pinning the three
+ * options together is what actually catches a regression here, since any one of
+ * them reverting reintroduces the same lockout.
+ */
+describe("Google account linking", () => {
+  it("links onto an existing password account that was never email-verified", () => {
+    const account = auth.options.account;
+    expect(account?.accountLinking?.enabled).toBe(true);
+    expect(account?.accountLinking?.trustedProviders).toContain("google");
+    // The load-bearing one: true (the default) means no local account we create
+    // can ever be linked, because none of them is verified.
+    expect(account?.accountLinking?.requireLocalEmailVerified).toBe(false);
+    // …which is only sound to assert while sign-up really does skip
+    // verification. If this flips, revisit the trade-off above.
+    expect(auth.options.emailAndPassword?.requireEmailVerification).toBe(false);
+  });
+});

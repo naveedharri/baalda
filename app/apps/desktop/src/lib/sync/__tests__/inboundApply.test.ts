@@ -376,10 +376,11 @@ describe("inbound delete", () => {
     expect(ipc.trashNote).not.toHaveBeenCalled();
   });
 
-  it("KEEPS a file whose access was revoked, and stops re-registering it", async () => {
-    // The regression that matters most. `GET /api/notes` is ACL-filtered, so a
-    // revoked share looks exactly like a delete — and removing files on absence
-    // would mean un-sharing a note destroys a teammate's local copy.
+  it("REMOVES a file whose access was revoked, and stops re-registering it", async () => {
+    // `GET /api/notes` is ACL-filtered, so a revoked share looks like a delete;
+    // the tombstone set is what tells them apart. Both end with the file in the
+    // vault's recoverable trash — a revocation that leaves a readable `.md`
+    // behind is cosmetic, since the ex-reader can open it in any editor forever.
     const disk = new FakeDisk();
     disk.notes.set("shared.md", "d1");
     const r = await twoPasses({
@@ -388,10 +389,49 @@ describe("inbound delete", () => {
       then: { notes: [], tombstones: [] },
     });
 
-    expect(disk.notes.has("shared.md")).toBe(true);
-    expect(ipc.trashNote).not.toHaveBeenCalled();
+    expect(disk.notes.has("shared.md")).toBe(false);
+    expect(ipc.trashNote).toHaveBeenCalledWith("shared.md", expect.any(String), null);
+    // And it is NOT re-registered on the way out, which would resurrect it as an
+    // unsyncable ghost.
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
     expect(r.reg.hasFailures()).toBe(false);
+  });
+
+  it("brings a revoked note BACK when access is restored", async () => {
+    // The round trip that makes the removal safe to do at all. Private takes the
+    // file; setting the item back to Shared or Read-only has to return it, or a
+    // permission toggle would be a one-way door. The server kept the content, so
+    // the file is re-materialised empty and hydrates on open.
+    const disk = new FakeDisk();
+    disk.notes.set("shared.md", "d1");
+    install(disk);
+
+    // Pass 1: agreed it is ours.
+    const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "shared.md" }] }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const carry = () => {
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+        writes[writes.length - 1]?.[0] as never,
+      );
+    };
+    carry();
+
+    // Pass 2: access revoked — gone from the listing, no tombstone.
+    const reg2 = new VaultRegistry(fakeApi({ notes: [], tombstones: [] }));
+    reg2.setInboundHost(recordingHost().host);
+    await reg2.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.notes.has("shared.md")).toBe(false);
+    carry();
+
+    // Pass 3: access restored — the server lists it again.
+    vi.mocked(ipc.writeNoteIfMissing).mockClear();
+    const reg3 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "shared.md" }] }));
+    reg3.setInboundHost(recordingHost().host);
+    await reg3.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("shared.md", "", null);
+    expect(disk.notes.has("shared.md")).toBe(true);
   });
 
   it("refuses to trash when the server reports no tombstones field", async () => {

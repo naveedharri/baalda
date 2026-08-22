@@ -5,8 +5,10 @@ import {
   ancestorFolderIds,
   buildAccessContext,
   effectivePermission,
+  isDenied,
   isLocked,
   resolveAccessForUser,
+  vaultBaseline,
 } from "./resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
 
@@ -68,10 +70,22 @@ export async function canEditFolder(
   const role = await orgRole(row.organization_id, userId, db);
   if (role === null) return false; // not a member of the vault
 
-  // Deny overlay first: a lock caps everyone at view (no edits at all).
+  // Overlays first — they outrank the role below, because what the Access panel
+  // sets applies to whoever set it.
   const chain = await ancestorFolderIds(db, folderId);
+  if (await isDenied(db, "user", userId, null, chain)) return false;
   if (await isLocked(db, userId, null, chain)) return false;
+  const itemPrivate = await isDenied(db, "org", row.organization_id, null, chain);
+  const readOnlyVault = (await vaultBaseline(db, row.organization_id)) === "view";
 
+  // Private and a Read-only vault both skip the shortcuts and let the share
+  // lookup at the bottom decide — that is how a folder marked Shared can still
+  // lift someone out of a Read-only vault.
+  if (itemPrivate || readOnlyVault) {
+    const ctx = await buildAccessContext("folder", folderId, db);
+    if (!ctx) return false;
+    return (await resolveAccessForUser(ctx, userId, role, db)).permission === "edit";
+  }
   if (role === "owner" || role === "admin") return true;
   if (row.created_by && row.created_by === userId) return true;
 

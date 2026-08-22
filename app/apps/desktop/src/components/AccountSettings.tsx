@@ -3,6 +3,7 @@ import { ACTIVITY_STATUSES, type ActivityStatus } from "../lib/prefs";
 import { checkForUpdate, currentVersion, installUpdate, useUpdateState } from "../lib/updater";
 import { useStore } from "../store";
 import { Avatar } from "./Identity";
+import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
 
 /**
@@ -305,10 +306,10 @@ function NotificationsTab() {
         Mention chime
         <span className="field-hint">Play a sound when a teammate pings you.</span>
       </span>
-      <input
-        type="checkbox"
+      <Switch
         checked={mentionSound}
-        onChange={(e) => useStore.getState().setMentionSound(e.target.checked)}
+        ariaLabel="Mention chime"
+        onChange={(next) => useStore.getState().setMentionSound(next)}
       />
     </label>
   );

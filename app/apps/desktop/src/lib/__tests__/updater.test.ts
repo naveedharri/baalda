@@ -24,6 +24,14 @@ describe("releaseNoteLines", () => {
     ]);
   });
 
+  it("unwraps **bold** rather than showing the asterisks", () => {
+    // The same text is the GitHub release body, where emphasis reads well; here
+    // it lands in a plain <span> and the markers would just be litter.
+    expect(releaseNoteLines("- New **Private** setting for any folder or note")).toEqual([
+      "New Private setting for any folder or note",
+    ]);
+  });
+
   it("drops the legacy placeholder body entirely", () => {
     expect(
       releaseNoteLines("See the assets below to download and install this version."),

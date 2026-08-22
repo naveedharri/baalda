@@ -156,6 +156,17 @@ button.primary.hero:hover:not(:disabled) {
   width: 18px;
   height: 18px;
 }
+/* Copy-link button. Goes green on success rather than only toasting: the toast
+   is at the other end of the window, and the confirmation belongs where the
+   click happened. */
+.share-btn.copied {
+  color: var(--success);
+}
+.share-btn .checkmark {
+  width: 18px;
+  height: 18px;
+}
+
 /* Graph view toggle in the main header — nudge toward accent so it reads as a
    navigable affordance rather than a passive status glyph. */
 .graph-btn {
@@ -1808,11 +1819,18 @@ body:has(.sidebar-resizer.dragging) {
   display: inline-flex;
   flex-shrink: 0;
 }
+/* Positioning is done in JS (`MenuSelect` → `placeMenu`) in viewport
+   coordinates, so the menu can flip above its trigger and can't be clipped by a
+   scrolling ancestor. Only the sizing belongs here. */
 .context-menu.role-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
   min-width: 150px;
+}
+/* Portalled to <body>, so it is no longer nested inside whatever opened it and
+   has to out-rank those layers by hand: the settings page is 200 and a modal
+   backdrop is 300. A popover always belongs above the surface it was opened
+   from. */
+.context-menu.menu-portal {
+  z-index: 400;
 }
 .context-menu.role-menu li {
   text-transform: capitalize;
@@ -3305,12 +3323,15 @@ body:has(.sidebar-resizer.dragging) {
 }
 
 /* --- master list --- */
+/* No scroll of its own. The settings page already scrolls, and a second scroll
+   region nested inside it is what sliced rows in half at the top edge — you
+   could never tell whether a row was cut off or simply short. The list grows to
+   its content and the page carries it; folders start collapsed, so what's on
+   screen by default is the vault's top level, not everything in it. */
 .access-master {
   background: var(--bg-subtle);
   border-radius: var(--radius-lg);
   padding: var(--sp-2);
-  max-height: 360px;
-  overflow-y: auto;
 }
 .access-list {
   list-style: none;
@@ -3344,6 +3365,77 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--accent-soft);
   border-color: transparent;
 }
+/* One list line: twisty + row button, side by side. Indentation lives on the
+   line so the twisty indents with the row it belongs to. */
+.access-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding-right: var(--sp-2);
+}
+.access-item .access-row {
+  padding-left: 2px;
+}
+
+/* Folder twisty. Its own hit target beside the row button, so opening a folder
+   and selecting it stay separate intents. */
+.access-twisty {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    transform var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.access-twisty.spacer {
+  cursor: default;
+}
+.access-twisty:not(.spacer):hover {
+  color: var(--text-primary);
+}
+.access-twisty.open {
+  transform: rotate(90deg);
+}
+.access-twisty svg {
+  width: 100%;
+  height: 100%;
+}
+/* The twisty is a sibling of the row, so it takes its selected colour from the
+   line, not from a descendant selector. */
+.access-item:has(.access-row.sel) .access-twisty {
+  color: var(--accent);
+}
+
+/* "Applying…" / "Resolving…" beside a section label. Permission writes fan out
+   into several round trips and a socket kick, so the wait is real and has to be
+   narrated — otherwise the panel just looks stuck. */
+.access-applying {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: var(--sp-2);
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+.access-seg.busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.access-seg {
+  transition: opacity var(--t-fast) var(--ease);
+}
+
 .access-glyph {
   width: 16px;
   height: 16px;
@@ -3715,11 +3807,63 @@ body:has(.sidebar-resizer.dragging) {
 .access-lv.no {
   color: var(--text-tertiary);
 }
-.access-choice {
-  width: auto !important;
+/* Per-member picker in the Access panel. Same popover as the Members page's
+   role picker (see MenuSelect) — the native <select> that used to sit here was
+   the last piece of OS chrome in the product and read as unfinished beside it.
+   Sized a notch smaller than the role field because it sits inside a list row. */
+.access-choice-trigger {
+  background: var(--bg-subtle);
+  border: 1px solid transparent;
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  padding: 5px var(--sp-2) 5px var(--sp-3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  white-space: nowrap;
   flex-shrink: 0;
-  font-size: var(--fs-sm) !important;
-  padding: var(--sp-1) var(--sp-2) !important;
+  transition:
+    border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.access-choice-trigger:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.access-choice-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+  background: var(--bg-surface);
+}
+.access-choice-trigger:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Wider than the role menu (these labels carry a hint line), and with the
+   role list's `capitalize` undone — that exists for "owner"/"admin", and would
+   turn "Can view" into "Can View". Specificity matches `.context-menu.role-menu`
+   so it actually overrides it. */
+.context-menu.role-menu.access-choice-menu {
+  min-width: 232px;
+}
+.context-menu.role-menu.access-choice-menu li {
+  text-transform: none;
+  align-items: flex-start;
+}
+/* Second line on an option — says what the choice does, so "Private" doesn't
+   have to be guessed at. */
+.menu-option-hint {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  margin-top: 1px;
+}
+.role-menu li .role-option-label {
+  display: inline-block;
 }
 
 .theme-toggle {
@@ -4731,6 +4875,73 @@ button.secondary:disabled {
   width: auto;
   flex: none;
   cursor: pointer;
+}
+
+/* ── Switch ──────────────────────────────────────────────────────────────
+   A real checkbox, visually replaced. The input keeps its size and sits on
+   top at zero opacity so it stays the hit target and the focus owner — the
+   track below is pure paint. */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 40px;
+  height: 24px;
+}
+.switch .switch-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+.switch.is-disabled .switch-input {
+  cursor: not-allowed;
+}
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  box-shadow: inset 0 0 0 1px var(--border);
+  transition:
+    background var(--t-med) var(--ease),
+    box-shadow var(--t-med) var(--ease);
+}
+.switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+  /* The knob is what makes the change read as a decision rather than a blink,
+     so it gets a slight overshoot on the way across. */
+  transition: transform var(--t-med) cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.switch.on .switch-track {
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.switch.on .switch-knob {
+  transform: translateX(16px);
+}
+.switch.is-disabled {
+  opacity: 0.5;
+}
+.switch .switch-input:focus-visible + .switch-track {
+  box-shadow: var(--focus-ring);
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch-knob,
+  .switch-track {
+    transition: none;
+  }
 }
 
 /* ============================================================

@@ -40,6 +40,40 @@ export interface RegistryDeps {
 export const ORIGIN_HEADER = "x-baalda-origin";
 
 /**
+ * Is this vault's ROOT closed to new folders/notes?
+ *
+ * "Freeze root" is a structural latch, not a permission: once a team has agreed
+ * the top-level shape, nothing new lands beside it — by anyone, owners and
+ * admins included. Making it role-scoped would defeat the point, because the
+ * accidental root folder is nearly always created by someone who *does* have
+ * permission. An owner/admin lifts the latch first, then creates.
+ *
+ * Only the root is affected. Everything nested keeps its normal ACL.
+ */
+export async function isRootFrozen(vaultId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ root_frozen: boolean }>(
+    "SELECT root_frozen FROM vaults WHERE id = $1",
+    [vaultId],
+  );
+  return rows[0]?.root_frozen === true;
+}
+
+/** The 403 body every frozen-root refusal shares, so clients can match on a code. */
+const ROOT_FROZEN_ERROR = {
+  error: "This vault's root is frozen — create this inside a folder instead.",
+  code: "root_frozen",
+} as const;
+
+/** Colors are a short id from the client's palette (`lib/appearance`), or null
+ *  to clear. Anything else is ignored rather than stored. */
+function normalizeColor(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > 32) return undefined;
+  return value;
+}
+
+/**
  * Registry API (session-authenticated). Lets the client map local vault files to
  * server doc_ids: create/list/rename/delete vaults, folders, notes, files.
  * doc_id is the join key between the .md file, the Yjs doc, and the relational
@@ -112,14 +146,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
         [randomUUID(), organizationId, session.userId],
       );
     }
-    return c.json({ id, organizationId, name }, 201);
+    return c.json({ id, organizationId, name, rootFrozen: false }, 201);
   });
 
   registryRoutes.get("/vaults", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const { rows } = await pool.query(
-      `SELECT v.id, v.organization_id, v.name, v.created_at
+      `SELECT v.id, v.organization_id, v.name, v.created_at, v.root_frozen
          FROM vaults v
          JOIN member m ON m."organizationId" = v.organization_id
         WHERE m."userId" = $1
@@ -127,6 +161,82 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       [session.userId],
     );
     return c.json({ vaults: rows });
+  });
+
+  /**
+   * Vault-level settings. Today that is one latch: `rootFrozen`.
+   *
+   * Owner/admin only to WRITE; every member reads it from `GET /api/vaults`, so
+   * a member's Settings page shows the toggle in its real state (disabled) and
+   * their client can explain a refusal before the server has to.
+   */
+  registryRoutes.patch("/vaults/:vaultId", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    const role = await orgRole(org, session.userId);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Only a vault owner or admin can change vault settings" }, 403);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    if (typeof body.rootFrozen !== "boolean") {
+      return c.json({ error: "rootFrozen (boolean) required" }, 400);
+    }
+    const { rows } = await pool.query<{ id: string; name: string; root_frozen: boolean }>(
+      "UPDATE vaults SET root_frozen = $2 WHERE id = $1 RETURNING id, name, root_frozen",
+      [vaultId, body.rootFrozen],
+    );
+    // Every open client re-pulls the registry on this frame, which is also how
+    // they learn the latch moved — no separate broadcast to keep in step.
+    changed(c, vaultId);
+    return c.json({ id: rows[0].id, name: rows[0].name, rootFrozen: rows[0].root_frozen }, 200);
+  });
+
+  /**
+   * The vault's WHOLE structure, unfiltered — folders and notes, ids and paths,
+   * no content. Owner/admin only.
+   *
+   * Every other listing here is ACL-filtered, which is right for sync and fatal
+   * for administration: the moment an item is set to Private it leaves
+   * `GET /api/notes`, its file leaves the manager's disk, and the Access panel —
+   * which was drawing its list from that disk — lost the only row you could
+   * un-Private it from. A restriction you cannot see is a restriction you cannot
+   * lift.
+   *
+   * Deliberately a separate endpoint rather than a flag on the sync listings.
+   * Those feed the reconciler, and an unfiltered response reaching it would have
+   * the client materialise notes it has no right to sync. The two must not be
+   * one call with a mode switch.
+   */
+  registryRoutes.get("/vaults/:vaultId/access-tree", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    const role = await orgRole(org, session.userId);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
+    }
+    const [folders, notes] = await Promise.all([
+      pool.query<{ id: string; path: string; color: string | null }>(
+        "SELECT id, path, color FROM folders WHERE vault_id = $1 ORDER BY path",
+        [vaultId],
+      ),
+      // Paths and titles only. This bypasses the ACL, so it carries the minimum
+      // that lets someone administer the tree and nothing that would let them
+      // read a note they've shut themselves out of.
+      pool.query<{ id: string; rel_path: string }>(
+        "SELECT id, rel_path FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path",
+        [vaultId],
+      ),
+    ]);
+    return c.json({
+      folders: folders.rows.map((f) => ({ id: f.id, path: f.path, color: f.color })),
+      notes: notes.rows.map((n) => ({ id: n.id, relPath: n.rel_path })),
+    });
   });
 
   // ── folders ──────────────────────────────────────────────────────────────
@@ -155,14 +265,22 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ id: existing.rows[0].id, vaultId, parentId: parentId ?? null, name, path }, 200);
     }
 
+    // Frozen root: only NEW root folders are refused. The adopt path above
+    // already returned, so an existing folder still reconciles from every
+    // device after the latch goes on.
+    if (!parentId && (await isRootFrozen(vaultId))) {
+      return c.json(ROOT_FROZEN_ERROR, 403);
+    }
+
     const id = randomUUID();
+    const color = normalizeColor(body.color) ?? null;
     await pool.query(
-      `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [id, vaultId, parentId ?? null, name, path, body.sort ?? 0, session.userId],
+      `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by, color)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, vaultId, parentId ?? null, name, path, body.sort ?? 0, session.userId, color],
     );
     changed(c, vaultId);
-    return c.json({ id, vaultId, parentId: parentId ?? null, name, path }, 201);
+    return c.json({ id, vaultId, parentId: parentId ?? null, name, path, color }, 201);
   });
 
   registryRoutes.get("/folders", async (c) => {
@@ -207,6 +325,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "You cannot move this folder there" }, 403);
     }
 
+    // Moving a folder OUT to the root is a root creation by another name.
+    if (newParentId === null && (await isRootFrozen(row.vault_id))) {
+      return c.json(ROOT_FROZEN_ERROR, 403);
+    }
+
+    // Color is a vault-wide fact about the folder, so it rides the same PATCH
+    // and syncs to every member like a rename does.
+    const color = normalizeColor(body.color);
+    if (color !== undefined) {
+      await pool.query("UPDATE folders SET color = $2 WHERE id = $1", [id, color]);
+    }
+
     try {
       const moved = await moveFolder(pool, id, {
         path: typeof body.path === "string" ? body.path : undefined,
@@ -214,7 +344,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
         parentId: newParentId,
       });
       changed(c, moved.vaultId);
-      return c.json({ id, vaultId: moved.vaultId, name: moved.name, path: moved.path }, 200);
+      return c.json(
+        { id, vaultId: moved.vaultId, name: moved.name, path: moved.path, color },
+        200,
+      );
     } catch (err) {
       if (err instanceof TreeOpError) return c.json({ error: err.message }, 400);
       throw err;
@@ -267,6 +400,15 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
 
     // Client may supply a stable doc_id (generated locally); else we mint one.
     const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
+
+    // Frozen root: refuse only notes that do not exist yet. Re-registering a
+    // root note that predates the latch (a second device, a repeat reconcile)
+    // has to keep working, or freezing the root would break sync for the very
+    // notes the team froze it to protect.
+    if (!folderId && (await isRootFrozen(vaultId))) {
+      const { rowCount } = await pool.query("SELECT 1 FROM notes WHERE id = $1", [id]);
+      if (!rowCount) return c.json(ROOT_FROZEN_ERROR, 403);
+    }
     // RETURNING tells us whether the row is actually ours. `DO NOTHING` alone is
     // silent about *why* nothing happened, and answering 201 regardless told the
     // client "doc `id` now belongs to `vaultId`" even when that id was already a
@@ -275,11 +417,19 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // reconnects on every rejection, and the note never loads. A doc_id is global,
     // so a collision across vaults has to be reported, not swallowed.
     const inserted = await pool.query(
-      `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by)
-       VALUES ($1, $2, $3, $4, $5, $1, $6)
+      `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by, color)
+       VALUES ($1, $2, $3, $4, $5, $1, $6, $7)
        ON CONFLICT (id) DO NOTHING
        RETURNING id`,
-      [id, vaultId, folderId ?? null, title ?? null, relPath, session.userId],
+      [
+        id,
+        vaultId,
+        folderId ?? null,
+        title ?? null,
+        relPath,
+        session.userId,
+        normalizeColor(body.color) ?? null,
+      ],
     );
     if (inserted.rowCount === 0) {
       const { rows: existing } = await pool.query<{ vault_id: string; rel_path: string }>(
@@ -321,7 +471,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // attribution stays live without a second endpoint or a new wire frame.
     const { rows } = await pool.query(
       `SELECT n.id, n.vault_id, n.folder_id, n.title, n.rel_path, n.doc_id, n.created_by,
-              n.created_at, n.updated_at,
+              n.created_at, n.updated_at, n.color,
               n.last_edited_by, u.name AS last_edited_by_name, n.last_edited_at
          FROM notes n
          LEFT JOIN "user" u ON u.id = n.last_edited_by
@@ -374,6 +524,16 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (folderId != null && !(await canEditFolder(session.userId, folderId))) {
       return c.json({ error: "You cannot move this note there" }, 403);
     }
+    // Dragging a note out to the root is a root creation by another name —
+    // unless it already lives there, which is a rename, not a move.
+    if (folderId === null && row.folder_id !== null && (await isRootFrozen(row.vault_id))) {
+      return c.json(ROOT_FROZEN_ERROR, 403);
+    }
+
+    const color = normalizeColor(body.color);
+    if (color !== undefined) {
+      await pool.query("UPDATE notes SET color = $2 WHERE id = $1", [id, color]);
+    }
 
     try {
       const moved = await moveNote(pool, id, {
@@ -390,6 +550,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
           relPath: moved.relPath,
           title: moved.title,
           folderId: moved.folderId,
+          color,
         },
         200,
       );

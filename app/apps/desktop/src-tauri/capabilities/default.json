@@ -18,6 +18,16 @@
     "dialog:default",
     "fs:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    {
+      "identifier": "core:window:allow-set-focus",
+      "comment": "A `baalda://` note link has to bring the window forward — a link that navigates a window the user can't see is the same as a link that did nothing. `core:default` grants only read-only window commands, so the three commands the deep-link handler needs are listed explicitly rather than by widening it."
+    },
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    {
+      "identifier": "deep-link:default",
+      "comment": "Registers the `baalda://` URL scheme and lets the webview subscribe to opens on it. This is how a shared note link gets from a teammate's chat window into this app; the payload is only ever a vault + note id, and the handler resolves it against the signed-in user's own access."
+    }
   ]
 }

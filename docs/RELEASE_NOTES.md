@@ -1,5 +1,9 @@
-- Version history for every note — open the clock icon to browse, preview and revert past versions
-- Vault checkpoints in Settings → Versioning — automatic daily snapshots plus manual ones, with owner-only full-vault revert
-- See who last edited a note in the presence menu, and "edited … ago" at a glance
-- Persistent sync indicator in the header — live download/upload progress that settles to a checkmark
-- Updates now install themselves; this banner is the new way you hear about them
+- Share a link to any note — the new share icon copies a link that opens it straight in a teammate's Baalda
+- Access is now your whole vault as a tree — expand a folder and set permissions on the notes inside it
+- New **Private** setting for any folder, note or person, and every access setting now applies to admins and owners too
+- Losing access de-syncs the note and takes the local copy with it (recoverable from the vault trash); getting it back brings the file back
+- **Reveal in Finder** on any note or folder, from the right-click menu
+- **Freeze vault root** in Settings → General — stop new notes and folders landing at the top level once the shape is settled
+- Folder and note colours now sync to your whole team, and survive renames
+- Admins can revert a vault checkpoint, not just the owner
+- Google sign-in now works on accounts that were created with a password

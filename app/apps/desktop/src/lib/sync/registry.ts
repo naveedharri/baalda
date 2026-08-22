@@ -311,6 +311,18 @@ export class VaultRegistry {
    */
   private onNoteMeta: ((meta: Record<string, NoteLastEdited>) => void) | null = null;
 
+  /**
+   * Notified with the {relPath → color id} map on every pull.
+   *
+   * Item colors used to be a localStorage preference keyed by path, so a folder
+   * you tinted was grey on every other machine and for every teammate. They are
+   * a fact about the folder, not about this computer, so they live on the row
+   * (keyed by id, surviving renames) and ride the registry pull that already
+   * fires whenever the structure changes. Keyed by PATH on the way out because
+   * that is what the sidebar draws with.
+   */
+  private onColors: ((colors: Record<string, string>) => void) | null = null;
+
   constructor(
     private readonly api: ApiClient,
     /** Where the current VaultScope comes from; injectable for tests. */
@@ -336,6 +348,11 @@ export class VaultRegistry {
   /** Subscribe to per-note last-edit metadata (see {@link onNoteMeta}). */
   setNoteMetaListener(cb: ((meta: Record<string, NoteLastEdited>) => void) | null): void {
     this.onNoteMeta = cb;
+  }
+
+  /** Subscribe to the vault's shared item colors (see {@link onColors}). */
+  setColorListener(cb: ((colors: Record<string, string>) => void) | null): void {
+    this.onColors = cb;
   }
 
   /** Provide the editor/doc-store coupling inbound reconciliation needs. Without
@@ -366,6 +383,28 @@ export class VaultRegistry {
       if (edited) meta[noteDocId(n)] = edited;
     }
     cb(meta);
+  }
+
+  /**
+   * Publish the server's item colors, keyed by vault-relative path.
+   *
+   * Whole-map replacement, like {@link publishNoteMeta}: a folder whose color was
+   * cleared by a teammate has no row here, and merging would keep it tinted
+   * forever on this machine.
+   */
+  private publishColors(
+    serverFolders: RegisteredFolder[],
+    serverNotes: RegisteredNote[],
+  ): void {
+    const cb = this.onColors;
+    if (!cb) return;
+    const colors: Record<string, string> = {};
+    for (const f of serverFolders) if (f.color) colors[f.path] = f.color;
+    for (const n of serverNotes) {
+      const rp = noteRelPath(n);
+      if (rp && n.color) colors[rp] = n.color;
+    }
+    cb(colors);
   }
 
   /**
@@ -441,6 +480,28 @@ export class VaultRegistry {
   /** Server folder id for a folder's vault-relative path, if registered. */
   getFolderId(relPath: string): string | null {
     return this.folderByPath.get(relPath) ?? null;
+  }
+
+  /**
+   * Persist an item's accent color on the server row behind `relPath`.
+   *
+   * Resolves folder-first, then note. Returns false when the path isn't mapped
+   * (a local-only vault, or a file registered a moment ago) — the caller keeps
+   * its optimistic local value rather than reporting a failure the user can do
+   * nothing about.
+   */
+  async setColor(relPath: string, colorId: string | null): Promise<boolean> {
+    const folderId = this.folderByPath.get(relPath);
+    if (folderId) {
+      await this.api.updateFolder(folderId, { color: colorId });
+      return true;
+    }
+    const mapping = this.byPath.get(relPath);
+    if (mapping) {
+      await this.api.updateNote(mapping.docId, { color: colorId });
+      return true;
+    }
+    return false;
   }
 
   // ---- content-push checkpoint (resume point for the bulk upload) ---------
@@ -530,8 +591,9 @@ export class VaultRegistry {
 
   /**
    * Bring local disk into line with the server's structure: create folders that
-   * only exist server-side, apply remote renames/moves, and move remotely-deleted
-   * notes to the vault's trash.
+   * only exist server-side, apply remote renames/moves, and move notes to the
+   * vault's trash when the server says they were deleted OR when they left this
+   * user's readable set (access revoked — see `InboundTrash.reason`).
    *
    * Every mutation below is guarded, and the guards are the point:
    *   - a persisted baseline for THIS collection must exist (else we can't tell a
@@ -677,14 +739,19 @@ export class VaultRegistry {
       if (this.stopRun()) break;
       // A note whose content this device never confirmed upstream may hold local
       // edits that exist NOWHERE else, so removing it could lose the only copy.
-      // Read `pushed` before the prune below has a chance to drop it.
+      // Read `pushed` before the prune below has a chance to drop it. This
+      // matters most for `revoked`: access can be taken away mid-edit, and the
+      // one thing a permission change must never do is destroy work that only
+      // exists here.
       if (!this.pushed.has(gone.docId) && !(await this.isEmptyOnDisk(gone.path))) {
         this.recordFailure({
           kind: "orphan",
           path: gone.path,
           docId: gone.docId,
           reason:
-            "deleted on the server, but this device never confirmed its content — left on disk",
+            gone.reason === "revoked"
+              ? "access was removed, but this device never confirmed its content upstream — left on disk"
+              : "deleted on the server, but this device never confirmed its content — left on disk",
           code: null,
         });
         continue;
@@ -990,6 +1057,7 @@ export class VaultRegistry {
     // re-read it), so the "edited by" tags reflect the same rows the rest of this
     // pass reconciles against.
     this.publishNoteMeta(serverNotes);
+    this.publishColors(serverFolders, serverNotes);
 
     // Drop anything belonging to a different collection before we start adding:
     // the maps are written into incrementally from here on (so a mid-run

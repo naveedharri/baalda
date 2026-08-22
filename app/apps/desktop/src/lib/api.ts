@@ -105,6 +105,10 @@ export interface Vault {
   organizationId?: string;
   organization_id?: string;
   name: string;
+  /** True when nothing new may be created at the vault root (see the General
+   *  settings toggle). Absent on an older server — treat that as false. */
+  rootFrozen?: boolean;
+  root_frozen?: boolean;
 }
 
 export interface RegisteredNote {
@@ -127,6 +131,8 @@ export interface RegisteredNote {
   last_edited_by_name?: string | null;
   lastEditedAt?: string | null;
   last_edited_at?: string | null;
+  /** Palette id (see `lib/appearance`), shared by the whole team. */
+  color?: string | null;
 }
 
 /** The normalized "last edited by" fact for one note (see {@link noteLastEdited}). */
@@ -137,6 +143,12 @@ export interface NoteLastEdited {
   at: string;
 }
 
+/** Flat structure listing that powers the Access panel (see `listAccessTree`). */
+export interface AccessTreeResponse {
+  folders: Array<{ id: string; path: string; color: string | null }>;
+  notes: Array<{ id: string; relPath: string }>;
+}
+
 export interface RegisteredFolder {
   id: string;
   vaultId?: string;
@@ -145,6 +157,8 @@ export interface RegisteredFolder {
   parent_id?: string | null;
   name: string;
   path: string;
+  /** Palette id (see `lib/appearance`), shared by the whole team. */
+  color?: string | null;
 }
 
 export interface Share {
@@ -157,7 +171,7 @@ export interface Share {
   principal_type?: "user" | "org";
   principalId?: string;
   principal_id?: string;
-  permission: "view" | "edit" | "locked";
+  permission: "view" | "edit" | "locked" | "denied";
   createdBy?: string;
   created_by?: string;
 }
@@ -173,6 +187,8 @@ export interface ResolvedMemberAccess {
   permission: "edit" | "view" | "none";
   /** True when a lock reduced an otherwise-`edit` member down to `view`. */
   capped: boolean;
+  /** True when the `none` is an explicit per-member block, not a missing grant. */
+  denied?: boolean;
 }
 
 export interface AccessResolution {
@@ -825,6 +841,37 @@ export class ApiClient {
     return data;
   }
 
+  /** Flip a vault-level latch (today: `rootFrozen`). Owner/admin only. */
+  async updateVaultSettings(
+    vaultId: string,
+    input: { rootFrozen: boolean },
+  ): Promise<{ id: string; name: string; rootFrozen: boolean }> {
+    const { data } = await this.request<{ id: string; name: string; rootFrozen: boolean }>(
+      "PATCH",
+      `/api/vaults/${encodeURIComponent(vaultId)}`,
+      { body: input },
+    );
+    return data;
+  }
+
+  /**
+   * The vault's whole structure for the Access panel - ids and paths only, not
+   * ACL-filtered. Owner/admin only (403 otherwise).
+   *
+   * Separate from {@link listFolders}/{@link listNotes} on purpose: those feed
+   * the reconciler and MUST stay filtered, or the client would materialise notes
+   * it has no right to sync. This one exists so an item you have made Private is
+   * still administrable - it has left your disk, and the panel used to draw its
+   * list from your disk.
+   */
+  async listAccessTree(vaultId: string): Promise<AccessTreeResponse> {
+    const { data } = await this.request<AccessTreeResponse>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/access-tree`,
+    );
+    return { folders: data.folders ?? [], notes: data.notes ?? [] };
+  }
+
   async listFolders(vaultId: string): Promise<RegisteredFolder[]> {
     const { data } = await this.request<{ folders: RegisteredFolder[] }>("GET", "/api/folders", {
       query: { vaultId },
@@ -845,7 +892,7 @@ export class ApiClient {
   /** Rename/move a folder (rewrites descendant paths server-side; id stays). */
   async updateFolder(
     id: string,
-    input: { name?: string; path?: string; parentId?: string | null },
+    input: { name?: string; path?: string; parentId?: string | null; color?: string | null },
   ): Promise<RegisteredFolder> {
     const { data } = await this.request<RegisteredFolder>(
       "PATCH",
@@ -905,7 +952,12 @@ export class ApiClient {
   /** Rename/move a note (rel_path/folder/title); doc_id is unchanged. */
   async updateNote(
     id: string,
-    input: { relPath?: string; title?: string | null; folderId?: string | null },
+    input: {
+      relPath?: string;
+      title?: string | null;
+      folderId?: string | null;
+      color?: string | null;
+    },
   ): Promise<RegisteredNote> {
     const { data } = await this.request<RegisteredNote>(
       "PATCH",
@@ -1018,7 +1070,7 @@ export class ApiClient {
     /** Required for user shares; ignored for org-wide grants/locks. */
     principalId?: string;
     principalType?: "user" | "org";
-    permission: Permission | "locked";
+    permission: Permission | "locked" | "denied";
   }): Promise<Share> {
     const { data } = await this.request<Share>("POST", "/api/shares", { body: input });
     return data;
@@ -1041,6 +1093,12 @@ export class ApiClient {
   }
 
   /** All locks in a vault (readable by any vault member — drives lock badges). */
+  /**
+   * Every access OVERLAY row in a note collection: `locked` (the read-only cap)
+   * and `denied` (Private). One request because both are read for the same
+   * reason — badging the tree and resolving what an item inherits — and both
+   * need the whole vault's set, which a per-resource read can't give.
+   */
   async listVaultLocks(vaultId: string): Promise<Share[]> {
     const { data } = await this.request<{ locks: Share[] }>(
       "GET",
@@ -1165,6 +1223,10 @@ export function noteLastEdited(n: RegisteredNote): NoteLastEdited | null {
 }
 export function vaultOrgId(v: Vault): string | undefined {
   return v.organizationId ?? v.organization_id;
+}
+/** Whether this vault's root is closed to new folders/notes. */
+export function vaultRootFrozen(v: Vault): boolean {
+  return (v.rootFrozen ?? v.root_frozen) === true;
 }
 export function sharePrincipalId(s: Share): string {
   return s.principalId ?? s.principal_id ?? "";

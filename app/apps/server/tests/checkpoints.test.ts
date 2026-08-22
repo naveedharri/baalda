@@ -105,7 +105,7 @@ describe("vault checkpoints", () => {
     expect(JSON.stringify(body)).not.toContain("alpha");
   });
 
-  it("gates create/delete to owner+admin and revert to the owner alone", async () => {
+  it("gates create/delete/revert to owner+admin, and shuts members out", async () => {
     const owner = await signUp("g-owner@t.com");
     const admin = await signUp("g-admin@t.com");
     const member = await signUp("g-member@t.com");
@@ -131,12 +131,21 @@ describe("vault checkpoints", () => {
     expect(created.status).toBe(201);
     const { id } = (await created.json()) as { id: string };
 
-    // Admins may take and delete checkpoints, but reverting the whole vault is
-    // the owner's call alone.
+    // Revert is the recovery half of an action admins can already take, so it
+    // matches create/delete: owner OR admin. A team whose owner is away used to
+    // be able to take checkpoints and not use them.
+    expect(
+      (await api(member, `/api/vaults/${vault}/checkpoints/${id}/revert`, { method: "POST" }))
+        .status,
+    ).toBe(403);
+    expect(
+      (await api(outsider, `/api/vaults/${vault}/checkpoints/${id}/revert`, { method: "POST" }))
+        .status,
+    ).toBe(403);
     expect(
       (await api(admin, `/api/vaults/${vault}/checkpoints/${id}/revert`, { method: "POST" }))
         .status,
-    ).toBe(403);
+    ).toBe(200);
     expect(
       (await api(member, `/api/vaults/${vault}/checkpoints/${id}`, { method: "DELETE" })).status,
     ).toBe(403);

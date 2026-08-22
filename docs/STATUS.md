@@ -115,6 +115,87 @@ De-risk the hardest part before networking.
   needs a `PS_MEMBER_REMOVED` frame each connection self-terminates on.
 - Specs: [[05-vault-sync-engine]] (transport), [[04-team-collaboration]] (membership gate)
 
+### Access & vault shape ✔ (v0.1.30)
+Six changes that together make a vault something a team can actually govern.
+- [x] **Access panel is a real tree.** Folders expand in place and pull their contents in on demand
+  (the sidebar loads folders lazily, so a flat list could only ever show what someone had already
+  clicked elsewhere) — which is what made the notes *inside* a folder reachable for the first time.
+  Row-building lives in `lib/accessTree.ts` so the "an un-listed folder is expandable, not empty"
+  rule is pinned by a test.
+- [x] **Private, at two scales.** A new `shares.permission = 'denied'` row (migration 018) — the
+  only row in the model that SUBTRACTS. Per-**member** (`principal_type 'user'`) it blocks one
+  person and beats everything, authorship included. Per-**item** (`principal_type 'org'`) it takes
+  a folder or note out of the team's reach, leaving only the people shared with by name — which is what finally made item-Private work at all: clearing an item's own grants left
+  the vault-wide grant still reaching it, so Private snapped straight back to Shared. Both are
+  mirrored in the readable-set dual. See [[04-team-collaboration]] §3.
+- [x] **Access settings apply to the person setting them.** The owner/admin and note-creator
+  branches were shortcuts that ran *before* any grant was consulted, so a vault set to Read-only
+  still let its owner edit and a folder set to Private still showed up for them — the one person
+  who couldn't check their own restriction was the one who made it. Both shortcuts are now skipped
+  under item-Private and under a Read-only vault, so the posture is a ceiling for everyone; a
+  folder marked Shared, or naming yourself in the per-member list, is the way back out. The panel's
+  "who can access" list now resolves through the same branches as the enforcer — the two disagreed
+  on a member's own note, and a list that contradicts what it describes is worse than no list.
+- [x] **Losing access de-syncs the file.** A revocation used to leave the `.md` on the ex-reader's
+  disk, which made it cosmetic — they could open the note in any editor forever. It now moves to
+  the vault's trash on every device that had it, alongside the existing tombstone path, with three
+  rails: it only fires when the server actually answered about deletions (`tombstones !== null`),
+  it trashes rather than destroys, and it refuses any doc whose content this device never confirmed
+  upstream, so a permission change can't take work that exists nowhere else. Revocations are capped
+  separately from deletions and more loosely — a whole shared folder leaving at once is ordinary,
+  a mass delete rarely is. An ACL change now also triggers the registry re-pull that carries this
+  out, so it lands in seconds instead of waiting for a restart. Restoring access re-materialises
+  the file and it hydrates on open — a permission toggle is never a one-way door.
+- [x] **The Access list reads the server's structure, not this machine's disk.** New owner/admin
+  endpoint `GET /api/vaults/:id/access-tree` (ids and paths, no content, deliberately not ACL
+  filtered). Every other listing is filtered, which is right for sync and fatal for administration:
+  once Private removed the file, the panel — which drew its rows from the disk — lost the only row
+  the restriction could be lifted from. Kept as a separate endpoint rather than a flag on the sync
+  listings, because an unfiltered response reaching the reconciler would have it materialise notes
+  it has no right to sync. Management stays role-gated
+  (`canManage`) so an owner can always undo what they applied to themselves. Note this governs
+  **sync, not disk**: losing access has never deleted anyone's local `.md` files, so the items stay
+  in your own sidebar — they just go read-only/no-access and leave every teammate's vault.
+- [x] **Permission writes narrate themselves.** Applying a mode is several round trips plus a socket
+  kick; the panel now says "Applying…" instead of looking stuck.
+- [x] **Reveal in Finder** on any note/folder — notes really are files on disk, so the shortest
+  bridge to the rest of the machine belongs in the context menu.
+- [x] **Freeze vault root** (General settings). A structural latch, not a permission: once the top
+  level is settled, nothing new lands beside it — for everyone, owners included, because the
+  accidental root folder is nearly always created by someone who does have permission. Only
+  owner/admin lifts it. Enforced on the HTTP registry AND the MCP tools; re-registering a root item
+  that predates the latch still works, so freezing can't break sync.
+- [x] **One popover select, everywhere.** The Access panel's per-member picker was the last native
+  `<select>` in the product; it now uses the Members page's popover (`MenuSelect`, which `RoleSelect`
+  is also a wrapper over). The Freeze-root checkbox became an animated `Switch` — a setting like
+  that is a decision, and a knob that slides confirms it landed.
+- [x] **Account menu leads with Home.** The popover's top row was a second copy of the identity
+  card that its own trigger already shows permanently in the sidebar footer. Home takes that row
+  instead; it was previously below the fold on an account with several vaults.
+- [x] **Shareable note links.** `baalda://note/<vault>/<doc>` via `tauri-plugin-deep-link`
+  (+ single-instance, so a click on Windows/Linux doesn't spawn a second app). The link carries
+  **identity, not access** — ids only, resolved against whoever opens it — and is keyed by `doc_id`,
+  so it survives every rename and move.
+- [x] **Vault revert is owner *or admin*.** It's the recovery half of an action admins could already
+  take; owner-only left a team whose owner was away able to take checkpoints and not use them.
+- [x] **Item colors sync.** `folders.color` / `notes.color` ride the registry pull, keyed by id so a
+  rename keeps the tint. Colors set before a vault gained sync are adopted upward once.
+
+### Google sign-in on an existing password account ✔ (v0.1.30)
+- [x] `account_not_linked` on the Google callback for anyone who first signed up with a password —
+  i.e. everyone except users created *through* Google, who had nothing to link. The cause was a
+  Better Auth default, not our code: `accountLinking.requireLocalEmailVerified` is **true** unless
+  set, and it refuses to link while the local row is unverified. `requireEmailVerification` is off
+  (no email round-trip in the MVP), so every password sign-up has `emailVerified = false` forever
+  — which made the `accountLinking` block dead code from the day it was written.
+- [x] Set `requireLocalEmailVerified: false`. **A knowingly-taken trade:** the check exists because,
+  with no verification at sign-up, someone can register an address they don't own, and linking then
+  joins the real owner to the squatter's account rather than locking them out. Accepted because the
+  squat is already possible without linking and Google's verified email is the strongest signal we
+  have. **Email verification at sign-up is the real fix** and is still owed.
+- [x] Pinned by a config test — the failure mode was a silent default, so the three options that
+  have to agree (`enabled`, `trustedProviders`, `requireLocalEmailVerified`) are asserted together.
+
 ### Phase 4: Polish / upgrades _(deferred)_ ⬜
 - [ ] Structural rich-text CRDT (y-prosemirror / `Y.XmlFragment`) for full WYSIWYG.
 - [ ] Vector / hybrid search (Orama) for semantic + AI retrieval.

@@ -132,6 +132,26 @@ export async function listFolders(ctx: McpContext, vaultId: string) {
   }));
 }
 
+/**
+ * Refuse a root-level create when the vault's root is frozen.
+ *
+ * The MCP surface has to honour the same latch as the HTTP registry, and for
+ * the same reason: an assistant asked to "add a note" with no folder in mind is
+ * one of the likelier ways a stray root file appears.
+ */
+async function assertRootNotFrozen(vaultId: string, parentId: string | null): Promise<void> {
+  if (parentId) return;
+  const { rows } = await pool.query<{ root_frozen: boolean }>(
+    "SELECT root_frozen FROM vaults WHERE id = $1",
+    [vaultId],
+  );
+  if (rows[0]?.root_frozen) {
+    throw new McpToolError(
+      "This vault's root is frozen — create this inside a folder instead.",
+    );
+  }
+}
+
 export async function createFolder(
   ctx: McpContext,
   input: { vaultId: string; name: string; path: string; parentId?: string | null },
@@ -154,6 +174,9 @@ export async function createFolder(
     const row = existing.rows[0];
     return { folderId: row.id, parentId, name: row.name, path: input.path, adopted: true };
   }
+  // After the adopt path: freezing the root must not break re-registering a
+  // root folder that already exists.
+  await assertRootNotFrozen(input.vaultId, parentId);
 
   const id = randomUUID();
   await pool.query(
@@ -424,6 +447,8 @@ export async function createNote(
       seeded,
     };
   }
+  // After the adopt path, for the same reason as `createFolder`.
+  await assertRootNotFrozen(input.vaultId, folderId);
 
   const docId = randomUUID();
   await pool.query(
