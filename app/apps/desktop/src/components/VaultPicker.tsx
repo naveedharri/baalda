@@ -324,8 +324,9 @@ export function VaultPicker() {
   // Open a vault row. Local-only folders open in place. A synced vault —
   // whether a cached remote row or a local folder whose own config says it
   // syncs — needs a session: if we still have one, switch straight to it
-  // (opening its folder + resyncing); if we're signed out, remember it and
-  // prompt sign-in — landInLastVault opens it once the session lands. Opening
+  // (opening its folder + resyncing); if we're signed out — or signed in as an
+  // account that can't see it — remember it and prompt sign-in;
+  // landInLastVault opens it once the right session lands. Opening
   // a synced folder *without* a session would edit it silently offline under a
   // "local" label; the escape hatch for deliberate offline work is "Open
   // existing", not a click that looks like any other.
@@ -344,10 +345,17 @@ export function VaultPicker() {
           if (!organizations.some((o) => o.id === orgId)) {
             // A stamped folder whose vault this account can't see. Switching
             // would 403, and adopting it would duplicate another account's
-            // vault — say why instead.
+            // vault. Hand over to the right account instead of dead-ending:
+            // drop this session and offer sign-in with the vault stashed, so
+            // the post-auth landing opens exactly it. (The dialog needs the
+            // sign-out — it dismisses itself while a session exists.)
             setError(
               `"${e.name}" was synced under a different account. Sign in with that account to open it.`,
             );
+            await useStore.getState().signOut();
+            requestOpenVault(orgId);
+            setSignInFor("open");
+            setSignInOpen(true);
             return;
           }
           await useStore.getState().setActiveOrganization(orgId);
