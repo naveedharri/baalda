@@ -476,6 +476,13 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
   // Whole-vault posture (Open / Read-only / Private) = the org grant on the
   // vault resource. Private removes it, falling back to per-item sharing.
+  //
+  // The Read-only grant is a CEILING for everyone now, not just a floor for
+  // members: the resolver stops taking the owner/admin and note-creator
+  // shortcuts when it's set (`vaultBaseline`), so "Everyone can read
+  // everything, not edit" finally includes the person who chose it. It stays a
+  // single grant row rather than a grant plus a lock because both would want
+  // the same (resource, principal) key.
   const setVaultPosture = (mode: Mode) => {
     if (!orgId || mode === wsPosture) return;
     void run(async () => {

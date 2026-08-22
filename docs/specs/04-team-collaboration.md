@@ -97,16 +97,33 @@ shares (
 
 **Effective permission** for a user on a file:
 0. A **`denied`** row for this *user* on the file or any containing folder → `none`, full stop.
-   A `denied` row for the *org* (the item set to Private) instead switches OFF the org-scoped
-   branch of step 3 for that resource.
-1. Vault `owner`/`admin` → `edit` on everything in the vault.
-2. A note's **creator** → `edit` on their own note.
-3. Else take the **max** of: any `share` on the file itself, any `share` on a containing folder
+1. The **shortcuts** in 2–3 are skipped entirely when either of these holds, and step 4 decides
+   alone:
+   - a `denied` row for the *org* on the file or a containing folder (the item set to **Private**);
+   - the vault's org-wide grant is `view` (the vault set to **Read-only**).
+2. Vault `owner`/`admin` → `edit` on everything in the vault.
+3. A note's **creator** → `edit` on their own note.
+4. Else take the **max** of: any `share` on the file itself, any `share` on a containing folder
    (walk `parent_id` up), and any vault-wide grant — each either **per-user** or an org-wide
-   **"share with team"** grant.
-4. `edit > view > none`. No matching grant → **no sync access**.
-5. A **`locked`** row matching the file or an ancestor caps the result at `view` (owners/admins
-   included).
+   **"share with team"** grant. Under item-Private the org-scoped half drops out, leaving only
+   per-user grants.
+5. `edit > view > none`. No matching grant → **no sync access**.
+6. A **`locked`** row matching the file or an ancestor caps the result at `view`.
+
+**Nothing in the Access panel exempts the person setting it.** Steps 2 and 3 are conveniences, not
+entitlements, and step 1 is what stops them swallowing a restriction: an owner who marks a folder
+Private loses it too, and a Read-only vault is read-only for its owner. A setting its author can't
+observe is one they have to take on trust, which is not a thing to ship in an access panel. The
+safety net is that *management* is gated separately — `canManage` (`http/routes/shares.ts`) asks
+for owner/admin and never for effective permission — so an owner can always lift what they set.
+The desktop's Access list is built from the local folder, so the row to lift it from never
+disappears either.
+
+> **A restriction governs sync, not someone's disk.** Losing access never deletes local `.md`
+> files (that's the whole point of `listDeletedReadableDocsInVault` — absence has to be
+> distinguishable from deletion). So an owner who makes everything Private still sees the files in
+> their own sidebar; what changes is that the notes go read-only or no-access, stop syncing, and
+> leave every teammate's vault.
 
 **Two overlays, deliberately different.** `locked` is a *cap* — it takes edit down to view and
 never removes read. `denied` is a *block*: the only row in the model that subtracts. It comes in
@@ -118,19 +135,16 @@ of their own vault).
 |---|---|---|
 | UI | per-member **Private** | the item set to **Private** |
 | Means | "this person is blocked" | "this item is not shared with the team" |
-| Beats | everything: role, vault grant, explicit share, authorship | org-scoped grants only, incl. the vault-wide one |
-| Spares | nobody | the creator, per-user grantees, owners/admins |
+| Beats | everything: role, vault grant, explicit share, authorship | every org-scoped grant, plus the owner/admin shortcut |
+| Spares | nobody | the creator, and per-user grantees |
 
 The user deny has to beat authorship, or "keep this away from Sam" would silently do nothing on
 exactly the notes Sam wrote. The org deny exists because **clearing an item's own grants could
 never express item-Private**: in a Shared vault the vault-wide grant still reached the item, so the
-segment snapped straight back to Shared. Sparing owners/admins is what stops someone creating a
-folder that nobody — themselves included — can ever reach again.
+segment snapped straight back to Shared.
 
 The readable-set dual (`permissions/vault-docs.ts`) subtracts both sets under the same rules, so a
-denied doc leaves the tree and stops syncing rather than merely failing to resolve. `vaultAccess`
-reports `vaultWideVia` (`role` / `org` / `user`) precisely so the org deny can skip the first and
-the third.
+denied doc leaves the tree and stops syncing rather than merely failing to resolve.
 
 **Private by default:** a new vault grants nothing org-wide, so members see only what they create
 or what's shared with them / the team. (Owner sets the whole vault to Shared/Read-only, or shares

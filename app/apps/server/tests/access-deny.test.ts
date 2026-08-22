@@ -265,7 +265,7 @@ describe("item set to Private (org deny)", () => {
     expect(await effectivePermission(member, doc)).toBe("none");
   });
 
-  it("leaves owners, admins, the creator and explicit grantees alone", async () => {
+  it("leaves the creator and explicit grantees alone — and nobody else, owners included", async () => {
     const org = await seedOrg("Acme", "priv-keeps");
     const owner = await seedUser("o@a.com");
     const admin = await seedUser("a@a.com");
@@ -285,14 +285,40 @@ describe("item set to Private (org deny)", () => {
 
     await seedItemPrivate(org, "folder", folder);
 
-    expect(await effectivePermission(owner, doc)).toBe("edit");
-    expect(await effectivePermission(admin, doc)).toBe("edit");
     expect(await effectivePermission(author, doc)).toBe("edit"); // "only you"
     expect(await effectivePermission(invited, doc)).toBe("view"); // "…and people you share it with"
     expect(await effectivePermission(outsider, doc)).toBe("none");
+    // Role is not an exemption. A restriction its author can't observe is one
+    // they have to take on trust, which is not a thing to ship in an access
+    // panel — so Private reaches owners and admins like everyone else.
+    expect(await effectivePermission(owner, doc)).toBe("none");
+    expect(await effectivePermission(admin, doc)).toBe("none");
   });
 
-  it("takes the docs and the folder out of a member's tree, but not the owner's", async () => {
+  it("still lets an owner lift a Private they applied to themselves", async () => {
+    // The safety net is NOT an exemption from the rule — it's that managing
+    // shares is gated on role, never on effective permission. Without this an
+    // owner could make a folder they can neither reach nor un-restrict.
+    const org = await seedOrg("Acme", "priv-undo");
+    const owner = await seedUser("o@a.com");
+    await seedMember(org, owner, "owner");
+    const vault = await seedVault(org);
+    const folder = await seedFolder(vault, null, "Locked", "Locked");
+    const doc = await seedNote(vault, folder, "Locked/x.md");
+    await seedVaultGrant(org, "edit");
+    const privateRow = await seedItemPrivate(org, "folder", folder);
+    expect(await effectivePermission(owner, doc)).toBe("none");
+
+    // …which is exactly what `DELETE /api/shares/:id` does, and its gate
+    // (`canManage`) asks for the role, not for access to the resource.
+    await pool.query("DELETE FROM shares WHERE id = $1", [privateRow]);
+    expect(await effectivePermission(owner, doc)).toBe("edit");
+  });
+
+  it("takes the docs and the folder out of everyone's tree, the owner's included", async () => {
+    // The set-based dual has to agree with the resolver here or the two would
+    // disagree about the owner, and a doc that resolves to `none` would keep
+    // syncing to them.
     const org = await seedOrg("Acme", "priv-sets");
     const owner = await seedUser("o@a.com");
     const member = await seedUser("m@a.com");
@@ -307,14 +333,12 @@ describe("item set to Private (org deny)", () => {
 
     await seedItemPrivate(org, "folder", secret);
 
-    const memberDocs = await listReadableDocsInVault(member, vault);
-    expect(memberDocs.has(hidden)).toBe(false);
-    expect(memberDocs.has(open)).toBe(true);
-    expect((await listVisibleFolders(member, vault)).map((f) => f.path)).not.toContain("Secret");
-
-    const ownerDocs = await listReadableDocsInVault(owner, vault);
-    expect(ownerDocs.has(hidden)).toBe(true);
-    expect((await listVisibleFolders(owner, vault)).map((f) => f.path)).toContain("Secret");
+    for (const who of [member, owner]) {
+      const docs = await listReadableDocsInVault(who, vault);
+      expect(docs.has(hidden)).toBe(false);
+      expect(docs.has(open)).toBe(true);
+      expect((await listVisibleFolders(who, vault)).map((f) => f.path)).not.toContain("Secret");
+    }
   });
 
   it("keeps a member's OWN notes inside a Private folder readable", async () => {
@@ -336,17 +360,132 @@ describe("item set to Private (org deny)", () => {
     expect(docs.has(theirs)).toBe(false);
   });
 
-  it("stacks with a per-member deny, which still beats everything", async () => {
+  it("is overridden for one person by an explicit share, and a personal block wins back", async () => {
+    // The three rows layered on one resource, in the order that decides them.
     const org = await seedOrg("Acme", "priv-stack");
     const admin = await seedUser("a@a.com");
     await seedMember(org, admin, "admin");
+    await seedVaultGrant(org, "edit");
     const vault = await seedVault(org);
     const folder = await seedFolder(vault, null, "HR", "HR");
     const doc = await seedNote(vault, folder, "HR/n.md");
 
+    expect(await effectivePermission(admin, doc)).toBe("edit");
     await seedItemPrivate(org, "folder", folder);
-    expect(await effectivePermission(admin, doc)).toBe("edit"); // Private spares admins
-    await seedDeny(org, "folder", folder, admin);
-    expect(await effectivePermission(admin, doc)).toBe("none"); // a personal block does not
+    expect(await effectivePermission(admin, doc)).toBe("none"); // Private reaches admins
+    await seedShare(org, "folder", folder, admin, "edit"); // "…people you share it with"
+    expect(await effectivePermission(admin, doc)).toBe("edit");
+    await seedDeny(org, "folder", folder, admin); // a personal block still wins
+    expect(await effectivePermission(admin, doc)).toBe("none");
+  });
+});
+
+/**
+ * The vault-wide **Read-only** posture.
+ *
+ * It is a plain org `view` grant on the vault resource, and a grant only ever
+ * RAISES permission — so owners, admins and note creators all kept `edit`
+ * through shortcuts that ran before any grant was consulted, and the setting
+ * silently did not apply to the person who chose it, despite the button reading
+ * "Everyone can read everything, not edit."
+ *
+ * It can't be fixed with a lock: a vault-scoped lock would need the same
+ * (resource, principal) key the grant already occupies. So the grant is now
+ * read as a *baseline for everyone* — when it says `view`, those shortcuts are
+ * skipped and the ordinary highest-wins lookup decides, which still lets a
+ * folder marked Shared lift someone back out.
+ */
+describe("vault-wide read-only cap", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  /** Set the vault posture, replacing whatever grant is there (one row per
+   *  (resource, principal) — the same upsert `POST /api/shares` does). */
+  const setVaultPosture = (orgId: string, permission: "view" | "edit") =>
+    pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES (gen_random_uuid()::text, $1, 'vault', $1, 'org', $1, $2)
+       ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+       DO UPDATE SET permission = EXCLUDED.permission`,
+      [orgId, permission],
+    );
+
+  it("caps owner, admin and member alike", async () => {
+    const org = await seedOrg("Acme", "ro-vault");
+    const owner = await seedUser("o@a.com");
+    const admin = await seedUser("a@a.com");
+    const member = await seedUser("m@a.com");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, admin, "admin");
+    await seedMember(org, member, "member");
+    await seedVaultGrant(org, "edit");
+    const vault = await seedVault(org);
+    const folder = await seedFolder(vault, null, "Docs", "Docs");
+    const doc = await seedNote(vault, folder, "Docs/n.md");
+
+    for (const who of [owner, admin, member]) {
+      expect(await effectivePermission(who, doc)).toBe("edit");
+    }
+
+    await setVaultPosture(org, "view");
+    for (const who of [owner, admin, member]) {
+      expect(await effectivePermission(who, doc)).toBe("view");
+    }
+    // It never GRANTS: an outsider is still shut out entirely.
+    const outsider = await seedUser("x@a.com");
+    expect(await effectivePermission(outsider, doc)).toBe("none");
+
+    // …and a folder marked Shared lifts everyone back out of it, which is the
+    // per-item override the panel offers.
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES (gen_random_uuid()::text, $1, 'folder', $2, 'org', $1, 'edit')`,
+      [org, folder],
+    );
+    for (const who of [owner, admin, member]) {
+      expect(await effectivePermission(who, doc)).toBe("edit");
+    }
+  });
+
+  it("caps a member on a note they created themselves", async () => {
+    // The creator shortcut is a shortcut like any other: read-only has to mean
+    // read-only, or "everyone" quietly excludes whoever wrote the note.
+    const org = await seedOrg("Acme", "ro-creator");
+    const member = await seedUser("m@a.com");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const mine = await seedNote(vault, null, "mine.md", member);
+
+    expect(await effectivePermission(member, mine)).toBe("edit");
+    await setVaultPosture(org, "view");
+    expect(await effectivePermission(member, mine)).toBe("view");
+  });
+
+  it("reaches a note at the vault ROOT, which no folder grant can", async () => {
+    // The whole reason the vault scope exists: a root note has no folder to
+    // hang a lock on.
+    const org = await seedOrg("Acme", "ro-root");
+    const owner = await seedUser("o@a.com");
+    await seedMember(org, owner, "owner");
+    const vault = await seedVault(org);
+    const doc = await seedNote(vault, null, "root.md");
+
+    expect(await effectivePermission(owner, doc)).toBe("edit");
+    await setVaultPosture(org, "view");
+    expect(await effectivePermission(owner, doc)).toBe("view");
+  });
+
+  it("still lets an owner edit content in ANOTHER vault", async () => {
+    const orgA = await seedOrg("A", "ro-a");
+    const orgB = await seedOrg("B", "ro-b");
+    const owner = await seedUser("o@a.com");
+    await seedMember(orgA, owner, "owner");
+    await seedMember(orgB, owner, "owner");
+    const vaultB = await seedVault(orgB);
+    const doc = await seedNote(vaultB, null, "b.md");
+
+    await setVaultPosture(orgA, "view");
+    expect(await effectivePermission(owner, doc)).toBe("edit");
   });
 });

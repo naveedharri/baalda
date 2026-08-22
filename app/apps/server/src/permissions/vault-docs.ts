@@ -30,21 +30,7 @@ export async function vaultAccess(
   db: Queryable,
   userId: string,
   vaultId: string,
-): Promise<{
-  organizationId: string;
-  role: string | null;
-  vaultWide: boolean;
-  /**
-   * WHERE the vault-wide reach came from, or null when there is none.
-   *
-   * Load-bearing for the item-Private rule: an item set to Private takes it
-   * out of the TEAM's reach only, so a member whose access is the org-wide
-   * grant loses it while an owner/admin or someone holding a personal
-   * vault grant keeps it. Collapsing all three into one boolean is what made
-   * that impossible to express.
-   */
-  vaultWideVia: "role" | "org" | "user" | null;
-} | null> {
+): Promise<{ organizationId: string; role: string | null; vaultWide: boolean } | null> {
   const org = await db.query<{ organization_id: string; role: string | null }>(
     `SELECT v.organization_id, m.role
        FROM vaults v
@@ -56,25 +42,17 @@ export async function vaultAccess(
   const row = org.rows[0];
   if (!row) return null;
   const base = { organizationId: row.organization_id, role: row.role };
-  if (row.role === "owner" || row.role === "admin") {
-    return { ...base, vaultWide: true, vaultWideVia: "role" };
-  }
+  if (row.role === "owner" || row.role === "admin") return { ...base, vaultWide: true };
   const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
-  const grant = await db.query<{ principal_type: string }>(
-    `SELECT principal_type FROM shares
+  const grant = await db.query(
+    `SELECT 1 FROM shares
       WHERE resource_type = 'vault' AND resource_id = $1
         AND permission IN ('view', 'edit')
         AND (${orgClause} (principal_type = 'user' AND principal_id = $2))
-      ORDER BY principal_type = 'user' DESC
       LIMIT 1`,
     [row.organization_id, userId],
   );
-  const via = grant.rows[0]?.principal_type;
-  return {
-    ...base,
-    vaultWide: via !== undefined,
-    vaultWideVia: via === "user" ? "user" : via === "org" ? "org" : null,
-  };
+  return { ...base, vaultWide: (grant.rowCount ?? 0) > 0 };
 }
 
 /**
@@ -165,7 +143,7 @@ async function listDocsInVault(
 ): Promise<Set<string>> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return new Set(); // unknown vault
-  const { organizationId, role, vaultWide, vaultWideVia } = access;
+  const { organizationId, role, vaultWide } = access;
 
   // The ONLY difference between the two sets. `files` has no `deleted_at`
   // column, so a tombstone can never be a file — the UNIONs below drop out.
@@ -231,14 +209,13 @@ async function listDocsInVault(
     return new Set(rows.map((r) => r.id));
   };
 
-  // A per-member deny always applies; an org deny (item Private) only takes the
-  // TEAM's reach away, so it is skipped for an owner/admin and for someone
-  // holding a personal vault grant.
+  // Both denies apply to everyone, owners and admins included — see
+  // [[resolver]] for why a restriction its author is exempt from is not one.
+  // The org deny is rescued only by `personal` below (what this user created or
+  // was shared by name), which is what "only you and people you share it with"
+  // means once it is a set rather than a sentence.
   const userDenied = await deniedDocsInVault(db, "user", userId, vaultId);
-  const orgDenied =
-    vaultWideVia === "role" || vaultWideVia === "user"
-      ? new Set<string>()
-      : await deniedDocsInVault(db, "org", organizationId, vaultId);
+  const orgDenied = await deniedDocsInVault(db, "org", organizationId, vaultId);
 
   let reachable: Set<string>;
   if (vaultWide) {
@@ -337,10 +314,7 @@ export async function listVisibleFolders(
   // owner/admin or to someone with a personal vault grant, and a folder the
   // user created themselves stays visible either way (that's "only you").
   const userDenied = await deniedFolderIds(db, "user", userId);
-  const orgDenied =
-    access.vaultWideVia === "role" || access.vaultWideVia === "user"
-      ? new Set<string>()
-      : await deniedFolderIds(db, "org", access.organizationId);
+  const orgDenied = await deniedFolderIds(db, "org", access.organizationId);
   const mine = new Set(
     all.rows.filter((f) => f.created_by === userId).map((f) => f.id),
   );

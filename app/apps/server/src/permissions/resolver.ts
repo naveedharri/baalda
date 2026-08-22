@@ -16,9 +16,10 @@ import { pool as defaultPool } from "../db/pool.js";
  * grant at all (a vault set to Private, or one created while private-by-default
  * was the rule) a member has no content access beyond notes it created: `none`.
  *
- * Denies (permission = 'denied') come in two flavours, both resolved BEFORE
- * the rules above: a per-USER deny is `none`, full stop; an ORG deny (the item
- * set to Private) only stops the team's grants reaching it. See {@link isDenied}.
+ * Denies (permission = 'denied') come in two flavours, both resolved BEFORE the
+ * rules above and both applying to owners and admins: a per-USER deny is
+ * `none`, full stop; an ORG deny (the item set to Private) leaves only the
+ * creator and explicit per-user grants. See {@link isDenied}.
  *
  * Locks (permission = 'locked') are a cap overlay resolved AFTER the rules
  * above: when a lock matches the doc or any ancestor folder — for this user
@@ -180,6 +181,11 @@ async function sharePermission(
 /**
  * True when a lock row covers this resource (a file when `docId` is set, plus
  * any folder in `folderIds`) for this user or the whole vault.
+ *
+ * Deliberately folder/file only. A vault-scoped lock cannot exist: it would
+ * need the same (resource_type, resource_id, principal_type, principal_id) key
+ * the vault GRANT already occupies. The vault-wide read-only ceiling is
+ * expressed by that grant instead — see {@link vaultBaseline}.
  */
 export async function isLocked(
   db: Queryable,
@@ -207,6 +213,34 @@ export async function isLocked(
 }
 
 /**
+ * The vault's declared posture: the org-wide grant on the vault resource, or
+ * null when there is none (the Private posture).
+ *
+ * This is a **baseline for everyone**, not just for plain members. Read-only
+ * says "Everyone can read everything, not edit", and until now it didn't mean
+ * everyone: owners, admins and note creators all kept `edit` through shortcuts
+ * that ran before any grant was consulted, so the person who chose the setting
+ * was the one person exempt from it. When the baseline is `view`, those
+ * shortcuts are skipped and the ordinary highest-wins grant lookup decides —
+ * which still lets a folder marked Shared, or a personal edit grant, lift an
+ * individual out of it. That is exactly what the panel offers.
+ */
+export async function vaultBaseline(
+  db: Queryable,
+  organizationId: string,
+): Promise<Permission | null> {
+  const { rows } = await db.query<{ permission: string }>(
+    `SELECT permission FROM shares
+      WHERE resource_type = 'vault' AND resource_id = $1
+        AND principal_type = 'org' AND permission IN ('view', 'edit')
+      LIMIT 1`,
+    [organizationId],
+  );
+  const p = rows[0]?.permission;
+  return p === "edit" || p === "view" ? p : null;
+}
+
+/**
  * True when a `denied` row covers the resource — the file itself or any
  * ancestor folder — for `principal`.
  *
@@ -221,11 +255,18 @@ export async function isLocked(
  * - **org deny** (`principal_type 'org'`) — the *item* set to Private. It says
  *   "this folder is not shared with the team", and it exists because clearing
  *   an item's own rows could never achieve that: a vault-wide Open grant still
- *   reached the item, so Private silently snapped back to Shared. It suppresses
- *   ORG-scoped grants only (see `sharePermission`), leaving the creator, anyone
- *   with an explicit personal share, and owners/admins — which is exactly
- *   "only you and people you share it with", and is what keeps an owner from
- *   making a folder nobody, including themselves, can ever reach again.
+ *   reached the item, so Private silently snapped back to Shared. It leaves the
+ *   creator and explicit per-user grants standing and drops everything
+ *   org-scoped — which is exactly "only you and people you share it with".
+ *
+ * Both apply to **owners and admins**. A restriction its author is exempt from
+ * cannot be checked by its author, and "it works, take my word for it" is not a
+ * thing to ship in an access panel. The safety net is not an exemption, it is
+ * that the *management* gate is role-based and separate: `canManage` in
+ * `http/routes/shares.ts` asks for owner/admin and never for effective
+ * permission, so an owner can always lift a restriction they applied to
+ * themselves — and the desktop's Access list is built from the local folder, so
+ * the row to do it from never disappears either.
  */
 export async function isDenied(
   db: Queryable,
@@ -258,15 +299,37 @@ export async function effectivePermission(
 
   const folderIds = await ancestorFolderIds(db, loc.folderId);
 
-  // A per-member deny is first and unconditional: it outranks role, grant and
-  // authorship.
+  // Denies are first and unconditional. Both kinds outrank the role branch
+  // below: what you set in the Access panel applies to you too, or a vault
+  // owner can never see the effect of their own restriction and has to take it
+  // on trust. The escape hatch is elsewhere and role-based — managing shares
+  // (`canManage` in http/routes/shares.ts) is gated on owner/admin, never on
+  // effective permission, so an owner can always lift what they set.
   if (await isDenied(db, "user", userId, docId, folderIds)) return "none";
-  // An item set to Private only removes the TEAM's reach (see isDenied).
-  const orgGrantsApply = !(await isDenied(db, "org", loc.organizationId, docId, folderIds));
+  const itemPrivate = await isDenied(db, "org", loc.organizationId, docId, folderIds);
 
   const role = await memberRole(db, loc.organizationId, userId);
+  // A Read-only vault caps EVERY shortcut below it (see `vaultBaseline`).
+  const readOnlyVault = (await vaultBaseline(db, loc.organizationId)) === "view";
   let granted: Permission;
-  if (role === "owner" || role === "admin") {
+  if (itemPrivate) {
+    // Private = "only me and people I share it with". The creator keeps it and
+    // explicit per-user grants still apply; everything org-scoped — including
+    // an admin's blanket edit — does not.
+    granted =
+      role !== null && loc.createdBy && loc.createdBy === userId
+        ? "edit"
+        : await sharePermission(db, userId, docId, folderIds, loc.organizationId, false, false);
+  } else if (readOnlyVault) {
+    granted = await sharePermission(
+      db,
+      userId,
+      docId,
+      folderIds,
+      loc.organizationId,
+      role !== null,
+    );
+  } else if (role === "owner" || role === "admin") {
     granted = "edit";
   } else if (role !== null && loc.createdBy && loc.createdBy === userId) {
     // Private-by-default: a member always has edit on a note they created, even
@@ -283,11 +346,10 @@ export async function effectivePermission(
       folderIds,
       loc.organizationId,
       role !== null, // isMember — gates the org-wide grant
-      orgGrantsApply,
     );
   }
 
-  // Deny overlay: a matching lock caps at view; it never grants.
+  // Cap overlay: a matching lock caps at view; it never grants.
   if (granted !== "none" && (await isLocked(db, userId, docId, folderIds))) {
     return "view";
   }
@@ -357,27 +419,26 @@ export async function resolveAccessForUser(
   if (await isDenied(db, "user", userId, ctx.docId, ctx.folderIds)) {
     return { permission: "none", capped: false, denied: true };
   }
-  const orgGrantsApply = !(await isDenied(
-    db,
-    "org",
-    ctx.organizationId,
-    ctx.docId,
-    ctx.folderIds,
-  ));
+  const itemPrivate = await isDenied(db, "org", ctx.organizationId, ctx.docId, ctx.folderIds);
+  const readOnlyVault = (await vaultBaseline(db, ctx.organizationId)) === "view";
   const granted: Permission =
-    role === "owner" || role === "admin"
-      ? "edit"
-      : await sharePermission(
-          db,
-          userId,
-          ctx.docId,
-          ctx.folderIds,
-          ctx.organizationId,
-          role !== null, // isMember — gates the org-wide grant
-          orgGrantsApply,
-        );
+    itemPrivate
+      ? // Private: only explicit per-user grants survive. (The creator rule
+        // needs a doc, which a folder context doesn't have — that branch lives
+        // in `effectivePermission`.)
+        await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false)
+      : !readOnlyVault && (role === "owner" || role === "admin")
+        ? "edit"
+        : await sharePermission(
+            db,
+            userId,
+            ctx.docId,
+            ctx.folderIds,
+            ctx.organizationId,
+            role !== null, // isMember — gates the org-wide grant
+          );
 
-  if (granted === "none") return { permission: "none", capped: false };
+  if (granted === "none") return { permission: "none", capped: false, denied: itemPrivate };
 
   const locked = await isLocked(db, userId, ctx.docId, ctx.folderIds);
   if (locked && granted === "edit") return { permission: "view", capped: true };

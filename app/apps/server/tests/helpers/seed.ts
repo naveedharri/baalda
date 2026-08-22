@@ -106,7 +106,7 @@ export async function seedVaultGrant(
   return id;
 }
 
-/** A lock row (DENY overlay) on a folder/file, for a user or the whole org. */
+/** A lock row (read-only cap) on a folder/file, for a user or the whole org. */
 export async function seedLock(
   organizationId: string,
   resourceType: "folder" | "file",
