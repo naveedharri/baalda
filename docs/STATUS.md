@@ -181,6 +181,21 @@ Six changes that together make a vault something a team can actually govern.
 - [x] **Item colors sync.** `folders.color` / `notes.color` ride the registry pull, keyed by id so a
   rename keeps the tint. Colors set before a vault gained sync are adopted upward once.
 
+### Google sign-in on an existing password account ✔ (v0.1.30)
+- [x] `account_not_linked` on the Google callback for anyone who first signed up with a password —
+  i.e. everyone except users created *through* Google, who had nothing to link. The cause was a
+  Better Auth default, not our code: `accountLinking.requireLocalEmailVerified` is **true** unless
+  set, and it refuses to link while the local row is unverified. `requireEmailVerification` is off
+  (no email round-trip in the MVP), so every password sign-up has `emailVerified = false` forever
+  — which made the `accountLinking` block dead code from the day it was written.
+- [x] Set `requireLocalEmailVerified: false`. **A knowingly-taken trade:** the check exists because,
+  with no verification at sign-up, someone can register an address they don't own, and linking then
+  joins the real owner to the squatter's account rather than locking them out. Accepted because the
+  squat is already possible without linking and Google's verified email is the strongest signal we
+  have. **Email verification at sign-up is the real fix** and is still owed.
+- [x] Pinned by a config test — the failure mode was a silent default, so the three options that
+  have to agree (`enabled`, `trustedProviders`, `requireLocalEmailVerified`) are asserted together.
+
 ### Phase 4: Polish / upgrades _(deferred)_ ⬜
 - [ ] Structural rich-text CRDT (y-prosemirror / `Y.XmlFragment`) for full WYSIWYG.
 - [ ] Vector / hybrid search (Orama) for semantic + AI retrieval.
