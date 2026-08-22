@@ -2207,9 +2207,16 @@ body:has(.sidebar-resizer.dragging) {
 /* Post-auto-update "What's New" modal. Rides the shared .modal/.modal-backdrop
    chrome; everything below is the celebratory dressing. */
 .whats-new {
-  width: 400px;
+  /* Wide and short rather than a tower: a long release list must never push
+     the dialog past the viewport (it used to clip top AND bottom). The card
+     caps its height, the notes list scrolls, hero + CTA stay pinned. */
+  width: 580px;
+  max-width: min(580px, 92vw);
+  max-height: min(72vh, 620px);
+  display: flex;
+  flex-direction: column;
   text-align: center;
-  padding: var(--sp-8) var(--sp-6) var(--sp-6);
+  padding: var(--sp-6) var(--sp-6) var(--sp-5);
   /* A soft accent wash from the top so the moment reads as good news, not a
      system dialog — same trick as the welcome screen's radial. */
   background:
@@ -2218,6 +2225,7 @@ body:has(.sidebar-resizer.dragging) {
 }
 .whats-new-hero {
   display: flex;
+  flex: none;
   flex-direction: column;
   align-items: center;
   gap: var(--sp-2);
@@ -2256,8 +2264,12 @@ body:has(.sidebar-resizer.dragging) {
 }
 .whats-new-notes {
   list-style: none;
-  margin: var(--sp-5) 0 0;
+  margin: var(--sp-4) 0 0;
   padding: var(--sp-4);
+  /* The one flexible region: eats the leftover height and scrolls past it. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
@@ -2283,7 +2295,8 @@ body:has(.sidebar-resizer.dragging) {
 }
 .whats-new-cta {
   width: 100%;
-  margin-top: var(--sp-5);
+  flex: none;
+  margin-top: var(--sp-4);
   padding: var(--sp-3) var(--sp-4);
 }
 @keyframes whats-new-pop {
