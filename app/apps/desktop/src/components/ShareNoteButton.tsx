@@ -33,7 +33,10 @@ export function ShareNoteButton({ docId }: { docId: string }) {
   if (!orgId) return null;
 
   const copy = async () => {
-    const link = buildNoteLink({ orgId, docId });
+    // Built on the server URL so it's an https link — chat apps make those
+    // clickable, where a bare baalda:// scheme had to be copy-pasted. The
+    // server's /open/note page bounces the click into the app.
+    const link = buildNoteLink({ orgId, docId }, useStore.getState().serverUrl);
     try {
       await navigator.clipboard.writeText(link);
       setCopied(true);

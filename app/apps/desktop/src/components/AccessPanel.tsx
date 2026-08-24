@@ -319,7 +319,14 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
    * too, and the panel has to be able to say which folder is deciding that.
    */
   const privatePaths = useMemo(() => {
-    const idToPath = resourceIdsByPath(tree);
+    // Mapped through the same entries the rows are drawn from — the SERVER
+    // structure when available — never through the local disk tree alone: a
+    // Private item has left the disk, so a disk-keyed map could not name its
+    // path and the row it still occupies on screen badged as "Shared".
+    const idToPath = new Map(entries.map((e) => [e.id, e.path] as const));
+    for (const [id, path] of resourceIdsByPath(tree)) {
+      if (!idToPath.has(id)) idToPath.set(id, path);
+    }
     const out = new Set<string>();
     for (const d of denies) {
       if (sharePrincipalType(d) !== "org") continue;
@@ -327,7 +334,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       if (path) out.add(path);
     }
     return out;
-  }, [tree, denies]);
+  }, [entries, tree, denies]);
   /** The nearest ANCESTOR of `path` that is Private, or null. */
   const privateSourcePath = (path: string): string | null => {
     const parts = path.split("/");

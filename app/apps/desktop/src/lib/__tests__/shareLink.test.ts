@@ -30,9 +30,35 @@ describe("share links", () => {
     });
   });
 
+  it("builds a clickable https link when a server base is known", () => {
+    // Chat apps linkify https; a bare baalda:// scheme just sits there as text.
+    // The server's /open/note page bounces the click into the app.
+    const target = { orgId: "org_123", docId: "d0c-4bcd" };
+    expect(buildNoteLink(target, "https://api.baalda.com")).toBe(
+      "https://api.baalda.com/open/note/org_123/d0c-4bcd",
+    );
+    // A reverse-proxy sub-path prefix on the server URL is preserved.
+    expect(buildNoteLink(target, "https://example.com/baalda/")).toBe(
+      "https://example.com/baalda/open/note/org_123/d0c-4bcd",
+    );
+    // A malformed base falls back to the raw scheme rather than a broken link.
+    expect(buildNoteLink(target, "not a url")).toBe(`${SHARE_SCHEME}://note/org_123/d0c-4bcd`);
+  });
+
+  it("parses the https form, host-agnostic (self-hosted servers mint links too)", () => {
+    const target = { orgId: "org_123", docId: "d0c-4bcd" };
+    expect(parseNoteLink(buildNoteLink(target, "https://api.baalda.com"))).toEqual(target);
+    expect(parseNoteLink("https://my.selfhost.io/prefix/open/note/o1/d1")).toEqual({
+      orgId: "o1",
+      docId: "d1",
+    });
+  });
+
   it("rejects anything that isn't one of ours", () => {
     for (const url of [
-      "https://example.com/note/org/doc",
+      "https://example.com/note/org/doc", // https without /open/note
+      "https://example.com/open/vault/org_1", // wrong resource
+      "https://example.com/open/note/org_1", // no doc id
       "baalda://vault/org_1",
       "baalda://note/org_1", // no doc id
       "baalda://note", // no ids at all
