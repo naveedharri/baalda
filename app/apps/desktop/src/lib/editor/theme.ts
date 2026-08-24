@@ -168,16 +168,38 @@ export const editorTheme = EditorView.theme({
   ".cm-md-table": {
     margin: "var(--sp-3) 0",
     overflowX: "auto",
+    // Without inline-size containment the table's natural width propagates
+    // into `.cm-content`'s intrinsic size (it's a flex item that sizes from
+    // its contents), widening the WHOLE sheet past the window — the prose
+    // shifts and clips instead of just this wrapper scrolling. Containment
+    // keeps the overflow here, where the scrollbar is.
+    contain: "inline-size",
   },
   ".cm-md-table table": {
     borderCollapse: "collapse",
-    // Natural column widths, capped at the prose measure: a table that fits
-    // stays put, a wide one overflows into the wrapper's horizontal scroll
-    // instead of crushing its columns (a table's min-content width beats
-    // max-width, which is exactly what lets it overflow).
+    // Natural column widths, uncapped: a wide table overflows into the
+    // wrapper's horizontal scroll instead of squeezing its columns to fit.
+    // (An earlier `max-width: 100%` here compressed every column toward its
+    // minimum before overflowing — the exact crushing this exists to avoid.)
     width: "max-content",
-    maxWidth: "100%",
     fontSize: "0.95em",
+  },
+  // The block inside each cell (see TableWidget). Its max-width is what bounds
+  // a column's natural size: long prose wraps at a readable measure, short
+  // columns stay as wide as their content — nothing is squeezed below it.
+  ".cm-md-table .cm-md-cell": {
+    maxWidth: "42ch",
+  },
+  // A visible (non-overlay) scrollbar, so a table that CAN scroll shows it.
+  ".cm-md-table::-webkit-scrollbar": {
+    height: "8px",
+  },
+  ".cm-md-table::-webkit-scrollbar-thumb": {
+    backgroundColor: "var(--border)",
+    borderRadius: "4px",
+  },
+  ".cm-md-table::-webkit-scrollbar-track": {
+    background: "transparent",
   },
   ".cm-md-table th, .cm-md-table td": {
     border: "1px solid var(--border)",

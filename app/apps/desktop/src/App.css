@@ -5479,33 +5479,60 @@ button.is-done:disabled {
   -webkit-backdrop-filter: blur(14px);
 }
 .update-gate-card {
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--sp-4);
-  max-width: 420px;
-  padding: var(--sp-8) var(--sp-8);
+  max-width: 440px;
+  padding: var(--sp-9, 44px) var(--sp-8) var(--sp-8);
   text-align: center;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
 }
+/* A thin accent thread across the top — enough identity without a logo. */
+.update-gate-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+.update-gate-version {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 3px 12px;
+  border-radius: var(--radius-pill);
+}
 .update-gate-card h1 {
   margin: 0;
-  font-size: var(--fs-lg);
+  font-size: var(--fs-xl);
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 .update-gate-card p {
   margin: 0;
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.55;
+  max-width: 36ch;
 }
-.update-gate-logo {
-  height: 22px;
+.update-gate-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
 }
 .update-gate-cta {
-  min-width: 180px;
+  min-width: 160px;
 }
 .update-gate .update-progress {
   width: 240px;

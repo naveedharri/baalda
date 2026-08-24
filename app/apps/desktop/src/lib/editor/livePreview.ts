@@ -216,7 +216,14 @@ class TableWidget extends WidgetType {
       const head = i === 0 && rows[1] && isDelim(rows[1]);
       for (const c of cells(line)) {
         const cell = document.createElement(head ? "th" : "td");
-        cell.textContent = c;
+        // Inner block, not textContent on the cell: `max-width` on a table
+        // cell is unreliable in auto table layout, but on a block child it
+        // reliably caps the column's natural width so long prose wraps at a
+        // readable measure while short columns keep their natural size.
+        const inner = document.createElement("div");
+        inner.className = "cm-md-cell";
+        inner.textContent = c;
+        cell.appendChild(inner);
         tr.appendChild(cell);
       }
       if (head) {

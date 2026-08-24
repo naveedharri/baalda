@@ -10,7 +10,6 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
 import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
-import { Wordmark } from "./components/Logo";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { SidebarResizer } from "./components/SidebarResizer";
@@ -293,21 +292,39 @@ function UpdateGate() {
       ? Math.round((update.downloaded / update.total) * 100)
       : null;
 
+  const version = ("version" in update ? update.version : null) ?? required;
+
+  // Escape hatch beside the install CTA: flush the open note, then reboot the
+  // webview — same as the reload shortcut. Useful when a wall raised by a
+  // half-failed check would otherwise strand the window.
+  const reload = async () => {
+    try {
+      await bridgeManager.currentBridge()?.flushEgest();
+    } catch {
+      // Best-effort: reload regardless, notes are already on disk.
+    }
+    window.location.reload();
+  };
+
   return (
     <div className="update-gate" role="alertdialog" aria-modal="true" aria-label="Update required">
       <div className="update-gate-card">
-        <Wordmark className="update-gate-logo" />
+        {version && <span className="update-gate-version">Version {version}</span>}
         <h1>Update required</h1>
         {update.phase === "available" && (
           <>
             <p>
-              {BRAND_NAME} <strong>v{update.version}</strong> is ready. Install the update to
-              continue using the app — it takes a moment and your notes stay right where they
-              are, on your disk.
+              A new version of {BRAND_NAME} is ready. Installing takes a moment, and your
+              notes stay right where they are — on your disk.
             </p>
-            <AsyncButton className="primary update-gate-cta" onClick={() => installUpdate()}>
-              Install &amp; Restart
-            </AsyncButton>
+            <div className="update-gate-actions">
+              <AsyncButton className="primary update-gate-cta" onClick={() => installUpdate()}>
+                Install Update
+              </AsyncButton>
+              <button className="ghost-pill lg" onClick={() => void reload()}>
+                Reload
+              </button>
+            </div>
           </>
         )}
         {(update.phase === "downloading" || update.phase === "installing") && (
@@ -342,16 +359,21 @@ function UpdateGate() {
               {update.message ? ` — ${update.message}` : ""}. Check your connection and try
               again.
             </p>
-            <AsyncButton
-              className="primary update-gate-cta"
-              onClick={async () => {
-                // Re-discover then install: the failed attempt may have died at
-                // either stage, and checkForUpdate re-arms the pending update.
-                if (await checkForUpdate()) await installUpdate();
-              }}
-            >
-              Try again
-            </AsyncButton>
+            <div className="update-gate-actions">
+              <AsyncButton
+                className="primary update-gate-cta"
+                onClick={async () => {
+                  // Re-discover then install: the failed attempt may have died at
+                  // either stage, and checkForUpdate re-arms the pending update.
+                  if (await checkForUpdate()) await installUpdate();
+                }}
+              >
+                Try again
+              </AsyncButton>
+              <button className="ghost-pill lg" onClick={() => void reload()}>
+                Reload
+              </button>
+            </div>
           </>
         )}
       </div>
