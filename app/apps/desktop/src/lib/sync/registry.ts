@@ -1022,25 +1022,48 @@ export class VaultRegistry {
   }
 
   /**
+   * The tail of the pull chain. Pulls are SERIALIZED: two interleaved
+   * `syncStructure` passes feed the shared progress reporter from both sides at
+   * once (each resets the denominator the other is still counting against),
+   * which is how the header once read "Syncing 585/164".
+   */
+  private pullChain: Promise<boolean> = Promise.resolve(false);
+
+  /**
    * Re-pull the server's folder/note set and reconcile it against the current
    * local tree WITHOUT re-resolving the vault or seeding. Called when the vault
    * channel signals a `registry` change (a teammate created/renamed/moved/
-   * deleted something) so this device's tree catches up live. Idempotent.
+   * deleted something) so this device's tree catches up live. Idempotent, and
+   * serialized — a pull that arrives while one is running waits its turn.
+   *
+   * Resolves TRUE only when the pass actually changed something this device can
+   * see (disk moved, rows created, notes materialized), so callers can skip a
+   * sidebar refresh — and the re-render flicker it causes — for the common
+   * "nothing new" pull.
    */
-  async pull(): Promise<void> {
+  pull(): Promise<boolean> {
+    const run = this.pullChain.then(
+      () => this.pullOnce(),
+      () => this.pullOnce(),
+    );
+    this.pullChain = run.catch(() => false);
+    return run;
+  }
+
+  private async pullOnce(): Promise<boolean> {
     // Scope-guarded because this is THE historical corruption path: a debounced
     // pull that survived a vault switch still held vault A's `serverVaultId`
     // while `listTree()` returned vault B's tree, so B's folders/notes were
     // created under A and A's doc map was written into B's config.json.
-    if (this.stale()) return;
-    if (!this.serverVaultId) return;
+    if (this.stale()) return false;
+    if (!this.serverVaultId) return false;
     const vaultId = this.serverVaultId;
     const tree = await this.readFullTree();
-    if (this.stale()) return;
+    if (this.stale()) return false;
     // The vault id must not have moved on either (a reconcile for another vault
     // could have re-pointed it while we were reading the tree).
-    if (this.serverVaultId !== vaultId) return;
-    await this.syncStructure(vaultId, tree, { inbound: true });
+    if (this.serverVaultId !== vaultId) return false;
+    return this.syncStructure(vaultId, tree, { inbound: true });
   }
 
   /**
@@ -1057,8 +1080,11 @@ export class VaultRegistry {
     vaultId: string,
     workingTree: FullTree,
     opts: { inbound: boolean },
-  ): Promise<void> {
-    if (this.stale()) return;
+  ): Promise<boolean> {
+    if (this.stale()) return false;
+    // Did this pass change anything the sidebar can see? Returned so a pull
+    // that found nothing new can skip the tree refresh (and its flicker).
+    let mutated = false;
     // Failures describe THIS pass. They used to accumulate across pulls — every
     // registry signal re-recorded the same refusals, so a vault could never come
     // back from "N not synced" even after the underlying cause was gone.
@@ -1068,7 +1094,7 @@ export class VaultRegistry {
       this.api.listFolderRegistry(vaultId),
       this.api.listNoteRegistry(vaultId),
     ]);
-    if (this.stale()) return;
+    if (this.stale()) return false;
     const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
@@ -1078,7 +1104,7 @@ export class VaultRegistry {
     // can match by docId rather than by path (a rename changes the path, which is
     // exactly why path-matching produced duplicates).
     let titles = await ipc.listNoteTitles(this.epoch());
-    if (this.stale()) return;
+    if (this.stale()) return false;
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
@@ -1092,8 +1118,9 @@ export class VaultRegistry {
         tombstones: noteRegistry.tombstones,
         folderTombstones: folderRegistry.tombstones,
       });
-      if (this.stale()) return;
+      if (this.stale()) return false;
       if (applied.changedDisk) {
+        mutated = true;
         // One re-read, only when we actually moved something. Without it the steps
         // below still see the OLD path as a local note missing from the server (so
         // they re-register it) and the NEW path as server-only (so they materialize
@@ -1101,14 +1128,14 @@ export class VaultRegistry {
         // Patching the in-memory lists by hand instead is the dual-bookkeeping that
         // caused this class of bug in the first place.
         const reread = await this.readFullTree();
-        if (this.stale()) return;
+        if (this.stale()) return false;
         ({ folders, notes } = flattenTree(reread));
         titles = await ipc.listNoteTitles(this.epoch());
-        if (this.stale()) return;
+        if (this.stale()) return false;
         // Re-read the server's notes too: `move_note` bumps rows we may have just
         // raced, and a stale list here would undo the move we just applied.
         const fresh = await this.api.listNoteRegistry(vaultId);
-        if (this.stale()) return;
+        if (this.stale()) return false;
         serverNotes = fresh.notes;
       }
       this.inboundSuppressed = applied.suppress;
@@ -1190,6 +1217,7 @@ export class VaultRegistry {
           if (out.ok) {
             this.folderByPath.set(f.path, out.value.id);
             checkpoint.touch();
+            mutated = true;
             this.sink.item("ok");
           } else {
             this.recordFailure({
@@ -1205,7 +1233,7 @@ export class VaultRegistry {
         { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
       );
     }
-    if (this.stale()) return;
+    if (this.stale()) return mutated;
 
     // ---- notes, one flat pool (parentIds are all resolved by now) ----
     await runPool(
@@ -1230,6 +1258,7 @@ export class VaultRegistry {
           this.setMapping(rp, noteDocId(out.value), vaultId);
           resolvedNotePaths.add(rp);
           checkpoint.touch();
+          mutated = true;
           this.sink.item("ok");
           return;
         }
@@ -1250,7 +1279,7 @@ export class VaultRegistry {
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
     );
-    if (this.stale()) return;
+    if (this.stale()) return mutated;
 
     // 4. Prune mappings for notes that no longer exist anywhere (deleted on the
     //    server AND absent locally), then checkpoint the map.
@@ -1276,7 +1305,7 @@ export class VaultRegistry {
     }
     checkpoint.touch();
     await checkpoint.flush();
-    if (this.stale()) return;
+    if (this.stale()) return mutated;
 
     // 5. Materialize server-only notes locally. This is what makes a folder
     //    that's empty on this device (a just-joined vault, or a fresh
@@ -1306,6 +1335,7 @@ export class VaultRegistry {
         // vault B's folder).
         try {
           await ipc.writeNoteIfMissing(rp, "", this.epoch());
+          mutated = true;
           this.sink.item("ok");
         } catch (e) {
           if (ipc.isVaultMismatch(e)) return; // the vault moved on — not a failure
@@ -1336,6 +1366,7 @@ export class VaultRegistry {
     // can't happen after a relaunch.
     checkpoint.touch();
     await checkpoint.flush();
+    return mutated;
   }
 
   /**

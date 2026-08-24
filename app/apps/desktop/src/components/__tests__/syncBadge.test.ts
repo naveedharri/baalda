@@ -70,7 +70,17 @@ describe("syncBadgeLabel with a bulk sync run", () => {
     ).toBe("Syncing 128/500");
   });
 
-  it("counts the registering and downloading phases too, named by direction", () => {
+  it("clamps a racing counter so it can never read 585/164", () => {
+    expect(
+      syncBadgeLabel({
+        status: "synced",
+        now,
+        progress: run({ phase: "registering", done: 585, total: 164 }),
+      }),
+    ).toBe("Syncing 164/164");
+  });
+
+  it("counts the registering and downloading phases too, all under one verb", () => {
     expect(
       syncBadgeLabel({
         status: "connecting",
@@ -78,14 +88,16 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         progress: run({ phase: "registering", done: 3, total: 40 }),
       }),
     ).toBe("Syncing 3/40");
-    // A freshly invited teammate watching their vault arrive reads "Downloading".
+    // Every phase reads "Syncing" — the per-phase verbs described mechanism,
+    // not the user's situation ("Uploading files" on an already-synced vault
+    // read as "my vault is being re-sent").
     expect(
       syncBadgeLabel({
         status: "synced",
         now,
         progress: run({ phase: "downloading", done: 9, total: 10 }),
       }),
-    ).toBe("Downloading 9/10");
+    ).toBe("Syncing 9/10");
   });
 
   it("falls back to the indeterminate label when the run has no total yet", () => {
@@ -168,7 +180,7 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         noteOpen: false,
         progress: run({ phase: "downloading", done: 128, total: 500 }),
       }),
-    ).toBe("Downloading 128/500");
+    ).toBe("Syncing 128/500");
     expect(
       syncBadgeLabel({
         status: "offline",

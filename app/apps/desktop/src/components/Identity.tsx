@@ -127,13 +127,13 @@ export function syncBadgeLabel(args: {
   }
   if (progress && isSyncRunActive(progress)) {
     if (progress.total <= 0) return "Syncing…";
-    // "Downloading" is the one direction we genuinely know (the inbound
-    // backfill). The content pass is NOT called "Uploading": it pulls each
-    // note's server state first and only then pushes what's missing, so on a
-    // vault that was already synced it is a verification sweep — calling that
-    // "Uploading files" told people their synced vault was being re-sent.
-    const verb = progress.phase === "downloading" ? "Downloading" : "Syncing";
-    return `${verb} ${progress.done}/${progress.total}`;
+    // One verb for every phase. The old per-phase labels ("Uploading",
+    // "Downloading") described the mechanism, not the user's situation — the
+    // content pass pulls each note's server state before pushing anything, so
+    // on an already-synced vault "Uploading files" read as "my synced vault is
+    // being re-sent". Done is clamped so a racing denominator can never render
+    // an impossible "585/164".
+    return `Syncing ${Math.min(progress.done, progress.total)}/${progress.total}`;
   }
   // A run that finished with failures must not read "Synced". `failed` is the
   // number of notes that are still only on this device.

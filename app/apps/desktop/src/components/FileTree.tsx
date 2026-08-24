@@ -1675,8 +1675,10 @@ function TreeSyncMark({
   if (!mark) return null;
   return (
     <span className={`tree-sync ${mark.state}`} title={mark.title} aria-label={mark.title}>
-      {mark.count != null ? (
-        <span className="tree-sync-pct">{mark.count}</span>
+      {mark.progress != null ? (
+        <span className="tree-sync-pct">
+          {mark.progress.synced}/{mark.progress.total}
+        </span>
       ) : (
         <span className="sync-dot" aria-hidden="true" />
       )}
