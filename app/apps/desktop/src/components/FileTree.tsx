@@ -31,6 +31,7 @@ import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
 import { previewKind } from "../lib/preview";
 import {
   buildTreeSyncIndex,
+  FolderWaveTracker,
   rowSyncMark,
   type TreeSyncIndex,
 } from "../lib/syncRollup";
@@ -255,17 +256,28 @@ export function FileTree() {
   // Note the denominator comes from `titles` + `docIdByPath`, NOT from `tree`:
   // the tree is lazily loaded, so a folder nobody expanded would roll up nothing
   // and read as fully synced.
-  const syncIndex = useMemo<TreeSyncIndex | null>(
-    () =>
-      syncEnabled
-        ? buildTreeSyncIndex({
-            docIdByPath,
-            docSyncState,
-            localNotePaths: titles.map((t) => t.path),
-          })
-        : null,
-    [syncEnabled, docIdByPath, docSyncState, titles],
-  );
+  // Wave memory for the folder badges: "1/2" counts progress through the notes
+  // that actually need syncing, which takes remembering how big the wave was
+  // across renders. Reset whenever the vault (or sync itself) changes — a wave
+  // from another vault's folders says nothing about this one's.
+  const wavesRef = useRef(new FolderWaveTracker());
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const lastWaveKeyRef = useRef<string | null>(null);
+  const syncIndex = useMemo<TreeSyncIndex | null>(() => {
+    const waveKey = syncEnabled ? vaultPath : null;
+    if (lastWaveKeyRef.current !== waveKey) {
+      wavesRef.current.reset();
+      lastWaveKeyRef.current = waveKey;
+    }
+    if (!syncEnabled) return null;
+    const index = buildTreeSyncIndex({
+      docIdByPath,
+      docSyncState,
+      localNotePaths: titles.map((t) => t.path),
+    });
+    wavesRef.current.apply(index);
+    return index;
+  }, [syncEnabled, docIdByPath, docSyncState, titles, vaultPath]);
 
   // Resolve lock rows (server resource ids) to tree paths for the badges.
   const lockByPath = useMemo(
@@ -1703,7 +1715,7 @@ function TreeSyncMark({
     <span className={`tree-sync ${mark.state}`} title={mark.title} aria-label={mark.title}>
       {mark.progress != null ? (
         <span className="tree-sync-pct">
-          {mark.progress.synced}/{mark.progress.total}
+          {mark.progress.done}/{mark.progress.total}
         </span>
       ) : (
         <span className="sync-dot" aria-hidden="true" />

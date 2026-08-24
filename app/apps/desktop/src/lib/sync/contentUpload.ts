@@ -9,7 +9,11 @@
 //
 // ── The idempotency guarantee (the single most important property) ────────────
 // Re-running this must NOT duplicate a note's text. It cannot, because the only
-// way text ever enters a doc here is `NoteBridge.seedFromFileIfEmpty()`, and:
+// ways text ever enters a doc here are `NoteBridge.seedFromFileIfEmpty()` and —
+// on `ingestFromFile` runs — `NoteBridge.ingestNow()`, whose echo-hash +
+// converged-content guards make a re-run of the same file bytes a no-op (it
+// applies a DIFF against the doc's current text, never an insert of the whole
+// file). For the seed path:
 //
 //   1. it inserts nothing when the Y.Text is already non-empty; and
 //   2. it is called ONLY after the provider's initial server sync has genuinely
@@ -77,6 +81,27 @@ export interface ContentUploaderOptions {
   /** Docs to leave alone — currently the open note, whose own editor session
    *  owns its provider (two providers on one doc is the one thing to avoid). */
   skip?: (docId: string) => boolean;
+  /** Queue every note regardless of the pushed checkpoint. For local-change
+   *  runs: the doc IS confirmed on the server, but its .md just changed on disk
+   *  underneath us, so "pushed" says nothing about the new bytes. */
+  force?: boolean;
+  /**
+   * Merge each note's current file bytes into its doc (`NoteBridge.ingestNow`)
+   * as part of the push — the local-change run's whole reason to exist. Without
+   * it this engine only ever *seeds an empty doc*, so an edit to a note that
+   * already has CRDT content would silently push nothing.
+   *
+   * Split-brain safe: the pre-connect ingest runs ONLY when the doc already has
+   * content (a diff-merge, same as the open editor's ingest); an empty doc
+   * waits for the server pull + `seedFromFileIfEmpty`, exactly like the bulk
+   * path, and a post-sync ingest then folds in any bytes the seed didn't cover.
+   */
+  ingestFromFile?: boolean;
+  /** Veto for the ingest fast-path (see below): true means this doc holds
+   *  local-only ops from an OUT-OF-BAND merge (a resident bridge or a cold
+   *  apply already folded the external edit in), so "the file matches the doc"
+   *  does not mean "nothing to send" — connect and flush regardless. */
+  mustConnect?: (docId: string) => boolean;
   progress?: SyncProgressSink;
   /** Abandon the run (vault switch). Checked before every doc. */
   shouldStop?: () => boolean;
@@ -161,7 +186,9 @@ export class ContentUploader {
     this.aborted = false;
     try {
       const queue = this.opts.notes.filter(
-        (n) => !this.opts.isPushed(n.docId) && !(this.opts.skip?.(n.docId) ?? false),
+        (n) =>
+          (this.opts.force === true || !this.opts.isPushed(n.docId)) &&
+          !(this.opts.skip?.(n.docId) ?? false),
       );
       // Everything already confirmed reads as synced straight away, so the badge
       // for a resumed vault is correct before a single socket opens.
@@ -224,6 +251,26 @@ export class ContentUploader {
       return false;
     }
 
+    let preIngested = false;
+    if (this.opts.ingestFromFile && bridge.serialize().length > 0) {
+      preIngested = true;
+      // Diff-merge the file into the already-populated doc BEFORE any network
+      // work. When nothing changed (our own background egest echoing back
+      // through the watcher, or an edit a previous run already merged) and the
+      // server has confirmed this doc before, there is nothing to send — skip
+      // the socket entirely. That check is what keeps a teammate's every remote
+      // update (which we egest to disk, which fires the watcher) from costing a
+      // provider connect apiece.
+      const changed = await bridge.ingestNow();
+      if (!changed && this.opts.isPushed(docId) && !(this.opts.mustConnect?.(docId) ?? false)) {
+        await this.releaseQuietly(docId);
+        this.streak = 0;
+        this.progress.doc(docId, "synced");
+        this.progress.item("ok");
+        return true;
+      }
+    }
+
     const push = this.opts.deps.connect({ docId, vaultId: this.opts.vaultId, doc: bridge.doc });
     try {
       // PULL FIRST. This is the split-brain rule (spec 03 §5): the server's state
@@ -243,11 +290,21 @@ export class ContentUploader {
       if (!push.readOnly) {
         // Seeds ONLY a genuine orphan (empty Y.Text) — see the module header.
         await bridge.seedFromFileIfEmpty();
+        // A doc that was empty before the pull couldn't take the pre-connect
+        // ingest (that would seed before the server's state — the doubling
+        // bug). Now the server's canonical state is in, fold in whatever the
+        // file holds that the seed didn't cover: e.g. an external write into a
+        // still-unhydrated placeholder file. ONLY when the pre-connect ingest
+        // didn't run: after it has, the file is one merge behind the doc (the
+        // pull just landed server ops the file has never seen), and diffing the
+        // stale file against the merged doc would DELETE those server ops.
+        if (this.opts.ingestFromFile && !preIngested) await bridge.ingestNow();
       }
       const flushed = await push.whenFlushed(this.flushTimeoutMs);
       // Whatever the server had for this doc has landed in the Y.Doc by now;
-      // write it out so the .md on disk matches. (Only the OPEN note ingests
-      // file changes, so this background write has no ingest side to echo off.)
+      // write it out so the .md on disk matches. (The watcher will see this
+      // write, but every ingest side runs behind the bridge's echo-hash guard —
+      // the local-change path recognizes its own bytes and stays quiet.)
       await bridge.flushEgest();
       if (!flushed) {
         this.fail(docId, relPath, "server did not acknowledge the content");

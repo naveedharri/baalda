@@ -140,6 +140,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 - `registry.ts` — reconciles local vault ↔ server vault/folders/notes, persists the doc-id map to
   `.context/config.json`, materializes server-only notes as empty files (hydrate lazily).
 - `tokenRefresh.ts` — re-mint 60s before JWT expiry. `attachments.ts` — content-hash (sha256) diff, upload/download.
+- **External writers are first-class** (`handleLocalFileChanged` in `docSession.ts`): a watcher event for a
+  non-open note routes to the sync layer — unmapped/structural changes trigger the debounced registry pull
+  (register + upload), mapped notes get a debounced `ContentUploader` run with `force` + `ingestFromFile`
+  (diff-merge the file into the CRDT via `NoteBridge.ingestNow`, echo-guarded fast-path skips our own egest
+  echoes; the `divergedDocs` set forces a connect for out-of-band merges by resident bridges / cold applies).
+  `NoteBridge.hydrate` also ingests the file on reopen when it moved on while the doc was closed. Disk
+  deletions are deliberately NOT propagated to the server.
 
 ### Desktop — React (`src/`)
 `store.ts` is a Zustand **UI view-state mirror only** (vault, tree, open note, auth/session, org members,

@@ -157,6 +157,15 @@ export class NoteBridge {
       // Baseline the echo guard at the current content so an identical file
       // doesn't trigger a spurious ingest, but a genuine external change does.
       this.lastWrittenHash = await this.hash(this.text.toString());
+      // The file may have moved on while this doc was closed — an AI editing
+      // the vault directly, or the app relaunching after external edits. The
+      // CRDT we just hydrated describes the LAST session; the .md on disk is
+      // the durable source of truth (spec 00), so reconcile against it now
+      // rather than waiting for a watcher event that already fired (or never
+      // will). Converged content no-ops. Guarded on a non-empty doc: an empty
+      // doc must go through the deferred pull-before-seed path, never a
+      // pre-sync ingest (that's the note-doubling bug).
+      if (this.text.length > 0) this.ingest();
       if (state.updateCount > this.cfg.compactThreshold) await this.compact();
     } else {
       // No CRDT yet. Normally seed Y.Text from the file in a 'disk' transaction
@@ -230,8 +239,27 @@ export class NoteBridge {
     }, this.cfg.ingestDebounceMs);
   }
 
-  private async drainIngest(): Promise<void> {
-    if (this.destroyed || !this.ingestDirty) return;
+  /**
+   * Merge the file's current bytes into the CRDT immediately (no debounce), for
+   * the background sync of a note nobody has open: an external writer (an AI
+   * working in the vault folder, another editor) changed the file, and the sync
+   * layer needs the diff in the doc NOW so it can push it. Returns true iff the
+   * doc actually changed — false covers our own egest echoing back and an
+   * already-converged file, which is what lets the caller skip the network
+   * round-trip entirely.
+   */
+  async ingestNow(): Promise<boolean> {
+    if (this.destroyed) return false;
+    if (this.ingestTimer != null) {
+      this.clearT(this.ingestTimer);
+      this.ingestTimer = null;
+    }
+    this.ingestDirty = true;
+    return this.drainIngest();
+  }
+
+  private async drainIngest(): Promise<boolean> {
+    if (this.destroyed || !this.ingestDirty) return false;
     this.ingestDirty = false;
 
     let fileText: string;
@@ -239,17 +267,17 @@ export class NoteBridge {
       fileText = await this.io.readFile(this._path);
     } catch (e) {
       this.reportError(e, "ingest:readFile");
-      return;
+      return false;
     }
 
     const fileHash = await this.hash(fileText);
-    if (fileHash === this.lastWrittenHash) return; // our own write echoing back → DROP
+    if (fileHash === this.lastWrittenHash) return false; // our own write echoing back → DROP
 
     const current = this.text.toString();
     if (current === fileText) {
       // Already converged (e.g. we ingested this exact change already).
       this.lastWrittenHash = fileHash;
-      return;
+      return false;
     }
 
     const diffs = computeDiff(current, fileText);
@@ -274,6 +302,7 @@ export class NoteBridge {
     this.doc.transact(() => {
       applyDiff(this.text, diffs);
     }, ORIGIN_DISK);
+    return true;
   }
 
   // ---- B. CRDT → DISK (egest) ------------------------------------------

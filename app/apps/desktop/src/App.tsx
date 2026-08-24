@@ -644,6 +644,12 @@ export default function App() {
             // and merges genuine external edits live into the open Y.Text.
             bridgeManager.handleFileChanged(e.path);
           }
+        } else {
+          // Everything that is NOT the open note goes to the sync layer: an
+          // external writer (an AI with the vault folder open, another editor)
+          // creating or changing files must reach the server live — not on the
+          // next sign-in reconcile, and not only once someone opens the note.
+          syncManager.handleLocalFileChanged(e.path, e.kind);
         }
 
         // Refresh tree + titles + backlinks (coalesced for bursts).

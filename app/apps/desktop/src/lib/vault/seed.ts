@@ -11,6 +11,11 @@
 // rather than `create_note` (which would prepend its own H1), so we control the
 // exact Markdown. `write_note` creates any missing parent folder, so each note
 // materializes its folder on its own.
+//
+// Prose is deliberately NOT hard-wrapped: the editor renders a source newline
+// as a line break, so wrapped-at-80 templates froze every paragraph at an old
+// column width. One logical line per paragraph / list item lets the text flow
+// to whatever measure the editor has.
 
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
@@ -30,17 +35,13 @@ export const STARTER_NOTES: ReadonlyArray<{ path: string; body: string }> = [
     path: WELCOME_NOTE_PATH,
     body: `# Welcome to Baalda 👋
 
-Baalda is your **local-first second brain** — notes that live as plain Markdown
-files on your own computer.
+Baalda is your **local-first second brain** — notes that live as plain Markdown files on your own computer.
 
 What makes it different:
 
-- **Your files, your disk.** Every note is a real \`.md\` file in this folder. No
-  lock-in — open them in any editor, back them up, sync them however you like.
-- **Write together, live.** Invite teammates and edit the same note at the same
-  time, with cursors and presence — like a shared doc, but still just files.
-- **Your AI can edit too.** Connect an assistant like Claude and let it read and
-  write these notes directly, right alongside you.
+- **Your files, your disk.** Every note is a real \`.md\` file in this folder. No lock-in — open them in any editor, back them up, sync them however you like.
+- **Write together, live.** Invite teammates and edit the same note at the same time, with cursors and presence — like a shared doc, but still just files.
+- **Your AI can edit too.** Connect an assistant like Claude and let it read and write these notes directly, right alongside you.
 
 Most tools give you one of these. Baalda is the bridge between all three.
 
@@ -50,8 +51,7 @@ Most tools give you one of these. Baalda is the bridge between all three.
 - 🚀 [[How Baalda works]] — a two-minute tour of the essentials.
 - 🕸️ [[The graph view]] — see how these notes connect.
 
-> These starter notes are already linked together, which is why your graph
-> isn't empty. Delete them whenever you like — this is your space.
+> These starter notes are already linked together, which is why your graph isn't empty. Delete them whenever you like — this is your space.
 
 Happy writing. ✍️
 `,
@@ -61,9 +61,7 @@ Happy writing. ✍️
     path: "Map of Content.md",
     body: `# Map of Content
 
-A **Map of Content** (MOC) is a note whose only job is to link to other notes.
-It's how you navigate a vault by hand instead of by folders. This one indexes
-your starter set — see [[Maps of Content]] for the idea behind it.
+A **Map of Content** (MOC) is a note whose only job is to link to other notes. It's how you navigate a vault by hand instead of by folders. This one indexes your starter set — see [[Maps of Content]] for the idea behind it.
 
 ## Getting started
 
@@ -99,27 +97,19 @@ your starter set — see [[Maps of Content]] for the idea behind it.
     path: "Getting Started/How Baalda works.md",
     body: `# How Baalda works
 
-A quick tour of the essentials. This whole note is just a Markdown file — try
-editing it as you read.
+A quick tour of the essentials. This whole note is just a Markdown file — try editing it as you read.
 
 ## 1. Everything is a file
 
-Notes are plain \`.md\` files in this folder. Create one with **⌘N**, organise
-them in the sidebar, and connect them with [[Wikilinks and backlinks]]. See
-[[Local-first notes]] for why that matters, and [[Keyboard shortcuts]] to move
-faster.
+Notes are plain \`.md\` files in this folder. Create one with **⌘N**, organise them in the sidebar, and connect them with [[Wikilinks and backlinks]]. See [[Local-first notes]] for why that matters, and [[Keyboard shortcuts]] to move faster.
 
 ## 2. Work together in real time
 
-This vault starts out **local** — just files on this computer. Sign in and
-turn on sync to keep it updated across your own devices, or accept a
-teammate's invite to collaborate on theirs — more in
-[[Collaborating with your team]].
+This vault starts out **local** — just files on this computer. Sign in and turn on sync to keep it updated across your own devices, or accept a teammate's invite to collaborate on theirs — more in [[Collaborating with your team]].
 
 ## 3. Bring in your AI
 
-Baalda speaks **MCP**, so an assistant like Claude can work in your vault
-directly — see [[Working with your AI]].
+Baalda speaks **MCP**, so an assistant like Claude can work in your vault directly — see [[Working with your AI]].
 
 When you're ready, the [[Map of Content]] links to everything else.
 `,
@@ -138,39 +128,37 @@ The handful worth memorising first:
 | Bold / italic | **⌘B** / **⌘I** |
 | Insert a \`[[wikilink]]\` | type \`[[\` |
 
-Typing \`[[\` starts a link — that's the core move behind
-[[Wikilinks and backlinks]]. Back to [[How Baalda works]].
+Typing \`[[\` anywhere starts a link.
+
+That's the core move behind [[Wikilinks and backlinks]]. Back to [[How Baalda works]].
 `,
   },
   {
     path: "Getting Started/Working with your AI.md",
     body: `# Working with your AI
 
-Baalda exposes your vault over **MCP**, so an assistant like **Claude** (in
-Claude Desktop or Cowork) can read and write these notes directly.
+Baalda exposes your vault over **MCP**, so an assistant like **Claude** (in Claude Desktop or Cowork) can read and write these notes directly.
 
 1. Open **Vault Settings → MCP** and create a connection token.
 2. Add it to Claude as an MCP server.
-3. Ask Claude to search, summarise, and write notes — its edits appear here
-   live, exactly the way a teammate's would (see [[Collaborating with your team]]).
+3. Ask Claude to search, summarise, and write notes — its edits appear here live, exactly the way a teammate's would (see [[Collaborating with your team]]).
 
-Good first tasks: turn your [[Ideas inbox]] into [[Atomic notes]], or draft a
-[[Weekly review]]. Back to [[How Baalda works]].
+You can also just open this folder in a coding assistant like Claude Code — files it writes here sync like any other edit.
+
+Good first tasks: turn your [[Ideas inbox]] into [[Atomic notes]], or draft a [[Weekly review]]. Back to [[How Baalda works]].
 `,
   },
   {
     path: "Getting Started/Collaborating with your team.md",
     body: `# Collaborating with your team
 
-Turn on sync and this vault stops being local-only — it stays updated across
-your own devices and with everyone you invite, live.
+Turn on sync and this vault stops being local-only — it stays updated across your own devices and with everyone you invite, live.
 
 - Open the same note as a teammate and you'll see each other's cursors.
 - Edits **merge** in real time — nothing gets overwritten.
 - Share a single folder or the whole vault; permissions are per-folder.
 
-Try it on [[Meeting notes]] or a [[Website launch]] plan. Your AI joins the same
-way — see [[Working with your AI]]. Back to [[How Baalda works]].
+Try it on [[Meeting notes]] or a [[Website launch]] plan. Your AI joins the same way — see [[Working with your AI]]. Back to [[How Baalda works]].
 `,
   },
 
@@ -179,75 +167,54 @@ way — see [[Working with your AI]]. Back to [[How Baalda works]].
     path: "Concepts/Local-first notes.md",
     body: `# Local-first notes
 
-**Local-first** means the source of truth lives on *your* device, not a server.
-Your notes are plain \`.md\` files you fully own — they work offline, open in any
-editor, and sync only when you choose.
+**Local-first** means the source of truth lives on *your* device, not a server. Your notes are plain \`.md\` files you fully own — they work offline, open in any editor, and sync only when you choose.
 
-Syncing is additive, not a dependency: turn it on for
-[[Collaborating with your team]], turn it off and everything still works. This is
-the foundation the rest of [[How Baalda works]] builds on.
+Syncing is additive, not a dependency: turn it on for [[Collaborating with your team]], turn it off and everything still works. This is the foundation the rest of [[How Baalda works]] builds on.
 `,
   },
   {
     path: "Concepts/Wikilinks and backlinks.md",
     body: `# Wikilinks and backlinks
 
-A **wikilink** connects one note to another: write \`[[Atomic notes]]\` and it
-becomes a link. The note you link *to* automatically gains a **backlink** —
-a list of everything pointing at it.
+A **wikilink** connects one note to another: write \`[[Atomic notes]]\` and it becomes a link. The note you link *to* automatically gains a **backlink** — a list of everything pointing at it.
 
-Links are the real structure of a vault (folders are secondary). Enough of them
-and you get [[The graph view]], and you can curate them by hand with
-[[Maps of Content]]. This idea powers [[Atomic notes]] and [[Daily notes]].
+Links are the real structure of a vault (folders are secondary). Enough of them and you get [[The graph view]], and you can curate them by hand with [[Maps of Content]]. This idea powers [[Atomic notes]] and [[Daily notes]].
 `,
   },
   {
     path: "Concepts/Maps of Content.md",
     body: `# Maps of Content
 
-A **Map of Content** (MOC) is a note that links to a cluster of related notes —
-a table of contents you write by hand. Use one whenever a topic grows past a few
-notes.
+A **Map of Content** (MOC) is a note that links to a cluster of related notes — a table of contents you write by hand. Use one whenever a topic grows past a few notes.
 
-They pair naturally with [[Wikilinks and backlinks]]: the MOC links out, the
-backlinks point home. Your vault's top-level MOC is the [[Map of Content]]. See
-also [[Atomic notes]].
+They pair naturally with [[Wikilinks and backlinks]]: the MOC links out, the backlinks point home. Your vault's top-level MOC is the [[Map of Content]]. See also [[Atomic notes]].
 `,
   },
   {
     path: "Concepts/Atomic notes.md",
     body: `# Atomic notes
 
-An **atomic note** holds *one* idea, titled so you can link to it later. Small
-notes recombine — one idea can support many others through
-[[Wikilinks and backlinks]].
+An **atomic note** holds *one* idea, titled so you can link to it later. Small notes recombine — one idea can support many others through [[Wikilinks and backlinks]].
 
-It's the core habit from [[How to Take Smart Notes]]. Capture rough thoughts in
-your [[Ideas inbox]] first, then split them into atomic notes. Gather related
-ones under [[Maps of Content]].
+It's the core habit from [[How to Take Smart Notes]]. Capture rough thoughts in your [[Ideas inbox]] first, then split them into atomic notes. Gather related ones under [[Maps of Content]].
 `,
   },
   {
     path: "Concepts/Daily notes.md",
     body: `# Daily notes
 
-A **daily note** is one page per day — a log, a scratchpad, a landing spot for
-whatever comes up. Link out from it liberally with [[Wikilinks and backlinks]].
+A **daily note** is one page per day — a log, a scratchpad, a landing spot for whatever comes up. Link out from it liberally with [[Wikilinks and backlinks]].
 
-Daily notes feed two rhythms: drop half-formed thoughts into your
-[[Ideas inbox]], and roll the week up in your [[Weekly review]].
+Daily notes feed two rhythms: drop half-formed thoughts into your [[Ideas inbox]], and roll the week up in your [[Weekly review]].
 `,
   },
   {
     path: "Concepts/The graph view.md",
     body: `# The graph view
 
-The **graph** draws every note as a node and every [[Wikilinks and backlinks]]
-connection as an edge. Press **⌘G** (see [[Keyboard shortcuts]]) to open it.
+The **graph** draws every note as a node and every [[Wikilinks and backlinks]] connection as an edge. Press **⌘G** (see [[Keyboard shortcuts]]) to open it.
 
-It's a fast way to *see* your thinking: clusters are topics, hubs are your
-[[Maps of Content]], and lonely nodes are notes worth linking. The vault you're
-reading now is why your graph isn't empty. Back to the [[Map of Content]].
+It's a fast way to *see* your thinking: clusters are topics, hubs are your [[Maps of Content]], and lonely nodes are notes worth linking. The vault you're reading now is why your graph isn't empty. Back to the [[Map of Content]].
 `,
   },
 
@@ -256,8 +223,7 @@ reading now is why your graph isn't empty. Back to the [[Map of Content]].
     path: "Examples/Reading list.md",
     body: `# Reading list
 
-A living list. Each book becomes its own note once you start taking
-[[Atomic notes]] from it.
+A living list. Each book becomes its own note once you start taking [[Atomic notes]] from it.
 
 - 📖 [[How to Take Smart Notes]] — Sönke Ahrens *(reading)*
 - 📕 *Building a Second Brain* — Tiago Forte *(next)*
@@ -275,10 +241,8 @@ Notes on Sönke Ahrens' book — the case for the *Zettelkasten* method.
 ## Key ideas
 
 - Write **[[Atomic notes]]** in your own words — one idea each.
-- Link every note to others so ideas find each other later
-  ([[Wikilinks and backlinks]]).
-- Don't file by folder; let structure emerge, then curate with
-  [[Maps of Content]].
+- Link every note to others so ideas find each other later ([[Wikilinks and backlinks]]).
+- Don't file by folder; let structure emerge, then curate with [[Maps of Content]].
 
 Part of the [[Reading list]].
 `,
@@ -295,8 +259,7 @@ A tiny project note, to show how work lives in the vault.
 - [ ] Design review — notes in [[Meeting notes]]
 - [ ] Ship 🚀
 
-Progress gets summarised in the [[Weekly review]]; coordinate with the team via
-[[Collaborating with your team]].
+Progress gets summarised in the [[Weekly review]]; coordinate with the team via [[Collaborating with your team]].
 `,
   },
   {
@@ -322,15 +285,13 @@ Everyone edits this live — see [[Collaborating with your team]].
     path: "Examples/Ideas inbox.md",
     body: `# Ideas inbox
 
-A single place to dump raw thoughts fast, so nothing gets lost. Process it later
-into [[Atomic notes]] — that's the habit from [[How to Take Smart Notes]].
+A single place to dump raw thoughts fast, so nothing gets lost. Process it later into [[Atomic notes]] — that's the habit from [[How to Take Smart Notes]].
 
 - A graph filter for orphan notes?
 - Blog post: what "local-first" really means → [[Local-first notes]]
 - Follow up on the [[Website launch]] copy
 
-Empty this out during your [[Weekly review]]; it often fills from your
-[[Daily notes]].
+Empty this out during your [[Weekly review]]; it often fills from your [[Daily notes]].
 `,
   },
   {

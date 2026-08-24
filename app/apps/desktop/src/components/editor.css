@@ -490,13 +490,13 @@
    open effect needs `hostRef.current` in the DOM to attach CodeMirror to.
 
    The padding deliberately mirrors `.cm-content` in `lib/editor/theme.ts`
-   (`--sp-8` top, the same centred 76ch measure) so the skeleton lines sit
-   exactly where the real text lands. Getting this wrong is worse than no
-   skeleton at all — the content appears to jump sideways as it loads. */
+   (`--sp-8` top, the same centred `--editor-measure` column) so the skeleton
+   lines sit exactly where the real text lands. Getting this wrong is worse than
+   no skeleton at all — the content appears to jump sideways as it loads. */
 .editor-skeleton {
   position: absolute;
   inset: 0;
-  padding: var(--sp-8) max(var(--sp-8), calc((100% - 76ch) / 2));
+  padding: var(--sp-8) max(var(--editor-gutter), calc((100% - var(--editor-measure)) / 2));
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
