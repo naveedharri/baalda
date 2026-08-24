@@ -4,6 +4,7 @@ import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { recordingAppDeps } from "./helpers/app.js";
 import {
+  freezeVaultRoot,
   seedFolder,
   seedLock,
   seedMember,
@@ -521,6 +522,51 @@ describe("MCP server", () => {
       vault = await seedVault(org);
       token = await tokenFor(owner, org);
       registryBroadcasts.length = 0;
+    });
+
+    it("refuses moving a note or folder OUT to a frozen root (HTTP parity)", async () => {
+      const folder = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Docs",
+        path: "Docs",
+      });
+      const folderId = folder.data.folderId as string;
+      const sub = await call(token, "create_folder", {
+        vaultId: vault,
+        name: "Specs",
+        path: "Docs/Specs",
+        parentId: folderId,
+      });
+      const subId = sub.data.folderId as string;
+      const note = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "Docs/n.md",
+        title: "N",
+        folderId,
+      });
+      const docId = note.data.docId as string;
+
+      await freezeVaultRoot(vault);
+
+      const movedFolder = await call(token, "move_folder", {
+        folderId: subId,
+        path: "Specs",
+        parentId: null,
+      });
+      expect(movedFolder.isError).toBe(true);
+      expect(movedFolder.text).toContain("root is frozen");
+
+      const movedNote = await call(token, "move_note", {
+        docId,
+        relPath: "n.md",
+        folderId: null,
+      });
+      expect(movedNote.isError).toBe(true);
+      expect(movedNote.text).toContain("root is frozen");
+
+      // A retitle that leaves the note in its folder is untouched by the latch.
+      const retitle = await call(token, "move_note", { docId, title: "Renamed" });
+      expect(retitle.isError).toBe(false);
     });
 
     it("renames a note in place, keeping its docId, and broadcasts", async () => {

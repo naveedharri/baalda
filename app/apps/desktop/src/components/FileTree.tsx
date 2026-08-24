@@ -1157,6 +1157,8 @@ export function FileTree() {
       ? menu.node.data.path
       : parentDir(menu.node.data.path)
     : "";
+  // Create/import from this menu would land at a frozen root.
+  const menuCreateBlocked = menuDir === "" && rootFrozen;
 
   // The lock applied DIRECTLY to the menu's node (not inherited), so the menu
   // can offer Unlock with the right share id.
@@ -1430,12 +1432,36 @@ export function FileTree() {
                 { left: menu.x, top: menu.y, visibility: "hidden" }
           }
         >
-          <li onClick={() => createUniqueNote(menuDir)}>New note</li>
-          <li onClick={() => createUniqueFolder(menuDir)}>New folder</li>
-          <li className="menu-sep-item" onClick={() => void importFilesInto(menuDir)}>
+          {/* Creating at a frozen root is refused; the items stay clickable so
+              the refusal toast can say why, but they read as unavailable. */}
+          <li
+            className={menuCreateBlocked ? "disabled" : undefined}
+            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            onClick={() => createUniqueNote(menuDir)}
+          >
+            New note
+          </li>
+          <li
+            className={menuCreateBlocked ? "disabled" : undefined}
+            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            onClick={() => createUniqueFolder(menuDir)}
+          >
+            New folder
+          </li>
+          <li
+            className={menuCreateBlocked ? "menu-sep-item disabled" : "menu-sep-item"}
+            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            onClick={() => void importFilesInto(menuDir)}
+          >
             Import files…
           </li>
-          <li onClick={() => void importFolderInto(menuDir)}>Import folder…</li>
+          <li
+            className={menuCreateBlocked ? "disabled" : undefined}
+            title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
+            onClick={() => void importFolderInto(menuDir)}
+          >
+            Import folder…
+          </li>
           {menu.node && <li onClick={() => void exportNode(menu.node!)}>Export…</li>}
           {menu.node && (
             <li onClick={() => void revealNode(menu.node!)}>{ipc.revealLabel()}</li>

@@ -139,7 +139,11 @@ export async function listFolders(ctx: McpContext, vaultId: string) {
  * the same reason: an assistant asked to "add a note" with no folder in mind is
  * one of the likelier ways a stray root file appears.
  */
-async function assertRootNotFrozen(vaultId: string, parentId: string | null): Promise<void> {
+async function assertRootNotFrozen(
+  vaultId: string,
+  parentId: string | null,
+  action: "create" | "move" = "create",
+): Promise<void> {
   if (parentId) return;
   const { rows } = await pool.query<{ root_frozen: boolean }>(
     "SELECT root_frozen FROM vaults WHERE id = $1",
@@ -147,7 +151,7 @@ async function assertRootNotFrozen(vaultId: string, parentId: string | null): Pr
   );
   if (rows[0]?.root_frozen) {
     throw new McpToolError(
-      "This vault's root is frozen — create this inside a folder instead.",
+      `This vault's root is frozen — ${action} this inside a folder instead.`,
     );
   }
 }
@@ -257,6 +261,11 @@ export async function moveFolderTool(
   if (input.parentId != null && (await folderWritePermission(ctx.auth, input.parentId)) !== "edit") {
     throw new McpToolError("You do not have edit access to the destination folder");
   }
+  // Moving a folder OUT to the root is a root creation by another name — the
+  // same latch the HTTP registry honours (a rename in place at root is fine).
+  if (input.parentId === null && folder.parent_id !== null) {
+    await assertRootNotFrozen(folder.vault_id, null, "move");
+  }
   try {
     const moved = await moveFolder(pool, input.folderId, {
       path: input.path,
@@ -286,6 +295,11 @@ export async function moveNoteTool(
     (await folderWritePermission(ctx.auth, input.folderId)) !== "edit"
   ) {
     throw new McpToolError("You do not have edit access to the destination folder");
+  }
+  // Same root-freeze latch as HTTP's PATCH /api/notes/:id: dragging a note out
+  // to a frozen root is refused; a rename in place at root is allowed.
+  if (input.folderId === null && note.folder_id !== null) {
+    await assertRootNotFrozen(note.vault_id, null, "move");
   }
   try {
     const moved = await moveNote(pool, input.docId, {

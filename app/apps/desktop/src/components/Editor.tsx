@@ -9,7 +9,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { createEditorState } from "../lib/editor";
 import { setActiveView } from "../lib/editor/activeView";
 import { saveAttachment } from "../lib/attachments";
-import { bridgeManager } from "../lib/bridge";
+import { bridgeManager, type NoteBridge } from "../lib/bridge";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
 import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
@@ -341,6 +341,13 @@ export function Editor() {
   // Editability is held in a Compartment so a lock applied while the note is
   // open can flip the live view read-only without rebuilding it.
   const editableRef = useRef<Compartment | null>(null);
+  // The open note's bridge — kept so the syncStatus effect can roll back
+  // keystrokes the server rejected (typed before its read-only verdict landed).
+  const bridgeRef = useRef<NoteBridge | null>(null);
+  // True once the server has confirmed edit access for THIS note session. Gates
+  // the rollback above: a live mid-session lock must never undo edits the
+  // server already accepted.
+  const hadEditAccessRef = useRef(false);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
@@ -459,7 +466,21 @@ export function Editor() {
       }
       awareness = opened.awareness;
       awarenessRef.current = awareness;
-      const ro = opened.readOnly;
+      bridgeRef.current = bridge;
+      hadEditAccessRef.current = false;
+      // Locks come FIRST: `opened.readOnly` is optimistic (the server's token
+      // verdict arrives an HTTP round trip later), so anything we already know
+      // locally — a "locked" share on this note or an ancestor folder — makes
+      // the very first frame read-only. The verdict then confirms it
+      // ("read-only" status) or relaxes it ("synced" → editable).
+      const st = useStore.getState();
+      const lockedLocally =
+        syncEnabled &&
+        effectiveLockForPath(
+          lockScopesByPath(st.tree, st.locks, st.session?.user.id),
+          notePath,
+        ) != null;
+      const ro = opened.readOnly || opened.status === "no-access" || lockedLocally;
       setReadOnly(ro);
       const editable = new Compartment();
       editableRef.current = editable;
@@ -528,6 +549,8 @@ export function Editor() {
       if (view) view.destroy();
       viewRef.current = null;
       editableRef.current = null;
+      bridgeRef.current = null;
+      hadEditAccessRef.current = false;
       awarenessRef.current = null;
       seenPingsRef.current.clear();
       setPeers([]);
@@ -546,11 +569,22 @@ export function Editor() {
   // token on reconnect and the status flips to "read-only" here — no reopen
   // needed. Also refresh the lock list so the tree badge appears for us too.
   useEffect(() => {
-    if (syncStatus === "read-only") {
+    if (syncStatus === "read-only" || syncStatus === "no-access") {
       setReadOnly(true);
-      void useStore.getState().refreshLocks();
+      if (syncStatus === "read-only") void useStore.getState().refreshLocks();
+      // Anything typed before this verdict arrived was already rejected by the
+      // server (it drops updates from read-only connections), so those
+      // keystrokes exist only in the local doc — a silent fork that would
+      // egest to the .md file and diverge forever. Roll them back. Guarded by
+      // hadEditAccessRef: once "synced" confirmed edit access this session,
+      // a later lock must not undo edits the server accepted.
+      if (!hadEditAccessRef.current) {
+        const um = bridgeRef.current?.undoManager;
+        if (um) while (um.undoStack.length > 0) um.undo();
+      }
     } else if (syncStatus === "synced") {
       // Unlocked / edit grant restored — become editable again.
+      hadEditAccessRef.current = true;
       setReadOnly(false);
     }
   }, [syncStatus]);

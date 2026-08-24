@@ -171,13 +171,25 @@ export const editorTheme = EditorView.theme({
   },
   ".cm-md-table table": {
     borderCollapse: "collapse",
-    width: "100%",
+    // Natural column widths, capped at the prose measure: a table that fits
+    // stays put, a wide one overflows into the wrapper's horizontal scroll
+    // instead of crushing its columns (a table's min-content width beats
+    // max-width, which is exactly what lets it overflow).
+    width: "max-content",
+    maxWidth: "100%",
     fontSize: "0.95em",
   },
   ".cm-md-table th, .cm-md-table td": {
     border: "1px solid var(--border)",
     padding: "var(--sp-1) var(--sp-3)",
     textAlign: "left",
+    // Undo the editor's inherited `.cm-lineWrapping` (overflow-wrap: anywhere,
+    // word-break: break-word, white-space: break-spaces): those shrink a
+    // cell's min-content width to a single character, which is what let the
+    // layout crush columns and stack headers letter-by-letter.
+    whiteSpace: "normal",
+    overflowWrap: "normal",
+    wordBreak: "normal",
   },
   ".cm-md-table th": {
     backgroundColor: "var(--bg-subtle)",

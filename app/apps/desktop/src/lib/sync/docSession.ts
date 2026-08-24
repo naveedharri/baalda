@@ -127,6 +127,7 @@ export class SyncManager implements InboundHost {
   private onPending?: (pending: boolean) => void;
   private onFlushed?: () => void;
   private onRegistryChanged?: () => void;
+  private onAclChangedListener?: () => void;
   private onNotePathChanged?: (docId: string, from: string, to: string) => void;
   private onNoteRemoved?: (docId: string, path: string, trashedTo: string | null) => void;
   private onMemberJoined?: (name: string) => void;
@@ -313,6 +314,16 @@ export class SyncManager implements InboundHost {
    */
   setRegistryListener(cb: (() => void) | undefined): void {
     this.onRegistryChanged = cb;
+  }
+
+  /**
+   * UI subscribes here to refresh its lock/share overlay when a teammate
+   * changes the vault's ACL (lock/unlock, grant/revoke). Kept separate from the
+   * registry listener because a pure share change often leaves the listing
+   * untouched, so the registry pull would never poke that one.
+   */
+  setAclListener(cb: (() => void) | undefined): void {
+    this.onAclChangedListener = cb;
   }
 
   /**
@@ -1070,6 +1081,9 @@ export class SyncManager implements InboundHost {
         // the next structural change or an app restart - long enough to look
         // like the revocation hadn't worked.
         this.handleRegistryChanged();
+        // ...and the UI's lock overlay refreshes, so the NEXT open of a
+        // just-locked note starts read-only from its first frame.
+        this.onAclChangedListener?.();
       },
       // A teammate changed the folder/note structure — re-pull + refresh tree.
       onRegistryChanged: () => this.handleRegistryChanged(),
