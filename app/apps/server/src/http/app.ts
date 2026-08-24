@@ -4,6 +4,7 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-a
 import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
+import { openLinkRoutes } from "./routes/open-link.js";
 import { blobRoutes } from "./routes/blobs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
@@ -129,6 +130,10 @@ export function createApp(deps: AppDeps): Hono {
   );
   // The human-facing login + consent screens of that OAuth flow.
   app.route("/", oauthConnectRoutes);
+
+  // Clickable share links: https://<server>/open/note/… bounces into the app's
+  // baalda:// deep link. Public — the URL carries identity, never access.
+  app.route("/", openLinkRoutes);
 
   // Better Auth owns everything under /api/auth (web-standard Request handler).
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));

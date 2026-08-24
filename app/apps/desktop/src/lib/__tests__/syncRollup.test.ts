@@ -166,11 +166,11 @@ describe("buildTreeSyncIndex", () => {
 });
 
 describe("rowSyncMark", () => {
-  it("shows a dot for a note and never a percentage", () => {
+  it("shows a dot for a note and never a fraction", () => {
     const index = indexOf({ "a.md": "syncing" });
     expect(rowSyncMark(file("a.md"), index)).toEqual({
       state: "syncing",
-      percent: null,
+      progress: null,
       title: "Syncing…",
     });
   });
@@ -183,34 +183,40 @@ describe("rowSyncMark", () => {
     expect(rowSyncMark(file("page.html"), index)).toBeNull();
   });
 
-  it("shows a folder's percentage while it works and a dot once settled", () => {
+  it("shows a folder's synced/total counts, and a dot once settled", () => {
     const busy = indexOf({ "A/a.md": "synced", "A/b.md": "syncing" });
-    expect(rowSyncMark(dir("A"), busy)).toMatchObject({ state: "syncing", percent: 50 });
+    expect(rowSyncMark(dir("A"), busy)).toMatchObject({
+      state: "syncing",
+      progress: { synced: 1, total: 2 },
+    });
 
     const done = indexOf({ "A/a.md": "synced", "A/b.md": "synced" });
-    expect(rowSyncMark(dir("A"), done)).toMatchObject({ state: "synced", percent: null });
+    expect(rowSyncMark(dir("A"), done)).toMatchObject({ state: "synced", progress: null });
 
     const broken = indexOf({ "A/a.md": "synced", "A/b.md": "error" });
-    expect(rowSyncMark(dir("A"), broken)).toMatchObject({ state: "error", percent: null });
+    expect(rowSyncMark(dir("A"), broken)).toMatchObject({ state: "error", progress: null });
   });
 
-  it("shows the percentage for a stalled partial folder too", () => {
+  it("shows the counts for a stalled partial folder too", () => {
     // Nothing in flight, not everything synced: the number is the only honest
     // answer, and it is what tells the user which folder to look at.
     const index = indexOf({ "A/a.md": "synced" }, ["A/b.md", "A/c.md"]);
-    expect(rowSyncMark(dir("A"), index)).toMatchObject({ state: "unsynced", percent: 33 });
+    expect(rowSyncMark(dir("A"), index)).toMatchObject({
+      state: "unsynced",
+      progress: { synced: 1, total: 3 },
+    });
   });
 
   it("resolves the vault root folder to the whole-vault roll-up", () => {
     const index = indexOf({ "A/a.md": "synced", "b.md": "synced" });
-    expect(rowSyncMark(dir(""), index)).toMatchObject({ state: "synced", percent: null });
+    expect(rowSyncMark(dir(""), index)).toMatchObject({ state: "synced", progress: null });
   });
 });
 
 describe("folderSyncTitle", () => {
   it("states the real counts rather than a rounded claim", () => {
     const index = indexOf({ "A/a.md": "synced", "A/b.md": "syncing", "A/c.md": "syncing" });
-    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 of 3 notes synced (33%)");
+    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 of 3 notes synced");
   });
 
   it("names the failures when there are any", () => {

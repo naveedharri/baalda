@@ -12,6 +12,7 @@ vi.mock("../../ipc", () => ({
   renamePath: vi.fn(),
   trashNote: vi.fn(),
   deletePath: vi.fn(),
+  deleteFolderIfEmpty: vi.fn(),
   isVaultMismatch: vi.fn(() => false),
 }));
 vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
@@ -103,6 +104,16 @@ function install(disk: FakeDisk) {
     }
     return to;
   }) as never);
+  vi.mocked(ipc.deleteFolderIfEmpty).mockImplementation((async (p: string) => {
+    if (!disk.folders.has(p)) return true; // already gone — the goal state
+    const prefix = p + "/";
+    const occupied =
+      [...disk.notes.keys()].some((n) => n.startsWith(prefix)) ||
+      [...disk.folders].some((f) => f.startsWith(prefix));
+    if (occupied) return false;
+    disk.folders.delete(p);
+    return true;
+  }) as never);
   vi.mocked(ipc.trashNote).mockImplementation((async (p: string, stamp: string) => {
     if (!disk.notes.has(p)) throw new Error("path does not exist");
     disk.notes.delete(p);
@@ -117,6 +128,7 @@ interface ServerState {
   notes: Array<{ id: string; rel_path: string }>;
   tombstones?: string[] | null;
   folders?: Array<{ id: string; path: string }>;
+  folderTombstones?: string[] | null;
 }
 
 function fakeApi(state: ServerState) {
@@ -124,6 +136,10 @@ function fakeApi(state: ServerState) {
     listVaults: vi.fn(async () => [{ id: VAULT, name: "v", organization_id: ORG }]),
     createVault: vi.fn(),
     listFolders: vi.fn(async () => state.folders ?? []),
+    listFolderRegistry: vi.fn(async () => ({
+      folders: state.folders ?? [],
+      tombstones: state.folderTombstones === undefined ? [] : state.folderTombstones,
+    })),
     createFolder: vi.fn(async (i: { path: string }) => ({ id: `folder-${i.path}`, path: i.path })),
     listNotes: vi.fn(async () => state.notes),
     listNoteRegistry: vi.fn(async () => ({
@@ -134,6 +150,8 @@ function fakeApi(state: ServerState) {
       id: i.docId ?? `note-${i.relPath}`,
       rel_path: i.relPath,
     })),
+    deleteNote: vi.fn(async () => {}),
+    deleteFolder: vi.fn(async () => {}),
   } as unknown as ApiClient;
 }
 
@@ -466,3 +484,69 @@ describe("inbound delete", () => {
   });
 });
 
+
+describe("inbound folder deletion", () => {
+  it("removes an emptied local folder the server deleted and does not re-register it", async () => {
+    // THE reappearing-folder bug, end to end: without a tombstone this device
+    // saw "missing from the server" and re-registered the folder, resurrecting
+    // it for the whole team on every pull.
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    disk.notes.set("Team/plan.md", "d1");
+    const { api } = await twoPasses({
+      disk,
+      first: {
+        notes: [{ id: "d1", rel_path: "Team/plan.md" }],
+        folders: [{ id: "f1", path: "Team" }],
+      },
+      then: { notes: [], tombstones: ["d1"], folders: [], folderTombstones: ["f1"] },
+    });
+
+    // The note left via its own tombstone first, then the emptied folder.
+    expect(disk.trashed.map((t) => t.from)).toEqual(["Team/plan.md"]);
+    expect(disk.folders.has("Team")).toBe(false);
+    expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
+  });
+
+  it("keeps a deleted folder that still holds content, re-registering it fresh", async () => {
+    // An unconfirmed note blocks its folder's removal — content must live
+    // somewhere — so the folder stays and goes back up under a NEW id.
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    disk.notes.set("Team/mine.md", "d1");
+    disk.bodies.set("Team/mine.md", "words nobody else has");
+    const { api } = await twoPasses({
+      disk,
+      first: {
+        notes: [{ id: "d1", rel_path: "Team/mine.md" }],
+        folders: [{ id: "f1", path: "Team" }],
+      },
+      then: { notes: [], tombstones: ["d1"], folders: [], folderTombstones: ["f1"] },
+    });
+
+    expect(disk.folders.has("Team")).toBe(true);
+    expect(vi.mocked(api.createFolder)).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "Team" }),
+    );
+  });
+
+  it("does nothing on folder tombstones the server did not answer about (null)", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    disk.notes.set("a.md", "d1");
+    await twoPasses({
+      disk,
+      first: {
+        notes: [{ id: "d1", rel_path: "a.md" }],
+        folders: [{ id: "f1", path: "Team" }],
+      },
+      then: {
+        notes: [{ id: "d1", rel_path: "a.md" }],
+        folders: [],
+        folderTombstones: null,
+      },
+    });
+    expect(disk.folders.has("Team")).toBe(true);
+    expect(ipc.deleteFolderIfEmpty).not.toHaveBeenCalled();
+  });
+});

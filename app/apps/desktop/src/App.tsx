@@ -10,6 +10,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
 import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
+import { Wordmark } from "./components/Logo";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { SidebarResizer } from "./components/SidebarResizer";
@@ -22,8 +23,10 @@ import * as ipc from "./lib/ipc";
 import { syncManager } from "./lib/sync/docSession";
 import {
   backgroundUpdateCheck,
+  checkForUpdate,
   clearJustUpdated,
   installUpdate,
+  isUpdateBlocking,
   justUpdatedTo,
   releaseNoteLines,
   useUpdateState,
@@ -257,76 +260,102 @@ function VaultFolderPrompt() {
 }
 
 /**
- * Non-blocking bar shown when a newer version is published. The launch-time
- * check (in App) populates the shared updater state; this just renders it.
- * Errors and the "up to date" result are intentionally silent here — those
- * only surface when the user checks manually from Settings → Updates.
+ * Full-screen REQUIRED-update wall. Updates are not optional: the moment a
+ * newer version is discovered (at launch or by the background poll) this covers
+ * the whole window and the only way forward is "Install & Restart". No "Later".
+ *
+ * Why a wall and not a bar: every dismissible banner left part of the fleet on
+ * old builds, and old builds are exactly where the bugs we just fixed live —
+ * one stale client can resurrect deleted folders for a whole team. Keeping
+ * everyone on the latest version is a correctness feature here, not a nag.
+ *
+ * The version is LATCHED: once `available` has been seen, an install error
+ * keeps the wall up with a retry rather than letting a known-stale build back
+ * in. A failed background *check* (offline launch, dev build without the
+ * updater) never had an `available` to latch, so it never walls anything off.
+ * Local edits stay safe throughout — notes are on disk, and `installUpdate`
+ * flushes the open note before relaunching.
  */
-function UpdateBanner() {
-  // Dismissal is per-version: "Later" on v0.1.27 must not also swallow the
-  // v0.1.28 banner when the background poll finds it hours later.
-  const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
+function UpdateGate() {
   const update = useUpdateState();
+  const [required, setRequired] = useState<string | null>(null);
+  useEffect(() => {
+    if (update.phase === "available") setRequired(update.version);
+  }, [update]);
 
-  if (update.phase === "available") {
-    if (update.version === dismissedVersion) return null;
-    return (
-      <Banner show className="update-banner global-banner">
-        <span>
-          A new version of {BRAND_NAME} (<strong>v{update.version}</strong>) is
-          available.
-        </span>
-        <div className="banner-actions">
-          <AsyncButton className="primary" onClick={() => installUpdate()}>
-            Install &amp; Restart
-          </AsyncButton>
-          <button
-            className="secondary"
-            onClick={() => setDismissedVersion(update.version)}
-          >
-            Later
-          </button>
-        </div>
-      </Banner>
-    );
+  if (!isUpdateBlocking(update) && !(update.phase === "error" && required)) {
+    return null;
   }
 
-  // Once the user clicks Install & Restart the banner becomes the progress
-  // strip while the new bytes come down, and the app restarts when they're in.
-  // The post-restart story is UpdatedBanner's.
-  if (update.phase === "downloading" || update.phase === "installing") {
-    const pct =
-      update.phase === "downloading" && update.total > 0
-        ? Math.round((update.downloaded / update.total) * 100)
-        : null;
-    return (
-      <Banner show className="update-banner global-banner" role="status">
-        <span>
-          {update.phase === "installing"
-            ? "Installing update — the app will restart…"
-            : `Downloading update${pct != null ? ` — ${pct}%` : "…"}`}
-        </span>
-        {/* A determinate bar when the server sent a content length, an
-            indeterminate sweep when it didn't. The distinction is worth the
-            extra rule: a bar that fills to an unknown target and stalls is
-            worse than one that never claimed to know. */}
-        <div
-          className={`update-progress${pct == null ? " indeterminate" : ""}`}
-          role="progressbar"
-          aria-valuenow={pct ?? undefined}
-          aria-valuemin={0}
-          aria-valuemax={100}
-        >
-          <span
-            className="update-progress-fill"
-            style={pct != null ? { width: `${pct}%` } : undefined}
-          />
-        </div>
-      </Banner>
-    );
-  }
+  const pct =
+    update.phase === "downloading" && update.total > 0
+      ? Math.round((update.downloaded / update.total) * 100)
+      : null;
 
-  return null;
+  return (
+    <div className="update-gate" role="alertdialog" aria-modal="true" aria-label="Update required">
+      <div className="update-gate-card">
+        <Wordmark className="update-gate-logo" />
+        <h1>Update required</h1>
+        {update.phase === "available" && (
+          <>
+            <p>
+              {BRAND_NAME} <strong>v{update.version}</strong> is ready. Install the update to
+              continue using the app — it takes a moment and your notes stay right where they
+              are, on your disk.
+            </p>
+            <AsyncButton className="primary update-gate-cta" onClick={() => installUpdate()}>
+              Install &amp; Restart
+            </AsyncButton>
+          </>
+        )}
+        {(update.phase === "downloading" || update.phase === "installing") && (
+          <>
+            <p role="status">
+              {update.phase === "installing"
+                ? "Installing — the app will restart itself…"
+                : `Downloading v${update.version}${pct != null ? ` — ${pct}%` : "…"}`}
+            </p>
+            {/* A determinate bar when the server sent a content length, an
+                indeterminate sweep when it didn't — a bar that fills to an
+                unknown target and stalls is worse than one that never claimed
+                to know. */}
+            <div
+              className={`update-progress${pct == null ? " indeterminate" : ""}`}
+              role="progressbar"
+              aria-valuenow={pct ?? undefined}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              <span
+                className="update-progress-fill"
+                style={pct != null ? { width: `${pct}%` } : undefined}
+              />
+            </div>
+          </>
+        )}
+        {update.phase === "error" && required && (
+          <>
+            <p>
+              The update to <strong>v{required}</strong> didn&rsquo;t finish
+              {update.message ? ` — ${update.message}` : ""}. Check your connection and try
+              again.
+            </p>
+            <AsyncButton
+              className="primary update-gate-cta"
+              onClick={async () => {
+                // Re-discover then install: the failed attempt may have died at
+                // either stage, and checkForUpdate re-arms the pending update.
+                if (await checkForUpdate()) await installUpdate();
+              }}
+            >
+              Try again
+            </AsyncButton>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -440,12 +469,6 @@ function WhatsNewModal() {
   );
 }
 
-function SaveIndicator() {
-  // The CRDT bridge autosaves to disk on a debounce, so the note is always
-  // being persisted; there is no "unsaved" state to surface anymore.
-  return <span className="save-indicator saved">Auto-saved</span>;
-}
-
 function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
   // Per-note sync status (offline / connecting / synced / read-only) PLUS the
   // vault's bulk-run progress, so a vault that is still uploading 380 of its 500
@@ -468,6 +491,9 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
       pending={pending}
       progress={progress}
       noteOpen={noteOpen}
+      // "N not synced" carries its own remedy: one click re-pulls the registry
+      // and re-runs the content pass for everything still unconfirmed.
+      onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
     />
   );
 }
@@ -546,8 +572,8 @@ export default function App() {
         setBooting(false);
       }
       // Check for updates at launch AND on a background poll, but never install
-      // uninvited: a found release only raises the UpdateBanner, and the
-      // download/relaunch waits for the user's "Install & Restart" click.
+      // uninvited: a found release raises the required-update wall (UpdateGate),
+      // and the download/relaunch waits for the user's "Install & Restart" click.
       // Failures (offline, non-bundled dev build) are swallowed by the updater
       // store — surfaced only in Settings → Updates. App-lifetime interval —
       // never cleared, and the launch guard above keeps it single in dev
@@ -711,7 +737,7 @@ export default function App() {
     // the user to choose/create one before its folder opens.
     return (
       <div className="app-shell">
-        <UpdateBanner />
+        <UpdateGate />
         <VaultPicker />
         <VaultFolderPrompt />
       </div>
@@ -722,7 +748,7 @@ export default function App() {
     <div className="app-shell">
       {/* Window-global, above the sidebar+main split: a new release must be
           visible the moment the poll finds it, whatever is on screen. */}
-      <UpdateBanner />
+      <UpdateGate />
       <div
         className="app"
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
@@ -760,7 +786,6 @@ export default function App() {
               region; Tauri exempts the buttons on the right, so they still click. */}
           <header className="main-header" data-tauri-drag-region="deep">
             <span className="note-title">{openNote?.title ?? "No note open"}</span>
-            {openNote && !isPreview && <SaveIndicator />}
             <SyncIndicator noteOpen={openNote != null && !isPreview} />
             {/* Vault-wide, so it sits in the header regardless of the open note. */}
             <TalkButton />

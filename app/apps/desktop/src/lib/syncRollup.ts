@@ -152,8 +152,10 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
 /** What to draw on one sidebar row. `null` ⇒ draw nothing at all. */
 export interface RowSyncMark {
   state: DocSyncState;
-  /** Render this percentage instead of a dot (folders that aren't settled). */
-  percent: number | null;
+  /** Render "synced/total" (e.g. "1/2") instead of a dot, for folders that
+   *  aren't settled. Real counts, not a percentage: "0%" on a one-note folder
+   *  read as gibberish, where "1/2" answers the actual question. */
+  progress: { synced: number; total: number } | null;
   /** Tooltip / accessible label. */
   title: string;
 }
@@ -179,7 +181,7 @@ export function folderSyncTitle(s: FolderSyncSummary): string {
   if (s.synced === s.total) {
     return `All ${plural(s.total, "note")} synced`;
   }
-  return `${s.synced} of ${plural(s.total, "note")} synced (${s.percent}%)`;
+  return `${s.synced} of ${plural(s.total, "note")} synced`;
 }
 
 /**
@@ -187,9 +189,11 @@ export function folderSyncTitle(s: FolderSyncSummary): string {
  * a file that isn't a synced note (an image, an unmapped page), or a folder that
  * contains no notes at all.
  *
- * A folder shows a PERCENTAGE until it is settled, then a single dot — which is
- * what makes "are all my folders synced?" answerable at a glance: a column of
- * quiet dots means yes, any number in it means not yet.
+ * A folder shows "synced/total" until it is settled, then a single dot — which
+ * is what makes "are all my folders synced?" answerable at a glance: a column
+ * of quiet dots means yes, any "1/2" in it says exactly where things stand.
+ * (Previously a percentage, which read as gibberish on small folders — one
+ * unsynced note out of one rendered "0%".)
  */
 export function rowSyncMark(
   row: { path: string; isDir: boolean },
@@ -201,11 +205,11 @@ export function rowSyncMark(
     const settled = summary.state === "synced" || summary.state === "error";
     return {
       state: summary.state,
-      percent: settled ? null : summary.percent,
+      progress: settled ? null : { synced: summary.synced, total: summary.total },
       title: folderSyncTitle(summary),
     };
   }
   const state = index.notes.get(row.path);
   if (!state) return null;
-  return { state, percent: null, title: DOC_SYNC_TITLES[state] };
+  return { state, progress: null, title: DOC_SYNC_TITLES[state] };
 }

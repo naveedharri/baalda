@@ -132,10 +132,36 @@ describe("registry structure sync", () => {
       notes: Array<{ id: string }>;
       tombstones: string[];
     };
-    // Folders are hard-deleted with no tombstone of their own, so the notes'
-    // tombstones are the ONLY way a client learns the subtree is gone.
     expect(body.tombstones.sort()).toEqual([a, b].sort());
     expect(body.notes).toEqual([]);
+  });
+
+  it("tombstones every FOLDER a folder delete cascaded over", async () => {
+    // Without these, a device still holding the folder locally re-registered it
+    // on its next pull — the "deleted folder keeps coming back" bug.
+    const parent = await seedFolder(vault, null, "Old", "Old");
+    const child = await seedFolder(vault, parent, "Sub", "Old/Sub");
+    const keep = await seedFolder(vault, null, "Keep", "Keep");
+    expect((await req(owner, "DELETE", `/api/folders/${parent}`)).status).toBe(200);
+
+    const body = (await (await req(owner, "GET", `/api/folders?vaultId=${vault}`)).json()) as {
+      folders: Array<{ id: string }>;
+      tombstones: string[];
+    };
+    // The whole subtree is announced dead — including the cascade's victims —
+    // and the surviving folder is not.
+    expect(body.tombstones.sort()).toEqual([parent, child].sort());
+    expect(body.folders.map((f) => f.id)).toEqual([keep]);
+  });
+
+  it("a clean vault reports an empty FOLDER tombstone list, never a missing field", async () => {
+    await seedFolder(vault, null, "Here", "Here");
+    const body = (await (await req(owner, "GET", `/api/folders?vaultId=${vault}`)).json()) as {
+      tombstones: string[];
+    };
+    // Same contract as note tombstones: the client treats a MISSING field as
+    // "this server can't answer" and removes nothing on that basis.
+    expect(body.tombstones).toEqual([]);
   });
 
   it("a clean vault reports an empty tombstone list, never a missing field", async () => {

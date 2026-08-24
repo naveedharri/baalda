@@ -282,6 +282,13 @@ export const trashNote = (path: string, stamp: string, expectedEpoch?: VaultEpoc
   invoke<string>("trash_note", { path, stamp, expectedEpoch: expectedEpoch ?? null });
 export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_path", { path, expectedEpoch: expectedEpoch ?? null });
+/**
+ * Remove a folder the server has deleted — only if it is empty by now. Resolves
+ * true when removed (or already gone); false when anything still lives inside,
+ * in which case the folder stays, deliberately.
+ */
+export const deleteFolderIfEmpty = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("delete_folder_if_empty", { path, expectedEpoch: expectedEpoch ?? null });
 
 /** Import external files/folders (absolute host paths) into `dest` (vault-relative). */
 export const importPaths = (dest: string, sources: string[], expectedEpoch?: VaultEpoch) =>

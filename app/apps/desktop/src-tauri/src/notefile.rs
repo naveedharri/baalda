@@ -185,6 +185,31 @@ fn unique_trash_dest(vault: &Path, rel: &str) -> AppResult<String> {
     Err(AppError::new("could not find a free name in the trash"))
 }
 
+/// Remove a directory ONLY if it is empty by now. Returns whether it was
+/// removed; anything still inside (an unconfirmed note, a stray image, a new
+/// local file) keeps the folder alive, which is the safe outcome.
+///
+/// This is the executor for an inbound folder delete: the server tombstones a
+/// deleted folder by id, the notes inside leave via their own tombstones, and
+/// then this unwinds the emptied directories bottom-up. Deliberately never
+/// recursive — `remove_dir`, not `remove_dir_all` — so it can only ever take
+/// away a folder that holds nothing.
+pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
+    if crate::vault::rel_path_is_ignored(rel) {
+        return Err(AppError::new("refusing to touch an ignored dir"));
+    }
+    let abs = resolve_in_vault(vault, rel)?;
+    if !abs.exists() {
+        return Ok(true); // already gone — the goal state
+    }
+    if !abs.is_dir() {
+        return Ok(false); // a file lives at this path; not ours to remove
+    }
+    // Any failure (non-empty, permissions, races) means "leave it": a folder
+    // that lingers is cosmetic, a reconcile pass that fails over it is not.
+    Ok(std::fs::remove_dir(&abs).is_ok())
+}
+
 /// Delete a file or folder (recursively for folders).
 pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
     let abs = resolve_in_vault(vault, rel)?;
@@ -403,5 +428,29 @@ mod tests {
         assert!(ensure_folder(tmp.path(), ".context/evil").is_err());
         assert!(ensure_folder(tmp.path(), "node_modules/x").is_err());
         assert!(ensure_folder(tmp.path(), "../up").is_err());
+    }
+
+    #[test]
+    fn delete_folder_if_empty_is_empty_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_folder(tmp.path(), "A/B").unwrap();
+        std::fs::write(tmp.path().join("A/B/keep.md"), "content").unwrap();
+        // Non-empty: stays, reported as not removed.
+        assert!(!delete_folder_if_empty(tmp.path(), "A/B").unwrap());
+        assert!(tmp.path().join("A/B").is_dir());
+        // Emptied: removed, bottom-up.
+        std::fs::remove_file(tmp.path().join("A/B/keep.md")).unwrap();
+        assert!(delete_folder_if_empty(tmp.path(), "A/B").unwrap());
+        assert!(delete_folder_if_empty(tmp.path(), "A").unwrap());
+        assert!(!tmp.path().join("A").exists());
+        // Already gone is the goal state, not an error.
+        assert!(delete_folder_if_empty(tmp.path(), "A").unwrap());
+        // A FILE at the path is not ours to remove.
+        std::fs::write(tmp.path().join("f.md"), "x").unwrap();
+        assert!(!delete_folder_if_empty(tmp.path(), "f.md").unwrap());
+        assert!(tmp.path().join("f.md").exists());
+        // Ignored dirs and traversal are refused loudly.
+        assert!(delete_folder_if_empty(tmp.path(), ".context/trash").is_err());
+        assert!(delete_folder_if_empty(tmp.path(), "../up").is_err());
     }
 }

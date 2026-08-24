@@ -115,6 +115,10 @@ function fakeApi(opts: FakeApiOpts = {}) {
       organization_id: ORG,
     })),
     listFolders: vi.fn(async () => opts.serverFolders ?? []),
+    listFolderRegistry: vi.fn(async () => ({
+      folders: opts.serverFolders ?? [],
+      tombstones: [],
+    })),
     listNotes: vi.fn(async () => opts.serverNotes ?? []),
     listNoteRegistry: vi.fn(async () => ({
       notes: opts.serverNotes ?? [],

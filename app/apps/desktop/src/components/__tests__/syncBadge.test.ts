@@ -9,14 +9,14 @@ import type { SyncProgress } from "../../lib/sync/vaultScope";
 
 // The sync pill is the user-facing "is my work safe?" signal. These lock in the
 // fix for the bug where it drifted to "Synced · 5m ago" while actively editing:
-// pending edits must read "Saving…", and a fresh flush must read "just now".
+// pending edits must read "Syncing…", and a fresh flush must read "just now".
 describe("syncBadgeLabel", () => {
   const now = 1_000_000_000_000;
 
-  it("shows Saving… while local edits are pending, ignoring the timestamp", () => {
+  it("shows Syncing… while local edits are pending, ignoring the timestamp", () => {
     expect(
       syncBadgeLabel({ status: "synced", pending: true, lastSyncedAt: now - 300_000, now }),
-    ).toBe("Saving…");
+    ).toBe("Syncing…");
   });
 
   it("reads 'Synced · just now' immediately after a flush", () => {
@@ -67,10 +67,20 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         now,
         progress: run({ phase: "uploading", done: 128, total: 500 }),
       }),
-    ).toBe("Uploading 128/500");
+    ).toBe("Syncing 128/500");
   });
 
-  it("counts the registering and downloading phases too, named by direction", () => {
+  it("clamps a racing counter so it can never read 585/164", () => {
+    expect(
+      syncBadgeLabel({
+        status: "synced",
+        now,
+        progress: run({ phase: "registering", done: 585, total: 164 }),
+      }),
+    ).toBe("Syncing 164/164");
+  });
+
+  it("counts the registering and downloading phases too, all under one verb", () => {
     expect(
       syncBadgeLabel({
         status: "connecting",
@@ -78,14 +88,16 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         progress: run({ phase: "registering", done: 3, total: 40 }),
       }),
     ).toBe("Syncing 3/40");
-    // A freshly invited teammate watching their vault arrive reads "Downloading".
+    // Every phase reads "Syncing" — the per-phase verbs described mechanism,
+    // not the user's situation ("Uploading files" on an already-synced vault
+    // read as "my vault is being re-sent").
     expect(
       syncBadgeLabel({
         status: "synced",
         now,
         progress: run({ phase: "downloading", done: 9, total: 10 }),
       }),
-    ).toBe("Downloading 9/10");
+    ).toBe("Syncing 9/10");
   });
 
   it("falls back to the indeterminate label when the run has no total yet", () => {
@@ -168,7 +180,7 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         noteOpen: false,
         progress: run({ phase: "downloading", done: 128, total: 500 }),
       }),
-    ).toBe("Downloading 128/500");
+    ).toBe("Syncing 128/500");
     expect(
       syncBadgeLabel({
         status: "offline",
@@ -193,7 +205,7 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         noteOpen: false,
         progress: run({ phase: "uploading", done: 1, total: 9 }),
       }),
-    ).toBe("Uploading 1/9");
+    ).toBe("Syncing 1/9");
   });
 
   it("keeps the vault-wide tone consistent with the vault-wide words", () => {

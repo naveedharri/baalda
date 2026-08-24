@@ -442,9 +442,13 @@ export class SyncManager implements InboundHost {
       if (!scope.isCurrent()) return;
       void this.registry
         .pull()
-        .then(() => {
+        .then((changed) => {
           if (!scope.isCurrent()) return;
-          this.onRegistryChanged?.();
+          // Only poke the sidebar when the pull actually changed something it
+          // can see. A refresh replaces the tree's row objects, which reads as
+          // a flicker under the pointer — needless on the common "nothing new"
+          // pull (e.g. the catch-up pull every reconnect now makes).
+          if (changed) this.onRegistryChanged?.();
           this.settleAfterPull(scope);
         })
         .catch((e) => console.warn("[sync] registry pull failed", e));
@@ -594,7 +598,27 @@ export class SyncManager implements InboundHost {
       onDocState: (patch) => this.onDocState?.(patch),
     });
     this.progress = progress;
-    this.registry.setProgressSink(progress);
+    // The registry writes into the SHARED reporter, but its COUNTERS are muted
+    // while a content run or the download phase owns the pill: a pull that lands
+    // mid-run re-stamps `registering` with its own (tiny) total while the
+    // uploader keeps ticking `done` against it — which once rendered the header
+    // as "Syncing 585/164". Per-doc badge states stay through in all cases:
+    // they are keyed by docId, so concurrent writers cannot garble them.
+    const counterOwned = (): boolean =>
+      (this.uploader?.isRunning() ?? false) || this.downloadPhase;
+    this.registry.setProgressSink({
+      phase: (p, t) => {
+        if (!counterOwned()) progress.phase(p, t);
+      },
+      addTotal: (n) => {
+        if (!counterOwned()) progress.addTotal(n);
+      },
+      item: (o) => {
+        if (!counterOwned()) progress.item(o);
+      },
+      doc: (docId, state) => progress.doc(docId, state),
+      flush: () => progress.flush(),
+    });
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
       // deliberately does not take one from here, because the tree this layer
@@ -632,6 +656,34 @@ export class SyncManager implements InboundHost {
   /** Resolves when the current bulk sync run settles (tests / shutdown). */
   whenBulkSyncSettled(): Promise<void> {
     return this.bulkRun ?? Promise.resolve();
+  }
+
+  /**
+   * User-triggered "sync now": re-pull the registry and re-run the content pass,
+   * so notes stranded by a transient failure get another chance without a
+   * sign-out/relaunch. Backs the sync pill's retry button.
+   *
+   * No-op while a run is already in flight — that run will pick everything up.
+   */
+  async retrySync(): Promise<void> {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.uploader?.isRunning()) return;
+    // The old uploader's failure list belongs to the run being retried; keeping
+    // it would let `completeRun` re-report failures the retry just fixed.
+    this.uploader = null;
+    // Show life immediately — the pull below can take a moment on a big vault.
+    this.progress?.phase("registering", 0);
+    this.progress?.flush();
+    let changed = false;
+    try {
+      changed = await this.registry.pull();
+    } catch (e) {
+      console.warn("[sync] manual retry pull failed", e);
+    }
+    if (!scope.isCurrent()) return;
+    if (changed) this.onRegistryChanged?.();
+    this.settleAfterPull(scope);
   }
 
   /**
@@ -996,6 +1048,14 @@ export class SyncManager implements InboundHost {
         this.vaultStatus = s;
         this.emitStatus();
         this.onVaultStatus?.(s);
+        // Every (re)connect re-pulls the registry. `registry` control frames only
+        // reach clients that were CONNECTED when the change happened — anything a
+        // teammate created/renamed/deleted while this device was offline (or
+        // between reconcile and the socket coming up) was announced to nobody
+        // here. Without this, those changes surfaced only on the next sign-in or
+        // relaunch. Debounced + idempotent, so the extra pull on a healthy
+        // connect costs one listing round trip.
+        if (s === "synced") this.handleRegistryChanged();
       },
       // An ACL change in this vault may have flipped the open note's grant
       // (view↔edit, lock/unlock). Re-mint its token so the editor becomes

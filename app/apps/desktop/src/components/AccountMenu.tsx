@@ -1008,6 +1008,20 @@ export function AuthDialog({
         </form>
 
         {authError && <div className="auth-error">{authError}</div>}
+        {/* The one trap this form can't detect: an account created THROUGH
+            Google has no password at all, so email sign-in answers "Invalid
+            email or password" and sign-up answers "already exists" — a dead end
+            unless someone says the words. Shown only on that failure, and only
+            when Google is actually offered. */}
+        {authError != null &&
+          googleAvailable &&
+          mode === "sign-in" &&
+          /invalid email or password/i.test(authError) && (
+            <p className="auth-hint">
+              First joined with Google? That account has no password — use
+              “Continue with Google” above.
+            </p>
+          )}
 
         <details className="server-config">
           <summary>Server settings</summary>

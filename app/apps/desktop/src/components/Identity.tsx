@@ -91,11 +91,12 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
 
 /**
  * Pure label for the sync pill. Extracted so the (surprisingly load-bearing)
- * "Saving…" vs "Synced · just now" logic is unit-testable without a DOM.
+ * "Syncing…" vs "Synced · just now" logic is unit-testable without a DOM.
  *
  * `pending` (local edits not yet acked) wins over the timestamp: while flushing
- * we show "Saving…"; once acked, the caller has bumped `lastSyncedAt`, so it
- * reads "Synced · just now" and counts up from there.
+ * we show "Syncing…" — the pill speaks exactly two words, Syncing and Synced,
+ * so nobody has to learn what a third ("Saving") means. Once acked, the caller
+ * has bumped `lastSyncedAt`, so it reads "Synced · just now" and counts up.
  *
  * `progress` is the VAULT's bulk run, and it outranks `status` (the open note's
  * CONNECTION) whenever it is live. Those two are genuinely independent: the
@@ -127,15 +128,13 @@ export function syncBadgeLabel(args: {
   }
   if (progress && isSyncRunActive(progress)) {
     if (progress.total <= 0) return "Syncing…";
-    // Name the direction: a freshly invited teammate watching their vault arrive
-    // should read "Downloading", not a generic "Syncing".
-    const verb =
-      progress.phase === "downloading"
-        ? "Downloading"
-        : progress.phase === "uploading"
-          ? "Uploading"
-          : "Syncing";
-    return `${verb} ${progress.done}/${progress.total}`;
+    // One verb for every phase. The old per-phase labels ("Uploading",
+    // "Downloading") described the mechanism, not the user's situation — the
+    // content pass pulls each note's server state before pushing anything, so
+    // on an already-synced vault "Uploading files" read as "my synced vault is
+    // being re-sent". Done is clamped so a racing denominator can never render
+    // an impossible "585/164".
+    return `Syncing ${Math.min(progress.done, progress.total)}/${progress.total}`;
   }
   // A run that finished with failures must not read "Synced". `failed` is the
   // number of notes that are still only on this device.
@@ -146,7 +145,7 @@ export function syncBadgeLabel(args: {
     return progress?.phase === "done" ? "Synced" : "Syncing…";
   }
   if (status === "synced") {
-    if (pending) return "Saving…";
+    if (pending) return "Syncing…";
     return lastSyncedAt != null ? `Synced · ${relativeAgo(lastSyncedAt, now)}` : "Synced";
   }
   if (status === "connecting") return "Syncing…";
@@ -194,12 +193,13 @@ export function SyncBadge({
   pending,
   progress,
   noteOpen,
+  onRetry,
 }: {
   status: string;
   enabled?: boolean;
   /** When set and status is "synced", the badge reads "Synced · 1m ago". */
   lastSyncedAt?: number | null;
-  /** True while local edits are still flushing to the server → "Saving…". */
+  /** True while local edits are still flushing to the server → "Syncing…". */
   pending?: boolean;
   /** The open vault's bulk sync run — turns the pill into "Syncing 128/500"
    *  with a determinate bar. Omit for a pill that only tracks the connection. */
@@ -207,6 +207,9 @@ export function SyncBadge({
   /** False when the pill stands for the vault, not an open note: socket-derived
    *  states are skipped and the label comes from `progress` alone. */
   noteOpen?: boolean;
+  /** When set, a run that ended with failures ("N not synced") renders as a
+   *  button that retries the whole sync — the remedy lives on the message. */
+  onRetry?: () => void;
 }) {
   const running = isSyncRunActive(progress);
   // Only tick the relative clock once we're settled (synced, nothing pending, no
@@ -228,12 +231,16 @@ export function SyncBadge({
   // indeterminate slide covers "working, size unknown" (connecting, saving).
   const percent = running ? syncRunPercent(progress) : null;
   // Hover answers "how far along?" in the same shape as the folder tooltips.
-  const title =
+  const runTitle =
     running && progress && percent != null
       ? `${progress.done} of ${progress.total} notes · ${percent}%`
       : undefined;
-  return (
-    <span className={`sync-badge ${tone}${pending ? " pending" : ""}`} title={title}>
+  // A run that ended with failures is actionable when the caller gave us the
+  // action: the pill becomes a button and one click retries everything.
+  const retryable = onRetry != null && !running && progress?.phase === "error";
+  const title = retryable ? "Click to sync now" : runTitle;
+  const body = (
+    <>
       {tone === "connecting" || (tone === "synced" && pending) ? (
         <span
           className={`sync-progress${percent != null ? " determinate" : ""}`}
@@ -266,6 +273,24 @@ export function SyncBadge({
         <span className="sync-dot" aria-hidden="true" />
       )}
       {label}
+    </>
+  );
+  if (retryable) {
+    return (
+      <button
+        type="button"
+        className={`sync-badge sync-badge-retry ${tone}`}
+        title={title}
+        onClick={onRetry}
+      >
+        {body}
+        <span className="sync-retry-cta">Sync now</span>
+      </button>
+    );
+  }
+  return (
+    <span className={`sync-badge ${tone}${pending ? " pending" : ""}`} title={title}>
+      {body}
     </span>
   );
 }

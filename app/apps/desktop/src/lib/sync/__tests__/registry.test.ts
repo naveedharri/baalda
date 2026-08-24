@@ -41,6 +41,7 @@ function fakeApi(opts: {
     listVaults: vi.fn(async () => opts.vaults),
     createVault,
     listFolders: vi.fn(async () => []),
+    listFolderRegistry: vi.fn(async () => ({ folders: [], tombstones: [] })),
     createFolder: vi.fn(async (input: { path: string }) => ({ id: `folder-${input.path}` })),
     listNotes: vi.fn(async () => opts.notes ?? []),
     listNoteRegistry: vi.fn(async () => ({ notes: opts.notes ?? [], tombstones: [] })),

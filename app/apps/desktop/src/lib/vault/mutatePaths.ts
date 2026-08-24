@@ -1,5 +1,5 @@
 /**
- * Deleting vault paths: on disk AND on the server, in that order, once.
+ * Deleting vault paths: on the server AND on disk, in that order, once.
  *
  * This exists because the two delete paths in the sidebar were hand-copied and
  * drifted. The single-item delete removed the file and told the server; the
@@ -29,18 +29,23 @@ export interface DeletePathsResult {
 }
 
 /**
- * Delete each path locally and then on the server.
+ * Delete each path on the server and then locally.
  *
  * Deepest-first, so a folder's children are gone before the folder itself.
  *
- * The server call runs ONLY after the disk delete succeeded, and that order is
- * the whole point: unregistering without deleting leaves a live local file with a
- * dead mapping, while deleting without unregistering leaves a live server row
- * that comes back as an empty file on the next pull. Of the two, the second is
- * the one that actually shipped.
+ * SERVER FIRST, and that order is the whole point — it is the self-healing one:
  *
- * A failed server call is recorded but does not undo the local delete — the file
- * is already gone, and the next reconcile is what reconciles it.
+ *   • Server delete succeeds, disk delete fails (or the app dies in between):
+ *     the row is tombstoned, so the next inbound pull trashes the local file.
+ *     The delete still sticks.
+ *   • Server delete FAILS (offline, or a 403 — no permission): nothing happened
+ *     anywhere. The item stays visible and the failure is reported, instead of
+ *     the old behaviour — disk deleted, server row alive — where the next pull
+ *     resurrected the "deleted" item as an empty ghost and the user learned
+ *     their delete silently hadn't counted.
+ *
+ * The old disk-first ordering predates inbound deletion; with tombstones on
+ * both notes and folders, server-first is strictly safer.
  */
 export async function deletePaths(
   paths: string[],
@@ -51,17 +56,23 @@ export async function deletePaths(
   let done = 0;
   for (const path of ordered) {
     try {
-      await deps.deleteDisk(path, deps.epoch);
+      await deps.unregister(path);
     } catch (e) {
+      // The server refused (or is unreachable): the row is still live, so a
+      // local delete would only produce the reappearing ghost. Leave the item
+      // alone and say so.
       result.failed.push({ path, reason: e instanceof Error ? e.message : String(e) });
       deps.onProgress?.(++done, ordered.length);
       continue;
     }
     try {
-      await deps.unregister(path);
+      await deps.deleteDisk(path, deps.epoch);
     } catch (e) {
-      // The local delete stands; the server row is retried by the next reconcile.
-      console.warn("[vault] failed to unregister deleted path", path, e);
+      // The server side is already done (tombstoned), so the next inbound pull
+      // cleans this file up — recorded for honesty, not for retry.
+      result.failed.push({ path, reason: e instanceof Error ? e.message : String(e) });
+      deps.onProgress?.(++done, ordered.length);
+      continue;
     }
     result.deleted.push(path);
     deps.onProgress?.(++done, ordered.length);

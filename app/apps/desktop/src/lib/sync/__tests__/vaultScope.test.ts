@@ -173,6 +173,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
         return { notes: [{ id: "server-only", rel_path: "FromA.md" }], tombstones: [] };
       }),
       listFolders: vi.fn(async () => []),
+      listFolderRegistry: vi.fn(async () => ({ folders: [], tombstones: [] })),
       createFolder,
       createNote,
     } as unknown as ApiClient;
@@ -212,6 +213,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
         tombstones: [],
       })),
       listFolders: vi.fn(async () => []),
+      listFolderRegistry: vi.fn(async () => ({ folders: [], tombstones: [] })),
       createFolder: vi.fn(async (i: { path: string }) => ({ id: `f-${i.path}` })),
       createNote,
     } as unknown as ApiClient;
@@ -240,6 +242,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
       listNotes: vi.fn(async () => []),
       listNoteRegistry: vi.fn(async () => ({ notes: [], tombstones: [] })),
       listFolders: vi.fn(async () => []),
+      listFolderRegistry: vi.fn(async () => ({ folders: [], tombstones: [] })),
       createFolder: vi.fn(),
       createNote: vi.fn(),
     } as unknown as ApiClient;
@@ -271,6 +274,7 @@ describe("VaultRegistry.reconcile across a vault switch", () => {
         tombstones: [],
       })),
       listFolders: vi.fn(async () => [{ id: "f1", path: "Docs" }]),
+      listFolderRegistry: vi.fn(async () => ({ folders: [{ id: "f1", path: "Docs" }], tombstones: [] })),
       createFolder: vi.fn(),
       createNote: vi.fn(),
     } as unknown as ApiClient;

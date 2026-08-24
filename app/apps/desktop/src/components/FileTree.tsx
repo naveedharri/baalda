@@ -368,7 +368,7 @@ export function FileTree() {
     // Shared with the single-item delete below. It used to be a hand-copied loop
     // that removed the files but never told the server, so every deleted note
     // came back as an empty file on the next registry pull.
-    const { deleted } = await deletePaths(paths, {
+    const { deleted, failed } = await deletePaths(paths, {
       // Pinned to the vault this bulk delete was asked for: every lap after the
       // first runs past an await, and a delete that landed in the vault the user
       // switched to would destroy a same-named file they never selected.
@@ -377,6 +377,16 @@ export function FileTree() {
       unregister: (p) => syncManager.registry.deletePath(p),
       onProgress: (done, total) => setBulkProgress({ done, total }),
     });
+    // A refused delete (offline, or no permission on the server) leaves the item
+    // in place everywhere — silence here is what used to read as "it came back".
+    if (failed.length > 0) {
+      toast(
+        failed.length === 1
+          ? `Couldn't delete "${failed[0].path}" — ${failed[0].reason}`
+          : `Couldn't delete ${failed.length} items — ${failed[0].reason}`,
+        "error",
+      );
+    }
     let order = store.itemOrder;
     for (const p of deleted) {
       order = removeFromOrder(order, p);
@@ -1126,11 +1136,14 @@ export function FileTree() {
     // Same helper as `bulkDelete`, including the epoch pin this call was missing:
     // an unpinned delete that lands after a vault switch destroys a same-named
     // file in a vault the user wasn't even looking at.
-    const { deleted } = await deletePaths([node.data.path], {
+    const { deleted, failed } = await deletePaths([node.data.path], {
       epoch: store.vault?.epoch,
       deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
       unregister: (p) => syncManager.registry.deletePath(p),
     });
+    if (failed.length > 0) {
+      toast(`Couldn't delete "${failed[0].path}" — ${failed[0].reason}`, "error");
+    }
     if (deleted.length === 0) return;
     store.setItemOrder(removeFromOrder(store.itemOrder, node.data.path));
     if (openNote && (openNote.path === node.data.path || openNote.path.startsWith(node.data.path + "/"))) {
@@ -1644,7 +1657,7 @@ function peersForNode(
 
 /**
  * The row's sync tell: one quiet dot, or — for a folder that hasn't settled — the
- * percentage of the notes inside it that are on the server.
+ * count of notes inside it still waiting to reach the server.
  *
  * Sized and positioned like `.tree-lock` (its neighbour) and built from the same
  * `.sync-dot` element and semantic tone tokens the vault-level `.sync-badge`
@@ -1662,8 +1675,10 @@ function TreeSyncMark({
   if (!mark) return null;
   return (
     <span className={`tree-sync ${mark.state}`} title={mark.title} aria-label={mark.title}>
-      {mark.percent != null ? (
-        <span className="tree-sync-pct">{mark.percent}%</span>
+      {mark.progress != null ? (
+        <span className="tree-sync-pct">
+          {mark.progress.synced}/{mark.progress.total}
+        </span>
       ) : (
         <span className="sync-dot" aria-hidden="true" />
       )}

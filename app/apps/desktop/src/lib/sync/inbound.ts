@@ -41,6 +41,19 @@ export interface InboundInput {
   serverFolders: Set<string>;
   /** Folder paths that exist on disk. */
   localFolders: Set<string>;
+  /**
+   * Folder ids the server says are DELETED (`folder_tombstones`). Same contract
+   * as note `tombstones`: `null` means the server did not answer (an older
+   * server), and "I don't know" must never remove or suppress anything.
+   */
+  folderTombstones?: Set<string> | null;
+  /**
+   * The server folder id this device last recorded per local folder path
+   * (the persisted `folders` map in `.context/config.json`). An id match against
+   * a tombstone is proof the local folder IS the deleted one — a folder the
+   * user re-created at the same path gets a fresh id and never matches.
+   */
+  localFolderIds?: Map<string, string>;
 }
 
 export interface InboundRename {
@@ -77,6 +90,15 @@ export interface InboundRejection {
 export interface InboundPlan {
   /** Folder paths to create locally, parents before children. */
   createFolders: string[];
+  /**
+   * Local folder paths the server has DELETED (tombstoned by id), children
+   * before parents. The executor removes each one only if it is empty by then —
+   * the notes inside leave via their own tombstones in {@link trash} first, and
+   * a folder still holding anything (an unconfirmed orphan, a stray image, a
+   * new local note) stays on disk and re-registers under a fresh id, which is
+   * the safe direction: content must live somewhere.
+   */
+  removeFolders: string[];
   renames: InboundRename[];
   trash: InboundTrash[];
   /**
@@ -203,6 +225,7 @@ function byDepth(a: string, b: string): number {
 export function planInbound(input: InboundInput): InboundPlan {
   const plan: InboundPlan = {
     createFolders: [],
+    removeFolders: [],
     renames: [],
     trash: [],
     revoked: new Set(),
@@ -210,15 +233,14 @@ export function planInbound(input: InboundInput): InboundPlan {
     rejected: [],
   };
 
-  // ---- folders: CREATE-ONLY, and that is permanent ------------------------
+  // ---- folders ------------------------------------------------------------
   //
-  // Not an oversight — inbound folder DELETE is undecidable. The `folders` table
-  // has no `deleted_at` (delete is a hard DELETE with ON DELETE CASCADE), and
-  // `GET /api/folders` is permission-filtered, so "absent from the listing" means
-  // deleted OR not-visible-to-me with no tombstone available even in principle.
-  // A folder that was deleted remotely therefore lingers locally once empty:
-  // cosmetic divergence, zero data loss, which is the right trade. The notes
-  // inside it DO leave, via their own tombstones.
+  // Creation is unconditional; DELETION requires a tombstone. "Absent from the
+  // listing" alone is undecidable — `GET /api/folders` is permission-filtered,
+  // so absence means deleted OR not-visible-to-me. `folder_tombstones` (keyed by
+  // folder id, exactly like note tombstones) is what makes the delete provable;
+  // without it, a device still holding the folder locally re-registered it on
+  // its next pull and the deleted folder came back for the whole team.
   for (const path of input.serverFolders) {
     if (input.localFolders.has(path)) continue;
     if (!isSafeFolderPath(path)) {
@@ -233,6 +255,29 @@ export function planInbound(input: InboundInput): InboundPlan {
     plan.createFolders.push(path);
   }
   plan.createFolders.sort(byDepth);
+
+  // A local folder whose recorded server id is tombstoned was deleted remotely.
+  // Gated on the id match (a same-path successor has a fresh id and never
+  // matches) and on the path not having been re-created on the server since.
+  if (input.folderTombstones && input.localFolderIds) {
+    for (const [path, id] of input.localFolderIds) {
+      if (!input.folderTombstones.has(id)) continue;
+      if (!input.localFolders.has(path)) continue; // already gone locally
+      if (input.serverFolders.has(path)) continue; // re-created server-side
+      if (!isSafeFolderPath(path)) {
+        plan.rejected.push({
+          kind: "folder",
+          path,
+          docId: null,
+          reason: "unsafe local folder path",
+        });
+        continue;
+      }
+      plan.removeFolders.push(path);
+    }
+  }
+  // Children before parents, so an emptied subtree unwinds bottom-up.
+  plan.removeFolders.sort((a, b) => byDepth(b, a));
 
   // ---- notes --------------------------------------------------------------
   // Every note path on disk, for the "we lost this doc's local identity" case

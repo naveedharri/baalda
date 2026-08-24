@@ -20,7 +20,9 @@ const fakeRegistry = vi.hoisted(() => {
   const reg = {
     vaultId: null as string | null,
     reconcile: vi.fn(async () => ({ seeded: false })),
-    pull: vi.fn(async () => {}),
+    // Resolves true ("something changed") so the tests can assert the tree
+    // refresh fires — a false pull deliberately skips it to avoid flicker.
+    pull: vi.fn(async () => true),
     reset: vi.fn(),
     getMapping: vi.fn(() => null),
     pathForDocId: vi.fn(() => null),
