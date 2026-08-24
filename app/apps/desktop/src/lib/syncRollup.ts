@@ -35,6 +35,12 @@ export interface FolderSyncSummary {
   /** `synced / total` as a whole percentage, floored (so it reads 99% at 499/500
    *  and only ever reads 100% when everything really is synced). */
   percent: number;
+  /** Progress through the CURRENT wave of not-yet-synced notes, stamped by
+   *  {@link FolderWaveTracker.apply}. Absent when no tracker ran or the folder
+   *  is settled. This is what the row badge renders: "1/2" meaning "1 of the 2
+   *  notes that need syncing", never "1113/1114" — the folder's whole
+   *  population is the tooltip's job, not the badge's. */
+  wave?: { done: number; total: number };
 }
 
 export interface TreeSyncIndex {
@@ -149,13 +155,61 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
   return { notes, folders, vault };
 }
 
+/**
+ * Remembers, per folder, how big the CURRENT wave of not-yet-synced notes got,
+ * so the badge can show progress through the files that actually need syncing.
+ *
+ * Stateless roll-ups can't do this: once a note syncs it stops being "remaining",
+ * so remaining-only counts run 2 → 1 → dot with no sense of progress, and
+ * whole-population counts ("1113/1114") drown one new file in the folder's
+ * entire history. The tracker pins the wave's denominator at the largest
+ * remaining count seen since the folder was last settled; a folder that settles
+ * (everything synced) forgets its wave, so the next external write starts a
+ * fresh "0/1" rather than resuming an old count.
+ *
+ * One instance should live as long as the vault view (the sidebar keeps one in
+ * a ref and resets it on vault switch).
+ */
+export class FolderWaveTracker {
+  /** folder path ("" = vault root) → the wave's pinned denominator. */
+  private waves = new Map<string, number>();
+
+  /** Forget everything (vault switch / sync toggled off). */
+  reset(): void {
+    this.waves.clear();
+  }
+
+  /** Stamp `wave` progress onto every unsettled folder of a freshly-built
+   *  index, and forget folders that settled or disappeared. Call once per
+   *  {@link buildTreeSyncIndex} result, before rendering rows from it. */
+  apply(index: TreeSyncIndex): void {
+    // Prune first: a settled folder's next wave must start from zero, and a
+    // deleted folder must not pin memory forever.
+    for (const key of [...this.waves.keys()]) {
+      const s = key === "" ? index.vault : index.folders.get(key);
+      if (!s || s.total - s.synced <= 0) this.waves.delete(key);
+    }
+    const stamp = (path: string, s: FolderSyncSummary): void => {
+      const remaining = s.total - s.synced;
+      if (remaining <= 0) return;
+      const wave = Math.max(this.waves.get(path) ?? 0, remaining);
+      this.waves.set(path, wave);
+      s.wave = { done: wave - remaining, total: wave };
+    };
+    for (const [path, s] of index.folders) stamp(path, s);
+    if (index.vault) stamp("", index.vault);
+  }
+}
+
 /** What to draw on one sidebar row. `null` ⇒ draw nothing at all. */
 export interface RowSyncMark {
   state: DocSyncState;
-  /** Render "synced/total" (e.g. "1/2") instead of a dot, for folders that
-   *  aren't settled. Real counts, not a percentage: "0%" on a one-note folder
-   *  read as gibberish, where "1/2" answers the actual question. */
-  progress: { synced: number; total: number } | null;
+  /** Render "done/total" (e.g. "1/2") instead of a dot, for folders that
+   *  aren't settled. Counts the current WAVE of notes needing sync (see
+   *  {@link FolderWaveTracker}), not the folder's whole population. Real
+   *  counts, not a percentage: "0%" on a one-note folder read as gibberish,
+   *  where "1/2" answers the actual question. */
+  progress: { done: number; total: number } | null;
   /** Tooltip / accessible label. */
   title: string;
 }
@@ -189,11 +243,12 @@ export function folderSyncTitle(s: FolderSyncSummary): string {
  * a file that isn't a synced note (an image, an unmapped page), or a folder that
  * contains no notes at all.
  *
- * A folder shows "synced/total" until it is settled, then a single dot — which
- * is what makes "are all my folders synced?" answerable at a glance: a column
- * of quiet dots means yes, any "1/2" in it says exactly where things stand.
- * (Previously a percentage, which read as gibberish on small folders — one
- * unsynced note out of one rendered "0%".)
+ * A folder shows "done/total" of its current sync wave until it is settled,
+ * then a single dot — which is what makes "are all my folders synced?"
+ * answerable at a glance: a column of quiet dots means yes, any "1/2" in it
+ * says exactly where things stand. (Previously the folder's whole population —
+ * "1113/1114" — which buried the one file that was actually moving; and before
+ * that a percentage, which read as gibberish on small folders.)
  */
 export function rowSyncMark(
   row: { path: string; isDir: boolean },
@@ -205,7 +260,11 @@ export function rowSyncMark(
     const settled = summary.state === "synced" || summary.state === "error";
     return {
       state: summary.state,
-      progress: settled ? null : { synced: summary.synced, total: summary.total },
+      progress: settled
+        ? null
+        : // No tracker ran (no `apply` call) ⇒ fall back to the wave a fresh
+          // tracker would report: everything unsynced right now, none done.
+          (summary.wave ?? { done: 0, total: summary.total - summary.synced }),
       title: folderSyncTitle(summary),
     };
   }

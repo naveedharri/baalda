@@ -28,11 +28,12 @@ export const editorTheme = EditorView.theme({
   // Full-width content box so a click *anywhere* in the sheet lands on
   // `.cm-content` (CodeMirror only maps clicks/drag-selection that hit the
   // content element — a centred column via `margin:auto` leaves the side
-  // margins as dead `.cm-scroller` zones). We centre the 76ch measure with
-  // symmetric auto-ish padding instead, and keep the tall bottom pad so there's
-  // always somewhere to click below the last line.
+  // margins as dead `.cm-scroller` zones). We centre the `--editor-measure`
+  // column with symmetric auto-ish padding instead, and keep the tall bottom
+  // pad so there's always somewhere to click below the last line.
   ".cm-content": {
-    padding: "var(--sp-8) max(var(--sp-8), calc((100% - 76ch) / 2)) 40vh",
+    padding:
+      "var(--sp-8) max(var(--editor-gutter), calc((100% - var(--editor-measure)) / 2)) 40vh",
     minHeight: "100%",
     caretColor: "var(--accent)",
   },

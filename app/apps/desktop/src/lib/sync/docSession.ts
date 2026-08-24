@@ -59,6 +59,15 @@ function baseName(relPath: string): string {
  */
 const REGISTRY_MAP_PUBLISH_MS = 100;
 
+/**
+ * Quiet window before pushing locally-changed (externally-written) notes. Long
+ * enough that an AI writing a batch of files coalesces into one run; short
+ * enough that a single saved file is on the server within ~a second.
+ */
+const LOCAL_CHANGE_DEBOUNCE_MS = 800;
+/** Re-check interval while a bulk run holds the uploader slot. */
+const LOCAL_CHANGE_RETRY_MS = 2_000;
+
 export interface OpenedDoc {
   awareness: Awareness;
   sync: DocSync | null;
@@ -174,6 +183,17 @@ export class SyncManager implements InboundHost {
   private onDocState?: (patch: Record<string, DocSyncState | null>) => void;
   /** The content upload for the current scope, while one is running. */
   private uploader: ContentUploader | null = null;
+  /** Locally-changed MAPPED notes awaiting a content push (docId → relPath):
+   *  the watcher saw an external writer (an AI, another editor) change their
+   *  .md on disk. Drained by {@link runLocalChangePush}, debounced so a burst
+   *  (an AI writing many files) coalesces into one run. */
+  private localChanges = new Map<string, string>();
+  private localChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Docs holding local-only ops from an out-of-band merge (a resident bridge
+   *  or a cold apply ingested an external edit). For these, "file == doc" does
+   *  NOT mean "nothing to send", so the push must connect regardless. Cleared
+   *  per doc when a push confirms it, wholesale on teardown. */
+  private divergedDocs = new Set<string>();
   /** True while the run is reporting the vault channel's inbound queue. */
   private downloadPhase = false;
   private lastInboundDone = 0;
@@ -471,6 +491,131 @@ export class SyncManager implements InboundHost {
     return this.registryPullTimer != null;
   }
 
+  /**
+   * A watcher `file-changed` event for something OTHER than the open note (App
+   * routes the open note's events into its bridge, whose own provider pushes).
+   *
+   * This is what makes an external writer a first-class editor: people open the
+   * vault folder in an AI tool (Claude, Cursor, a script) that creates and edits
+   * `.md` files directly on disk. Before this hook, those files reached the
+   * server only when a human opened each note — or at the next sign-in's full
+   * reconcile, which is why "sign out and back in" appeared to find unsynced
+   * files. Now:
+   *
+   *  - a path the registry doesn't map (a NEW note), or any structural change
+   *    (`tree`: folders, non-md note files) → the same debounced registry pull a
+   *    teammate's change triggers, which registers it and — via `settleAfterPull`
+   *    — uploads its content;
+   *  - a change to a note we DO map → a debounced content push that diff-merges
+   *    the file into the note's CRDT and sends it (`runLocalChangePush`);
+   *  - a removal → nothing. Deleting a server note stays an explicit act (UI or
+   *    MCP): auto-propagating disk deletions would let `git checkout`-style tree
+   *    churn delete a team's notes.
+   */
+  handleLocalFileChanged(relPath: string, kind: "modified" | "removed" | "tree"): void {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (kind === "removed") return;
+    if (kind === "tree") {
+      this.handleRegistryChanged();
+      return;
+    }
+    const mapping = this.registry.getMapping(relPath);
+    if (!mapping) {
+      this.handleRegistryChanged();
+      return;
+    }
+    // Belt and braces with the uploader's own `skip`: the open note's editor
+    // session owns its provider, and its bridge already ingests watcher events.
+    if (this.docStore?.suppressedDoc() === mapping.docId) return;
+    this.localChanges.set(mapping.docId, relPath);
+    this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+    // A doc resident in the hot tier has a LIVE bridge, and its next egest (a
+    // remote update landing) would overwrite the file's new bytes before the
+    // drain runs — merge them into the doc NOW. A genuine merge goes into the
+    // diverged set: the drain's own ingest will then find file == doc, and only
+    // this marker tells it the doc still holds unsent ops.
+    const resident = this.docStore?.peekResident(mapping.docId);
+    if (resident) {
+      void resident
+        .ingestNow()
+        .then((changed) => {
+          if (changed && scope.isCurrent()) this.divergedDocs.add(mapping.docId);
+        })
+        .catch((e) => console.warn("[sync] resident ingest failed", e));
+    }
+  }
+
+  private armLocalChangeDrain(scope: VaultScope, delayMs: number): void {
+    if (this.localChangeTimer) clearTimeout(this.localChangeTimer);
+    this.localChangeTimer = setTimeout(() => {
+      this.localChangeTimer = null;
+      if (!scope.isCurrent()) return;
+      // A bulk run (enable's backfill, or a settle pass) is single-writer on the
+      // uploader slot AND may be about to push these very docs. Wait it out; the
+      // queue survives, so nothing is dropped.
+      if (this.uploader?.isRunning()) {
+        this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
+        return;
+      }
+      void this.runLocalChangePush(scope).catch((e) =>
+        console.warn("[sync] local change push failed", e),
+      );
+    }, delayMs);
+  }
+
+  /**
+   * Push the queued locally-changed notes: same engine as the bulk backfill, but
+   * `force` (these docs are already "pushed" — that checkpoint says nothing
+   * about the new bytes) and `ingestFromFile` (the change lives in the file, not
+   * the doc). The uploader's echo guard keeps this cheap: a file write that was
+   * our own background egest merges to "no change" and never opens a socket.
+   */
+  private async runLocalChangePush(scope: VaultScope): Promise<void> {
+    const vaultId = this.registry.vaultId;
+    const store = this.docStore;
+    const progress = this.progress;
+    if (!vaultId || !store || !progress) return;
+    const notes = [...this.localChanges].map(([docId, relPath]) => ({ docId, relPath }));
+    this.localChanges.clear();
+    if (notes.length === 0) return;
+
+    const uploader: ContentUploader = new ContentUploader({
+      vaultId,
+      notes,
+      deps: {
+        acquire: (docId, relPath) =>
+          store.promote(docId, relPath, {
+            seedFromFile: false, // pull-before-seed, exactly like the bulk run
+            markRecent: true, // an externally-edited note is genuinely recent
+            pin: true,
+          }),
+        release: (docId) => store.demote(docId),
+        connect: ({ docId, vaultId: collectionId, doc }) =>
+          new DocSync({ api, doc, docId, vaultId: collectionId }),
+      },
+      isPushed: (docId) => this.registry.isPushed(docId),
+      markPushed: (docId) => {
+        this.registry.markPushed(docId);
+        this.divergedDocs.delete(docId); // its local-only ops are now on the server
+      },
+      skip: (docId) => store.suppressedDoc() === docId,
+      force: true,
+      ingestFromFile: true,
+      mustConnect: (docId) => this.divergedDocs.has(docId),
+      progress,
+      shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+    });
+    this.uploader = uploader;
+
+    const result = await uploader.run();
+    if (!scope.isCurrent() || this.uploader !== uploader) return;
+    await this.registry.flushCheckpoint();
+    if (!scope.isCurrent() || this.uploader !== uploader) return;
+    if (result.cancelled) return;
+    this.completeRun(scope);
+  }
+
   // ---- InboundHost: letting go of a doc before its path moves --------------
   //
   // The registry is about to rename or remove a file. Anything still holding the
@@ -730,7 +875,10 @@ export class SyncManager implements InboundHost {
           new DocSync({ api, doc, docId, vaultId: collectionId }),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
-      markPushed: (docId) => this.registry.markPushed(docId),
+      markPushed: (docId) => {
+        this.registry.markPushed(docId);
+        this.divergedDocs.delete(docId); // a confirmed push carries any merged ops
+      },
       // Never touch the open note: its editor session owns a provider for that doc.
       skip: (docId) => store.suppressedDoc() === docId,
       progress,
@@ -861,6 +1009,12 @@ export class SyncManager implements InboundHost {
       clearTimeout(this.registryPullTimer);
       this.registryPullTimer = null;
     }
+    if (this.localChangeTimer) {
+      clearTimeout(this.localChangeTimer);
+      this.localChangeTimer = null;
+    }
+    this.localChanges.clear();
+    this.divergedDocs.clear();
     // The bulk run before the engine it borrows from: `stop()` makes every pool
     // lane drop at its next checkpoint, so nothing is still promoting a bridge
     // when `stopVaultEngine` destroys the store underneath it.
@@ -1045,6 +1199,19 @@ export class SyncManager implements InboundHost {
       // epoch-pinned for the same reason. Without it the engine's `hello` was empty
       // on every launch and the server re-sent the full state of every doc, forever.
       manifest: createIpcManifestStore(scope.vaultEpoch),
+      // A cold apply merged an external disk edit into the doc: those ops are
+      // local-only until pushed, and the local-change drain's own ingest will
+      // see file == doc and try to skip — the diverged set is what forces the
+      // connect (see `handleLocalFileChanged`).
+      onExternalMerge: (docId) => {
+        if (!scope.isCurrent()) return;
+        this.divergedDocs.add(docId);
+        const relPath = this.registry.pathForDocId(docId);
+        if (relPath) {
+          this.localChanges.set(docId, relPath);
+          this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+        }
+      },
     });
     this.docStore = store;
     this.vaultEngine = new VaultSyncEngine({

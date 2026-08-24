@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTreeSyncIndex,
+  FolderWaveTracker,
   folderSyncTitle,
   rowSyncMark,
   type TreeSyncIndex,
@@ -183,11 +184,14 @@ describe("rowSyncMark", () => {
     expect(rowSyncMark(file("page.html"), index)).toBeNull();
   });
 
-  it("shows a folder's synced/total counts, and a dot once settled", () => {
+  it("shows a folder's wave counts (not its population), and a dot once settled", () => {
+    // One of two notes is still moving: the badge counts the WAVE (the one note
+    // that needs syncing), not the folder's whole population — a single new
+    // file in a 1114-note folder must read "0/1", never "1113/1114".
     const busy = indexOf({ "A/a.md": "synced", "A/b.md": "syncing" });
     expect(rowSyncMark(dir("A"), busy)).toMatchObject({
       state: "syncing",
-      progress: { synced: 1, total: 2 },
+      progress: { done: 0, total: 1 },
     });
 
     const done = indexOf({ "A/a.md": "synced", "A/b.md": "synced" });
@@ -203,13 +207,70 @@ describe("rowSyncMark", () => {
     const index = indexOf({ "A/a.md": "synced" }, ["A/b.md", "A/c.md"]);
     expect(rowSyncMark(dir("A"), index)).toMatchObject({
       state: "unsynced",
-      progress: { synced: 1, total: 3 },
+      progress: { done: 0, total: 2 },
     });
   });
 
   it("resolves the vault root folder to the whole-vault roll-up", () => {
     const index = indexOf({ "A/a.md": "synced", "b.md": "synced" });
     expect(rowSyncMark(dir(""), index)).toMatchObject({ state: "synced", progress: null });
+  });
+});
+
+describe("FolderWaveTracker", () => {
+  it("pins the wave's denominator while notes sync, so progress reads forward", () => {
+    const waves = new FolderWaveTracker();
+
+    // Two new files land: wave is 0/2.
+    const start = indexOf({ "A/a.md": "queued", "A/b.md": "queued", "A/c.md": "synced" });
+    waves.apply(start);
+    expect(rowSyncMark(dir("A"), start)!.progress).toEqual({ done: 0, total: 2 });
+
+    // One of them syncs: 1/2 — NOT 0/1, which would erase the progress made.
+    const half = indexOf({ "A/a.md": "synced", "A/b.md": "syncing", "A/c.md": "synced" });
+    waves.apply(half);
+    expect(rowSyncMark(dir("A"), half)!.progress).toEqual({ done: 1, total: 2 });
+  });
+
+  it("forgets a settled folder, so the next wave starts fresh at 0/1", () => {
+    const waves = new FolderWaveTracker();
+    const busy = indexOf({ "A/a.md": "syncing", "A/b.md": "syncing" });
+    waves.apply(busy);
+
+    // Everything lands — the folder settles (dot; no progress stamped).
+    const done = indexOf({ "A/a.md": "synced", "A/b.md": "synced" });
+    waves.apply(done);
+    expect(rowSyncMark(dir("A"), done)!.progress).toBeNull();
+
+    // One NEW file later: a fresh 0/1 wave, not a resumed 2/3.
+    const next = indexOf({ "A/a.md": "synced", "A/b.md": "synced", "A/c.md": "queued" });
+    waves.apply(next);
+    expect(rowSyncMark(dir("A"), next)!.progress).toEqual({ done: 0, total: 1 });
+  });
+
+  it("grows the wave when more work arrives mid-flight", () => {
+    const waves = new FolderWaveTracker();
+    const one = indexOf({ "A/a.md": "syncing" });
+    waves.apply(one);
+    expect(one.folders.get("A")!.wave).toEqual({ done: 0, total: 1 });
+
+    // A second file lands before the first finishes: the wave widens to 2.
+    const two = indexOf({ "A/a.md": "syncing", "A/b.md": "queued" });
+    waves.apply(two);
+    expect(two.folders.get("A")!.wave).toEqual({ done: 0, total: 2 });
+  });
+
+  it("tracks the vault root under its own key and resets on demand", () => {
+    const waves = new FolderWaveTracker();
+    const busy = indexOf({ "a.md": "syncing", "b.md": "synced" });
+    waves.apply(busy);
+    expect(busy.vault!.wave).toEqual({ done: 0, total: 1 });
+
+    waves.reset();
+    const again = indexOf({ "a.md": "syncing", "b.md": "syncing" });
+    waves.apply(again);
+    // After a reset nothing is remembered: the wave is exactly what's unsynced now.
+    expect(again.vault!.wave).toEqual({ done: 0, total: 2 });
   });
 });
 

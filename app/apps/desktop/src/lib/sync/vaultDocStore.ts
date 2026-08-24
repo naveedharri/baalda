@@ -13,9 +13,13 @@
 //     transient headless bridge, applies + flushes to disk + persists, then
 //     evicts. Cost is paid only when a cold doc actually changes.
 //
-// Background egest can't echo-loop: only the OPEN note ingests file changes
-// (BridgeManager.handleFileChanged), so a background write to a closed note's
-// .md has no ingest side to react to it.
+// Background egest can't echo-loop: the ingest sides that CAN see a background
+// write (the open note's bridge via BridgeManager.handleFileChanged, a resident
+// bridge via the session's local-change routing, and this store's own cold
+// applies) all run behind the bridge's echo-hash guard, which drops the exact
+// bytes egest just wrote. Genuine external writes — an AI editing the vault
+// folder directly — take the same ingest paths and DO merge (see
+// `SyncManager.handleLocalFileChanged` and `onExternalMerge`).
 //
 // The manifest is DURABLE (see `ManifestStore`). It used to be in-memory only, so
 // the engine's `hello` was empty on every launch and the server re-sent the full
@@ -67,6 +71,12 @@ export interface VaultDocStoreOptions {
   resolvePath: (docId: string) => string | null;
   io?: BridgeIO;
   hotCap?: number;
+  /** A cold apply found (and merged) an EXTERNAL edit on disk — bytes the doc
+   *  had never seen, written by something outside the app while no bridge was
+   *  alive. The merged ops are local-only until a provider connects, so the
+   *  session must schedule a content push for this doc (its own local-change
+   *  drain would otherwise see file == doc and skip the network). */
+  onExternalMerge?: (docId: string) => void;
   /** Durable manifest. Defaults to {@link nullManifestStore}. */
   manifest?: ManifestStore;
   /** Injected in tests. */
@@ -85,6 +95,7 @@ interface HotEntry {
 export class VaultDocStore implements DocUpdateSink {
   private readonly io: BridgeIO;
   private readonly resolvePath: (docId: string) => string | null;
+  private readonly onExternalMerge?: (docId: string) => void;
   private readonly hotCap: number;
   private readonly manifest: ManifestStore;
   private readonly setT: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
@@ -118,6 +129,7 @@ export class VaultDocStore implements DocUpdateSink {
   constructor(opts: VaultDocStoreOptions) {
     this.io = opts.io ?? createTauriBridgeIO();
     this.resolvePath = opts.resolvePath;
+    this.onExternalMerge = opts.onExternalMerge;
     this.hotCap = opts.hotCap ?? HOT_DOC_CAP;
     this.manifest = opts.manifest ?? nullManifestStore;
     this.setT = opts.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
@@ -383,6 +395,14 @@ export class VaultDocStore implements DocUpdateSink {
     return [...this.coldChains.keys()];
   }
 
+  /** The live resident bridge for a doc, or null. A PEEK — no open, no LRU
+   *  touch, no pin. For routing watcher events into already-hot docs: a
+   *  resident bridge's next egest would overwrite an un-ingested external edit,
+   *  so the session merges the file in the moment the watcher reports it. */
+  peekResident(docId: string): NoteBridge | null {
+    return this.hot.get(docId)?.bridge ?? null;
+  }
+
   private async coldApply(docId: string, update: Uint8Array): Promise<void> {
     const path = this.resolvePath(docId);
     if (!path) return; // unknown doc (not yet materialised) — skip; next reconnect retries
@@ -390,6 +410,16 @@ export class VaultDocStore implements DocUpdateSink {
     // evict. seedFromFile:false — the server feed is the source for background docs.
     const bridge = await NoteBridge.open(this.io, { docId, path, seedFromFile: false });
     try {
+      // Fold in any external edit sitting on disk BEFORE the remote delta lands
+      // and gets egested: the flush below rewrites the file from the doc, and a
+      // file the doc has never ingested (an AI edited it while no bridge was
+      // alive) would be silently overwritten. The doc-non-empty guard keeps an
+      // unhydrated placeholder on the pull-before-seed path (never a pre-sync
+      // seed); converged content makes this a no-op read. A genuine merge is
+      // reported up so the session pushes it (see `onExternalMerge`).
+      if (bridge.serialize().length > 0 && (await bridge.ingestNow())) {
+        this.onExternalMerge?.(docId);
+      }
       bridge.applyRemote(update);
       await bridge.flushEgest();
       this.rememberSv(docId, Y.encodeStateVector(bridge.doc));

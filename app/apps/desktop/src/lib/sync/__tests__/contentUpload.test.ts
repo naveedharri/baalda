@@ -130,6 +130,9 @@ interface RigOptions {
   shouldStop?: () => boolean;
   concurrency?: number;
   failureStreakLimit?: number;
+  force?: boolean;
+  ingestFromFile?: boolean;
+  mustConnect?: (docId: string) => boolean;
   /** Reuse a previous rig's CRDT store, to model a SECOND run on one device. */
   harness?: ReturnType<typeof makeHarness>;
   onAcquire?: (docId: string, store: VaultDocStore) => void;
@@ -168,6 +171,9 @@ function rig(opts: RigOptions) {
       pushedSet.add(id);
     },
     skip: opts.skip,
+    force: opts.force,
+    ingestFromFile: opts.ingestFromFile,
+    mustConnect: opts.mustConnect,
     shouldStop: opts.shouldStop,
     progress: sink.sink,
     concurrency: opts.concurrency,
@@ -446,5 +452,154 @@ describe("ContentUploader — resume and honest failures", () => {
     expect(result).toMatchObject({ total: 2, pushed: 1, failed: 1 });
     expect(r.server.text("d2")).toBe("here");
     expect(r.uploader.failedDocs()[0].docId).toBe("d1");
+  });
+});
+
+describe("ContentUploader — local-change runs (force + ingestFromFile)", () => {
+  // The live sync of externally-written files (an AI with the vault folder open
+  // in Claude/Cursor writing .md files directly): the doc is already confirmed
+  // on the server ("pushed"), but its file just changed underneath us.
+
+  it("pushes an external edit to an already-pushed note", async () => {
+    const notes = [{ docId: "d1", relPath: "Note.md" }];
+    const first = rig({ files: { "Note.md": "v1" }, notes });
+    await first.uploader.run();
+    expect(first.server.text("d1")).toBe("v1");
+
+    // Claude rewrites the file on disk while nobody has the note open.
+    first.harness.fs.externalWrite("Note.md", "v1 plus an AI edit");
+    const second = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["d1"]),
+      force: true,
+      ingestFromFile: true,
+    });
+    const result = await second.uploader.run();
+
+    expect(result).toMatchObject({ total: 1, pushed: 1, failed: 0 });
+    expect(second.server.text("d1")).toBe("v1 plus an AI edit");
+  });
+
+  it("skips the network entirely when the file matches the doc (egest echo)", async () => {
+    const notes = [{ docId: "d1", relPath: "Note.md" }];
+    const first = rig({ files: { "Note.md": "steady" }, notes });
+    await first.uploader.run();
+
+    // The watcher fires for our OWN background write: same bytes, no diff.
+    const second = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["d1"]),
+      force: true,
+      ingestFromFile: true,
+    });
+    const result = await second.uploader.run();
+
+    expect(result).toMatchObject({ total: 1, pushed: 1, failed: 0 });
+    expect(second.connects).toEqual([]); // no provider was ever opened
+    expect(second.server.text("d1")).toBe("steady");
+    expect(second.store.hotSize()).toBe(0); // bridge released on the skip path
+  });
+
+  it("merges an external edit instead of doubling when the server moved too", async () => {
+    const notes = [{ docId: "d1", relPath: "Note.md" }];
+    const first = rig({ files: { "Note.md": "alpha beta" }, notes });
+    await first.uploader.run();
+
+    // A teammate appends on the server; Claude appends in the file. Both must
+    // survive the push (CRDT merge), and nothing may double.
+    first.server.doc("d1").getText("content").insert(0, "THEIRS ");
+    first.harness.fs.externalWrite("Note.md", "alpha beta OURS");
+    const second = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["d1"]),
+      force: true,
+      ingestFromFile: true,
+    });
+    await second.uploader.run();
+
+    const merged = second.server.text("d1");
+    expect(merged).toContain("THEIRS");
+    expect(merged).toContain("OURS");
+    expect(merged.match(/alpha beta/g)).toHaveLength(1);
+    // The merged text landed back on disk too.
+    expect(second.harness.fs.get("Note.md")).toBe(merged);
+  });
+
+  it("still seeds an empty doc AFTER the pull on ingest runs (split-brain rule)", async () => {
+    // A brand-new file (doc empty, never pushed) going through the local-change
+    // path must behave exactly like the bulk path: pull first, then seed — the
+    // pre-connect ingest is only for docs that already hold content.
+    const server = new FakeServer();
+    server.seed("d1", "server truth");
+    const r = rig({
+      files: { "Note.md": "" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      force: true,
+      ingestFromFile: true,
+    });
+    await r.uploader.run();
+
+    expect(r.server.text("d1")).toBe("server truth"); // no doubling, no clobber
+    expect(r.harness.fs.get("Note.md")).toBe("server truth");
+  });
+});
+
+describe("ContentUploader — mustConnect (out-of-band merges)", () => {
+  it("connects and pushes even when file == doc, when the doc is marked diverged", async () => {
+    // A cold apply (or resident bridge) already merged the external edit into
+    // the doc and egested it back, so the file matches the doc — but the merged
+    // ops never reached the server. `mustConnect` is the marker that forces the
+    // flush the fast-path would otherwise skip.
+    const notes = [{ docId: "d1", relPath: "Note.md" }];
+    const first = rig({ files: { "Note.md": "v1" }, notes });
+    await first.uploader.run();
+    expect(first.server.text("d1")).toBe("v1");
+
+    // Simulate the out-of-band merge: local ops land in the CRDT store and the
+    // file, without any provider seeing them (exactly what coldApply's ingest
+    // does when the server sent an unrelated delta).
+    const { NoteBridge } = await import("../../bridge/noteBridge");
+    first.harness.fs.externalWrite("Note.md", "v1 merged-out-of-band");
+    const b = await NoteBridge.open(first.harness.io, { docId: "d1", path: "Note.md" });
+    await b.ingestNow();
+    b.destroy();
+
+    const second = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["d1"]),
+      force: true,
+      ingestFromFile: true,
+    });
+    // Without the marker: the fast-path skips, and the server never learns.
+    await second.uploader.run();
+    expect(second.server.text("d1")).toBe("v1");
+    expect(second.connects).toEqual([]);
+
+    const third = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["d1"]),
+      force: true,
+      ingestFromFile: true,
+      mustConnect: () => true,
+    });
+    await third.uploader.run();
+    expect(third.connects).toEqual(["d1"]);
+    expect(third.server.text("d1")).toBe("v1 merged-out-of-band");
   });
 });

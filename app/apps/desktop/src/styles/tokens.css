@@ -81,6 +81,15 @@
   --sp-8: 32px;
   --sp-10: 40px;
 
+  /* The editor's prose column. One pair of tokens so the CM6 theme
+     (`lib/editor/theme.ts`) and the loading skeleton (`components/editor.css`)
+     can never drift — the skeleton must land exactly where the real text does.
+     Wide on purpose: the content should fill most of the window, with
+     `--editor-gutter` as the minimum breathing room at each edge on narrow
+     windows (see the `max(...)` the consumers wrap these in). */
+  --editor-measure: 120ch;
+  --editor-gutter: 64px;
+
   /* Height to keep clear at the very top of the window for system window
      controls. Zero everywhere the OS still draws its own title bar above the
      webview; only macOS runs `titleBarStyle: "Overlay"`, where the webview owns
