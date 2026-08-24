@@ -614,6 +614,7 @@ export class VaultRegistry {
       serverFolders: Array<{ path: string }>;
       serverNotes: RegisteredNote[];
       tombstones: string[] | null;
+      folderTombstones: string[] | null;
     },
   ): Promise<{ changedDisk: boolean; suppress: Set<string> }> {
     const none = { changedDisk: false, suppress: new Set<string>() };
@@ -675,6 +676,10 @@ export class VaultRegistry {
       local,
       serverFolders: new Set(args.serverFolders.map((f) => f.path)),
       localFolders: new Set(args.folders.map((f) => f.path)),
+      folderTombstones: args.folderTombstones ? new Set(args.folderTombstones) : null,
+      // The persisted path → server-folder-id join: an id match against a
+      // tombstone is proof the local folder IS the deleted one.
+      localFolderIds: new Map(this.folderByPath),
     });
 
     for (const r of plan.rejected) {
@@ -774,6 +779,39 @@ export class VaultRegistry {
           reason: reasonOf(e),
           code: null,
         });
+      }
+    }
+
+    // Folders the server has deleted, children before parents, AFTER the trash
+    // loop above has moved their notes out. Empty-only removal (`remove_dir`,
+    // never recursive): a folder still holding anything stays on disk and — its
+    // dead mapping dropped below — re-registers under a fresh id, because
+    // content must live somewhere. Either way the stale id leaves the map, so
+    // nothing can later rename/color/re-register against a deleted server row.
+    for (const path of plan.removeFolders) {
+      if (this.stopRun()) break;
+      try {
+        const removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
+        if (removed) changedDisk = true;
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+        this.recordFailure({
+          kind: "inbound",
+          path,
+          docId: null,
+          reason: reasonOf(e),
+          code: null,
+        });
+      }
+      this.folderByPath.delete(path);
+    }
+    // Drop EVERY mapping whose id is tombstoned, not just the ones whose dir
+    // still existed: a surviving dead entry would make `registerFolder` at the
+    // same path adopt the deleted row's id and silently skip creating.
+    if (args.folderTombstones) {
+      const dead = new Set(args.folderTombstones);
+      for (const [rp, id] of [...this.folderByPath]) {
+        if (dead.has(id)) this.folderByPath.delete(rp);
       }
     }
 
@@ -904,8 +942,10 @@ export class VaultRegistry {
     // Publish the resolved collection id on the scope for the layers above.
     if (this.bound) this.bound.serverVaultId = vaultId;
     // Adopt the previous run's content-push checkpoint. This is what makes a
-    // killed backfill resume instead of re-walking the whole vault.
-    this.pushed = new Set(cfg.pushed ?? []);
+    // killed backfill resume instead of re-walking the whole vault. Guarded on
+    // the collection matching, like everything else read back from config: a
+    // pushed-set recorded against another collection says nothing about this one.
+    this.pushed = new Set(cfg.serverVaultId === vaultId ? (cfg.pushed ?? []) : []);
     // Adopt the baseline ONLY if the config we just read describes the collection
     // we actually resolved. Anything else (a first run, a config from another
     // vault, a rewritten `.context`) leaves it empty, which disables inbound for
@@ -938,6 +978,15 @@ export class VaultRegistry {
     if (cfg.serverVaultId === vaultId && cfg.docs) {
       for (const [rp, docId] of Object.entries(cfg.docs)) {
         if (typeof docId === "string" && docId) this.setMapping(rp, docId, vaultId);
+      }
+    }
+    // Restore the folder path → server-id join too (same collection guard). It
+    // was written every pass and read back by nobody — so after a relaunch a
+    // folder the server had DELETED could not be recognised as the deleted one
+    // (the tombstone match is by id), and the outbound half re-registered it.
+    if (cfg.serverVaultId === vaultId && cfg.folders) {
+      for (const [rp, id] of Object.entries(cfg.folders)) {
+        if (typeof id === "string" && id) this.folderByPath.set(rp, id);
       }
     }
 
@@ -1010,11 +1059,17 @@ export class VaultRegistry {
     opts: { inbound: boolean },
   ): Promise<void> {
     if (this.stale()) return;
-    const [serverFolders, noteRegistry] = await Promise.all([
-      this.api.listFolders(vaultId),
+    // Failures describe THIS pass. They used to accumulate across pulls — every
+    // registry signal re-recorded the same refusals, so a vault could never come
+    // back from "N not synced" even after the underlying cause was gone.
+    this.failed = [];
+    this.limitReached = null;
+    const [folderRegistry, noteRegistry] = await Promise.all([
+      this.api.listFolderRegistry(vaultId),
       this.api.listNoteRegistry(vaultId),
     ]);
     if (this.stale()) return;
+    const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
     const checkpoint = this.checkpoint ?? this.newCheckpointer();
@@ -1028,7 +1083,15 @@ export class VaultRegistry {
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
     if (opts.inbound) {
-      const applied = await this.applyInbound(vaultId, { folders, notes, titles, serverFolders, serverNotes, tombstones: noteRegistry.tombstones });
+      const applied = await this.applyInbound(vaultId, {
+        folders,
+        notes,
+        titles,
+        serverFolders,
+        serverNotes,
+        tombstones: noteRegistry.tombstones,
+        folderTombstones: folderRegistry.tombstones,
+      });
       if (this.stale()) return;
       if (applied.changedDisk) {
         // One re-read, only when we actually moved something. Without it the steps
@@ -1198,9 +1261,18 @@ export class VaultRegistry {
         this.notifyMapChanged();
       }
     }
-    // The push checkpoint only ever describes docs we still track.
+    // The push checkpoint describes docs we still track OR still remember in the
+    // baseline. The baseline part is load-bearing: a note deleted remotely leaves
+    // the server listing (and hence `byDocId`) on the pass that LEARNS about the
+    // delete, but its file may only be trashed on a LATER pass — and the trash
+    // executor refuses any doc whose content was never confirmed upstream.
+    // Pruning `pushed` by `byDocId` alone erased that confirmation in between,
+    // which is how already-synced notes turned into permanent "left on disk"
+    // orphans with an error badge that never cleared.
     for (const docId of [...this.pushed]) {
-      if (!this.byDocId.has(docId)) this.pushed.delete(docId);
+      if (!this.byDocId.has(docId) && !this.baselineDocs.has(docId)) {
+        this.pushed.delete(docId);
+      }
     }
     checkpoint.touch();
     await checkpoint.flush();
@@ -1394,7 +1466,15 @@ export class VaultRegistry {
     }
   }
 
-  /** Propagate a local delete of a folder subtree or a note to the server. */
+  /**
+   * Propagate a delete of a folder subtree or a note to the server.
+   *
+   * THROWS when the server refused (offline, 403): callers run server-first —
+   * `deletePaths` only removes the local files once the server rows are gone —
+   * so a swallowed failure here would let the local delete proceed and the next
+   * pull resurrect the item as an empty ghost. A 404 is treated as success: the
+   * row is already gone, which is the goal state.
+   */
   async deletePath(path: string): Promise<void> {
     if (this.stale()) return;
     const vaultId = this.serverVaultId;
@@ -1404,8 +1484,7 @@ export class VaultRegistry {
       try {
         await this.api.deleteFolder(folderId);
       } catch (e) {
-        console.error("[registry] deleteFolder failed", path, e);
-        return;
+        if (!(e instanceof ApiError && e.status === 404)) throw e;
       }
       if (this.stale() || this.serverVaultId !== vaultId) return;
       this.folderByPath = dropPrefix(this.folderByPath, path);
@@ -1421,8 +1500,7 @@ export class VaultRegistry {
       try {
         await this.api.deleteNote(mapping.docId);
       } catch (e) {
-        console.error("[registry] deleteNote failed", path, e);
-        return;
+        if (!(e instanceof ApiError && e.status === 404)) throw e;
       }
       if (this.stale() || this.serverVaultId !== vaultId) return;
       this.byPath.delete(path);
@@ -1439,10 +1517,14 @@ export class VaultRegistry {
     for (const [rp, m] of this.byPath) this.byDocId.set(m.docId, rp);
   }
 
-  /** Drop push-checkpoint entries for docs we no longer track. */
+  /** Drop push-checkpoint entries for docs we neither track nor remember in the
+   *  baseline (see the pass-end prune in `syncStructure` for why the baseline
+   *  keeps a confirmation alive until the file actually leaves). */
   private prunePushed(): void {
     for (const docId of [...this.pushed]) {
-      if (!this.byDocId.has(docId)) this.pushed.delete(docId);
+      if (!this.byDocId.has(docId) && !this.baselineDocs.has(docId)) {
+        this.pushed.delete(docId);
+      }
     }
   }
 

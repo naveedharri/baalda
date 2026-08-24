@@ -280,6 +280,23 @@ export async function deleteFolderCascade(
       RETURNING id`,
     [folderId, folder.path, likeEscape(folder.path), folder.vault_id],
   );
+  // Tombstone EVERY folder in the subtree before the cascade removes the rows.
+  // Notes soft-delete and therefore announce their own deletion; folders were
+  // erased without a trace, so any device still holding one locally
+  // re-registered it on its next pull — the "deleted folder keeps coming back"
+  // bug. Keyed by folder id (what clients persist), so an id match proves the
+  // local folder is THIS deleted one and not a same-named successor.
+  await db.query(
+    `WITH RECURSIVE subtree AS (
+        SELECT id, vault_id, path FROM folders WHERE id = $1
+        UNION
+        SELECT f.id, f.vault_id, f.path FROM folders f JOIN subtree s ON f.parent_id = s.id
+     )
+     INSERT INTO folder_tombstones (id, vault_id, path)
+     SELECT id, vault_id, path FROM subtree
+     ON CONFLICT (id) DO NOTHING`,
+    [folderId],
+  );
   await db.query("DELETE FROM folders WHERE id = $1", [folderId]);
   return {
     vaultId: folder.vault_id,

@@ -635,6 +635,33 @@ export class SyncManager implements InboundHost {
   }
 
   /**
+   * User-triggered "sync now": re-pull the registry and re-run the content pass,
+   * so notes stranded by a transient failure get another chance without a
+   * sign-out/relaunch. Backs the sync pill's retry button.
+   *
+   * No-op while a run is already in flight — that run will pick everything up.
+   */
+  async retrySync(): Promise<void> {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.uploader?.isRunning()) return;
+    // The old uploader's failure list belongs to the run being retried; keeping
+    // it would let `completeRun` re-report failures the retry just fixed.
+    this.uploader = null;
+    // Show life immediately — the pull below can take a moment on a big vault.
+    this.progress?.phase("registering", 0);
+    this.progress?.flush();
+    try {
+      await this.registry.pull();
+    } catch (e) {
+      console.warn("[sync] manual retry pull failed", e);
+    }
+    if (!scope.isCurrent()) return;
+    this.onRegistryChanged?.();
+    this.settleAfterPull(scope);
+  }
+
+  /**
    * Push every registered note's CONTENT to the server, then wait out the inbound
    * backfill, then report a terminal phase.
    *
@@ -996,6 +1023,14 @@ export class SyncManager implements InboundHost {
         this.vaultStatus = s;
         this.emitStatus();
         this.onVaultStatus?.(s);
+        // Every (re)connect re-pulls the registry. `registry` control frames only
+        // reach clients that were CONNECTED when the change happened — anything a
+        // teammate created/renamed/deleted while this device was offline (or
+        // between reconcile and the socket coming up) was announced to nobody
+        // here. Without this, those changes surfaced only on the next sign-in or
+        // relaunch. Debounced + idempotent, so the extra pull on a healthy
+        // connect costs one listing round trip.
+        if (s === "synced") this.handleRegistryChanged();
       },
       // An ACL change in this vault may have flipped the open note's grant
       // (view↔edit, lock/unlock). Re-mint its token so the editor becomes

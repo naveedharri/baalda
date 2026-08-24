@@ -295,7 +295,16 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Private-by-default: only folders the caller may see (created / shared /
     // path-to-a-shared-note). Owner/admin + Open vaults see everything.
     const folders = await listVisibleFolders(session.userId, vaultId);
-    return c.json({ folders });
+    // Folder tombstones ride the same response as note tombstones do on
+    // GET /api/notes, and for the same reason: the client subtracts one set
+    // from the other, so both must come from one snapshot. Ids only — an id is
+    // the minimum that lets a client stop re-registering (and remove) a local
+    // folder, and it leaks nothing about what the folder was called.
+    const { rows: tombstones } = await pool.query<{ id: string }>(
+      "SELECT id FROM folder_tombstones WHERE vault_id = $1",
+      [vaultId],
+    );
+    return c.json({ folders, tombstones: tombstones.map((t) => t.id) });
   });
 
   // Rename / move a folder. Rewrites the folder's own row AND every descendant

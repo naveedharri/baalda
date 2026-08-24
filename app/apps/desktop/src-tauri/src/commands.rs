@@ -849,6 +849,27 @@ pub async fn trash_note(
     Ok(dest)
 }
 
+/// Remove a folder the server has deleted — but only when it is empty by now
+/// (its notes leave via their own tombstones first). Returns whether it was
+/// removed; a folder still holding anything stays on disk, which is the safe
+/// direction (see `notefile::delete_folder_if_empty`).
+#[tauri::command]
+pub async fn delete_folder_if_empty(
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    // Epoch-pinned like `trash_note`: driven by a debounced registry pull that
+    // can outlive a vault switch.
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let abs = vault::resolve_in_vault(&vault, &path)?;
+    let removed = notefile::delete_folder_if_empty(&vault, &path)?;
+    if removed {
+        index.lock().unwrap().remove_note(&vault, &abs)?;
+    }
+    Ok(removed)
+}
+
 #[tauri::command]
 pub async fn delete_path(
     state: State<'_, AppState>,

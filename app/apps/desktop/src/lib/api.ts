@@ -879,6 +879,27 @@ export class ApiClient {
     return data.folders ?? [];
   }
 
+  /**
+   * The registry pull's view of a vault's folders: the folders the server will
+   * show us, plus the folder ids it says are **deleted**.
+   *
+   * Same `null`-vs-`[]` contract as {@link listNoteRegistry}: `tombstones: null`
+   * means the server did not answer (an older server), and the reconciler must
+   * never remove or suppress a folder on the strength of "I don't know".
+   */
+  async listFolderRegistry(
+    vaultId: string,
+  ): Promise<{ folders: RegisteredFolder[]; tombstones: string[] | null }> {
+    const { data } = await this.request<{
+      folders: RegisteredFolder[];
+      tombstones?: string[];
+    }>("GET", "/api/folders", { query: { vaultId } });
+    return {
+      folders: data.folders ?? [],
+      tombstones: Array.isArray(data.tombstones) ? data.tombstones : null,
+    };
+  }
+
   async createFolder(input: {
     vaultId: string;
     name: string;

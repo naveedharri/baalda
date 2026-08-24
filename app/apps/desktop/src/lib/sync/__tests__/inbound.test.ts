@@ -21,6 +21,8 @@ const empty = {
   local: new Map<string, string>(),
   serverFolders: new Set<string>(),
   localFolders: new Set<string>(),
+  folderTombstones: new Set<string>() as Set<string> | null,
+  localFolderIds: new Map<string, string>(),
 };
 
 function plan(over: Partial<typeof empty>) {
@@ -49,12 +51,55 @@ describe("planInbound — folders", () => {
     expect(p.createFolders).toEqual([]);
   });
 
-  it("never deletes a local folder the server no longer lists", () => {
-    // Folders are hard-deleted server-side with no tombstone, and the folder
-    // listing is permission-filtered, so "absent" is irreducibly ambiguous.
-    // Inbound folders are create-only, permanently.
+  it("never deletes a local folder the server merely no longer lists", () => {
+    // The folder listing is permission-filtered, so "absent" alone is
+    // irreducibly ambiguous — only a tombstone proves a delete.
     const p = plan({ localFolders: new Set(["Gone"]) });
-    expect(p).toMatchObject({ createFolders: [], trash: [], renames: [] });
+    expect(p).toMatchObject({ createFolders: [], removeFolders: [], trash: [], renames: [] });
+  });
+
+  it("removes a local folder whose recorded id is tombstoned, children first", () => {
+    // THE reappearing-folder bug: a device still holding the folder locally used
+    // to re-register it on its next pull, resurrecting it for the whole team.
+    const p = plan({
+      localFolders: new Set(["A", "A/B", "Keep"]),
+      localFolderIds: new Map([
+        ["A", "fa"],
+        ["A/B", "fb"],
+        ["Keep", "fk"],
+      ]),
+      folderTombstones: new Set(["fa", "fb"]),
+    });
+    expect(p.removeFolders).toEqual(["A/B", "A"]);
+  });
+
+  it("does not remove on a tombstone when the server did not answer (null)", () => {
+    const p = plan({
+      localFolders: new Set(["A"]),
+      localFolderIds: new Map([["A", "fa"]]),
+      folderTombstones: null,
+    });
+    expect(p.removeFolders).toEqual([]);
+  });
+
+  it("leaves a folder re-created at the same path alone", () => {
+    // The successor has a fresh server id; the old id's tombstone must not take
+    // the new folder down with it.
+    const p = plan({
+      localFolders: new Set(["A"]),
+      serverFolders: new Set(["A"]),
+      localFolderIds: new Map([["A", "fa-old"]]),
+      folderTombstones: new Set(["fa-old"]),
+    });
+    expect(p.removeFolders).toEqual([]);
+  });
+
+  it("skips a tombstoned folder that is already gone locally", () => {
+    const p = plan({
+      localFolderIds: new Map([["A", "fa"]]),
+      folderTombstones: new Set(["fa"]),
+    });
+    expect(p.removeFolders).toEqual([]);
   });
 
   it("refuses an unsafe folder path", () => {

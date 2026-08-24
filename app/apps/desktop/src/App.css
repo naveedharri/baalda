@@ -4253,6 +4253,24 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--danger-soft);
   color: var(--danger);
 }
+/* A run that ended with failures renders as a button: the remedy ("Sync now")
+   lives on the message instead of asking the user to sign out and back in. */
+button.sync-badge-retry {
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+button.sync-badge-retry:hover {
+  filter: brightness(0.96);
+}
+.sync-retry-cta {
+  padding-left: var(--sp-2);
+  border-left: 1px solid currentColor;
+  opacity: 0.85;
+  white-space: nowrap;
+}
 @keyframes sync-pulse {
   0%,
   100% {

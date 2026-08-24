@@ -468,6 +468,9 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
       pending={pending}
       progress={progress}
       noteOpen={noteOpen}
+      // "N not synced" carries its own remedy: one click re-pulls the registry
+      // and re-runs the content pass for everything still unconfirmed.
+      onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
     />
   );
 }

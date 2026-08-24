@@ -40,32 +40,48 @@ describe("deletePaths", () => {
     expect(res.deleted.sort()).toEqual(["a.md", "b.md"]);
   });
 
-  it("does NOT unregister when the disk delete failed", async () => {
-    // Unregistering without deleting leaves a live local file with a dead mapping,
-    // which then re-registers as a brand-new note.
+  it("unregisters BEFORE touching disk (server-first is the self-healing order)", async () => {
+    const order: string[] = [];
     const d = deps({
-      deleteDisk: vi.fn(async () => {
-        throw new Error("permission denied");
+      unregister: vi.fn(async (p: string) => {
+        order.push(`server:${p}`);
+      }),
+      deleteDisk: vi.fn(async (p: string) => {
+        order.push(`disk:${p}`);
       }),
     });
-    const res = await deletePaths(["a.md"], d.all);
-    expect(d.unregister).not.toHaveBeenCalled();
-    expect(res.deleted).toEqual([]);
-    expect(res.failed).toEqual([{ path: "a.md", reason: "permission denied" }]);
+    await deletePaths(["a.md"], d.all);
+    expect(order).toEqual(["server:a.md", "disk:a.md"]);
   });
 
-  it("keeps the local delete when the server call fails", async () => {
-    // The file is already gone; the row is reconciled on the next pull. Reporting
-    // this as a failure would be honest but useless — there is nothing to retry
-    // locally, and the delete did happen.
+  it("does NOT delete locally when the server call fails", async () => {
+    // A live server row plus a deleted local file is the reappearing-ghost bug:
+    // the next pull materializes the "deleted" item back. If the server refused
+    // (offline, or no permission), nothing may happen anywhere — and the user is
+    // told, instead of watching their delete silently not count.
     const d = deps({
       unregister: vi.fn(async () => {
         throw new Error("offline");
       }),
     });
     const res = await deletePaths(["a.md"], d.all);
-    expect(res.deleted).toEqual(["a.md"]);
-    expect(res.failed).toEqual([]);
+    expect(d.deleteDisk).not.toHaveBeenCalled();
+    expect(res.deleted).toEqual([]);
+    expect(res.failed).toEqual([{ path: "a.md", reason: "offline" }]);
+  });
+
+  it("reports a disk failure after a successful unregister", async () => {
+    // The server side is tombstoned, so the next inbound pull cleans the file
+    // up — but the caller still hears that this path isn't done.
+    const d = deps({
+      deleteDisk: vi.fn(async () => {
+        throw new Error("permission denied");
+      }),
+    });
+    const res = await deletePaths(["a.md"], d.all);
+    expect(d.unregister).toHaveBeenCalledWith("a.md");
+    expect(res.deleted).toEqual([]);
+    expect(res.failed).toEqual([{ path: "a.md", reason: "permission denied" }]);
   });
 
   it("passes the pinned epoch to every disk call", async () => {

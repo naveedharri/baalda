@@ -67,7 +67,7 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         now,
         progress: run({ phase: "uploading", done: 128, total: 500 }),
       }),
-    ).toBe("Uploading 128/500");
+    ).toBe("Syncing 128/500");
   });
 
   it("counts the registering and downloading phases too, named by direction", () => {
@@ -193,7 +193,7 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         noteOpen: false,
         progress: run({ phase: "uploading", done: 1, total: 9 }),
       }),
-    ).toBe("Uploading 1/9");
+    ).toBe("Syncing 1/9");
   });
 
   it("keeps the vault-wide tone consistent with the vault-wide words", () => {
