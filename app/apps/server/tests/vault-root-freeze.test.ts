@@ -189,6 +189,46 @@ describe("frozen vault root", () => {
     });
     expect(rename.status).toBe(200);
   });
+
+  it("refuses a new root FILE too, but allows nested and re-registered ones", async () => {
+    const folder = await req(owner, "POST", "/api/folders", {
+      vaultId: vault,
+      name: "Assets",
+      path: "Assets",
+    });
+    const folderId = (await folder.json()).id as string;
+    const docId = crypto.randomUUID();
+    const pre = await req(owner, "POST", "/api/files", {
+      vaultId: vault,
+      path: "logo.svg",
+      docId,
+    });
+    expect(pre.status).toBe(201);
+
+    await freezeVaultRoot(vault);
+
+    const refused = await req(owner, "POST", "/api/files", {
+      vaultId: vault,
+      path: "stray.bin",
+    });
+    expect(refused.status).toBe(403);
+    expect((await refused.json()).code).toBe("root_frozen");
+
+    const nested = await req(owner, "POST", "/api/files", {
+      vaultId: vault,
+      folderId,
+      path: "Assets/pic.png",
+    });
+    expect(nested.status).toBe(201);
+
+    // Second device re-registering the pre-freeze root file still syncs.
+    const readopt = await req(owner, "POST", "/api/files", {
+      vaultId: vault,
+      path: "logo.svg",
+      docId,
+    });
+    expect(readopt.status).toBe(201);
+  });
 });
 
 /**

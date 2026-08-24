@@ -39,6 +39,7 @@ import { Checkpointer } from "./checkpoint";
 import { planInbound } from "./inbound";
 import { REGISTRY_CONCURRENCY, runPool, withRetry } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
+import { toast } from "../toast";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
 export interface DocMapping {
@@ -160,6 +161,10 @@ export interface RegistryFailure {
   /** Server error code when it carried one (`vault_limit_reached`, …). */
   code: string | null;
 }
+
+/** Paths already toasted about a frozen-root refusal — reconcile re-runs and
+ *  retry clicks re-hit the same 403, and one sticky explanation is enough. */
+const frozenRootNotified = new Set<string>();
 
 /** Extensions treated as editable notes (reconciled to the server `notes` set).
  *  Images/PDFs surface in the tree but sync as embedded attachments, not notes. */
@@ -548,6 +553,16 @@ export class VaultRegistry {
     this.failed.push(f);
     if (f.code === "vault_limit_reached" || f.code === "member_limit_reached") {
       this.limitReached = f.code;
+    }
+    // A frozen-root refusal is the user's problem to fix (move the item into a
+    // folder), not a transient sync error — so say so, once per path. Without
+    // this the item just counts toward "N not synced" forever with no reason.
+    if (f.code === "root_frozen" && !frozenRootNotified.has(f.path)) {
+      frozenRootNotified.add(f.path);
+      toast(
+        `"${f.path}" can't sync — this vault's root is frozen. Move it into a folder to sync it.`,
+        "error",
+      );
     }
     if (f.docId) this.sink.doc(f.docId, "error");
     console.warn(`[registry] ${f.kind} ${f.path} failed — ${f.reason}`);

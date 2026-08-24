@@ -1153,6 +1153,12 @@ export const useStore = create<AppStore>((set, get) => ({
       // when it changes, so a teammate flipping it reaches this app live.
       void get().refreshVaultSettings();
     });
+    // A teammate changed shares (lock/unlock, grant/revoke). Fresh lock
+    // knowledge is what lets the editor open a just-locked note read-only from
+    // its very first frame instead of an HTTP round trip in.
+    syncManager.setAclListener(() => {
+      void get().refreshLocks();
+    });
     // A teammate renamed/moved or deleted a note we have on disk, and the registry
     // has just applied that to the file. The open editor's bridge was destroyed
     // before the move, so the view MUST be re-pointed or closed — leaving

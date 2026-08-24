@@ -15,6 +15,7 @@ import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { Toasts } from "./components/Toasts";
+import { toast } from "./lib/toast";
 import { VaultPicker } from "./components/VaultPicker";
 import { VersionPanel } from "./components/VersionPanel";
 import { bridgeManager } from "./lib/bridge";
@@ -671,6 +672,16 @@ export default function App() {
     const onKey = async (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
+        // ⌘N creates at the vault root, so it honours the same freeze latch as
+        // the tree's New-note button — silently writing a root file here would
+        // leave it permanently unsyncable (the server refuses to register it).
+        if (useStore.getState().rootFrozen) {
+          toast(
+            "This vault's root is frozen — create this inside a folder instead.",
+            "error",
+          );
+          return;
+        }
         try {
           const path = await ipc.createNote("", `Untitled ${Date.now()}`);
           await useStore.getState().refreshTree();

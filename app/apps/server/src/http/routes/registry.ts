@@ -611,6 +611,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
     const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
+    // Frozen root: same rule as notes — refuse only files that do not exist
+    // yet, so a device re-registering a root file that predates the latch
+    // still syncs.
+    if (!folderId && (await isRootFrozen(vaultId))) {
+      const { rowCount } = await pool.query("SELECT 1 FROM files WHERE id = $1", [id]);
+      if (!rowCount) return c.json(ROOT_FROZEN_ERROR, 403);
+    }
     await pool.query(
       "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
       [id, vaultId, folderId ?? null, path],

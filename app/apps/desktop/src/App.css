@@ -1727,6 +1727,15 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--accent-soft);
   color: var(--text-primary);
 }
+/* Unavailable action (e.g. create at a frozen root). Still clickable so the
+   refusal toast can explain why, but visibly not a live option. */
+.context-menu li.disabled {
+  opacity: 0.45;
+}
+.context-menu li.disabled:hover {
+  background: none;
+  color: inherit;
+}
 /* A thin rule above an item groups it apart from the ones above (Import/Export
    sit below the create actions). */
 .context-menu li.menu-sep-item {
