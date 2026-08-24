@@ -9,14 +9,14 @@ import type { SyncProgress } from "../../lib/sync/vaultScope";
 
 // The sync pill is the user-facing "is my work safe?" signal. These lock in the
 // fix for the bug where it drifted to "Synced · 5m ago" while actively editing:
-// pending edits must read "Saving…", and a fresh flush must read "just now".
+// pending edits must read "Syncing…", and a fresh flush must read "just now".
 describe("syncBadgeLabel", () => {
   const now = 1_000_000_000_000;
 
-  it("shows Saving… while local edits are pending, ignoring the timestamp", () => {
+  it("shows Syncing… while local edits are pending, ignoring the timestamp", () => {
     expect(
       syncBadgeLabel({ status: "synced", pending: true, lastSyncedAt: now - 300_000, now }),
-    ).toBe("Saving…");
+    ).toBe("Syncing…");
   });
 
   it("reads 'Synced · just now' immediately after a flush", () => {

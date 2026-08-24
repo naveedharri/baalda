@@ -91,11 +91,12 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
 
 /**
  * Pure label for the sync pill. Extracted so the (surprisingly load-bearing)
- * "Saving…" vs "Synced · just now" logic is unit-testable without a DOM.
+ * "Syncing…" vs "Synced · just now" logic is unit-testable without a DOM.
  *
  * `pending` (local edits not yet acked) wins over the timestamp: while flushing
- * we show "Saving…"; once acked, the caller has bumped `lastSyncedAt`, so it
- * reads "Synced · just now" and counts up from there.
+ * we show "Syncing…" — the pill speaks exactly two words, Syncing and Synced,
+ * so nobody has to learn what a third ("Saving") means. Once acked, the caller
+ * has bumped `lastSyncedAt`, so it reads "Synced · just now" and counts up.
  *
  * `progress` is the VAULT's bulk run, and it outranks `status` (the open note's
  * CONNECTION) whenever it is live. Those two are genuinely independent: the
@@ -144,7 +145,7 @@ export function syncBadgeLabel(args: {
     return progress?.phase === "done" ? "Synced" : "Syncing…";
   }
   if (status === "synced") {
-    if (pending) return "Saving…";
+    if (pending) return "Syncing…";
     return lastSyncedAt != null ? `Synced · ${relativeAgo(lastSyncedAt, now)}` : "Synced";
   }
   if (status === "connecting") return "Syncing…";
@@ -198,7 +199,7 @@ export function SyncBadge({
   enabled?: boolean;
   /** When set and status is "synced", the badge reads "Synced · 1m ago". */
   lastSyncedAt?: number | null;
-  /** True while local edits are still flushing to the server → "Saving…". */
+  /** True while local edits are still flushing to the server → "Syncing…". */
   pending?: boolean;
   /** The open vault's bulk sync run — turns the pill into "Syncing 128/500"
    *  with a determinate bar. Omit for a pill that only tracks the connection. */

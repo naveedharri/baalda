@@ -5455,6 +5455,54 @@ button.is-done:disabled {
   color: var(--text-primary);
 }
 
+/* ---- Required-update wall ----
+   Covers the whole window above everything else (modals top out at 300):
+   updates are mandatory, so nothing behind this may be reachable until the
+   install lands. The card stays calm — this is routine, not an emergency. */
+.update-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.update-gate-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+  max-width: 420px;
+  padding: var(--sp-8) var(--sp-8);
+  text-align: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+.update-gate-card h1 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+}
+.update-gate-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.update-gate-logo {
+  height: 22px;
+}
+.update-gate-cta {
+  min-width: 180px;
+}
+.update-gate .update-progress {
+  width: 240px;
+  flex: none;
+}
+
 /* ---- Update download progress ---- */
 .update-progress {
   position: relative;

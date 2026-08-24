@@ -133,6 +133,24 @@ export function currentVersion(): Promise<string> {
   return getVersion();
 }
 
+/**
+ * Updates are REQUIRED: is the app currently blocked behind one?
+ *
+ * True for every live stage of an update — discovered, downloading, installing.
+ * The `error` phase is deliberately NOT blocking on its own: a failed background
+ * CHECK (offline launch, dev build without the updater) must never wall off the
+ * app. The gate component latches the version once it has seen `available`, so
+ * an error *during the install* keeps the wall up with a retry instead of
+ * silently letting a known-stale build back in.
+ */
+export function isUpdateBlocking(state: UpdateState): boolean {
+  return (
+    state.phase === "available" ||
+    state.phase === "downloading" ||
+    state.phase === "installing"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The post-restart "Updated to vX" banner.
 //
