@@ -172,17 +172,14 @@ button.primary.hero:hover:not(:disabled) {
   bottom: auto;
   right: 0;
   left: auto;
-  width: 280px;
+  width: 400px;
 }
-.share-fallback-url {
+/* The minted url as a click-to-copy row (shown only when the automatic
+   clipboard write failed). The label carries the FULL url — the click copies
+   that, never the ellipsized text. */
+.share-fallback-url .menu-item-label {
   font-size: var(--fs-xs);
   color: var(--text-secondary);
-  padding: var(--sp-1) var(--sp-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  user-select: all;
-  -webkit-user-select: all;
 }
 .share-btn.copied {
   color: var(--success);
