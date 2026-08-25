@@ -159,6 +159,37 @@ describe("ApiClient against a mocked fetch", () => {
     expect(await api.getAuthMethods()).toEqual({ emailPassword: true, google: false });
   });
 
+  it("public links: create POSTs, get maps {link:null}, revoke DELETEs", async () => {
+    const link = { id: "pl1", docId: "doc1", url: "https://s/p/tok", createdAt: "now" };
+    const { impl, calls } = fakeFetch((call) => {
+      if (call.method === "POST") return { status: 201, json: { ...link, existing: false } };
+      if (call.method === "GET") return { json: { link: null } };
+      return { json: { revoked: true } };
+    });
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+
+    const created = await api.createPublicLink("doc1");
+    expect(created.url).toBe("https://s/p/tok");
+    expect(calls[0].url).toContain("/api/notes/doc1/public-link");
+    expect(calls[0].headers.Authorization).toBe("Bearer t");
+
+    expect(await api.getPublicLink("doc1")).toBeNull();
+    await api.revokePublicLink("doc1");
+    expect(calls[2].method).toBe("DELETE");
+    expect(calls[2].url).toContain("/api/notes/doc1/public-link");
+  });
+
+  it("getPublicLink returns the link when one exists and rethrows real errors", async () => {
+    const link = { id: "pl1", docId: "doc1", url: "https://s/p/tok", createdAt: "now" };
+    const ok = fakeFetch(() => ({ json: { link } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: ok.impl });
+    expect((await api.getPublicLink("doc1"))?.url).toBe("https://s/p/tok");
+
+    const denied = fakeFetch(() => ({ status: 403, json: { error: "Not allowed" } }));
+    const api2 = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: denied.impl });
+    await expect(api2.getPublicLink("doc1")).rejects.toMatchObject({ name: "ApiError", status: 403 });
+  });
+
   it("updateUser posts name/image to Better Auth update-user", async () => {
     const { impl, calls } = fakeFetch((call) => {
       expect(call.url).toContain("/api/auth/update-user");
