@@ -139,7 +139,9 @@ describe("frozen vault root", () => {
       relPath: "readme.md",
       docId,
     });
-    expect(renote.status).toBe(201);
+    // 200, not 201: a live note already owns this path, so the register adopts
+    // it (same as the folder above) rather than reporting a fresh create.
+    expect(renote.status).toBe(200);
   });
 
   it("refuses a move OUT to the root, but allows a rename in place", async () => {

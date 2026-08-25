@@ -59,6 +59,47 @@ describe("registry structure sync", () => {
     expect(changed()).toEqual([vault, vault]);
   });
 
+  it("registering a path that already has a live note ADOPTS it — even under a different doc_id", async () => {
+    const first = await req(owner, "POST", "/api/notes", {
+      vaultId: vault,
+      relPath: "Daily/2026-08-10.md",
+      docId: crypto.randomUUID(),
+    });
+    expect(first.status).toBe(201);
+    const { id: original } = (await first.json()) as { id: string };
+
+    // A second device whose doc-id map was lost re-registers the same path
+    // under a fresh local id. This used to create a SECOND live row — a forked
+    // identity whose two docs then ping-pong the file's content between them
+    // (the 2026-08-25 runaway-daily-notes incident).
+    const again = await req(owner, "POST", "/api/notes", {
+      vaultId: vault,
+      relPath: "Daily/2026-08-10.md",
+      docId: crypto.randomUUID(),
+    });
+    expect(again.status).toBe(200);
+    const body = (await again.json()) as { id: string; docId: string };
+    expect(body.id).toBe(original); // adopted, not forked
+    expect(body.docId).toBe(original);
+
+    const { rows } = await pgPool.query(
+      "SELECT count(*)::int AS n FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL",
+      [vault, "Daily/2026-08-10.md"],
+    );
+    expect(rows[0].n).toBe(1);
+
+    // A DELETED note frees its path: the next register is a fresh create.
+    await req(owner, "DELETE", `/api/notes/${original}`);
+    const remade = await req(owner, "POST", "/api/notes", {
+      vaultId: vault,
+      relPath: "Daily/2026-08-10.md",
+      docId: crypto.randomUUID(),
+    });
+    expect(remade.status).toBe(201);
+    const remadeBody = (await remade.json()) as { id: string };
+    expect(remadeBody.id).not.toBe(original);
+  });
+
   it("renaming a folder rewrites its own + descendant paths, keeping doc_ids", async () => {
     const folderId = await seedFolder(vault, null, "Docs", "Docs");
     await seedFolder(vault, folderId, "Sub", "Docs/Sub");

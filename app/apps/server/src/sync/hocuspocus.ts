@@ -74,6 +74,25 @@ export function createSyncServer(
     // (spec 05 §5). Empty (single-instance) otherwise — no behaviour change.
     extensions: redisExtensions(config.redisUrl),
 
+    /**
+     * Circuit breaker: refuse any sync message larger than the note ceiling.
+     * A legitimate note never comes close (see `config.maxNoteMb`); a message
+     * this big means runaway growth — historically a forked-note feedback loop
+     * duplicating the content on every bounce. Throwing rejects the message and
+     * closes the connection BEFORE the update is applied or broadcast, so the
+     * oversized state can neither persist nor fan out.
+     */
+    async beforeHandleMessage(data) {
+      const cap = config.maxNoteMb * 1024 * 1024;
+      if (data.update.byteLength > cap) {
+        console.error(
+          `Rejecting oversized sync message for ${data.documentName}: ` +
+            `${data.update.byteLength} bytes (cap ${cap})`,
+        );
+        throw new Error("note exceeds the maximum size");
+      }
+    },
+
     async onAuthenticate(data) {
       const parsed = parseDocName(data.documentName);
       if (!parsed) {
