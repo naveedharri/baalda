@@ -209,6 +209,11 @@ export class VaultSyncEngine {
   // the moment the channel is ready — including after a reconnect.
   private localPresence: LocalPresence | null = null;
   private ready = false;
+  // True from the moment `hello` is on the wire until the socket drops. Presence
+  // frames are valid this early — the server parks one that races its auth I/O —
+  // and announcing here instead of on `ready` is what puts this user on
+  // teammates' sidebars during the backfill rather than after it.
+  private helloSent = false;
 
   // ---- inbound (download) queue ----
   //
@@ -274,7 +279,7 @@ export class VaultSyncEngine {
    */
   setPresence(presence: LocalPresence | null): void {
     this.localPresence = presence;
-    if (this.ready) this.sendPresence();
+    if (this.helloSent) this.sendPresence();
   }
 
   private sendPresence(): void {
@@ -422,6 +427,13 @@ export class VaultSyncEngine {
         caps: CLIENT_CAPS,
       }),
     );
+    this.helloSent = true;
+    // First announce rides right behind the hello. Waiting for `ready` meant a
+    // teammate connecting to a big vault stayed invisible — and saw nobody,
+    // because the roster re-announce round is triggered by this very frame —
+    // until the entire backfill drained. The `ready` re-send below still runs,
+    // which also covers an older server that drops this pre-auth frame.
+    this.sendPresence();
   }
 
   private async buildManifest(): Promise<Record<string, string>> {
@@ -595,6 +607,7 @@ export class VaultSyncEngine {
   private onDisconnect(): void {
     if (this.stopped) return;
     this.ready = false; // must re-announce presence after we reconnect
+    this.helloSent = false;
     this.closeSocket();
     this.setStatus("error");
     this.scheduleReconnect();

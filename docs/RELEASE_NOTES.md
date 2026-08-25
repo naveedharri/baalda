@@ -1,5 +1,3 @@
-- The public note page now looks like Baalda — the app's theme (dark mode included), a full-width sheet, proper tables, and an **Open in Baalda** button for teammates
-- Copy link now goes straight to the clipboard in one click, with a checkmark — no more intermediate link to copy by hand
-- Clicking New note / New folder while the vault root is frozen now tells you why immediately, instead of silently doing nothing
-- Copying a public link now lands on the clipboard reliably — and if the popover ever shows the link itself, clicking it copies the full URL with a checkmark
-- The share button now offers two links: **Private** for teammates, and **Public** — a read-only page anyone can open in a browser, images included
+- Notes now open in **tabs** across the top — switch with a click, close with × or a middle-click, and jump back to where you were
+- Tabs follow renames and moves, and close themselves when a note is deleted
+- Teammates now show up in the sidebar the moment they open the app, instead of after their vault finishes syncing
