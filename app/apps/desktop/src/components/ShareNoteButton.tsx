@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, type PublicLink } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
+import { copyText } from "../lib/clipboard";
 import { buildNoteLink } from "../lib/shareLink";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
@@ -29,9 +30,10 @@ export function ShareNoteButton({ docId }: { docId: string }) {
   const [copied, setCopied] = useState(false);
   const [existing, setExisting] = useState<PublicLink | null | "loading">(null);
   const [publicBusy, setPublicBusy] = useState(false);
-  // Clipboard write failed after the link was minted: show the url for a
-  // manual copy instead of losing it behind an error toast.
+  // Clipboard write failed after the link was minted: show the url as a
+  // click-to-copy row instead of losing it behind an error toast.
   const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
+  const [fallbackCopied, setFallbackCopied] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // The tick is a state, so it has to be cleared — otherwise switching notes
@@ -45,7 +47,13 @@ export function ShareNoteButton({ docId }: { docId: string }) {
     setCopied(false);
     setOpen(false);
     setFallbackUrl(null);
+    setFallbackCopied(false);
   }, [docId]);
+  useEffect(() => {
+    if (!fallbackCopied) return;
+    const id = window.setTimeout(() => setFallbackCopied(false), 1600);
+    return () => window.clearTimeout(id);
+  }, [fallbackCopied]);
 
   // Close on outside click or Escape (the AccountMenu popover pattern).
   useEffect(() => {
@@ -90,12 +98,11 @@ export function ShareNoteButton({ docId }: { docId: string }) {
     // clickable, where a bare baalda:// scheme had to be copy-pasted. The
     // server's /open/note page bounces the click into the app.
     const link = buildNoteLink({ orgId, docId }, useStore.getState().serverUrl);
-    try {
-      await navigator.clipboard.writeText(link);
+    if (await copyText(link)) {
       setCopied(true);
       setOpen(false);
       toast("Link copied — anyone on your team with access can open it");
-    } catch {
+    } else {
       toast("Couldn't copy the link", "error");
     }
   };
@@ -106,11 +113,10 @@ export function ShareNoteButton({ docId }: { docId: string }) {
     try {
       const link = await authManager.api.createPublicLink(docId);
       setExisting(link);
-      try {
-        await navigator.clipboard.writeText(link.url);
-      } catch {
-        // The link exists now even though the clipboard write failed — surface
-        // it in the popover rather than stranding it behind an error.
+      if (!(await copyText(link.url))) {
+        // The link exists now even though both clipboard paths failed —
+        // surface it as a click-to-copy row rather than stranding it behind
+        // an error (the fresh click carries its own user activation).
         setFallbackUrl(link.url);
         return;
       }
@@ -191,9 +197,23 @@ export function ShareNoteButton({ docId }: { docId: string }) {
             )}
           </button>
           {fallbackUrl && (
-            <div className="share-fallback-url" title={fallbackUrl}>
-              {fallbackUrl}
-            </div>
+            <button
+              className="menu-item share-fallback-url"
+              title="Copy the public link"
+              onClick={() => {
+                void copyText(fallbackUrl).then((ok) => {
+                  if (ok) {
+                    setFallbackCopied(true);
+                    toast("Public link copied — anyone with this link can view this note");
+                  } else {
+                    toast("Couldn't copy the link", "error");
+                  }
+                });
+              }}
+            >
+              <span className="menu-item-label">{fallbackUrl}</span>
+              {fallbackCopied ? <CheckMark size="xs" /> : <span className="menu-hint">Copy</span>}
+            </button>
           )}
           {existing !== null && existing !== "loading" && (
             <>
