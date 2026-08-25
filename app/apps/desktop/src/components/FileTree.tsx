@@ -406,6 +406,7 @@ export function FileTree() {
         store.closeNote();
       }
     }
+    store.pruneTabs(deleted);
     store.setItemOrder(order);
     await refreshAll();
     setBulkProgress(null);
@@ -758,6 +759,7 @@ export function FileTree() {
       // Keep the item's rank (and its subtree's arrangement) across the rename.
       const store = useStore.getState();
       store.setItemOrder(renameInOrder(store.itemOrder, oldPath, newPath));
+      store.remapTabs(oldPath, newPath);
       if (openNote && (openNote.path === oldPath || openNote.path.startsWith(oldPath + "/"))) {
         const updated = openNote.path.replace(oldPath, newPath);
         await useStore.getState().openNoteByPath(updated);
@@ -832,6 +834,7 @@ export function FileTree() {
           console.warn("[sync] move propagate failed", from[i], e);
         }
         movedOnDisk = true;
+        useStore.getState().remapTabs(from[i], to[i]);
         if (openNote && (openNote.path === from[i] || openNote.path.startsWith(from[i] + "/"))) {
           await useStore.getState().openNoteByPath(openNote.path.replace(from[i], to[i]));
         }
@@ -1158,6 +1161,7 @@ export function FileTree() {
     }
     if (deleted.length === 0) return;
     store.setItemOrder(removeFromOrder(store.itemOrder, node.data.path));
+    store.pruneTabs([node.data.path]);
     if (openNote && (openNote.path === node.data.path || openNote.path.startsWith(node.data.path + "/"))) {
       store.closeNote();
     }

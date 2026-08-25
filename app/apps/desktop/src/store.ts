@@ -99,6 +99,10 @@ interface AppStore {
   vault: ipc.VaultInfo | null;
   tree: ipc.TreeNode | null;
   openNote: OpenNote | null;
+  /** Paths of the files held open as tabs, in the order they were opened. The
+   *  ACTIVE tab is `openNote.path` — this list is only which tabs exist, so the
+   *  two never disagree about what's on screen. Session-only, vault-scoped. */
+  openTabs: string[];
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
   /**
@@ -282,6 +286,13 @@ interface AppStore {
   refreshBacklinks: () => Promise<void>;
   setNoteRemoved: (removed: boolean) => void;
   closeNote: () => void;
+  /** Close one tab. Closing the active one activates its right-hand neighbour
+   *  (left-hand when it was last); closing the only tab clears the editor. */
+  closeTab: (path: string) => void;
+  /** Drop the tabs at (or under — folders) the given deleted paths. */
+  pruneTabs: (paths: string[]) => void;
+  /** Re-point tabs across a rename/move of a file or a folder subtree. */
+  remapTabs: (from: string, to: string) => void;
 
   // Auth actions
   initAuth: () => Promise<void>;
@@ -836,6 +847,9 @@ function vaultScopedSyncReset() {
     checkpoints: null,
     // A latch belongs to the vault it was read from; a local vault has none.
     rootFrozen: false,
+    // Tabs are paths, and paths only mean something inside the vault that
+    // minted them — every vault leave/switch spreads this reset.
+    openTabs: [] as string[],
   } satisfies Partial<AppStore>;
 }
 
@@ -1090,10 +1104,13 @@ export const useStore = create<AppStore>((set, get) => ({
         }
         if (!sameVault(get, epoch)) return;
       }
-      set({
+      set((s) => ({
         openNote: { path, id: meta?.id ?? null, title },
         noteRemoved: false,
-      });
+        // Every open gets (or keeps) a tab; switching tabs re-runs this path,
+        // so membership is checked rather than blindly appended.
+        openTabs: s.openTabs.includes(path) ? s.openTabs : [...s.openTabs, path],
+      }));
       // Tell teammates which note we're now viewing (drives their sidebar dots).
       // The announced id must be the SERVER doc_id — see `viewingDocId`, which
       // exists to hold that reasoning and a regression test for it.
@@ -1217,6 +1234,9 @@ export const useStore = create<AppStore>((set, get) => ({
    * someone else initiated that's an acceptable trade for not forking the note.
    */
   followNoteRename: (from, to) => {
+    // Background tabs follow the move too, open note or not — a stale tab path
+    // would reopen a file that no longer exists.
+    get().remapTabs(from, to);
     const open = get().openNote;
     if (!open) return;
     if (open.path === from) {
@@ -1230,6 +1250,39 @@ export const useStore = create<AppStore>((set, get) => ({
   closeNote: () => {
     syncManager.setViewing(null);
     set({ openNote: null, backlinks: [], noteRemoved: false, noteRemovedByTeammate: null });
+  },
+
+  closeTab: (path) => {
+    const { openTabs, openNote } = get();
+    const idx = openTabs.indexOf(path);
+    const next = idx === -1 ? openTabs : openTabs.filter((p) => p !== path);
+    if (idx !== -1) set({ openTabs: next });
+    if (openNote?.path !== path) return;
+    // The closed tab was on screen: land on the neighbour that slid into its
+    // slot (i.e. the tab to its right; the new last one when it WAS last).
+    const neighbor = next.length > 0 ? next[Math.min(Math.max(idx, 0), next.length - 1)] : null;
+    if (neighbor) void get().openNoteByPath(neighbor);
+    else get().closeNote();
+  },
+
+  pruneTabs: (paths) => {
+    const tabs = get().openTabs;
+    const gone = (p: string) => paths.some((d) => p === d || p.startsWith(d + "/"));
+    const next = tabs.filter((p) => !gone(p));
+    if (next.length !== tabs.length) set({ openTabs: next });
+  },
+
+  remapTabs: (from, to) => {
+    const tabs = get().openTabs;
+    const mapped = tabs.map((p) =>
+      p === from ? to : p.startsWith(from + "/") ? to + p.slice(from.length) : p,
+    );
+    // A move onto a path that already has a tab would leave twins — keep the first.
+    const seen = new Set<string>();
+    const next = mapped.filter((p) => !seen.has(p) && (seen.add(p), true));
+    if (next.length !== tabs.length || next.some((p, i) => p !== tabs[i])) {
+      set({ openTabs: next });
+    }
   },
 
   // ---- Auth ----
@@ -1262,6 +1315,7 @@ export const useStore = create<AppStore>((set, get) => ({
     syncManager.setInboundListeners({
       onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
       onNoteRemoved: (_docId, path, trashedTo) => {
+        get().pruneTabs([path]);
         const open = get().openNote;
         if (open && (open.path === path || open.path.startsWith(path + "/"))) {
           get().closeNote();

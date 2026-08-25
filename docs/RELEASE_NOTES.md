@@ -1,5 +1,3 @@
-- Copying a public link now lands on the clipboard reliably — and if the popover ever shows the link itself, clicking it copies the full URL with a checkmark
-- The share button now offers two links: **Private** for teammates, and **Public** — a read-only page anyone can open in a browser, images included
-- Public links can be disabled anytime from the same menu — the old link stops working immediately
-- Opening a shared link while signed out now brings up sign-in and opens the note right after, instead of dropping you on the home screen
-- Shared links now ride out a vault's first sync (and say so), instead of failing on big or slow vaults
+- Notes now open in **tabs** across the top — switch with a click, close with × or a middle-click, and jump back to where you were
+- Tabs follow renames and moves, and close themselves when a note is deleted
+- Teammates now show up in the sidebar the moment they open the app, instead of after their vault finishes syncing

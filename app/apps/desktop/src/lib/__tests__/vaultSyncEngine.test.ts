@@ -126,6 +126,34 @@ describe("VaultSyncEngine", () => {
     expect((hello.manifest as Record<string, string>).A).toBe("AQI=");
   });
 
+  it("announces presence right behind hello — before ready, so the sidebar dots don't wait out the backfill", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.setPresence({ docId: "D", name: "Ada", color: "#6366f1", status: "online" });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+
+    // No `ready` has been delivered, yet the announce is already on the wire.
+    const texts = ws!.sent
+      .filter((x): x is string => typeof x === "string")
+      .map((s) => JSON.parse(s) as Record<string, unknown>);
+    expect(texts.map((t) => t.t)).toEqual(["hello", "presence"]);
+    expect(texts[1].docId).toBe("D");
+
+    // A presence CHANGE mid-backfill goes out live too (the old gate held it
+    // back until ready).
+    engine.setPresence({ docId: "E", name: "Ada", color: "#6366f1", status: "online" });
+    const last = ws!.sent[ws!.sent.length - 1];
+    expect(JSON.parse(last as string).docId).toBe("E");
+  });
+
   it("routes a binary update frame to the sink and flips to synced on ready", async () => {
     const sink = new MemSink();
     let ws: FakeWs | null = null;

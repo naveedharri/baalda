@@ -13,6 +13,7 @@ import { SyncBadge } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { SidebarResizer } from "./components/SidebarResizer";
+import { TabBar } from "./components/TabBar";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
 import { VaultPicker } from "./components/VaultPicker";
@@ -99,7 +100,16 @@ function RemovedBanner() {
         <strong>{openNote?.title}</strong> was deleted on disk.
       </span>
       <div className="banner-actions">
-        <button className="primary" onClick={() => useStore.getState().closeNote()}>
+        <button
+          className="primary"
+          onClick={() => {
+            // The file is gone — drop its tab too, and let the neighbour tab
+            // (if any) take the screen rather than an empty editor.
+            const open = useStore.getState().openNote;
+            if (open) useStore.getState().closeTab(open.path);
+            else useStore.getState().closeNote();
+          }}
+        >
           Close note
         </button>
       </div>
@@ -926,6 +936,7 @@ export default function App() {
               </svg>
             </button>
           </header>
+          <TabBar />
           <RemovedBanner />
           <DeletedByTeammateBanner />
           <div className="editor-wrap">

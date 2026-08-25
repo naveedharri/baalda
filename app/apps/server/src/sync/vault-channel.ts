@@ -299,6 +299,10 @@ class VaultConnection {
   // kept so we can re-broadcast it when a newcomer asks, and clear it on close.
   private myPresence: { docId: string | null; name: string; color: string; status: string } | null =
     null;
+  /** A presence frame that arrived before auth finished; replayed right after
+   *  the pub/sub subscribe so the announce (and the roster query it triggers)
+   *  doesn't wait for the backfill. */
+  private pendingPresence: PresenceFrame | null = null;
   private announced = false;
   // ---- inbound voice budget ----
   // Nothing else on this channel is client-*originated* bulk traffic, so voice
@@ -430,6 +434,15 @@ class VaultConnection {
     }
     this.unsubscribe = off;
 
+    // Replay the announce that raced the auth I/O — BEFORE the backfill, so the
+    // rest of the vault sees this user (and this user gets the re-announce
+    // round) seconds before their own download finishes.
+    if (this.pendingPresence) {
+      const parked = this.pendingPresence;
+      this.pendingPresence = null;
+      this.handlePresence(parked);
+    }
+
     await this.backfill(hello.manifest, hello.priority ?? []);
     this.send({ t: "ready" });
   }
@@ -446,7 +459,15 @@ class VaultConnection {
    *  first announce — ask everyone else to re-announce so this newcomer learns
    *  the current roster (the channel holds no shared presence state). */
   private handlePresence(frame: PresenceFrame): void {
-    if (!this.userId || !this.vaultId) return;
+    if (!this.userId || !this.vaultId) {
+      // Clients announce right behind `hello` so teammates' sidebars light up
+      // during backfill, not after it — which lands the frame here while the
+      // token verify / ACL resolve is still in flight. Park it (last one wins)
+      // and onText replays it the moment auth completes; dropping it instead
+      // is what made presence wait out the whole backfill.
+      this.pendingPresence = frame;
+      return;
+    }
     this.myPresence = {
       docId: frame.docId,
       name: frame.name,

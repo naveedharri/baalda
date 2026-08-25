@@ -8,6 +8,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Tabs for open files.** Every note you open now stays open as a tab in a
+  strip under the header — click to switch, × or middle-click to close, and
+  closing the active tab lands on its neighbour. Tabs follow renames and moves
+  (yours and teammates'), close when their file is deleted, and are scoped to
+  the vault (switching vaults starts a fresh strip).
+
+### Fixed
+- **Sidebar presence no longer waits out the backfill.** A client announced
+  which note it was viewing only after the server's `ready` — i.e. after the
+  entire vault download — and the roster round that reveals everyone *else* is
+  triggered by that same first announce. On any real vault that read as
+  "teammates don't show up" for many seconds on every launch and reconnect. The
+  announce now rides right behind `hello`, and the server parks a frame that
+  races its auth I/O and replays it once the connection is subscribed.
 - **Public note links.** The share button now offers Private and Public: Public
   mints `https://<server>/p/<token>` — a server-rendered read-only page anyone
   with the link can open (images included, served token-scoped; never SVG).

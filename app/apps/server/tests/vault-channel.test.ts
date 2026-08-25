@@ -224,6 +224,29 @@ describe("VaultChannel relay (spec 05 §3.1)", () => {
     await waitFor(() => b.controls().some((c) => c.t === "presence" && c.docId === "A"));
   });
 
+  it("parks a presence frame that races the hello auth and replays it once subscribed", async () => {
+    const { channel } = channelWith(() => new Set(["A", "B"]));
+    const a = new FakeWs();
+    const b = new FakeWs();
+    channel.handleConnection(b as never);
+    b.hello("good");
+    await waitFor(() => b.controls().some((c) => c.t === "ready"));
+    b.presence("B"); // B is already here before A joins
+
+    // Clients announce right behind hello (they don't wait for ready), so this
+    // presence frame lands while A's token verify / ACL resolve is still in
+    // flight. It must be parked and replayed — not dropped — or A stays
+    // invisible until its whole backfill drains.
+    channel.handleConnection(a as never);
+    a.hello("good");
+    a.presence("A");
+
+    await waitFor(() => b.controls().some((c) => c.t === "presence" && c.docId === "A"));
+    // The replayed announce still counts as A's first: it triggers the roster
+    // query round, so A learns B is on "B" without waiting for its own ready.
+    await waitFor(() => a.controls().some((c) => c.t === "presence" && c.docId === "B"));
+  });
+
   it("drops a doc when an acl change removes it from the readable set", async () => {
     let set = new Set(["A", "B"]);
     const { channel } = channelWith(() => set);

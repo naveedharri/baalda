@@ -2374,6 +2374,91 @@ body:has(.sidebar-resizer.dragging) {
   white-space: nowrap;
   margin-right: auto;
 }
+/* ---- Open-file tabs (TabBar) ---- */
+.tab-strip {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-1);
+  flex: none;
+  padding: 0 var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  /* The strip scrolls (wheel/trackpad/drag-into-view), but a scrollbar under
+     a row of tabs reads as clutter, so it's hidden in both engines. */
+  scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar {
+  display: none;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  flex: none;
+  max-width: 220px;
+  margin: var(--sp-1) 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+.tab:hover {
+  background: var(--bg-hover);
+}
+/* Same selected idiom as the sidebar's .tree-row.selected. */
+.tab.active {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.tab.active:hover {
+  background: var(--accent-soft-hover);
+}
+/* Click acknowledged, open in flight (same signal as the sidebar row). */
+.tab.opening {
+  opacity: 0.6;
+}
+.tab-label {
+  background: none;
+  border: 0;
+  padding: var(--sp-1) 2px var(--sp-1) var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.tab.active .tab-label {
+  font-weight: 500;
+}
+.tab-close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  /* Transparent, not absent: the space stays reserved so tabs don't change
+     width as the pointer moves across the strip. */
+  opacity: 0;
+}
+.tab:hover .tab-close,
+.tab.active .tab-close,
+.tab-close:focus-visible {
+  opacity: 1;
+}
+.tab-close:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+.tab-close svg {
+  width: 11px;
+  height: 11px;
+}
+
 .save-indicator {
   font-size: var(--fs-sm);
   color: var(--text-tertiary);
