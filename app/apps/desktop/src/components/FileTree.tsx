@@ -1202,20 +1202,24 @@ export function FileTree() {
       <div className="filetree-head">
         <span className="section-label">Notes</span>
         <div className="filetree-actions">
+          {/* Dimmed but NOT `disabled` while the root is frozen: a disabled
+              button swallows the click, so the only explanation was a tooltip
+              that needs a patient hover. The click routes through
+              `rootBlocked("")`, which toasts the reason immediately. */}
           <button
-            className="tree-tool"
+            className={`tree-tool${rootFrozen ? " blocked" : ""}`}
             title={rootFrozen ? ROOT_FROZEN_HINT : "New note"}
             aria-label="New note"
-            disabled={rootFrozen}
+            aria-disabled={rootFrozen}
             onClick={() => createUniqueNote("")}
           >
             {ICON_NEW_NOTE}
           </button>
           <button
-            className="tree-tool"
+            className={`tree-tool${rootFrozen ? " blocked" : ""}`}
             title={rootFrozen ? ROOT_FROZEN_HINT : "New folder"}
             aria-label="New folder"
-            disabled={rootFrozen}
+            aria-disabled={rootFrozen}
             onClick={() => createUniqueFolder("")}
           >
             {ICON_NEW_FOLDER}

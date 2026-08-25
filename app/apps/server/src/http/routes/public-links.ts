@@ -200,25 +200,60 @@ function esc(s: string): string {
 }
 
 const PAGE_CSS = `
-  :root { color-scheme: light; }
+  :root {
+    --bg-app: #ececf0; --bg-surface: #ffffff;
+    --text-primary: #1a1a1e; --text-secondary: #6b6b76;
+    --border: rgba(20, 20, 40, 0.09); --code-bg: #f1f1f4;
+    --accent: #6d5ae6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-app: #101014; --bg-surface: #1d1d24;
+      --text-primary: #f2f2f5; --text-secondary: #a6a6b2;
+      --border: rgba(255, 255, 255, 0.09); --code-bg: #26262e;
+      --accent: #8d7cf0;
+    }
+  }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         margin: 0; background: #f6f5f2; color: #2a2a28; line-height: 1.6; }
-  main { max-width: 44rem; margin: 0 auto; padding: 3rem 1.5rem 4rem; }
+         margin: 0; background: var(--bg-app); color: var(--text-primary);
+         line-height: 1.65; -webkit-font-smoothing: antialiased; }
+  /* The app's editor sheet: a centred column at the same measure. */
+  main { max-width: min(120ch, calc(100vw - 32px)); margin: 24px auto 48px;
+         background: var(--bg-surface); border: 1px solid var(--border);
+         border-radius: 14px; padding: 48px 64px 56px; }
+  @media (max-width: 760px) { main { padding: 28px 20px 36px; margin: 0 auto 24px;
+         border-radius: 0; border-left: none; border-right: none; } }
+  .page-top { display: flex; align-items: center; gap: 12px; justify-content: space-between;
+              margin-bottom: 20px; }
+  a.open-app { display: inline-block; padding: 7px 16px; border-radius: 999px;
+               background: var(--text-primary); color: var(--bg-surface);
+               text-decoration: none; font-weight: 600; font-size: 0.9rem;
+               white-space: nowrap; }
   article h1, article h2, article h3 { line-height: 1.3; }
   article img { max-width: 100%; height: auto; border-radius: 6px; }
-  article pre { background: #eceae5; padding: 0.8rem 1rem; border-radius: 8px;
+  article pre { background: var(--code-bg); padding: 0.8rem 1rem; border-radius: 8px;
                 overflow-x: auto; }
-  article code { background: #eceae5; padding: 0.1em 0.35em; border-radius: 4px;
-                 font-size: 0.92em; }
+  article code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px;
+                 font-size: 0.92em; font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; }
   article pre code { background: none; padding: 0; }
-  article blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid #d8d5cd;
-                       color: #6b6b66; }
-  article a { color: #2a5db0; }
-  .wikilink { color: #6b6b66; border-bottom: 1px dotted #b5b2aa; }
-  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e3e0d9;
-           font-size: 0.85rem; color: #6b6b66; }
+  article blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid var(--border);
+                       color: var(--text-secondary); }
+  article a { color: var(--accent); }
+  .wikilink { color: var(--text-secondary); border-bottom: 1px dotted var(--border); }
+  /* Tables — the editor's exact treatment: natural column widths, cells wrap
+     at a readable measure, a wide table scrolls in its wrapper. */
+  .md-table { margin: 12px 0; overflow-x: auto; contain: inline-size; }
+  .md-table table { border-collapse: collapse; width: max-content; font-size: 0.95em; }
+  .md-table th, .md-table td { border: 1px solid var(--border); padding: 4px 12px;
+                               text-align: left; vertical-align: top; max-width: 42ch; }
+  .md-table th { font-weight: 600; }
+  .md-table::-webkit-scrollbar { height: 8px; }
+  .md-table::-webkit-scrollbar-thumb { background-color: var(--border); border-radius: 4px; }
+  .md-table::-webkit-scrollbar-track { background: transparent; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border);
+           font-size: 0.85rem; color: var(--text-secondary); }
   footer a { color: inherit; }
-  h1.doc-title { font-size: 1.7rem; margin: 0 0 1.5rem; }
+  h1.doc-title { font-size: 1.7rem; margin: 0; }
 `;
 
 function pageShell(title: string, inner: string): string {
@@ -263,6 +298,7 @@ const NOT_FOUND_HTML = pageShell(
 interface PublicNoteRow {
   doc_id: string;
   vault_id: string;
+  org_id: string;
   title: string | null;
   rel_path: string;
 }
@@ -270,7 +306,7 @@ interface PublicNoteRow {
 async function noteForToken(token: string): Promise<PublicNoteRow | null> {
   if (!TOKEN_RE.test(token)) return null;
   const { rows } = await pool.query<PublicNoteRow>(
-    `SELECT pl.doc_id, pl.vault_id, n.title, n.rel_path
+    `SELECT pl.doc_id, pl.vault_id, pl.org_id, n.title, n.rel_path
        FROM public_links pl
        JOIN notes n ON n.id = pl.doc_id AND n.deleted_at IS NULL
       WHERE pl.token = $1`,
@@ -314,10 +350,14 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
         `/p/${token}/a/${rel.split("/").map(encodeURIComponent).join("/")}`,
     });
     const title = noteTitle(row);
+    // The private-link flow, one click away: /open/note bounces into the app,
+    // where the viewer's own session and ACL decide what they see — the button
+    // grants nothing the ids don't already carry.
+    const openHref = `/open/note/${encodeURIComponent(row.org_id)}/${encodeURIComponent(row.doc_id)}`;
     return c.html(
       pageShell(
         title,
-        `<article><h1 class="doc-title">${esc(title)}</h1>\n${bodyHtml}</article>`,
+        `<div class="page-top"><h1 class="doc-title">${esc(title)}</h1><a class="open-app" href="${esc(openHref)}">Open in ${esc(BRAND_NAME)}</a></div>\n<article>${bodyHtml}</article>`,
       ),
       200,
       PAGE_HEADERS,

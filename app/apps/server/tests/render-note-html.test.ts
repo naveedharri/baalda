@@ -80,6 +80,31 @@ describe("renderNoteHtml — markdown subset", () => {
     expect(bodyHtml).not.toContain("<a ");
   });
 
+  it("renders GFM tables with alignment, header, and safe cells", () => {
+    const md = [
+      "| Part | Points |",
+      "|---|:---:|",
+      "| **one** | a · b |",
+      "| <script>x</script> | [s](https://e.com) |",
+    ].join("\n");
+    const { bodyHtml } = renderNoteHtml(md, noAssets);
+    expect(bodyHtml).toContain('<div class="md-table"><table>');
+    expect(bodyHtml).toContain("<th>Part</th>");
+    expect(bodyHtml).toContain('<th style="text-align:center">Points</th>');
+    expect(bodyHtml).toContain("<td><strong>one</strong></td>");
+    expect(bodyHtml).not.toContain("<script>");
+    expect(bodyHtml).toContain('href="https://e.com"');
+  });
+
+  it("a table straight after prose is a table, and a lone pipe line is prose", () => {
+    const { bodyHtml } = renderNoteHtml("intro line\n| a | b |\n|---|---|\n| 1 | 2 |", noAssets);
+    expect(bodyHtml).toContain("<p>intro line</p>");
+    expect(bodyHtml).toContain("<td>1</td>");
+    const lone = renderNoteHtml("just a | pipe in prose", noAssets).bodyHtml;
+    expect(lone).toContain("<p>just a | pipe in prose</p>");
+    expect(lone).not.toContain("<table>");
+  });
+
   it("strips frontmatter", () => {
     const { bodyHtml } = renderNoteHtml("---\ntags: [x]\n---\nBody here", noAssets);
     expect(bodyHtml).not.toContain("tags:");

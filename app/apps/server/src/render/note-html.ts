@@ -124,6 +124,28 @@ interface ListFrame {
 const LIST_ITEM_RE = /^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/;
 const ORDERED_RE = /^\s*\d+[.)]\s/;
 
+/** `| --- | :---: |` — the row that makes the line above it a table header. */
+const TABLE_SEP_RE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+
+function splitRow(line: string): string[] {
+  let cells = line.split("|").map((c) => c.trim());
+  // GFM rows usually open and close with a pipe — those outer splits are
+  // empty and are frame, not cells.
+  if (cells.length > 0 && cells[0] === "") cells = cells.slice(1);
+  if (cells.length > 0 && cells[cells.length - 1] === "") cells = cells.slice(0, -1);
+  return cells;
+}
+
+function columnAligns(sep: string): Array<"left" | "center" | "right"> {
+  return splitRow(sep).map((c) => {
+    const l = c.startsWith(":");
+    const r = c.endsWith(":");
+    if (l && r) return "center";
+    if (r) return "right";
+    return "left";
+  });
+}
+
 /** Block-level pass over escaped lines. Recursion only for blockquote bodies. */
 function renderBlocks(lines: string[], opts: RenderOptions): string {
   const out: string[] = [];
@@ -189,6 +211,32 @@ function renderBlocks(lines: string[], opts: RenderOptions): string {
       continue;
     }
 
+    // GFM table: a pipe row whose NEXT line is the ---|--- separator.
+    if (line.includes("|") && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1])) {
+      closeAllLists();
+      const aligns = columnAligns(lines[i + 1]);
+      const cell = (text: string, tag: "th" | "td", col: number): string => {
+        const align = aligns[col] ?? "left";
+        const style = align === "left" ? "" : ` style="text-align:${align}"`;
+        return `<${tag}${style}>${renderInline(text, opts)}</${tag}>`;
+      };
+      const header = splitRow(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
+        rows.push(splitRow(lines[i]));
+        i++;
+      }
+      const thead = `<thead><tr>${header.map((h, c) => cell(h, "th", c)).join("")}</tr></thead>`;
+      const tbody = rows
+        .map((r) => `<tr>${r.map((v, c) => cell(v, "td", c)).join("")}</tr>`)
+        .join("");
+      // Same shape the app's editor renders: a scroll wrapper so a wide table
+      // scrolls here instead of stretching the page.
+      out.push(`<div class="md-table"><table>${thead}${tbody ? `<tbody>${tbody}</tbody>` : ""}</table></div>`);
+      continue;
+    }
+
     const item = LIST_ITEM_RE.exec(line);
     if (item) {
       const indent = item[1].length;
@@ -224,7 +272,8 @@ function renderBlocks(lines: string[], opts: RenderOptions): string {
       !LIST_ITEM_RE.test(lines[i]) &&
       !lines[i].trimStart().startsWith("&#62;") &&
       !/^(```|~~~)/.test(lines[i].trim()) &&
-      !/^\s*([-*_])\s*(\1\s*){2,}$/.test(lines[i])
+      !/^\s*([-*_])\s*(\1\s*){2,}$/.test(lines[i]) &&
+      !(lines[i].includes("|") && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1]))
     ) {
       para.push(renderInline(lines[i], opts));
       i++;
