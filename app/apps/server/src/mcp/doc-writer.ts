@@ -4,6 +4,7 @@ import { formatDocName } from "../sync/doc-name.js";
 import type { SyncContext } from "../sync/hocuspocus.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
 import { indexDoc } from "../index/indexer.js";
+import { config } from "../config.js";
 
 /**
  * Server-side writer for a note's shared Y.Text `content` — the bridge between
@@ -187,12 +188,26 @@ export function createDocWriter(
     }
   }
 
+  // The note-size ceiling, enforced where the resulting length is knowable.
+  // Guards especially against a WRITER IN A LOOP — an agent appending to the
+  // same note forever grows it unboundedly, and past a few MB the doc starts
+  // OOM-ing every rebuild (index backfill, compaction, backfill sends).
+  const capChars = () => config.maxNoteMb * 1024 * 1024;
+  const requireUnderCap = (resulting: number): void => {
+    if (resulting > capChars()) {
+      throw new Error(
+        `note would exceed the ${config.maxNoteMb} MB size ceiling — split the content across smaller notes`,
+      );
+    }
+  };
+
   return {
     setContent: (vaultId, docId, content, actor) =>
       mutate(
         vaultId,
         docId,
         (text) => {
+          requireUnderCap(content.length);
           if (text.length > 0) text.delete(0, text.length);
           if (content) text.insert(0, content);
         },
@@ -204,6 +219,7 @@ export function createDocWriter(
         vaultId,
         docId,
         (text) => {
+          requireUnderCap(text.length + appended.length);
           text.insert(text.length, appended);
         },
         actor,

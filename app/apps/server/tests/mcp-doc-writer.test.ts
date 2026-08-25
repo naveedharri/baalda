@@ -155,4 +155,24 @@ describe("MCP doc writer (no client connected)", () => {
     await writer.setContent("vault-1", "doc-6", "round trip");
     expect(await writer.readContent("vault-1", "doc-6")).toBe("round trip");
   });
+
+  it("refuses to grow a note past the size ceiling (the runaway-writer circuit breaker)", async () => {
+    const writer = writerThatRecords();
+    const overCap = "x".repeat(11 * 1024 * 1024); // MAX_NOTE_MB defaults to 10
+
+    // A single oversized write is rejected outright — nothing persists, nothing
+    // fans out.
+    await expect(writer.setContent("vault-1", "doc-7", overCap)).rejects.toThrow(/size ceiling/);
+    expect(await persistedText("doc-7")).toBe("");
+    expect(published).toHaveLength(0);
+
+    // A writer in a LOOP (append, append, append…) is what actually produced a
+    // runaway note in production: the cap is on the RESULTING length, so the
+    // append that would cross it fails even though its own chunk is small.
+    await writer.setContent("vault-1", "doc-7", "start");
+    const chunk = "y".repeat(6 * 1024 * 1024);
+    await expect(writer.appendContent("vault-1", "doc-7", chunk)).resolves.toBeUndefined();
+    await expect(writer.appendContent("vault-1", "doc-7", chunk)).rejects.toThrow(/size ceiling/);
+    expect(await persistedText("doc-7")).toBe("start" + chunk);
+  });
 });

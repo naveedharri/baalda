@@ -158,6 +158,12 @@ export const config = {
    *  product rather than the moment it stops being a pair. */
   freeMaxVaults: int("FREE_MAX_VAULTS", 3),
   freeMaxMembers: int("FREE_MAX_MEMBERS", 10),
+  /** Hard ceiling on a single note-sync message / note body, in MB. Real notes
+   *  are tiny (production p99 ≈ 600 kB; the largest legitimate page ≈ 7 MB), so
+   *  anything past this is a runaway — most likely a forked-note feedback loop
+   *  duplicating content on every bounce (2026-08-25: single updates reached
+   *  17 MB and OOM-crash-looped the server). The cap is the circuit breaker. */
+  maxNoteMb: int("MAX_NOTE_MB", 10),
 } as const;
 
 /**

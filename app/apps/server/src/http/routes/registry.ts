@@ -410,6 +410,35 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Client may supply a stable doc_id (generated locally); else we mint one.
     const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
 
+    // A live note already at this path IS this note — return it so the caller
+    // adopts its doc_id. Registering the same path under a DIFFERENT id used to
+    // create a second live row, forking the note's identity: two devices then
+    // map one file to two docs, and every external write bounces between them,
+    // duplicating the content each cycle (the 2026-08-25 runaway-daily-notes
+    // incident). The unique index `notes_live_path_uq` backstops the race below.
+    const { rows: samePath } = await pool.query<{
+      id: string;
+      folder_id: string | null;
+      title: string | null;
+    }>(
+      "SELECT id, folder_id, title FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL",
+      [vaultId, relPath],
+    );
+    if (samePath.length > 0) {
+      const row = samePath[0];
+      return c.json(
+        {
+          id: row.id,
+          docId: row.id,
+          vaultId,
+          folderId: row.folder_id,
+          title: row.title,
+          relPath,
+        },
+        200,
+      );
+    }
+
     // Frozen root: refuse only notes that do not exist yet. Re-registering a
     // root note that predates the latch (a second device, a repeat reconcile)
     // has to keep working, or freezing the root would break sync for the very
@@ -425,21 +454,45 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // against a doc it has no grant on: /api/sync-token 403s forever, the provider
     // reconnects on every rejection, and the note never loads. A doc_id is global,
     // so a collision across vaults has to be reported, not swallowed.
-    const inserted = await pool.query(
-      `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by, color)
-       VALUES ($1, $2, $3, $4, $5, $1, $6, $7)
-       ON CONFLICT (id) DO NOTHING
-       RETURNING id`,
-      [
-        id,
-        vaultId,
-        folderId ?? null,
-        title ?? null,
-        relPath,
-        session.userId,
-        normalizeColor(body.color) ?? null,
-      ],
-    );
+    let inserted;
+    try {
+      inserted = await pool.query(
+        `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by, color)
+         VALUES ($1, $2, $3, $4, $5, $1, $6, $7)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING id`,
+        [
+          id,
+          vaultId,
+          folderId ?? null,
+          title ?? null,
+          relPath,
+          session.userId,
+          normalizeColor(body.color) ?? null,
+        ],
+      );
+    } catch (err) {
+      // Lost the race against a concurrent register of the same path
+      // (notes_live_path_uq). The winner's row is this note — adopt it.
+      if ((err as { code?: string }).code === "23505") {
+        const { rows } = await pool.query<{
+          id: string;
+          folder_id: string | null;
+          title: string | null;
+        }>(
+          "SELECT id, folder_id, title FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL",
+          [vaultId, relPath],
+        );
+        const row = rows[0];
+        if (row) {
+          return c.json(
+            { id: row.id, docId: row.id, vaultId, folderId: row.folder_id, title: row.title, relPath },
+            200,
+          );
+        }
+      }
+      throw err;
+    }
     if (inserted.rowCount === 0) {
       const { rows: existing } = await pool.query<{ vault_id: string; rel_path: string }>(
         "SELECT vault_id, rel_path FROM notes WHERE id = $1",
