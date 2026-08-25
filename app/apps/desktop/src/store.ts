@@ -55,8 +55,17 @@ import { planTurnOnSync } from "./lib/vault/turnOnSync";
 import { configOrgId, rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
-import { toast } from "./lib/toast";
+import { dismissToast, toast } from "./lib/toast";
 import { parseNoteLink } from "./lib/shareLink";
+import {
+  clearPendingNoteLink,
+  hasPendingNoteLink,
+  keepWaitingForDoc,
+  openNoteFailureMessage,
+  peekPendingNoteLink,
+  queueNoteLink,
+  takePendingNoteLink,
+} from "./lib/noteLinkFlow";
 
 export interface OpenNote {
   path: string;
@@ -109,6 +118,14 @@ interface AppStore {
   session: SessionInfo | null;
   serverUrl: string;
   authError: string | null;
+  /**
+   * A flow needs the sign-in dialog on screen NOW (currently only "note-link":
+   * a shared link arrived while signed out, and the link is queued to open
+   * right after the sign-in succeeds). App.tsx mounts AuthDialog off this in
+   * both root branches; dismissing the dialog clears the queued link too.
+   */
+  authPrompt: "note-link" | null;
+  setAuthPrompt: (prompt: "note-link" | null) => void;
   /**
    * A sign-in has landed but we're still resolving which vault to open (and
    * possibly creating it, its folder, and its starter notes — a few seconds).
@@ -684,6 +701,25 @@ async function landInLastVault(get: () => AppStore): Promise<void> {
   }
 }
 
+/**
+ * Open the shared-note link that was parked while sign-in / a folder choice
+ * happened. Runs AFTER the landing/Welcome so the link supersedes both; a
+ * no-op when nothing is queued.
+ */
+async function consumeQueuedNoteLink(get: () => AppStore): Promise<void> {
+  const url = takePendingNoteLink();
+  if (url) await get().openNoteLink(url);
+}
+
+/** A link is queued but there's no session: put the sign-in dialog up and say
+ *  why (shared by initAuth's signed-out and error endings). */
+function promptSignInForQueuedLink(
+  set: (partial: Partial<AppStore>) => void,
+): void {
+  set({ authPrompt: "note-link" });
+  toast("Sign in to open this shared note — it will open right after you sign in", "neutral");
+}
+
 /** Auto-dismiss timer for the member-joined celebration (module-scoped so a
  *  repeat join resets it rather than stacking). */
 let memberJoinedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -762,12 +798,21 @@ function sameVault(get: () => AppStore, epoch: number | null | undefined): boole
  * immediately would make links look broken exactly when they're most likely to
  * be used (someone opening one for the first time).
  */
-async function waitForDocPath(docId: string, timeoutMs = 20_000): Promise<string | null> {
-  const deadline = Date.now() + timeoutMs;
+async function waitForDocPath(
+  docId: string,
+  opts: { baseMs?: number; capMs?: number; isBusy?: () => boolean } = {},
+): Promise<string | null> {
+  const { baseMs = 20_000, capMs = 90_000, isBusy = () => false } = opts;
+  const start = Date.now();
   for (;;) {
     const path = syncManager.registry.pathForDocId(docId);
     if (path) return path;
-    if (Date.now() >= deadline) return null;
+    // Past the base window we keep polling only while sync is demonstrably
+    // still working (a first pull of a big vault can outlast the base), and
+    // never past the cap (rule + table tests in lib/noteLinkFlow).
+    if (!keepWaitingForDoc({ elapsedMs: Date.now() - start, baseMs, capMs, busy: isBusy() })) {
+      return null;
+    }
     await new Promise((r) => setTimeout(r, 300));
   }
 }
@@ -807,6 +852,8 @@ export const useStore = create<AppStore>((set, get) => ({
   session: null,
   serverUrl: authManager.getServerUrl(),
   authError: null,
+  authPrompt: null,
+  setAuthPrompt: (prompt) => set({ authPrompt: prompt }),
   landingVault: false,
   switchingVault: null,
   openingNotePath: null,
@@ -1064,8 +1111,20 @@ export const useStore = create<AppStore>((set, get) => ({
   openNoteLink: async (url) => {
     const target = parseNoteLink(url);
     if (!target) return;
-    if (get().authStatus !== "signed-in") {
-      toast("Sign in to open this shared note", "error");
+    const authStatus = get().authStatus;
+    if (authStatus !== "signed-in") {
+      // Not signed in (or the click LAUNCHED the app and initAuth is still
+      // restoring the session — authStatus "unknown"). Queue the link so it
+      // opens by itself the moment a session exists, and arm the landing to
+      // put us in the link's vault rather than the last-used one.
+      queueNoteLink(url);
+      requestOpenVault(target.orgId);
+      if (authStatus === "signed-out") {
+        // Actually signed out: put the sign-in dialog up. "unknown" stays
+        // silent — initAuth resolves it either way and consumes the queue.
+        set({ authPrompt: "note-link" });
+        toast("Sign in to open this shared note — it will open right after you sign in", "neutral");
+      }
       return;
     }
     if (!get().organizations.some((o) => o.id === target.orgId)) {
@@ -1084,12 +1143,49 @@ export const useStore = create<AppStore>((set, get) => ({
     if (get().session?.activeOrganizationId !== target.orgId) {
       await get().setActiveOrganization(target.orgId);
     }
+    const pendingFolder = get().pendingVaultFolder;
+    if (pendingFolder?.orgId === target.orgId) {
+      // The vault has no local folder on this device (the switch just landed
+      // on the choose-a-folder prompt, or the landing already had). Waiting
+      // here would just time out into a misleading access error — park the
+      // link instead; the folder prompt's resolution (applyVaultFolder)
+      // consumes it, and dismissing the prompt drops it.
+      queueNoteLink(url);
+      toast(
+        `Choose a folder for “${pendingFolder.orgName}” — the shared note will open once it's set`,
+        "neutral",
+      );
+      return;
+    }
     // The path→docId map arrives with the registry pull, which a vault switch
     // has only just started. Wait for the note to show up rather than reporting
-    // "not found" during the seconds it takes to reconcile.
-    const path = await waitForDocPath(target.docId);
+    // "not found" during the seconds it takes to reconcile; say what's
+    // happening if it takes more than a beat.
+    let progressToastId: number | null = null;
+    const progressTimer = setTimeout(() => {
+      const name =
+        get().organizations.find((o) => o.id === target.orgId)?.name ?? "the vault";
+      progressToastId = toast(`Opening shared note — syncing “${name}”…`, "neutral");
+    }, 1_000);
+    const path = await waitForDocPath(target.docId, {
+      isBusy: () => {
+        const s = get();
+        const phase = s.syncProgress?.phase;
+        return (
+          s.switchingVault != null ||
+          phase === "registering" ||
+          phase === "uploading" ||
+          phase === "downloading"
+        );
+      },
+    });
+    clearTimeout(progressTimer);
+    if (progressToastId != null) dismissToast(progressToastId);
     if (!path) {
-      toast("Couldn't open that note — you may not have access to it", "error");
+      toast(
+        openNoteFailureMessage({ syncEnabled: get().syncEnabled, syncStatus: get().syncStatus }),
+        "error",
+      );
       return;
     }
     await get().openNoteByPath(path);
@@ -1214,11 +1310,16 @@ export const useStore = create<AppStore>((set, get) => ({
         await get().refreshBillingConfig();
         await landInLastVault(get);
         await get().refreshOrgBilling();
+        // A share link may have LAUNCHED the app: its deep-link replay raced
+        // this restore while authStatus was still "unknown" and got queued.
+        await consumeQueuedNoteLink(get);
       } else {
         set({ session: null, authStatus: "signed-out" });
+        if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
       }
     } catch (e) {
       set({ authStatus: "signed-out", authError: errMsg(e) });
+      if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
     }
   },
 
@@ -1237,6 +1338,9 @@ export const useStore = create<AppStore>((set, get) => ({
         await landInLastVault(get);
         await get().refreshOrgBilling();
         await get().openWelcomeIfPresent();
+        // A shared link queued while signed out supersedes Welcome — the
+        // landing already switched into its vault via requestOpenVault.
+        await consumeQueuedNoteLink(get);
       }
     } catch (e) {
       set({ authError: errMsg(e) });
@@ -1260,6 +1364,7 @@ export const useStore = create<AppStore>((set, get) => ({
       await landInLastVault(get);
       await get().refreshOrgBilling();
       await get().openWelcomeIfPresent();
+      await consumeQueuedNoteLink(get);
     }
   },
 
@@ -1279,6 +1384,7 @@ export const useStore = create<AppStore>((set, get) => ({
         await landInLastVault(get);
         await get().refreshOrgBilling();
         await get().openWelcomeIfPresent();
+        await consumeQueuedNoteLink(get);
       }
     } catch (e) {
       set({ authError: errMsg(e) });
@@ -1298,9 +1404,12 @@ export const useStore = create<AppStore>((set, get) => ({
     // reconcile/pull with a token that is about to be revoked.
     leaveVaultSync();
     await authManager.signOut();
+    // A queued shared link belongs to the account that clicked it.
+    clearPendingNoteLink();
     set({
       session: null,
       authStatus: "signed-out",
+      authPrompt: null,
       landingVault: false,
       organizations: [],
       members: [],
@@ -1333,6 +1442,7 @@ export const useStore = create<AppStore>((set, get) => ({
     // in the first place — otherwise planLanding still answers "nothing".
     await landInLastVault(get);
     await get().openWelcomeIfPresent();
+    await consumeQueuedNoteLink(get);
   },
 
   setServerUrl: async (url) => {
@@ -1966,6 +2076,13 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     await get().refreshTree();
     await get().refreshTitles();
+    // A shared link parked on the choose-a-folder prompt resumes here, now
+    // that the vault has a folder and its pull has started. Guarded by orgId
+    // so a link queued for some OTHER flow isn't eaten by an unrelated bind.
+    const queued = peekPendingNoteLink();
+    if (queued && parseNoteLink(queued)?.orgId === orgId) {
+      await consumeQueuedNoteLink(get);
+    }
   },
 
   chooseVaultFolder: async () => {
@@ -2001,6 +2118,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   cancelVaultFolder: async () => {
     const pending = get().pendingVaultFolder;
+    clearPendingNoteLink();
     set({ pendingVaultFolder: null });
     if (pending?.previousOrgId) {
       await get().setActiveOrganization(pending.previousOrgId);

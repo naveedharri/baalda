@@ -166,7 +166,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   roles owner/admin/member; 48h invitations). Session token is
   opaque (instant revocation), stored client-side only in the OS keychain.
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
-  `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`.
+  `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`,
+  `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
+  read-only page — token is the capability; renders via the escape-first `render/note-html.ts`,
+  no renderer deps).
 - `sync/hocuspocus.ts` — `onAuthenticate` verifies the per-doc JWT & sets `readOnly` for view grants;
   `onChange` appends the binary update + schedules re-index. `disconnectDoc` force-closes sockets on revoke.
 - `yjs/persistence.ts` — binary-only store: `doc_updates` append log + `doc_snapshots` (compact past
@@ -199,7 +202,8 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
 **Postgres tables** — Better Auth (`user`, `session`, `account`, `organization`, `member`, `invitation`;
 camelCase quoted, migration 001), app tables (all ids `TEXT`, migration 002+): `vaults`, `folders`, `notes`
 (id==doc_id, soft-delete via `deleted_at`), `files` (id==doc_id), `shares`, `doc_updates`, `doc_snapshots`,
-`blobs`, `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`.
+`blobs`, `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one plaintext
+token per note; revoke = DELETE).
 
 ## Server env vars (`app/apps/server/.env`)
 `DATABASE_URL` (Docker host port **5439**→5432) · `JWT_SECRET` (Better Auth crypto **and** sync JWTs —

@@ -1,9 +1,5 @@
-- Share a link to any note — the new share icon copies a link that opens it straight in a teammate's Baalda
+- The share button now offers two links: **Private** for teammates, and **Public** — a read-only page anyone can open in a browser, images included
+- Public links can be disabled anytime from the same menu — the old link stops working immediately
+- Opening a shared link while signed out now brings up sign-in and opens the note right after, instead of dropping you on the home screen
+- Shared links now ride out a vault's first sync (and say so), instead of failing on big or slow vaults
 - Access is now your whole vault as a tree — expand a folder and set permissions on the notes inside it
-- New **Private** setting for any folder, note or person, and every access setting now applies to admins and owners too
-- Losing access de-syncs the note and takes the local copy with it (recoverable from the vault trash); getting it back brings the file back
-- **Reveal in Finder** on any note or folder, from the right-click menu
-- **Freeze vault root** in Settings → General — stop new notes and folders landing at the top level once the shape is settled
-- Folder and note colours now sync to your whole team, and survive renames
-- Admins can revert a vault checkpoint, not just the owner
-- Google sign-in now works on accounts that were created with a password

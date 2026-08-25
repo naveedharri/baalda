@@ -196,6 +196,15 @@ export interface AccessResolution {
 }
 
 /** An MCP access token (metadata only; the plaintext is shown once at creation). */
+/** A note's public browser link (server-rendered read-only page). */
+export interface PublicLink {
+  id: string;
+  docId: string;
+  /** The full shareable url — built by the server, so it names the right origin. */
+  url: string;
+  createdAt: string;
+}
+
 export interface McpTokenRow {
   id: string;
   name: string;
@@ -778,6 +787,38 @@ export class ApiClient {
 
   async revokeMcpToken(id: string): Promise<void> {
     await this.request<unknown>("DELETE", `/api/mcp/tokens/${encodeURIComponent(id)}`);
+  }
+
+  // ---- Public links ---------------------------------------------------------
+
+  /**
+   * Create-or-get the note's public browser link (`https://<server>/p/<token>`).
+   * Repeated calls return the SAME url until it's revoked; gated server-side
+   * like share management (owner/admin or the note's creator).
+   */
+  async createPublicLink(docId: string): Promise<PublicLink> {
+    const { data } = await this.request<PublicLink>(
+      "POST",
+      `/api/notes/${encodeURIComponent(docId)}/public-link`,
+    );
+    return data;
+  }
+
+  /** The note's public link if one exists, else null. */
+  async getPublicLink(docId: string): Promise<PublicLink | null> {
+    const { data } = await this.request<{ link: PublicLink | null }>(
+      "GET",
+      `/api/notes/${encodeURIComponent(docId)}/public-link`,
+    );
+    return data.link ?? null;
+  }
+
+  /** Kill the note's public link — the old url 404s immediately. */
+  async revokePublicLink(docId: string): Promise<void> {
+    await this.request<unknown>(
+      "DELETE",
+      `/api/notes/${encodeURIComponent(docId)}/public-link`,
+    );
   }
 
   // ---- Billing (subscription) ---------------------------------------------

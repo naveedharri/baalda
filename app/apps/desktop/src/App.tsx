@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import "./App.css";
-import { AccountMenu } from "./components/AccountMenu";
+import { AccountMenu, AuthDialog } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
@@ -36,7 +36,8 @@ import { previewKind } from "./lib/preview";
 import { ShareNoteButton } from "./components/ShareNoteButton";
 import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
-import { useStore } from "./store";
+import { requestOpenVault, useStore } from "./store";
+import { clearPendingNoteLink } from "./lib/noteLinkFlow";
 
 /** How often a running app re-checks for a new release (it also checks at
  *  launch). The check is one cheap GET of the release's static `latest.json`
@@ -521,6 +522,29 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
   );
 }
 
+/**
+ * Sign-in dialog raised by a flow, not by a click — today only the shared-link
+ * flow: a baalda:// link arrived while signed out, the link itself is queued in
+ * lib/noteLinkFlow, and signing in here opens it automatically. Dismissing the
+ * dialog abandons the link (and the vault-landing request it armed) so nothing
+ * fires on a later, unrelated sign-in. Mounted in BOTH root branches — a
+ * signed-out user can receive a link with or without a folder open.
+ */
+function PromptedAuthDialog() {
+  const authPrompt = useStore((s) => s.authPrompt);
+  if (authPrompt !== "note-link") return null;
+  return (
+    <AuthDialog
+      onSignedIn={() => useStore.getState().setAuthPrompt(null)}
+      onClose={() => {
+        clearPendingNoteLink();
+        requestOpenVault(null);
+        useStore.getState().setAuthPrompt(null);
+      }}
+    />
+  );
+}
+
 export default function App() {
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
@@ -779,6 +803,7 @@ export default function App() {
         <UpdateGate />
         <VaultPicker />
         <VaultFolderPrompt />
+        <PromptedAuthDialog />
       </div>
     );
   }
@@ -788,6 +813,7 @@ export default function App() {
       {/* Window-global, above the sidebar+main split: a new release must be
           visible the moment the poll finds it, whatever is on screen. */}
       <UpdateGate />
+      <PromptedAuthDialog />
       <div
         className="app"
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}

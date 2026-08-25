@@ -159,6 +159,31 @@ button.primary.hero:hover:not(:disabled) {
 /* Copy-link button. Goes green on success rather than only toasting: the toast
    is at the other end of the window, and the confirmation belongs where the
    click happened. */
+/* ---- Share popover: the header share button's private/public choice.
+   Reuses the account-popover shell + dense menu scale; only the anchoring
+   differs — it hangs down-right from a fixed header button instead of rising
+   from the sidebar's identity bar. ---- */
+.share-menu {
+  position: relative;
+  display: inline-flex;
+}
+.account-popover.share-popover {
+  top: calc(100% + var(--sp-1));
+  bottom: auto;
+  right: 0;
+  left: auto;
+  width: 280px;
+}
+.share-fallback-url {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  padding: var(--sp-1) var(--sp-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: all;
+  -webkit-user-select: all;
+}
 .share-btn.copied {
   color: var(--success);
 }

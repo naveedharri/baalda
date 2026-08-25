@@ -5,6 +5,7 @@ import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { openLinkRoutes } from "./routes/open-link.js";
+import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { blobRoutes } from "./routes/blobs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
@@ -83,6 +84,8 @@ function allowedOrigins(): string[] {
  *  - /api/vaults/:id/blobs, /api/blobs/:id → attachment blob store
  *  - /api/notes/:id/versions, /api/vaults/:id/checkpoints → version history
  *  - /api/shares → folder/file ACL management
+ *  - /api/notes/:docId/public-link → mint/inspect/revoke a public note link
+ *  - /p/:token → public read-only note page (no auth; token is the capability)
  *  - /api/orgs/join-code, /api/orgs/join → vault join codes
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
  *  - /api/mcp → Model Context Protocol endpoint (AI clients); /api/mcp/tokens → token mgmt
@@ -135,6 +138,10 @@ export function createApp(deps: AppDeps): Hono {
   // baalda:// deep link. Public — the URL carries identity, never access.
   app.route("/", openLinkRoutes);
 
+  // Public note pages: /p/<token> renders a note read-only for anyone with the
+  // link. Here the URL DOES carry access — the token is the capability.
+  app.route("/", createPublicPageRoutes({ docWriter: deps.docWriter }));
+
   // Better Auth owns everything under /api/auth (web-standard Request handler).
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
@@ -159,6 +166,7 @@ export function createApp(deps: AppDeps): Hono {
     }),
   );
   app.route("/api", createShareRoutes(deps));
+  app.route("/api", publicLinkApiRoutes);
   const billingProvider = deps.billingProvider ?? new PolarBillingProvider();
   app.route(
     "/api",

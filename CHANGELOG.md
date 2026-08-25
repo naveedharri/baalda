@@ -7,6 +7,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Public note links.** The share button now offers Private and Public: Public
+  mints `https://<server>/p/<token>` — a server-rendered read-only page anyone
+  with the link can open (images included, served token-scoped; never SVG).
+  Revocable anytime from the same menu; revoked/unknown/deleted all serve one
+  identical 404. New `public_links` table (migration 020) and an escape-first
+  markdown renderer with no new dependencies.
+- **Private links queue through sign-in.** A shared link opened while signed
+  out now raises the sign-in dialog and opens the note right after auth; a link
+  into a vault with no folder on the device parks on the folder prompt and opens
+  once one is chosen. The wait for a first sync extends while sync is visibly
+  working, and connectivity failures are named instead of implying no access.
+
 ### Changed
 - Rebranded the project to Baalda (brand only; the internal
   "context" codename, storage identifiers, and bundle/keychain id are
