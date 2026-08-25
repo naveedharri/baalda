@@ -36,6 +36,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
+        // Native clipboard: the webview's navigator.clipboard is tied to
+        // WebKit's transient user activation, which an await (e.g. minting a
+        // share link) outlives — a native call has no such rule.
+        .plugin(tauri_plugin_clipboard_manager::init())
         // `baalda://` links. A teammate pastes one into chat; clicking it hands
         // the URL to this app, which resolves it against the *recipient's* own
         // account and access — the link carries ids, never content or a grant.

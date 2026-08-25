@@ -172,7 +172,7 @@ button.primary.hero:hover:not(:disabled) {
   bottom: auto;
   right: 0;
   left: auto;
-  width: 400px;
+  width: 340px;
 }
 /* The minted url as a click-to-copy row (shown only when the automatic
    clipboard write failed). The label carries the FULL url — the click copies
@@ -1131,6 +1131,12 @@ body:has(.sidebar-resizer.dragging) {
   transition:
     background var(--t-fast) var(--ease),
     color var(--t-fast) var(--ease);
+}
+/* Frozen-root: reads as unavailable but still takes the click, so the toast
+   in `rootBlocked` can say WHY instead of the button silently doing nothing. */
+.filetree-actions .tree-tool.blocked {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .filetree-actions .tree-tool:hover {
   background: var(--bg-hover);
