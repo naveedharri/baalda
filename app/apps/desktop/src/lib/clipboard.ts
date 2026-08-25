@@ -4,11 +4,19 @@
  * WebKit ties `navigator.clipboard.writeText` to transient user activation,
  * and an async hop (e.g. the API call that MINTS the link being copied) can
  * outlive it — the write then rejects even though the user really did click.
- * The hidden-textarea + `execCommand("copy")` path doesn't carry that
- * restriction in the wkwebview, so it is the fallback. Returns whether ANY
- * path succeeded; callers decide what to show when both fail.
+ * The native Tauri clipboard has no such rule, so it goes first; the web API
+ * and the hidden-textarea `execCommand("copy")` path are fallbacks (and what
+ * runs under vitest, where the plugin import fails). Returns whether ANY path
+ * succeeded; callers decide what to show when all fail.
  */
 export async function copyText(text: string): Promise<boolean> {
+  try {
+    const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
+    await writeText(text);
+    return true;
+  } catch {
+    /* not running under Tauri (tests, plain browser) — fall through */
+  }
   try {
     await navigator.clipboard.writeText(text);
     return true;
