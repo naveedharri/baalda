@@ -139,7 +139,12 @@ export function syncBadgeLabel(args: {
   // A run that finished with failures must not read "Synced". `failed` is the
   // number of notes that are still only on this device.
   if (progress?.phase === "error") {
-    return progress.failed > 0 ? `${progress.failed} not synced` : "Sync incomplete";
+    if (progress.failed > 0) return `${progress.failed} not synced`;
+    // No note failed — the run itself could not proceed because the vault
+    // channel never connected (the download-phase watchdog). Name the situation
+    // the user can act on, not a mystery "incomplete".
+    if (status === "connecting" || status === "error") return "Retrying…";
+    return "Sync incomplete";
   }
   if (noteOpen === false) {
     return progress?.phase === "done" ? "Synced" : "Syncing…";

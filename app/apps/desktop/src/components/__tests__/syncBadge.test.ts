@@ -13,6 +13,18 @@ import type { SyncProgress } from "../../lib/sync/vaultScope";
 describe("syncBadgeLabel", () => {
   const now = 1_000_000_000_000;
 
+  it("reads 'Retrying…' when the run errored only because the channel never connected", () => {
+    const stalled: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0 };
+    expect(syncBadgeLabel({ status: "connecting", now, progress: stalled })).toBe("Retrying…");
+    expect(syncBadgeLabel({ status: "error", now, progress: stalled })).toBe("Retrying…");
+    // A note that actually failed still names the count; a connected channel
+    // with an errored run still reads incomplete.
+    expect(
+      syncBadgeLabel({ status: "synced", now, progress: { ...stalled, failed: 2 } }),
+    ).toBe("2 not synced");
+    expect(syncBadgeLabel({ status: "synced", now, progress: stalled })).toBe("Sync incomplete");
+  });
+
   it("shows Syncing… while local edits are pending, ignoring the timestamp", () => {
     expect(
       syncBadgeLabel({ status: "synced", pending: true, lastSyncedAt: now - 300_000, now }),

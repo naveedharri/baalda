@@ -357,6 +357,49 @@ describe("SyncManager — ready.empty is the authority", () => {
     await flush();
     expect(progress).toHaveLength(settledAt);
   });
+
+  it("stops claiming 'Syncing…' when the vault channel never connects, and recovers on ready", async () => {
+    vi.useFakeTimers();
+    fakeRegistry.mappedNotes.mockReturnValue([{ docId: "a", relPath: "A.md" }]);
+    fakeRegistry.pushed.add("a");
+    const sm = new SyncManager();
+    const progress: Array<SyncProgress | null> = [];
+    sm.setSyncProgressListener((p) => progress.push(p));
+    await enable(sm);
+    // The engine is started but its socket never opens: no status, no ready.
+    engineHooks.opts!.onStatus?.("error");
+    await vi.advanceTimersByTimeAsync(31_000);
+    await flush();
+    // The download phase gave up: the pill must not read "Syncing…" forever.
+    expect(progress[progress.length - 1]?.phase).toBe("error");
+
+    // The server comes back: hello → backfill → ready. The stall clears and the
+    // run lands on `done` exactly as it would have without the outage.
+    engineHooks.settled = true;
+    engineHooks.opts!.onStatus?.("synced");
+    engineHooks.opts!.onServerEmpty?.([], false);
+    engineHooks.opts!.onInboundIdle?.();
+    await flush();
+    expect(progress[progress.length - 1]?.phase).toBe("done");
+    vi.useRealTimers();
+  });
+
+  it("does not trip the watchdog once the channel has reached ready", async () => {
+    vi.useFakeTimers();
+    fakeRegistry.mappedNotes.mockReturnValue([{ docId: "a", relPath: "A.md" }]);
+    fakeRegistry.pushed.add("a");
+    const sm = new SyncManager();
+    const progress: Array<SyncProgress | null> = [];
+    sm.setSyncProgressListener((p) => progress.push(p));
+    await enable(sm);
+    engineHooks.opts!.onStatus?.("synced");
+    engineHooks.opts!.onServerEmpty?.([], false);
+    // A slow backfill is still draining well past the watchdog window.
+    await vi.advanceTimersByTimeAsync(31_000);
+    await flush();
+    expect(progress[progress.length - 1]?.phase).not.toBe("error");
+    vi.useRealTimers();
+  });
 });
 
 describe("SyncManager.handleLocalFilesChanged", () => {

@@ -67,6 +67,14 @@ const REGISTRY_MAP_PUBLISH_MS = 100;
 const LOCAL_CHANGE_DEBOUNCE_MS = 800;
 /** Re-check interval while a bulk run holds the uploader slot. */
 const LOCAL_CHANGE_RETRY_MS = 2_000;
+/**
+ * How long the download phase may wait for the vault channel's `ready` before
+ * the run stops reporting "Syncing…" and admits the channel is unreachable.
+ * Generous: a cold 5k-note backfill legitimately takes a while, but its frames
+ * flip the engine to `synced`-in-progress long before this elapses; only a
+ * socket that never opens gets here.
+ */
+const CHANNEL_WATCHDOG_MS = 30_000;
 
 export interface OpenedDoc {
   awareness: Awareness;
@@ -209,6 +217,15 @@ export class SyncManager implements InboundHost {
   private serverEmptyTruncated = false;
   /** True while the run is reporting the vault channel's inbound queue. */
   private downloadPhase = false;
+  /**
+   * The channel watchdog. The content run waits for the vault channel's `ready`
+   * (download before upload), so a channel that never connects — WS blocked by a
+   * proxy, server down — would otherwise leave the pill on "Syncing…" forever.
+   * When this fires with no `ready` in sight, the run is stamped `error` so the
+   * pill reads "Retrying…"; the next `ready` clears the stall and resumes.
+   */
+  private channelWatchdog: ReturnType<typeof setTimeout> | null = null;
+  private channelStalled = false;
   private lastInboundDone = 0;
   private lastInboundTotal = 0;
   /** Resolves when the current bulk run finishes (tests). */
@@ -737,7 +754,9 @@ export class SyncManager implements InboundHost {
       // fires again on every drained inbound frame (a teammate typing), and
       // re-stamping `done` there would be a store write per keystroke.
       const phase = this.progress?.snapshot().phase;
-      if (phase !== "done" && phase !== "error") this.completeRun(scope);
+      const stalled = this.channelStalled;
+      this.channelStalled = false;
+      if (phase !== "done" && (phase !== "error" || stalled)) this.completeRun(scope);
       return;
     }
     this.bulkRun = this.runBulkSync(scope).catch((e) => {
@@ -778,6 +797,7 @@ export class SyncManager implements InboundHost {
    */
   private handleServerEmpty(docIds: string[], truncated: boolean, scope: VaultScope): void {
     if (!scope.isCurrent()) return;
+    this.clearChannelWatchdog(); // `ready` arrived — the channel is alive
     this.serverEmpty = new Set(docIds);
     this.serverEmptyTruncated = truncated;
     // A live run keeps its queue and picks this set up on its next pass; only
@@ -1026,12 +1046,38 @@ export class SyncManager implements InboundHost {
     this.lastInboundDone = done;
     this.lastInboundTotal = total;
     this.downloadPhase = true;
+    this.armChannelWatchdog(scope);
     // Opens at 0/0 ("Syncing…"), because this now runs the moment the engine is
     // started — before its socket is even open, let alone `hello`ed. There is
     // deliberately no `backfillSettled()` short-circuit here any more: an engine
     // that has not connected yet reports settled (nothing is queued and no window
     // is open), so checking it here would end the phase before it began.
     progress.phase("downloading", total - done);
+  }
+
+  private armChannelWatchdog(scope: VaultScope): void {
+    this.clearChannelWatchdog();
+    this.channelWatchdog = setTimeout(() => {
+      this.channelWatchdog = null;
+      if (!scope.isCurrent() || !this.downloadPhase) return;
+      if (this.vaultStatus === "synced") return; // `ready` landed; the idle edge owns it
+      const progress = this.progress;
+      if (!progress) return;
+      // Stop claiming progress that isn't happening. `channelStalled` lets the
+      // next `ready` re-stamp a terminal phase (completion normally refuses to
+      // overwrite `error`, because a real failure must not be papered over).
+      this.downloadPhase = false;
+      this.channelStalled = true;
+      progress.phase("error");
+      progress.flush();
+    }, CHANNEL_WATCHDOG_MS);
+  }
+
+  private clearChannelWatchdog(): void {
+    if (this.channelWatchdog) {
+      clearTimeout(this.channelWatchdog);
+      this.channelWatchdog = null;
+    }
   }
 
   /** One backfilled document applied by the vault channel. */
@@ -1075,6 +1121,8 @@ export class SyncManager implements InboundHost {
     const progress = this.progress;
     if (!progress) return;
     this.downloadPhase = false;
+    this.channelStalled = false;
+    this.clearChannelWatchdog();
     const uploadFailures = this.uploader?.failedDocs().length ?? 0;
     const clean =
       uploadFailures === 0 &&
@@ -1143,6 +1191,8 @@ export class SyncManager implements InboundHost {
     this.uploader = null;
     this.bulkRun = null;
     this.downloadPhase = false;
+    this.clearChannelWatchdog();
+    this.channelStalled = false;
     this.lastInboundDone = 0;
     this.lastInboundTotal = 0;
     this.attachments?.stop();
