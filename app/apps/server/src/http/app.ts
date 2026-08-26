@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-auth/plugins";
 import { config } from "../config.js";
@@ -117,6 +118,27 @@ export function createApp(deps: AppDeps): Hono {
       exposeHeaders: ["set-auth-token"],
     }),
   );
+
+  // Response compression for the JSON API. The registry listings are what make
+  // this worth having: GET /api/notes for a several-hundred-note vault is a few
+  // hundred KB of highly repetitive JSON, and it is on the critical path of every
+  // client start-up and every `registry` broadcast.
+  //
+  // After CORS (so preflights are answered plain) and scoped to /api/*, which
+  // also keeps it off the WS upgrade paths — those are handled by the Node
+  // server, not by Hono, but /health and /p/:token stay uncompressed too.
+  //
+  // Hono's compress already limits itself to compressible content types (its
+  // default regex covers JSON/text and never image/*, application/octet-stream
+  // or text/event-stream). Blob DOWNLOAD is nonetheless excluded by path rather
+  // than trusted to that: a stored mime of text/markdown would otherwise put a
+  // re-encode on a route whose only job is handing back exact bytes. The blob
+  // LIST route (/api/vaults/:id/blobs) is JSON and stays compressed.
+  const compressor = compress();
+  app.use("/api/*", async (c, next) => {
+    if (c.req.path.startsWith("/api/blobs/")) return next();
+    return compressor(c, next);
+  });
 
   app.get("/health", (c) => c.json({ ok: true }));
 

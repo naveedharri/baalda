@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
-import { VaultChannel } from "../src/sync/vault-channel.js";
+import { VaultChannel, type VaultChannelDeps } from "../src/sync/vault-channel.js";
 import { InMemoryPubSub } from "../src/sync/pubsub.js";
 import {
   decodeWsUpdate,
@@ -82,7 +82,16 @@ async function waitFor(fn: () => boolean, ms = 1000): Promise<void> {
 }
 
 const pubsubs: InMemoryPubSub[] = [];
-function channelWith(readable: () => Set<string>): { channel: VaultChannel; pubsub: InMemoryPubSub } {
+
+/** No-op empty-doc probe. Stubbed by default because the real one queries
+ *  Postgres and these are socket-free unit tests; the `ready.empty` suite below
+ *  injects its own. */
+const noEmpty = async () => ({ empty: [] as string[], truncated: false });
+
+function channelWith(
+  readable: () => Set<string>,
+  listEmpty: VaultChannelDeps["listEmpty"] = noEmpty,
+): { channel: VaultChannel; pubsub: InMemoryPubSub } {
   const pubsub = new InMemoryPubSub();
   pubsubs.push(pubsub);
   const channel = new VaultChannel({
@@ -93,6 +102,7 @@ function channelWith(readable: () => Set<string>): { channel: VaultChannel; pubs
     },
     listReadableDocs: async () => readable(),
     loadDiff: async (docId: string) => diffFor(docId),
+    listEmpty,
     backfillConcurrency: 4,
   });
   return { channel, pubsub };
@@ -285,6 +295,7 @@ describe("VaultChannel relay (spec 05 §3.1)", () => {
         return new Set(["A"]);
       },
       loadDiff: async (docId: string) => diffFor(docId),
+      listEmpty: noEmpty,
       backfillConcurrency: 4,
     });
 
@@ -317,6 +328,7 @@ function voiceChannel(): { channel: VaultChannel; pubsub: InMemoryPubSub } {
     verifyToken: async (token: string) => ({ userId: token, vaultId: "v1" }),
     listReadableDocs: async () => new Set<string>(),
     loadDiff: async () => null,
+    listEmpty: noEmpty,
     backfillConcurrency: 4,
   });
   return { channel, pubsub };
@@ -450,5 +462,98 @@ describe("VaultChannel voice broadcast", () => {
 
     await new Promise((r) => setTimeout(r, 30));
     expect(grace.voices()).toHaveLength(0);
+  });
+});
+
+// ---- `ready.empty`: notes that hold nothing on the server -----------------
+//
+// The 2026-08 bulk-register incident left 613 notes registered with no content.
+// Backfill sends no frame for such a doc, so the client cannot tell "the server
+// has nothing" from "not backfilled yet" and the note stays blank forever. The
+// `ready` frame now names them so the client seeds from its own disk.
+
+/** The `ready` control frame this connection received. */
+function readyFrame(ws: FakeWs): Record<string, unknown> | undefined {
+  return ws.controls().find((c) => c.t === "ready");
+}
+
+async function connectAndWait(channel: VaultChannel): Promise<FakeWs> {
+  const ws = new FakeWs();
+  channel.handleConnection(ws as never);
+  ws.hello("good");
+  await waitFor(() => ws.controls().some((c) => c.t === "ready"));
+  return ws;
+}
+
+describe("ready.empty (server-side-empty notes)", () => {
+  it("names a readable doc that has no updates and no snapshot", async () => {
+    // The probe is handed the readable set and answers from it; "B" is the doc
+    // with nothing behind it.
+    const { channel } = channelWith(
+      () => new Set(["A", "B"]),
+      async (docIds) => ({ empty: docIds.filter((d) => d === "B"), truncated: false }),
+    );
+    const ws = await connectAndWait(channel);
+    expect(readyFrame(ws)).toEqual({ t: "ready", empty: ["B"] });
+  });
+
+  it("omits `empty` entirely when every readable doc has content", async () => {
+    const { channel } = channelWith(() => new Set(["A", "B"]));
+    const ws = await connectAndWait(channel);
+    // Byte-identical to what every shipped client already parses — no new keys.
+    const frame = readyFrame(ws)!;
+    expect(frame).toEqual({ t: "ready" });
+    expect("empty" in frame).toBe(false);
+    expect("emptyTruncated" in frame).toBe(false);
+  });
+
+  it("is asked about exactly the readable set, so a doc outside it can't appear", async () => {
+    let asked: string[] = [];
+    const { channel } = channelWith(
+      () => new Set(["A", "B"]),
+      async (docIds) => {
+        asked = [...docIds];
+        // A hostile/buggy probe naming an unreadable doc still can't leak it,
+        // because the probe is only ever given the readable set.
+        return { empty: docIds, truncated: false };
+      },
+    );
+    const ws = await connectAndWait(channel);
+    expect(asked.sort()).toEqual(["A", "B"]);
+    expect(readyFrame(ws)!.empty).toEqual(["A", "B"]);
+    expect(readyFrame(ws)!.empty).not.toContain("C");
+  });
+
+  it("flags a truncated list", async () => {
+    const { channel } = channelWith(
+      () => new Set(["A", "B", "C"]),
+      async () => ({ empty: ["A", "B"], truncated: true }),
+    );
+    const ws = await connectAndWait(channel);
+    expect(readyFrame(ws)).toEqual({ t: "ready", empty: ["A", "B"], emptyTruncated: true });
+  });
+
+  it("still sends `ready` when the probe throws", async () => {
+    // Withholding `ready` would leave the client stuck "connecting" forever, so
+    // a failed hint must cost only the hint.
+    const { channel } = channelWith(
+      () => new Set(["A"]),
+      async () => {
+        throw new Error("probe exploded");
+      },
+    );
+    const ws = await connectAndWait(channel);
+    expect(readyFrame(ws)).toEqual({ t: "ready" });
+  });
+
+  it("sends `ready` after the backfill frames, never before", async () => {
+    const { channel } = channelWith(
+      () => new Set(["A", "B"]),
+      async (docIds) => ({ empty: [...docIds], truncated: false }),
+    );
+    const ws = await connectAndWait(channel);
+    const readyAt = ws.sent.findIndex((x) => x.kind === "text" && (x.value as { t: string }).t === "ready");
+    const lastBinary = ws.sent.reduce((acc, x, i) => (x.kind === "binary" ? i : acc), -1);
+    expect(readyAt).toBeGreaterThan(lastBinary);
   });
 });

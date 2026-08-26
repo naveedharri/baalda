@@ -36,15 +36,51 @@ impl Rng {
 }
 
 const WORDS: &[&str] = &[
-    "vault", "note", "graph", "link", "crdt", "merge", "sync", "index", "search",
-    "folder", "markdown", "editor", "buffer", "snapshot", "debounce", "backlink",
-    "tag", "frontmatter", "atomic", "local", "first", "peer", "presence", "token",
-    "permission", "share", "collaborate", "rewrite", "ingest", "egest", "watcher",
-    "convergence", "identity", "durable", "source", "truth", "bridge", "operation",
+    "vault",
+    "note",
+    "graph",
+    "link",
+    "crdt",
+    "merge",
+    "sync",
+    "index",
+    "search",
+    "folder",
+    "markdown",
+    "editor",
+    "buffer",
+    "snapshot",
+    "debounce",
+    "backlink",
+    "tag",
+    "frontmatter",
+    "atomic",
+    "local",
+    "first",
+    "peer",
+    "presence",
+    "token",
+    "permission",
+    "share",
+    "collaborate",
+    "rewrite",
+    "ingest",
+    "egest",
+    "watcher",
+    "convergence",
+    "identity",
+    "durable",
+    "source",
+    "truth",
+    "bridge",
+    "operation",
 ];
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn note_name(i: usize) -> String {
@@ -200,6 +236,77 @@ fn data_volume_bench() {
         t.elapsed().as_micros(),
         resolved.is_some()
     );
+
+    // ---- batch (re)index of an existing set of notes ----------------------
+    //
+    // The watcher path: N already-known files change at once. The old code ran
+    // `index_note` per path, and each call re-resolved EVERY link in the vault in
+    // its own transaction — O(N × links). `index_notes` does one pass for the
+    // batch. Both are timed here so the ratio is visible.
+    let batch_n = env_usize("BAALDA_BENCH_BATCH", 200).min(notes);
+    let batch: Vec<PathBuf> = (0..batch_n)
+        .map(|i| vault.join(format!("{}/{}.md", folder_for(i), note_name(i))))
+        .collect();
+
+    let t = Instant::now();
+    let failures = idx.index_notes(&vault, &batch).unwrap();
+    let batched_ms = t.elapsed().as_millis();
+    assert!(failures.is_empty(), "batch reported failures: {failures:?}");
+    println!(
+        "index_notes({batch_n}):  {batched_ms:>6} ms  ({:.2} ms/note, 1 link pass)",
+        batched_ms as f64 / batch_n as f64
+    );
+
+    // The same work the old way: one call, one transaction, one link pass each.
+    let per_file_n = batch_n.min(env_usize("BAALDA_BENCH_PER_FILE", 50));
+    let t = Instant::now();
+    for abs in batch.iter().take(per_file_n) {
+        idx.index_note(&vault, abs).unwrap();
+    }
+    let per_file_ms = t.elapsed().as_millis();
+    println!(
+        "index_note ×{per_file_n:<4}     {per_file_ms:>6} ms  ({:.2} ms/note, {per_file_n} link passes)",
+        per_file_ms as f64 / per_file_n as f64
+    );
+
+    // ---- the reported failure mode: drop N brand-new files at once ---------
+    //
+    // "Copy 1000 notes into the vault". Every file is new, so every one is a
+    // fresh insert AND (the old way) a whole-vault link pass.
+    let drop_n = env_usize("BAALDA_BENCH_DROP", 1000);
+    let mut dropped: Vec<PathBuf> = Vec::with_capacity(drop_n);
+    let mut rng = Rng(0xDEADBEEFCAFEF00D);
+    for i in 0..drop_n {
+        let name = format!("dropped-{i:05}");
+        let links: Vec<usize> = (0..links_per).map(|_| rng.below(notes)).collect();
+        let content = format!("# {name}\n\n{}", body(&mut rng, 600, &links));
+        let rel = format!("Dropped/batch-{:03}/{name}.md", i / 100);
+        notefile::write_note(&vault, &rel, &content).unwrap();
+        dropped.push(vault.join(&rel));
+    }
+    let t = Instant::now();
+    let failures = idx.index_notes(&vault, &dropped).unwrap();
+    let drop_ms = t.elapsed().as_millis();
+    assert!(failures.is_empty(), "drop reported failures: {failures:?}");
+    println!(
+        "drop {drop_n} + index:  {drop_ms:>6} ms  ({:.2} ms/note)",
+        drop_ms as f64 / drop_n as f64
+    );
+    assert_eq!(
+        idx.list_note_titles().unwrap().len(),
+        notes + drop_n,
+        "every dropped note should be indexed"
+    );
+
+    // And removing them again, batched.
+    let t = Instant::now();
+    idx.remove_notes(&vault, &dropped).unwrap();
+    let rm_ms = t.elapsed().as_millis();
+    println!(
+        "remove {drop_n}:        {rm_ms:>6} ms  ({:.2} ms/note)",
+        rm_ms as f64 / drop_n as f64
+    );
+    assert_eq!(idx.list_note_titles().unwrap().len(), notes);
 
     let sqlite_bytes = dir_size(&vault.join(".context"));
     println!(

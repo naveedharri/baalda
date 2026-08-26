@@ -658,33 +658,39 @@ export default function App() {
       }, 120);
     };
     (async () => {
-      unlistenFile = await ipc.onFileChanged(async (e) => {
-        // Attachments are content-synced, not indexed/CRDT-bridged. A change
-        // under `attachments/` triggers a debounced two-way blob reconcile.
-        if (e.path === "attachments" || e.path.startsWith("attachments/")) {
-          syncManager.handleAttachmentChanged();
-          scheduleRefresh();
-          return;
-        }
-
-        // Open-note reconciliation runs immediately (per event); the sidebar
-        // refresh is coalesced via scheduleRefresh below.
+      // Whole batches, not one event per file: the sync layer folds every
+      // unmapped/structural item in a batch into a SINGLE registry pull, which it
+      // cannot do when the items arrive one at a time.
+      unlistenFile = await ipc.onFilesChanged((changes) => {
+        if (changes.length === 0) return;
         const open = useStore.getState().openNote;
-        if (open && e.path === open.path) {
-          if (e.kind === "removed") {
-            useStore.getState().setNoteRemoved(true);
-          } else {
-            // Route the edit into the bridge; it debounces, drops our own echo,
-            // and merges genuine external edits live into the open Y.Text.
-            bridgeManager.handleFileChanged(e.path);
+        const forSync: ipc.FileChanged[] = [];
+        for (const e of changes) {
+          // Attachments are content-synced, not indexed/CRDT-bridged. A change
+          // under `attachments/` triggers a debounced two-way blob reconcile.
+          if (e.path === "attachments" || e.path.startsWith("attachments/")) {
+            syncManager.handleAttachmentChanged();
+            continue;
           }
-        } else {
+          // Open-note reconciliation runs immediately (per event); the sidebar
+          // refresh is coalesced via scheduleRefresh below.
+          if (open && e.path === open.path) {
+            if (e.kind === "removed") {
+              useStore.getState().setNoteRemoved(true);
+            } else {
+              // Route the edit into the bridge; it debounces, drops our own echo,
+              // and merges genuine external edits live into the open Y.Text.
+              bridgeManager.handleFileChanged(e.path);
+            }
+            continue;
+          }
           // Everything that is NOT the open note goes to the sync layer: an
           // external writer (an AI with the vault folder open, another editor)
           // creating or changing files must reach the server live — not on the
           // next sign-in reconcile, and not only once someone opens the note.
-          syncManager.handleLocalFileChanged(e.path, e.kind);
+          forSync.push(e);
         }
+        if (forSync.length > 0) syncManager.handleLocalFilesChanged(forSync);
 
         // Refresh tree + titles + backlinks (coalesced for bursts).
         scheduleRefresh();

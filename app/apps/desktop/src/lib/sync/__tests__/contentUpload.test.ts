@@ -131,6 +131,8 @@ interface RigOptions {
   concurrency?: number;
   failureStreakLimit?: number;
   force?: boolean;
+  include?: (docId: string) => boolean;
+  priority?: (docId: string) => boolean;
   ingestFromFile?: boolean;
   mustConnect?: (docId: string) => boolean;
   /** Reuse a previous rig's CRDT store, to model a SECOND run on one device. */
@@ -172,6 +174,8 @@ function rig(opts: RigOptions) {
     },
     skip: opts.skip,
     force: opts.force,
+    include: opts.include,
+    priority: opts.priority,
     ingestFromFile: opts.ingestFromFile,
     mustConnect: opts.mustConnect,
     shouldStop: opts.shouldStop,
@@ -601,5 +605,85 @@ describe("ContentUploader — mustConnect (out-of-band merges)", () => {
     await third.uploader.run();
     expect(third.connects).toEqual(["d1"]);
     expect(third.server.text("d1")).toBe("v1 merged-out-of-band");
+  });
+});
+
+// ── `ready.empty`: the server outranks the local checkpoint ─────────────────
+// `pushed` is a local optimisation. A crashed run, a wiped `.context/` or a
+// restored backup can leave it claiming notes the server never received — 613 of
+// them in prod, registered with zero content and unreachable forever, because
+// every later run skipped them on the strength of that claim.
+
+describe("ContentUploader — include (the server's empty list)", () => {
+  it("pushes a doc the checkpoint claims but the server has no content for", async () => {
+    const r = rig({
+      files: { "Lost.md": "the only copy", "Fine.md": "already there" },
+      notes: [
+        { docId: "lost", relPath: "Lost.md" },
+        { docId: "fine", relPath: "Fine.md" },
+      ],
+      pushed: new Set(["lost", "fine"]),
+      include: (id) => id === "lost",
+    });
+    r.server.seed("fine", "already there");
+
+    const result = await r.uploader.run();
+
+    expect(result.total).toBe(1); // only the doc the server actually lacks
+    expect(r.connects).toEqual(["lost"]);
+    expect(r.server.text("lost")).toBe("the only copy");
+    // …and it is never badged synced on the way in, not even for one emission.
+    expect(r.sink.stateOf("lost")).toEqual(["queued", "syncing", "synced"]);
+    expect(r.sink.stateOf("fine")).toEqual(["synced"]);
+  });
+
+  it("still connects when the file matches the doc (the ingest fast-path must not skip it)", async () => {
+    // The local-change fast-path exists to avoid a socket per watcher echo, and
+    // its whole premise is "the server already has this". For an `include` doc
+    // that premise is false, so the fast-path has to stand down.
+    const r = rig({
+      files: { "Echo.md": "same bytes" },
+      notes: [{ docId: "echo", relPath: "Echo.md" }],
+      pushed: new Set(["echo"]),
+      include: (id) => id === "echo",
+      force: true,
+      ingestFromFile: true,
+    });
+
+    await r.uploader.run();
+
+    expect(r.connects).toEqual(["echo"]);
+    expect(r.server.text("echo")).toBe("same bytes");
+  });
+});
+
+describe("ContentUploader — priority", () => {
+  it("pushes the prioritised docs first, keeping the order within each group", async () => {
+    const notes = ["a", "b", "c", "d", "e"].map((id) => ({
+      docId: id,
+      relPath: `${id.toUpperCase()}.md`,
+    }));
+    const files: Record<string, string> = {};
+    for (const n of notes) files[n.relPath] = `text ${n.docId}`;
+    const r = rig({
+      files,
+      notes,
+      // Serial, so `connects` IS the queue order.
+      concurrency: 1,
+      priority: (id) => id === "d" || id === "b",
+    });
+
+    await r.uploader.run();
+
+    // Stable partition: d/b keep their relative order, and so does the rest.
+    expect(r.connects).toEqual(["b", "d", "a", "c", "e"]);
+  });
+
+  it("leaves the queue untouched when no priority is given", async () => {
+    const notes = ["a", "b", "c"].map((id) => ({ docId: id, relPath: `${id}.md` }));
+    const files: Record<string, string> = { "a.md": "1", "b.md": "2", "c.md": "3" };
+    const r = rig({ files, notes, concurrency: 1 });
+    await r.uploader.run();
+    expect(r.connects).toEqual(["a", "b", "c"]);
   });
 });

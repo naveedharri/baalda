@@ -451,8 +451,31 @@ export const getVaultEpoch = () => invoke<number>("get_vault_epoch");
 
 // ---- Events ---------------------------------------------------------------
 
+/**
+ * One watcher debounce batch (the Rust `FilesChanged` payload).
+ *
+ * The watcher emits ONE event per batch rather than one per file: a vault import
+ * or an AI writing 200 notes used to cross the IPC boundary 200 times, each
+ * costing a full round of listeners, a registry-pull re-arm and a sidebar
+ * refresh re-arm.
+ */
+export interface FilesChanged {
+  changes: FileChanged[];
+}
+
+/** Subscribe to whole watcher batches — what the sync layer wants, because a
+ *  batch has exactly ONE structural conclusion to draw. */
+export const onFilesChanged = (
+  cb: (changes: FileChanged[]) => void,
+): Promise<UnlistenFn> =>
+  listen<FilesChanged>("files-changed", (event) => cb(event.payload?.changes ?? []));
+
+/** Per-item adapter over {@link onFilesChanged}, for callers that only care that
+ *  *something* changed (the graph, the HTML view, the open note's bridge). */
 export const onFileChanged = (cb: (e: FileChanged) => void): Promise<UnlistenFn> =>
-  listen<FileChanged>("file-changed", (event) => cb(event.payload));
+  onFilesChanged((changes) => {
+    for (const change of changes) cb(change);
+  });
 
 export const onVaultOpened = (cb: (v: VaultInfo) => void): Promise<UnlistenFn> =>
   listen<VaultInfo>("vault-opened", (event) => cb(event.payload));

@@ -202,6 +202,7 @@ curl -sL https://railway.com/deploy/baalda-server | grep -o '<title>[^<]*</title
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `DATABASE_URL` | yes | `postgres://context:context@localhost:5439/context` | Postgres connection string. |
+| `PG_POOL_MAX` | no | `20` | Postgres connections this instance pools. Keep the total across all instances under the server's `max_connections`; a pool below `BACKFILL_CONCURRENCY` lets one vault reconnect starve the HTTP routes. |
 | `JWT_SECRET` | yes | dev-only insecure default | Better Auth crypto **and** sync JWT signing. Generate with `openssl rand -base64 32`. Rotating it invalidates all sessions and sync tokens. |
 | `BETTER_AUTH_URL` | yes | `http://localhost:3010` | Public base URL used for auth links (email verification, invitations). Must match the URL clients actually use. |
 | `PORT` | no | `3010` | HTTP API port. Serves the sync WebSocket at `/sync` too. This is the only port a deployment needs to expose. |

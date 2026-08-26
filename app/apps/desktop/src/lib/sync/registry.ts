@@ -35,7 +35,7 @@ import {
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
 import { seedWelcomeContent } from "../vault/seed";
-import { Checkpointer } from "./checkpoint";
+import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { planInbound } from "./inbound";
 import { REGISTRY_CONCURRENCY, runPool, withRetry } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
@@ -65,11 +65,14 @@ interface VaultSyncConfig {
    * docIds whose CONTENT this device has confirmed on the server (the bulk
    * upload's resume point — see `ContentUploader`).
    *
-   * Purely an optimization: it lets a relaunch skip re-connecting every note in
-   * the vault. Correctness never depends on it, because the upload path is
-   * idempotent by construction (pull-before-seed; it only ever transmits CRDT
-   * state that already exists locally, never re-inserts text). A missing or
-   * stale entry therefore costs a round trip, never duplicated content.
+   * Purely an optimization ("nothing local left to send"), NEVER a correctness
+   * gate — the vault channel's `ready.empty` is the authority on what the server
+   * actually holds. Correctness never depends on this list, because the upload
+   * path is idempotent by construction (pull-before-seed; it only ever transmits
+   * CRDT state that already exists locally, never re-inserts text). A missing
+   * entry costs a round trip; a WRONG one (a crashed run, a wiped `.context/`,
+   * a restored backup) would strand a note forever if anything treated it as
+   * proof — which is why the server re-states the truth on every connect.
    */
   pushed?: string[];
   /**
@@ -856,7 +859,11 @@ export class VaultRegistry {
     // Never write another vault's doc map into this folder's config.
     if (this.stale()) return;
     if (!cfg.serverVaultId) return; // nothing meaningful to persist yet
-    await ipc.setVaultConfig(JSON.stringify(cfg, null, 2), this.epoch());
+    // Compact, not pretty-printed. This file is rewritten whole on every
+    // checkpoint and holds three entries per note; two-space indentation added
+    // ~35% to every one of those writes for the benefit of nobody — it is derived
+    // state, not something a person edits.
+    await ipc.setVaultConfig(JSON.stringify(cfg), this.epoch());
   }
 
   private newCheckpointer(): Checkpointer<VaultSyncConfig> {
@@ -864,9 +871,19 @@ export class VaultRegistry {
     const cp = new Checkpointer<VaultSyncConfig>({
       write: (cfg) => this.writeConfig(cfg),
       snapshot: () => this.configSnapshot(),
+      // Starts at the default and is retuned by `tuneCheckpointBatch` the moment
+      // we know how many notes this vault has (see `checkpointBatchFor`).
+      everyItems: checkpointBatchFor(this.byPath.size),
     });
     this.checkpoint = cp;
     return cp;
+  }
+
+  /** Size the config.json flush batch to this vault: one write per
+   *  `checkpointBatchFor(n)` notes, so the write COUNT stays flat as the file
+   *  itself grows. */
+  private tuneCheckpointBatch(mapped: number): void {
+    this.checkpoint?.setEveryItems(checkpointBatchFor(mapped));
   }
 
   private setMapping(relPath: string, docId: string, vaultId: string): void {
@@ -910,6 +927,7 @@ export class VaultRegistry {
     if (this.stale()) return { seeded: false };
     const cfg = await this.loadConfig();
     if (this.stale()) return { seeded: false };
+    this.tuneCheckpointBatch(Object.keys(cfg.docs ?? {}).length);
 
     // 1. Ensure a server note collection (the `vaults` table row, 1:1 with this
     //    vault in practice) — resolved by ID, never by name (names collide and
@@ -1114,6 +1132,10 @@ export class VaultRegistry {
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
     const checkpoint = this.checkpoint ?? this.newCheckpointer();
+    // A pull can be the first thing to touch a big vault's map (a reconnect
+    // catch-up), so retune here too rather than trusting the construction-time
+    // guess.
+    this.tuneCheckpointBatch(this.byPath.size);
 
     // The local index's docId per note path, read BEFORE any decision so inbound
     // can match by docId rather than by path (a rename changes the path, which is

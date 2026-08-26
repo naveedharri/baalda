@@ -9,6 +9,7 @@ import {
 import {
   decodeVoiceFrame,
   encodeVoiceFrame,
+  parseServerControl,
   VOICE_FRAME,
   type VoiceFrame,
 } from "../sync/vaultProtocol";
@@ -667,5 +668,148 @@ describe("VaultSyncEngine voice", () => {
     expect(decoded).toBeNull(); // outbound frames carry no `u` — the server stamps it
     // ...but the raw framing is intact and the server will accept it.
     expect((binary[0] as Uint8Array)[0]).toBe(VOICE_FRAME);
+  });
+});
+
+// ── `ready.empty`: the server's list of docs it holds NO content for ────────
+// The client's own `pushed` checkpoint cannot see a note the server lost (a
+// crashed run, a wiped `.context/`, a restored backup), which is how 613 notes
+// ended up registered with zero content. This frame is the authority, so parsing
+// it has to be defensive: a bogus entry would sit at the HEAD of the upload queue.
+
+describe("parseServerControl — ready", () => {
+  it("reads the empty list and the truncation flag", () => {
+    expect(parseServerControl(JSON.stringify({ t: "ready", empty: ["a", "b"] }))).toEqual({
+      t: "ready",
+      empty: ["a", "b"],
+    });
+    expect(
+      parseServerControl(JSON.stringify({ t: "ready", empty: ["a"], emptyTruncated: true })),
+    ).toEqual({ t: "ready", empty: ["a"], emptyTruncated: true });
+  });
+
+  it("tolerates an older server that omits both fields", () => {
+    expect(parseServerControl(JSON.stringify({ t: "ready" }))).toEqual({ t: "ready" });
+  });
+
+  it("keeps only string ids, and omits the field when nothing survives", () => {
+    expect(
+      parseServerControl(JSON.stringify({ t: "ready", empty: ["a", 7, null, "", "b"] })),
+    ).toEqual({ t: "ready", empty: ["a", "b"] });
+    // A `ready` is still a `ready` — never dropped over a malformed extra.
+    expect(parseServerControl(JSON.stringify({ t: "ready", empty: "a" }))).toEqual({
+      t: "ready",
+    });
+    expect(parseServerControl(JSON.stringify({ t: "ready", empty: [] }))).toEqual({
+      t: "ready",
+    });
+  });
+
+  it("treats anything but `true` as not truncated", () => {
+    expect(
+      parseServerControl(JSON.stringify({ t: "ready", empty: ["a"], emptyTruncated: 1 })),
+    ).toEqual({ t: "ready", empty: ["a"] });
+  });
+});
+
+describe("VaultSyncEngine — server-empty reporting", () => {
+  it("fires onServerEmpty on every ready, before the idle signal", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const events: Array<{ ids: string[]; truncated: boolean }> = [];
+    const order: string[] = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onServerEmpty: (ids, truncated) => {
+        events.push({ ids, truncated });
+        order.push("empty");
+      },
+      onInboundIdle: () => order.push("idle"),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+
+    ws!.onmessage?.({
+      data: JSON.stringify({ t: "ready", empty: ["a", "b"], emptyTruncated: true }),
+    });
+    expect(events).toEqual([{ ids: ["a", "b"], truncated: true }]);
+    // The list must land BEFORE the edge that starts the content run, or the run
+    // works from the previous connect's answer (or none at all).
+    expect(order).toEqual(["empty", "idle"]);
+
+    // Reconnects re-state it — that is what re-arms a paused content run.
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+    expect(events).toHaveLength(2);
+    expect(events[1]).toEqual({ ids: [], truncated: false });
+  });
+
+  it("refresh() sends a fresh hello over the existing backoff", async () => {
+    const sink = new MemSink();
+    const created: FakeWs[] = [];
+    const scheduled: Array<() => void> = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => {
+        const w = new FakeWs();
+        created.push(w);
+        return w;
+      },
+      random: () => 0,
+      setTimeoutImpl: (fn) => {
+        scheduled.push(fn);
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimeoutImpl: () => {},
+    });
+    engine.start();
+    created[0].onopen?.(null);
+    await awaitHello(created[0]);
+    created[0].onmessage?.({ data: JSON.stringify({ t: "ready", emptyTruncated: true }) });
+
+    // Asking the server the second question: one socket per vault, so the only
+    // way to send another hello is to cycle this one.
+    engine.refresh();
+    expect(created[0].closed).toBe(true);
+    expect(scheduled).toHaveLength(1);
+    scheduled[0]();
+    expect(created).toHaveLength(2);
+    created[1].onopen?.(null);
+    await awaitHello(created[1]);
+    expect(created[1].helloText()).toMatchObject({ t: "hello", token: "vault-tok" });
+  });
+
+  it("a disconnect closes the backfill window, so the download can settle", async () => {
+    // `backfilling` used to survive the socket, and everything that waits for the
+    // download to settle (the content run) waited forever on a flaky link.
+    const sink = new MemSink();
+    const created: FakeWs[] = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => {
+        const w = new FakeWs();
+        created.push(w);
+        return w;
+      },
+      random: () => 0,
+      setTimeoutImpl: () => 0 as unknown as ReturnType<typeof setTimeout>,
+      clearTimeoutImpl: () => {},
+    });
+    engine.start();
+    created[0].onopen?.(null);
+    await awaitHello(created[0]);
+    created[0].onmessage?.({ data: updateFrame("a", [1]) });
+    for (let i = 0; i < 40 && !engine.inboundIdle(); i++) await tick();
+    expect(engine.backfillSettled()).toBe(false); // mid-backfill, `ready` pending
+
+    created[0].onclose?.(null);
+    expect(engine.backfillSettled()).toBe(true);
   });
 });

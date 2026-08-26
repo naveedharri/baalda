@@ -3,7 +3,7 @@
 // single-writer checkpointer (so a kill -9 loses at most one batch).
 
 import { describe, expect, it, vi } from "vitest";
-import { Checkpointer } from "../checkpoint";
+import { Checkpointer, checkpointBatchFor } from "../checkpoint";
 import { SyncProgressReporter } from "../progress";
 import { runPool, withRetry } from "../pool";
 import type { DocSyncState, SyncProgress } from "../vaultScope";
@@ -257,6 +257,80 @@ describe("Checkpointer", () => {
     await cp.flush();
     expect(attempts).toBe(2);
     expect(cp.isDirty).toBe(false);
+  });
+});
+
+// ── config.json write volume ────────────────────────────────────────────────
+// The file is rewritten WHOLE on every flush and carries three entries per note,
+// so on a big vault the batch size decides how many megabytes a backfill writes.
+
+describe("checkpointBatchFor", () => {
+  it("never drops below 25, so a small vault still checkpoints often", () => {
+    expect(checkpointBatchFor(0)).toBe(25);
+    expect(checkpointBatchFor(60)).toBe(25);
+    expect(checkpointBatchFor(1250)).toBe(25);
+  });
+
+  it("scales with the vault, keeping the write COUNT flat as the file grows", () => {
+    // 5,000 notes: ~50 writes of a big file, not ~200.
+    expect(checkpointBatchFor(5_000)).toBe(100);
+    expect(5_000 / checkpointBatchFor(5_000)).toBe(50);
+    expect(20_000 / checkpointBatchFor(20_000)).toBe(50);
+  });
+});
+
+describe("Checkpointer.setEveryItems", () => {
+  it("retunes the batch after the caller learns the vault's size", async () => {
+    const clock = fakeClock();
+    const written: number[] = [];
+    let counter = 0;
+    const cp = new Checkpointer<number>({
+      write: async (v) => {
+        written.push(v);
+      },
+      snapshot: () => counter,
+      everyItems: 25,
+      everyMs: 750,
+      setTimeoutImpl: clock.setTimeoutImpl,
+      clearTimeoutImpl: clock.clearTimeoutImpl,
+    });
+    cp.setEveryItems(checkpointBatchFor(5_000)); // 100
+
+    for (let i = 0; i < 99; i++) {
+      counter++;
+      cp.touch();
+    }
+    await Promise.resolve();
+    expect(written).toHaveLength(0); // the old 25-item batch would have fired 3×
+    counter++;
+    cp.touch();
+    await cp.flush();
+    expect(written).toEqual([100]);
+  });
+
+  it("flushes immediately when the new batch is already full", async () => {
+    const clock = fakeClock();
+    const written: number[] = [];
+    let counter = 0;
+    const cp = new Checkpointer<number>({
+      write: async (v) => {
+        written.push(v);
+      },
+      snapshot: () => counter,
+      everyItems: 100,
+      everyMs: 750,
+      setTimeoutImpl: clock.setTimeoutImpl,
+      clearTimeoutImpl: clock.clearTimeoutImpl,
+    });
+    for (let i = 0; i < 30; i++) {
+      counter++;
+      cp.touch();
+    }
+    // Lowering the batch under what is already pending must not leave the write
+    // owed until the next touch.
+    cp.setEveryItems(10);
+    await cp.flush();
+    expect(written).toEqual([30]);
   });
 });
 

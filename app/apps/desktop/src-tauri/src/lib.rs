@@ -1,6 +1,6 @@
 //! Baalda — desktop Rust core (Phase 0).
 //! Rust owns all disk I/O; the React UI talks to it through the typed commands
-//! registered here and reacts to `file-changed` / `vault-opened` events.
+//! registered here and reacts to `files-changed` / `vault-opened` events.
 
 pub mod attachments;
 mod commands;

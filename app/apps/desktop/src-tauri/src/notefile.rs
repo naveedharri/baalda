@@ -34,6 +34,45 @@ pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Atomic write of an absolute path, with the data **fsync'd** before the
+/// rename. For files that have no second copy anywhere.
+///
+/// [`write_note`] deliberately skips the fsync: a note's bytes also live in the
+/// open Y.Doc and (when synced) on the server, so a crash that loses the tail of
+/// a write costs at most a re-egest. `.context/config.json` is the opposite —
+/// it is the ONLY copy of the vault's doc-id map, and a rename that lands before
+/// its data reaches disk leaves an empty or truncated map, which reads as "this
+/// vault knows nothing about its notes" and re-registers the whole vault.
+///
+/// The caller supplies an absolute path because the one caller writes inside
+/// `.context/`, which `resolve_in_vault` is not used for.
+pub fn write_atomic_fsync(target: &Path, content: &[u8]) -> AppResult<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| AppError::new("target has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| AppError::new("invalid file name"))?;
+    let tmp = parent.join(format!(".{file_name}.tmp"));
+
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content)?;
+        // Data on disk BEFORE the rename publishes it.
+        f.sync_all()?;
+    }
+    // Leave no debris behind if the rename fails (a full disk, a permissions
+    // change): the stale temp file would otherwise sit in `.context` forever.
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 /// Write a note ONLY if nothing is there yet. Returns true when the file was
 /// created, false when it already existed (left byte-for-byte untouched).
 ///
@@ -113,7 +152,9 @@ pub fn rename_path(vault: &Path, old_rel: &str, new_rel: &str) -> AppResult<Stri
 /// from a real failure is how idempotency quietly breaks.
 pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<()> {
     if crate::vault::rel_path_is_ignored(rel) {
-        return Err(AppError::new("refusing to create a folder in an ignored dir"));
+        return Err(AppError::new(
+            "refusing to create a folder in an ignored dir",
+        ));
     }
     let abs = resolve_in_vault(vault, rel)?;
     std::fs::create_dir_all(&abs)?;
@@ -143,7 +184,9 @@ pub fn trash_note(vault: &Path, rel: &str, stamp: &str) -> AppResult<String> {
         return Err(AppError::new("invalid trash stamp"));
     }
     if crate::vault::rel_path_is_ignored(rel) {
-        return Err(AppError::new("refusing to trash a path inside an ignored dir"));
+        return Err(AppError::new(
+            "refusing to trash a path inside an ignored dir",
+        ));
     }
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
@@ -280,6 +323,35 @@ mod tests {
     }
 
     #[test]
+    fn atomic_fsync_write_replaces_content_and_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join(".context").join("config.json");
+
+        write_atomic_fsync(&target, br#"{"organizationId":"org-1"}"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"{"organizationId":"org-1"}"#
+        );
+
+        // Overwrite in place (the doc-id map grows on every registry pull).
+        write_atomic_fsync(&target, br#"{"organizationId":"org-1","notes":{}}"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"{"organizationId":"org-1","notes":{}}"#
+        );
+
+        // The temp file is gone — a `.config.json.tmp` left in `.context` would
+        // sit there forever (nothing walks that dir to clean it up).
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path().join(".context"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
     fn write_note_if_missing_creates_but_never_overwrites() {
         let tmp = tempfile::tempdir().unwrap();
 
@@ -288,7 +360,12 @@ mod tests {
         assert_eq!(read_note(tmp.path(), "Context/brand/kit.md").unwrap(), "");
 
         // A real note is then written there by the user.
-        write_note(tmp.path(), "Context/brand/kit.md", "# Brand kit\n\nreal content").unwrap();
+        write_note(
+            tmp.path(),
+            "Context/brand/kit.md",
+            "# Brand kit\n\nreal content",
+        )
+        .unwrap();
 
         // Materializing it again — the exact call that emptied 428 notes when it
         // was a plain write — reports "already there" and changes nothing.
@@ -399,7 +476,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_note(tmp.path(), "a.md", "x").unwrap();
         for bad in ["", "a/b", "../..", ".hidden", "a b"] {
-            assert!(trash_note(tmp.path(), "a.md", bad).is_err(), "stamp {bad:?}");
+            assert!(
+                trash_note(tmp.path(), "a.md", bad).is_err(),
+                "stamp {bad:?}"
+            );
         }
         // Nothing was moved by any of the rejected attempts.
         assert!(tmp.path().join("a.md").exists());

@@ -77,6 +77,17 @@ export interface VaultDocStoreOptions {
    *  session must schedule a content push for this doc (its own local-change
    *  drain would otherwise see file == doc and skip the network). */
   onExternalMerge?: (docId: string) => void;
+  /**
+   * A cold apply landed the server's state for this doc and found NOTHING local
+   * to merge into it — the file on disk now equals the doc, and the doc equals
+   * what the server sent.
+   *
+   * This is the signal that removes the double-delivery: the session marks such
+   * a doc as pushed, so the content run's queue shrinks to exactly "the docs the
+   * server did not deliver" instead of re-pushing every note the vault channel
+   * had already handed us over one socket apiece.
+   */
+  onConverged?: (docId: string) => void;
   /** Durable manifest. Defaults to {@link nullManifestStore}. */
   manifest?: ManifestStore;
   /** Injected in tests. */
@@ -96,6 +107,7 @@ export class VaultDocStore implements DocUpdateSink {
   private readonly io: BridgeIO;
   private readonly resolvePath: (docId: string) => string | null;
   private readonly onExternalMerge?: (docId: string) => void;
+  private readonly onConverged?: (docId: string) => void;
   private readonly hotCap: number;
   private readonly manifest: ManifestStore;
   private readonly setT: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
@@ -130,6 +142,7 @@ export class VaultDocStore implements DocUpdateSink {
     this.io = opts.io ?? createTauriBridgeIO();
     this.resolvePath = opts.resolvePath;
     this.onExternalMerge = opts.onExternalMerge;
+    this.onConverged = opts.onConverged;
     this.hotCap = opts.hotCap ?? HOT_DOC_CAP;
     this.manifest = opts.manifest ?? nullManifestStore;
     this.setT = opts.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
@@ -417,12 +430,29 @@ export class VaultDocStore implements DocUpdateSink {
       // unhydrated placeholder on the pull-before-seed path (never a pre-sync
       // seed); converged content makes this a no-op read. A genuine merge is
       // reported up so the session pushes it (see `onExternalMerge`).
+      // Whether this doc held ANY local CRDT ops before the remote state landed.
+      // Only a doc that had none — the empty placeholder a fresh join
+      // materializes — can be declared converged below: a doc with prior local
+      // ops may hold edits the server has never seen (typed offline, app closed
+      // before the flush; NOT in `divergedDocs`, which only tracks out-of-band
+      // file merges), and marking it pushed would strand exactly those bytes.
+      const hadLocalState = bridge.doc.store.clients.size > 0;
+      let merged = false;
       if (bridge.serialize().length > 0 && (await bridge.ingestNow())) {
+        merged = true;
         this.onExternalMerge?.(docId);
       }
       bridge.applyRemote(update);
       await bridge.flushEgest();
       this.rememberSv(docId, Y.encodeStateVector(bridge.doc));
+      // Converged: the server's state is on disk and the file had nothing of its
+      // own to contribute. A merge is the opposite case — those ops are
+      // local-only until a provider pushes them, which is `onExternalMerge`'s
+      // job — so the two are mutually exclusive by construction. And only for a
+      // doc that started empty (see `hadLocalState`): that is the join case the
+      // signal exists for, and the only one where "the server's state is all
+      // there is" holds by construction.
+      if (!merged && !hadLocalState) this.onConverged?.(docId);
     } finally {
       bridge.destroy();
     }
