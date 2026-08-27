@@ -11,6 +11,33 @@
 -- at their path — one of them rendering a phantom root-level folder on every
 -- desktop that no folder row backed and that re-materialized after every delete.
 
+-- 0. Duplicate folder rows at one path. Nothing enforced (vault_id, path)
+--    uniqueness, and two devices reconciling the same new folder at once (the
+--    adopt-by-path SELECT races the INSERT) left 2–5 rows per path in production —
+--    the desktop's path→id map then picked one at random, so notes and children
+--    were split across twins. Keep the OLDEST row, re-point everything at it,
+--    delete the rest. No tombstones for the losers: a tombstone tells clients to
+--    remove the local folder, and the local folder IS the keeper's.
+CREATE TEMP TABLE folder_dupes AS
+SELECT f.id AS loser,
+       (SELECT k.id FROM folders k
+         WHERE k.vault_id = f.vault_id AND k.path = f.path
+         ORDER BY k.created_at ASC, k.id ASC LIMIT 1) AS keeper
+  FROM folders f;
+DELETE FROM folder_dupes WHERE loser = keeper;
+
+UPDATE notes n SET folder_id = d.keeper FROM folder_dupes d WHERE n.folder_id = d.loser;
+UPDATE files fi SET folder_id = d.keeper FROM folder_dupes d WHERE fi.folder_id = d.loser;
+UPDATE folders c SET parent_id = d.keeper FROM folder_dupes d WHERE c.parent_id = d.loser;
+-- Children were re-pointed above, so ON DELETE CASCADE has nothing to cascade.
+DELETE FROM folders f USING folder_dupes d WHERE f.id = d.loser;
+DROP TABLE folder_dupes;
+
+-- One path, one folder — the backstop the dedupe above should never be needed
+-- again for. Both create surfaces adopt by path first; a lost race now surfaces
+-- as 23505, which they catch and adopt.
+CREATE UNIQUE INDEX IF NOT EXISTS folders_vault_path_uq ON folders (vault_id, path);
+
 -- 1. A folder exists at the path's directory → the path wins; re-point folder_id.
 --    Covers folder_id NULL + nested path, and folder_id pointing elsewhere.
 UPDATE notes n

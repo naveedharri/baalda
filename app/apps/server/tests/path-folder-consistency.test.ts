@@ -231,6 +231,31 @@ describe("rel_path ↔ folder_id consistency", () => {
   describe("migration 022 repairs pre-existing drift", () => {
     const sql = readFileSync(new URL("../migrations/022_note_folder_consistency.sql", import.meta.url), "utf8");
 
+    it("collapses duplicate folder rows at one path onto the oldest, re-pointing notes and children", async () => {
+      // The unique index already exists in the test DB (migrations ran), so the
+      // twins are seeded with it dropped and the migration puts it back.
+      await pool.query("DROP INDEX IF EXISTS folders_vault_path_uq");
+      const twin = await seedFolder(vault, team, "Daily", "Team/Daily"); // newer twin of `daily`
+      const inTwin = await seedNote(vault, twin, "Team/Daily/twin.md", owner.userId);
+      const child = await seedFolder(vault, twin, "Sub", "Team/Daily/Sub");
+
+      await pool.query(sql);
+
+      const { rows } = await pool.query<{ id: string }>(
+        "SELECT id FROM folders WHERE vault_id = $1 AND path = 'Team/Daily'",
+        [vault],
+      );
+      expect(rows.map((r) => r.id)).toEqual([daily]); // oldest survives
+      expect(await noteRow(inTwin)).toEqual({ rel_path: "Team/Daily/twin.md", folder_id: daily });
+      const { rows: kid } = await pool.query<{ parent_id: string }>(
+        "SELECT parent_id FROM folders WHERE id = $1",
+        [child],
+      );
+      expect(kid[0].parent_id).toBe(daily); // child followed, not cascaded away
+      // …and the backstop is back: a second row at the same path is refused.
+      await expect(seedFolder(vault, team, "Daily", "Team/Daily")).rejects.toMatchObject({ code: "23505" });
+    });
+
     it("re-points folder_id from the path, and moves a path under its folder when no folder exists there", async () => {
       // (a) folder_id NULL, nested path → parented where the path says.
       const orphan = await seedNote(vault, null, "Team/Daily/orphan.md", owner.userId);

@@ -299,11 +299,27 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
 
     const id = randomUUID();
     const color = normalizeColor(body.color) ?? null;
-    await pool.query(
-      `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by, color)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [id, vaultId, resolvedParent, name, path, body.sort ?? 0, session.userId, color],
-    );
+    try {
+      await pool.query(
+        `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by, color)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [id, vaultId, resolvedParent, name, path, body.sort ?? 0, session.userId, color],
+      );
+    } catch (err) {
+      // Lost the race against another device registering the same path: the
+      // unique index `folders_vault_path_uq` (migration 022) refused the twin.
+      // Adopt the winner — before that index, this race produced 2–5 rows per
+      // path and split a folder's notes across them.
+      if ((err as { code?: string }).code === "23505") {
+        const winner = await pool.query<{ id: string; parent_id: string | null; name: string }>(
+          "SELECT id, parent_id, name FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
+          [vaultId, path],
+        );
+        const w = winner.rows[0];
+        if (w) return c.json({ id: w.id, vaultId, parentId: w.parent_id, name: w.name, path }, 200);
+      }
+      throw err;
+    }
     changed(c, vaultId);
     return c.json({ id, vaultId, parentId: resolvedParent, name, path, color }, 201);
   });

@@ -197,15 +197,31 @@ export async function createFolder(
   await assertRootNotFrozen(input.vaultId, parentId);
 
   const id = randomUUID();
-  await pool.query(
-    // `created_by` matters beyond bookkeeping: it's what `canEditFolder` and
-    // `listVisibleFolders` use to give a non-admin rights over folders they made.
-    // Omitting it (as this did) meant a member who created a folder through an
-    // assistant couldn't see it in their own sidebar or rename it in the app.
-    `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by)
-     VALUES ($1, $2, $3, $4, $5, 0, $6)`,
-    [id, input.vaultId, parentId, input.name, input.path, ctx.auth.userId],
-  );
+  try {
+    await pool.query(
+      // `created_by` matters beyond bookkeeping: it's what `canEditFolder` and
+      // `listVisibleFolders` use to give a non-admin rights over folders they made.
+      // Omitting it (as this did) meant a member who created a folder through an
+      // assistant couldn't see it in their own sidebar or rename it in the app.
+      `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by)
+       VALUES ($1, $2, $3, $4, $5, 0, $6)`,
+      [id, input.vaultId, parentId, input.name, input.path, ctx.auth.userId],
+    );
+  } catch (err) {
+    // Lost the race against a concurrent create at this path (unique index
+    // `folders_vault_path_uq`): adopt the winner, same as the HTTP route.
+    if ((err as { code?: string }).code === "23505") {
+      const winner = await pool.query<{ id: string; name: string }>(
+        "SELECT id, name FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
+        [input.vaultId, input.path],
+      );
+      const w = winner.rows[0];
+      if (w) {
+        return { folderId: w.id, parentId, name: w.name, path: input.path, adopted: true };
+      }
+    }
+    throw err;
+  }
   ctx.onRegistryChanged?.(input.vaultId);
   return { folderId: id, parentId, name: input.name, path: input.path, adopted: false };
 }
