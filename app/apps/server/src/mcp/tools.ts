@@ -157,14 +157,14 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_note",
     description:
-      "Create a new markdown note. relPath is the vault-relative path ending in .md (e.g. 'Ideas/draft.md'). Optionally seed its content.",
+      "Create a new markdown note. relPath is the vault-relative path ending in .md (e.g. 'Ideas/draft.md'); every folder in it must already exist (see list_folders / create_folder). If you also pass folderId it must be the folder whose path is relPath's directory. Optionally seed its content.",
     inputSchema: {
       type: "object",
       properties: {
         vaultId: S("Vault id from list_vaults"),
         relPath: S("Vault-relative path ending in .md, e.g. 'Ideas/draft.md'"),
         title: S("Optional display title (defaults to the filename)"),
-        folderId: S("Optional folder id the note belongs to"),
+        folderId: S("Optional folder id; must match relPath's directory. Usually omit it — the folder is resolved from relPath."),
         content: S("Optional initial markdown content"),
       },
       required: ["vaultId", "relPath"],
@@ -267,7 +267,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "move_note",
     description:
-      "Rename, move, or retitle a note. relPath moves the file, folderId re-parents it (null for the vault root), title changes the display title. The note keeps its docId and its full history, so links and edits survive.",
+      "Rename, move, or retitle a note. relPath moves the file (its directory must be an existing folder, which becomes the note's folder); folderId alone re-parents it keeping its filename (null for the vault root); title changes the display title. The note keeps its docId and its full history, so links and edits survive.",
     inputSchema: {
       type: "object",
       properties: {

@@ -25,6 +25,117 @@ export function basename(path: string): string {
   return i === -1 ? path : path.slice(i + 1);
 }
 
+/** dirname of a `/`-separated vault-relative path; `""` for a root-level path. */
+export function dirname(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
+/**
+ * A vault-relative path the tree can hold: non-empty, no leading/trailing `/`,
+ * no empty, `.` or `..` segments. Same shape the desktop's `resolve_in_vault`
+ * enforces on disk, so a path the server accepts is one every client can write.
+ */
+export function assertValidRelPath(path: string, what = "path"): void {
+  const bad =
+    path.length === 0 ||
+    path.startsWith("/") ||
+    path.endsWith("/") ||
+    path.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
+  if (bad) throw new TreeOpError(`Invalid ${what} "${path}"`);
+}
+
+/** Load the folder at exactly `path` in `vaultId`, or null. */
+export async function findFolderByPath(
+  db: Queryable,
+  vaultId: string,
+  path: string,
+): Promise<FolderRow | null> {
+  const { rows } = await db.query<FolderRow>(
+    "SELECT id, vault_id, path, parent_id FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
+    [vaultId, path],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * The folder a note (or file) at `relPath` belongs to — derived from the path,
+ * and checked against the caller's `folderId` when one is given.
+ *
+ * A note's location is stored twice: `rel_path` (what every client renders and
+ * writes to disk) and `folder_id` (what every ACL walk and the root-freeze latch
+ * read). Nothing used to tie them together, and the two surfaces that create
+ * notes took both as independent inputs. The 2026-08-27 phantom-root-folder
+ * incident is what that allows: an assistant passed `folderId` of
+ * `Team/BenAI/…/Daily` with a `relPath` that dropped the `Team/` prefix. The
+ * freeze saw a parent and let it through; every desktop then rendered a
+ * root-level `BenAI/` folder that no folder row backed, materialized an empty
+ * placeholder for it, and re-created it after every local delete (disk
+ * deletions never propagate). Separately, 100+ notes had been registered with
+ * `folderId: null` and a nested path — "at the root" for permissions, so
+ * folder shares never reached them.
+ *
+ * Rules:
+ *  - `folderId` given → that folder must exist in this vault AND its path must
+ *    equal `dirname(relPath)`. A mismatch is refused, not silently repaired —
+ *    the caller (usually an LLM) needs to learn which of its two inputs is wrong.
+ *  - `folderId` absent/null → resolve by `dirname(relPath)`: `""` is the root
+ *    (null); otherwise the folder at that path must already exist.
+ * Returns the resolved parent id (null = vault root).
+ */
+export async function resolveParentFolder(
+  db: Queryable,
+  vaultId: string,
+  relPath: string,
+  folderId: string | null | undefined,
+): Promise<string | null> {
+  assertValidRelPath(relPath);
+  const dir = dirname(relPath);
+  if (folderId != null) {
+    const folder = await findFolder(db, folderId);
+    if (!folder) throw new TreeOpError("Unknown folder");
+    if (folder.vault_id !== vaultId) throw new TreeOpError("Folder is in a different vault");
+    if (folder.path !== dir) {
+      throw new TreeOpError(
+        `"${relPath}" is not inside folder "${folder.path}" — use relPath "${folder.path}/${basename(relPath)}" or the folder whose path is "${dir}"`,
+      );
+    }
+    return folder.id;
+  }
+  if (dir === "") return null;
+  const byPath = await findFolderByPath(db, vaultId, dir);
+  if (!byPath) throw new TreeOpError(`No folder at "${dir}" — create it first`);
+  return byPath.id;
+}
+
+/**
+ * Folder twin of {@link resolveParentFolder}: the parent of a folder at `path`,
+ * checked against `parentId` when given. `folders.path`/`parent_id` carry the
+ * same duplicated-location hazard as notes.
+ */
+export async function resolveFolderParent(
+  db: Queryable,
+  vaultId: string,
+  path: string,
+  parentId: string | null | undefined,
+): Promise<string | null> {
+  assertValidRelPath(path, "folder path");
+  const dir = dirname(path);
+  if (parentId != null) {
+    const parent = await findFolder(db, parentId);
+    if (!parent) throw new TreeOpError("Unknown parent folder");
+    if (parent.vault_id !== vaultId) throw new TreeOpError("Parent folder is in a different vault");
+    if (parent.path !== dir) {
+      throw new TreeOpError(`Folder path "${path}" is not inside its parent "${parent.path}"`);
+    }
+    return parent.id;
+  }
+  if (dir === "") return null;
+  const byPath = await findFolderByPath(db, vaultId, dir);
+  if (!byPath) throw new TreeOpError(`No folder at "${dir}" — create it first`);
+  return byPath.id;
+}
+
 /** Escape SQL LIKE metacharacters (\ % _) so a value is matched literally under
  *  `LIKE … ESCAPE '\'`. Single home: a folder named `100%_done` must not widen a
  *  subtree rewrite or a cascade delete into unrelated notes. */
@@ -120,6 +231,44 @@ export interface MoveFolderInput {
 }
 
 /**
+ * Where a folder ends up after `input`, with `path` and `parentId` agreeing:
+ *  - `path` given → it is authoritative; a `parentId`, when also given, must be
+ *    the folder at `dirname(path)`, else the parent is resolved from the path.
+ *  - only `parentId` given → the folder keeps its name and follows the parent
+ *    (`null` = the vault root).
+ *  - neither → unchanged.
+ */
+export async function planFolderMove(
+  db: Queryable,
+  folder: FolderRow,
+  input: MoveFolderInput,
+): Promise<{ path: string; parentId: string | null }> {
+  if (input.path !== undefined) {
+    const parentId = await resolveFolderParent(db, folder.vault_id, input.path, input.parentId);
+    return { path: input.path, parentId };
+  }
+  if (input.parentId !== undefined) {
+    const name = input.name ?? basename(folder.path);
+    if (input.parentId === null) return { path: name, parentId: null };
+    const parent = await findFolder(db, input.parentId);
+    if (!parent) throw new TreeOpError("Unknown destination folder");
+    // A cross-vault parent would put a folder in one vault under a tree in
+    // another, so the subtree's paths and its ACL would resolve in different
+    // collections.
+    if (parent.vault_id !== folder.vault_id) {
+      throw new TreeOpError("Destination folder is in a different vault");
+    }
+    return { path: `${parent.path}/${name}`, parentId: parent.id };
+  }
+  if (input.name !== undefined && input.name !== basename(folder.path)) {
+    // A rename in place: same parent, new last segment.
+    const dir = dirname(folder.path);
+    return { path: dir ? `${dir}/${input.name}` : input.name, parentId: folder.parent_id };
+  }
+  return { path: folder.path, parentId: folder.parent_id };
+}
+
+/**
  * Rename and/or move a folder, rewriting every descendant path in place. Ids are
  * never touched, so open CRDT docs and backlinks survive the move (the spec
  * invariant: key by doc_id, never by path).
@@ -133,19 +282,14 @@ export async function moveFolder(
   if (!folder) throw new TreeOpError("Unknown folder");
 
   const oldPath = folder.path;
-  const newPath = input.path ?? oldPath;
+  const plan = await planFolderMove(db, folder, input);
+  const newPath = plan.path;
   const newName = input.name ?? basename(newPath);
-  const newParentId = input.parentId;
+  // Always written: `path` and `parent_id` are resolved together (see
+  // `planFolderMove`), so re-parenting by path alone lands on the right parent.
+  const newParentId: string | null = plan.parentId;
 
-  if (newParentId != null) {
-    const parent = await findFolder(db, newParentId);
-    if (!parent) throw new TreeOpError("Unknown destination folder");
-    // A cross-vault parent would put a folder in one vault under a tree in
-    // another, so the subtree's paths and its ACL would resolve in different
-    // collections.
-    if (parent.vault_id !== folder.vault_id) {
-      throw new TreeOpError("Destination folder is in a different vault");
-    }
+  if (newParentId != null && newParentId !== folder.parent_id) {
     if (await wouldCycle(db, folderId, newParentId)) {
       throw new TreeOpError("Cannot move a folder inside itself");
     }
@@ -162,11 +306,8 @@ export async function moveFolder(
   }
 
   await db.query(
-    `UPDATE folders SET path = $1, name = $2${newParentId === undefined ? "" : ", parent_id = $4"}
-      WHERE id = $3`,
-    newParentId === undefined
-      ? [newPath, newName, folderId]
-      : [newPath, newName, folderId, newParentId],
+    "UPDATE folders SET path = $1, name = $2, parent_id = $4 WHERE id = $3",
+    [newPath, newName, folderId, newParentId],
   );
   if (newPath !== oldPath) {
     await rewriteDescendantPaths(db, folder.vault_id, oldPath, newPath);
@@ -200,6 +341,39 @@ export interface MoveNoteInput {
   folderId?: string | null;
 }
 
+/**
+ * Where a note ends up after `input`, with `rel_path` and `folder_id` agreeing
+ * (see {@link resolveParentFolder} for why that is not optional):
+ *  - `relPath` given → authoritative; `folderId`, when also given, must be the
+ *    folder at `dirname(relPath)`, else the parent is resolved from the path.
+ *  - only `folderId` given → the note keeps its filename and follows the folder
+ *    (`null` = the vault root).
+ *  - neither → unchanged.
+ * Callers gate the root-freeze latch and destination permissions on the
+ * RESOLVED parent, which is why this is exported separately from the write.
+ */
+export async function planNoteMove(
+  db: Queryable,
+  note: NoteRow,
+  input: MoveNoteInput,
+): Promise<{ relPath: string; folderId: string | null }> {
+  if (input.relPath !== undefined) {
+    const folderId = await resolveParentFolder(db, note.vault_id, input.relPath, input.folderId);
+    return { relPath: input.relPath, folderId };
+  }
+  if (input.folderId !== undefined) {
+    const name = basename(note.rel_path);
+    if (input.folderId === null) return { relPath: name, folderId: null };
+    const parent = await findFolder(db, input.folderId);
+    if (!parent) throw new TreeOpError("Unknown destination folder");
+    if (parent.vault_id !== note.vault_id) {
+      throw new TreeOpError("Destination folder is in a different vault");
+    }
+    return { relPath: `${parent.path}/${name}`, folderId: parent.id };
+  }
+  return { relPath: note.rel_path, folderId: note.folder_id };
+}
+
 /** Rename, retitle, and/or move a single note. Its doc_id never changes. */
 export async function moveNote(
   db: Queryable,
@@ -209,16 +383,17 @@ export async function moveNote(
   const note = await findNote(db, docId);
   if (!note) throw new TreeOpError("Unknown note");
 
-  const relPath = input.relPath ?? note.rel_path;
   const title = input.title === undefined ? note.title : input.title;
-  const folderId = input.folderId === undefined ? note.folder_id : input.folderId;
+  const { relPath, folderId } = await planNoteMove(db, note, input);
 
-  if (folderId != null && folderId !== note.folder_id) {
-    const parent = await findFolder(db, folderId);
-    if (!parent) throw new TreeOpError("Unknown destination folder");
-    if (parent.vault_id !== note.vault_id) {
-      throw new TreeOpError("Destination folder is in a different vault");
-    }
+  if (relPath !== note.rel_path) {
+    // Surface the collision as a refusal rather than letting the partial unique
+    // index (`notes_live_path_uq`, migration 021) throw a bare 23505.
+    const clash = await db.query(
+      "SELECT 1 FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL AND id <> $3 LIMIT 1",
+      [note.vault_id, relPath, docId],
+    );
+    if ((clash.rowCount ?? 0) > 0) throw new TreeOpError("A note already exists at that path");
   }
 
   await db.query(

@@ -418,6 +418,9 @@ describe("MCP server", () => {
     });
 
     it("create_note broadcasts to the vault", async () => {
+      // The folder must exist: a nested relPath is resolved to its folder row
+      // (path/folder consistency), never left dangling at the root.
+      await seedFolder(vault, null, "Daily", "Daily");
       const created = await call(token, "create_note", {
         vaultId: vault,
         relPath: "Daily/today.md",
@@ -577,6 +580,7 @@ describe("MCP server", () => {
         content: "body",
       });
       const docId = created.data.docId as string;
+      await seedFolder(vault, null, "Archive", "Archive");
       registryBroadcasts.length = 0;
 
       const moved = await call(token, "move_note", {
@@ -611,6 +615,7 @@ describe("MCP server", () => {
         folderId: sub.data.folderId as string,
       });
       const docId = note.data.docId as string;
+      await seedFolder(vault, null, "Archive", "Archive");
       registryBroadcasts.length = 0;
 
       const moved = await call(token, "move_folder", {
@@ -624,7 +629,7 @@ describe("MCP server", () => {
         "SELECT path FROM folders WHERE vault_id = $1 ORDER BY path",
         [vault],
       );
-      expect(folders.map((f) => f.path)).toEqual(["Archive/Ideas", "Archive/Ideas/Drafts"]);
+      expect(folders.map((f) => f.path)).toEqual(["Archive", "Archive/Ideas", "Archive/Ideas/Drafts"]);
       const { rows: notes } = await pool.query<{ id: string; rel_path: string }>(
         "SELECT id, rel_path FROM notes WHERE vault_id = $1",
         [vault],

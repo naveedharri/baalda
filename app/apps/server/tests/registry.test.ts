@@ -60,6 +60,7 @@ describe("registry structure sync", () => {
   });
 
   it("registering a path that already has a live note ADOPTS it — even under a different doc_id", async () => {
+    await seedFolder(vault, null, "Daily", "Daily");
     const first = await req(owner, "POST", "/api/notes", {
       vaultId: vault,
       relPath: "Daily/2026-08-10.md",

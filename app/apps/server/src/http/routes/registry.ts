@@ -10,10 +10,16 @@ import {
 } from "../../permissions/vault-docs.js";
 import { purgeNoteIndex } from "../../index/indexer.js";
 import {
+  TreeOpError,
   deleteFolderCascade,
+  findFolder,
+  findNote,
   moveFolder,
   moveNote,
-  TreeOpError,
+  planFolderMove,
+  planNoteMove,
+  resolveFolderParent,
+  resolveParentFolder,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 
@@ -63,6 +69,13 @@ const ROOT_FROZEN_ERROR = {
   error: "This vault's root is frozen — create this inside a folder instead.",
   code: "root_frozen",
 } as const;
+
+/** 400 body for a path that disagrees with its folder (or names a folder that
+ *  does not exist). Terminal for the desktop's `withRetry`, which is right: the
+ *  request is wrong, not the network. */
+function pathFolderMismatch(err: TreeOpError) {
+  return { error: err.message, code: "path_folder_mismatch" } as const;
+}
 
 /** Colors are a short id from the client's palette (`lib/appearance`), or null
  *  to clear. Anything else is ignored rather than stored. */
@@ -265,10 +278,22 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ id: existing.rows[0].id, vaultId, parentId: parentId ?? null, name, path }, 200);
     }
 
+    // `path` is authoritative; `parentId` must be the folder at its dirname (or
+    // is resolved from it when absent). See `resolveParentFolder` for the
+    // incident this closes.
+    let resolvedParent: string | null;
+    try {
+      resolvedParent = await resolveFolderParent(pool, vaultId, path, parentId ?? null);
+    } catch (err) {
+      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
+      throw err;
+    }
+
     // Frozen root: only NEW root folders are refused. The adopt path above
     // already returned, so an existing folder still reconciles from every
-    // device after the latch goes on.
-    if (!parentId && (await isRootFrozen(vaultId))) {
+    // device after the latch goes on. Judged on the RESOLVED parent, so a nested
+    // path with no parentId is not mistaken for a root creation.
+    if (resolvedParent === null && (await isRootFrozen(vaultId))) {
       return c.json(ROOT_FROZEN_ERROR, 403);
     }
 
@@ -277,10 +302,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     await pool.query(
       `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by, color)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [id, vaultId, parentId ?? null, name, path, body.sort ?? 0, session.userId, color],
+      [id, vaultId, resolvedParent, name, path, body.sort ?? 0, session.userId, color],
     );
     changed(c, vaultId);
-    return c.json({ id, vaultId, parentId: parentId ?? null, name, path, color }, 201);
+    return c.json({ id, vaultId, parentId: resolvedParent, name, path, color }, 201);
   });
 
   registryRoutes.get("/folders", async (c) => {
@@ -328,14 +353,34 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "You cannot modify this folder" }, 403);
     }
     const newParentId = body.parentId === undefined ? undefined : (body.parentId ?? null);
+    const moveInput = {
+      path: typeof body.path === "string" ? body.path : undefined,
+      name: typeof body.name === "string" ? body.name : undefined,
+      parentId: newParentId,
+    };
+    // Resolve where the folder will land BEFORE gating: a `path`-only move to
+    // another directory (or to the root) is a re-parent whether or not the
+    // caller said `parentId`, and both gates below must see the real target.
+    const current = (await findFolder(pool, id))!;
+    let plan;
+    try {
+      plan = await planFolderMove(pool, current, moveInput);
+    } catch (err) {
+      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
+      throw err;
+    }
     // Re-parenting under another folder must not be a way to change inherited
     // access: require edit on the destination parent too (root/null is fine).
-    if (newParentId != null && !(await canEditFolder(session.userId, newParentId))) {
+    if (
+      plan.parentId != null &&
+      plan.parentId !== current.parent_id &&
+      !(await canEditFolder(session.userId, plan.parentId))
+    ) {
       return c.json({ error: "You cannot move this folder there" }, 403);
     }
 
     // Moving a folder OUT to the root is a root creation by another name.
-    if (newParentId === null && (await isRootFrozen(row.vault_id))) {
+    if (plan.parentId === null && current.parent_id !== null && (await isRootFrozen(row.vault_id))) {
       return c.json(ROOT_FROZEN_ERROR, 403);
     }
 
@@ -347,11 +392,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     }
 
     try {
-      const moved = await moveFolder(pool, id, {
-        path: typeof body.path === "string" ? body.path : undefined,
-        name: typeof body.name === "string" ? body.name : undefined,
-        parentId: newParentId,
-      });
+      const moved = await moveFolder(pool, id, moveInput);
       changed(c, moved.vaultId);
       return c.json(
         { id, vaultId: moved.vaultId, name: moved.name, path: moved.path, color },
@@ -439,11 +480,24 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       );
     }
 
+    // `relPath` is authoritative; `folderId` must be the folder at its dirname
+    // (or is resolved from it when the client sent none). A desktop whose
+    // folder map missed a parent, or an assistant that computed the two
+    // inconsistently, otherwise writes a row every client renders in one place
+    // and every ACL walk reads in another (2026-08-27 phantom-root-folder).
+    let resolvedFolder: string | null;
+    try {
+      resolvedFolder = await resolveParentFolder(pool, vaultId, relPath, folderId ?? null);
+    } catch (err) {
+      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
+      throw err;
+    }
+
     // Frozen root: refuse only notes that do not exist yet. Re-registering a
     // root note that predates the latch (a second device, a repeat reconcile)
     // has to keep working, or freezing the root would break sync for the very
-    // notes the team froze it to protect.
-    if (!folderId && (await isRootFrozen(vaultId))) {
+    // notes the team froze it to protect. Judged on the RESOLVED parent.
+    if (resolvedFolder === null && (await isRootFrozen(vaultId))) {
       const { rowCount } = await pool.query("SELECT 1 FROM notes WHERE id = $1", [id]);
       if (!rowCount) return c.json(ROOT_FROZEN_ERROR, 403);
     }
@@ -464,7 +518,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
         [
           id,
           vaultId,
-          folderId ?? null,
+          resolvedFolder,
           title ?? null,
           relPath,
           session.userId,
@@ -514,7 +568,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     }
     changed(c, vaultId);
     return c.json(
-      { id, docId: id, vaultId, folderId: folderId ?? null, title: title ?? null, relPath },
+      { id, docId: id, vaultId, folderId: resolvedFolder, title: title ?? null, relPath },
       201,
     );
   });
@@ -579,16 +633,36 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "You cannot modify this note" }, 403);
     }
     const folderId = body.folderId === undefined ? undefined : (body.folderId ?? null);
+    const moveInput = {
+      relPath: typeof body.relPath === "string" ? body.relPath : undefined,
+      title: body.title,
+      folderId,
+    };
+    // Resolve the destination from the PATH first: a `relPath`-only move to
+    // another folder (or out to the root) is a re-parent whether or not the
+    // client also said `folderId`, and both gates below must judge the real one.
+    const note = (await findNote(pool, id))!;
+    let plan;
+    try {
+      plan = await planNoteMove(pool, note, moveInput);
+    } catch (err) {
+      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
+      throw err;
+    }
     // Same rule the folder route has always had, applied here too: moving a note
     // INTO a folder must not be a way to hand out access to it. Folder grants
     // inherit down, so without this a member could take a note only they can read
     // and drop it into a team-shared folder, granting the whole team edit on it.
-    if (folderId != null && !(await canEditFolder(session.userId, folderId))) {
+    if (
+      plan.folderId != null &&
+      plan.folderId !== row.folder_id &&
+      !(await canEditFolder(session.userId, plan.folderId))
+    ) {
       return c.json({ error: "You cannot move this note there" }, 403);
     }
     // Dragging a note out to the root is a root creation by another name —
     // unless it already lives there, which is a rename, not a move.
-    if (folderId === null && row.folder_id !== null && (await isRootFrozen(row.vault_id))) {
+    if (plan.folderId === null && row.folder_id !== null && (await isRootFrozen(row.vault_id))) {
       return c.json(ROOT_FROZEN_ERROR, 403);
     }
 
@@ -598,11 +672,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     }
 
     try {
-      const moved = await moveNote(pool, id, {
-        relPath: typeof body.relPath === "string" ? body.relPath : undefined,
-        title: body.title,
-        folderId,
-      });
+      const moved = await moveNote(pool, id, moveInput);
       changed(c, moved.vaultId);
       return c.json(
         {
@@ -664,19 +734,26 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
     const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
+    let resolvedFolder: string | null;
+    try {
+      resolvedFolder = await resolveParentFolder(pool, vaultId, path, folderId ?? null);
+    } catch (err) {
+      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
+      throw err;
+    }
     // Frozen root: same rule as notes — refuse only files that do not exist
     // yet, so a device re-registering a root file that predates the latch
     // still syncs.
-    if (!folderId && (await isRootFrozen(vaultId))) {
+    if (resolvedFolder === null && (await isRootFrozen(vaultId))) {
       const { rowCount } = await pool.query("SELECT 1 FROM files WHERE id = $1", [id]);
       if (!rowCount) return c.json(ROOT_FROZEN_ERROR, 403);
     }
     await pool.query(
       "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
-      [id, vaultId, folderId ?? null, path],
+      [id, vaultId, resolvedFolder, path],
     );
     changed(c, vaultId);
-    return c.json({ id, docId: id, vaultId, folderId: folderId ?? null, path }, 201);
+    return c.json({ id, docId: id, vaultId, folderId: resolvedFolder, path }, 201);
   });
 
   return registryRoutes;
