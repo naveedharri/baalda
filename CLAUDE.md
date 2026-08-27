@@ -213,6 +213,11 @@ change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011
 ## Conventions & gotchas
 
 - **`doc_id` is identity.** Never resolve or store a note by path across layers.
+- **`rel_path` and `folder_id` must agree.** A note/file/folder's location is stored twice; the server
+  derives or validates the parent from the path on every create and move
+  (`registry/tree-ops.ts` `resolveParentFolder` / `planNoteMove` / `planFolderMove`; mismatch → 400
+  `path_folder_mismatch`) and the root-freeze latch judges the *resolved* parent. Migration 022 repaired
+  the drift that let a phantom root folder appear (2026-08-27).
 - **`.context/` is sacred and hidden** — never walk, sync, or index it. It holds `index.sqlite`, the CRDT
   store, and `config.json` (server vault id + doc-id map; travels with the vault).
 - **Reuse patterns, not code.** We study OSS references (Noteriv, Relay, Hocuspocus, Better Auth) but write

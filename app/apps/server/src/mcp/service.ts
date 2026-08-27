@@ -5,12 +5,17 @@ import { effectivePermission, type Permission } from "../permissions/resolver.js
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
 import { canEditFolder } from "../permissions/http-gates.js";
 import {
+  TreeOpError,
   deleteFolderCascade,
   findFolder,
+  findNote,
   folderIsEmpty,
   moveFolder,
   moveNote,
-  TreeOpError,
+  planFolderMove,
+  planNoteMove,
+  resolveFolderParent,
+  resolveParentFolder,
 } from "../registry/tree-ops.js";
 import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
@@ -161,7 +166,16 @@ export async function createFolder(
   input: { vaultId: string; name: string; path: string; parentId?: string | null },
 ) {
   await requireVaultInScope(ctx.auth, input.vaultId);
-  const parentId = input.parentId ?? null;
+  // `path` is authoritative; `parentId` must be the folder at its dirname or is
+  // resolved from it. Done before the permission check so the check judges the
+  // real parent (see `resolveParentFolder`).
+  let parentId: string | null;
+  try {
+    parentId = await resolveFolderParent(pool, input.vaultId, input.path, input.parentId ?? null);
+  } catch (err) {
+    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    throw err;
+  }
   if ((await folderWritePermission(ctx.auth, parentId)) !== "edit") {
     throw new McpToolError("You do not have edit access to create a folder here");
   }
@@ -183,15 +197,31 @@ export async function createFolder(
   await assertRootNotFrozen(input.vaultId, parentId);
 
   const id = randomUUID();
-  await pool.query(
-    // `created_by` matters beyond bookkeeping: it's what `canEditFolder` and
-    // `listVisibleFolders` use to give a non-admin rights over folders they made.
-    // Omitting it (as this did) meant a member who created a folder through an
-    // assistant couldn't see it in their own sidebar or rename it in the app.
-    `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by)
-     VALUES ($1, $2, $3, $4, $5, 0, $6)`,
-    [id, input.vaultId, parentId, input.name, input.path, ctx.auth.userId],
-  );
+  try {
+    await pool.query(
+      // `created_by` matters beyond bookkeeping: it's what `canEditFolder` and
+      // `listVisibleFolders` use to give a non-admin rights over folders they made.
+      // Omitting it (as this did) meant a member who created a folder through an
+      // assistant couldn't see it in their own sidebar or rename it in the app.
+      `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by)
+       VALUES ($1, $2, $3, $4, $5, 0, $6)`,
+      [id, input.vaultId, parentId, input.name, input.path, ctx.auth.userId],
+    );
+  } catch (err) {
+    // Lost the race against a concurrent create at this path (unique index
+    // `folders_vault_path_uq`): adopt the winner, same as the HTTP route.
+    if ((err as { code?: string }).code === "23505") {
+      const winner = await pool.query<{ id: string; name: string }>(
+        "SELECT id, name FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
+        [input.vaultId, input.path],
+      );
+      const w = winner.rows[0];
+      if (w) {
+        return { folderId: w.id, parentId, name: w.name, path: input.path, adopted: true };
+      }
+    }
+    throw err;
+  }
   ctx.onRegistryChanged?.(input.vaultId);
   return { folderId: id, parentId, name: input.name, path: input.path, adopted: false };
 }
@@ -258,20 +288,29 @@ export async function moveFolderTool(
   // means the vault root, which `folderWritePermission` treats as admin-only;
   // applying that here would make moving to the root admin-only over MCP while
   // HTTP allows it for the same user (it short-circuits on null the same way).
-  if (input.parentId != null && (await folderWritePermission(ctx.auth, input.parentId)) !== "edit") {
+  const moveInput = { path: input.path, name: input.name, parentId: input.parentId };
+  // Judge the RESOLVED destination: a `path`-only move is a re-parent too.
+  let plan;
+  try {
+    plan = await planFolderMove(pool, folder, moveInput);
+  } catch (err) {
+    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    throw err;
+  }
+  if (
+    plan.parentId != null &&
+    plan.parentId !== folder.parent_id &&
+    (await folderWritePermission(ctx.auth, plan.parentId)) !== "edit"
+  ) {
     throw new McpToolError("You do not have edit access to the destination folder");
   }
   // Moving a folder OUT to the root is a root creation by another name — the
   // same latch the HTTP registry honours (a rename in place at root is fine).
-  if (input.parentId === null && folder.parent_id !== null) {
+  if (plan.parentId === null && folder.parent_id !== null) {
     await assertRootNotFrozen(folder.vault_id, null, "move");
   }
   try {
-    const moved = await moveFolder(pool, input.folderId, {
-      path: input.path,
-      name: input.name,
-      parentId: input.parentId,
-    });
+    const moved = await moveFolder(pool, input.folderId, moveInput);
     ctx.onRegistryChanged?.(moved.vaultId);
     return { folderId: moved.id, name: moved.name, path: moved.path };
   } catch (err) {
@@ -286,27 +325,34 @@ export async function moveNoteTool(
   input: { docId: string; relPath?: string; title?: string; folderId?: string | null },
 ) {
   const note = await requireEditableNote(ctx.auth, input.docId);
+  const moveInput = { relPath: input.relPath, title: input.title, folderId: input.folderId };
+  // Judge the RESOLVED destination: `relPath` alone can move the note to another
+  // folder or out to the root, and both gates below must see that.
+  const row = (await findNote(pool, input.docId))!;
+  let plan;
+  try {
+    plan = await planNoteMove(pool, row, moveInput);
+  } catch (err) {
+    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    throw err;
+  }
   // Moving a note INTO a folder inherits that folder's grants, so it needs edit
   // on the destination as well as on the note. Same null-is-the-root carve-out as
   // `moveFolderTool`.
   if (
-    input.folderId != null &&
-    input.folderId !== note.folder_id &&
-    (await folderWritePermission(ctx.auth, input.folderId)) !== "edit"
+    plan.folderId != null &&
+    plan.folderId !== note.folder_id &&
+    (await folderWritePermission(ctx.auth, plan.folderId)) !== "edit"
   ) {
     throw new McpToolError("You do not have edit access to the destination folder");
   }
   // Same root-freeze latch as HTTP's PATCH /api/notes/:id: dragging a note out
   // to a frozen root is refused; a rename in place at root is allowed.
-  if (input.folderId === null && note.folder_id !== null) {
+  if (plan.folderId === null && note.folder_id !== null) {
     await assertRootNotFrozen(note.vault_id, null, "move");
   }
   try {
-    const moved = await moveNote(pool, input.docId, {
-      relPath: input.relPath,
-      title: input.title,
-      folderId: input.folderId,
-    });
+    const moved = await moveNote(pool, input.docId, moveInput);
     ctx.onRegistryChanged?.(moved.vaultId);
     return {
       docId: moved.id,
@@ -421,7 +467,18 @@ export async function createNote(
   },
 ) {
   await requireVaultInScope(ctx.auth, input.vaultId);
-  const folderId = input.folderId ?? null;
+  // `relPath` is authoritative; `folderId` must be the folder at its dirname or
+  // is resolved from it. An assistant that computes the two inconsistently
+  // (the 2026-08-27 phantom-root-folder: `folderId` of `Team/BenAI/…/Daily`,
+  // `relPath` without the `Team/`) is told so instead of writing a row every
+  // client renders at the root while the root-freeze latch sees a parent.
+  let folderId: string | null;
+  try {
+    folderId = await resolveParentFolder(pool, input.vaultId, input.relPath, input.folderId ?? null);
+  } catch (err) {
+    if (err instanceof TreeOpError) throw new McpToolError(err.message);
+    throw err;
+  }
   if ((await folderWritePermission(ctx.auth, folderId)) !== "edit") {
     throw new McpToolError("You do not have edit access to create a note here");
   }
