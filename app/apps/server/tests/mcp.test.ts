@@ -264,7 +264,7 @@ describe("MCP server", () => {
     await seedMember(org, member, "member");
     const vault = await seedVault(org);
     const folder = await seedFolder(vault, null, "Locked", "Locked");
-    const child = await seedFolder(vault, folder, "Locked/Child", "Child");
+    const child = await seedFolder(vault, folder, "Child", "Locked/Child");
     // Member has an explicit edit grant on the folder …
     await seedShare(org, "folder", folder, member, "edit");
     const ownerToken = await tokenFor(owner, org);
@@ -316,7 +316,7 @@ describe("MCP server", () => {
     // on the child caps it. (Grant + lock live on different folders so they
     // don't collide on the one-row-per-(resource,principal) key.)
     const grantParent = await seedFolder(vault, null, "Grant", "Grant");
-    const userLocked = await seedFolder(vault, grantParent, "Grant/Locked", "Locked");
+    const userLocked = await seedFolder(vault, grantParent, "Locked", "Grant/Locked");
     await seedShare(org, "folder", grantParent, member, "edit");
     await seedLock(org, "folder", userLocked, { type: "user", id: member });
     expect(
