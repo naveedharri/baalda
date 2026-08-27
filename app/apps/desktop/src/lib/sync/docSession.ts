@@ -67,6 +67,14 @@ const REGISTRY_MAP_PUBLISH_MS = 100;
 const LOCAL_CHANGE_DEBOUNCE_MS = 800;
 /** Re-check interval while a bulk run holds the uploader slot. */
 const LOCAL_CHANGE_RETRY_MS = 2_000;
+/**
+ * How long the download phase may wait for the vault channel's `ready` before
+ * the run stops reporting "Syncing…" and admits the channel is unreachable.
+ * Generous: a cold 5k-note backfill legitimately takes a while, but its frames
+ * flip the engine to `synced`-in-progress long before this elapses; only a
+ * socket that never opens gets here.
+ */
+const CHANNEL_WATCHDOG_MS = 30_000;
 
 export interface OpenedDoc {
   awareness: Awareness;
@@ -194,8 +202,30 @@ export class SyncManager implements InboundHost {
    *  NOT mean "nothing to send", so the push must connect regardless. Cleared
    *  per doc when a push confirms it, wholesale on teardown. */
   private divergedDocs = new Set<string>();
+  /**
+   * docIds the SERVER says it holds no CRDT state for (`ready.empty`), replaced
+   * on every vault-channel `ready`.
+   *
+   * The authority on what still needs uploading. `registry.isPushed` is a local
+   * optimisation and can be wrong in the one direction that matters — claiming a
+   * note the server never received (613 of them in prod) — so the run's work list
+   * is "not confirmed locally OR named here", and these go first.
+   */
+  private serverEmpty = new Set<string>();
+  /** The server truncated `ready.empty`: more empty docs exist than one frame
+   *  names, so another `hello` is owed once this run drains them. */
+  private serverEmptyTruncated = false;
   /** True while the run is reporting the vault channel's inbound queue. */
   private downloadPhase = false;
+  /**
+   * The channel watchdog. The content run waits for the vault channel's `ready`
+   * (download before upload), so a channel that never connects — WS blocked by a
+   * proxy, server down — would otherwise leave the pill on "Syncing…" forever.
+   * When this fires with no `ready` in sight, the run is stamped `error` so the
+   * pill reads "Retrying…"; the next `ready` clears the stall and resumes.
+   */
+  private channelWatchdog: ReturnType<typeof setTimeout> | null = null;
+  private channelStalled = false;
   private lastInboundDone = 0;
   private lastInboundTotal = 0;
   /** Resolves when the current bulk run finishes (tests). */
@@ -492,8 +522,8 @@ export class SyncManager implements InboundHost {
   }
 
   /**
-   * A watcher `file-changed` event for something OTHER than the open note (App
-   * routes the open note's events into its bridge, whose own provider pushes).
+   * One watcher `files-changed` BATCH, minus the open note (App routes the open
+   * note's events into its bridge, whose own provider pushes).
    *
    * This is what makes an external writer a first-class editor: people open the
    * vault folder in an AI tool (Claude, Cursor, a script) that creates and edits
@@ -512,38 +542,54 @@ export class SyncManager implements InboundHost {
    *    MCP): auto-propagating disk deletions would let `git checkout`-style tree
    *    churn delete a team's notes.
    */
-  handleLocalFileChanged(relPath: string, kind: "modified" | "removed" | "tree"): void {
+  handleLocalFilesChanged(
+    changes: ReadonlyArray<{ path: string; kind: "modified" | "removed" | "tree" }>,
+  ): void {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
-    if (kind === "removed") return;
-    if (kind === "tree") {
-      this.handleRegistryChanged();
-      return;
+    // ONE registry pull for the whole batch, however many items ask for it. The
+    // watcher already debounces into batches, and an AI writing 200 new files
+    // used to re-enter `handleRegistryChanged` 200 times per batch — 200 timer
+    // teardowns for the single pull that was always going to happen.
+    let pullRegistry = false;
+    for (const { path: relPath, kind } of changes) {
+      if (kind === "removed") continue;
+      if (kind === "tree") {
+        pullRegistry = true;
+        continue;
+      }
+      const mapping = this.registry.getMapping(relPath);
+      if (!mapping) {
+        pullRegistry = true;
+        continue;
+      }
+      // Belt and braces with the uploader's own `skip`: the open note's editor
+      // session owns its provider, and its bridge already ingests watcher events.
+      if (this.docStore?.suppressedDoc() === mapping.docId) continue;
+      this.localChanges.set(mapping.docId, relPath);
+      this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+      // A doc resident in the hot tier has a LIVE bridge, and its next egest (a
+      // remote update landing) would overwrite the file's new bytes before the
+      // drain runs — merge them into the doc NOW. A genuine merge goes into the
+      // diverged set: the drain's own ingest will then find file == doc, and only
+      // this marker tells it the doc still holds unsent ops.
+      const resident = this.docStore?.peekResident(mapping.docId);
+      if (resident) {
+        void resident
+          .ingestNow()
+          .then((changed) => {
+            if (changed && scope.isCurrent()) this.divergedDocs.add(mapping.docId);
+          })
+          .catch((e) => console.warn("[sync] resident ingest failed", e));
+      }
     }
-    const mapping = this.registry.getMapping(relPath);
-    if (!mapping) {
-      this.handleRegistryChanged();
-      return;
-    }
-    // Belt and braces with the uploader's own `skip`: the open note's editor
-    // session owns its provider, and its bridge already ingests watcher events.
-    if (this.docStore?.suppressedDoc() === mapping.docId) return;
-    this.localChanges.set(mapping.docId, relPath);
-    this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
-    // A doc resident in the hot tier has a LIVE bridge, and its next egest (a
-    // remote update landing) would overwrite the file's new bytes before the
-    // drain runs — merge them into the doc NOW. A genuine merge goes into the
-    // diverged set: the drain's own ingest will then find file == doc, and only
-    // this marker tells it the doc still holds unsent ops.
-    const resident = this.docStore?.peekResident(mapping.docId);
-    if (resident) {
-      void resident
-        .ingestNow()
-        .then((changed) => {
-          if (changed && scope.isCurrent()) this.divergedDocs.add(mapping.docId);
-        })
-        .catch((e) => console.warn("[sync] resident ingest failed", e));
-    }
+    if (pullRegistry) this.handleRegistryChanged();
+  }
+
+  /** Single-event form of {@link handleLocalFilesChanged}, for call sites that
+   *  see one change at a time. */
+  handleLocalFileChanged(relPath: string, kind: "modified" | "removed" | "tree"): void {
+    this.handleLocalFilesChanged([{ path: relPath, kind }]);
   }
 
   private armLocalChangeDrain(scope: VaultScope, delayMs: number): void {
@@ -658,23 +704,6 @@ export class SyncManager implements InboundHost {
   }
 
   /**
-   * Notes this device has NOT confirmed the content of. Excludes the open note,
-   * whose own editor session owns its provider.
-   *
-   * A freshly materialized note is an EMPTY `.md` on disk (the registry writes a
-   * placeholder and hydrates lazily), so "not confirmed" is literally "this
-   * device does not have the content" — not a bookkeeping detail.
-   */
-  private unconfirmedNotes(): number {
-    const open = this.docStore?.suppressedDoc() ?? null;
-    let n = 0;
-    for (const note of this.registry.mappedNotes()) {
-      if (note.docId !== open && !this.registry.isPushed(note.docId)) n++;
-    }
-    return n;
-  }
-
-  /**
    * Land the vault on a coherent state after a registry pull.
    *
    * A pull re-enters the `registering` phase (it may create rows for a teammate's
@@ -685,8 +714,10 @@ export class SyncManager implements InboundHost {
    * row plus an empty placeholder file. Stamping `done` there would claim the
    * vault is fully synced while that note has no content on this device, and the
    * sidebar would (correctly, and contradictorily) badge its row as not synced.
-   * So: if anything is unconfirmed, run the content pass that confirms it, and let
-   * THAT run stamp the terminal phase. Otherwise stamp it here.
+   * So: if anything is still unconfirmed (or the server told us it holds no
+   * content for it), run the content pass that confirms it and let THAT run stamp
+   * the terminal phase — `startContentRunIfNeeded` decides which, and defers to
+   * the vault channel's backfill if one is still arriving.
    */
   private settleAfterPull(scope: VaultScope): void {
     // A live run will reach its own terminal phase and will pick up whatever the
@@ -694,13 +725,84 @@ export class SyncManager implements InboundHost {
     // pushed set. Restarting it here instead would let a busy team's structural
     // churn abandon the initial backfill over and over.
     if (this.uploader?.isRunning()) return;
-    if (this.unconfirmedNotes() === 0) {
-      this.completeRun(scope);
+    this.startContentRunIfNeeded(scope);
+  }
+
+  /**
+   * Start the content run, or stamp the terminal phase when there is nothing to
+   * send. The ONE entry point for starting a run, called from every edge that can
+   * change the answer: the download phase settling, a `ready` frame, a registry
+   * pull, and the user's manual retry.
+   *
+   * Two gates, both load-bearing:
+   *
+   *  - a run already in flight is left alone. Its queue is rebuilt from
+   *    `mappedNotes()` minus the pushed set, so it picks up whatever arrived
+   *    while it was running; restarting it would let a busy team's structural
+   *    churn abandon the initial backfill over and over.
+   *  - the vault channel's backfill must have settled. Uploading a doc the
+   *    channel is about to hand us is the double delivery this exists to remove,
+   *    and the settle edge re-enters here anyway.
+   */
+  private startContentRunIfNeeded(scope: VaultScope): void {
+    if (!this.enabled || !scope.isCurrent()) return;
+    if (this.uploader?.isRunning()) return;
+    const engine = this.vaultEngine;
+    if (engine && !engine.backfillSettled()) return;
+    if (this.contentWorkList().length === 0) {
+      // Nothing to send. Stamp a terminal phase once, and only once: this edge
+      // fires again on every drained inbound frame (a teammate typing), and
+      // re-stamping `done` there would be a store write per keystroke.
+      const phase = this.progress?.snapshot().phase;
+      const stalled = this.channelStalled;
+      this.channelStalled = false;
+      if (phase !== "done" && (phase !== "error" || stalled)) this.completeRun(scope);
       return;
     }
     this.bulkRun = this.runBulkSync(scope).catch((e) => {
-      console.warn("[sync] follow-up content sync failed", e);
+      console.warn("[sync] content sync failed", e);
     });
+  }
+
+  /**
+   * The docs a content run would push: not confirmed by this device, OR named by
+   * the server's `ready.empty` (which outranks our checkpoint). The open note is
+   * excluded — its editor session owns that doc's provider.
+   *
+   * Replaces the old `unconfirmedNotes()` count, which asked the narrower
+   * (device-local) question and could therefore never see a note the server had
+   * lost. A freshly materialized note is an EMPTY `.md` on disk (the registry
+   * writes a placeholder and hydrates lazily), so "in this list" is literally
+   * "somebody does not have the content" — not a bookkeeping detail.
+   */
+  private contentWorkList(): Array<{ docId: string; relPath: string }> {
+    const open = this.docStore?.suppressedDoc() ?? null;
+    return this.registry
+      .mappedNotes()
+      .filter(
+        (n) =>
+          n.docId !== open &&
+          (!this.registry.isPushed(n.docId) || this.serverEmpty.has(n.docId)),
+      );
+  }
+
+  /**
+   * A `ready` frame told us which readable docs the server holds no content for.
+   *
+   * Every `ready` re-arms the run, which is what makes the uploader's failure
+   * streak a PAUSE rather than a verdict: a server that was dead when the run
+   * gave up will, when it comes back, send a `hello`→`ready` round that starts a
+   * fresh one. Nothing else restarted it before — a five-failure streak stranded
+   * every remaining note until sign-out.
+   */
+  private handleServerEmpty(docIds: string[], truncated: boolean, scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    this.clearChannelWatchdog(); // `ready` arrived — the channel is alive
+    this.serverEmpty = new Set(docIds);
+    this.serverEmptyTruncated = truncated;
+    // A live run keeps its queue and picks this set up on its next pass; only
+    // the set is refreshed here.
+    this.startContentRunIfNeeded(scope);
   }
 
   isEnabled(): boolean {
@@ -796,12 +898,19 @@ export class SyncManager implements InboundHost {
         ?.reconcile()
         .catch((e) => console.warn("[attachments] initial reconcile failed", e));
       this.startVaultEngine(scope);
-      // Bulk content sync runs in the BACKGROUND: `enable` must return as soon as
-      // the vault is usable, or "Turn on sync" would block the UI for the whole
-      // backfill. Progress + per-doc state are reported as it advances.
-      this.bulkRun = this.runBulkSync(scope).catch((e) => {
-        console.warn("[sync] bulk run failed", e);
-      });
+      // DOWNLOAD FIRST, then push what is left. This order is the whole point of
+      // the change: the vault channel backfills every readable doc over ONE
+      // socket, and a doc it delivers needs no upload at all (see the
+      // `onConverged` wiring in `startVaultEngine`). Running the content pass
+      // first meant every note was delivered twice — once over the vault channel
+      // and once over a dedicated per-note provider at 3.7 notes/second.
+      //
+      // The content run is now started by whichever of these lands first: the
+      // download phase settling (`handleInboundIdle`), or a `ready` frame that
+      // names docs the server has no content for (`handleServerEmpty`). Both run
+      // in the BACKGROUND — `enable` must return as soon as the vault is usable,
+      // or "Turn on sync" would block the UI for the whole backfill.
+      this.beginDownloadPhase(scope);
       return { ok: true, seeded, scope };
     } catch (e) {
       if (scope.isCurrent()) this.disable();
@@ -843,13 +952,18 @@ export class SyncManager implements InboundHost {
   }
 
   /**
-   * Push every registered note's CONTENT to the server, then wait out the inbound
-   * backfill, then report a terminal phase.
+   * Push the CONTENT of every note the server does not already have, then report
+   * a terminal phase.
    *
    * This is the half of "turn on sync" that did not exist: reconcile created a
    * `notes` row (and an EMPTY server Y.Doc) per file, and a note's markdown only
    * ever reached the server when a human opened that note. See `contentUpload.ts`
    * for why re-running it cannot duplicate content.
+   *
+   * It runs AFTER the vault channel's backfill now (`startContentRunIfNeeded`),
+   * so its queue is the remainder rather than the whole vault: every doc the
+   * channel delivered is already marked pushed, and every doc the server has no
+   * content for is named in `serverEmpty` and pushed first.
    */
   private async runBulkSync(scope: VaultScope): Promise<void> {
     const vaultId = this.registry.vaultId;
@@ -875,9 +989,17 @@ export class SyncManager implements InboundHost {
           new DocSync({ api, doc, docId, vaultId: collectionId }),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
+      // The server's word beats our checkpoint: a doc it holds no content for is
+      // queued even when `pushed` claims it, which is the only way a note
+      // stranded by a crashed run (or a restored `.context/`) is ever recovered.
+      include: (docId) => this.serverEmpty.has(docId),
+      // …and it goes FIRST. Those notes have nothing at all on the server, so if
+      // the run is cut short they are the work that had to happen.
+      priority: (docId) => this.serverEmpty.has(docId),
       markPushed: (docId) => {
         this.registry.markPushed(docId);
         this.divergedDocs.delete(docId); // a confirmed push carries any merged ops
+        this.serverEmpty.delete(docId); // the server has its content now
       },
       // Never touch the open note: its editor session owns a provider for that doc.
       skip: (docId) => store.suppressedDoc() === docId,
@@ -893,7 +1015,15 @@ export class SyncManager implements InboundHost {
     await this.registry.flushCheckpoint();
     if (!scope.isCurrent() || this.uploader !== uploader) return;
     if (result.cancelled) return;
-    this.beginDownloadPhase(scope);
+    this.completeRun(scope);
+    // The server had more empty docs than one `ready` frame names. Ask again —
+    // but only after a run that actually SENT something and failed nothing,
+    // otherwise a server that keeps naming docs we cannot push would spin the
+    // socket in a tight hello/ready loop.
+    if (this.serverEmptyTruncated && result.pushed > 0 && result.failed === 0) {
+      this.serverEmptyTruncated = false;
+      this.vaultEngine?.refresh();
+    }
   }
 
   /**
@@ -911,18 +1041,43 @@ export class SyncManager implements InboundHost {
     const engine = this.vaultEngine;
     const progress = this.progress;
     if (!engine || !progress) return;
+    if (!scope.isCurrent()) return;
     const { done, total } = engine.inboundProgress();
-    // `backfillSettled`, not `inboundIdle`: an idle queue mid-backfill just means
-    // the next document hasn't arrived yet, and stopping there would claim a
-    // still-arriving vault is fully synced.
-    if (engine.backfillSettled()) {
-      this.completeRun(scope);
-      return;
-    }
     this.lastInboundDone = done;
     this.lastInboundTotal = total;
     this.downloadPhase = true;
+    this.armChannelWatchdog(scope);
+    // Opens at 0/0 ("Syncing…"), because this now runs the moment the engine is
+    // started — before its socket is even open, let alone `hello`ed. There is
+    // deliberately no `backfillSettled()` short-circuit here any more: an engine
+    // that has not connected yet reports settled (nothing is queued and no window
+    // is open), so checking it here would end the phase before it began.
     progress.phase("downloading", total - done);
+  }
+
+  private armChannelWatchdog(scope: VaultScope): void {
+    this.clearChannelWatchdog();
+    this.channelWatchdog = setTimeout(() => {
+      this.channelWatchdog = null;
+      if (!scope.isCurrent() || !this.downloadPhase) return;
+      if (this.vaultStatus === "synced") return; // `ready` landed; the idle edge owns it
+      const progress = this.progress;
+      if (!progress) return;
+      // Stop claiming progress that isn't happening. `channelStalled` lets the
+      // next `ready` re-stamp a terminal phase (completion normally refuses to
+      // overwrite `error`, because a real failure must not be papered over).
+      this.downloadPhase = false;
+      this.channelStalled = true;
+      progress.phase("error");
+      progress.flush();
+    }, CHANNEL_WATCHDOG_MS);
+  }
+
+  private clearChannelWatchdog(): void {
+    if (this.channelWatchdog) {
+      clearTimeout(this.channelWatchdog);
+      this.channelWatchdog = null;
+    }
   }
 
   /** One backfilled document applied by the vault channel. */
@@ -941,10 +1096,18 @@ export class SyncManager implements InboundHost {
     // engine signals the real edge through `handleInboundIdle`.
   }
 
-  /** The backfill finished and everything it sent has been applied. */
+  /**
+   * The backfill finished and everything it sent has been applied — the edge that
+   * ends the download phase and hands over to the content run.
+   *
+   * Fires again on every later drain (a teammate typing keeps the queue moving),
+   * so it must stay cheap when there is nothing to do: `startContentRunIfNeeded`
+   * no-ops unless the work list is non-empty and no run is live.
+   */
   private handleInboundIdle(scope: VaultScope): void {
-    if (!this.downloadPhase || !scope.isCurrent()) return;
-    this.completeRun(scope);
+    if (!scope.isCurrent()) return;
+    this.downloadPhase = false;
+    this.startContentRunIfNeeded(scope);
   }
 
   /**
@@ -958,6 +1121,8 @@ export class SyncManager implements InboundHost {
     const progress = this.progress;
     if (!progress) return;
     this.downloadPhase = false;
+    this.channelStalled = false;
+    this.clearChannelWatchdog();
     const uploadFailures = this.uploader?.failedDocs().length ?? 0;
     const clean =
       uploadFailures === 0 &&
@@ -1015,6 +1180,10 @@ export class SyncManager implements InboundHost {
     }
     this.localChanges.clear();
     this.divergedDocs.clear();
+    // Scoped to the vault like everything else here: another vault's empty-doc
+    // list would put ITS doc ids at the head of this vault's upload queue.
+    this.serverEmpty.clear();
+    this.serverEmptyTruncated = false;
     // The bulk run before the engine it borrows from: `stop()` makes every pool
     // lane drop at its next checkpoint, so nothing is still promoting a bridge
     // when `stopVaultEngine` destroys the store underneath it.
@@ -1022,6 +1191,8 @@ export class SyncManager implements InboundHost {
     this.uploader = null;
     this.bulkRun = null;
     this.downloadPhase = false;
+    this.clearChannelWatchdog();
+    this.channelStalled = false;
     this.lastInboundDone = 0;
     this.lastInboundTotal = 0;
     this.attachments?.stop();
@@ -1212,6 +1383,21 @@ export class SyncManager implements InboundHost {
           this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
         }
       },
+      // The counterpart: a cold apply landed the server's state and the file had
+      // nothing of its own to add, so this doc is on the server BY DEFINITION —
+      // record the push. This is what stops the content run from re-sending every
+      // note the vault channel just delivered, over a socket apiece.
+      //
+      // Never for a diverged doc: those hold local-only ops from an out-of-band
+      // merge, and marking them pushed would strand exactly the bytes nobody else
+      // has. (`divergedDocs` is the only local-only state this layer can see; a
+      // doc edited offline in the editor and never flushed is not in it, which is
+      // why `pushed` stays an optimisation and `ready.empty` stays the authority.)
+      onConverged: (docId) => {
+        if (!scope.isCurrent() || this.divergedDocs.has(docId)) return;
+        this.registry.markPushed(docId);
+        this.serverEmpty.delete(docId);
+      },
     });
     this.docStore = store;
     this.vaultEngine = new VaultSyncEngine({
@@ -1262,8 +1448,12 @@ export class SyncManager implements InboundHost {
       onVoice: (frame) => this.handleVoice(frame),
       // Inbound backfill progress — the `downloading` half of the run's progress.
       onInboundProgress: (done, total) => this.handleInboundProgress(done, total, scope),
-      // …and the edge that ends it.
+      // …and the edge that ends it (and starts the content run).
       onInboundIdle: () => this.handleInboundIdle(scope),
+      // Which readable docs the server has NO content for. Arrives on every
+      // `ready`, so it also re-arms a run the uploader's failure streak paused.
+      onServerEmpty: (docIds, truncated) =>
+        this.handleServerEmpty(docIds, truncated, scope),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).

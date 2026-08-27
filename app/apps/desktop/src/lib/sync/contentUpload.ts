@@ -86,6 +86,25 @@ export interface ContentUploaderOptions {
    *  underneath us, so "pushed" says nothing about the new bytes. */
   force?: boolean;
   /**
+   * Queue this doc even though {@link ContentUploaderOptions.isPushed} says it is
+   * confirmed — a targeted `force`.
+   *
+   * Fed by the vault channel's `ready.empty`: the server is the authority on
+   * whether it holds a note's content, and `pushed` is only a local optimisation
+   * that a crashed run or a wiped `.context/` gets wrong. Without this, a note
+   * the checkpoint claims and the server does not have is unreachable forever.
+   */
+  include?: (docId: string) => boolean;
+  /**
+   * Docs to push FIRST. Order within each group is preserved (a stable
+   * partition), so the queue stays deterministic.
+   *
+   * Used for the same `ready.empty` set: those notes have NO content on the
+   * server, so if a run is cut short (vault switch, quit, failure pause) the
+   * work that mattered most is the work that already happened.
+   */
+  priority?: (docId: string) => boolean;
+  /**
    * Merge each note's current file bytes into its doc (`NoteBridge.ingestNow`)
    * as part of the push — the local-change run's whole reason to exist. Without
    * it this engine only ever *seeds an empty doc*, so an edit to a note that
@@ -111,12 +130,17 @@ export interface ContentUploaderOptions {
   /** How long to wait for the server to ack our push per doc. Default 30s. */
   flushTimeoutMs?: number;
   /**
-   * Consecutive per-doc failures that abort the whole run. Default 5.
+   * Consecutive per-doc failures that PAUSE the run. Default 10.
    *
    * A dead/unreachable server fails EVERY doc, and grinding through 500 × the
-   * sync timeout is exactly the "syncing forever" symptom. Five in a row is
-   * conclusive enough: the run stops, phase goes `error`, and the remaining docs
-   * stay honestly unsynced instead of silently claimed.
+   * sync timeout is exactly the "syncing forever" symptom. So the run stops and
+   * the remaining docs stay honestly unsynced instead of silently claimed.
+   *
+   * This is a pause, not a verdict: a dead server pauses the run, and the next
+   * vault-channel `ready` resumes it (see `SyncManager.handleServerEmpty`). That
+   * is why the limit is 10 rather than the original 5 — with nothing to restart
+   * the run, five transient failures used to strand every remaining note until
+   * the user signed out and back in.
    */
   failureStreakLimit?: number;
 }
@@ -152,7 +176,7 @@ export class ContentUploader {
     this.concurrency = Math.max(1, opts.concurrency ?? UPLOAD_CONCURRENCY);
     this.syncTimeoutMs = opts.syncTimeoutMs ?? 10_000;
     this.flushTimeoutMs = opts.flushTimeoutMs ?? 30_000;
-    this.streakLimit = Math.max(1, opts.failureStreakLimit ?? 5);
+    this.streakLimit = Math.max(1, opts.failureStreakLimit ?? 10);
   }
 
   /** Cancel the run. Called from `SyncManager.teardown` on every vault switch. */
@@ -185,15 +209,26 @@ export class ContentUploader {
     this.streak = 0;
     this.aborted = false;
     try {
-      const queue = this.opts.notes.filter(
-        (n) =>
-          (this.opts.force === true || !this.opts.isPushed(n.docId)) &&
-          !(this.opts.skip?.(n.docId) ?? false),
+      const queue = this.orderQueue(
+        this.opts.notes.filter(
+          (n) =>
+            (this.opts.force === true ||
+              !this.opts.isPushed(n.docId) ||
+              (this.opts.include?.(n.docId) ?? false)) &&
+            !(this.opts.skip?.(n.docId) ?? false),
+        ),
       );
       // Everything already confirmed reads as synced straight away, so the badge
       // for a resumed vault is correct before a single socket opens.
+      const queued = new Set(queue.map((n) => n.docId));
       for (const n of this.opts.notes) {
-        if (this.opts.isPushed(n.docId)) this.progress.doc(n.docId, "synced");
+        // `queued` wins over the checkpoint: a doc named by `ready.empty` is
+        // "pushed" locally and yet has no content on the server, so badging it
+        // synced here — even for the one emission before the `queued` below
+        // overwrites it — would be the exact lie this run exists to fix.
+        if (this.opts.isPushed(n.docId) && !queued.has(n.docId)) {
+          this.progress.doc(n.docId, "synced");
+        }
       }
       this.progress.phase("uploading", queue.length);
       for (const n of queue) this.progress.doc(n.docId, "queued");
@@ -223,6 +258,21 @@ export class ContentUploader {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * Stable partition: `priority` docs first, everything else in its original
+   * order. A sort() would be shorter and wrong — `Array.prototype.sort` is only
+   * guaranteed stable per spec for the comparator's ties, and reordering the
+   * queue arbitrarily makes a resumed run's progress unrepeatable.
+   */
+  private orderQueue<T extends { docId: string }>(queue: T[]): T[] {
+    const isFirst = this.opts.priority;
+    if (!isFirst) return queue;
+    const first: T[] = [];
+    const rest: T[] = [];
+    for (const n of queue) (isFirst(n.docId) ? first : rest).push(n);
+    return [...first, ...rest];
   }
 
   /** Push one note. Returns true when the server has acked its content. */
@@ -262,7 +312,9 @@ export class ContentUploader {
       // update (which we egest to disk, which fires the watcher) from costing a
       // provider connect apiece.
       const changed = await bridge.ingestNow();
-      if (!changed && this.opts.isPushed(docId) && !(this.opts.mustConnect?.(docId) ?? false)) {
+      const serverHasIt =
+        this.opts.isPushed(docId) && !(this.opts.include?.(docId) ?? false);
+      if (!changed && serverHasIt && !(this.opts.mustConnect?.(docId) ?? false)) {
         await this.releaseQuietly(docId);
         this.streak = 0;
         this.progress.doc(docId, "synced");

@@ -42,7 +42,23 @@ export interface PresenceState {
 }
 
 export type ServerControl =
-  | { t: "ready" }
+  | {
+      t: "ready";
+      /**
+       * Readable docIds the server holds NO CRDT state for — it has a `notes`
+       * row but not one byte of content. Sent on every connect/reconnect, and
+       * the AUTHORITY on what still needs uploading: the client's own `pushed`
+       * checkpoint is a local optimisation that a crashed run, a fresh device or
+       * a wiped `.context/` can silently get wrong (613 notes registered with
+       * zero content in prod).
+       *
+       * Absent when there are none.
+       */
+      empty?: string[];
+      /** The server had more empty docs than it would name in one frame (cap
+       *  2000), so another `hello` is needed to fetch the next batch. */
+      emptyTruncated?: boolean;
+    }
   | { t: "drop"; docId: string }
   | { t: "reauth" }
   | { t: "registry" }
@@ -75,7 +91,21 @@ export function parseServerControl(text: string): ServerControl | null {
   }
   if (!v || typeof v !== "object") return null;
   const t = (v as { t?: unknown }).t;
-  if (t === "ready") return { t: "ready" };
+  if (t === "ready") {
+    const o = v as Record<string, unknown>;
+    // Defensive on purpose: `empty` is new, so an older server omits it and a
+    // future one may widen it. Anything that isn't an array of non-empty strings
+    // is dropped rather than trusted — a bad entry here would put a bogus docId
+    // at the FRONT of the upload queue.
+    const empty = Array.isArray(o.empty)
+      ? o.empty.filter((d): d is string => typeof d === "string" && d.length > 0)
+      : null;
+    return {
+      t: "ready",
+      ...(empty && empty.length > 0 ? { empty } : {}),
+      ...(o.emptyTruncated === true ? { emptyTruncated: true } : {}),
+    };
+  }
   if (t === "reauth") return { t: "reauth" };
   if (t === "registry") return { t: "registry" };
   if (t === "member" && typeof (v as { name?: unknown }).name === "string") {

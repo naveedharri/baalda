@@ -16,6 +16,79 @@ function updateSetting(text: string): Uint8Array {
   return u;
 }
 
+// ── the two ways a cold apply can end ───────────────────────────────────────
+// Converged (the file had nothing of its own) means the server HAS this doc, and
+// the session records the push — which is what stops the content run re-sending
+// every note the vault channel just delivered, over a socket apiece. A merge is
+// the opposite: those ops exist only here until a provider pushes them.
+
+describe("VaultDocStore — converged vs merged cold applies", () => {
+  it("reports a converged cold apply, so the doc is never re-uploaded", async () => {
+    const { io, fs } = makeHarness({ "note.md": "" });
+    const converged: string[] = [];
+    const merged: string[] = [];
+    const store = new VaultDocStore({
+      io,
+      resolvePath: () => "note.md",
+      onConverged: (id) => converged.push(id),
+      onExternalMerge: (id) => merged.push(id),
+    });
+
+    await store.applyUpdate("d1", updateSetting("from the server"));
+
+    expect(fs.get("note.md")).toBe("from the server");
+    expect(converged).toEqual(["d1"]);
+    expect(merged).toEqual([]);
+  });
+
+  it("reports a MERGE instead when the file held bytes the doc had never seen", async () => {
+    const { io, fs } = makeHarness({ "note.md": "" });
+    const converged: string[] = [];
+    const merged: string[] = [];
+    const store = new VaultDocStore({
+      io,
+      resolvePath: () => "note.md",
+      onConverged: (id) => converged.push(id),
+      onExternalMerge: (id) => merged.push(id),
+    });
+
+    await store.applyUpdate("d1", updateSetting("server line"));
+    converged.length = 0;
+    // An AI edits the file while no bridge is alive for it.
+    fs.externalWrite("note.md", "server line\nlocal line");
+
+    await store.applyUpdate("d1", updateSetting("ignored — the doc already has state"));
+
+    expect(merged).toEqual(["d1"]);
+    // Mutually exclusive: those merged ops are local-only, so claiming the server
+    // has this doc would strand exactly the bytes nobody else holds.
+    expect(converged).toEqual([]);
+    expect(fs.get("note.md")).toContain("local line");
+  });
+
+  it("does NOT report converged for a doc that already held local CRDT ops", async () => {
+    const { io, fs } = makeHarness({ "note.md": "" });
+    const converged: string[] = [];
+    const store = new VaultDocStore({
+      io,
+      resolvePath: () => "note.md",
+      onConverged: (id) => converged.push(id),
+    });
+
+    // First delivery lands on an empty placeholder → converged (the join case).
+    await store.applyUpdate("d1", updateSetting("first"));
+    expect(converged).toEqual(["d1"]);
+    converged.length = 0;
+
+    // A later delivery onto a doc with prior local state: the store cannot know
+    // whether those local ops ever reached the server (typed offline, never
+    // flushed), so it must not declare the doc pushed.
+    await store.applyUpdate("d1", updateSetting("second"));
+    expect(converged).toEqual([]);
+    expect(fs.get("note.md")).toContain("second");
+  });
+});
+
 describe("VaultDocStore", () => {
   it("cold-applies an update: writes the .md, persists, caches the state vector", async () => {
     const { io, fs, persistence } = makeHarness({ "note.md": "" });

@@ -137,6 +137,15 @@ export interface VaultSyncEngineOptions {
    * download phase used to end that way, i.e. never.
    */
   onInboundIdle?: () => void;
+  /**
+   * The server named the readable docs it holds NO CRDT state for (`ready.empty`).
+   *
+   * Fired on EVERY `ready`, i.e. every connect and reconnect, with `truncated`
+   * set when the server had more than it would name in one frame. This is the
+   * authority the content run keys off: a doc listed here needs its markdown
+   * pushed no matter what the local `pushed` checkpoint claims.
+   */
+  onServerEmpty?: (docIds: string[], truncated: boolean) => void;
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
   /** Backoff bounds (ms). */
@@ -192,6 +201,7 @@ export class VaultSyncEngine {
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
   private readonly onInboundIdle?: () => void;
+  private readonly onServerEmpty?: (docIds: string[], truncated: boolean) => void;
   private readonly wsFactory: WsFactory;
   private readonly inboundMaxBytes: number;
   private readonly baseMs: number;
@@ -258,6 +268,7 @@ export class VaultSyncEngine {
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
     this.onInboundIdle = opts.onInboundIdle;
+    this.onServerEmpty = opts.onServerEmpty;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
@@ -305,6 +316,25 @@ export class VaultSyncEngine {
   start(): void {
     if (this.stopped || this.ws) return;
     this.connect();
+  }
+
+  /**
+   * Force a fresh `hello` — drop the socket and let the normal backoff bring it
+   * back up.
+   *
+   * The only way to ask the server a second question: `ready.empty` is capped, so
+   * a vault with more empty docs than one frame will name (`emptyTruncated`) needs
+   * another handshake to learn the next batch. Reuses the reconnect machinery
+   * rather than opening a second socket — one WS per vault is the invariant.
+   */
+  refresh(): void {
+    if (this.stopped) return;
+    this.ready = false;
+    this.helloSent = false;
+    this.backfilling = false; // this window is over; the next hello opens a new one
+    this.closeSocket();
+    this.setStatus("connecting");
+    this.scheduleReconnect();
   }
 
   /** Tear down permanently; no further reconnects. */
@@ -457,6 +487,10 @@ export class VaultSyncEngine {
         this.attempt = 0; // a clean sync resets backoff
         this.ready = true;
         this.backfilling = false;
+        // BEFORE the idle signal: `maybeSignalIdle` is what starts the content
+        // run, and a run that starts without this frame's `empty` list would
+        // work from the stale one (or none at all on a first connect).
+        this.onServerEmpty?.(control.empty ?? [], control.emptyTruncated === true);
         // `ready` routinely arrives AFTER the last backfill frame has already been
         // applied, so this is the edge that settles the download phase. Checking
         // only on drain would strand it: no further frame is coming to trigger one.
@@ -608,6 +642,11 @@ export class VaultSyncEngine {
     if (this.stopped) return;
     this.ready = false; // must re-announce presence after we reconnect
     this.helloSent = false;
+    // The backfill window closed with the socket: no further frame of it is
+    // coming until the next `hello` opens a new one. Leaving it open would make
+    // `backfillSettled()` permanently false on a flaky link, and everything that
+    // waits for the download to settle (the content run) would wait forever.
+    this.backfilling = false;
     this.closeSocket();
     this.setStatus("error");
     this.scheduleReconnect();

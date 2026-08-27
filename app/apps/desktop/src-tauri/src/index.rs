@@ -7,19 +7,29 @@
 //! forks a note's identity. On rename we update the path column by id, so
 //! inbound links (which store `dst_note_id`) never break.
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::notefile::sha256_hex;
 use crate::parse::parse_note;
 use crate::vault::{is_ignored_name, rel_from_abs};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+/// Only log a batch's timing past this many files: a single-note save goes
+/// through the same code and must stay silent.
+const BATCH_LOG_MIN: usize = 50;
+
 pub struct Index {
     conn: Connection,
+    /// Test-only: how many times `resolve_all_links` has run. The entire point of
+    /// the batch entry points is ONE link pass per batch instead of one per file,
+    /// and that difference is only observable by counting.
+    #[cfg(test)]
+    resolve_calls: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -88,7 +98,15 @@ impl Index {
         // "database is locked" — a big index build and a concurrent read/sync
         // can briefly overlap, and a short wait is far better than an error.
         conn.pragma_update(None, "busy_timeout", 5000)?;
-        let idx = Index { conn };
+        // NORMAL, not the default FULL: under WAL this stops fsync'ing the WAL on
+        // every commit, which is what made a bulk index (one transaction per file)
+        // disk-bound. The safety trade is bounded and acceptable here — WAL+NORMAL
+        // can lose the last transaction(s) on an OS/power crash but never corrupts
+        // the database, and everything in this file is either derived from the
+        // `.md` files (rebuildable by `rebuild`) or a CRDT update log whose peer
+        // copies (the open Y.Doc and the server) re-supply anything lost.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        let idx = Index::new(conn);
         idx.migrate()?;
         Ok(idx)
     }
@@ -96,9 +114,23 @@ impl Index {
     #[cfg(test)]
     pub fn open_in_memory() -> AppResult<Self> {
         let conn = Connection::open_in_memory()?;
-        let idx = Index { conn };
+        let idx = Index::new(conn);
         idx.migrate()?;
         Ok(idx)
+    }
+
+    fn new(conn: Connection) -> Self {
+        Index {
+            conn,
+            #[cfg(test)]
+            resolve_calls: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Test-only accessor for the link-pass counter (see `resolve_calls`).
+    #[cfg(test)]
+    fn resolve_call_count(&self) -> usize {
+        self.resolve_calls.get()
     }
 
     fn migrate(&self) -> AppResult<()> {
@@ -192,6 +224,8 @@ impl Index {
     /// live edits are indexed by the file watcher through `index_note`, so this
     /// only governs changes made while the app was closed, where mtimes differ.
     pub fn rebuild(&self, vault: &Path) -> AppResult<()> {
+        let started = Instant::now();
+        let mut touched = 0usize;
         let tx = self.conn.unchecked_transaction()?;
 
         // Snapshot what's already indexed: path -> (id, mtime, rowid).
@@ -250,11 +284,13 @@ impl Index {
                 // Changed — re-index in place, preserving the doc_id.
                 Some((id, _, _)) => {
                     self.index_one(&tx, vault, abs, Some(id.clone()))?;
+                    touched += 1;
                     changed = true;
                 }
                 // New file.
                 None => {
                     self.index_one(&tx, vault, abs, None)?;
+                    touched += 1;
                     changed = true;
                 }
             }
@@ -286,48 +322,128 @@ impl Index {
             self.resolve_all_links(&tx)?;
         }
         tx.commit()?;
+        log_batch("rebuild", touched, started);
         Ok(())
     }
 
-    /// Incrementally (re)index a single note by absolute path.
-    pub fn index_note(&self, vault: &Path, abs: &Path) -> AppResult<()> {
+    /// (Re)index a BATCH of notes: ONE transaction, ONE link-resolution pass.
+    ///
+    /// Why this exists. `resolve_all_links` reads every row of `notes` and every
+    /// row of `links` and then rewrites every link row. Running it once *per
+    /// file* — which is what `index_note` did, and the watcher called it once per
+    /// dirty path — makes indexing N files O(N × links_in_vault), each pass in
+    /// its own transaction. Dropping 1000 notes into a vault meant 1000
+    /// whole-vault link passes and 1000 commits. `rebuild` has always had the
+    /// right shape (one tx, `index_one` per file, one link pass if anything
+    /// changed); this is that shape for an incremental batch.
+    ///
+    /// Per-path failures are RETURNED, not propagated: one unreadable file in a
+    /// 1000-file drop must not cost the other 999 their index rows. A file whose
+    /// read fails has written nothing to the transaction yet (`index_one` reads
+    /// and parses before it touches SQL), so skipping it leaves no partial row.
+    pub fn index_notes(
+        &self,
+        vault: &Path,
+        abs_paths: &[PathBuf],
+    ) -> AppResult<Vec<(PathBuf, AppError)>> {
+        if abs_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
         let tx = self.conn.unchecked_transaction()?;
-        let rel = rel_from_abs(vault, abs)?;
-        let reuse_id = self.id_for_path(&tx, &rel)?;
-        self.index_one(&tx, vault, abs, reuse_id)?;
-        self.resolve_all_links(&tx)?;
+        let mut failures: Vec<(PathBuf, AppError)> = Vec::new();
+        let mut indexed = 0usize;
+        for abs in abs_paths {
+            let outcome = rel_from_abs(vault, abs)
+                .and_then(|rel| self.id_for_path(&tx, &rel))
+                .and_then(|reuse_id| self.index_one(&tx, vault, abs, reuse_id));
+            match outcome {
+                Ok(()) => indexed += 1,
+                Err(e) => failures.push((abs.clone(), e)),
+            }
+        }
+        // The single pass the whole batch shares.
+        if indexed > 0 {
+            self.resolve_all_links(&tx)?;
+        }
         tx.commit()?;
-        Ok(())
+        log_batch("index_notes", abs_paths.len(), started);
+        Ok(failures)
+    }
+
+    /// Incrementally (re)index a single note by absolute path — a one-element
+    /// [`Index::index_notes`], so the two paths can never drift.
+    pub fn index_note(&self, vault: &Path, abs: &Path) -> AppResult<()> {
+        let mut failures = self.index_notes(vault, &[abs.to_path_buf()])?;
+        match failures.pop() {
+            Some((_, e)) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove a BATCH of notes/folders: ONE transaction, ONE link pass — the
+    /// removal twin of [`Index::index_notes`] (same quadratic problem: a folder
+    /// delete arrives as many watcher paths at once).
+    pub fn remove_notes(
+        &self,
+        vault: &Path,
+        abs_paths: &[PathBuf],
+    ) -> AppResult<Vec<(PathBuf, AppError)>> {
+        if abs_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut failures: Vec<(PathBuf, AppError)> = Vec::new();
+        let mut removed = 0usize;
+        for abs in abs_paths {
+            match self.remove_one(&tx, vault, abs) {
+                Ok(()) => removed += 1,
+                Err(e) => failures.push((abs.clone(), e)),
+            }
+        }
+        if removed > 0 {
+            self.resolve_all_links(&tx)?;
+        }
+        tx.commit()?;
+        Ok(failures)
     }
 
     /// Remove a note by absolute path, OR every note under a deleted folder
-    /// (prefix match). Idempotent.
+    /// (prefix match). Idempotent. One-element [`Index::remove_notes`].
     pub fn remove_note(&self, vault: &Path, abs: &Path) -> AppResult<()> {
+        let mut failures = self.remove_notes(vault, &[abs.to_path_buf()])?;
+        match failures.pop() {
+            Some((_, e)) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// The row-level removal, inside a caller-owned transaction and WITHOUT a
+    /// link pass (the batch does that once at the end).
+    fn remove_one(&self, tx: &Connection, vault: &Path, abs: &Path) -> AppResult<()> {
         let rel = rel_from_abs(vault, abs)?;
-        let tx = self.conn.unchecked_transaction()?;
 
         // Exact-path note (a file delete).
-        if let Some((id, rowid)) = self.row_for_path(&tx, &rel)? {
-            Self::delete_note_rows(&tx, &id, rowid)?;
+        if let Some((id, rowid)) = self.row_for_path(tx, &rel)? {
+            Self::delete_note_rows(tx, &id, rowid)?;
         }
 
         // Any notes under a deleted folder (prefix delete).
         let prefix = format!("{rel}/");
         let victims: Vec<(String, i64)> = {
-            let mut stmt =
-                tx.prepare("SELECT id, rowid FROM notes WHERE path LIKE ?1 || '%'")?;
+            let mut stmt = tx.prepare("SELECT id, rowid FROM notes WHERE path LIKE ?1 || '%'")?;
             let rows = stmt.query_map(params![prefix], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for (id, rowid) in victims {
-            Self::delete_note_rows(&tx, &id, rowid)?;
+            Self::delete_note_rows(tx, &id, rowid)?;
         }
-        tx.execute("DELETE FROM folders WHERE id = ?1 OR path LIKE ?2 || '%'", params![rel, prefix])?;
-
-        self.resolve_all_links(&tx)?;
-        tx.commit()?;
+        tx.execute(
+            "DELETE FROM folders WHERE id = ?1 OR path LIKE ?2 || '%'",
+            params![rel, prefix],
+        )?;
         Ok(())
     }
 
@@ -359,8 +475,7 @@ impl Index {
         // each note's doc_id stable.
         let old_prefix = format!("{old_rel}/");
         let children: Vec<(String, String)> = {
-            let mut stmt =
-                tx.prepare("SELECT id, path FROM notes WHERE path LIKE ?1 || '%'")?;
+            let mut stmt = tx.prepare("SELECT id, path FROM notes WHERE path LIKE ?1 || '%'")?;
             let rows = stmt.query_map(params![old_prefix], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
@@ -369,7 +484,10 @@ impl Index {
         for (id, path) in children {
             let suffix = &path[old_prefix.len()..];
             let new_path = format!("{new_rel}/{suffix}");
-            tx.execute("UPDATE notes SET path = ?1 WHERE id = ?2", params![new_path, id])?;
+            tx.execute(
+                "UPDATE notes SET path = ?1 WHERE id = ?2",
+                params![new_path, id],
+            )?;
         }
 
         // Re-resolve links (a file rename can change the basename used to resolve).
@@ -407,9 +525,10 @@ impl Index {
             params![id, rel, parsed.title, mtime, sha, parsed.frontmatter_json],
         )?;
 
-        let rowid: i64 = tx.query_row("SELECT rowid FROM notes WHERE id = ?1", params![id], |r| {
-            r.get(0)
-        })?;
+        let rowid: i64 =
+            tx.query_row("SELECT rowid FROM notes WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })?;
 
         // FTS: replace the row (contentless_delete lets us DELETE by rowid).
         tx.execute("DELETE FROM notes_fts WHERE rowid = ?1", params![rowid])?;
@@ -421,7 +540,10 @@ impl Index {
         // Tags.
         tx.execute("DELETE FROM note_tags WHERE note_id = ?1", params![id])?;
         for tag in &parsed.tags {
-            tx.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", params![tag])?;
+            tx.execute(
+                "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
+                params![tag],
+            )?;
             let tag_id: i64 =
                 tx.query_row("SELECT id FROM tags WHERE name = ?1", params![tag], |r| {
                     r.get(0)
@@ -468,6 +590,8 @@ impl Index {
     /// note basenames (case-insensitive), then titles. Cheap enough for Phase 0
     /// and guarantees previously-dangling links resolve once a target appears.
     fn resolve_all_links(&self, tx: &Connection) -> AppResult<()> {
+        #[cfg(test)]
+        self.resolve_calls.set(self.resolve_calls.get() + 1);
         // Build lookup maps from all notes.
         let mut by_basename: HashMap<String, String> = HashMap::new();
         let mut by_title: HashMap<String, String> = HashMap::new();
@@ -499,11 +623,18 @@ impl Index {
         let links: Vec<(i64, String)> = {
             let mut stmt = tx.prepare("SELECT id, dst_path_raw FROM links")?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default()))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
+        // Hoisted out of the loop: `Connection::execute` re-prepares (and
+        // re-parses) the statement on every call, which on a link-dense vault is
+        // tens of thousands of needless prepares per pass.
+        let mut update = tx.prepare("UPDATE links SET dst_note_id = ?1 WHERE id = ?2")?;
         for (link_id, raw) in links {
             // raw may contain alias/heading — strip for matching.
             let target = raw
@@ -522,10 +653,7 @@ impl Index {
                 .trim_end_matches(".md")
                 .to_string();
             let dst = by_basename.get(&base).or_else(|| by_title.get(&target));
-            tx.execute(
-                "UPDATE links SET dst_note_id = ?1 WHERE id = ?2",
-                params![dst, link_id],
-            )?;
+            update.execute(params![dst, link_id])?;
         }
         Ok(())
     }
@@ -685,7 +813,12 @@ impl Index {
         }
         let base = target.rsplit('/').next().unwrap_or(&target).to_string();
 
-        let map = |r: &rusqlite::Row| Ok(ResolvedLink { id: r.get(0)?, path: r.get(1)? });
+        let map = |r: &rusqlite::Row| {
+            Ok(ResolvedLink {
+                id: r.get(0)?,
+                path: r.get(1)?,
+            })
+        };
 
         // 1. Full relative path (e.g. "Projects/Baalda").
         let full_md = format!("{target}.md");
@@ -915,6 +1048,21 @@ fn file_mtime(abs: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+/// Terse timing for the batch index paths. Silent for small batches so a normal
+/// single-note save logs nothing; a cold `rebuild` or a bulk file drop — the two
+/// places where the old one-link-pass-per-file behaviour showed up as seconds of
+/// stall — reports how long it took.
+fn log_batch(label: &str, files: usize, started: Instant) {
+    if files < BATCH_LOG_MIN {
+        return;
+    }
+    let ms = started.elapsed().as_millis();
+    eprintln!(
+        "[index] {label}: {files} files in {ms} ms ({:.2} ms/file)",
+        ms as f64 / files as f64
+    );
+}
+
 /// Turn free-form user input into a safe FTS5 MATCH query: each term becomes a
 /// prefix match, joined by AND. Quotes special chars to avoid syntax errors.
 fn build_fts_query(input: &str) -> String {
@@ -962,8 +1110,18 @@ mod tests {
     fn seed_vault() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let v = tmp.path().to_path_buf();
-        write_note(&v, "Alpha.md", "---\ntags: [project]\n---\n# Alpha\n\nLinks to [[Beta]] and #inline tag.").unwrap();
-        write_note(&v, "sub/Beta.md", "# Beta\n\nThe quick brown fox. Back to [[Alpha]].").unwrap();
+        write_note(
+            &v,
+            "Alpha.md",
+            "---\ntags: [project]\n---\n# Alpha\n\nLinks to [[Beta]] and #inline tag.",
+        )
+        .unwrap();
+        write_note(
+            &v,
+            "sub/Beta.md",
+            "# Beta\n\nThe quick brown fox. Back to [[Alpha]].",
+        )
+        .unwrap();
         write_note(&v, "Gamma.md", "# Gamma\n\nDangling [[Nonexistent]] link.").unwrap();
         (tmp, v)
     }
@@ -1021,7 +1179,10 @@ mod tests {
             .map(|t| t.path)
             .collect();
         assert!(paths.contains("Delta.md"), "new file should be indexed");
-        assert!(!paths.contains("Gamma.md"), "deleted file should be dropped");
+        assert!(
+            !paths.contains("Gamma.md"),
+            "deleted file should be dropped"
+        );
         assert_eq!(paths.len(), 3); // Alpha, sub/Beta, Delta
 
         // Alpha kept its identity through the edit, and its new link resolved
@@ -1031,6 +1192,250 @@ mod tests {
         let backlinks = idx.get_backlinks(&delta.id).unwrap();
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].title, "Alpha");
+    }
+
+    // ---- batch indexing (the quadratic-link-pass fix) ---------------------
+
+    /// Every file-derived row a batch produces, in a form that is comparable
+    /// across two independently-built vaults (doc_ids are fresh UUIDs, and the
+    /// two vaults' mtimes can differ by a second, so neither is included).
+    #[allow(clippy::type_complexity)]
+    fn file_derived_snapshot(
+        idx: &Index,
+    ) -> (
+        Vec<(String, String, String)>,
+        Vec<(String, String)>,
+        Vec<(String, String, String)>,
+        Vec<(String, String)>,
+    ) {
+        let notes: Vec<(String, String, String)> = {
+            let mut stmt = idx
+                .conn
+                .prepare("SELECT path, title, sha256 FROM notes ORDER BY path")
+                .unwrap();
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let fts: Vec<(String, String)> = {
+            let mut stmt = idx
+                .conn
+                .prepare(
+                    "SELECT n.path, f.body FROM notes_fts f
+                     JOIN notes n ON n.rowid = f.rowid ORDER BY n.path",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        // Links joined back to PATHS on both ends: `dst_note_id` proves the link
+        // pass ran, and a path is stable across vaults where an id is not.
+        let links: Vec<(String, String, String)> = {
+            let mut stmt = idx
+                .conn
+                .prepare(
+                    "SELECT src.path, COALESCE(dst.path, '-'), l.dst_path_raw
+                     FROM links l
+                     JOIN notes src ON src.id = l.src_note_id
+                     LEFT JOIN notes dst ON dst.id = l.dst_note_id
+                     ORDER BY src.path, l.dst_path_raw",
+                )
+                .unwrap();
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let tags: Vec<(String, String)> = {
+            let mut stmt = idx
+                .conn
+                .prepare(
+                    "SELECT n.path, t.name FROM note_tags nt
+                     JOIN notes n ON n.id = nt.note_id
+                     JOIN tags t ON t.id = nt.tag_id
+                     ORDER BY n.path, t.name",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        (notes, fts, links, tags)
+    }
+
+    fn seed_batch_vault() -> (tempfile::TempDir, std::path::PathBuf, Vec<PathBuf>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        let files = [
+            (
+                "Alpha.md",
+                "---\ntags: [project]\n---\n# Alpha\n\nTo [[Beta]] and [[Gamma]]. #inline",
+            ),
+            (
+                "sub/Beta.md",
+                "# Beta\n\nBack to [[Alpha]] and out to [[Nowhere]].",
+            ),
+            (
+                "Gamma.md",
+                "# Gamma\n\nquick brown fox linking [[sub/Beta]].",
+            ),
+            (
+                "sub/deep/Delta.md",
+                "---\ntags: [a, b]\n---\n# Delta\n\n[[Alpha]] [[Gamma]]",
+            ),
+            ("Epsilon.md", "# Epsilon\n\nNo links here at all."),
+        ];
+        let mut abs = Vec::new();
+        for (rel, body) in files {
+            write_note(&v, rel, body).unwrap();
+            abs.push(v.join(rel));
+        }
+        (tmp, v, abs)
+    }
+
+    /// The batch entry point must be observationally identical to calling
+    /// `index_note` once per file — same notes, FTS rows, tags, and RESOLVED
+    /// links. Only the number of whole-vault link passes differs.
+    #[test]
+    fn index_notes_matches_one_index_note_per_file() {
+        let (_tmp_a, va, abs_a) = seed_batch_vault();
+        let idx_a = Index::open(&va).unwrap();
+        for abs in &abs_a {
+            idx_a.index_note(&va, abs).unwrap();
+        }
+
+        let (_tmp_b, vb, abs_b) = seed_batch_vault();
+        let idx_b = Index::open(&vb).unwrap();
+        assert!(idx_b.index_notes(&vb, &abs_b).unwrap().is_empty());
+
+        assert_eq!(file_derived_snapshot(&idx_a), file_derived_snapshot(&idx_b));
+
+        // And the snapshot is not trivially empty / unresolved.
+        let (notes, _, links, _) = file_derived_snapshot(&idx_b);
+        assert_eq!(notes.len(), 5);
+        assert!(
+            links.iter().any(|(_, dst, _)| dst != "-"),
+            "links should be resolved: {links:?}"
+        );
+        assert!(
+            links
+                .iter()
+                .any(|(_, dst, raw)| dst == "-" && raw == "Nowhere"),
+            "a dangling link stays dangling: {links:?}"
+        );
+    }
+
+    /// The whole point: ONE link pass for the batch, versus one per file.
+    #[test]
+    fn index_notes_runs_exactly_one_link_pass_per_batch() {
+        let (_tmp, v, abs) = seed_batch_vault();
+        let idx = Index::open(&v).unwrap();
+        assert_eq!(idx.resolve_call_count(), 0);
+
+        idx.index_notes(&v, &abs).unwrap();
+        assert_eq!(
+            idx.resolve_call_count(),
+            1,
+            "5 files must cost ONE whole-vault link pass"
+        );
+
+        // The old shape, for contrast: one pass per file.
+        for one in &abs {
+            idx.index_note(&v, one).unwrap();
+        }
+        assert_eq!(idx.resolve_call_count(), 1 + abs.len());
+
+        // Removals batch the same way.
+        idx.remove_notes(&v, &abs).unwrap();
+        assert_eq!(idx.resolve_call_count(), 2 + abs.len());
+
+        // An empty batch does no work at all (no transaction, no pass).
+        let before = idx.resolve_call_count();
+        assert!(idx.index_notes(&v, &[]).unwrap().is_empty());
+        assert!(idx.remove_notes(&v, &[]).unwrap().is_empty());
+        assert_eq!(idx.resolve_call_count(), before);
+    }
+
+    /// One bad file in a big drop must not cost the rest their index rows — it
+    /// comes back as a reported failure instead.
+    #[test]
+    fn index_notes_reports_a_bad_file_without_aborting_the_batch() {
+        let (_tmp, v, mut abs) = seed_batch_vault();
+        let idx = Index::open(&v).unwrap();
+
+        // Two failures of different shapes: a path that doesn't exist (read
+        // error) and one outside the vault (rel_from_abs error).
+        let missing = v.join("sub/Ghost.md");
+        let outside = std::path::PathBuf::from("/definitely/not/in/the/vault.md");
+        abs.insert(2, missing.clone());
+        abs.push(outside.clone());
+
+        let failures = idx.index_notes(&v, &abs).unwrap();
+        let failed: Vec<&PathBuf> = failures.iter().map(|(p, _)| p).collect();
+        assert_eq!(failures.len(), 2, "reported: {failed:?}");
+        assert!(failed.contains(&&missing));
+        assert!(failed.contains(&&outside));
+
+        // Every good file still landed, links and all.
+        assert_eq!(idx.list_note_titles().unwrap().len(), 5);
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();
+        assert!(!idx.get_backlinks(&alpha.id).unwrap().is_empty());
+        // Still exactly one link pass despite the failures.
+        assert_eq!(idx.resolve_call_count(), 1);
+    }
+
+    /// A folder delete arrives as several watcher paths; batching removals must
+    /// prune the subtree exactly as the per-path loop did.
+    #[test]
+    fn remove_notes_prunes_files_and_folder_subtrees() {
+        let (_tmp, v, _abs) = seed_batch_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.list_note_titles().unwrap().len(), 5);
+
+        // One file plus a whole folder (which owns sub/Beta.md and sub/deep/Delta.md).
+        let victims = vec![v.join("Epsilon.md"), v.join("sub")];
+        assert!(idx.remove_notes(&v, &victims).unwrap().is_empty());
+
+        let left: Vec<String> = idx
+            .list_note_titles()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.path)
+            .collect();
+        assert_eq!(left, vec!["Alpha.md".to_string(), "Gamma.md".to_string()]);
+        // Alpha's [[Beta]] is dangling again — the link pass ran after the batch.
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();
+        let dangling: i64 = idx
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE src_note_id = ?1 AND dst_note_id IS NULL",
+                params![alpha.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dangling, 1);
+        // A path with nothing indexed under it is a no-op, not an error.
+        assert!(idx
+            .remove_notes(&v, &[v.join("never-existed")])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1064,13 +1469,22 @@ mod tests {
         let snip = &results[0].snippet;
         // The dangerous markup is escaped — no live tags survive.
         assert!(snip.contains("&lt;img"), "raw < must be escaped: {snip}");
-        assert!(!snip.contains("<img"), "no live <img> tag may survive: {snip}");
-        assert!(!snip.contains("onerror=\"alert"), "no live handler may survive: {snip}");
+        assert!(
+            !snip.contains("<img"),
+            "no live <img> tag may survive: {snip}"
+        );
+        assert!(
+            !snip.contains("onerror=\"alert"),
+            "no live handler may survive: {snip}"
+        );
         // The `"` around the handler is entity-escaped (proves the &-based
         // escaping path runs over the snippet).
         assert!(snip.contains("&quot;"), "raw \" must be escaped: {snip}");
         // The highlight markers are still present and are the only surviving tags.
-        assert!(snip.contains("<mark>") && snip.contains("</mark>"), "highlight preserved: {snip}");
+        assert!(
+            snip.contains("<mark>") && snip.contains("</mark>"),
+            "highlight preserved: {snip}"
+        );
     }
 
     #[test]
@@ -1101,7 +1515,12 @@ mod tests {
         let beta_id = beta.id.clone();
 
         // Move Beta on disk + update the index by id.
-        write_note(&v, "moved/BetaRenamedFile.md", "# Beta\n\nMoved body [[Alpha]].").unwrap();
+        write_note(
+            &v,
+            "moved/BetaRenamedFile.md",
+            "# Beta\n\nMoved body [[Alpha]].",
+        )
+        .unwrap();
         std::fs::remove_file(v.join("sub/Beta.md")).unwrap();
         idx.rename_note(
             &v,
@@ -1111,7 +1530,10 @@ mod tests {
         .unwrap();
 
         // The rule: rename preserves doc_id (identity never forks).
-        let moved = idx.get_note_meta("moved/BetaRenamedFile.md").unwrap().unwrap();
+        let moved = idx
+            .get_note_meta("moved/BetaRenamedFile.md")
+            .unwrap()
+            .unwrap();
         assert_eq!(moved.id, beta_id);
 
         // Inbound links keyed by dst_note_id are never touched by a move — so
@@ -1207,7 +1629,8 @@ mod tests {
         idx.append_yjs_update("doc-a", &[2]).unwrap();
         idx.append_yjs_update("doc-b", &[7]).unwrap();
 
-        idx.save_yjs_snapshot("doc-a", &[10, 20, 30], &[40]).unwrap();
+        idx.save_yjs_snapshot("doc-a", &[10, 20, 30], &[40])
+            .unwrap();
 
         let a = idx.load_yjs_state("doc-a").unwrap();
         assert_eq!(a.snapshot, Some(vec![10, 20, 30]));

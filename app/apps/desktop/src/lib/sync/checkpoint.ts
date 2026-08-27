@@ -18,6 +18,24 @@
 // overlapping flushes can never interleave and write a torn map. Pure — timers
 // injectable — so it is unit-testable without Tauri.
 
+/**
+ * Flush batch for a vault with `mapped` notes in its doc map.
+ *
+ * config.json is not a small file: it carries a `docs` entry, a `baseline` entry
+ * and (once pushed) a `pushed` entry per note, so a 5,000-note vault writes
+ * ~megabytes per flush. A fixed 25-item batch therefore turns a big backfill into
+ * ~200 whole-file rewrites — hundreds of megabytes of disk churn on the very
+ * vaults that are already struggling. Scaling the batch with the map keeps the
+ * number of writes roughly constant (~50 per full run) instead of the SIZE of
+ * each write being the only thing that grows.
+ *
+ * Never below 25: a small vault must still checkpoint often enough that a kill -9
+ * loses under a second of work.
+ */
+export function checkpointBatchFor(mapped: number): number {
+  return Math.max(25, Math.floor(mapped / 50));
+}
+
 export interface CheckpointOptions<T> {
   /** Serialize + persist the value. Must not throw for a normal failure — the
    *  checkpointer logs and keeps the dirty flag so the next window retries. */
@@ -42,7 +60,9 @@ export interface CheckpointOptions<T> {
 export class Checkpointer<T> {
   private readonly writeFn: (value: T) => Promise<void>;
   private readonly snapshotFn: () => T;
-  private readonly everyItems: number;
+  /** Not readonly: {@link Checkpointer.setEveryItems} retunes it once the caller
+   *  knows how big this vault's map actually is. */
+  private everyItems: number;
   private readonly everyMs: number;
   private readonly setT: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly clearT: (h: ReturnType<typeof setTimeout>) => void;
@@ -63,6 +83,18 @@ export class Checkpointer<T> {
     this.everyMs = Math.max(0, opts.everyMs ?? 750);
     this.setT = opts.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearT = opts.clearTimeoutImpl ?? ((h) => clearTimeout(h));
+  }
+
+  /**
+   * Retune the batch size mid-life — the caller only learns the vault's size
+   * after it has read config.json, which is already past construction.
+   *
+   * Flushes immediately if the new (smaller) batch is already full, so lowering
+   * it can't leave a write owed indefinitely.
+   */
+  setEveryItems(n: number): void {
+    this.everyItems = Math.max(1, Math.floor(n));
+    if (!this.disposed && this.pending >= this.everyItems) void this.flush();
   }
 
   /** Note that `n` units of work happened. Flushes when the batch fills, else

@@ -60,6 +60,8 @@ describe("vault fanout isolation / load (spec 05 §5)", () => {
       listReadableDocs: async (_userId: string, vaultId: string) =>
         new Set([`doc:${vaultId}`]),
       loadDiff: async () => null, // no backfill; we only measure live fanout
+      // Stubbed: pure in-memory fanout test, no DB.
+      listEmpty: async () => ({ empty: [], truncated: false }),
     });
 
     const sockets: FakeWs[] = [];

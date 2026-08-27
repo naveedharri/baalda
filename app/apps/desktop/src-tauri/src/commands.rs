@@ -496,26 +496,34 @@ pub async fn import_paths(
     // it opened. Without the pin an import could copy files into a different vault.
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let summary = import_export::import_paths(&vault, &dest, &sources);
-    // Index every new note under the imported top-level items.
-    let guard = index.lock().unwrap();
+    // Index every new note under the imported top-level items — collected FIRST,
+    // then handed to the index as ONE batch. Indexing them one at a time re-ran a
+    // whole-vault link-resolution pass per file, so importing a folder of 1000
+    // notes cost 1000 of them (see `Index::index_notes`).
+    let mut md_paths: Vec<PathBuf> = Vec::new();
     for rel in &summary.imported {
         if let Ok(abs) = vault::resolve_in_vault(&vault, rel) {
-            index_md_tree(&guard, &vault, &abs);
+            collect_md_tree(&abs, &mut md_paths);
         }
+    }
+    let guard = index.lock().unwrap();
+    for (path, err) in guard.index_notes(&vault, &md_paths)? {
+        eprintln!("[import] index failed for {}: {err}", path.display());
     }
     Ok(summary)
 }
 
-/// Recursively index every `.md` file at/under `abs` (best-effort).
-fn index_md_tree(index: &Index, vault: &Path, abs: &Path) {
+/// Collect every `.md` file at/under `abs` (best-effort; an unreadable dir is
+/// skipped rather than failing the whole import).
+fn collect_md_tree(abs: &Path, out: &mut Vec<PathBuf>) {
     if abs.is_dir() {
         if let Ok(entries) = std::fs::read_dir(abs) {
             for entry in entries.flatten() {
-                index_md_tree(index, vault, &entry.path());
+                collect_md_tree(&entry.path(), out);
             }
         }
     } else if abs.extension().and_then(|e| e.to_str()) == Some("md") {
-        let _ = index.index_note(vault, abs);
+        out.push(abs.to_path_buf());
     }
 }
 
@@ -684,10 +692,13 @@ pub async fn set_vault_config(
     expected_epoch: Option<u64>,
 ) -> AppResult<()> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    let dir = vault.join(".context");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("config.json"), content)?;
-    Ok(())
+    // Atomic + fsync'd: this file is the ONLY copy of the vault's doc-id map, and
+    // it is rewritten on every registry pull. A bare `fs::write` truncates first,
+    // so a crash (or a full disk) mid-write leaves a half-written or empty map —
+    // which the sync layer reads as "this vault knows nothing about its notes"
+    // and re-registers everything. See `notefile::write_atomic_fsync`.
+    let target = vault.join(".context").join("config.json");
+    notefile::write_atomic_fsync(&target, content.as_bytes())
 }
 
 /// Persist the sync server base URL (app config, next to last_vault).

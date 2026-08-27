@@ -138,6 +138,12 @@ export async function canReadAttachment(
  * Filter a vault's blob list to the ones `userId` may read (see
  * {@link canReadAttachment}). Vault-wide readers get everything; a scoped
  * member gets only blobs referenced by a note they can read.
+ *
+ * The reference test runs in Postgres, one `LIKE` per (path, readable note),
+ * the same shape {@link canReadAttachment} already uses. It used to `SELECT
+ * content` for every readable doc and concatenate the lot into one JS string —
+ * i.e. pull an entire vault's markdown into the heap of a list request, on a
+ * path a scoped member hits on every attachment sync.
  */
 export async function filterReadableBlobs<T extends { rel_path: string | null }>(
   userId: string,
@@ -151,10 +157,23 @@ export async function filterReadableBlobs<T extends { rel_path: string | null }>
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   if (readable.size === 0) return [];
-  const { rows } = await db.query<{ content: string | null }>(
-    `SELECT content FROM note_index WHERE vault_id = $1 AND doc_id = ANY($2::text[])`,
-    [vaultId, [...readable]],
+  // A falsy rel_path can never match (it has no needle to search for), so it is
+  // dropped here exactly as the old `!!b.rel_path` guard dropped it.
+  const paths = [...new Set(blobs.map((b) => b.rel_path).filter((p): p is string => !!p))];
+  if (paths.length === 0) return [];
+
+  // Two parallel arrays, not one: the escaped form is what LIKE matches, the raw
+  // form is what maps the answer back onto the blob rows.
+  const { rows } = await db.query<{ rel_path: string }>(
+    `SELECT p.rel_path
+       FROM unnest($3::text[], $4::text[]) AS p(rel_path, needle)
+      WHERE EXISTS (
+        SELECT 1 FROM note_index ni
+         WHERE ni.vault_id = $1 AND ni.doc_id = ANY($2::text[])
+           AND ni.content LIKE '%' || p.needle || '%' ESCAPE '\\'
+      )`,
+    [vaultId, [...readable], paths, paths.map(likeEscape)],
   );
-  const haystack = rows.map((r) => r.content ?? "").join("\n");
-  return blobs.filter((b) => !!b.rel_path && haystack.includes(b.rel_path));
+  const referenced = new Set(rows.map((r) => r.rel_path));
+  return blobs.filter((b) => !!b.rel_path && referenced.has(b.rel_path));
 }

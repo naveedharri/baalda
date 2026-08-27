@@ -64,7 +64,24 @@ export interface PresenceState {
 }
 
 export type ServerControl =
-  | { t: "ready" } // initial backfill drained
+  /**
+   * Initial backfill drained.
+   *
+   * `empty` names the readable docs that hold NOTHING on the server — no
+   * snapshot, no logged update. Backfill sends no frame for those, so without
+   * this the client cannot distinguish "the server has nothing" from "my
+   * backfill hasn't reached it yet", and a note registered but never uploaded
+   * (the 2026-08 bulk-register incident) stays blank forever. Named docs are the
+   * client's cue to seed from its own disk. `emptyTruncated` means the list hit
+   * the server's cap and another pass is needed.
+   *
+   * Both fields are OMITTED when nothing is empty, so the overwhelmingly common
+   * frame stays byte-identical to `{"t":"ready"}`. Old clients ignore unknown
+   * keys (`parseServerControl` switches on `t` and reads only what it knows),
+   * which is why this could be added without a capability flag — unlike a new
+   * *binary* frame, see {@link HelloFrame.caps}.
+   */
+  | { t: "ready"; empty?: string[]; emptyTruncated?: true }
   | { t: "drop"; docId: string } // access lost / doc removed -> client evicts
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token
   | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry

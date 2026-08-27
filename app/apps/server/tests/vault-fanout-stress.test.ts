@@ -59,6 +59,8 @@ function makeChannel(): VaultChannel {
     listReadableDocs: async (_userId: string, vaultId: string) =>
       new Set(Array.from({ length: DOCS_PER_VAULT }, (_, i) => `${vaultId}/doc${i}`)),
     loadDiff: async () => null, // no backfill; we measure live fanout only
+    // Stubbed: pure in-memory fanout test, no DB.
+    listEmpty: async () => ({ empty: [], truncated: false }),
   });
 }
 

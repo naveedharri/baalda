@@ -5,7 +5,7 @@ import { config } from "../config.js";
 import { type PubSub, vaultTopic } from "./pubsub.js";
 import { verifyVaultToken } from "../tokens/vault-token.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
-import { loadDocDiff } from "../yjs/persistence.js";
+import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
 import {
   parseHello,
   parsePresence,
@@ -59,6 +59,8 @@ export interface VaultChannelDeps {
   pubsub: PubSub;
   listReadableDocs?: typeof listReadableDocsInVault;
   loadDiff?: typeof loadDocDiff;
+  /** Which readable docs hold no server content — reported on `ready`. */
+  listEmpty?: typeof listEmptyDocs;
   verifyToken?: typeof verifyVaultToken;
   backfillConcurrency?: number;
   /** Per-connection outbound cap in bytes (default `config.vaultSendCapBytes`). */
@@ -83,6 +85,7 @@ export class VaultChannel {
   private readonly pubsub: PubSub;
   private readonly listReadableDocs: typeof listReadableDocsInVault;
   private readonly loadDiff: typeof loadDocDiff;
+  private readonly listEmpty: typeof listEmptyDocs;
   private readonly verifyToken: typeof verifyVaultToken;
   private readonly concurrency: number;
   private readonly sendCapBytes: number;
@@ -105,6 +108,7 @@ export class VaultChannel {
     this.pubsub = deps.pubsub;
     this.listReadableDocs = deps.listReadableDocs ?? listReadableDocsInVault;
     this.loadDiff = deps.loadDiff ?? loadDocDiff;
+    this.listEmpty = deps.listEmpty ?? listEmptyDocs;
     this.verifyToken = deps.verifyToken ?? verifyVaultToken;
     this.concurrency = deps.backfillConcurrency ?? config.backfillConcurrency;
     this.sendCapBytes = deps.sendCapBytes ?? config.vaultSendCapBytes;
@@ -255,6 +259,7 @@ export class VaultChannel {
     const conn = new VaultConnection(ws, this.pubsub, {
       listReadableDocs: this.listReadableDocs,
       loadDiff: this.loadDiff,
+      listEmpty: this.listEmpty,
       verifyToken: this.verifyToken,
       concurrency: this.concurrency,
       sendCapBytes: this.sendCapBytes,
@@ -269,6 +274,7 @@ export class VaultChannel {
 interface ConnDeps {
   listReadableDocs: typeof listReadableDocsInVault;
   loadDiff: typeof loadDocDiff;
+  listEmpty: typeof listEmptyDocs;
   verifyToken: typeof verifyVaultToken;
   concurrency: number;
   sendCapBytes: number;
@@ -444,7 +450,34 @@ class VaultConnection {
     }
 
     await this.backfill(hello.manifest, hello.priority ?? []);
-    this.send({ t: "ready" });
+
+    // Backfill sends nothing for a doc with no server state, so the client would
+    // otherwise sit on a blank note it can't tell apart from one still in flight
+    // (the 2026-08 bulk-register incident left 613 such notes in prod). Naming
+    // them on `ready` is the client's cue to seed them from disk. One query for
+    // the whole readable set, and a failure only costs the hint — `ready` still
+    // ships, because withholding it would leave the client stuck "connecting".
+    // Gone mid-backfill (a reconnect storm makes this common, and it is exactly
+    // the load this probe must not add to): `send` would no-op anyway, so skip
+    // the query rather than pay for an answer nobody receives.
+    if (this.closed || this.ws.readyState !== this.ws.OPEN) return;
+
+    let empty: string[] = [];
+    let emptyTruncated = false;
+    try {
+      const probe = await this.deps.listEmpty([...this.readable]);
+      empty = probe.empty;
+      emptyTruncated = probe.truncated;
+    } catch (err) {
+      console.error("Vault channel empty-doc probe failed:", err);
+    }
+    this.send({
+      t: "ready",
+      // Omitted when nothing is empty, so the common frame is byte-identical to
+      // what every shipped client already parses.
+      ...(empty.length > 0 ? { empty } : {}),
+      ...(empty.length > 0 && emptyTruncated ? { emptyTruncated: true as const } : {}),
+    });
   }
 
   /** Binary from the client. Only voice frames are defined; the leading type
