@@ -293,6 +293,13 @@ interface AppStore {
   pruneTabs: (paths: string[]) => void;
   /** Re-point tabs across a rename/move of a file or a folder subtree. */
   remapTabs: (from: string, to: string) => void;
+  /** Close every tab except the given one, which takes (or keeps) the screen. */
+  closeOtherTabs: (path: string) => void;
+  /** Close every tab after the given one; it takes the screen if the active
+   *  tab was among the closed. */
+  closeTabsToRight: (path: string) => void;
+  /** Close every tab and clear the editor. */
+  closeAllTabs: () => void;
 
   // Auth actions
   initAuth: () => Promise<void>;
@@ -1283,6 +1290,32 @@ export const useStore = create<AppStore>((set, get) => ({
     if (next.length !== tabs.length || next.some((p, i) => p !== tabs[i])) {
       set({ openTabs: next });
     }
+  },
+
+  closeOtherTabs: (path) => {
+    // No membership guard: the strip can offer this on the phantom tab it
+    // renders for an open note that vault machinery dropped from the list —
+    // "close others" then simply makes that note's tab real and only.
+    set({ openTabs: [path] });
+    // The survivor takes the screen; leaving a closed tab's note up would break
+    // the strip's "active = what's on screen" rule.
+    if (get().openNote?.path !== path) void get().openNoteByPath(path);
+  },
+
+  closeTabsToRight: (path) => {
+    const { openTabs, openNote } = get();
+    const idx = openTabs.indexOf(path);
+    if (idx === -1 || idx === openTabs.length - 1) return;
+    const next = openTabs.slice(0, idx + 1);
+    set({ openTabs: next });
+    // The active tab was among the closed: the anchor of the close is the
+    // nearest survivor, so it takes the screen.
+    if (openNote && !next.includes(openNote.path)) void get().openNoteByPath(path);
+  },
+
+  closeAllTabs: () => {
+    set({ openTabs: [] });
+    get().closeNote();
   },
 
   // ---- Auth ----
