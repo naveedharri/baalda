@@ -198,6 +198,28 @@ export function VaultPicker() {
     await useStore.getState().adoptOpenedVault(vault, opts);
   }
 
+  // "Open by path": a typed/pasted absolute path, for what the native picker
+  // cannot select — notably a drive root (a bare `D:\` or a mounted volume).
+  // The OS folder dialog only offers folders *inside* a drive, so the only way
+  // to make the drive itself the vault is to say so in text (#75).
+  const [pathOpen, setPathOpen] = useState(false);
+  const [manualPath, setManualPath] = useState("");
+  async function openByPath() {
+    const path = manualPath.trim();
+    if (!path) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // `openLocalVault`, not `adoptOpenedVault`: WE control this open, so the
+      // store can tear down any active vault sync before Rust swaps the slot.
+      await useStore.getState().openLocalVault(path);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // "Open existing": native folder picker → open the chosen vault.
   async function pickExisting() {
     setBusy(true);
@@ -774,8 +796,54 @@ export function VaultPicker() {
               reduceMotion ? undefined : revealTransition(REVEAL_DELAY + 0.3)
             }
           >
-            A vault is any folder of <code>.md</code> files.
+            A vault is any folder of <code>.md</code> files.{" "}
+            <button
+              type="button"
+              className="linkish"
+              disabled={busy}
+              aria-expanded={pathOpen}
+              onClick={() => setPathOpen((v) => !v)}
+            >
+              Open by path
+            </button>
           </motion.p>
+        )}
+
+        {/* The escape hatch itself. Plain conditional (no enter animation): it
+            appears in direct response to the link above, and motion between a
+            question and its answer reads as lag. */}
+        {!inFlow && pathOpen && (
+          <form
+            className="open-by-path"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void openByPath();
+            }}
+          >
+            {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+            <input
+              className="new-vault-input open-by-path-input"
+              autoFocus
+              value={manualPath}
+              disabled={busy}
+              onChange={(e) => setManualPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setPathOpen(false);
+              }}
+              placeholder={"Full folder or drive path, e.g. D:\\ or /Volumes/Notes"}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <button
+              type="submit"
+              className={`primary sm${busy ? " is-busy" : ""}`}
+              disabled={busy || !manualPath.trim()}
+              aria-busy={busy || undefined}
+            >
+              <span className="async-btn-label">{busy ? "Opening…" : "Open"}</span>
+              {busy && <Spinner size="xs" tone="on-accent" />}
+            </button>
+          </form>
         )}
 
         {/*

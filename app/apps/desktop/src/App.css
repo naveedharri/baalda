@@ -456,6 +456,21 @@ button.primary.hero:hover:not(:disabled) {
   outline: none;
   border-color: var(--accent);
 }
+/* "Open by path" — the picker's escape hatch for what the native folder dialog
+   can't select (a drive root as the vault). Sits under the hint that reveals it. */
+.open-by-path {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: stretch;
+  justify-content: center;
+  width: min(420px, 84vw);
+  margin: var(--sp-2) auto 0;
+}
+.open-by-path-input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
 .new-vault-loc {
   font-size: var(--fs-sm);
   color: var(--text-tertiary);

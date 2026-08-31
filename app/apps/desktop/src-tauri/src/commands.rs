@@ -146,14 +146,30 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Label for a path with no `file_name` (a filesystem/drive root): the path
+/// itself minus trailing separators, so `D:\\` reads "D:" — except a bare `/`,
+/// which has nothing left after the trim and stays as it is.
+fn root_label(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn vault_info(path: &Path, epoch: u64) -> VaultInfo {
+    // A filesystem/drive root (`/`, `D:\`) has no `file_name`, but it is a
+    // legal vault root (opened by path — the native picker can't select one).
+    // Label it by the path itself, trimmed of trailing separators, rather than
+    // the old anonymous "vault".
+    let name = match path.file_name().and_then(|s| s.to_str()) {
+        Some(n) => n.to_string(),
+        None => root_label(&path.to_string_lossy()),
+    };
     VaultInfo {
         path: path.to_string_lossy().to_string(),
-        name: path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("vault")
-            .to_string(),
+        name,
         epoch,
     }
 }
@@ -1079,6 +1095,22 @@ pub async fn read_external_file(path: String) -> AppResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vault opened at a filesystem/drive root has no `file_name`; its label
+    /// must fall back to the path itself, never the anonymous "vault".
+    #[test]
+    fn vault_info_names_filesystem_roots() {
+        // Ordinary folder: the folder's own name.
+        let v = vault_info(Path::new("/home/me/Notes"), 1);
+        assert_eq!(v.name, "Notes");
+        // Unix root: nothing to trim — keep the path.
+        let v = vault_info(Path::new("/"), 1);
+        assert_eq!(v.name, "/");
+        // Windows drive root (verbatim string, host-independent): trailing
+        // separator trimmed so the label reads "D:".
+        assert_eq!(root_label("D:\\"), "D:");
+        assert_eq!(root_label("/"), "/");
+    }
 
     /// The rediscovery probe must identify a vault folder without opening it,
     /// and must answer None (never an error) for everything that isn't one —
