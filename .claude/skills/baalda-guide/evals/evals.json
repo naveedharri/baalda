@@ -1,0 +1,47 @@
+{
+  "skill_name": "baalda-guide",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "by the way how does it or can it hold and load and sync other formats like DOCX, XLSX, PNG, PY, and JS files?",
+      "expected_output": "Plain-language answer: images/PDF preview and sync via attachments; DOCX/XLSX attach-only as links, not opened or converted; PY/JS ignored on purpose; only text notes get live editing/search/AI; 25 MB attachment limit.",
+      "files": [],
+      "assertions": [
+        "Leads with a direct answer (yes/no/partly) in the first sentence",
+        "States that PY and JS (code files) are ignored / not shown in the vault",
+        "States that DOCX and XLSX cannot be opened or edited in Baalda but can be attached to a note",
+        "States that PNG (images) preview in the app and sync when embedded in a note",
+        "Does not use the words CRDT, Yjs, or Hocuspocus",
+        "Under 250 words"
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "My team of 6 uses Obsidian with a shared Dropbox folder and it keeps making conflicted copies. Would Baalda fix that? Do we all need to pay, and can we keep our existing vault?",
+      "expected_output": "Yes: live merge, no conflicted copies; existing Obsidian vault opens as-is (plugins don't carry over); free locally/self-hosted; managed service free up to 3 vaults/10 members, then Pro $10/vault/month or $97/year bought in-app; team can start today.",
+      "files": [],
+      "assertions": [
+        "Says conflicted copies do not happen because edits merge automatically",
+        "Says the existing Obsidian vault folder can be opened directly without conversion",
+        "Mentions that Obsidian plugins do not carry over",
+        "States the managed plan is live and self-serve now (upgrade in-app), with Pro at $10 per vault per month or $97 per year; does not say 'early access' or 'contact us for pricing'",
+        "Distinguishes free (local/self-host) from the paid managed Team plan",
+        "Does not use the words CRDT, Yjs, or Hocuspocus"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I'm not technical. If I invite my assistant to my Baalda vault, can I stop her from seeing my personal folder? And can I let ChatGPT or Claude read my notes, and would it also see her stuff?",
+      "expected_output": "Yes: make the folder private / share per person with view or edit; AI via MCP token is bound to the token creator's permissions, or a local agent edits files on disk; no built-in chat; mention where in the app.",
+      "files": [],
+      "assertions": [
+        "Says a folder or note can be made private or shared with specific people",
+        "Says the AI connects through a token created in Vault Settings (MCP) or via a local tool editing files",
+        "Says the AI sees exactly what the person who made the token can see (same permissions)",
+        "Explains MCP in a short gloss rather than assuming the reader knows it",
+        "Gives at least one concrete in-app location (e.g. right-click → Share, Vault Settings → MCP)",
+        "Under 300 words"
+      ]
+    }
+  ]
+}
