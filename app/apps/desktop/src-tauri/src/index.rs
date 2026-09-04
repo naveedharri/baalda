@@ -23,9 +23,25 @@ use walkdir::WalkDir;
 /// through the same code and must stay silent.
 const BATCH_LOG_MIN: usize = 50;
 
+/// Files above this are indexed by title only — never parsed for body text or
+/// links. Mirrors the sync layer's `MAX_NOTE_BYTES` (contentUpload.ts): a note
+/// too big to upload is a note too big to fully index. See `index_one`.
+const MAX_INDEX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Which links a resolution pass has to reconsider.
+pub enum LinkScope<'a> {
+    /// Every link in the vault. Correct but O(all links): only for `rebuild`,
+    /// where we are rewriting everything anyway.
+    All,
+    /// Only the links a batch can have changed the answer for (see
+    /// `Index::resolve_links` for why this set is sufficient). These are the
+    /// note ids the batch created, re-parsed, renamed or removed.
+    Touched(&'a [String]),
+}
+
 pub struct Index {
     conn: Connection,
-    /// Test-only: how many times `resolve_all_links` has run. The entire point of
+    /// Test-only: how many times `resolve_links` has run. The entire point of
     /// the batch entry points is ONE link pass per batch instead of one per file,
     /// and that difference is only observable by counting.
     #[cfg(test)]
@@ -317,9 +333,11 @@ impl Index {
             changed = true;
         }
 
-        // Link targets only need re-resolving when the note set changed.
+        // Link targets only need re-resolving when the note set changed. Full
+        // scope: `rebuild` has just rewritten every note, so there is no smaller
+        // set to narrow to.
         if changed {
-            self.resolve_all_links(&tx)?;
+            self.resolve_links(&tx, LinkScope::All)?;
         }
         tx.commit()?;
         log_batch("rebuild", touched, started);
@@ -328,7 +346,7 @@ impl Index {
 
     /// (Re)index a BATCH of notes: ONE transaction, ONE link-resolution pass.
     ///
-    /// Why this exists. `resolve_all_links` reads every row of `notes` and every
+    /// Why this exists. `resolve_links` reads every row of `notes` and every
     /// row of `links` and then rewrites every link row. Running it once *per
     /// file* — which is what `index_note` did, and the watcher called it once per
     /// dirty path — makes indexing N files O(N × links_in_vault), each pass in
@@ -352,19 +370,19 @@ impl Index {
         let started = Instant::now();
         let tx = self.conn.unchecked_transaction()?;
         let mut failures: Vec<(PathBuf, AppError)> = Vec::new();
-        let mut indexed = 0usize;
+        let mut touched: Vec<String> = Vec::with_capacity(abs_paths.len());
         for abs in abs_paths {
             let outcome = rel_from_abs(vault, abs)
                 .and_then(|rel| self.id_for_path(&tx, &rel))
                 .and_then(|reuse_id| self.index_one(&tx, vault, abs, reuse_id));
             match outcome {
-                Ok(()) => indexed += 1,
+                Ok(id) => touched.push(id),
                 Err(e) => failures.push((abs.clone(), e)),
             }
         }
-        // The single pass the whole batch shares.
-        if indexed > 0 {
-            self.resolve_all_links(&tx)?;
+        // The single pass the whole batch shares, narrowed to the notes it wrote.
+        if !touched.is_empty() {
+            self.resolve_links(&tx, LinkScope::Touched(&touched))?;
         }
         tx.commit()?;
         log_batch("index_notes", abs_paths.len(), started);
@@ -394,15 +412,15 @@ impl Index {
         }
         let tx = self.conn.unchecked_transaction()?;
         let mut failures: Vec<(PathBuf, AppError)> = Vec::new();
-        let mut removed = 0usize;
+        let mut gone: Vec<String> = Vec::new();
         for abs in abs_paths {
             match self.remove_one(&tx, vault, abs) {
-                Ok(()) => removed += 1,
+                Ok(mut ids) => gone.append(&mut ids),
                 Err(e) => failures.push((abs.clone(), e)),
             }
         }
-        if removed > 0 {
-            self.resolve_all_links(&tx)?;
+        if !gone.is_empty() {
+            self.resolve_links(&tx, LinkScope::Touched(&gone))?;
         }
         tx.commit()?;
         Ok(failures)
@@ -420,12 +438,16 @@ impl Index {
 
     /// The row-level removal, inside a caller-owned transaction and WITHOUT a
     /// link pass (the batch does that once at the end).
-    fn remove_one(&self, tx: &Connection, vault: &Path, abs: &Path) -> AppResult<()> {
+    /// Returns the ids it deleted, so the batch can scope `resolve_links`: links
+    /// that pointed AT a removed note must go back to dangling.
+    fn remove_one(&self, tx: &Connection, vault: &Path, abs: &Path) -> AppResult<Vec<String>> {
         let rel = rel_from_abs(vault, abs)?;
+        let mut gone: Vec<String> = Vec::new();
 
         // Exact-path note (a file delete).
         if let Some((id, rowid)) = self.row_for_path(tx, &rel)? {
             Self::delete_note_rows(tx, &id, rowid)?;
+            gone.push(id);
         }
 
         // Any notes under a deleted folder (prefix delete).
@@ -439,12 +461,13 @@ impl Index {
         };
         for (id, rowid) in victims {
             Self::delete_note_rows(tx, &id, rowid)?;
+            gone.push(id);
         }
         tx.execute(
             "DELETE FROM folders WHERE id = ?1 OR path LIKE ?2 || '%'",
             params![rel, prefix],
         )?;
-        Ok(())
+        Ok(gone)
     }
 
     fn delete_note_rows(tx: &Connection, id: &str, rowid: i64) -> AppResult<()> {
@@ -490,28 +513,94 @@ impl Index {
             )?;
         }
 
-        // Re-resolve links (a file rename can change the basename used to resolve).
-        self.resolve_all_links(&tx)?;
+        // Re-resolve links (a file rename can change the basename used to
+        // resolve). Full scope: a FOLDER move rewrites a whole subtree's paths,
+        // and the ids are gathered above only for the descendants, so narrowing
+        // here would be easy to get subtly wrong for a rename that changes a
+        // basename other notes link to.
+        self.resolve_links(&tx, LinkScope::All)?;
         tx.commit()?;
         Ok(())
     }
 
+    /// The note row for a file over [`MAX_INDEX_BYTES`]: identity, title and
+    /// mtime, with an EMPTY FTS body and no links or tags. Any body/link/tag rows
+    /// a smaller earlier version left behind are cleared, so a note growing past
+    /// the cap cannot strand millions of link rows in the table.
+    fn index_oversized(
+        &self,
+        tx: &Connection,
+        rel: &str,
+        stem: &str,
+        mtime: i64,
+        reuse_id: Option<String>,
+    ) -> AppResult<String> {
+        let id = reuse_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        tx.execute(
+            "INSERT INTO notes (id, path, title, mtime, sha256, frontmatter)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                path=excluded.path, title=excluded.title, mtime=excluded.mtime,
+                sha256=excluded.sha256, frontmatter=excluded.frontmatter",
+            params![id, rel, stem, mtime],
+        )?;
+        let rowid: i64 =
+            tx.query_row("SELECT rowid FROM notes WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })?;
+        tx.execute("DELETE FROM notes_fts WHERE rowid = ?1", params![rowid])?;
+        tx.execute(
+            "INSERT INTO notes_fts (rowid, title, body) VALUES (?1, ?2, '')",
+            params![rowid, stem],
+        )?;
+        tx.execute("DELETE FROM note_tags WHERE note_id = ?1", params![id])?;
+        tx.execute("DELETE FROM links WHERE src_note_id = ?1", params![id])?;
+        Ok(id)
+    }
+
+    /// Returns the note id it wrote, so a batch can tell `resolve_links` exactly
+    /// which notes it touched (see `LinkScope`).
     fn index_one(
         &self,
         tx: &Connection,
         vault: &Path,
         abs: &Path,
         reuse_id: Option<String>,
-    ) -> AppResult<()> {
+    ) -> AppResult<String> {
         let rel = rel_from_abs(vault, abs)?;
-        let content = std::fs::read_to_string(abs)?;
         let stem = abs
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("untitled");
+        let mtime = file_mtime(abs);
+
+        // Oversized notes are LISTED but not parsed. A note has no business being
+        // this big, and when one gets there anyway (the 2026-09-04 doubling bug
+        // took a daily note to 68 MB) parsing it is what turns one bad file into a
+        // vault-wide outage: `parse_note` found ~86,370 wikilinks in it, `links`
+        // reached 2,025,307 rows for 37,138 distinct targets, the FTS content
+        // table took 503 MB, and index.sqlite hit 1.27 GB. Every index pass then
+        // ran for tens of seconds holding the index mutex, which is the lock the
+        // UI waits on.
+        //
+        // Skipping the parse (not the note row) keeps the file visible in the
+        // sidebar and searchable by title, so the user can find and fix it, while
+        // costing the index nothing. Matches the sync layer's `MAX_NOTE_BYTES`, so
+        // a note too big to upload is also a note too big to fully index.
+        let size = std::fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
+        if size > MAX_INDEX_BYTES {
+            eprintln!(
+                "[index] {} is {:.1} MB (> {} MB cap): indexing title only, skipping body + links",
+                rel,
+                size as f64 / (1024.0 * 1024.0),
+                MAX_INDEX_BYTES / (1024 * 1024)
+            );
+            return self.index_oversized(tx, &rel, stem, mtime, reuse_id);
+        }
+
+        let content = std::fs::read_to_string(abs)?;
         let parsed = parse_note(&content, stem);
         let sha = sha256_hex(&content);
-        let mtime = file_mtime(abs);
 
         let id = reuse_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -554,7 +643,7 @@ impl Index {
             )?;
         }
 
-        // Links (dst resolved later in resolve_all_links).
+        // Links (dst resolved later in resolve_links).
         tx.execute("DELETE FROM links WHERE src_note_id = ?1", params![id])?;
         for link in &parsed.links {
             tx.execute(
@@ -564,7 +653,7 @@ impl Index {
             )?;
         }
 
-        Ok(())
+        Ok(id)
     }
 
     fn upsert_folder(&self, tx: &Connection, vault: &Path, abs: &Path) -> AppResult<()> {
@@ -586,10 +675,37 @@ impl Index {
         Ok(())
     }
 
-    /// Recompute `dst_note_id` for every link by matching the raw target against
-    /// note basenames (case-insensitive), then titles. Cheap enough for Phase 0
-    /// and guarantees previously-dangling links resolve once a target appears.
-    fn resolve_all_links(&self, tx: &Connection) -> AppResult<()> {
+    /// Recompute `dst_note_id` for links by matching the raw target against note
+    /// basenames (case-insensitive), then titles.
+    ///
+    /// ## Why this is scoped
+    ///
+    /// This used to be `resolve_all_links`: one pass over EVERY row of `links`,
+    /// per batch. That is O(all links in the vault) work for a change to a
+    /// handful of notes, and it is charged while the watcher's drain thread holds
+    /// the index mutex — the lock every UI command waits on. Measured on a vault
+    /// with a forked note that had ballooned to 68 MB (2,025,307 link rows for
+    /// 37,138 distinct targets): `index_notes: 176 files in 27128 ms`. Opening a
+    /// note, the sidebar's titles and its backlinks all queue behind that, which
+    /// is what "the sidebar blinks and clicks are slow while it syncs" was.
+    ///
+    /// ## Why `Touched` is sufficient
+    ///
+    /// A link's answer is a pure function of (its raw target, the set of note
+    /// basenames/titles). So it can only change when:
+    ///  - its OWN row was just rewritten — `src_note_id` is in the batch
+    ///    (`index_one` deletes and re-inserts a note's links); or
+    ///  - the note it points AT changed path or title, or is gone —
+    ///    `dst_note_id` is in the batch; or
+    ///  - it was dangling and a matching note has now appeared —
+    ///    `dst_note_id IS NULL`.
+    ///
+    /// The one case deliberately NOT re-examined: a new note whose basename
+    /// duplicates an existing note's does not steal links already resolved to
+    /// the older one. That matches the old behaviour, which broke such ties by
+    /// `HashMap::or_insert` over an unordered `SELECT` — i.e. arbitrarily. Making
+    /// it "first writer keeps it" is no less correct and is stable.
+    fn resolve_links(&self, tx: &Connection, scope: LinkScope<'_>) -> AppResult<()> {
         #[cfg(test)]
         self.resolve_calls.set(self.resolve_calls.get() + 1);
         // Build lookup maps from all notes.
@@ -619,22 +735,66 @@ impl Index {
             }
         }
 
-        // Resolve each link.
-        let links: Vec<(i64, String)> = {
-            let mut stmt = tx.prepare("SELECT id, dst_path_raw FROM links")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                ))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
+        // The candidate links. `All` reads the table; `Touched` narrows it to the
+        // three cases that can have changed (see the doc comment) via a temp
+        // table, so the id list is not spliced into SQL and is not capped by
+        // SQLITE_MAX_VARIABLE_NUMBER.
+        let links: Vec<(i64, String)> = match scope {
+            LinkScope::All => {
+                let mut stmt = tx.prepare("SELECT id, dst_path_raw FROM links")?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            }
+            LinkScope::Touched(ids) => {
+                tx.execute_batch(
+                    "CREATE TEMP TABLE IF NOT EXISTS touched_notes (id TEXT PRIMARY KEY);
+                     DELETE FROM touched_notes;",
+                )?;
+                {
+                    let mut ins =
+                        tx.prepare("INSERT OR IGNORE INTO touched_notes (id) VALUES (?1)")?;
+                    for id in ids {
+                        ins.execute(params![id])?;
+                    }
+                }
+                // Both `idx_links_src` and `idx_links_dst` serve these, and the
+                // NULL arm is an index range scan rather than a table scan.
+                let mut stmt = tx.prepare(
+                    "SELECT id, dst_path_raw FROM links
+                      WHERE dst_note_id IS NULL
+                         OR src_note_id IN (SELECT id FROM touched_notes)
+                         OR dst_note_id IN (SELECT id FROM touched_notes)",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            }
         };
 
         // Hoisted out of the loop: `Connection::execute` re-prepares (and
         // re-parses) the statement on every call, which on a link-dense vault is
         // tens of thousands of needless prepares per pass.
-        let mut update = tx.prepare("UPDATE links SET dst_note_id = ?1 WHERE id = ?2")?;
+        //
+        // `IS NOT ?1` makes the write conditional, and that is the expensive half.
+        // A link's resolution almost never changes — re-indexing a note re-derives
+        // the same target — but this rewrote EVERY row of `links` on EVERY pass,
+        // dirtying a WAL page each time. That fixed cost is what a batch actually
+        // pays for: a 357-file watcher batch on a ~5k-note vault took 10.6s, and
+        // it is paid while `process_batch` holds the index mutex, which is the
+        // lock every UI command queues behind — the "clicks are slow during sync"
+        // report. `IS NOT` (not `<>`) because `dst_note_id` is nullable and an
+        // unresolved link must compare equal to an unresolved link.
+        let mut update =
+            tx.prepare("UPDATE links SET dst_note_id = ?1 WHERE id = ?2 AND dst_note_id IS NOT ?1")?;
         for (link_id, raw) in links {
             // raw may contain alias/heading — strip for matching.
             let target = raw
@@ -828,7 +988,7 @@ impl Index {
     }
 
     /// Resolve a wiki-link target to a note: by full relative path, then by
-    /// basename (case-insensitive), then by title. Mirrors `resolve_all_links`.
+    /// basename (case-insensitive), then by title. Mirrors `resolve_links`.
     pub fn resolve_wikilink(&self, name: &str) -> AppResult<Option<ResolvedLink>> {
         let target = name
             .split('|')
@@ -1371,6 +1531,127 @@ mod tests {
                 .any(|(_, dst, raw)| dst == "-" && raw == "Nowhere"),
             "a dangling link stays dangling: {links:?}"
         );
+    }
+
+    /// A note past `MAX_INDEX_BYTES` must stay LISTED but contribute no links —
+    /// the guard that stops one runaway file (68 MB, ~86k wikilinks) from putting
+    /// 2M rows in `links` and making every later index pass take tens of seconds.
+    #[test]
+    fn an_oversized_note_is_listed_but_not_parsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        // One link per copy; well past the cap.
+        let huge = "see [[Target]]\n".repeat(800_000);
+        assert!(huge.len() as u64 > MAX_INDEX_BYTES);
+        std::fs::write(v.join("Huge.md"), &huge).unwrap();
+        std::fs::write(v.join("Target.md"), "# Target").unwrap();
+        std::fs::write(v.join("Small.md"), "# Small\n\nsee [[Target]]").unwrap();
+
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(
+            &v,
+            &[v.join("Huge.md"), v.join("Target.md"), v.join("Small.md")],
+        )
+        .unwrap();
+
+        // Listed, so the user can still find the offender.
+        let listed: i64 = idx
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE path = 'Huge.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(listed, 1, "an oversized note must still be indexed by title");
+
+        // …but it contributes NO links, while the small note's link still works.
+        let from_huge: i64 = idx
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links l JOIN notes n ON n.id = l.src_note_id
+                  WHERE n.path = 'Huge.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(from_huge, 0, "oversized note must not be parsed for links");
+
+        let from_small: i64 = idx
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links l JOIN notes n ON n.id = l.src_note_id
+                  WHERE n.path = 'Small.md' AND l.dst_note_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(from_small, 1, "normal notes are unaffected");
+    }
+
+    /// Scoping the link pass (`LinkScope::Touched`) must not cost correctness.
+    /// The risky case: a link that was DANGLING when written has to resolve once
+    /// its target is indexed by a later, scoped batch — the target's id is in
+    /// that batch, and the dangling row is picked up by the `dst_note_id IS NULL`
+    /// arm.
+    #[test]
+    fn a_dangling_link_still_resolves_when_its_target_arrives_in_a_later_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        std::fs::write(v.join("Alpha.md"), "# Alpha\n\nsee [[Beta]]").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+
+        // Beta doesn't exist yet, so the link is dangling.
+        let dst: Option<String> = idx
+            .conn
+            .query_row("SELECT dst_note_id FROM links", [], |r| r.get(0))
+            .unwrap();
+        assert!(dst.is_none(), "link to a missing note must be unresolved");
+
+        // Beta arrives in its own batch; Alpha is NOT re-indexed.
+        std::fs::write(v.join("Beta.md"), "# Beta").unwrap();
+        idx.index_notes(&v, &[v.join("Beta.md")]).unwrap();
+
+        let (dst, beta): (Option<String>, String) = (
+            idx.conn
+                .query_row("SELECT dst_note_id FROM links", [], |r| r.get(0))
+                .unwrap(),
+            idx.conn
+                .query_row("SELECT id FROM notes WHERE path = 'Beta.md'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap(),
+        );
+        assert_eq!(dst.as_deref(), Some(beta.as_str()), "must resolve to Beta");
+    }
+
+    /// The other half: removing a note sends links that pointed AT it back to
+    /// dangling. `remove_notes` scopes on the removed ids, so those rows are in
+    /// the `dst_note_id IN (…)` arm.
+    #[test]
+    fn removing_a_note_redangles_links_that_pointed_at_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        std::fs::write(v.join("Alpha.md"), "# Alpha\n\nsee [[Beta]]").unwrap();
+        std::fs::write(v.join("Beta.md"), "# Beta").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(&v, &[v.join("Alpha.md"), v.join("Beta.md")])
+            .unwrap();
+        let dst: Option<String> = idx
+            .conn
+            .query_row("SELECT dst_note_id FROM links", [], |r| r.get(0))
+            .unwrap();
+        assert!(dst.is_some(), "precondition: resolved");
+
+        std::fs::remove_file(v.join("Beta.md")).unwrap();
+        idx.remove_notes(&v, &[v.join("Beta.md")]).unwrap();
+
+        let dst: Option<String> = idx
+            .conn
+            .query_row("SELECT dst_note_id FROM links", [], |r| r.get(0))
+            .unwrap();
+        assert!(dst.is_none(), "target gone → link must dangle again");
     }
 
     /// The whole point: ONE link pass for the batch, versus one per file.
