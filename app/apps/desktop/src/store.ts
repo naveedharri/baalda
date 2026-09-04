@@ -478,19 +478,49 @@ export function readOrgVaults(): Record<string, string> {
 }
 
 /**
- * A folder name for a vault that won't collide with a folder already bound
- * to another vault under the managed root. Deterministic-ish for the MVP.
+ * A folder name for a vault that won't collide with a folder already bound to
+ * another vault under the managed root, or with one merely sitting there on
+ * disk. Deterministic-ish for the MVP.
+ *
+ * The on-disk half is not belt-and-braces: `openVaultInRoot({ create: true })`
+ * is a `create_dir_all`, so it opens a folder that already exists just as
+ * happily as it makes a new one. A vault named like a local vault the user
+ * already had ("hello") therefore used to ADOPT that folder — binding it to the
+ * new vault and uploading its notes into it, while the local vault itself
+ * vanished from the switcher. Vault names are allowed to repeat (identity is
+ * the doc_ids); their folders are not.
  */
-function uniqueFolderSlug(name: string, bound: Record<string, string>): string {
+function uniqueFolderSlug(
+  name: string,
+  bound: Record<string, string>,
+  onDisk: readonly string[] = [],
+): string {
   const base = slugify(name);
-  const taken = new Set(
-    Object.values(bound).map((p) => (p.split("/").pop() ?? "").toLowerCase()),
-  );
+  const basename = (p: string) => (p.split("/").pop() ?? "").toLowerCase();
+  const taken = new Set([
+    ...Object.values(bound).map(basename),
+    ...onDisk.map(basename),
+  ]);
   if (!taken.has(base)) return base;
   for (let i = 2; i < 1000; i++) {
     if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
   }
   return base;
+}
+
+/**
+ * Absolute path for a vault that has no local folder on this device yet: a free
+ * name under the managed vaults root (see `uniqueFolderSlug`). Callers have
+ * already exhausted the alternatives — a live binding, then rediscovery of an
+ * existing copy — so anything still standing in the way belongs to something
+ * else.
+ */
+async function freeVaultFolder(name: string): Promise<string> {
+  const [root, onDisk] = await Promise.all([
+    ipc.getVaultsRoot(),
+    ipc.listVaultsRootDirs().catch(() => [] as string[]),
+  ]);
+  return `${root}/${uniqueFolderSlug(name, readOrgVaults(), onDisk)}`;
 }
 
 function rememberOrgVault(orgId: string, vaultPath: string): void {
@@ -2025,10 +2055,9 @@ export const useStore = create<AppStore>((set, get) => ({
       // The prompt survives as the FALLBACK: if we can't create a folder (a bad
       // vaults root, permissions), asking beats failing silently.
       try {
-        const root = await ipc.getVaultsRoot();
+        const folder = await freeVaultFolder(orgName);
         if (superseded()) return;
-        const slug = uniqueFolderSlug(orgName, readOrgVaults());
-        await get().applyVaultFolder(organizationId, `${root}/${slug}`, {
+        await get().applyVaultFolder(organizationId, folder, {
           create: true,
           seedIfEmpty: opts.seedIfEmpty,
         });
@@ -2290,12 +2319,11 @@ export const useStore = create<AppStore>((set, get) => ({
   startEmptyVault: async () => {
     const pending = get().pendingVaultFolder;
     if (!pending) return;
-    const root = await ipc.getVaultsRoot();
+    const folder = await freeVaultFolder(pending.orgName);
     // A switch during that read would replace the prompt; binding a folder for the
     // superseded vault would point the Rust slot at the wrong folder.
     if (get().pendingVaultFolder?.orgId !== pending.orgId) return;
-    const slug = uniqueFolderSlug(pending.orgName, readOrgVaults());
-    await get().applyVaultFolder(pending.orgId, `${root}/${slug}`, {
+    await get().applyVaultFolder(pending.orgId, folder, {
       create: true,
       seedIfEmpty: pending.seedIfEmpty,
     });
