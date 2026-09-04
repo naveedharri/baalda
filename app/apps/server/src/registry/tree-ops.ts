@@ -32,6 +32,33 @@ export function dirname(path: string): string {
 }
 
 /**
+ * Do two vault-relative paths name the same item? Compared **case-insensitively**,
+ * because most of our clients cannot tell them apart.
+ *
+ * macOS (APFS default) and Windows are case-INSENSITIVE, so `Projects/Community`
+ * and `Projects/community` are one directory on disk. Postgres `TEXT` compares
+ * case-sensitively, so the server used to store both as distinct rows with
+ * distinct `doc_id`s — and then every desktop mapped ONE file to TWO docs. Each
+ * doc egested to disk, the watcher fired, the other doc ingested a file that
+ * disagreed with its CRDT state and wrote back, forever: the 2026-09-04 BenAI OS
+ * runaway, 189 MB of updates an hour, where 328 notes (0.5% of the vault) were
+ * 26% of all CRDT bytes. Migration 021's `notes_live_path_uq` does not catch it
+ * — the collision is case-only, so both rows satisfy an exact-path unique index.
+ *
+ * A vault that syncs between a Mac and a Linux box therefore cannot safely hold
+ * case-variant siblings: the Mac physically cannot represent both. We treat them
+ * as one item everywhere (the same call Git makes with `core.ignorecase`), which
+ * costs a case-sensitive Linux vault the ability to keep `a.md` and `A.md` apart
+ * and buys every other vault immunity from the fork.
+ *
+ * `toLowerCase()`, not `localeCompare`: it must agree exactly with the
+ * `lower()`-based unique indexes in migration 023 for the backstop to hold.
+ */
+export function samePath(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
  * A vault-relative path the tree can hold: non-empty, no leading/trailing `/`,
  * no empty, `.` or `..` segments. Same shape the desktop's `resolve_in_vault`
  * enforces on disk, so a path the server accepts is one every client can write.
@@ -45,14 +72,27 @@ export function assertValidRelPath(path: string, what = "path"): void {
   if (bad) throw new TreeOpError(`Invalid ${what} "${path}"`);
 }
 
-/** Load the folder at exactly `path` in `vaultId`, or null. */
+/**
+ * Load the folder at `path` in `vaultId`, or null.
+ *
+ * Matched case-insensitively (see {@link samePath}), so a client that walked a
+ * case-insensitive disk and reports `Projects/community` resolves to the
+ * existing `Projects/Community` row instead of being told to create a twin.
+ * The returned row carries the CANONICAL stored path — callers hand that back to
+ * the client so it converges on one spelling.
+ *
+ * Ordered so the result is stable when a pre-migration-023 vault still holds
+ * case-variant twins: oldest wins, matching migration 023's keeper rule.
+ */
 export async function findFolderByPath(
   db: Queryable,
   vaultId: string,
   path: string,
 ): Promise<FolderRow | null> {
   const { rows } = await db.query<FolderRow>(
-    "SELECT id, vault_id, path, parent_id FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
+    `SELECT id, vault_id, path, parent_id FROM folders
+      WHERE vault_id = $1 AND lower(path) = lower($2)
+      ORDER BY created_at ASC, id ASC LIMIT 1`,
     [vaultId, path],
   );
   return rows[0] ?? null;
@@ -81,31 +121,50 @@ export async function findFolderByPath(
  *    the caller (usually an LLM) needs to learn which of its two inputs is wrong.
  *  - `folderId` absent/null → resolve by `dirname(relPath)`: `""` is the root
  *    (null); otherwise the folder at that path must already exist.
- * Returns the resolved parent id (null = vault root).
+ *
+ * The parent is matched case-insensitively ({@link samePath}), and the returned
+ * `relPath` is rewritten onto the parent's OWN spelling. Both matter: a client
+ * reporting `Projects/community/x.md` when the folder row says
+ * `Projects/Community` must resolve to that folder rather than be told to create
+ * a twin, and the stored path must then agree with it exactly, or migration
+ * 022's `dirname(rel_path) === folder.path` invariant would hold only up to case
+ * and the next move would refuse itself.
  */
+export interface ResolvedLocation {
+  /** Resolved parent folder id; `null` = vault root. */
+  folderId: string | null;
+  /** The path to store: the parent's spelling + the caller's basename. */
+  relPath: string;
+}
+
+/** Join a parent path (possibly `""` for the root) and a basename. */
+export function joinPath(dir: string, name: string): string {
+  return dir === "" ? name : `${dir}/${name}`;
+}
+
 export async function resolveParentFolder(
   db: Queryable,
   vaultId: string,
   relPath: string,
   folderId: string | null | undefined,
-): Promise<string | null> {
+): Promise<ResolvedLocation> {
   assertValidRelPath(relPath);
   const dir = dirname(relPath);
   if (folderId != null) {
     const folder = await findFolder(db, folderId);
     if (!folder) throw new TreeOpError("Unknown folder");
     if (folder.vault_id !== vaultId) throw new TreeOpError("Folder is in a different vault");
-    if (folder.path !== dir) {
+    if (!samePath(folder.path, dir)) {
       throw new TreeOpError(
         `"${relPath}" is not inside folder "${folder.path}" — use relPath "${folder.path}/${basename(relPath)}" or the folder whose path is "${dir}"`,
       );
     }
-    return folder.id;
+    return { folderId: folder.id, relPath: joinPath(folder.path, basename(relPath)) };
   }
-  if (dir === "") return null;
+  if (dir === "") return { folderId: null, relPath };
   const byPath = await findFolderByPath(db, vaultId, dir);
   if (!byPath) throw new TreeOpError(`No folder at "${dir}" — create it first`);
-  return byPath.id;
+  return { folderId: byPath.id, relPath: joinPath(byPath.path, basename(relPath)) };
 }
 
 /**
@@ -118,22 +177,22 @@ export async function resolveFolderParent(
   vaultId: string,
   path: string,
   parentId: string | null | undefined,
-): Promise<string | null> {
+): Promise<ResolvedLocation> {
   assertValidRelPath(path, "folder path");
   const dir = dirname(path);
   if (parentId != null) {
     const parent = await findFolder(db, parentId);
     if (!parent) throw new TreeOpError("Unknown parent folder");
     if (parent.vault_id !== vaultId) throw new TreeOpError("Parent folder is in a different vault");
-    if (parent.path !== dir) {
+    if (!samePath(parent.path, dir)) {
       throw new TreeOpError(`Folder path "${path}" is not inside its parent "${parent.path}"`);
     }
-    return parent.id;
+    return { folderId: parent.id, relPath: joinPath(parent.path, basename(path)) };
   }
-  if (dir === "") return null;
+  if (dir === "") return { folderId: null, relPath: path };
   const byPath = await findFolderByPath(db, vaultId, dir);
   if (!byPath) throw new TreeOpError(`No folder at "${dir}" — create it first`);
-  return byPath.id;
+  return { folderId: byPath.id, relPath: joinPath(byPath.path, basename(path)) };
 }
 
 /** Escape SQL LIKE metacharacters (\ % _) so a value is matched literally under
@@ -244,8 +303,10 @@ export async function planFolderMove(
   input: MoveFolderInput,
 ): Promise<{ path: string; parentId: string | null }> {
   if (input.path !== undefined) {
-    const parentId = await resolveFolderParent(db, folder.vault_id, input.path, input.parentId);
-    return { path: input.path, parentId };
+    // `relPath` from the resolver, not `input.path`: it carries the parent's own
+    // spelling, so the subtree keeps one consistent prefix.
+    const resolved = await resolveFolderParent(db, folder.vault_id, input.path, input.parentId);
+    return { path: resolved.relPath, parentId: resolved.folderId };
   }
   if (input.parentId !== undefined) {
     const name = input.name ?? basename(folder.path);
@@ -295,9 +356,14 @@ export async function moveFolder(
     }
   }
 
-  if (newPath !== oldPath) {
+  // `samePath`, not `!==`: a pure case change of the folder's own name (`docs` →
+  // `Docs`) is a legal rename, but landing on a DIFFERENT folder that already
+  // holds this path up to case would fork the subtree across two rows that are
+  // one directory on disk. Surfaced as a refusal so the caller sees why, rather
+  // than as a bare 23505 from `folders_vault_path_ci_uq` (migration 023).
+  if (!samePath(newPath, oldPath)) {
     const clash = await db.query(
-      "SELECT 1 FROM folders WHERE vault_id = $1 AND path = $2 AND id <> $3 LIMIT 1",
+      "SELECT 1 FROM folders WHERE vault_id = $1 AND lower(path) = lower($2) AND id <> $3 LIMIT 1",
       [folder.vault_id, newPath, folderId],
     );
     if ((clash.rowCount ?? 0) > 0) {
@@ -358,8 +424,8 @@ export async function planNoteMove(
   input: MoveNoteInput,
 ): Promise<{ relPath: string; folderId: string | null }> {
   if (input.relPath !== undefined) {
-    const folderId = await resolveParentFolder(db, note.vault_id, input.relPath, input.folderId);
-    return { relPath: input.relPath, folderId };
+    const resolved = await resolveParentFolder(db, note.vault_id, input.relPath, input.folderId);
+    return { relPath: resolved.relPath, folderId: resolved.folderId };
   }
   if (input.folderId !== undefined) {
     const name = basename(note.rel_path);
@@ -386,11 +452,15 @@ export async function moveNote(
   const title = input.title === undefined ? note.title : input.title;
   const { relPath, folderId } = await planNoteMove(db, note, input);
 
-  if (relPath !== note.rel_path) {
+  // Compared up to case (see the folder twin above): renaming `notes.md` →
+  // `Notes.md` is legal, but moving onto a path another live note already holds
+  // case-insensitively is the fork that the 2026-09-04 runaway was made of.
+  if (!samePath(relPath, note.rel_path)) {
     // Surface the collision as a refusal rather than letting the partial unique
-    // index (`notes_live_path_uq`, migration 021) throw a bare 23505.
+    // indexes (`notes_live_path_uq` m021, `notes_live_path_ci_uq` m023) throw a
+    // bare 23505.
     const clash = await db.query(
-      "SELECT 1 FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL AND id <> $3 LIMIT 1",
+      "SELECT 1 FROM notes WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL AND id <> $3 LIMIT 1",
       [note.vault_id, relPath, docId],
     );
     if ((clash.rowCount ?? 0) > 0) throw new TreeOpError("A note already exists at that path");

@@ -232,14 +232,23 @@ describe("rel_path ↔ folder_id consistency", () => {
     const sql = readFileSync(new URL("../migrations/022_note_folder_consistency.sql", import.meta.url), "utf8");
 
     it("collapses duplicate folder rows at one path onto the oldest, re-pointing notes and children", async () => {
-      // The unique index already exists in the test DB (migrations ran), so the
-      // twins are seeded with it dropped and the migration puts it back.
+      // The unique indexes already exist in the test DB (migrations ran), so the
+      // twins are seeded with them dropped and the migration puts them back.
+      // `folders_vault_path_ci_uq` (migration 023, case-insensitive) also refuses
+      // these twins and is NOT restored by 022's SQL, so it is re-created at the
+      // end of this test — dropping it for the whole run would silently disarm
+      // the case-collision backstop for every test after this one.
       await pool.query("DROP INDEX IF EXISTS folders_vault_path_uq");
+      await pool.query("DROP INDEX IF EXISTS folders_vault_path_ci_uq");
       const twin = await seedFolder(vault, team, "Daily", "Team/Daily"); // newer twin of `daily`
       const inTwin = await seedNote(vault, twin, "Team/Daily/twin.md", owner.userId);
       const child = await seedFolder(vault, twin, "Sub", "Team/Daily/Sub");
 
       await pool.query(sql);
+      // 022 has collapsed the twins, so the case-insensitive backstop can go back.
+      await pool.query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS folders_vault_path_ci_uq ON folders (vault_id, lower(path))",
+      );
 
       const { rows } = await pool.query<{ id: string }>(
         "SELECT id FROM folders WHERE vault_id = $1 AND path = 'Team/Daily'",
