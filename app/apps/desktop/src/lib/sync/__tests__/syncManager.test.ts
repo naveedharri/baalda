@@ -22,11 +22,14 @@ describe("deriveWsUrl", () => {
     expect(deriveWsUrl("https://api.baalda.com/")).toBe("wss://api.baalda.com/sync");
   });
 
-  it("swaps legacy dev port 3010 to the dedicated 3011, no path change", () => {
-    expect(deriveWsUrl("http://localhost:3010")).toBe("ws://localhost:3011");
+  it("keeps an explicit :3010 on the SAME port and appends /sync (single-port self-host, #79)", () => {
+    // The Compose bundle publishes only 3010; bumping to a dedicated 3011 here
+    // sent every content upload to a port nothing listened on.
+    expect(deriveWsUrl("http://localhost:3010")).toBe("ws://localhost:3010/sync");
+    expect(deriveWsUrl("http://127.0.0.1:3010")).toBe("ws://127.0.0.1:3010/sync");
   });
 
-  it("falls back to the local default for unparseable input", () => {
-    expect(deriveWsUrl("not a url")).toBe("ws://localhost:3011");
+  it("falls back to the local default on the HTTP port for unparseable input", () => {
+    expect(deriveWsUrl("not a url")).toBe("ws://localhost:3010/sync");
   });
 });

@@ -10,7 +10,13 @@
 // transformation (dedupe, self-link/dangling-link filtering, linkCount
 // aggregation) can be unit-tested without Tauri.
 
-import { getGraphEdges, listNoteTitles, type NoteTitle } from "../ipc";
+import {
+  getGraphEdges,
+  getGraphEdgesFor,
+  getNoteMeta,
+  listNoteTitles,
+  type NoteTitle,
+} from "../ipc";
 
 export interface GraphNode {
   id: string;
@@ -70,4 +76,57 @@ export function assembleGraph(titles: NoteTitle[], rawEdges: GraphEdge[]): Graph
 export async function buildGraph(): Promise<Graph> {
   const [titles, edges] = await Promise.all([listNoteTitles(), getGraphEdges()]);
   return assembleGraph(titles, edges);
+}
+
+/** What changed for a handful of notes: their current title rows and EVERY
+ *  edge touching them (as source or target), fresh from the index. */
+export interface GraphDelta {
+  nodes: NoteTitle[];
+  edges: GraphEdge[];
+}
+
+/**
+ * Patch `graph` with a delta for the notes in `delta.nodes` (#83): their
+ * titles/paths are refreshed, every edge touching them is replaced by the
+ * delta's edges, and link counts are recomputed. Pure.
+ *
+ * Returns null when the delta names a note the graph does not have — a NEW note
+ * (or one the graph predates). A new note can also resolve OTHER notes' dangling
+ * `[[links]]`, which no per-note query would report, so the caller falls back to
+ * a full rebuild there rather than guess.
+ */
+export function applyGraphDelta(graph: Graph, delta: GraphDelta): Graph | null {
+  const changed = new Set(delta.nodes.map((n) => n.id));
+  const known = new Set(graph.nodes.map((n) => n.id));
+  for (const id of changed) if (!known.has(id)) return null;
+
+  // Refresh the changed rows in place; everything else is carried over as-is.
+  const fresh = new Map(delta.nodes.map((n) => [n.id, n] as const));
+  const titles: NoteTitle[] = graph.nodes.map((n) => {
+    const f = fresh.get(n.id);
+    return f ?? { id: n.id, path: n.path, title: n.title };
+  });
+
+  // Every edge touching a changed note is stale (a removed [[link]] would
+  // otherwise survive); the delta carries the current set for those notes.
+  const kept: GraphEdge[] = graph.edges.filter(
+    (e) => !changed.has(e.source) && !changed.has(e.target),
+  );
+  return assembleGraph(titles, [...kept, ...delta.edges]);
+}
+
+/**
+ * Fetch a delta for `paths` (modified notes) — two round trips bounded by the
+ * number of changed notes, not the vault. Returns null when any path no longer
+ * resolves to an indexed note (deleted/renamed under us): full rebuild.
+ */
+export async function fetchGraphDelta(paths: string[]): Promise<GraphDelta | null> {
+  const metas = await Promise.all(paths.map((p) => getNoteMeta(p)));
+  const nodes: NoteTitle[] = [];
+  for (const m of metas) {
+    if (!m) return null;
+    nodes.push({ id: m.id, path: m.path, title: m.title });
+  }
+  const edges = await getGraphEdgesFor(nodes.map((n) => n.id));
+  return { nodes, edges };
 }

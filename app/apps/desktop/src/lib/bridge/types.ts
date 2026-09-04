@@ -47,6 +47,14 @@ export interface BridgeIO {
   reindex?(path: string): Promise<void> | void;
   /** Optional error sink (defaults to console.error). */
   onError?(err: unknown, context: string): void;
+  /**
+   * Optional: an egest (CRDT → disk) write FAILED. `attempt` counts consecutive
+   * failures for this note; the bridge retries with backoff on its own, so this
+   * is the UI's cue to say "couldn't save" — never a place to retry from.
+   */
+  onWriteFailed?(path: string, err: unknown, attempt: number): void;
+  /** Optional: an egest write succeeded after one or more failures. */
+  onWriteRecovered?(path: string): void;
   /** Optional timer injection; defaults to global setTimeout/clearTimeout. */
   setTimeout?(fn: () => void, ms: number): number;
   clearTimeout?(id: number): void;
@@ -62,6 +70,10 @@ export interface BridgeConfig {
   compactThreshold: number;
   /** Take a recovery snapshot before a diff that churns this fraction of the doc. */
   largeDiffRatio: number;
+  /** First retry delay after a failed egest write; doubles per consecutive
+   *  failure up to `egestRetryMaxMs`. */
+  egestRetryBaseMs: number;
+  egestRetryMaxMs: number;
   /**
    * Undo grouping window: local edits landing within this many ms of each other
    * merge into ONE undo step (Yjs `UndoManager.captureTimeout`). This is what
@@ -83,6 +95,8 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   egestDebounceMs: 300,
   compactThreshold: 64,
   largeDiffRatio: 0.6,
+  egestRetryBaseMs: 1_000,
+  egestRetryMaxMs: 30_000,
   // 500ms matches Yjs' own default and CodeMirror's `newGroupDelay`, so undo
   // granularity feels the same as the non-collab editor.
   undoCaptureTimeoutMs: 500,

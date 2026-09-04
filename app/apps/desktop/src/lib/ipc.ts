@@ -311,6 +311,9 @@ export const getBacklinks = (noteId: string) =>
  *  Graph view instead of one getBacklinks per note. */
 export const getGraphEdges = () =>
   invoke<{ source: string; target: string }[]>("graph_edges");
+/** Only the edges touching `noteIds` — the Graph view's per-change delta (#83). */
+export const getGraphEdgesFor = (noteIds: string[]) =>
+  invoke<{ source: string; target: string }[]>("graph_edges_for", { noteIds });
 export const getNoteMeta = (path: string) =>
   invoke<NoteMeta | null>("get_note_meta", { path });
 export const resolveWikilink = (name: string) =>
@@ -479,3 +482,13 @@ export const onFileChanged = (cb: (e: FileChanged) => void): Promise<UnlistenFn>
 
 export const onVaultOpened = (cb: (v: VaultInfo) => void): Promise<UnlistenFn> =>
   listen<VaultInfo>("vault-opened", (event) => cb(event.payload));
+
+/** The background index rebuild `open_vault` starts has committed (#84). */
+export interface IndexReady {
+  path: string;
+  epoch: number;
+  ok: boolean;
+  ms: number;
+}
+export const onIndexReady = (cb: (e: IndexReady) => void): Promise<UnlistenFn> =>
+  listen<IndexReady>("index-ready", (event) => cb(event.payload));

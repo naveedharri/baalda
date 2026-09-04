@@ -78,35 +78,37 @@ export function ttlFromToken(token: string, nowMs = Date.now()): number {
 }
 
 /**
- * Derive the sync WebSocket URL from the HTTP base.
+ * Derive the per-note sync WebSocket URL from the HTTP base.
  *
- * Two server topologies, two rules:
- *  - Local/self-hosted dev (explicit port 3010, README "Ports" default): the
- *    dedicated Hocuspocus port 3011 is still separate from the HTTP API, so we
- *    just swap scheme http→ws and bump 3010→3011, path untouched. Kept for
- *    back-compat with existing dev setups and older self-hosted servers.
- *  - Everything else — no port (a normal hosted domain) or any other explicit
- *    port (e.g. a PaaS-assigned :8080) — assumes the single-port topology: the
- *    WS upgrade is mounted at `/sync` on the SAME origin/port as the HTTP API.
- *    We swap scheme and append `/sync` after any existing path (preserving a
- *    reverse-proxy sub-path prefix), collapsing double/trailing slashes. This
- *    is what lets the server run behind one domain on PaaS hosts.
+ * ONE rule: the Hocuspocus upgrade is mounted at `/sync` on the SAME origin and
+ * port as the HTTP API (`sync/http-upgrade.ts`), so we swap the scheme and
+ * append `/sync` after any existing path — preserving a reverse-proxy sub-path
+ * prefix and collapsing double/trailing slashes. Identical to how the vault
+ * channel derives its `/vault-sync` URL (`deriveVaultWsUrl`).
  *
- * Unparseable input falls back to the legacy local default.
+ * This used to special-case an explicit `:3010` and bump it to the dedicated
+ * Hocuspocus port `:3011`, "for local dev". That assumption broke every
+ * single-port self-host: the Docker Compose bundle publishes ONLY 3010, so with
+ * a server URL of `http://localhost:3010` the vault channel connected (one TCP
+ * connection to :3010, structure and downloads fine) while every per-note
+ * provider — the path ALL content uploads take — dialled a port nothing was
+ * listening on, timed out, and the run gave up after ten failures. The server
+ * held a `notes` row and no content for every file, forever (#79). The server
+ * has served `/sync` on the HTTP port since single-port deploys existed, so the
+ * dedicated port is never needed by a client; `HOCUSPOCUS_PORT` stays for
+ * anything else that still dials it.
+ *
+ * Unparseable input falls back to the local default, on the HTTP port.
  */
 export function deriveWsUrl(httpBase: string): string {
   try {
     const u = new URL(httpBase);
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    if (u.port === "3010") {
-      u.port = "3011";
-    } else {
-      const prefix = u.pathname.replace(/\/+$/, "");
-      u.pathname = `${prefix}/sync`;
-    }
+    const prefix = u.pathname.replace(/\/+$/, "");
+    u.pathname = `${prefix}/sync`;
     return u.toString().replace(/\/+$/, "");
   } catch {
-    return "ws://localhost:3011";
+    return "ws://localhost:3010/sync";
   }
 }
 

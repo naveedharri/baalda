@@ -4,8 +4,46 @@
 
 import * as ipc from "../ipc";
 import { currentVaultEpoch } from "../sync/vaultScope";
+import { dismissToast, toast } from "../toast";
 import { NoteBridge } from "./noteBridge";
 import type { BridgeIO } from "./types";
+
+/**
+ * One sticky "couldn't save" toast per note with a failing egest, dismissed the
+ * moment a write lands. Module-level so every bridge (the open note's and the
+ * background store's) shares the same de-duplication.
+ */
+const saveFailureToasts = new Map<string, number>();
+
+function baseName(relPath: string): string {
+  const i = relPath.lastIndexOf("/");
+  return i === -1 ? relPath : relPath.slice(i + 1);
+}
+
+function errorText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw.length > 160 ? `${raw.slice(0, 157)}…` : raw;
+}
+
+/** An egest write failed. Surface it once (sticky), keep it until it recovers. */
+export function reportSaveFailure(relPath: string, err: unknown, attempt: number): void {
+  if (saveFailureToasts.has(relPath)) return;
+  const id = toast(
+    `Couldn't save "${baseName(relPath)}" to disk — ${errorText(err)}. Your text is kept and the save will be retried.`,
+    "error",
+  );
+  saveFailureToasts.set(relPath, id);
+  if (attempt > 1) console.warn(`[bridge] save still failing for ${relPath} (attempt ${attempt})`);
+}
+
+/** A write landed after failures: clear the warning. */
+export function reportSaveRecovered(relPath: string): void {
+  const id = saveFailureToasts.get(relPath);
+  if (id == null) return;
+  saveFailureToasts.delete(relPath);
+  dismissToast(id);
+  toast(`Saved "${baseName(relPath)}"`, "success");
+}
 
 /** SHA-256 hex via the Web Crypto API (available in the Tauri webview). */
 export async function sha256Hex(text: string): Promise<string> {
@@ -34,6 +72,10 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
     // so egest gets FTS/backlink refresh for free — no separate reindex hook.
     writeFileAtomic: (path, content) => ipc.writeNote(path, content, epoch),
     sha256: sha256Hex,
+    // A failed write is the one bridge error a person must see (#81): the .md is
+    // the durable copy, and "nothing happened" is how it would otherwise read.
+    onWriteFailed: reportSaveFailure,
+    onWriteRecovered: reportSaveRecovered,
     persistence: {
       loadState: async (docId) => {
         const s = await ipc.loadYjsState(docId, epoch);

@@ -14,7 +14,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { makeHarness } from "../../bridge/__tests__/helpers";
-import { ContentUploader, type DocPush } from "../contentUpload";
+import { ContentUploader, MAX_NOTE_BYTES, type DocPush } from "../contentUpload";
 import { UPLOAD_CONCURRENCY } from "../pool";
 import type { SyncProgressSink } from "../progress";
 import { VaultDocStore } from "../vaultDocStore";
@@ -138,6 +138,8 @@ interface RigOptions {
   /** Reuse a previous rig's CRDT store, to model a SECOND run on one device. */
   harness?: ReturnType<typeof makeHarness>;
   onAcquire?: (docId: string, store: VaultDocStore) => void;
+  /** Wire the production `readFile` dep (the pre-network checks need it). */
+  readFile?: boolean;
 }
 
 function rig(opts: RigOptions) {
@@ -166,6 +168,7 @@ function rig(opts: RigOptions) {
       },
       release: (docId) => store.demote(docId),
       connect,
+      ...(opts.readFile ? { readFile: (relPath: string) => harness.io.readFile(relPath) } : {}),
     },
     isPushed: (id) => pushedSet.has(id),
     markPushed: (id) => {
@@ -187,6 +190,73 @@ function rig(opts: RigOptions) {
   });
   return { uploader, store, server, harness, connects, marked, sink, pushedSet };
 }
+
+describe("ContentUploader — pre-network checks (readFile)", () => {
+  it("settles a note the server lacks whose file is empty too, without a socket", async () => {
+    // The prod loop: 307 zero-byte .md files, all "pushed" locally, all named by
+    // `ready.empty` on every connect. Seeding an empty file inserts nothing, so
+    // the server kept holding nothing and named them again next time — a token
+    // mint and a WebSocket apiece, forever.
+    const r = rig({
+      files: { "Empty.md": "" },
+      notes: [{ docId: "e", relPath: "Empty.md" }],
+      pushed: new Set(["e"]),
+      include: () => true, // the server says it has nothing for this doc
+      readFile: true,
+    });
+    const result = await r.uploader.run();
+    expect(result).toMatchObject({ total: 1, pushed: 1, failed: 0 });
+    expect(r.connects).toEqual([]);
+    expect(r.marked).toEqual(["e"]);
+    const states = r.sink.stateOf("e");
+    expect(states[states.length - 1]).toBe("synced");
+    expect(r.store.hotSize()).toBe(0);
+  });
+
+  it("still PULLS for an empty placeholder when the server has not said it is empty", async () => {
+    // Same local shape (empty file, empty doc) but the server holds content the
+    // backfill never delivered here. Skipping the network would strand the note
+    // blank until the next reconnect — the socket is the recovery path.
+    const server = new FakeServer();
+    server.seed("p", "content from a teammate");
+    const r = rig({
+      files: { "Placeholder.md": "" },
+      notes: [{ docId: "p", relPath: "Placeholder.md" }],
+      server,
+      readFile: true,
+    });
+    await r.uploader.run();
+    expect(r.connects).toEqual(["p"]);
+    expect(r.harness.fs.get("Placeholder.md")).toBe("content from a teammate");
+  });
+
+  it("fails a note over the size ceiling permanently, without a socket or a streak hit", async () => {
+    const huge = "x".repeat(MAX_NOTE_BYTES + 1);
+    const r = rig({
+      files: { "Huge.md": huge, "Small.md": "fine" },
+      notes: [
+        { docId: "huge", relPath: "Huge.md" },
+        { docId: "small", relPath: "Small.md" },
+      ],
+      readFile: true,
+      concurrency: 1,
+      failureStreakLimit: 1, // a single COUNTED failure would abort the run
+    });
+    const result = await r.uploader.run();
+    // The oversized note failed once, for a reason a person can act on...
+    expect(r.uploader.failedDocs()).toEqual([
+      expect.objectContaining({
+        docId: "huge",
+        permanent: true,
+        reason: expect.stringContaining("10 MB"),
+      }),
+    ]);
+    expect(r.connects).toEqual(["small"]); // ...never dialled the server...
+    // ...and did not count toward the streak: the run carried on and pushed the rest.
+    expect(result).toMatchObject({ total: 2, pushed: 1, failed: 1, aborted: false });
+    expect(r.server.text("small")).toBe("fine");
+  });
+});
 
 describe("ContentUploader — pushing local content", () => {
   it("seeds an empty server doc from the local markdown", async () => {

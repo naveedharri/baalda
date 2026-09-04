@@ -142,7 +142,7 @@ cd apps/server
 cp .env.example .env      # adjust JWT_SECRET for anything real
 pnpm run db:up            # start Postgres in Docker (host port 5439)
 pnpm run migrate          # create the database schema
-pnpm run dev              # HTTP API :3010 · sync WS :3011 (also served at :3010/sync)
+pnpm run dev              # HTTP API :3010 · sync WS at :3010/sync (a legacy dedicated :3011 also listens)
 ```
 
 ### 3. Start the desktop app
@@ -206,7 +206,7 @@ claude mcp add --transport http context http://localhost:3010/api/mcp \
 (On the managed service the endpoint is `https://api.baalda.com/api/mcp`; for a
 self-hosted server, use your server URL plus `/api/mcp`.)
 
-The AI can now `read_note`, `search_notes`, `create_note`, `update_note`, and more. Its writes flow through the same sync engine, so if the note is open you'll watch the AI type in real time.
+The AI can now `read_note`, `search_notes`, `create_note`, `edit_note` (targeted replace/insert/delete at exact anchors), `update_note`, and more. `read_note` returns a `revision`; pass it back as `expectedRevision` and a write against a note that changed in between is refused instead of merged. Its writes flow through the same sync engine, so if the note is open you'll watch the AI type in real time.
 
 ---
 

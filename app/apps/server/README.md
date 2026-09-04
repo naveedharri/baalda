@@ -88,7 +88,7 @@ npm run build && npm run start
 ```
 
 - HTTP API → `http://localhost:3010`
-- Hocuspocus sync → `ws://localhost:3011`
+- Hocuspocus sync → `ws://localhost:3010/sync` (the desktop app always uses the HTTP port + `/sync`; the dedicated `ws://localhost:3011` still listens)
 - Health check → `GET /health`
 
 ## Ports & env (`.env`)

@@ -1,3 +1,13 @@
-- Notes now open in **tabs** across the top — switch with a click, close with × or a middle-click, and jump back to where you were
-- Tabs follow renames and moves, and close themselves when a note is deleted
-- Teammates now show up in the sidebar the moment they open the app, instead of after their vault finishes syncing
+- Self-hosted servers on a single port (the Docker Compose bundle) now receive note content: the app no longer dials a separate sync port that isn't exposed, so "structure syncs but notes stay empty" is fixed
+- Reloading or switching vaults no longer "re-syncs" hundreds of empty placeholder notes on every connect
+- Notes over the 10 MB sync limit are reported once as too large instead of being retried on every reconnect
+- If a note can't be written to disk (disk full, permissions), you now see a sticky warning and the save is retried automatically until it lands
+- A note that fails to register for sync when opened now tells you, and registration is retried automatically
+- Turning on sync, creating an MCP token and deleting a vault now show a visible error when they fail
+- Opening a large vault no longer freezes while the index rebuilds — the sidebar appears immediately and search/backlinks fill in when indexing finishes
+- The sidebar refreshes only the folders a change touched, and the graph view patches only the notes that changed, so big vaults stay smooth while editing
+- MCP: `read_note` returns a `revision`, writes accept `expectedRevision` to refuse stale edits, a new `edit_note` tool makes targeted changes, and `append_note` accepts an idempotency key
+- Server: notes containing a NUL character no longer break search indexing or version checkpoints
+- Right-click a tab for quick actions: close, close others, close tabs to the right, or close all
+- You can now open a folder — including a whole drive — as a vault by typing its path on the vault screen
+- A vault at a drive root now shows its drive name instead of a generic label

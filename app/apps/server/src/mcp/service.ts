@@ -19,7 +19,7 @@ import {
 } from "../registry/tree-ops.js";
 import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
-import type { DocWriter } from "./doc-writer.js";
+import { StaleRevisionError, revisionOf, type DocWriter, type TextOp } from "./doc-writer.js";
 
 /**
  * The CRUD operations the MCP exposes, each one gated by the SAME ACL the rest
@@ -453,6 +453,9 @@ export async function readNote(ctx: McpContext, docId: string) {
     relPath: note.rel_path,
     permission: perm,
     content,
+    // Hand back with `expectedRevision` on update/append/edit to refuse a write
+    // against text that has since changed (#78).
+    revision: revisionOf(content),
   };
 }
 
@@ -575,20 +578,249 @@ async function requireEditableNote(auth: McpAuth, docId: string) {
  * doc-scoped frame (`{t:"touched", docId, updatedAt}`) the client applies to one
  * row — not a whole-tree re-pull.
  */
-export async function updateNote(ctx: McpContext, docId: string, content: string) {
+/**
+ * Refuse a write whose caller read a different text (#78). Runs inside the
+ * doc's write lock (see `DocWriter.editContent`), so "checked" and "applied"
+ * cannot straddle a concurrent edit.
+ */
+function requireRevision(current: string, expected: string | undefined): void {
+  if (expected === undefined) return;
+  const actual = revisionOf(current);
+  if (actual !== expected) throw new StaleRevisionError(expected, actual);
+}
+
+/** Map the doc writer's failures onto user-facing tool errors. */
+async function writeOrToolError<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof StaleRevisionError || err instanceof EditError) {
+      throw new McpToolError(err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * The smallest single replacement that turns `current` into `next`: the shared
+ * prefix and suffix are left alone. So `update_note` on a 20 KB note where one
+ * paragraph changed touches one paragraph's worth of CRDT — a concurrent edit
+ * elsewhere in the note merges instead of being clobbered by a delete-all —
+ * while remaining, by construction, a whole-body replacement in effect.
+ */
+export function replacementOp(current: string, next: string): TextOp[] {
+  if (current === next) return [];
+  let prefix = 0;
+  const max = Math.min(current.length, next.length);
+  while (prefix < max && current.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++;
+  let suffix = 0;
+  while (
+    suffix < max - prefix &&
+    current.charCodeAt(current.length - 1 - suffix) === next.charCodeAt(next.length - 1 - suffix)
+  ) {
+    suffix++;
+  }
+  return [
+    {
+      index: prefix,
+      deleteLength: current.length - prefix - suffix,
+      insert: next.slice(prefix, next.length - suffix),
+    },
+  ];
+}
+
+export async function updateNote(
+  ctx: McpContext,
+  docId: string,
+  content: string,
+  expectedRevision?: string,
+) {
   const note = await requireEditableNote(ctx.auth, docId);
   // The actor rides along so the edit is attributed to the MCP token's user —
   // an AI write shows up as "edited by <that user>" like any teammate's.
-  await ctx.docWriter.setContent(note.vault_id, docId, content, { userId: ctx.auth.userId });
+  const { revision } = await writeOrToolError(() =>
+    ctx.docWriter.editContent(
+      note.vault_id,
+      docId,
+      (current) => {
+        requireRevision(current, expectedRevision);
+        return replacementOp(current, content);
+      },
+      { userId: ctx.auth.userId },
+    ),
+  );
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
-  return { docId, bytes: content.length };
+  return { docId, bytes: content.length, revision };
 }
 
-export async function appendNote(ctx: McpContext, docId: string, text: string) {
+/**
+ * Appends already seen, keyed by (docId, idempotencyKey) → the result returned
+ * the first time. An agent that retries a timed-out `append_note` with the same
+ * key gets that result back instead of a second copy of the text (#78).
+ * In-memory and bounded: a key is remembered for {@link APPEND_KEY_TTL_MS} or
+ * until the map fills, whichever comes first — a best-effort dedupe window for
+ * retries, not a durable ledger (a restart forgets it).
+ */
+const APPEND_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+const APPEND_KEY_CAP = 10_000;
+const seenAppends = new Map<string, { at: number; result: { revision: string } }>();
+
+function rememberAppend(key: string, result: { revision: string }): void {
+  if (seenAppends.size >= APPEND_KEY_CAP) {
+    // Map iteration is insertion-ordered: the first key is the oldest.
+    const oldest = seenAppends.keys().next().value;
+    if (oldest !== undefined) seenAppends.delete(oldest);
+  }
+  seenAppends.set(key, { at: Date.now(), result });
+}
+
+function recallAppend(key: string): { revision: string } | null {
+  const hit = seenAppends.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > APPEND_KEY_TTL_MS) {
+    seenAppends.delete(key);
+    return null;
+  }
+  return hit.result;
+}
+
+/** Test hook: forget every idempotency key. */
+export function resetAppendKeys(): void {
+  seenAppends.clear();
+}
+
+export async function appendNote(
+  ctx: McpContext,
+  docId: string,
+  text: string,
+  opts: { expectedRevision?: string; idempotencyKey?: string } = {},
+) {
   const note = await requireEditableNote(ctx.auth, docId);
-  await ctx.docWriter.appendContent(note.vault_id, docId, text, { userId: ctx.auth.userId });
+  const key = opts.idempotencyKey ? `${docId}\n${opts.idempotencyKey}` : null;
+  if (key) {
+    const prior = recallAppend(key);
+    if (prior) return { docId, appended: 0, duplicate: true, revision: prior.revision };
+  }
+  const { revision } = await writeOrToolError(() =>
+    ctx.docWriter.editContent(
+      note.vault_id,
+      docId,
+      (current) => {
+        requireRevision(current, opts.expectedRevision);
+        return [{ index: current.length, deleteLength: 0, insert: text }];
+      },
+      { userId: ctx.auth.userId },
+    ),
+  );
+  if (key) rememberAppend(key, { revision });
   await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
-  return { docId, appended: text.length };
+  return { docId, appended: text.length, duplicate: false, revision };
+}
+
+// ── targeted edits (#78) ────────────────────────────────────────────────────
+
+/** One `edit_note` instruction. Anchors are matched EXACTLY (no regex). */
+export type NoteEdit =
+  | { type: "replace"; find: string; replace: string; all?: boolean }
+  | { type: "insert_before"; anchor: string; text: string }
+  | { type: "insert_after"; anchor: string; text: string }
+  | { type: "delete"; find: string; all?: boolean };
+
+/** An edit's anchor was missing or ambiguous — nothing was written. */
+export class EditError extends Error {}
+
+function occurrences(haystack: string, needle: string): number[] {
+  const out: number[] = [];
+  let from = 0;
+  for (;;) {
+    const i = haystack.indexOf(needle, from);
+    if (i === -1) return out;
+    out.push(i);
+    from = i + needle.length;
+  }
+}
+
+function anchorOf(edit: NoteEdit): string {
+  return edit.type === "replace" || edit.type === "delete" ? edit.find : edit.anchor;
+}
+
+/**
+ * Turn `edits` into ops against `current`, in order — each edit is matched in
+ * the text as left by the previous ones, and its ops are emitted with indices
+ * relative to that text (which is exactly how `TextOp`s are applied).
+ *
+ * Strict on purpose: an anchor must occur EXACTLY once unless the edit says
+ * `all`. "Not found" and "ambiguous" are both refused with the count, so an
+ * agent gets a conflict it can reason about instead of a change in the wrong
+ * place — the failure mode this tool exists to remove.
+ */
+export function planEdits(current: string, edits: NoteEdit[]): TextOp[] {
+  if (edits.length === 0) throw new EditError("edit_note needs at least one edit");
+  const ops: TextOp[] = [];
+  let text = current;
+  edits.forEach((edit, n) => {
+    const anchor = anchorOf(edit);
+    if (typeof anchor !== "string" || anchor.length === 0) {
+      throw new EditError(`edit ${n + 1}: the anchor text must be a non-empty string`);
+    }
+    const hits = occurrences(text, anchor);
+    const all = (edit.type === "replace" || edit.type === "delete") && edit.all === true;
+    if (hits.length === 0) {
+      throw new EditError(
+        `edit ${n + 1} (${edit.type}): anchor not found — the note may have changed; read it again`,
+      );
+    }
+    if (hits.length > 1 && !all) {
+      throw new EditError(
+        `edit ${n + 1} (${edit.type}): anchor matches ${hits.length} times — include more surrounding text to make it unique` +
+          (edit.type === "replace" || edit.type === "delete" ? ", or set all: true" : ""),
+      );
+    }
+    const targets = all ? hits : [hits[0]];
+    // Apply right-to-left so earlier indices stay valid within this one edit.
+    for (const at of [...targets].reverse()) {
+      let op: TextOp;
+      switch (edit.type) {
+        case "replace":
+          op = { index: at, deleteLength: anchor.length, insert: edit.replace };
+          break;
+        case "delete":
+          op = { index: at, deleteLength: anchor.length, insert: "" };
+          break;
+        case "insert_before":
+          op = { index: at, deleteLength: 0, insert: edit.text };
+          break;
+        case "insert_after":
+          op = { index: at + anchor.length, deleteLength: 0, insert: edit.text };
+          break;
+      }
+      ops.push(op);
+      text = text.slice(0, op.index) + op.insert + text.slice(op.index + op.deleteLength);
+    }
+  });
+  return ops;
+}
+
+export async function editNote(
+  ctx: McpContext,
+  docId: string,
+  edits: NoteEdit[],
+  expectedRevision?: string,
+) {
+  const note = await requireEditableNote(ctx.auth, docId);
+  const { revision, content } = await writeOrToolError(() =>
+    ctx.docWriter.editContent(
+      note.vault_id,
+      docId,
+      (current) => {
+        requireRevision(current, expectedRevision);
+        return planEdits(current, edits);
+      },
+      { userId: ctx.auth.userId },
+    ),
+  );
+  await pool.query("UPDATE notes SET updated_at = now() WHERE id = $1", [docId]);
+  return { docId, applied: edits.length, bytes: content.length, revision };
 }
 
 /** Soft-delete a note (matches the app: sets deleted_at, keeps CRDT history). */

@@ -49,6 +49,9 @@ export class NoteBridge {
   private egestTimer: number | null = null;
   private ingestDirty = false;
   private destroyed = false;
+  /** Consecutive failed egest writes (0 once one lands). Drives the retry
+   *  backoff and the `onWriteFailed`/`onWriteRecovered` UI cues. */
+  private egestFailures = 0;
 
   private readonly setT: (fn: () => void, ms: number) => number;
   private readonly clearT: (id: number) => void;
@@ -338,15 +341,68 @@ export class NoteBridge {
         return;
       }
     }
-    // Set the echo guard BEFORE writing so the watcher's ingest sees our bytes
-    // and drops them (this is what closes the loop — spec 03 §5).
-    this.lastWrittenHash = await this.hash(content);
+    // Hash first, assign only once the bytes are CONFIRMED on disk. The guard
+    // used to be primed before the write; a failed write (disk full, permission
+    // lost, path gone) then left it pointing at bytes that never landed, so the
+    // next watcher read of the still-stale file was judged against the wrong
+    // baseline. Assigning after is still in time for the echo: the watcher's
+    // event is debounced ~150ms in Rust and ~150ms more here, while this
+    // assignment runs the moment the IPC resolves (spec 03 §5).
+    const hash = await this.hash(content);
     try {
       await this.io.writeFileAtomic(this._path, content);
-      if (this.io.reindex) await this.io.reindex(this._path);
     } catch (e) {
+      // The .md on disk is the durable source of truth, so a lost write is a
+      // data-safety event, not a log line: tell the UI, and retry with backoff
+      // until it lands (the CRDT still holds the text; nothing is dropped).
+      this.egestFailures++;
       this.reportError(e, "egest:write");
+      try {
+        this.io.onWriteFailed?.(this._path, e, this.egestFailures);
+      } catch (hookErr) {
+        this.reportError(hookErr, "egest:onWriteFailed");
+      }
+      this.scheduleEgestRetry();
+      return;
     }
+    this.lastWrittenHash = hash;
+    if (this.egestFailures > 0) {
+      this.egestFailures = 0;
+      try {
+        this.io.onWriteRecovered?.(this._path);
+      } catch (hookErr) {
+        this.reportError(hookErr, "egest:onWriteRecovered");
+      }
+    }
+    // Indexing is derived state: a failure here is worth a log, not a re-write.
+    if (this.io.reindex) {
+      try {
+        await this.io.reindex(this._path);
+      } catch (e) {
+        this.reportError(e, "egest:reindex");
+      }
+    }
+  }
+
+  /** Re-arm the egest after a failed write: 1s, 2s, 4s… capped (`egestRetryMaxMs`).
+   *  Reuses `egestTimer`, so `flushEgest` (close/save) still forces an attempt
+   *  and `destroy` still cancels it. */
+  private scheduleEgestRetry(): void {
+    if (this.destroyed) return;
+    const delay = Math.min(
+      this.cfg.egestRetryMaxMs,
+      this.cfg.egestRetryBaseMs * 2 ** Math.max(0, this.egestFailures - 1),
+    );
+    if (this.egestTimer != null) this.clearT(this.egestTimer);
+    this.egestTimer = this.setT(() => {
+      this.egestTimer = null;
+      void this.drainEgest();
+    }, delay);
+  }
+
+  /** Consecutive failed disk writes for this note (tests / observability). */
+  get pendingWriteFailures(): number {
+    return this.egestFailures;
   }
 
   /**

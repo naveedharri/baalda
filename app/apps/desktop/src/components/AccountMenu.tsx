@@ -1375,7 +1375,14 @@ function GeneralTab({
     } catch (e) {
       const kind = classifyLimitError(e);
       if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
-      else setError(e instanceof Error ? e.message : String(e));
+      else {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+        // The inline line can be scrolled out of view, and the button simply
+        // returns to idle — which reads as "nothing happened". A sticky toast is
+        // always visible (#85).
+        toast(`Couldn't turn on sync — ${message}`, "error");
+      }
     } finally {
       setBusy(false);
     }
@@ -1678,7 +1685,10 @@ function VaultsTab() {
       setBound(readOrgVaults());
       setConfirmDelete(null);
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setActionError(message);
+      // Destructive path: a failure here must never look like a success (#85).
+      toast(`Couldn't delete the vault — ${message}`, "error");
     } finally {
       setBusy(false);
     }
@@ -2678,7 +2688,11 @@ function McpTab() {
       setTokens((prev) => [row, ...prev]);
       setName("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      // Otherwise the button just returns to idle and the user clicks again,
+      // minting duplicate tokens on a server that is actually failing (#85).
+      toast(`Couldn't create the MCP token — ${message}`, "error");
     } finally {
       setBusy(false);
     }

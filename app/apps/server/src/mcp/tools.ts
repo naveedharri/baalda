@@ -5,6 +5,7 @@ import {
   createNote,
   deleteFolder,
   deleteNote,
+  editNote,
   listFolders,
   listNotes,
   listVaults,
@@ -14,6 +15,7 @@ import {
   searchNotes,
   updateNote,
   type McpContext,
+  type NoteEdit,
 } from "./service.js";
 
 /**
@@ -87,6 +89,37 @@ function optStrOrNull(args: Args, key: string): string | null | undefined {
 
 const S = (description: string) => ({ type: "string", description });
 
+/** Validate `edit_note`'s `edits` argument into typed edits (McpToolError on a bad shape). */
+function parseEdits(raw: unknown): NoteEdit[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new McpToolError("edit_note requires a non-empty `edits` array");
+  }
+  return raw.map((e, i): NoteEdit => {
+    if (!e || typeof e !== "object") throw new McpToolError(`edits[${i}] must be an object`);
+    const o = e as Args;
+    const str = (key: string): string => {
+      const v = o[key];
+      if (typeof v !== "string") throw new McpToolError(`edits[${i}].${key} must be a string`);
+      return v;
+    };
+    const all = optBool(o, "all");
+    switch (o.type) {
+      case "replace":
+        return { type: "replace", find: str("find"), replace: str("replace"), ...(all !== undefined ? { all } : {}) };
+      case "delete":
+        return { type: "delete", find: str("find"), ...(all !== undefined ? { all } : {}) };
+      case "insert_before":
+        return { type: "insert_before", anchor: str("anchor"), text: str("text") };
+      case "insert_after":
+        return { type: "insert_after", anchor: str("anchor"), text: str("text") };
+      default:
+        throw new McpToolError(
+          `edits[${i}].type must be one of replace, insert_before, insert_after, delete`,
+        );
+    }
+  });
+}
+
 export const TOOLS: McpTool[] = [
   {
     name: "list_vaults",
@@ -126,7 +159,8 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "read_note",
-    description: "Read a note's full markdown content by its docId.",
+    description:
+      "Read a note's full markdown content by its docId. Also returns its `revision` — pass it as expectedRevision to update_note / append_note / edit_note so a write is refused if the note changed in between.",
     inputSchema: {
       type: "object",
       properties: { docId: S("Note docId from list_notes or search_notes") },
@@ -182,32 +216,86 @@ export const TOOLS: McpTool[] = [
   {
     name: "update_note",
     description:
-      "Replace a note's entire markdown content. Read it first if you mean to edit rather than overwrite.",
+      "Replace a note's entire markdown content. Prefer edit_note for a change to part of a note. Pass expectedRevision (from read_note) so the write is refused if the note changed since you read it.",
     inputSchema: {
       type: "object",
       properties: {
         docId: S("Note docId"),
         content: S("The new full markdown content"),
+        expectedRevision: S(
+          "The `revision` read_note returned. If the note no longer matches, the write is refused with a conflict — read again and retry.",
+        ),
       },
       required: ["docId", "content"],
       additionalProperties: false,
     },
     annotations: { idempotentHint: true },
-    handler: (ctx, a) => updateNote(ctx, reqStr(a, "docId"), reqStr(a, "content")),
+    handler: (ctx, a) =>
+      updateNote(ctx, reqStr(a, "docId"), reqStr(a, "content"), optStr(a, "expectedRevision")),
   },
   {
     name: "append_note",
-    description: "Append text to the end of a note's markdown content.",
+    description:
+      "Append text to the end of a note's markdown content. Pass an idempotencyKey when you may retry the call, so a retry cannot append the text twice.",
     inputSchema: {
       type: "object",
       properties: {
         docId: S("Note docId"),
         text: S("Markdown to append to the end of the note"),
+        expectedRevision: S("Optional `revision` from read_note; refuses the append if the note changed."),
+        idempotencyKey: S(
+          "Optional caller-chosen key (e.g. a UUID). A repeat with the same key returns the first result instead of appending again.",
+        ),
       },
       required: ["docId", "text"],
       additionalProperties: false,
     },
-    handler: (ctx, a) => appendNote(ctx, reqStr(a, "docId"), reqStr(a, "text")),
+    handler: (ctx, a) =>
+      appendNote(ctx, reqStr(a, "docId"), reqStr(a, "text"), {
+        expectedRevision: optStr(a, "expectedRevision"),
+        idempotencyKey: optStr(a, "idempotencyKey"),
+      }),
+  },
+  {
+    name: "edit_note",
+    description:
+      "Make targeted edits to a note without resending the whole body: replace exact text, insert before/after an anchor, or delete exact text. Each anchor must match exactly once (or set all: true for replace/delete); a missing or ambiguous anchor refuses the whole call with nothing written. Edits apply in order. Pass expectedRevision from read_note to also refuse the call if the note changed since you read it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        docId: S("Note docId"),
+        expectedRevision: S("Optional `revision` from read_note; refuses the edit if the note changed."),
+        edits: {
+          type: "array",
+          minItems: 1,
+          description: "Edits to apply in order, each matched against the text as left by the previous one.",
+          items: {
+            type: "object",
+            properties: {
+              type: {
+                type: "string",
+                enum: ["replace", "insert_before", "insert_after", "delete"],
+                description: "What to do at the anchor.",
+              },
+              find: S("Exact text to replace or delete (replace / delete)"),
+              replace: S("Replacement text (replace)"),
+              anchor: S("Exact text to insert next to (insert_before / insert_after)"),
+              text: S("Text to insert (insert_before / insert_after)"),
+              all: {
+                type: "boolean",
+                description: "replace / delete only: apply to every occurrence instead of requiring exactly one.",
+              },
+            },
+            required: ["type"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["docId", "edits"],
+      additionalProperties: false,
+    },
+    handler: (ctx, a) =>
+      editNote(ctx, reqStr(a, "docId"), parseEdits(a.edits), optStr(a, "expectedRevision")),
   },
   {
     name: "delete_note",

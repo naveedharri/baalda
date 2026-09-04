@@ -19,7 +19,8 @@ import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
 import type { ActivityStatus } from "../prefs";
 import { AttachmentSync } from "./attachments";
-import { ContentUploader } from "./contentUpload";
+import { ContentUploader, type UploadFailure } from "./contentUpload";
+import { runPool } from "./pool";
 import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
 import { DocSync, type SyncStatus } from "./syncManager";
@@ -215,6 +216,29 @@ export class SyncManager implements InboundHost {
   /** The server truncated `ready.empty`: more empty docs exist than one frame
    *  names, so another `hello` is owed once this run drains them. */
   private serverEmptyTruncated = false;
+  /**
+   * Docs named by `ready.empty` whose LOCAL file is empty too — nothing anywhere.
+   *
+   * `ready.empty` is the authority on what the server lacks, but it cannot know
+   * that this device has nothing to give: a 0-byte `.md` is a legitimate note (an
+   * index stub, a placeholder someone meant to fill in). Pushing one seeds no
+   * text, the server keeps holding nothing, and the NEXT connect names it again —
+   * so a vault with 307 empty files "re-synced 307 notes" on every reload and
+   * every vault switch, a token mint and a WebSocket apiece, for nothing. These
+   * are settled here instead: marked pushed, badged synced, never queued. A
+   * watcher event for the file drops it from this set so real bytes still push.
+   */
+  private emptyEverywhere = new Set<string>();
+  /** The in-flight disk probe behind {@link handleServerEmpty}, if any. The
+   *  content run waits for it, so a run never starts from a half-filtered list. */
+  private emptyProbe: Promise<void> | null = null;
+  /**
+   * Docs the uploader gave up on PERMANENTLY (over the size ceiling): re-queuing
+   * them on every `ready` would only re-fail them. They stay unsynced — and the
+   * run stays `error` — until the file changes, which is when the watcher lets
+   * them back in. Keyed by docId like everything else here.
+   */
+  private permanentFailures = new Map<string, UploadFailure>();
   /** True while the run is reporting the vault channel's inbound queue. */
   private downloadPhase = false;
   /**
@@ -566,6 +590,11 @@ export class SyncManager implements InboundHost {
       // Belt and braces with the uploader's own `skip`: the open note's editor
       // session owns its provider, and its bridge already ingests watcher events.
       if (this.docStore?.suppressedDoc() === mapping.docId) continue;
+      // The file has new bytes, so two verdicts about its OLD bytes are void: an
+      // empty placeholder may now hold text, and an oversized file may have been
+      // trimmed under the ceiling. Both get a fresh push.
+      this.emptyEverywhere.delete(mapping.docId);
+      this.permanentFailures.delete(mapping.docId);
       this.localChanges.set(mapping.docId, relPath);
       this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
       // A doc resident in the hot tier has a LIVE bridge, and its next egest (a
@@ -639,6 +668,7 @@ export class SyncManager implements InboundHost {
         release: (docId) => store.demote(docId),
         connect: ({ docId, vaultId: collectionId, doc }) =>
           new DocSync({ api, doc, docId, vaultId: collectionId }),
+        readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       markPushed: (docId) => {
@@ -656,6 +686,7 @@ export class SyncManager implements InboundHost {
 
     const result = await uploader.run();
     if (!scope.isCurrent() || this.uploader !== uploader) return;
+    this.recordPermanentFailures(uploader);
     await this.registry.flushCheckpoint();
     if (!scope.isCurrent() || this.uploader !== uploader) return;
     if (result.cancelled) return;
@@ -747,6 +778,10 @@ export class SyncManager implements InboundHost {
   private startContentRunIfNeeded(scope: VaultScope): void {
     if (!this.enabled || !scope.isCurrent()) return;
     if (this.uploader?.isRunning()) return;
+    // The `ready.empty` list is still being checked against disk. Starting now
+    // would queue every named doc — including the empty placeholders the probe
+    // is about to settle — so the probe's completion re-enters here instead.
+    if (this.emptyProbe) return;
     const engine = this.vaultEngine;
     if (engine && !engine.backfillSettled()) return;
     if (this.contentWorkList().length === 0) {
@@ -782,6 +817,10 @@ export class SyncManager implements InboundHost {
       .filter(
         (n) =>
           n.docId !== open &&
+          // Settled as "nothing anywhere", or failed for a reason a retry can't
+          // fix — neither is work (see the field comments).
+          !this.emptyEverywhere.has(n.docId) &&
+          !this.permanentFailures.has(n.docId) &&
           (!this.registry.isPushed(n.docId) || this.serverEmpty.has(n.docId)),
       );
   }
@@ -798,11 +837,82 @@ export class SyncManager implements InboundHost {
   private handleServerEmpty(docIds: string[], truncated: boolean, scope: VaultScope): void {
     if (!scope.isCurrent()) return;
     this.clearChannelWatchdog(); // `ready` arrived — the channel is alive
-    this.serverEmpty = new Set(docIds);
     this.serverEmptyTruncated = truncated;
     // A live run keeps its queue and picks this set up on its next pass; only
-    // the set is refreshed here.
+    // the set is refreshed here. The refresh itself may need the disk (see
+    // `settleServerEmpty`); when it does, the run start waits for it.
+    const settled = this.settleServerEmpty(docIds, scope);
+    if (settled instanceof Promise) {
+      const probe = settled.then(() => {
+        if (this.emptyProbe === probe) this.emptyProbe = null;
+        if (!scope.isCurrent()) return;
+        this.startContentRunIfNeeded(scope);
+      });
+      this.emptyProbe = probe;
+      return;
+    }
+    this.serverEmpty = settled;
     this.startContentRunIfNeeded(scope);
+  }
+
+  /**
+   * Turn `ready.empty` into the docs that actually need a push, settling the
+   * ones this device has nothing for (see {@link emptyEverywhere}).
+   *
+   * Synchronous when nothing has to be read — a doc whose path is unknown here
+   * stays in the list (the run can't manufacture work for it anyway, but this
+   * layer must not decide that), and one already settled is skipped without a
+   * read. Otherwise the remaining files are read with bounded concurrency and
+   * the result lands in `serverEmpty` when the promise resolves. Every step is
+   * scope-guarded: a vault switch mid-probe leaves the new vault's set alone.
+   */
+  private settleServerEmpty(docIds: string[], scope: VaultScope): Set<string> | Promise<void> {
+    const keep = new Set<string>();
+    const toProbe: Array<{ docId: string; relPath: string }> = [];
+    for (const docId of docIds) {
+      if (this.emptyEverywhere.has(docId) || this.permanentFailures.has(docId)) continue;
+      const relPath = this.registry.pathForDocId(docId);
+      if (!relPath) {
+        keep.add(docId);
+        continue;
+      }
+      toProbe.push({ docId, relPath });
+    }
+    if (toProbe.length === 0) return keep;
+    return runPool(
+      toProbe,
+      async ({ docId, relPath }) => {
+        let empty = false;
+        try {
+          empty = await this.registry.isNoteEmptyOnDisk(relPath);
+        } catch {
+          empty = false; // unreadable ⇒ let the run try (and report) it
+        }
+        if (!scope.isCurrent()) return;
+        if (!empty) {
+          keep.add(docId);
+          return;
+        }
+        // Nothing here, nothing there. Confirmed by definition — there is no
+        // content whose arrival on the server could still be pending.
+        this.emptyEverywhere.add(docId);
+        this.registry.markPushed(docId);
+        this.progress?.doc(docId, "synced");
+      },
+      { concurrency: 8, shouldStop: () => !scope.isCurrent() },
+    ).then(() => {
+      if (!scope.isCurrent()) return;
+      this.serverEmpty = keep;
+      this.progress?.flush();
+    });
+  }
+
+  /** Remember the run's permanent failures so later runs neither re-queue nor
+   *  forget them (each run builds a fresh uploader with an empty failure list). */
+  private recordPermanentFailures(uploader: ContentUploader): void {
+    for (const f of uploader.failedDocs()) {
+      if (f.permanent) this.permanentFailures.set(f.docId, f);
+    }
   }
 
   isEnabled(): boolean {
@@ -919,8 +1029,10 @@ export class SyncManager implements InboundHost {
   }
 
   /** Resolves when the current bulk sync run settles (tests / shutdown). */
-  whenBulkSyncSettled(): Promise<void> {
-    return this.bulkRun ?? Promise.resolve();
+  async whenBulkSyncSettled(): Promise<void> {
+    // The disk probe behind a `ready` runs before the run it may start.
+    while (this.emptyProbe) await this.emptyProbe;
+    await (this.bulkRun ?? Promise.resolve());
   }
 
   /**
@@ -987,6 +1099,7 @@ export class SyncManager implements InboundHost {
         release: (docId) => store.demote(docId),
         connect: ({ docId, vaultId: collectionId, doc }) =>
           new DocSync({ api, doc, docId, vaultId: collectionId }),
+        readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // The server's word beats our checkpoint: a doc it holds no content for is
@@ -1010,6 +1123,7 @@ export class SyncManager implements InboundHost {
 
     const result = await uploader.run();
     if (!scope.isCurrent() || this.uploader !== uploader) return;
+    this.recordPermanentFailures(uploader);
     // Durably record what we pushed before claiming anything: this is the resume
     // point a kill -9 falls back to.
     await this.registry.flushCheckpoint();
@@ -1126,6 +1240,7 @@ export class SyncManager implements InboundHost {
     const uploadFailures = this.uploader?.failedDocs().length ?? 0;
     const clean =
       uploadFailures === 0 &&
+      this.permanentFailures.size === 0 &&
       !this.registry.hasFailures() &&
       this.registry.limitCode() == null;
     progress.phase(clean ? "done" : "error");
@@ -1138,9 +1253,17 @@ export class SyncManager implements InboundHost {
     content: Array<{ docId: string; relPath: string; reason: string }>;
     limitCode: string | null;
   } {
+    // Permanent failures are remembered across runs (see the field), so they are
+    // reported from there; the live uploader's list covers this run's transient
+    // ones. A doc in both is listed once.
+    const content = [...this.permanentFailures.values()];
+    const seen = new Set(content.map((f) => f.docId));
+    for (const f of this.uploader?.failedDocs() ?? []) {
+      if (!seen.has(f.docId)) content.push(f);
+    }
     return {
       registry: this.registry.failures(),
-      content: this.uploader?.failedDocs() ?? [],
+      content,
       limitCode: this.registry.limitCode(),
     };
   }
@@ -1184,6 +1307,9 @@ export class SyncManager implements InboundHost {
     // list would put ITS doc ids at the head of this vault's upload queue.
     this.serverEmpty.clear();
     this.serverEmptyTruncated = false;
+    this.emptyEverywhere.clear();
+    this.permanentFailures.clear();
+    this.emptyProbe = null; // a probe still in flight sees a stale scope and drops
     // The bulk run before the engine it borrows from: `stop()` makes every pool
     // lane drop at its next checkpoint, so nothing is still promoting a bridge
     // when `stopVaultEngine` destroys the store underneath it.
