@@ -659,19 +659,28 @@ export default function App() {
     // batch in the window carried a structural change (then the whole tree is
     // re-listed, as before).
     let pendingFolders: Set<string> | null = new Set();
+    // The file changes themselves (last kind per path), for the titles patch.
+    let pendingChanges = new Map<string, "modified" | "removed">();
     const scheduleRefresh = (changes: ipc.FileChanged[]) => {
       if (pendingFolders) {
         const dirs = implicatedFolders(changes);
         if (dirs) for (const d of dirs) pendingFolders.add(d);
         else pendingFolders = null;
       }
+      for (const c of changes) if (c.kind !== "tree") pendingChanges.set(c.path, c.kind);
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => {
         const folders = pendingFolders;
+        const fileChanges = [...pendingChanges].map(([path, kind]) => ({ path, kind }));
         pendingFolders = new Set();
-        void useStore.getState().refreshTree(folders ?? undefined);
-        void useStore.getState().refreshTitles();
-        void useStore.getState().refreshBacklinks();
+        pendingChanges = new Map();
+        const store = useStore.getState();
+        void store.refreshTree(folders ?? undefined);
+        // Titles: patch the named rows for a plain file batch; only a structural
+        // change (folder rename/move, which rewrites many paths) re-lists all.
+        if (folders) void store.patchTitles(fileChanges);
+        else void store.refreshTitles();
+        void store.refreshBacklinks();
       }, 120);
     };
     (async () => {

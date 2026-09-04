@@ -30,6 +30,15 @@ export interface FolderSyncSummary {
   /** In flight right now (queued or syncing). */
   pending: number;
   failed: number;
+  /**
+   * Mapped notes for which NO state has been reported yet this session. They
+   * read as `unsynced` (honesty: nothing has confirmed them) but they are not
+   * "work": the sync run stamps every confirmed note `synced` in one batch once
+   * the vault channel is ready, and until that batch lands a fresh launch would
+   * otherwise pin every folder's wave at its whole population ("186/187" for
+   * one genuinely new note). See {@link FolderWaveTracker}.
+   */
+  unreported: number;
   /** The folder row's state. See {@link rollupState}. */
   state: DocSyncState;
   /** `synced / total` as a whole percentage, floored (so it reads 99% at 499/500
@@ -79,6 +88,7 @@ interface Counts {
   synced: number;
   pending: number;
   failed: number;
+  unreported: number;
 }
 
 /**
@@ -106,10 +116,14 @@ function summarize(c: Counts): FolderSyncSummary {
 export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
   const { docIdByPath, docSyncState, localNotePaths } = input;
   const notes = new Map<string, DocSyncState>();
+  /** Mapped notes with no reported transition (see `FolderSyncSummary.unreported`). */
+  const unreported = new Set<string>();
 
   // Every note the server knows about, at its reported state.
   for (const [relPath, docId] of Object.entries(docIdByPath)) {
-    notes.set(relPath, docSyncState[docId] ?? "unsynced");
+    const reported = docSyncState[docId];
+    if (reported === undefined) unreported.add(relPath);
+    notes.set(relPath, reported ?? "unsynced");
   }
   // Every note only this device knows about. It has no docId, so it cannot have a
   // state — and "no server row" is exactly what unsynced means.
@@ -123,23 +137,25 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
   }
 
   const counts = new Map<string, Counts>();
-  const credit = (dir: string, state: DocSyncState): void => {
+  const credit = (dir: string, state: DocSyncState, isUnreported: boolean): void => {
     let c = counts.get(dir);
     if (!c) {
-      c = { total: 0, synced: 0, pending: 0, failed: 0 };
+      c = { total: 0, synced: 0, pending: 0, failed: 0, unreported: 0 };
       counts.set(dir, c);
     }
     c.total++;
     if (state === "synced") c.synced++;
     else if (state === "error") c.failed++;
     else if (state === "queued" || state === "syncing") c.pending++;
+    if (isUnreported) c.unreported++;
   };
 
   // Credit each note to every folder above it, up to and including the root ("").
   for (const [relPath, state] of notes) {
+    const isUnreported = unreported.has(relPath);
     let dir = parentDir(relPath);
     for (;;) {
-      credit(dir, state);
+      credit(dir, state, isUnreported);
       if (dir === "") break;
       dir = parentDir(dir);
     }
@@ -190,7 +206,11 @@ export class FolderWaveTracker {
       if (!s || s.total - s.synced <= 0) this.waves.delete(key);
     }
     const stamp = (path: string, s: FolderSyncSummary): void => {
-      const remaining = s.total - s.synced;
+      // Only notes that have actually been REPORTED as not synced are work. A
+      // mapped note nobody has spoken for yet is not in the wave: before the
+      // run's first batch of `synced` stamps lands, every note looks unsynced,
+      // and pinning the wave then is exactly the "186/187" badge.
+      const remaining = s.total - s.synced - s.unreported;
       if (remaining <= 0) return;
       const wave = Math.max(this.waves.get(path) ?? 0, remaining);
       this.waves.set(path, wave);
@@ -225,6 +245,13 @@ export const DOC_SYNC_TITLES: Record<DocSyncState, string> = {
 
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** A wave with nothing in it is not progress — draw the dot instead of "0/0". */
+function waveOrNull(
+  wave: { done: number; total: number },
+): { done: number; total: number } | null {
+  return wave.total > 0 ? wave : null;
 }
 
 /** Tooltip for a folder row: always the real counts, never a rounded claim. */
@@ -263,8 +290,14 @@ export function rowSyncMark(
       progress: settled
         ? null
         : // No tracker ran (no `apply` call) ⇒ fall back to the wave a fresh
-          // tracker would report: everything unsynced right now, none done.
-          (summary.wave ?? { done: 0, total: summary.total - summary.synced }),
+          // tracker would report: everything REPORTED unsynced right now, none
+          // done. Nothing reported at all ⇒ no counts to show yet, just the dot.
+          waveOrNull(
+            summary.wave ?? {
+              done: 0,
+              total: summary.total - summary.synced - summary.unreported,
+            },
+          ),
       title: folderSyncTitle(summary),
     };
   }

@@ -14,6 +14,7 @@ import {
 } from "./lib/appearance";
 import { readItemOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
 import { loadedFolderPaths, mergeChildren, nodeAt, setChildrenAt } from "./lib/tree/lazyTree";
+import { applyTitlePatch } from "./lib/tree/titles";
 import {
   ApiError,
   type BillingConfig,
@@ -280,6 +281,12 @@ interface AppStore {
   /** Lazily load one folder's immediate children into the sidebar tree. */
   loadChildren: (path: string) => Promise<void>;
   refreshTitles: () => Promise<void>;
+  /**
+   * Bring `titles` current for just the notes a watcher batch named: re-read
+   * those rows (one `getNoteMeta` each) and drop the removed ones, instead of
+   * re-listing every note in the vault (`refreshTitles`).
+   */
+  patchTitles: (changes: ReadonlyArray<{ path: string; kind: "modified" | "removed" }>) => Promise<void>;
   /** First-run seeding for a local (not-yet-synced) empty vault. */
   seedLocalVaultIfEmpty: () => Promise<void>;
   /** Open the root Welcome note if it exists and nothing else is open. */
@@ -1098,6 +1105,34 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     if (!sameVault(get, epoch)) return;
     set({ titles });
+  },
+
+  patchTitles: async (changes) => {
+    const epoch = get().vault?.epoch;
+    const md = changes.filter((c) => c.path.toLowerCase().endsWith(".md"));
+    if (md.length === 0) return;
+    const removed: string[] = [];
+    const updates: ipc.NoteTitle[] = [];
+    await Promise.all(
+      md.map(async (c) => {
+        if (c.kind === "removed") {
+          removed.push(c.path);
+          return;
+        }
+        try {
+          const meta = await ipc.getNoteMeta(c.path);
+          // Not in the index (yet, or any more): nothing to show for it.
+          if (!meta) removed.push(c.path);
+          else updates.push({ id: meta.id, path: meta.path, title: meta.title });
+        } catch {
+          // Leave that row alone; the next full refresh (a structural batch or a
+          // vault open) reconciles it.
+        }
+      }),
+    );
+    if (!sameVault(get, epoch)) return;
+    const next = applyTitlePatch(get().titles, updates, removed);
+    if (next !== get().titles) set({ titles: next });
   },
 
   seedLocalVaultIfEmpty: async () => {

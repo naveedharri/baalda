@@ -389,6 +389,31 @@ describe("SyncManager — ready.empty is the authority", () => {
     expect(connects.order).toEqual(["a", "b"]);
   });
 
+  it("badges every confirmed note synced even when there is nothing to send", async () => {
+    // Only a run's uploader used to stamp confirmed docs `synced`; a fully
+    // synced vault (empty work list ⇒ no run) sat on unsynced badges until
+    // something happened to start one.
+    fakeRegistry.mappedNotes.mockReturnValue([
+      { docId: "a", relPath: "A.md" },
+      { docId: "b", relPath: "B.md" },
+      { docId: OPEN_DOC, relPath: "Open.md" },
+    ]);
+    for (const id of ["a", "b", OPEN_DOC]) fakeRegistry.pushed.add(id);
+    const sm = new SyncManager();
+    const badges: Record<string, string> = {};
+    sm.setDocStateListener((patch) => {
+      for (const [id, state] of Object.entries(patch)) if (state) badges[id] = state;
+    });
+    await enable(sm);
+    storeHooks.open = OPEN_DOC;
+    engineHooks.settled = true;
+    engineHooks.opts!.onServerEmpty?.([], false);
+    engineHooks.opts!.onInboundIdle?.();
+    await flush();
+    expect(connects.order).toEqual([]);
+    expect(badges).toEqual({ a: "synced", b: "synced" }); // the open note reports itself
+  });
+
   it("reaches a terminal phase with nothing to send, and does not re-stamp it", async () => {
     fakeRegistry.mappedNotes.mockReturnValue([{ docId: "a", relPath: "A.md" }]);
     fakeRegistry.pushed.add("a");
