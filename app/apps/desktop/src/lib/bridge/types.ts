@@ -70,6 +70,18 @@ export interface BridgeConfig {
   compactThreshold: number;
   /** Take a recovery snapshot before a diff that churns this fraction of the doc. */
   largeDiffRatio: number;
+  /**
+   * Refuse to ingest a file larger than this many bytes.
+   *
+   * A note has no business being this big, and a file that gets there is almost
+   * always damage rather than content — on 2026-09-04 a daily note reached
+   * 68 MB (2.37M lines, 35 distinct) from the seed-vs-pull race that used to
+   * double a doc's text. Ingesting such a file pulls the damage INTO the CRDT,
+   * where it then propagates to every device and to the server. Matching the
+   * sync layer's `MAX_NOTE_BYTES` keeps one rule: a note too big to upload is a
+   * note we also refuse to read back in. 0 disables the check.
+   */
+  maxIngestBytes: number;
   /** First retry delay after a failed egest write; doubles per consecutive
    *  failure up to `egestRetryMaxMs`. */
   egestRetryBaseMs: number;
@@ -95,6 +107,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   egestDebounceMs: 300,
   compactThreshold: 64,
   largeDiffRatio: 0.6,
+  maxIngestBytes: 10 * 1024 * 1024,
   egestRetryBaseMs: 1_000,
   egestRetryMaxMs: 30_000,
   // 500ms matches Yjs' own default and CodeMirror's `newGroupDelay`, so undo

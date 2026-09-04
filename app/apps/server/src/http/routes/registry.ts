@@ -270,20 +270,34 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
 
     // A given path maps to one folder per vault — adopt an existing row rather
     // than duplicating it (reconcile and on-demand create can race).
-    const existing = await pool.query(
-      "SELECT id FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
+    //
+    // Matched case-insensitively, and the response echoes the row's CANONICAL
+    // path/name rather than what was asked for. A Mac and a Windows box see one
+    // directory where Postgres would store two rows, and the desktop that then
+    // maps its file to the twin's doc_id is the 2026-09-04 ping-pong (see
+    // `samePath`). Echoing canonical is what lets the caller converge instead of
+    // re-asking with its own spelling on every pass.
+    const existing = await pool.query<{ id: string; parent_id: string | null; name: string; path: string }>(
+      `SELECT id, parent_id, name, path FROM folders
+        WHERE vault_id = $1 AND lower(path) = lower($2)
+        ORDER BY created_at ASC, id ASC LIMIT 1`,
       [vaultId, path],
     );
     if (existing.rows[0]) {
-      return c.json({ id: existing.rows[0].id, vaultId, parentId: parentId ?? null, name, path }, 200);
+      const e = existing.rows[0];
+      return c.json({ id: e.id, vaultId, parentId: e.parent_id, name: e.name, path: e.path }, 200);
     }
 
     // `path` is authoritative; `parentId` must be the folder at its dirname (or
     // is resolved from it when absent). See `resolveParentFolder` for the
-    // incident this closes.
+    // incident this closes. `storedPath` is `path` rewritten onto the parent's
+    // own spelling, so a subtree never mixes cases across levels.
     let resolvedParent: string | null;
+    let storedPath: string;
     try {
-      resolvedParent = await resolveFolderParent(pool, vaultId, path, parentId ?? null);
+      const loc = await resolveFolderParent(pool, vaultId, path, parentId ?? null);
+      resolvedParent = loc.folderId;
+      storedPath = loc.relPath;
     } catch (err) {
       if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
       throw err;
@@ -303,25 +317,27 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       await pool.query(
         `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by, color)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [id, vaultId, resolvedParent, name, path, body.sort ?? 0, session.userId, color],
+        [id, vaultId, resolvedParent, name, storedPath, body.sort ?? 0, session.userId, color],
       );
     } catch (err) {
       // Lost the race against another device registering the same path: the
-      // unique index `folders_vault_path_uq` (migration 022) refused the twin.
-      // Adopt the winner — before that index, this race produced 2–5 rows per
-      // path and split a folder's notes across them.
+      // unique indexes `folders_vault_path_uq` (m022) / `folders_vault_path_ci_uq`
+      // (m023) refused the twin. Adopt the winner — before those, this race
+      // produced 2–5 rows per path and split a folder's notes across them.
       if ((err as { code?: string }).code === "23505") {
-        const winner = await pool.query<{ id: string; parent_id: string | null; name: string }>(
-          "SELECT id, parent_id, name FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
-          [vaultId, path],
+        const winner = await pool.query<{ id: string; parent_id: string | null; name: string; path: string }>(
+          `SELECT id, parent_id, name, path FROM folders
+            WHERE vault_id = $1 AND lower(path) = lower($2)
+            ORDER BY created_at ASC, id ASC LIMIT 1`,
+          [vaultId, storedPath],
         );
         const w = winner.rows[0];
-        if (w) return c.json({ id: w.id, vaultId, parentId: w.parent_id, name: w.name, path }, 200);
+        if (w) return c.json({ id: w.id, vaultId, parentId: w.parent_id, name: w.name, path: w.path }, 200);
       }
       throw err;
     }
     changed(c, vaultId);
-    return c.json({ id, vaultId, parentId: resolvedParent, name, path, color }, 201);
+    return c.json({ id, vaultId, parentId: resolvedParent, name, path: storedPath, color }, 201);
   });
 
   registryRoutes.get("/folders", async (c) => {
@@ -473,16 +489,29 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // map one file to two docs, and every external write bounces between them,
     // duplicating the content each cycle (the 2026-08-25 runaway-daily-notes
     // incident). The unique index `notes_live_path_uq` backstops the race below.
-    const { rows: samePath } = await pool.query<{
+    // Matched case-insensitively, because a case-variant of a live note's path is
+    // the SAME FILE on macOS and Windows. Storing both forked one file across two
+    // doc_ids and the two docs then wrote over each other through the disk
+    // forever — the 2026-09-04 BenAI OS runaway (`samePath` in tree-ops carries
+    // the full account). `notes_live_path_uq` (m021) could not see it: a
+    // case-only difference satisfies an exact-path unique index.
+    //
+    // The response echoes the row's CANONICAL `rel_path`, not the caller's, so a
+    // desktop whose disk spells it differently adopts this doc_id and stops
+    // re-registering its own spelling on every reconcile pass.
+    const { rows: samePathRows } = await pool.query<{
       id: string;
       folder_id: string | null;
       title: string | null;
+      rel_path: string;
     }>(
-      "SELECT id, folder_id, title FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL",
+      `SELECT id, folder_id, title, rel_path FROM notes
+        WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
+        ORDER BY created_at ASC, id ASC LIMIT 1`,
       [vaultId, relPath],
     );
-    if (samePath.length > 0) {
-      const row = samePath[0];
+    if (samePathRows.length > 0) {
+      const row = samePathRows[0];
       return c.json(
         {
           id: row.id,
@@ -490,7 +519,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
           vaultId,
           folderId: row.folder_id,
           title: row.title,
-          relPath,
+          relPath: row.rel_path,
         },
         200,
       );
@@ -502,8 +531,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // inconsistently, otherwise writes a row every client renders in one place
     // and every ACL walk reads in another (2026-08-27 phantom-root-folder).
     let resolvedFolder: string | null;
+    let storedRelPath: string;
     try {
-      resolvedFolder = await resolveParentFolder(pool, vaultId, relPath, folderId ?? null);
+      const loc = await resolveParentFolder(pool, vaultId, relPath, folderId ?? null);
+      resolvedFolder = loc.folderId;
+      storedRelPath = loc.relPath;
     } catch (err) {
       if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
       throw err;
@@ -536,27 +568,39 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
           vaultId,
           resolvedFolder,
           title ?? null,
-          relPath,
+          storedRelPath,
           session.userId,
           normalizeColor(body.color) ?? null,
         ],
       );
     } catch (err) {
       // Lost the race against a concurrent register of the same path
-      // (notes_live_path_uq). The winner's row is this note — adopt it.
+      // (notes_live_path_uq m021, or notes_live_path_ci_uq m023 for a
+      // case-variant). The winner's row is this note — adopt it, canonical path
+      // and all.
       if ((err as { code?: string }).code === "23505") {
         const { rows } = await pool.query<{
           id: string;
           folder_id: string | null;
           title: string | null;
+          rel_path: string;
         }>(
-          "SELECT id, folder_id, title FROM notes WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL",
-          [vaultId, relPath],
+          `SELECT id, folder_id, title, rel_path FROM notes
+            WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
+            ORDER BY created_at ASC, id ASC LIMIT 1`,
+          [vaultId, storedRelPath],
         );
         const row = rows[0];
         if (row) {
           return c.json(
-            { id: row.id, docId: row.id, vaultId, folderId: row.folder_id, title: row.title, relPath },
+            {
+              id: row.id,
+              docId: row.id,
+              vaultId,
+              folderId: row.folder_id,
+              title: row.title,
+              relPath: row.rel_path,
+            },
             200,
           );
         }
@@ -584,7 +628,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     }
     changed(c, vaultId);
     return c.json(
-      { id, docId: id, vaultId, folderId: resolvedFolder, title: title ?? null, relPath },
+      { id, docId: id, vaultId, folderId: resolvedFolder, title: title ?? null, relPath: storedRelPath },
       201,
     );
   });
@@ -751,8 +795,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     }
     const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
     let resolvedFolder: string | null;
+    let storedPath: string;
     try {
-      resolvedFolder = await resolveParentFolder(pool, vaultId, path, folderId ?? null);
+      const loc = await resolveParentFolder(pool, vaultId, path, folderId ?? null);
+      resolvedFolder = loc.folderId;
+      storedPath = loc.relPath;
     } catch (err) {
       if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
       throw err;
@@ -766,10 +813,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     }
     await pool.query(
       "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
-      [id, vaultId, resolvedFolder, path],
+      [id, vaultId, resolvedFolder, storedPath],
     );
     changed(c, vaultId);
-    return c.json({ id, docId: id, vaultId, folderId: resolvedFolder, path }, 201);
+    return c.json({ id, docId: id, vaultId, folderId: resolvedFolder, path: storedPath }, 201);
   });
 
   return registryRoutes;

@@ -170,8 +170,11 @@ export async function createFolder(
   // resolved from it. Done before the permission check so the check judges the
   // real parent (see `resolveParentFolder`).
   let parentId: string | null;
+  let storedPath: string;
   try {
-    parentId = await resolveFolderParent(pool, input.vaultId, input.path, input.parentId ?? null);
+    const loc = await resolveFolderParent(pool, input.vaultId, input.path, input.parentId ?? null);
+    parentId = loc.folderId;
+    storedPath = loc.relPath;
   } catch (err) {
     if (err instanceof TreeOpError) throw new McpToolError(err.message);
     throw err;
@@ -180,17 +183,20 @@ export async function createFolder(
     throw new McpToolError("You do not have edit access to create a folder here");
   }
   // Adopt an existing row at this path instead of inserting a duplicate, exactly
-  // as `POST /api/folders` does. There is no UNIQUE constraint behind
-  // (vault_id, path), so without this an assistant asking for "Ideas" twice
-  // creates two rows at one path and the desktop's path→id map picks one at
-  // random. Idempotent is also just the right shape for a tool an LLM retries.
-  const existing = await pool.query<{ id: string; name: string }>(
-    "SELECT id, name FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
-    [input.vaultId, input.path],
+  // as `POST /api/folders` does. Matched case-insensitively and echoing the
+  // stored spelling: `Ideas` and `ideas` are one directory on macOS/Windows, and
+  // an assistant that creates the second one forks the subtree into two rows the
+  // desktop then ping-pongs between (see `samePath`). Idempotent is also just
+  // the right shape for a tool an LLM retries.
+  const existing = await pool.query<{ id: string; name: string; path: string }>(
+    `SELECT id, name, path FROM folders
+      WHERE vault_id = $1 AND lower(path) = lower($2)
+      ORDER BY created_at ASC, id ASC LIMIT 1`,
+    [input.vaultId, storedPath],
   );
   if (existing.rows[0]) {
     const row = existing.rows[0];
-    return { folderId: row.id, parentId, name: row.name, path: input.path, adopted: true };
+    return { folderId: row.id, parentId, name: row.name, path: row.path, adopted: true };
   }
   // After the adopt path: freezing the root must not break re-registering a
   // root folder that already exists.
@@ -205,19 +211,22 @@ export async function createFolder(
       // assistant couldn't see it in their own sidebar or rename it in the app.
       `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by)
        VALUES ($1, $2, $3, $4, $5, 0, $6)`,
-      [id, input.vaultId, parentId, input.name, input.path, ctx.auth.userId],
+      [id, input.vaultId, parentId, input.name, storedPath, ctx.auth.userId],
     );
   } catch (err) {
     // Lost the race against a concurrent create at this path (unique index
-    // `folders_vault_path_uq`): adopt the winner, same as the HTTP route.
+    // `folders_vault_path_uq` m022, or `folders_vault_path_ci_uq` m023 for a
+    // case-variant): adopt the winner, same as the HTTP route.
     if ((err as { code?: string }).code === "23505") {
-      const winner = await pool.query<{ id: string; name: string }>(
-        "SELECT id, name FROM folders WHERE vault_id = $1 AND path = $2 LIMIT 1",
-        [input.vaultId, input.path],
+      const winner = await pool.query<{ id: string; name: string; path: string }>(
+        `SELECT id, name, path FROM folders
+          WHERE vault_id = $1 AND lower(path) = lower($2)
+          ORDER BY created_at ASC, id ASC LIMIT 1`,
+        [input.vaultId, storedPath],
       );
       const w = winner.rows[0];
       if (w) {
-        return { folderId: w.id, parentId, name: w.name, path: input.path, adopted: true };
+        return { folderId: w.id, parentId, name: w.name, path: w.path, adopted: true };
       }
     }
     throw err;
@@ -476,8 +485,11 @@ export async function createNote(
   // `relPath` without the `Team/`) is told so instead of writing a row every
   // client renders at the root while the root-freeze latch sees a parent.
   let folderId: string | null;
+  let storedRelPath: string;
   try {
-    folderId = await resolveParentFolder(pool, input.vaultId, input.relPath, input.folderId ?? null);
+    const loc = await resolveParentFolder(pool, input.vaultId, input.relPath, input.folderId ?? null);
+    folderId = loc.folderId;
+    storedRelPath = loc.relPath;
   } catch (err) {
     if (err instanceof TreeOpError) throw new McpToolError(err.message);
     throw err;
@@ -490,11 +502,16 @@ export async function createNote(
   // nothing in the schema enforces that, and the desktop's path→docId map just
   // picks one of a duplicate pair, so the loser becomes a row no client can see
   // or delete. An LLM retrying a tool call must not be able to create that.
-  const existing = await pool.query<{ id: string; title: string | null; folder_id: string | null }>(
-    `SELECT id, title, folder_id FROM notes
-      WHERE vault_id = $1 AND rel_path = $2 AND deleted_at IS NULL
-      ORDER BY created_at ASC LIMIT 1`,
-    [input.vaultId, input.relPath],
+  const existing = await pool.query<{
+    id: string;
+    title: string | null;
+    folder_id: string | null;
+    rel_path: string;
+  }>(
+    `SELECT id, title, folder_id, rel_path FROM notes
+      WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
+      ORDER BY created_at ASC, id ASC LIMIT 1`,
+    [input.vaultId, storedRelPath],
   );
   if (existing.rows[0]) {
     const row = existing.rows[0];
@@ -515,8 +532,10 @@ export async function createNote(
       docId: row.id,
       vaultId: input.vaultId,
       folderId: row.folder_id,
-      title: row.title ?? relPathStem(input.relPath),
-      relPath: input.relPath,
+      title: row.title ?? relPathStem(row.rel_path),
+      // The row's OWN spelling: the caller asked for a case-variant of a path
+      // that already exists, and needs to learn which one this vault uses.
+      relPath: row.rel_path,
       adopted: true,
       seeded,
     };
@@ -528,7 +547,7 @@ export async function createNote(
   await pool.query(
     `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by)
      VALUES ($1, $2, $3, $4, $5, $1, $6)`,
-    [docId, input.vaultId, folderId, input.title ?? null, input.relPath, ctx.auth.userId],
+    [docId, input.vaultId, folderId, input.title ?? null, storedRelPath, ctx.auth.userId],
   );
   if (input.content) {
     await ctx.docWriter.setContent(input.vaultId, docId, input.content, {
@@ -542,8 +561,8 @@ export async function createNote(
     docId,
     vaultId: input.vaultId,
     folderId,
-    title: input.title ?? relPathStem(input.relPath),
-    relPath: input.relPath,
+    title: input.title ?? relPathStem(storedRelPath),
+    relPath: storedRelPath,
     adopted: false,
     seeded: Boolean(input.content),
   };

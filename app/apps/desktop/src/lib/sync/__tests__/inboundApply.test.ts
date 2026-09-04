@@ -664,6 +664,66 @@ describe("inbound folder deletion", () => {
     expect(vi.mocked(api.createNote)).not.toHaveBeenCalled(); // still no ghost
   });
 
+  it("stops claiming a non-empty leftover, so a LATER pass syncs the user's content", async () => {
+    // The regression behind "dragging a folder in doesn't start syncing, and on
+    // reload it never does". A previously-synced folder was deleted server-side,
+    // leaving tombstones AND baseline entries for its paths. Re-importing the
+    // folder puts files back on those exact paths under fresh local index ids, so
+    // `planInbound` hits `dead && loc === undefined` and suppresses every one of
+    // them — in production, all 176 `Daily/*` notes: `0/174`, nothing queued, no
+    // error shown, and only opening a note synced it (the editor calls
+    // `registerNote` directly, bypassing `suppress`).
+    //
+    // The pass that discovers this still suppresses (no mid-pass ghost), but it
+    // must RELEASE the baseline claim so the next pass can register the file as
+    // the new local note it is.
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    disk.notes.set("Team/stub.md", "d1");
+    const { api } = await twoPasses({
+      disk,
+      first: {
+        notes: [{ id: "d1", rel_path: "Team/stub.md" }],
+        folders: [{ id: "f1", path: "Team" }],
+      },
+      then: { notes: [], tombstones: ["d1"], folders: [{ id: "f1", path: "Team" }] },
+    });
+    // Re-imported: same path, fresh local id, real content.
+    disk.notes.set("Team/stub.md", "local-rekeyed");
+    disk.bodies.set("Team/stub.md", "# a day\n\nreal content the user dropped in");
+    disk.trashed.length = 0;
+
+    // Pass 3 discovers the dead-but-present file: suppressed, not trashed, and
+    // the claim is dropped (surfaced, not silent).
+    vi.mocked(api.createNote).mockClear();
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.trashed).toEqual([]); // never destroy content we can't identify
+    expect(vi.mocked(api.createNote)).not.toHaveBeenCalled(); // no ghost this pass
+    expect(reg.failures().map((f) => f.reason).join(" ")).toContain(
+      "deleted on the server",
+    );
+
+    // Pass 4 — the reload. THIS is what used to never happen. Feed it the config
+    // pass 3 actually persisted (the harness pins `getVaultConfig` otherwise), so
+    // this is a genuine restart against the released baseline.
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+      writes[writes.length - 1]?.[0] as never,
+    );
+    vi.mocked(api.createNote).mockClear();
+    const reg2 = new VaultRegistry(api);
+    reg2.setInboundHost(recordingHost().host);
+    await reg2.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(vi.mocked(api.createNote)).toHaveBeenCalledWith(
+      expect.objectContaining({ relPath: "Team/stub.md" }),
+    );
+    expect(reg2.getMapping("Team/stub.md")).not.toBeNull();
+    expect(disk.trashed).toEqual([]); // still never trashed
+  });
+
   it("does nothing on folder tombstones the server did not answer about (null)", async () => {
     const disk = new FakeDisk();
     disk.folders.add("Team");

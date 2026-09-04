@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.1.43"
+version = "0.1.44"
 description = "Baalda — local-first markdown app"
 authors = ["Baalda"]
 license = "Apache-2.0"
@@ -22,6 +22,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-process = "2"
 tauri-plugin-clipboard-manager = "2"
+# Frontend logging: `console.log` in a WKWebView never reaches the `tauri dev`
+# terminal, so the UI reports through this plugin's Stdout target instead.
+tauri-plugin-log = "2"
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

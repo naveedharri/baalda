@@ -1,4 +1,6 @@
 import {
+  createContext,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -26,7 +28,7 @@ import {
   removeFromOrder,
   renameInOrder,
 } from "../lib/ordering";
-import { sortTree, TREE_SORTS } from "../lib/tree/sort";
+import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
 import { previewKind } from "../lib/preview";
 import {
@@ -40,12 +42,20 @@ import { toast } from "../lib/toast";
 import { deletePaths } from "../lib/vault/mutatePaths";
 import { AsyncButton } from "./AsyncButton";
 import { Spinner } from "./Spinner";
-import { activeNoteEditable, insertIntoActiveNote } from "../lib/editor/activeView";
+import {
+  activeNoteEditable,
+  insertIntoActiveNote,
+} from "../lib/editor/activeView";
 import { useStore } from "../store";
 import { shareResourceId } from "../lib/api";
 import { syncManager } from "../lib/sync/docSession";
+import { isBulkPhase } from "../lib/sync/vaultScope";
 import type { VaultPeer } from "../lib/sync/vaultSyncEngine";
-import { PRESENCE_OFFLINE, ringShowsColor, statusTone } from "../lib/presence/color";
+import {
+  PRESENCE_OFFLINE,
+  ringShowsColor,
+  statusTone,
+} from "../lib/presence/color";
 import { characterSvg } from "./Identity";
 import { ShareDialog, type ShareTarget } from "./ShareDialog";
 import { placeMenu, type Placement } from "../lib/menuPlacement";
@@ -102,7 +112,13 @@ function dirAtClientPoint(x: number, y: number): string {
  * the pointer is over somewhere nothing may be dropped.
  */
 type DropAt =
-  | { kind: "line"; destDir: string; index: number; top: number; indent: number }
+  | {
+      kind: "line";
+      destDir: string;
+      index: number;
+      top: number;
+      indent: number;
+    }
   | { kind: "into"; destDir: string }
   | null;
 
@@ -225,9 +241,10 @@ export function FileTree() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   // While a bulk delete runs: {done,total} drives a progress bar in the
   // selectbar so a large delete reads as "working", not "frozen".
-  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(
-    null,
-  );
+  const [bulkProgress, setBulkProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
   // onActivate is captured by arborist; read the live mode through a ref.
   const selectModeRef = useRef(false);
   selectModeRef.current = selectMode;
@@ -263,6 +280,12 @@ export function FileTree() {
   const wavesRef = useRef(new FolderWaveTracker());
   const vaultPath = useStore((s) => s.vault?.path ?? null);
   const lastWaveKeyRef = useRef<string | null>(null);
+  // Split out so a progress emission doesn't rebuild it: `docSyncState` changes
+  // ~10×/second for the length of a bulk run, while `titles` changes only when
+  // the vault does. Re-deriving one string per note (10k+ on a big vault) at
+  // that rate was pure allocation churn on the main thread — the same thread
+  // the sidebar's clicks are queued on.
+  const localNotePaths = useMemo(() => titles.map((t) => t.path), [titles]);
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {
     const waveKey = syncEnabled ? vaultPath : null;
     if (lastWaveKeyRef.current !== waveKey) {
@@ -273,15 +296,42 @@ export function FileTree() {
     const index = buildTreeSyncIndex({
       docIdByPath,
       docSyncState,
-      localNotePaths: titles.map((t) => t.path),
+      localNotePaths,
     });
     wavesRef.current.apply(index);
     return index;
-  }, [syncEnabled, docIdByPath, docSyncState, titles, vaultPath]);
+  }, [syncEnabled, docIdByPath, docSyncState, localNotePaths, vaultPath]);
+
+  // ---- Row-order stability while something is syncing ------------------
+  //
+  // The default sort is "Recently modified", whose key is the `.md` file's
+  // mtime — and a sync run REWRITES files (a bulk wave moved 1,372 of this
+  // vault's 1,560 mtimes inside three minutes). Each write re-sorted its folder
+  // and arborist positions rows absolutely, so the row under the pointer was
+  // swapped for a different one several times a second: the hover highlight
+  // flickers, and a click lands on whatever slid into place. Hence the pin —
+  // rows keep the mtime they were first seen with while either
+  //   • the pointer is inside the sidebar (someone is aiming at a row), or
+  //   • a bulk run is in flight (nothing is stable enough to be worth showing),
+  // and the true order is restored the moment both clear. Only "recent" needs
+  // it; "name" has no live sort key.
+  const [pointerInTree, setPointerInTree] = useState(false);
+  const syncBusy = useStore((s) => isBulkPhase(s.syncProgress?.phase));
+  const orderPinned = treeSort === "recent" && (pointerInTree || syncBusy);
+  const pinnedMtimes = useRef(new Map<string, number>());
+  // Safety net for a pin that never got its `pointerleave` — the window losing
+  // focus with the cursor still over the tree (cmd-tab, a dialog stealing it).
+  // Without this the order could stay frozen with nobody looking at it.
+  useEffect(() => {
+    const thaw = () => setPointerInTree(false);
+    window.addEventListener("blur", thaw);
+    return () => window.removeEventListener("blur", thaw);
+  }, []);
 
   // Resolve lock rows (server resource ids) to tree paths for the badges.
   const lockByPath = useMemo(
-    () => (syncEnabled ? lockScopesByPath(tree, locks, session?.user.id) : new Map()),
+    () =>
+      syncEnabled ? lockScopesByPath(tree, locks, session?.user.id) : new Map(),
     [tree, locks, syncEnabled, session?.user.id],
   );
 
@@ -298,7 +348,9 @@ export function FileTree() {
     if (!syncEnabled) return null;
     if (isDir) {
       const id = syncManager.registry.getFolderId(path);
-      return id ? { resourceType: "folder", resourceId: id, title: name } : null;
+      return id
+        ? { resourceType: "folder", resourceId: id, title: name }
+        : null;
     }
     const mapping = syncManager.registry.getMapping(path);
     return mapping
@@ -316,10 +368,18 @@ export function FileTree() {
   // it received them, so a folder dragged into place keeps its spot while
   // everything untouched — including that folder's own contents — follows the
   // sort. Flipping these two would make every sort change wipe the arrangement.
-  const data = useMemo<TreeNode[]>(
-    () => applyOrder(sortTree(tree?.children ?? [], treeSort), "", itemOrder),
-    [tree, itemOrder, treeSort],
-  );
+  const data = useMemo<TreeNode[]>(() => {
+    const level = tree?.children ?? [];
+    if (!orderPinned) {
+      pinnedMtimes.current.clear();
+      return applyOrder(sortTree(level, treeSort), "", itemOrder);
+    }
+    return applyOrder(
+      sortTree(pinModified(level, pinnedMtimes.current), treeSort),
+      "",
+      itemOrder,
+    );
+  }, [tree, itemOrder, treeSort, orderPinned]);
 
   // Flatten the (arranged) tree so bulk actions can resolve any path — even a
   // collapsed one — to its node, and so "Select all" knows every path.
@@ -402,7 +462,10 @@ export function FileTree() {
     let order = store.itemOrder;
     for (const p of deleted) {
       order = removeFromOrder(order, p);
-      if (openNote && (openNote.path === p || openNote.path.startsWith(p + "/"))) {
+      if (
+        openNote &&
+        (openNote.path === p || openNote.path.startsWith(p + "/"))
+      ) {
         store.closeNote();
       }
     }
@@ -494,7 +557,8 @@ export function FileTree() {
   async function registerImported(summary: ipc.ImportSummary) {
     if (!useStore.getState().syncEnabled) return;
     const roots = summary.imported;
-    const under = (p: string) => roots.some((r) => p === r || p.startsWith(`${r}/`));
+    const under = (p: string) =>
+      roots.some((r) => p === r || p.startsWith(`${r}/`));
     for (const t of useStore.getState().titles) {
       if (!t.path.toLowerCase().endsWith(".md") || !under(t.path)) continue;
       try {
@@ -516,7 +580,9 @@ export function FileTree() {
   /** Announce an import outcome: green on success, neutral if nothing landed. */
   function announceImport(s: ipc.ImportSummary) {
     const files =
-      s.files > 0 ? `Imported ${s.files} file${s.files === 1 ? "" : "s"}` : "Nothing imported";
+      s.files > 0
+        ? `Imported ${s.files} file${s.files === 1 ? "" : "s"}`
+        : "Nothing imported";
     const text = s.skipped > 0 ? `${files} · ${s.skipped} skipped` : files;
     flashStatus(text, s.files > 0 ? "success" : "neutral");
   }
@@ -558,13 +624,17 @@ export function FileTree() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
-    const insideTree = (px: number, py: number): { x: number; y: number } | null => {
+    const insideTree = (
+      px: number,
+      py: number,
+    ): { x: number; y: number } | null => {
       const scale = window.devicePixelRatio || 1;
       const x = px / scale;
       const y = py / scale;
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return null;
-      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom)
+        return null;
       return { x, y };
     };
     void (async () => {
@@ -588,7 +658,8 @@ export function FileTree() {
           if (!pt && activeNoteEditable()) {
             try {
               const embeds: string[] = [];
-              for (const path of p.paths) embeds.push(await embedDroppedFile(path));
+              for (const path of p.paths)
+                embeds.push(await embedDroppedFile(path));
               insertIntoActiveNote(embeds.join("\n"));
               await refreshAll();
             } catch (e) {
@@ -724,13 +795,24 @@ export function FileTree() {
     if (!node.data.isDir) {
       // Notes/pages render in the editor; images/PDFs open in the file preview.
       // Any other binary is listed but not opened (nothing can render it).
-      if (isOpenablePath(node.data.path) || previewKind(node.data.path) != null) {
+      if (
+        isOpenablePath(node.data.path) ||
+        previewKind(node.data.path) != null
+      ) {
         void useStore.getState().openNoteByPath(node.data.path);
       }
     }
   };
 
-  const onRename = async ({ id, name, node }: { id: string; name: string; node: NodeApi<TreeNode> }) => {
+  const onRename = async ({
+    id,
+    name,
+    node,
+  }: {
+    id: string;
+    name: string;
+    node: NodeApi<TreeNode>;
+  }) => {
     const oldPath = node.data.path;
     const dir = parentDir(oldPath);
     let newName = name.trim();
@@ -760,7 +842,10 @@ export function FileTree() {
       const store = useStore.getState();
       store.setItemOrder(renameInOrder(store.itemOrder, oldPath, newPath));
       store.remapTabs(oldPath, newPath);
-      if (openNote && (openNote.path === oldPath || openNote.path.startsWith(oldPath + "/"))) {
+      if (
+        openNote &&
+        (openNote.path === oldPath || openNote.path.startsWith(oldPath + "/"))
+      ) {
         const updated = openNote.path.replace(oldPath, newPath);
         await useStore.getState().openNoteByPath(updated);
       }
@@ -771,18 +856,21 @@ export function FileTree() {
     void id;
   };
 
-  const applyMove = async (dragIds: string[], destDir: string, index: number) => {
+  const applyMove = async (
+    dragIds: string[],
+    destDir: string,
+    index: number,
+  ) => {
     // dragIds are node ids === current paths. Their paths after the drop only
     // change when the parent folder changes (a reorder keeps the same path).
     const from = dragIds;
     // Dragging something OUT to a frozen root is a root create by another name.
     // Reordering things already at the root is fine — the shape doesn't change.
-    if (
-      destDir === "" &&
-      rootFrozen &&
-      dragIds.some((p) => p.includes("/"))
-    ) {
-      toast("This vault's root is frozen — drop this inside a folder.", "error");
+    if (destDir === "" && rootFrozen && dragIds.some((p) => p.includes("/"))) {
+      toast(
+        "This vault's root is frozen — drop this inside a folder.",
+        "error",
+      );
       return;
     }
     const to = from.map((p) => {
@@ -835,8 +923,13 @@ export function FileTree() {
         }
         movedOnDisk = true;
         useStore.getState().remapTabs(from[i], to[i]);
-        if (openNote && (openNote.path === from[i] || openNote.path.startsWith(from[i] + "/"))) {
-          await useStore.getState().openNoteByPath(openNote.path.replace(from[i], to[i]));
+        if (
+          openNote &&
+          (openNote.path === from[i] || openNote.path.startsWith(from[i] + "/"))
+        ) {
+          await useStore
+            .getState()
+            .openNoteByPath(openNote.path.replace(from[i], to[i]));
         }
       } catch (e) {
         console.error("move failed", e);
@@ -916,7 +1009,9 @@ export function FileTree() {
     //
     // Measuring instead means every pixel of the list belongs to exactly one
     // row, so the target changes once per row and never blinks elsewhere.
-    const rows = Array.from(container.querySelectorAll<HTMLElement>(".tree-row"));
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>(".tree-row"),
+    );
     const rects = rows.map((el) => el.getBoundingClientRect());
     if (!rows.length) {
       return { kind: "line", destDir: "", index: 0, top: 0, indent: 0 };
@@ -974,7 +1069,9 @@ export function FileTree() {
     const holding = held?.kind === "into" && held.destDir === path;
     const lo = holding ? 0.18 : 0.28;
     if (isDir && frac > lo && frac < 1 - lo) {
-      return wouldSwallowItself(moving, path) ? null : { kind: "into", destDir: path };
+      return wouldSwallowItself(moving, path)
+        ? null
+        : { kind: "into", destDir: path };
     }
     const after = frac >= 0.5;
     if (wouldSwallowItself(moving, parent)) return null;
@@ -1000,7 +1097,8 @@ export function FileTree() {
       const p = probe.current;
       if (!p) return;
       if (!dragRef.current) {
-        if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < DRAG_THRESHOLD) return;
+        if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < DRAG_THRESHOLD)
+          return;
         if (!nodeByPath.has(p.path)) return;
         dragRef.current = p.path;
         setDrag({ path: p.path });
@@ -1008,7 +1106,8 @@ export function FileTree() {
       }
       const next = planDrop(p.path, e.clientX, e.clientY);
       if (sameDrop(next, dropAtRef.current)) return;
-      const wasInto = dropAtRef.current?.kind === "into" ? dropAtRef.current.destDir : null;
+      const wasInto =
+        dropAtRef.current?.kind === "into" ? dropAtRef.current.destDir : null;
       dropAtRef.current = next;
       // The line: moved by hand, so it glides between slots (CSS transitions the
       // transform) without React touching a single row.
@@ -1054,7 +1153,10 @@ export function FileTree() {
       window.addEventListener("click", swallow, true);
       setTimeout(() => window.removeEventListener("click", swallow, true), 0);
       if (!p || !plan) return;
-      const index = plan.kind === "into" ? childrenAt(data, plan.destDir).length : plan.index;
+      const index =
+        plan.kind === "into"
+          ? childrenAt(data, plan.destDir).length
+          : plan.index;
       void applyMove([p.path], plan.destDir, index);
     };
     const cancel = (e: KeyboardEvent) => {
@@ -1157,12 +1259,19 @@ export function FileTree() {
       unregister: (p) => syncManager.registry.deletePath(p),
     });
     if (failed.length > 0) {
-      toast(`Couldn't delete "${failed[0].path}" — ${failed[0].reason}`, "error");
+      toast(
+        `Couldn't delete "${failed[0].path}" — ${failed[0].reason}`,
+        "error",
+      );
     }
     if (deleted.length === 0) return;
     store.setItemOrder(removeFromOrder(store.itemOrder, node.data.path));
     store.pruneTabs([node.data.path]);
-    if (openNote && (openNote.path === node.data.path || openNote.path.startsWith(node.data.path + "/"))) {
+    if (
+      openNote &&
+      (openNote.path === node.data.path ||
+        openNote.path.startsWith(node.data.path + "/"))
+    ) {
       store.closeNote();
     }
     await refreshAll();
@@ -1185,7 +1294,9 @@ export function FileTree() {
 
   async function lockFromMenu(target: ShareTarget) {
     try {
-      await useStore.getState().createLock(target.resourceType, target.resourceId, null);
+      await useStore
+        .getState()
+        .createLock(target.resourceType, target.resourceId, null);
     } catch (e) {
       console.error("lock failed", e);
     }
@@ -1202,7 +1313,15 @@ export function FileTree() {
   return (
     // `row-dragging` is added/removed imperatively by the drag listener above,
     // never through React — see the comment there.
-    <div className={`filetree${dropActive ? " drop-active" : ""}`} ref={containerRef}>
+    <div
+      className={`filetree${dropActive ? " drop-active" : ""}`}
+      ref={containerRef}
+      // Pointer in/out drives the row-order pin (see `orderPinned`). On the
+      // whole panel, not the rows: moving between two rows, or up to the
+      // toolbar, must not thaw the order and re-sort mid-aim.
+      onPointerEnter={() => setPointerInTree(true)}
+      onPointerLeave={() => setPointerInTree(false)}
+    >
       <div className="filetree-head">
         <span className="section-label">Notes</span>
         <div className="filetree-actions">
@@ -1233,8 +1352,12 @@ export function FileTree() {
               the shown action and cross-fades to its opposite. */}
           <button
             className={`tree-tool tree-fold-toggle${treeCollapsed ? " collapsed" : ""}`}
-            title={treeCollapsed ? "Expand all folders" : "Collapse all folders"}
-            aria-label={treeCollapsed ? "Expand all folders" : "Collapse all folders"}
+            title={
+              treeCollapsed ? "Expand all folders" : "Collapse all folders"
+            }
+            aria-label={
+              treeCollapsed ? "Expand all folders" : "Collapse all folders"
+            }
             onClick={() => {
               if (treeCollapsed) treeRef.current?.openAll();
               else treeRef.current?.closeAll();
@@ -1379,8 +1502,14 @@ export function FileTree() {
                 onClick={() =>
                   confirmDelete ? void bulkDelete() : setConfirmDelete(true)
                 }
-                title={confirmDelete ? `Delete ${selected.size}? Click to confirm` : "Delete selected"}
-                aria-label={confirmDelete ? "Confirm delete" : "Delete selected"}
+                title={
+                  confirmDelete
+                    ? `Delete ${selected.size}? Click to confirm`
+                    : "Delete selected"
+                }
+                aria-label={
+                  confirmDelete ? "Confirm delete" : "Delete selected"
+                }
               >
                 {ICON_TRASH}
               </button>
@@ -1391,47 +1520,51 @@ export function FileTree() {
       {data.length === 0 ? (
         <div className="filetree-empty">No notes yet</div>
       ) : (
-        <Tree<TreeNode>
-          ref={treeRef}
-          className="filetree-scroll"
-          data={data}
-          idAccessor="id"
-          openByDefault={false}
-          width={dim.width}
-          height={dim.height - 34 - (selectMode ? 36 : 0)}
-          indent={14}
-          rowHeight={32}
-          onToggle={onToggle}
-          onActivate={onActivate}
-          onRename={onRename}
-          // Arborist's own drag is HTML5-based and cannot complete inside this
-          // webview (see the pointer-drag block above), so it is switched off
-          // entirely rather than left to start drags that die silently — which
-          // is also what stopped a refused drag smearing a text selection
-          // across the rows, and what stopped Tauri mistaking a row drag for a
-          // file drop and throwing up the "drop files here" frame.
-          disableDrag
-          disableDrop
-          rowClassName="tree-rowwrap"
+        <RowSharedContext.Provider
+          value={{
+            selectedPath: openNote?.path ?? null,
+            lockByPath,
+            syncIndex,
+            presenceByDoc,
+            itemColors,
+            onMenu: (x, y, node, flipY) => setMenu({ x, y, flipY, node }),
+            selectMode,
+            selected,
+            onToggleCheck: toggleSelect,
+            onDragProbe: beginProbe,
+            dragPath: drag?.path ?? null,
+            dropInto,
+          }}
         >
-          {(props) => (
-            <Node
-              {...props}
-              dropInto={dropInto}
-              dragging={drag?.path === props.node.data.path}
-              onDragProbe={beginProbe}
-              selectedPath={openNote?.path ?? null}
-              lock={lockByPath.get(props.node.data.path) ?? null}
-              syncIndex={syncIndex}
-              presenceByDoc={presenceByDoc}
-              color={itemColors[props.node.data.path]}
-              onMenu={(x, y, node, flipY) => setMenu({ x, y, flipY, node })}
-              selectMode={selectMode}
-              checked={selected.has(props.node.data.path)}
-              onToggleCheck={toggleSelect}
-            />
-          )}
-        </Tree>
+          <Tree<TreeNode>
+            ref={treeRef}
+            className="filetree-scroll"
+            data={data}
+            idAccessor="id"
+            openByDefault={false}
+            width={dim.width}
+            height={dim.height - 34 - (selectMode ? 36 : 0)}
+            indent={14}
+            rowHeight={32}
+            onToggle={onToggle}
+            onActivate={onActivate}
+            onRename={onRename}
+            // Arborist's own drag is HTML5-based and cannot complete inside this
+            // webview (see the pointer-drag block above), so it is switched off
+            // entirely rather than left to start drags that die silently — which
+            // is also what stopped a refused drag smearing a text selection
+            // across the rows, and what stopped Tauri mistaking a row drag for a
+            // file drop and throwing up the "drop files here" frame.
+            disableDrag
+            disableDrop
+            rowClassName="tree-rowwrap"
+          >
+            {/* A module-scope component, NEVER an inline arrow: arborist uses this
+              as the row's element TYPE, so a new identity per render remounts
+              every row. What rows need travels by context — see `RowShared`. */}
+            {TreeRow}
+          </Tree>
+        </RowSharedContext.Provider>
       )}
 
       {/* The insertion line. Mounted for the whole drag and moved by transform
@@ -1446,7 +1579,11 @@ export function FileTree() {
           ref={menuRef}
           style={
             menuPos
-              ? { left: menuPos.left, top: menuPos.top, maxHeight: menuPos.maxHeight }
+              ? {
+                  left: menuPos.left,
+                  top: menuPos.top,
+                  maxHeight: menuPos.maxHeight,
+                }
               : // Rendered off the anchor for the measuring pass only, and hidden
                 // so that pass can't flash on screen at the wrong place.
                 { left: menu.x, top: menu.y, visibility: "hidden" }
@@ -1469,7 +1606,9 @@ export function FileTree() {
             New folder
           </li>
           <li
-            className={menuCreateBlocked ? "menu-sep-item disabled" : "menu-sep-item"}
+            className={
+              menuCreateBlocked ? "menu-sep-item disabled" : "menu-sep-item"
+            }
             title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
             onClick={() => void importFilesInto(menuDir)}
           >
@@ -1482,9 +1621,13 @@ export function FileTree() {
           >
             Import folder…
           </li>
-          {menu.node && <li onClick={() => void exportNode(menu.node!)}>Export…</li>}
           {menu.node && (
-            <li onClick={() => void revealNode(menu.node!)}>{ipc.revealLabel()}</li>
+            <li onClick={() => void exportNode(menu.node!)}>Export…</li>
+          )}
+          {menu.node && (
+            <li onClick={() => void revealNode(menu.node!)}>
+              {ipc.revealLabel()}
+            </li>
           )}
           {menu.node && <li onClick={() => menu.node!.edit()}>Rename</li>}
           {/* The same vault-wide sort as the header button. A per-folder sort
@@ -1518,7 +1661,9 @@ export function FileTree() {
                   : "Forget the drag-and-drop arrangement in this folder"
               }
               onClick={() =>
-                useStore.getState().setItemOrder(clearOrderAt(itemOrder, menuDir))
+                useStore
+                  .getState()
+                  .setItemOrder(clearOrderAt(itemOrder, menuDir))
               }
             >
               Reset manual order
@@ -1527,8 +1672,10 @@ export function FileTree() {
           {menu.node && menuTarget && (
             <li onClick={() => setShareTarget(menuTarget)}>Share…</li>
           )}
-          {menu.node && menuTarget && canManage && (
-            menuLock ? (
+          {menu.node &&
+            menuTarget &&
+            canManage &&
+            (menuLock ? (
               <li onClick={() => void unlockFromMenu(menuLock.id)}>Unlock</li>
             ) : (
               <li
@@ -1537,8 +1684,7 @@ export function FileTree() {
               >
                 Lock for everyone
               </li>
-            )
-          )}
+            ))}
           {menu.node && (
             <li className="menu-swatches" onClick={(e) => e.stopPropagation()}>
               <span
@@ -1556,7 +1702,9 @@ export function FileTree() {
                   style={{ backgroundColor: c.value }}
                   title={c.label}
                   onClick={() => {
-                    useStore.getState().setItemColor(menu.node!.data.path, c.id);
+                    useStore
+                      .getState()
+                      .setItemColor(menu.node!.data.path, c.id);
                     setMenu(null);
                   }}
                 />
@@ -1572,9 +1720,88 @@ export function FileTree() {
       )}
 
       {shareTarget && (
-        <ShareDialog target={shareTarget} onClose={() => setShareTarget(null)} />
+        <ShareDialog
+          target={shareTarget}
+          onClose={() => setShareTarget(null)}
+        />
       )}
     </div>
+  );
+}
+
+/**
+ * Everything a row needs that does not come from arborist, passed by context.
+ *
+ * ## Why this is not just closed over by the render prop
+ *
+ * `<Tree>{...}</Tree>` hands arborist a *component type*: it reads
+ * `renderNode = this.props.children` and renders `<Node …/>` with it. React
+ * treats a new function identity as a new element type, so an inline
+ * `{(props) => <Node …/>}` — a fresh closure on every parent render — made
+ * React UNMOUNT and REMOUNT every visible row each time the sidebar rendered.
+ *
+ * Measured with the log probe while a vault synced: `render=16 rowRender=84
+ * rowUnmount=84 rowMount=84` for six visible rows — every row destroyed and
+ * rebuilt sixteen times a second. A remounted element has no `:hover` until the
+ * pointer moves again, which is the row "blinking" under the cursor, and a
+ * click on an element being torn down mid-gesture goes nowhere. That is the
+ * bug; the sort churn and the index lock were only making it more frequent.
+ *
+ * So {@link TreeRow} is defined ONCE, at module scope, and the values it needs
+ * arrive through this context instead. Context updates propagate through
+ * `React.memo` (arborist memoizes `RowContainer`), so rows still re-render when
+ * a badge or a lock changes — they just never remount.
+ */
+interface RowShared {
+  selectedPath: string | null;
+  lockByPath: Map<string, LockScope>;
+  /** Whole-vault sync roll-up; null when sync is off (no indicators at all). */
+  syncIndex: TreeSyncIndex | null;
+  /** docId -> teammates currently viewing that note (drives presence dots). */
+  presenceByDoc: Map<string, VaultPeer[]>;
+  /** Item color ids (vault-local preference) — tint the type glyph. */
+  itemColors: Record<string, string | undefined>;
+  onMenu: (
+    x: number,
+    y: number,
+    node: NodeApi<TreeNode>,
+    flipY?: number,
+  ) => void;
+  /** Multi-select: when on, rows show a checkbox and hide per-row actions. */
+  selectMode: boolean;
+  selected: Set<string>;
+  onToggleCheck: (path: string) => void;
+  /** Arms a hand-drag on a row; it only starts once the pointer travels. */
+  onDragProbe: (path: string, x: number, y: number) => void;
+  /** The row being dragged, if any (it lifts and dims). */
+  dragPath: string | null;
+  /** The folder a drop would land inside, if the pointer is over one. */
+  dropInto: string | null;
+}
+
+const RowSharedContext = createContext<RowShared | null>(null);
+
+/** The stable row renderer. Its identity must never change — see {@link RowShared}. */
+function TreeRow(props: NodeRendererProps<TreeNode>) {
+  const shared = useContext(RowSharedContext);
+  if (!shared) return null;
+  const path = props.node.data.path;
+  return (
+    <Node
+      {...props}
+      selectedPath={shared.selectedPath}
+      lock={shared.lockByPath.get(path) ?? null}
+      syncIndex={shared.syncIndex}
+      presenceByDoc={shared.presenceByDoc}
+      color={shared.itemColors[path]}
+      onMenu={shared.onMenu}
+      selectMode={shared.selectMode}
+      checked={shared.selected.has(path)}
+      onToggleCheck={shared.onToggleCheck}
+      onDragProbe={shared.onDragProbe}
+      dragging={shared.dragPath === path}
+      dropInto={shared.dropInto}
+    />
   );
 }
 
@@ -1587,7 +1814,12 @@ interface NodeExtra {
   presenceByDoc: Map<string, VaultPeer[]>;
   /** Item color id (vault-local preference) — tints the type glyph. */
   color: string | undefined;
-  onMenu: (x: number, y: number, node: NodeApi<TreeNode>, flipY?: number) => void;
+  onMenu: (
+    x: number,
+    y: number,
+    node: NodeApi<TreeNode>,
+    flipY?: number,
+  ) => void;
   /** Multi-select: when on, rows show a checkbox and hide per-row actions. */
   selectMode: boolean;
   checked: boolean;
@@ -1720,7 +1952,11 @@ function TreeSyncMark({
   const mark = rowSyncMark(node.data, index);
   if (!mark) return null;
   return (
-    <span className={`tree-sync ${mark.state}`} title={mark.title} aria-label={mark.title}>
+    <span
+      className={`tree-sync ${mark.state}`}
+      title={mark.title}
+      aria-label={mark.title}
+    >
       {mark.progress != null ? (
         <span className="tree-sync-pct">
           {mark.progress.done}/{mark.progress.total}
@@ -1744,7 +1980,11 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
   return (
     <span
       className={`tree-presence-avatar tone-${tone}${live ? "" : " offline"}`}
-      style={{ "--user-color": live ? peer.color : PRESENCE_OFFLINE } as CSSProperties}
+      style={
+        {
+          "--user-color": live ? peer.color : PRESENCE_OFFLINE,
+        } as CSSProperties
+      }
       title={peer.name}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
@@ -1755,16 +1995,24 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
 function SidebarPresence({ peers }: { peers: VaultPeer[] }) {
   if (peers.length === 0) return null;
   const shown =
-    peers.length > MAX_ROW_AVATARS ? peers.slice(0, MAX_ROW_AVATARS - 1) : peers;
+    peers.length > MAX_ROW_AVATARS
+      ? peers.slice(0, MAX_ROW_AVATARS - 1)
+      : peers;
   const overflow = peers.length - shown.length;
   const names = peers.map((p) => p.name).join(", ");
   return (
-    <span className="tree-presence" title={names} aria-label={`Viewing: ${names}`}>
+    <span
+      className="tree-presence"
+      title={names}
+      aria-label={`Viewing: ${names}`}
+    >
       {shown.map((p) => (
         <SidebarAvatar key={p.userId} peer={p} />
       ))}
       {overflow > 0 && (
-        <span className="tree-presence-avatar tree-presence-overflow">+{overflow}</span>
+        <span className="tree-presence-avatar tree-presence-overflow">
+          +{overflow}
+        </span>
       )}
     </span>
   );
@@ -1791,7 +2039,9 @@ function Node({
   // also carries `children: []`, and claiming "empty" for it is a flat lie about
   // a folder that may hold hundreds of notes.
   const isEmpty =
-    isDir && node.data.childrenLoaded === true && (node.data.children?.length ?? 0) === 0;
+    isDir &&
+    node.data.childrenLoaded === true &&
+    (node.data.children?.length ?? 0) === 0;
   const isSelected = !isDir && node.data.path === selectedPath;
   // Subscribed as a boolean rather than by pulling the path and comparing, so a
   // note opening elsewhere in the tree doesn't re-render every other row — this
@@ -1836,7 +2086,8 @@ function Node({
         // select checkbox) — those are buttons, not handles. Selection mode
         // is for picking rows, not moving them.
         if (e.button !== 0 || selectMode) return;
-        if ((e.target as HTMLElement).closest("button, input, .tree-check")) return;
+        if ((e.target as HTMLElement).closest("button, input, .tree-check"))
+          return;
         onDragProbe(node.data.path, e.clientX, e.clientY);
       }}
       onClick={() => {
@@ -1909,7 +2160,9 @@ function Node({
         />
       ) : (
         <>
-          <span className="tree-label">{displayName(node.data.name, isDir)}</span>
+          <span className="tree-label">
+            {displayName(node.data.name, isDir)}
+          </span>
           {isEmpty && !lock && <span className="tree-hint">empty</span>}
           {lock && (
             <span
@@ -1923,28 +2176,27 @@ function Node({
           {syncIndex && <TreeSyncMark node={node} index={syncIndex} />}
           <SidebarPresence peers={peers} />
           {!selectMode && (
-          <button
-            className="tree-more"
-            title="More actions"
-            aria-label={`Actions for ${displayName(node.data.name, isDir)}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              const r = e.currentTarget.getBoundingClientRect();
-              // Below the ⋯ button normally; above it when there's no room, so a
-              // flipped menu never lands on top of the button that opened it.
-              onMenu(r.left, r.bottom + 4, node, r.top - 4);
-            }}
-          >
-            <TreeSvg>
-              <circle cx="5" cy="12" r="2.1" />
-              <circle cx="12" cy="12" r="2.1" />
-              <circle cx="19" cy="12" r="2.1" />
-            </TreeSvg>
-          </button>
+            <button
+              className="tree-more"
+              title="More actions"
+              aria-label={`Actions for ${displayName(node.data.name, isDir)}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                const r = e.currentTarget.getBoundingClientRect();
+                // Below the ⋯ button normally; above it when there's no room, so a
+                // flipped menu never lands on top of the button that opened it.
+                onMenu(r.left, r.bottom + 4, node, r.top - 4);
+              }}
+            >
+              <TreeSvg>
+                <circle cx="5" cy="12" r="2.1" />
+                <circle cx="12" cy="12" r="2.1" />
+                <circle cx="19" cy="12" r="2.1" />
+              </TreeSvg>
+            </button>
           )}
         </>
       )}
     </div>
   );
 }
-
