@@ -59,13 +59,42 @@ export interface ContentUploadDeps {
   release(docId: string): Promise<void>;
   /** Attach a network provider to the bridge's Y.Doc (`new DocSync(...)`). */
   connect(input: { docId: string; vaultId: string; doc: Y.Doc }): DocPush;
+  /**
+   * Read a note's current file text (`ipc.readNote`, epoch-pinned). Optional so
+   * the older harnesses need not provide it; when present it powers the two
+   * pre-network checks in {@link ContentUploader.pushOne}: the empty-everywhere
+   * short-circuit and the size ceiling.
+   */
+  readFile?(relPath: string): Promise<string>;
 }
+
+/**
+ * The note-size ceiling, mirroring the server's `MAX_NOTE_MB` default (10 MB;
+ * `sync/hocuspocus.ts` refuses any sync message above it and closes the socket).
+ *
+ * Checked BEFORE a provider is opened. Without it a file over the cap was pushed
+ * on every connect: the server closed the connection, the push read as "server
+ * did not acknowledge", and — because the server still held nothing for the doc —
+ * the next `ready.empty` queued it again. Two such files in one production vault
+ * cost a rejected socket apiece on every reconnect of every member, forever.
+ * Here the doc fails ONCE, permanently, with a reason a person can act on.
+ */
+export const MAX_NOTE_BYTES = 10 * 1024 * 1024;
+
+const utf8 = new TextEncoder();
 
 /** A doc whose content could not be pushed, after retries. */
 export interface UploadFailure {
   docId: string;
   relPath: string;
   reason: string;
+  /**
+   * The failure is a property of the FILE, not of the network: retrying on the
+   * next `ready` cannot fix it (today: the note is over {@link MAX_NOTE_BYTES}).
+   * The session remembers these so they are not re-queued every connect, and
+   * they never count toward the failure streak that pauses a run.
+   */
+  permanent?: boolean;
 }
 
 export interface ContentUploaderOptions {
@@ -301,6 +330,61 @@ export class ContentUploader {
       return false;
     }
 
+    // Two checks that need no socket, both driven by the file's current bytes.
+    if (this.opts.deps.readFile) {
+      let fileText: string | null = null;
+      try {
+        fileText = await this.opts.deps.readFile(relPath);
+      } catch {
+        fileText = null; // unreadable — let the normal path decide (and report)
+      }
+      if (this.shouldStop()) {
+        await this.releaseQuietly(docId);
+        return false;
+      }
+      if (fileText != null) {
+        // (a) Over the server's size ceiling: the server would refuse the sync
+        //     message and close the socket, so don't open one. Permanent — the
+        //     bytes on disk have to change for this to ever succeed.
+        const bytes = utf8.encode(fileText).byteLength;
+        if (bytes > MAX_NOTE_BYTES) {
+          await this.releaseQuietly(docId);
+          const mb = (bytes / (1024 * 1024)).toFixed(1);
+          const cap = Math.round(MAX_NOTE_BYTES / (1024 * 1024));
+          this.fail(docId, relPath, `too large to sync (${mb} MB; the limit is ${cap} MB)`, {
+            permanent: true,
+          });
+          return false;
+        }
+        // (b) Nothing anywhere: the SERVER said it holds nothing for this doc
+        //     (`include`, fed by `ready.empty`), the file is empty AND the local
+        //     doc is empty. There is no text to seed and nothing to pull, so a
+        //     socket would only cost a token mint to learn that — and on a vault
+        //     with hundreds of empty placeholder files, `ready.empty` names every
+        //     one of them on EVERY connect, which is exactly how "310 files
+        //     re-syncing on each reload" happened. Record it as confirmed.
+        //
+        //     Gated on the server's word on purpose. Without `include`, an empty
+        //     file + empty doc can still mean "a placeholder whose backfill
+        //     frame this device missed" — the pull is what fills it in — or, on
+        //     a local-change run, "someone truncated the file", which the
+        //     post-sync ingest must propagate as a deletion. Both keep the
+        //     network path.
+        if (
+          fileText.length === 0 &&
+          bridge.serialize().length === 0 &&
+          (this.opts.include?.(docId) ?? false)
+        ) {
+          await this.releaseQuietly(docId);
+          this.streak = 0;
+          this.opts.markPushed(docId);
+          this.progress.doc(docId, "synced");
+          this.progress.item("ok");
+          return true;
+        }
+      }
+    }
+
     let preIngested = false;
     if (this.opts.ingestFromFile && bridge.serialize().length > 0) {
       preIngested = true;
@@ -390,10 +474,18 @@ export class ContentUploader {
     }
   }
 
-  private fail(docId: string, relPath: string, reason: string): void {
-    this.failures.push({ docId, relPath, reason });
+  private fail(
+    docId: string,
+    relPath: string,
+    reason: string,
+    opts: { permanent?: boolean } = {},
+  ): void {
+    this.failures.push({ docId, relPath, reason, ...(opts.permanent ? { permanent: true } : {}) });
     this.progress.doc(docId, "error");
     this.progress.item("failed");
+    // A permanent failure says nothing about the server's health, so it must
+    // not help trip the streak that pauses the run for everyone else.
+    if (opts.permanent) return;
     this.streak++;
     if (this.streak >= this.streakLimit && !this.aborted) {
       this.aborted = true;

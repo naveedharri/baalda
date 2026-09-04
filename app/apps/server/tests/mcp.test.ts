@@ -104,6 +104,7 @@ describe("MCP server", () => {
         "read_note",
         "create_note",
         "update_note",
+        "edit_note",
         "delete_note",
         "search_notes",
       ]),
@@ -142,9 +143,10 @@ describe("MCP server", () => {
     const notes = await call(token, "list_notes", { vaultId: vault });
     expect(notes.data.results.map((n: any) => n.docId)).toContain(docId);
 
-    // update_note replaces content.
-    await call(token, "update_note", { docId, content: "replaced" });
+    // update_note replaces content, and reports the new revision.
+    const updated = await call(token, "update_note", { docId, content: "replaced" });
     expect(mem.store.get(docId)).toBe("replaced");
+    expect(updated.data.revision).toBe((await call(token, "read_note", { docId })).data.revision);
 
     // append_note appends.
     await call(token, "append_note", { docId, text: "!" });
@@ -159,6 +161,130 @@ describe("MCP server", () => {
 
     // read after delete → error.
     expect((await call(token, "read_note", { docId })).isError).toBe(true);
+  });
+
+  // ── stale-write protection + targeted edits (#78) ─────────────────────────
+  describe("revisions and edit_note", () => {
+    let token: string;
+    let docId: string;
+
+    beforeEach(async () => {
+      const owner = await seedUser("owner@mcp-rev.com");
+      const org = await seedOrg("Acme", "acme-mcp-rev");
+      await seedMember(org, owner, "owner");
+      const vault = await seedVault(org);
+      token = await tokenFor(owner, org);
+      const created = await call(token, "create_note", {
+        vaultId: vault,
+        relPath: "plan.md",
+        content: "# Plan\n\n- one\n- two\n",
+      });
+      docId = created.data.docId as string;
+    });
+
+    it("read_note returns a revision that changes with the content", async () => {
+      const a = await call(token, "read_note", { docId });
+      expect(a.data.revision).toMatch(/^[0-9a-f]{64}$/);
+      await call(token, "append_note", { docId, text: "- three\n" });
+      const b = await call(token, "read_note", { docId });
+      expect(b.data.revision).not.toBe(a.data.revision);
+    });
+
+    it("update_note / append_note / edit_note refuse a stale expectedRevision, writing nothing", async () => {
+      const read = await call(token, "read_note", { docId });
+      // Someone else edits in between (here: another MCP call).
+      await call(token, "append_note", { docId, text: "- interloper\n" });
+      const after = mem.store.get(docId);
+
+      const upd = await call(token, "update_note", {
+        docId,
+        content: "clobber",
+        expectedRevision: read.data.revision,
+      });
+      expect(upd.isError).toBe(true);
+      expect(upd.text).toMatch(/Stale write/);
+      const app = await call(token, "append_note", {
+        docId,
+        text: "x",
+        expectedRevision: read.data.revision,
+      });
+      expect(app.isError).toBe(true);
+      const edit = await call(token, "edit_note", {
+        docId,
+        expectedRevision: read.data.revision,
+        edits: [{ type: "replace", find: "- one", replace: "- 1" }],
+      });
+      expect(edit.isError).toBe(true);
+      expect(mem.store.get(docId)).toBe(after); // untouched by all three
+
+      // With the CURRENT revision the same write goes through.
+      const fresh = await call(token, "read_note", { docId });
+      const ok = await call(token, "update_note", {
+        docId,
+        content: "clobber",
+        expectedRevision: fresh.data.revision,
+      });
+      expect(ok.isError).toBe(false);
+      expect(mem.store.get(docId)).toBe("clobber");
+    });
+
+    it("edit_note applies targeted edits and refuses missing/ambiguous anchors as a whole", async () => {
+      const res = await call(token, "edit_note", {
+        docId,
+        edits: [
+          { type: "replace", find: "- two", replace: "- 2" },
+          { type: "insert_after", anchor: "- 2", text: "\n- 3" },
+          { type: "delete", find: "# Plan\n\n" },
+        ],
+      });
+      expect(res.isError).toBe(false);
+      expect(res.data.applied).toBe(3);
+      expect(mem.store.get(docId)).toBe("- one\n- 2\n- 3\n");
+      expect(res.data.revision).toBe((await call(token, "read_note", { docId })).data.revision);
+
+      const before = mem.store.get(docId);
+      const missing = await call(token, "edit_note", {
+        docId,
+        edits: [
+          { type: "replace", find: "- one", replace: "- 1" }, // fine on its own…
+          { type: "replace", find: "- nine", replace: "x" }, // …but this anchor is gone
+        ],
+      });
+      expect(missing.isError).toBe(true);
+      expect(missing.text).toMatch(/edit 2 .*not found/);
+      expect(mem.store.get(docId)).toBe(before); // all-or-nothing
+
+      const ambiguous = await call(token, "edit_note", {
+        docId,
+        edits: [{ type: "insert_before", anchor: "- ", text: "*" }],
+      });
+      expect(ambiguous.isError).toBe(true);
+      expect(ambiguous.text).toMatch(/matches 3 times/);
+      expect(mem.store.get(docId)).toBe(before);
+
+      const bad = await call(token, "edit_note", { docId, edits: [{ type: "explode" }] });
+      expect(bad.isError).toBe(true);
+    });
+
+    it("append_note with an idempotencyKey appends once across retries", async () => {
+      const first = await call(token, "append_note", {
+        docId,
+        text: "- retry-me\n",
+        idempotencyKey: "k-1",
+      });
+      expect(first.data.duplicate).toBe(false);
+      const again = await call(token, "append_note", {
+        docId,
+        text: "- retry-me\n",
+        idempotencyKey: "k-1",
+      });
+      expect(again.data.duplicate).toBe(true);
+      expect(again.data.revision).toBe(first.data.revision);
+      expect(mem.store.get(docId)).toBe("# Plan\n\n- one\n- two\n- retry-me\n");
+      // A different key is a different append.
+      await call(token, "append_note", { docId, text: "- more\n", idempotencyKey: "k-2" });
+      expect(mem.store.get(docId)).toBe("# Plan\n\n- one\n- two\n- retry-me\n- more\n");
+    });
   });
 
   it("create_note adopts the note already at that path instead of duplicating it", async () => {

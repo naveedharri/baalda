@@ -21,6 +21,7 @@ import { VersionPanel } from "./components/VersionPanel";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
+import { implicatedFolders } from "./lib/tree/lazyTree";
 import { syncManager } from "./lib/sync/docSession";
 import {
   backgroundUpdateCheck,
@@ -616,7 +617,11 @@ export default function App() {
           // (`get_last_vault` reports the epoch from before it opened anything).
           useStore.getState().setVault(opened ?? last);
           await useStore.getState().refreshTree();
-          await useStore.getState().refreshTitles();
+          // Not awaited: the index rebuild runs in the background now (#84), and
+          // this call parks on its lock until it commits. The tree above needs
+          // no index, so the vault is on screen while the rebuild runs; titles
+          // land when it finishes (and `index-ready` refreshes them again).
+          void useStore.getState().refreshTitles();
         }
       } catch (e) {
         console.error("auto-reopen failed", e);
@@ -644,15 +649,27 @@ export default function App() {
   useEffect(() => {
     let unlistenFile: (() => void) | undefined;
     let unlistenVault: (() => void) | undefined;
+    let unlistenIndex: (() => void) | undefined;
     // Coalesce sidebar refreshes: a bulk change (e.g. importing a folder) emits
     // many `file-changed` batches in quick succession; refreshing the tree on
     // each one re-renders the whole sidebar repeatedly and flickers hover state.
     // Debounce so a burst settles into a single refresh.
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleRefresh = () => {
+    // Folders whose listings the pending batches can have changed; null once any
+    // batch in the window carried a structural change (then the whole tree is
+    // re-listed, as before).
+    let pendingFolders: Set<string> | null = new Set();
+    const scheduleRefresh = (changes: ipc.FileChanged[]) => {
+      if (pendingFolders) {
+        const dirs = implicatedFolders(changes);
+        if (dirs) for (const d of dirs) pendingFolders.add(d);
+        else pendingFolders = null;
+      }
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => {
-        void useStore.getState().refreshTree();
+        const folders = pendingFolders;
+        pendingFolders = new Set();
+        void useStore.getState().refreshTree(folders ?? undefined);
         void useStore.getState().refreshTitles();
         void useStore.getState().refreshBacklinks();
       }, 120);
@@ -692,16 +709,28 @@ export default function App() {
         }
         if (forSync.length > 0) syncManager.handleLocalFilesChanged(forSync);
 
-        // Refresh tree + titles + backlinks (coalesced for bursts).
-        scheduleRefresh();
+        // Refresh tree + titles + backlinks (coalesced for bursts; the tree
+        // refresh is targeted at the folders this batch touched — #82).
+        scheduleRefresh(changes);
       });
       unlistenVault = await ipc.onVaultOpened((v) => {
         useStore.getState().setVault(v);
+      });
+      // The background index rebuild committed: everything derived from the
+      // index catches up. Stale epochs (a vault switched during a long rebuild)
+      // are dropped — the open that replaced it gets its own event.
+      unlistenIndex = await ipc.onIndexReady((e) => {
+        const vault = useStore.getState().vault;
+        if (!vault || vault.epoch !== e.epoch) return;
+        if (!e.ok) toast("Couldn't finish indexing this vault — search and backlinks may be incomplete.", "error");
+        void useStore.getState().refreshTitles();
+        void useStore.getState().refreshBacklinks();
       });
     })();
     return () => {
       unlistenFile?.();
       unlistenVault?.();
+      unlistenIndex?.();
       if (refreshTimer) clearTimeout(refreshTimer);
     };
   }, []);

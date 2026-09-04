@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { pgText } from "../db/text.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
@@ -56,7 +57,9 @@ export async function recordVersion(
   },
   db: Queryable = defaultPool,
 ): Promise<number | null> {
-  const sha = sha256Hex(input.content);
+  // NUL cannot be stored in Postgres text (see `pgText`); hash what is stored.
+  const content = pgText(input.content);
+  const sha = sha256Hex(content);
   const { rows: latest } = await db.query<{ sha256: string }>(
     "SELECT sha256 FROM note_versions WHERE doc_id = $1 ORDER BY id DESC LIMIT 1",
     [input.docId],
@@ -67,7 +70,7 @@ export async function recordVersion(
     `INSERT INTO note_versions (doc_id, vault_id, content, sha256, cause, author_id)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id`,
-    [input.docId, input.vaultId, input.content, sha, input.cause, input.authorId],
+    [input.docId, input.vaultId, content, sha, input.cause, input.authorId],
   );
   await pruneVersions(input.docId, db);
   // BIGSERIAL arrives as a string from node-postgres; the API hands out numbers.

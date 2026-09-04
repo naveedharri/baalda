@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
 import { formatDocName } from "../sync/doc-name.js";
@@ -33,7 +34,53 @@ export interface DocActor {
   userId?: string | null;
 }
 
+/**
+ * One targeted change to a note body: delete `deleteLength` chars at `index`,
+ * then insert `insert` there. Applied IN ORDER, each index relative to the text
+ * as left by the previous op — the natural shape of "edit, then edit again".
+ */
+export interface TextOp {
+  index: number;
+  deleteLength: number;
+  insert: string;
+}
+
+/**
+ * The revision of a note body: sha256 of its current text. What `read_note`
+ * hands out and what a mutation may be preconditioned on (#78) — a stable,
+ * cheap identity for "the text I read", with no server-side revision counter to
+ * keep (the CRDT has no single version number; the content hash is the honest
+ * equivalent).
+ */
+export function revisionOf(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/** A mutation's precondition failed: the note is not the text the caller read. */
+export class StaleRevisionError extends Error {
+  constructor(
+    readonly expected: string,
+    readonly actual: string,
+  ) {
+    super(
+      `Stale write: the note changed since it was read (revision ${actual.slice(0, 12)}…, expected ${expected.slice(0, 12)}…). Read it again and retry.`,
+    );
+  }
+}
+
 export interface DocWriter {
+  /**
+   * Apply targeted ops (#78). `plan` runs under the doc's write lock with the
+   * CURRENT text and returns the ops to apply, or throws to abort with nothing
+   * written — that is where a revision precondition is checked, so the check and
+   * the write are one atomic step. Returns the resulting text's revision.
+   */
+  editContent(
+    vaultId: string,
+    docId: string,
+    plan: (current: string) => TextOp[],
+    actor?: DocActor,
+  ): Promise<{ revision: string; content: string }>;
   /** Replace the whole note body. */
   setContent(
     vaultId: string,
@@ -101,7 +148,41 @@ export function createDocWriter(
   publishUpdate?: DocUpdatePublisher,
   onDocWritten?: DocWrittenHook,
 ): DocWriter {
-  async function mutate(
+  /**
+   * Per-doc write serialisation. The detached path awaits between reading the
+   * stored state and appending its update, so two concurrent MCP writes to one
+   * note used to each hydrate the SAME state and each apply a whole-body
+   * delete+insert — Yjs merged both inserts and the note held the text twice
+   * (#78's "duplicated" outcome). Chaining per docId makes the second write see
+   * the first's result, which is also what makes a revision precondition mean
+   * anything. Self-cleaning: an entry is removed once its chain settles.
+   */
+  const locks = new Map<string, Promise<unknown>>();
+  async function withDocLock<T>(docId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = locks.get(docId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    locks.set(docId, chain);
+    try {
+      return await run;
+    } finally {
+      if (locks.get(docId) === chain) locks.delete(docId);
+    }
+  }
+
+  function mutate(
+    vaultId: string,
+    docId: string,
+    fn: (text: Y.Text) => void,
+    actor?: DocActor,
+  ): Promise<void> {
+    return withDocLock(docId, () => mutateLocked(vaultId, docId, fn, actor));
+  }
+
+  async function mutateLocked(
     vaultId: string,
     docId: string,
     fn: (text: Y.Text) => void,
@@ -134,8 +215,11 @@ export function createDocWriter(
       if (state) Y.applyUpdate(doc, state);
       // Register AFTER hydration so we capture only our own edit.
       doc.on("update", capture);
-      doc.transact(() => fn(doc.getText(CONTENT_FIELD)), MCP_ORIGIN);
-      doc.off("update", capture);
+      try {
+        doc.transact(() => fn(doc.getText(CONTENT_FIELD)), MCP_ORIGIN);
+      } finally {
+        doc.off("update", capture);
+      }
       if (updates.length > 0) {
         const merged = Y.mergeUpdates(updates);
         await appendUpdate(docId, merged);
@@ -201,7 +285,43 @@ export function createDocWriter(
     }
   };
 
+  /** Apply a plan's ops to a Y.Text, validating each against the live length. */
+  const applyOps = (text: Y.Text, ops: TextOp[]): void => {
+    for (const op of ops) {
+      const len = text.length;
+      if (
+        !Number.isInteger(op.index) ||
+        !Number.isInteger(op.deleteLength) ||
+        op.index < 0 ||
+        op.deleteLength < 0 ||
+        op.index + op.deleteLength > len
+      ) {
+        throw new Error(`edit out of range: index ${op.index}, delete ${op.deleteLength}, length ${len}`);
+      }
+      requireUnderCap(len - op.deleteLength + op.insert.length);
+      if (op.deleteLength > 0) text.delete(op.index, op.deleteLength);
+      if (op.insert) text.insert(op.index, op.insert);
+    }
+  };
+
   return {
+    editContent: async (vaultId, docId, plan, actor) => {
+      let result = "";
+      await mutate(
+        vaultId,
+        docId,
+        (text) => {
+          // The plan sees the text under the lock; a throw here (stale revision,
+          // missing anchor) leaves the transaction empty — nothing is written.
+          const ops = plan(text.toString());
+          applyOps(text, ops);
+          result = text.toString();
+        },
+        actor,
+      );
+      return { revision: revisionOf(result), content: result };
+    },
+
     setContent: (vaultId, docId, content, actor) =>
       mutate(
         vaultId,

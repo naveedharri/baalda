@@ -133,8 +133,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 - `docSession.ts` (`syncManager`) — owns the registry, current `DocSync`, presence, attachments.
 - `syncManager.ts` (`DocSync`) — `HocuspocusProvider` over the bridge's `Y.Doc`; doc name
   `vault:<vaultId>/note:<docId>`. Token is a **function** re-minted per (re)connect via `POST /api/sync-token`;
-  403 → `no-access`. WS URL derived from the server URL (`deriveWsUrl`): explicit port 3010 →
-  legacy dedicated port 3011; any other/no port → same-origin `ws(s)://…/sync` (single-port topology).
+  403 → `no-access`. WS URL derived from the server URL (`deriveWsUrl`): ALWAYS same-origin
+  `ws(s)://<server>/sync`, like the vault channel's `/vault-sync`. (It used to bump an explicit
+  `:3010` to the dedicated `:3011`, which broke every single-port self-host — the Compose bundle
+  publishes only 3010 — so content never uploaded while structure synced fine, #79.)
 - `startup.ts` (`decideSeed`) — **split-brain rule**: when signed in, pull from server FIRST, then seed a
   local orphan only if the doc is still empty. Reversing this causes permanent divergence.
 - `registry.ts` — reconciles local vault ↔ server vault/folders/notes, persists the doc-id map to
@@ -147,6 +149,12 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   echoes; the `divergedDocs` set forces a connect for out-of-band merges by resident bridges / cold applies).
   `NoteBridge.hydrate` also ingests the file on reopen when it moved on while the doc was closed. Disk
   deletions are deliberately NOT propagated to the server.
+- **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
+  readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing
+  to push — it is marked pushed + badged synced and never queued (a vault with 307 zero-byte `_Index.md`
+  stubs used to "re-sync 307 notes" on every reload). Files over `MAX_NOTE_BYTES` (10 MB, the server's
+  `MAX_NOTE_MB`) fail once, permanently, without a socket (`permanentFailures`) instead of being rejected
+  by the server on every reconnect.
 
 ### Desktop — React (`src/`)
 `store.ts` is a Zustand **UI view-state mirror only** (vault, tree, open note, auth/session, org members,
@@ -187,7 +195,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   registry listings).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/move_note/delete_note`.
+  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note`.
+  `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
+  optional `expectedRevision` and refuse a stale write (the check runs under the doc writer's per-doc
+  lock, so check + apply are atomic). `edit_note` applies exact-anchor replace/insert/delete ops (an
+  anchor must match exactly once unless `all`), `update_note` sends only the changed span, and
+  `append_note` accepts an `idempotencyKey` so a retried call cannot append twice.
   Structural tools (create/move/delete of folders and notes) broadcast `registry-changed` with a
   `null` origin, and content writes fan out through `createDocWriter`, so an AI edit lands live on
   every open app exactly like a teammate's. `delete_folder` refuses a non-empty folder unless

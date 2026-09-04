@@ -9,12 +9,18 @@ instead of self-hosting: set the server URL in Settings to `https://api.baalda.c
 
 ## Ports
 
-The server binds one HTTP port (`PORT`, default `3010`) that serves both the
-REST/auth API and the sync WebSocket at `/sync`. That is the only port a
-deployment needs to expose. `HOCUSPOCUS_PORT` (default `3011`) still exists for
-local development and for older clients that dial the dedicated Hocuspocus
-port directly, but it does not need to be reachable from outside the container
-in production.
+The server binds one HTTP port (`PORT`, default `3010`) that serves the
+REST/auth API, the per-note sync WebSocket at `/sync` and the vault channel at
+`/vault-sync`. That is the only port a deployment needs to expose, and the only
+one the desktop app (0.1.42+) ever dials — it derives both WebSocket URLs from
+the server URL by appending the path, whatever the port. `HOCUSPOCUS_PORT`
+(default `3011`) still listens for anything else that dials the dedicated
+Hocuspocus port directly, but nothing in this repo needs it reachable.
+
+> Desktop builds before 0.1.42 bumped an explicit `:3010` in the server URL to
+> `:3011` for per-note sync. On a single-port deploy that port is unreachable,
+> so folder structure synced while note content never uploaded (issue #79).
+> Update the app; no server change is needed.
 
 ## Option A: plain Docker
 

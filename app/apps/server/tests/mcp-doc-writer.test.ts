@@ -95,6 +95,70 @@ describe("MCP doc writer (no client connected)", () => {
     mirror.destroy();
   });
 
+  it("editContent applies targeted ops to the stored text and reports the revision", async () => {
+    const writer = writerThatRecords();
+    await writer.setContent("vault-1", "doc-e", "# T\n\n- one\n- two\n");
+    const res = await writer.editContent("vault-1", "doc-e", (current) => {
+      expect(current).toBe("# T\n\n- one\n- two\n");
+      return [
+        { index: current.indexOf("- two"), deleteLength: "- two".length, insert: "- 2" },
+        { index: current.length - "- two".length + "- 2".length, deleteLength: 0, insert: "- 3\n" },
+      ];
+    });
+    expect(res.content).toBe("# T\n\n- one\n- 2\n- 3\n");
+    expect(await persistedText("doc-e")).toBe(res.content);
+    // Two updates published (set + edit); replaying them reconstructs the note.
+    const mirror = new Y.Doc();
+    for (const p of published) Y.applyUpdate(mirror, p.update);
+    expect(mirror.getText("content").toString()).toBe(res.content);
+    mirror.destroy();
+  });
+
+  it("a plan that throws writes nothing (the precondition path)", async () => {
+    const writer = writerThatRecords();
+    await writer.setContent("vault-1", "doc-f", "keep");
+    published = [];
+    await expect(
+      writer.editContent("vault-1", "doc-f", () => {
+        throw new Error("stale");
+      }),
+    ).rejects.toThrow("stale");
+    expect(published).toHaveLength(0);
+    expect(await persistedText("doc-f")).toBe("keep");
+  });
+
+  it("serialises concurrent writes to one doc — no doubled text (#78)", async () => {
+    // Before the per-doc lock, two concurrent detached writes each hydrated the
+    // SAME stored state and each applied delete-all + insert; Yjs merged both
+    // inserts and the note held two bodies. Now the second sees the first.
+    const writer = writerThatRecords();
+    await writer.setContent("vault-1", "doc-g", "start");
+    await Promise.all([
+      writer.setContent("vault-1", "doc-g", "AAA"),
+      writer.setContent("vault-1", "doc-g", "BBB"),
+      writer.appendContent("vault-1", "doc-g", "!"),
+    ]);
+    const text = await persistedText("doc-g");
+    // The append lands after whichever replacement ran last; both replacements
+    // are wholesale, so exactly one body survives.
+    expect(["AAA!", "BBB!"]).toContain(text);
+
+    // And the plan of an edit sees the text the previous write left.
+    const seen: string[] = [];
+    await Promise.all([
+      writer.editContent("vault-1", "doc-g", (cur) => {
+        seen.push(cur);
+        return [{ index: cur.length, deleteLength: 0, insert: "1" }];
+      }),
+      writer.editContent("vault-1", "doc-g", (cur) => {
+        seen.push(cur);
+        return [{ index: cur.length, deleteLength: 0, insert: "2" }];
+      }),
+    ]);
+    expect(seen[1]).toBe(`${seen[0]}1`);
+    expect(await persistedText("doc-g")).toBe(`${seen[0]}12`);
+  });
+
   it("announces a rewrite even when the text is unchanged", async () => {
     // `setContent` is a wholesale replace — delete the whole Y.Text, insert the
     // new one — so re-setting identical content is still a real CRDT change and

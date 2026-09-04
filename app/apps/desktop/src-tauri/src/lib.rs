@@ -85,6 +85,7 @@ pub fn run() {
             commands::search_notes,
             commands::get_backlinks,
             commands::graph_edges,
+            commands::graph_edges_for,
             commands::get_note_meta,
             commands::resolve_wikilink,
             commands::list_note_titles,

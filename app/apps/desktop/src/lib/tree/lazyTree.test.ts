@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "../ipc";
-import { loadedFolderPaths, setChildrenAt } from "./lazyTree";
+import { loadedFolderPaths, setChildrenAt, implicatedFolders, mergeChildren, nodeAt } from "./lazyTree";
 
 // The sidebar folds itself up if a refresh forgets which folders were expanded.
 // `refreshTree` runs on every `file-changed` burst and every sync registry pull
@@ -140,5 +140,70 @@ describe("restoring an expanded tree the way refreshTree does", () => {
     const rebuilt = rootWith([]);
     expect(loadedFolderPaths(expanded)).toEqual(["Gone"]);
     expect(rebuilt.children).toEqual([]);
+  });
+});
+
+describe("targeted refresh helpers (#82)", () => {
+  const dir = (path: string, extra: Partial<TreeNode> = {}): TreeNode => ({
+    id: path,
+    name: path.split("/").pop() ?? path,
+    path,
+    isDir: true,
+    children: [],
+    ...extra,
+  });
+  const file = (path: string): TreeNode => ({
+    id: path,
+    name: path.split("/").pop() ?? path,
+    path,
+    isDir: false,
+  });
+
+  it("implicatedFolders: a file change implicates only its parent; structure means everything", () => {
+    expect(
+      implicatedFolders([
+        { path: "Daily/2026-09-04.md", kind: "modified" },
+        { path: "Root.md", kind: "removed" },
+        { path: "Daily/notes.md", kind: "modified" },
+      ]),
+    ).toEqual(new Set(["Daily", ""]));
+    expect(
+      implicatedFolders([
+        { path: "Daily/x.md", kind: "modified" },
+        { path: "Archive", kind: "tree" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("mergeChildren keeps an expanded sub-folder loaded across a fresh listing", () => {
+    const previous = [
+      dir("A/inner", { childrenLoaded: true, children: [file("A/inner/n.md")] }),
+      dir("A/stale", { childrenLoaded: true, children: [file("A/stale/old.md")] }),
+      file("A/gone.md"),
+    ];
+    // The fresh listing: `inner` (as a placeholder), a new folder, a new file;
+    // `stale` and `gone.md` left the disk.
+    const fresh = [dir("A/inner", { childrenLoaded: false }), dir("A/new"), file("A/new.md")];
+    const merged = mergeChildren(previous, fresh);
+    expect(merged.map((n) => n.path)).toEqual(["A/inner", "A/new", "A/new.md"]);
+    const inner = merged[0];
+    expect(inner.childrenLoaded).toBe(true);
+    expect(inner.children?.map((c) => c.path)).toEqual(["A/inner/n.md"]);
+    expect(merged[1].childrenLoaded).toBeFalsy();
+  });
+
+  it("nodeAt finds a loaded folder by path and returns null for an unloaded one", () => {
+    const root: TreeNode = dir("", {
+      childrenLoaded: true,
+      children: [
+        dir("A", { childrenLoaded: true, children: [dir("A/inner", { childrenLoaded: true })] }),
+        dir("B"),
+      ],
+    });
+    expect(nodeAt(root, "")?.path).toBe("");
+    expect(nodeAt(root, "A/inner")?.path).toBe("A/inner");
+    expect(nodeAt(root, "B")?.path).toBe("B");
+    expect(nodeAt(root, "B/deeper")).toBeNull();
+    expect(nodeAt(root, "Absent")).toBeNull();
   });
 });

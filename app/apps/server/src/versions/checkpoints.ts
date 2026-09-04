@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { pgText } from "../db/text.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
@@ -141,7 +142,9 @@ export async function captureCheckpoint(
 
   let noteCount = 0;
   for (const note of structure.notes) {
-    const content = await opts.docWriter.peekContent(vaultId, note.id);
+    const raw = await opts.docWriter.peekContent(vaultId, note.id);
+    // NUL would abort the whole checkpoint transaction (see `pgText`).
+    const content = raw == null ? null : pgText(raw);
     // `null` = the server has never seen this note's content (registered, but
     // its CRDT is still on its way up from a freshly-synced client). Recording
     // "" for it would make a later revert bulldoze the real text — the exact

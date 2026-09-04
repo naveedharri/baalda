@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { parseWikilinks } from "../src/index/indexer.js";
 import {
   EMBED_DIM,
@@ -70,3 +70,38 @@ describe("embedder helpers", () => {
     expect(l2normalize([0, 0, 0])).toEqual([0, 0, 0]);
   });
 });
+
+describe("indexer — NUL bytes", () => {
+  beforeEach(async () => {
+    const { resetDb } = await import("./helpers/db.js");
+    await resetDb();
+  });
+  afterAll(async () => {
+    const { pool } = await import("../src/db/pool.js");
+    await pool.end();
+  });
+
+  it("indexes a note whose body contains U+0000 (Postgres text rejects it)", async () => {
+    // One such note in production failed its own indexing AND every daily
+    // checkpoint of its vault: `invalid byte sequence for encoding "UTF8": 0x00`.
+    const { pool } = await import("../src/db/pool.js");
+    const { indexDoc } = await import("../src/index/indexer.js");
+    const { appendUpdate } = await import("../src/yjs/persistence.js");
+    const { seedOrg, seedVault, seedNote } = await import("./helpers/seed.js");
+    const Y = await import("yjs");
+    const org = await seedOrg("Nul", "nul-org");
+    const vault = await seedVault(org);
+    const docId = await seedNote(vault, null, "nul.md");
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "before\u0000after [[Target]]");
+    await appendUpdate(docId, Y.encodeStateAsUpdate(doc));
+    doc.destroy();
+    await expect(indexDoc(docId)).resolves.toBe(true);
+    const { rows } = await pool.query<{ content: string }>(
+      "SELECT content FROM note_index WHERE doc_id = $1",
+      [docId],
+    );
+    expect(rows[0].content).toBe("beforeafter [[Target]]");
+  });
+});
+

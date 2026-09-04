@@ -836,6 +836,16 @@ export class VaultRegistry {
     return { changedDisk, suppress: plan.suppress };
   }
 
+  /**
+   * Is this note empty on disk (nothing but whitespace)? Public for the session's
+   * `ready.empty` probe: a doc the server has no content for AND whose file here
+   * is empty has nothing to push, so it must not be queued (see
+   * `SyncManager.settleServerEmpty`). Epoch-pinned like every read here.
+   */
+  isNoteEmptyOnDisk(relPath: string): Promise<boolean> {
+    return this.isEmptyOnDisk(relPath);
+  }
+
   /** Is this note empty on disk? Used to decide whether an unconfirmed note is
    *  safe to remove — an empty file can't be holding the only copy of anything. */
   private async isEmptyOnDisk(relPath: string): Promise<boolean> {

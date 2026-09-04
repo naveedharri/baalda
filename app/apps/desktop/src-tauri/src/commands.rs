@@ -174,6 +174,17 @@ fn vault_info(path: &Path, epoch: u64) -> VaultInfo {
     }
 }
 
+/// Payload of the `index-ready` event: the background index rebuild that
+/// `open_vault` starts has committed. `epoch` lets the UI drop a stale one.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexReady {
+    pub path: String,
+    pub epoch: u64,
+    pub ok: bool,
+    pub ms: u64,
+}
+
 /// The epoch of the currently-open vault (0 when none has been opened). The TS
 /// layer reads this when it starts a VaultScope for a vault it didn't just open.
 #[tauri::command]
@@ -199,21 +210,68 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
     // stream vault files (e.g. `<img src>` in notes) via convertFileSrc.
     let _ = app.asset_protocol_scope().allow_directory(&path, true);
 
-    let index = Index::open(&path)?;
-    index.rebuild(&path)?;
-    let index = Arc::new(Mutex::new(index));
+    let index = Arc::new(Mutex::new(Index::open(&path)?));
 
+    // The watcher first, so nothing that changes during the rebuild below is
+    // missed: its drain thread queues behind the same index lock and re-indexes
+    // any file the rebuild may have seen too (idempotent).
     let watcher = watcher::start(path.clone(), index.clone(), app.clone())?;
 
     let epoch = {
         let mut inner = state.inner.lock().unwrap();
+        // Every open invalidates the previous vault's epoch, so any command still
+        // in flight for it is rejected rather than applied to this one.
+        let epoch = inner.vault_epoch + 1;
+
+        // Reconcile the index with disk in the BACKGROUND (#84). This used to run
+        // inline, so opening a large vault returned nothing to the UI until every
+        // changed/new `.md` had been re-parsed — a multi-second blank on first
+        // open, read as "the app hangs". The sidebar listing needs no index (it
+        // walks the disk), so the vault is usable at once; anything that does
+        // need the index (titles, search, backlinks, the sync reconcile) simply
+        // waits on its lock and gets the rebuilt answer.
+        //
+        // The rebuild thread takes the index lock BEFORE this open publishes the
+        // index into the state (the `ready` handshake below), so no command can
+        // read a stale index in between: the first reader blocks until the
+        // rebuild commits, exactly as if it had been inline. Correctness of every
+        // index reader is unchanged; only who waits for the rebuild is.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (bg_index, bg_path, bg_app) = (index.clone(), path.clone(), app.clone());
+        std::thread::spawn(move || {
+            let guard = bg_index.lock().unwrap();
+            let _ = ready_tx.send(());
+            let started = std::time::Instant::now();
+            let result = guard.rebuild(&bg_path);
+            drop(guard);
+            let ok = match result {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("[index] rebuild failed for {}: {e}", bg_path.display());
+                    false
+                }
+            };
+            // Tells the UI the index is current: titles/backlinks/graph refresh.
+            let _ = bg_app.emit(
+                "index-ready",
+                IndexReady {
+                    path: bg_path.to_string_lossy().to_string(),
+                    epoch,
+                    ok,
+                    ms: started.elapsed().as_millis() as u64,
+                },
+            );
+        });
+        // Wait until the rebuild thread HOLDS the index lock (sub-millisecond),
+        // then publish. A `recv` error means the thread died before locking, in
+        // which case the index is simply stale-but-consistent, as before.
+        let _ = ready_rx.recv();
+
         inner.vault = Some(path.clone());
         inner.index = Some(index);
         inner.watcher = Some(watcher); // replaces & drops any previous watcher
-        // Every open invalidates the previous vault's epoch, so any command still
-        // in flight for it is rejected rather than applied to this one.
-        inner.vault_epoch += 1;
-        inner.vault_epoch
+        inner.vault_epoch = epoch;
+        epoch
     };
 
     let info = vault_info(&path, epoch);
@@ -942,6 +1000,18 @@ pub async fn graph_edges(state: State<'_, AppState>) -> AppResult<Vec<GraphEdge>
     let (_, index) = require_vault(&state)?;
     let guard = index.lock().unwrap();
     guard.graph_edges()
+}
+
+/// The edges touching the given notes only — the Graph view's per-change delta
+/// (#83), so an edit to one note no longer re-reads the whole edge set.
+#[tauri::command]
+pub async fn graph_edges_for(
+    state: State<'_, AppState>,
+    note_ids: Vec<String>,
+) -> AppResult<Vec<GraphEdge>> {
+    let (_, index) = require_vault(&state)?;
+    let guard = index.lock().unwrap();
+    guard.graph_edges_for(&note_ids)
 }
 
 #[tauri::command]

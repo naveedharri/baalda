@@ -752,6 +752,38 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The edges touching any of `note_ids` (as source OR target) — the delta the
+    /// Graph view applies when a few notes change, instead of re-reading every
+    /// edge in the vault on every `files-changed` (#83). Deduplicated across the
+    /// ids so an edge between two changed notes is reported once.
+    pub fn graph_edges_for(&self, note_ids: &[String]) -> AppResult<Vec<GraphEdge>> {
+        let mut out: Vec<GraphEdge> = Vec::new();
+        if note_ids.is_empty() {
+            return Ok(out);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT src_note_id, dst_note_id
+             FROM links
+             WHERE dst_note_id IS NOT NULL AND (src_note_id = ?1 OR dst_note_id = ?1)",
+        )?;
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for id in note_ids {
+            let rows = stmt.query_map(params![id], |r| {
+                Ok(GraphEdge {
+                    source: r.get(0)?,
+                    target: r.get(1)?,
+                })
+            })?;
+            for edge in rows {
+                let edge = edge?;
+                if seen.insert((edge.source.clone(), edge.target.clone())) {
+                    out.push(edge);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get_note_meta(&self, rel: &str) -> AppResult<Option<NoteMeta>> {
         let base = self
             .conn

@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { pgText } from "../db/text.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { loadDocState } from "../yjs/persistence.js";
@@ -94,8 +95,10 @@ export async function indexDoc(
     return false;
   }
 
-  const content = await extractDocText(docId, db);
-  const title = note.title ?? relPathStem(note.rel_path);
+  // Postgres rejects NUL in `text`; a single such byte in one note used to fail
+  // that note's indexing forever (see `pgText`).
+  const content = pgText(await extractDocText(docId, db));
+  const title = pgText(note.title ?? relPathStem(note.rel_path));
   const links = parseWikilinks(content);
   // Embed title + body so a query matching the title still ranks the note.
   const vector = embed(`${title ?? ""}\n${content}`);
