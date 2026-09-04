@@ -1,13 +1,6 @@
-- Self-hosted servers on a single port (the Docker Compose bundle) now receive note content: the app no longer dials a separate sync port that isn't exposed, so "structure syncs but notes stay empty" is fixed
-- Reloading or switching vaults no longer "re-syncs" hundreds of empty placeholder notes on every connect
-- Notes over the 10 MB sync limit are reported once as too large instead of being retried on every reconnect
-- If a note can't be written to disk (disk full, permissions), you now see a sticky warning and the save is retried automatically until it lands
-- A note that fails to register for sync when opened now tells you, and registration is retried automatically
-- Turning on sync, creating an MCP token and deleting a vault now show a visible error when they fail
-- Opening a large vault no longer freezes while the index rebuilds — the sidebar appears immediately and search/backlinks fill in when indexing finishes
-- The sidebar refreshes only the folders a change touched, and the graph view patches only the notes that changed, so big vaults stay smooth while editing
-- MCP: `read_note` returns a `revision`, writes accept `expectedRevision` to refuse stale edits, a new `edit_note` tool makes targeted changes, and `append_note` accepts an idempotency key
-- Server: notes containing a NUL character no longer break search indexing or version checkpoints
-- Right-click a tab for quick actions: close, close others, close tabs to the right, or close all
-- You can now open a folder — including a whole drive — as a vault by typing its path on the vault screen
-- A vault at a drive root now shows its drive name instead of a generic label
+- Folder badges now count only the notes that actually need syncing (for example "1/2" for two new files), instead of the folder's whole population ("186/187")
+- A fully synced vault shows its synced dots right after connecting, without waiting for a sync run
+- Editing while a sync is running no longer re-reads every note title on each change, so the sidebar stays responsive on large vaults
+- A file added to a folder that a teammate had moved on the server no longer fails to sync forever ("1 not synced"): the folder is re-created at its old path and the file registers normally
+- Empty leftover files of notes deleted on the server are now cleaned up instead of lingering as unsyncable stubs
+- After a teammate moves a folder, the emptied old folder is removed on your device instead of coming back for everyone as an empty duplicate

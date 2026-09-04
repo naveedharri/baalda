@@ -248,6 +248,32 @@ describe("FolderWaveTracker", () => {
     expect(rowSyncMark(dir("A"), next)!.progress).toEqual({ done: 0, total: 1 });
   });
 
+  it("does not pin the wave on notes nobody has reported yet (fresh launch)", () => {
+    // A fresh launch: the registry has mapped every note but the run has not
+    // stamped anything. Every note reads unsynced, yet none of them is WORK —
+    // pinning the wave here is what produced "186/187" for one new note.
+    const waves = new FolderWaveTracker();
+    const launch = buildTreeSyncIndex({
+      docIdByPath: { "A/a.md": "d1", "A/b.md": "d2", "A/c.md": "d3" },
+      docSyncState: {},
+      localNotePaths: ["A/a.md", "A/b.md", "A/c.md"],
+    });
+    waves.apply(launch);
+    expect(launch.folders.get("A")!.unreported).toBe(3);
+    expect(launch.folders.get("A")!.state).toBe("unsynced"); // still honest
+    expect(rowSyncMark(dir("A"), launch)!.progress).toBeNull(); // no "0/3"
+
+    // The run's batch lands: two confirmed, and one NEW file appears queued.
+    const busy = buildTreeSyncIndex({
+      docIdByPath: { "A/a.md": "d1", "A/b.md": "d2", "A/c.md": "d3", "A/new.md": "d4" },
+      docSyncState: { d1: "synced", d2: "synced", d3: "synced", d4: "queued" },
+      localNotePaths: ["A/a.md", "A/b.md", "A/c.md", "A/new.md"],
+    });
+    waves.apply(busy);
+    expect(rowSyncMark(dir("A"), busy)!.progress).toEqual({ done: 0, total: 1 }); // not 3/4
+    expect(folderSyncTitle(busy.folders.get("A")!)).toBe("3 of 4 notes synced");
+  });
+
   it("grows the wave when more work arrives mid-flight", () => {
     const waves = new FolderWaveTracker();
     const one = indexOf({ "A/a.md": "syncing" });

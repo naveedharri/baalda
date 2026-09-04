@@ -791,12 +791,32 @@ export class SyncManager implements InboundHost {
       const phase = this.progress?.snapshot().phase;
       const stalled = this.channelStalled;
       this.channelStalled = false;
-      if (phase !== "done" && (phase !== "error" || stalled)) this.completeRun(scope);
+      if (phase !== "done" && (phase !== "error" || stalled)) {
+        // The per-doc badges too. A run's uploader stamps every confirmed note
+        // `synced` before its first socket; with no run there was nobody to do
+        // it, so a fully-synced vault sat on "0/N" folder badges until something
+        // happened to start one. Same guard as the phase: once per settle.
+        this.badgeConfirmedDocs();
+        this.completeRun(scope);
+      }
       return;
     }
     this.bulkRun = this.runBulkSync(scope).catch((e) => {
       console.warn("[sync] content sync failed", e);
     });
+  }
+
+  /** Report every note the server is known to hold as `synced` (one coalesced
+   *  patch). The open note is left to its own provider's reporting. */
+  private badgeConfirmedDocs(): void {
+    const progress = this.progress;
+    if (!progress) return;
+    const open = this.docStore?.suppressedDoc() ?? null;
+    for (const { docId } of this.registry.mappedNotes()) {
+      if (docId !== open && this.registry.isPushed(docId) && !this.serverEmpty.has(docId)) {
+        progress.doc(docId, "synced");
+      }
+    }
   }
 
   /**
