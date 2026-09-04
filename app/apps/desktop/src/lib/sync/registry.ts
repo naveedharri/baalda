@@ -800,6 +800,35 @@ export class VaultRegistry {
       }
     }
 
+    // Paths the plan suppressed WITHOUT trashing: a tombstoned note whose file
+    // is still on disk under an identity the index no longer ties to the
+    // tombstone (a materialized placeholder whose mapping was pruned). The plan
+    // cannot prove that file IS the deleted note, so it leaves it — rightly, for
+    // a file with text in it. An EMPTY file is different: there is no work in it
+    // to lose, and left alone it sits unmapped, uncounted and unsyncable forever
+    // (21 zero-byte stubs under re-created "… 2/" folders in one vault). So the
+    // empty ones go to the trash like any other tombstoned note.
+    // (`plan.stubs` is only ever filled for notes the server confirmed deleted —
+    // never for revocations or a listing that didn't report tombstones, where
+    // "I don't know" must remove nothing.)
+    for (const path of plan.stubs) {
+      if (this.stopRun()) break;
+      if (!(await this.isEmptyOnDisk(path))) continue;
+      if (this.stale()) return { changedDisk, suppress: plan.suppress };
+      try {
+        await ipc.trashNote(path, stamp, this.epoch());
+        changedDisk = true;
+        // Nothing is at that path any more, so no baseline entry may keep
+        // claiming it (which would suppress a genuinely new file there later).
+        for (const [docId, rp] of [...this.baselineDocs]) {
+          if (rp === path) this.baselineDocs.delete(docId);
+        }
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+        // Left on disk; it stays suppressed and harmless, as before.
+      }
+    }
+
     // Folders the server has deleted, children before parents, AFTER the trash
     // loop above has moved their notes out. Empty-only removal (`remove_dir`,
     // never recursive): a folder still holding anything stays on disk and — its
@@ -1209,6 +1238,19 @@ export class VaultRegistry {
     }
 
     // 2. Folders: adopt by path, create missing (parents first).
+    //
+    // The path → id map is RE-DERIVED from the server's listing, not merely added
+    // to. A folder the server moved keeps its id under a new path, and the old
+    // path's entry used to survive here forever. This device then believed the
+    // old directory — still on disk, e.g. holding a `.txt` the index doesn't key
+    // and so the per-note rename never carried — was registered, never re-created
+    // it, and registered any note inside it with the MOVED folder's id. The server
+    // rightly refused that as `path_folder_mismatch`, on every pull, forever:
+    // "1 not synced" with nothing the user could do about it.
+    const serverFolderByPath = new Map(serverFolders.map((f) => [f.path, f.id] as const));
+    for (const [rp, id] of [...this.folderByPath]) {
+      if (serverFolderByPath.get(rp) !== id) this.folderByPath.delete(rp);
+    }
     for (const f of serverFolders) this.folderByPath.set(f.path, f.id);
     const missingFolders = folders.filter((f) => !this.folderByPath.has(f.path));
 
@@ -1315,12 +1357,18 @@ export class VaultRegistry {
         // keeps working locally, whereas mapping it would point sync at a doc the
         // user has no grant on, which only yields a permanent 403. Rotating the
         // local doc_id to rejoin such a note to this vault is not implemented.
+        const code = errorCode(out.error) ?? (isConflict(out.error) ? "doc_id_conflict" : null);
+        // The server says the folder id we sent is not the folder at this path:
+        // our mapping for the parent is stale (see step 2). Drop it so the next
+        // pass re-creates the folder and this note registers — belt to step 2's
+        // braces, for a listing that changed between the two reads of one pass.
+        if (code === "path_folder_mismatch") this.folderByPath.delete(parentDir(rp));
         this.recordFailure({
           kind: "note",
           path: rp,
           docId,
           reason: reasonOf(out.error),
-          code: errorCode(out.error) ?? (isConflict(out.error) ? "doc_id_conflict" : null),
+          code,
         });
         this.sink.item("failed");
       },

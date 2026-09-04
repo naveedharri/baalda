@@ -118,6 +118,15 @@ export interface InboundPlan {
    * it here lets the existing prune drop the mapping instead.
    */
   suppress: Set<string>;
+  /**
+   * Paths of DELETED (tombstoned — the server answered) notes whose file is
+   * still on disk but which the local index keys under some other id, so the
+   * plan could only suppress them (see the `dead && loc === undefined` branch).
+   * The executor may trash such a file if — and only if — it is empty: no work
+   * to lose, and otherwise a zero-byte stub nobody can sync or count, forever.
+   * Never populated for revoked notes or when tombstones were not reported.
+   */
+  stubs: string[];
   rejected: InboundRejection[];
 }
 
@@ -230,6 +239,7 @@ export function planInbound(input: InboundInput): InboundPlan {
     trash: [],
     revoked: new Set(),
     suppress: new Set(),
+    stubs: [],
     rejected: [],
   };
 
@@ -331,7 +341,10 @@ export function planInbound(input: InboundInput): InboundPlan {
         // match we can't prove the file at that path is still this note, and a
         // wrong guess here deletes someone's work. It stays on disk as a purely
         // local note the user can remove themselves.
-        if (prev !== undefined && localPaths.has(prev)) plan.suppress.add(prev);
+        if (prev !== undefined && localPaths.has(prev)) {
+          plan.suppress.add(prev);
+          plan.stubs.push(prev);
+        }
         continue;
       }
       // Belt as well as braces: if the trash step is skipped or fails, this still
