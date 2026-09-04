@@ -18,7 +18,13 @@ import {
   installUpdate,
   useUpdateState,
 } from "../lib/updater";
-import { readOrgVaults, useStore } from "../store";
+import { readKnownVaults, readOrgVaults, useStore } from "../store";
+import {
+  POPOVER_VAULT_ROWS,
+  recentVaultRows,
+  unboundRecents,
+  type VaultRow,
+} from "../lib/vaultRows";
 import { configOrgId } from "../lib/vault/rediscover";
 import { statusTone } from "../lib/presence/color";
 import { AccessPanel } from "./AccessPanel";
@@ -269,40 +275,8 @@ export function AccountMenu() {
   );
 }
 
-// How many vault rows the popover spends in total, across both kinds. A fixed
-// budget rather than a per-kind cap is what keeps the menu the same height for
-// everyone: whoever has vaults fills it. The rest live on the Vaults settings
-// page, reached from the Vault settings row at the foot of this menu.
-const POPOVER_VAULT_ROWS = 4;
-
-/**
- * Divide the row budget between synced and local vaults: an even split when
- * both kinds can fill their half, otherwise the kind that has vaults takes the
- * space the other one isn't using. Signed out there are no synced vaults, so
- * local takes all four.
- *
- * Deliberately not proportional — someone with 12 synced and 1 local should
- * still see that 1 local vault, because it's the one the split is there to
- * protect. It only loses its slot when it doesn't exist.
- */
-export function splitVaultRows(
-  syncedCount: number,
-  localCount: number,
-  budget = POPOVER_VAULT_ROWS,
-): { synced: number; local: number } {
-  const half = Math.floor(budget / 2);
-  // Each kind is guaranteed its half; local then claims whatever synced left
-  // unused, and synced claims what's still free after that.
-  const local = Math.min(localCount, budget - Math.min(syncedCount, half));
-  return { synced: Math.min(syncedCount, budget - local), local };
-}
-
-/**
- * Recent on-disk folders that aren't bound to a synced vault — i.e. the
- * user's LOCAL vaults. A vault is one concept in two states; these are
- * the ones that just aren't syncing to an org yet.
- */
-function useLocalVaults(nonce = 0): RecentVault[] {
+/** Every recently opened folder on this device, newest first. */
+function useRecentVaults(nonce = 0): RecentVault[] {
   const [recents, setRecents] = useState<RecentVault[]>([]);
   // Re-fetch when the open folder changes (a switch/open reorders recents) and
   // when `nonce` is bumped (after a local remove/delete removes a row).
@@ -319,8 +293,39 @@ function useLocalVaults(nonce = 0): RecentVault[] {
       alive = false;
     };
   }, [nonce, openPath]);
-  const bound = new Set(Object.values(readOrgVaults()));
-  return recents.filter((r) => !bound.has(r.path));
+  return recents;
+}
+
+/**
+ * Vaults this account knows about: the ones it holds now, plus the cached list
+ * (which survives sign-out and a dropped connection). Used to tell a folder
+ * bound to a real vault from one bound to a vault that's gone — see
+ * `unboundRecents` for why that distinction is what un-hides ghost vaults.
+ */
+function useKnownOrgIds(): ReadonlySet<string> {
+  const organizations = useStore((s) => s.organizations);
+  return useMemo(
+    () =>
+      new Set([
+        ...organizations.map((o) => o.id),
+        ...readKnownVaults().map((v) => v.id),
+      ]),
+    [organizations],
+  );
+}
+
+/**
+ * Recent on-disk folders that aren't bound to a vault in this account — i.e.
+ * the user's LOCAL vaults. A vault is one concept in two states; these are
+ * the ones that just aren't syncing to a vault yet.
+ */
+function useLocalVaults(nonce = 0): RecentVault[] {
+  const recents = useRecentVaults(nonce);
+  const knownOrgIds = useKnownOrgIds();
+  return useMemo(
+    () => unboundRecents(recents, readOrgVaults(), knownOrgIds),
+    [recents, knownOrgIds],
+  );
 }
 
 /** Native-pick a folder and open it as a local vault, then close the menu. */
@@ -399,63 +404,97 @@ function NewVaultItem({ onDone }: { onDone: () => void }) {
 }
 
 /**
- * The "On this device" rows: local vaults you can switch to with one click.
- * `limit` caps how many show inline; the rest are reached through the Vault
- * settings row just below, which lists local and synced together — so there's
- * no "All local vaults (N)" link here spending a row to say what the item
- * under it already does. The current local vault is always pinned to the top
- * so it never hides behind the cap.
+ * The vault switcher's rows: every vault you can switch to with one click,
+ * newest-opened first, capped at four (`recentVaultRows` explains why they're
+ * one list rather than two). The rest are on the Vaults settings page, reached
+ * through the Vault settings row just below — so there's no "All vaults (N)"
+ * link here spending a row to say what the item under it already does.
  */
-function LocalVaultRows({
+function VaultRows({
   onClose,
+  organizations,
+  recents,
   locals,
-  limit,
+  budget = POPOVER_VAULT_ROWS,
 }: {
   onClose: () => void;
-  /** Passed in rather than fetched here: the caller needs the count anyway to
-   *  divide the row budget, and two `useLocalVaults()` calls would mean two
-   *  IPC round-trips for one list. */
-  locals: RecentVault[];
-  limit?: number;
+  organizations: readonly { id: string; name: string }[];
+  /** The full recents list — where a synced vault's last-opened time comes from. */
+  recents: readonly RecentVault[];
+  /** Passed in rather than fetched here: the caller already has the list, and
+   *  a second `useLocalVaults()` would mean a second IPC round-trip for it. */
+  locals: readonly RecentVault[];
+  budget?: number;
 }) {
-  const vault = useStore((s) => s.vault);
-  const syncEnabled = useStore((s) => s.syncEnabled);
-  if (locals.length === 0) return null;
-  const isCurrentLocal = (path: string) => !syncEnabled && vault?.path === path;
-  const ordered = [
-    ...locals.filter((r) => isCurrentLocal(r.path)),
-    ...locals.filter((r) => !isCurrentLocal(r.path)),
-  ];
-  const shown = limit ? ordered.slice(0, limit) : ordered;
+  const openPath = useStore((s) => s.vault?.path) ?? null;
+  const rows = useMemo(
+    () =>
+      recentVaultRows({
+        organizations,
+        locals,
+        orgVaults: readOrgVaults(),
+        openedAt: Object.fromEntries(recents.map((r) => [r.path, r.openedAt])),
+        openPath,
+        budget,
+      }),
+    [organizations, locals, recents, openPath, budget],
+  );
+  if (rows.length === 0) return null;
+
+  const open = (row: VaultRow) => {
+    if (!row.current) {
+      if (row.kind === "synced") {
+        // Fire-and-forget on purpose: the switch is long and the menu should
+        // not sit open through it. The feedback lives in the sidebar header,
+        // which renames itself to this vault immediately (`switchingVault`)
+        // and spins until the folder has swapped.
+        void useStore.getState().setActiveOrganization(row.orgId);
+      } else {
+        void useStore.getState().openLocalVault(row.path);
+      }
+    }
+    onClose();
+  };
+
   return (
     <>
-      <div className="menu-label">On this device</div>
-      {shown.map((r) => {
-        const isCurrent = isCurrentLocal(r.path);
-        return (
-          <button
-            key={r.path}
-            className={`menu-item${isCurrent ? " active" : ""}`}
-            role="menuitemradio"
-            aria-checked={isCurrent}
-            title={r.path}
-            onClick={() => {
-              if (!isCurrent) void useStore.getState().openLocalVault(r.path);
-              onClose();
-            }}
-          >
-            <span className="menu-swatch" aria-hidden="true">
-              {r.name[0]?.toUpperCase() ?? "?"}
-            </span>
-            <span className="menu-item-label">{r.name}</span>
-            {isCurrent ? (
+      <div className="menu-label">Baalda Vaults</div>
+      {rows.map((row) => (
+        <button
+          key={row.key}
+          className={`menu-item${row.current ? " active" : ""}`}
+          role="menuitemradio"
+          aria-checked={row.current}
+          title={row.kind === "local" ? row.path : undefined}
+          onClick={() => open(row)}
+        >
+          <span className="menu-swatch" aria-hidden="true">
+            {row.name[0]?.toUpperCase() ?? "?"}
+          </span>
+          <span className="menu-item-label">{row.name}</span>
+          {row.current ? (
+            <>
               <span className="menu-current">Current</span>
-            ) : (
-              <span className="ws-badge local">Local</span>
-            )}
-          </button>
-        );
-      })}
+              <svg
+                className="menu-check"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </>
+          ) : row.kind === "synced" ? (
+            <span className="ws-badge synced">Remote</span>
+          ) : (
+            <span className="ws-badge local">Local</span>
+          )}
+        </button>
+      ))}
     </>
   );
 }
@@ -475,14 +514,14 @@ function SignedOutPopover({
   onOpenSettings: () => void;
 }) {
   const vault = useStore((s) => s.vault);
+  const recents = useRecentVaults();
   const locals = useLocalVaults();
-  // Signed out there are no synced vaults, so local vaults get the whole budget.
-  const rows = splitVaultRows(0, locals.length);
   return (
     <div className="account-popover" role="menu">
       {vault && <HomeButton onClose={onClose} />}
-      <div className="menu-label">Remote vaults</div>
-      <LocalVaultRows onClose={onClose} locals={locals} limit={rows.local} />
+      {/* Signed out there are no vaults in an account, so local folders get
+          the whole budget. */}
+      <VaultRows onClose={onClose} organizations={[]} recents={recents} locals={locals} />
 
       <NewVaultItem onDone={onClose} />
 
@@ -525,6 +564,7 @@ function AccountPopover({
   const pendingInvitations = useStore((s) => s.pendingInvitations);
   const userInvitations = useStore((s) => s.userInvitations);
   const vault = useStore((s) => s.vault);
+  const recents = useRecentVaults();
   const locals = useLocalVaults();
 
   const [joining, setJoining] = useState(false);
@@ -533,13 +573,7 @@ function AccountPopover({
   const [busy, setBusy] = useState(false);
 
   if (!session) return null;
-  const rows = splitVaultRows(organizations.length, locals.length);
   const activeOrgId = session.activeOrganizationId;
-  // "Current" tracks the vault whose folder is actually OPEN right now —
-  // not merely the account's active org. After signing in you can be viewing a
-  // local folder while an org is active; only one row may read "Current".
-  const openPath = vault?.path ?? null;
-  const boundVaults = readOrgVaults();
 
   const joinByCode = async () => {
     if (!joinCode.trim()) return;
@@ -591,61 +625,12 @@ function AccountPopover({
       )}
 
       <div className="menu-sep" />
-      <div className="menu-label">Remote vaults</div>
-
-      {/* Active vault pinned to the top — it's the one you're working in.
-          Only the first few show here; the rest live in Vault settings. */}
-      {[
-        ...organizations.filter((o) => o.id === activeOrgId),
-        ...organizations.filter((o) => o.id !== activeOrgId),
-      ]
-        .slice(0, rows.synced)
-        .map((o) => {
-        const isActive = openPath != null && boundVaults[o.id] === openPath;
-        return (
-          <button
-            key={o.id}
-            className={`menu-item${isActive ? " active" : ""}`}
-            role="menuitemradio"
-            aria-checked={isActive}
-            // Fire-and-forget on purpose: the switch is long and the menu should
-            // not sit open through it. The feedback lives in the sidebar header,
-            // which renames itself to this vault immediately (`switchingVault`)
-            // and spins until the folder has swapped.
-            onClick={() => {
-              if (!isActive) {
-                void useStore.getState().setActiveOrganization(o.id);
-              }
-              onClose();
-            }}
-          >
-            <span className="menu-swatch" aria-hidden="true">
-              {o.name[0]?.toUpperCase() ?? "?"}
-            </span>
-            <span className="menu-item-label">{o.name}</span>
-            {!isActive && <span className="ws-badge synced">Remote</span>}
-            {isActive && (
-              <>
-                <span className="menu-current">Current</span>
-                <svg
-                  className="menu-check"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M20 6 9 17l-5-5" />
-                </svg>
-              </>
-            )}
-          </button>
-        );
-      })}
-
-      <LocalVaultRows onClose={onClose} locals={locals} limit={rows.local} />
+      <VaultRows
+        onClose={onClose}
+        organizations={organizations}
+        recents={recents}
+        locals={locals}
+      />
 
       <NewVaultItem onDone={onClose} />
 
@@ -1583,6 +1568,7 @@ function VaultsTab() {
   // Bumped after a local remove/delete so the recents list re-fetches.
   const [localsNonce, setLocalsNonce] = useState(0);
   const locals = useLocalVaults(localsNonce);
+  const knownOrgIds = useKnownOrgIds();
 
   const [root, setRoot] = useState<string | null>(null);
   const [bound, setBound] = useState<Record<string, string>>(() => readOrgVaults());
@@ -1777,6 +1763,13 @@ function VaultsTab() {
     ...organizations.filter((o) => o.id !== activeOrgId),
   ];
 
+  // A folder still carrying a binding to a vault this account doesn't have:
+  // the vault was deleted, or belongs to another account, or the binding is
+  // just stale. It's listed here (not silently swallowed as "bound") so the
+  // user's notes are never on disk and absent from every list at once.
+  const orphanBinding = (path: string) =>
+    Object.entries(bound).some(([orgId, p]) => p === path && !knownOrgIds.has(orgId));
+
   const localsOrdered = [
     ...locals.filter((r) => !syncEnabled && vault?.path === r.path),
     ...locals.filter((r) => !(!syncEnabled && vault?.path === r.path)),
@@ -1937,8 +1930,15 @@ function VaultsTab() {
                   </span>
                   <span className="member-name">
                     {r.name}
-                    <span className="muted vault-folder" title={r.path}>
-                      {" · Local"}
+                    <span
+                      className="muted vault-folder"
+                      title={
+                        orphanBinding(r.path)
+                          ? `${r.path} — this folder was synced to a vault that isn't in this account`
+                          : r.path
+                      }
+                    >
+                      {orphanBinding(r.path) ? " · Local · was synced elsewhere" : " · Local"}
                     </span>
                   </span>
                   {confirmDeleteLocal === r.path ? (

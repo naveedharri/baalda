@@ -400,7 +400,9 @@ pub fn delete_vault(app: AppHandle, path: String) -> AppResult<()> {
     write_config(&app, &cfg)
 }
 
-/// Create a brand-new empty vault folder `<parent>/<name>` and open it.
+/// Create a brand-new empty vault folder `<parent>/<name>` and open it. A name
+/// whose folder is taken gets a numeric suffix (see `free_vault_dir`) rather
+/// than an error — duplicate vault names are allowed.
 #[tauri::command]
 pub async fn create_vault(
     app: AppHandle,
@@ -417,12 +419,28 @@ pub async fn create_vault(
     {
         return Err(AppError::new("invalid vault name"));
     }
-    let dir = PathBuf::from(&parent).join(name);
-    if dir.exists() {
-        return Err(AppError::new("a folder with that name already exists"));
-    }
+    let dir = free_vault_dir(Path::new(&parent), name)
+        .ok_or_else(|| AppError::new("a folder with that name already exists"))?;
     std::fs::create_dir_all(&dir)?;
     open_vault_inner(&app, &state, dir)
+}
+
+/// `<parent>/<name>`, or the first free `<parent>/<name> 2`, `… 3`, … if that
+/// folder is taken. None if every candidate up to 99 exists.
+///
+/// A vault's identity is its `doc_id`s, never its name, so two vaults may share
+/// a display name — including one already on this disk. This used to be a hard
+/// error ("a folder with that name already exists"), which made a name someone
+/// else had picked (a teammate's vault, an old folder of your own) un-typeable
+/// rather than merely un-repeatable as a *folder*. A local vault is named by
+/// its folder, so the second "hey" reads "hey 2" — nameable, and renamable
+/// from Finder — instead of refusing to be created at all.
+fn free_vault_dir(parent: &Path, name: &str) -> Option<PathBuf> {
+    let first = parent.join(name);
+    if !first.exists() {
+        return Some(first);
+    }
+    (2..100).map(|n| parent.join(format!("{name} {n}"))).find(|d| !d.exists())
 }
 
 /// Report whether a folder already looks like a vault (has our `.context/` index
@@ -1220,6 +1238,26 @@ mod tests {
             peek_vault_config(file.to_string_lossy().to_string()).unwrap(),
             None
         );
+    }
+
+    /// Two vaults may share a name (identity is the doc_ids, not the name), so
+    /// a taken folder must not make the name un-typeable — it takes a suffix.
+    #[test]
+    fn free_vault_dir_suffixes_a_taken_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Free name: used exactly as typed.
+        assert_eq!(free_vault_dir(root, "hey").unwrap(), root.join("hey"));
+        // Taken twice over: the first free suffix wins, and the user's name
+        // stays recognizable in it.
+        std::fs::create_dir_all(root.join("hey")).unwrap();
+        assert_eq!(free_vault_dir(root, "hey").unwrap(), root.join("hey 2"));
+        std::fs::create_dir_all(root.join("hey 2")).unwrap();
+        assert_eq!(free_vault_dir(root, "hey").unwrap(), root.join("hey 3"));
+        // A file (not a folder) in the way still counts as taken — creating the
+        // vault there would fail.
+        std::fs::write(root.join("note"), "x").unwrap();
+        assert_eq!(free_vault_dir(root, "note").unwrap(), root.join("note 2"));
     }
 
     /// `folder_exists` is what tells "bound folder moved" (rediscover) from
