@@ -247,6 +247,9 @@ export class VaultRegistry {
   private byPath = new Map<string, DocMapping>();
   /** Reverse of byPath: docId → relPath, for the vault sync engine (spec 05). */
   private byDocId = new Map<string, string>();
+  /** Lazy case-folded view of `byPath` (lowercased path → the path as mapped).
+   *  Null = not built / invalidated; see `canonicalNotePath`. */
+  private byPathCi: Map<string, string> | null = null;
   private folderByPath = new Map<string, string>();
   /** docIds whose content this device has confirmed on the server. See
    *  `VaultSyncConfig.pushed` for why this is an optimization, not a guarantee. */
@@ -373,7 +376,54 @@ export class VaultRegistry {
   /** Announce a change to the path→docId map. Fired freely (once per adopted or
    *  created note); the listener is responsible for coalescing. */
   private notifyMapChanged(): void {
+    // Every `byPath` mutation funnels through here, which makes it the one place
+    // the case-folded view has to be dropped. See `canonicalNotePath`.
+    this.byPathCi = null;
     this.onMapChanged?.();
+  }
+
+  /**
+   * The path this vault already uses for `relPath`, compared case-insensitively,
+   * or null if nothing is mapped there yet.
+   *
+   * macOS and Windows cannot distinguish `Projects/Community/x.md` from
+   * `Projects/community/x.md` — they are one file. If this device maps its disk
+   * spelling to a second doc_id while the server holds another, the two docs
+   * write over each other through that one file forever (the 2026-09-04 runaway;
+   * `samePath` in the server's tree-ops.ts has the full account). The server now
+   * adopts case-insensitively and answers with its canonical spelling, so this
+   * is the client half: recognise that we already track the file and reuse the
+   * mapping instead of registering a twin.
+   *
+   * Exact hits skip the folded map entirely, so the common path is one Map.get
+   * and nothing is built during a reconcile that finds everything already
+   * mapped. The lazy index is rebuilt at most once per mutation batch.
+   */
+  private canonicalNotePath(relPath: string): string | null {
+    if (this.byPath.has(relPath)) return relPath;
+    if (!this.byPathCi) {
+      this.byPathCi = new Map();
+      // Insertion order = first writer wins, so a vault that still holds
+      // pre-migration-023 twins resolves to one of them consistently rather
+      // than alternating between passes.
+      for (const rp of this.byPath.keys()) {
+        const k = rp.toLowerCase();
+        if (!this.byPathCi.has(k)) this.byPathCi.set(k, rp);
+      }
+    }
+    return this.byPathCi.get(relPath.toLowerCase()) ?? null;
+  }
+
+  /** Folder twin of {@link canonicalNotePath}. Scanned rather than indexed:
+   *  `folderByPath` is a fraction of `byPath` and this runs only when a folder
+   *  is genuinely missing from the map. */
+  private canonicalFolderPath(relPath: string): string | null {
+    if (this.folderByPath.has(relPath)) return relPath;
+    const want = relPath.toLowerCase();
+    for (const rp of this.folderByPath.keys()) {
+      if (rp.toLowerCase() === want) return rp;
+    }
+    return null;
   }
 
   /**
@@ -429,6 +479,7 @@ export class VaultRegistry {
     this.organizationId = null;
     this.byPath.clear();
     this.byDocId.clear();
+    this.byPathCi = null;
     this.folderByPath.clear();
     this.pushed.clear();
     // A surviving baseline is exactly the cross-vault confusion this method
@@ -778,6 +829,19 @@ export class VaultRegistry {
               : "deleted on the server, but this device never confirmed its content — left on disk",
           code: null,
         });
+        // Stop claiming the path, so the file can re-register on a later pass.
+        //
+        // Without this the baseline keeps naming this docId at this path, the
+        // plan suppresses the path on every pass, and the file is stranded:
+        // visible in the sidebar, never counted, never uploaded, while the header
+        // reads "Synced". For a note whose content this device never confirmed
+        // upstream that is the worst possible outcome — the local copy is the ONLY
+        // copy, and we were leaving it unsyncable on purpose. Re-registering it
+        // gets that work onto the server instead.
+        //
+        // NOT for a revocation: there the server still holds the content and the
+        // user has lost write access, so re-registering would only 403 in a loop.
+        if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
         continue;
       }
       await this.host?.releaseDoc(gone.docId);
@@ -814,7 +878,43 @@ export class VaultRegistry {
     // "I don't know" must remove nothing.)
     for (const path of plan.stubs) {
       if (this.stopRun()) break;
-      if (!(await this.isEmptyOnDisk(path))) continue;
+      if (!(await this.isEmptyOnDisk(path))) {
+        // A file WITH content at a path the server says was deleted, and no
+        // docId match to prove it is that note (the `dead && loc === undefined`
+        // branch in `planInbound`). We will not trash it — we cannot prove whose
+        // it is — but we must also stop claiming it, or the baseline suppresses
+        // this path on every pass forever and the user's content becomes
+        // permanently unsyncable while the header still reads "Synced".
+        //
+        // That is exactly what re-dropping a previously-synced folder did: 176
+        // `Daily/*` tombstones still held baseline entries, the re-imported files
+        // landed on those same paths under fresh local index ids, and all 176 were
+        // suppressed — `0/174`, nothing queued, no error, and only opening a note
+        // synced it (the editor calls `registerNote` directly, bypassing
+        // `suppress`). Releasing the claim lets the NEXT pass register it as the
+        // new local note it is.
+        //
+        // The trade this makes, deliberately: a file that really IS the deleted
+        // note — same path, new local identity — re-registers under a fresh docId
+        // instead of staying dead (the resurrect this branch was written to
+        // prevent). That case is visible and re-deletable; silent permanent
+        // divergence is neither, and `.md` on disk is the source of truth. The
+        // device that performed the delete removes its own file, so it never
+        // reaches here. Recorded rather than done silently.
+        for (const [docId, rp] of [...this.baselineDocs]) {
+          if (rp !== path) continue;
+          this.baselineDocs.delete(docId);
+          this.recordFailure({
+            kind: "inbound",
+            path,
+            docId,
+            reason:
+              "deleted on the server but still on disk with content — re-registering it as a new local note",
+            code: "resurrected_local_note",
+          });
+        }
+        continue;
+      }
       if (this.stale()) return { changedDisk, suppress: plan.suppress };
       try {
         await ipc.trashNote(path, stamp, this.epoch());
@@ -1481,8 +1581,11 @@ export class VaultRegistry {
     if (this.stale()) return null;
     const vaultId = this.serverVaultId;
     if (!vaultId) return null;
-    const existing = this.byPath.get(relPath);
-    if (existing) return existing;
+    // Case-insensitive, because on macOS/Windows a case-variant of a path we
+    // already track is the SAME FILE — registering it would map one file to two
+    // doc_ids and start the ping-pong (see `canonicalNotePath`).
+    const mappedAs = this.canonicalNotePath(relPath);
+    if (mappedAs) return this.byPath.get(mappedAs) ?? null;
     try {
       const folderId = this.folderByPath.get(parentDir(relPath)) ?? null;
       const created = await this.api.createNote({
@@ -1496,7 +1599,11 @@ export class VaultRegistry {
       });
       if (this.stale() || this.serverVaultId !== vaultId) return null;
       const mapping = { vaultId, docId: noteDocId(created) };
-      this.setMapping(relPath, mapping.docId, vaultId);
+      // Key by the path the SERVER says this doc lives at. It adopts by path
+      // case-insensitively, so when its spelling differs from ours this is how
+      // the two converge — keying by our own `relPath` instead would leave the
+      // server's spelling unmapped and re-register it on every pass.
+      this.setMapping(noteRelPath(created) ?? relPath, mapping.docId, vaultId);
       this.checkpoint?.touch();
       return mapping;
     } catch (e) {
@@ -1520,8 +1627,10 @@ export class VaultRegistry {
     if (this.stale()) return null;
     const vaultId = this.serverVaultId;
     if (!vaultId) return null;
-    const existing = this.folderByPath.get(relPath);
-    if (existing) return existing;
+    // Case-insensitive for the same reason as `registerNote`: one directory on
+    // disk must not become two folder rows whose subtrees then fork.
+    const mappedAs = this.canonicalFolderPath(relPath);
+    if (mappedAs) return this.folderByPath.get(mappedAs) ?? null;
     try {
       const parentId = this.folderByPath.get(parentDir(relPath)) ?? null;
       const created = await this.api.createFolder({
@@ -1531,7 +1640,8 @@ export class VaultRegistry {
         parentId,
       });
       if (this.stale() || this.serverVaultId !== vaultId) return null;
-      this.folderByPath.set(relPath, created.id);
+      // The server's canonical spelling, as in `registerNote`.
+      this.folderByPath.set(created.path ?? relPath, created.id);
       this.persist();
       return created.id;
     } catch (e) {
