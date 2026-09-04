@@ -30,6 +30,10 @@
     "core:window:allow-show",
     "core:window:allow-unminimize",
     {
+      "identifier": "log:default",
+      "comment": "Lets the React layer write to the app log. A `console.log` in a WKWebView reaches only the Web Inspector, so without this the UI cannot report anything to whoever is reading the `tauri dev` terminal. The plugin is registered for debug builds only (src/lib.rs)."
+    },
+    {
       "identifier": "deep-link:default",
       "comment": "Registers the `baalda://` URL scheme and lets the webview subscribe to opens on it. This is how a shared note link gets from a teammate's chat window into this app; the payload is only ever a vault + note id, and the handler resolves it against the signed-in user's own access."
     }
