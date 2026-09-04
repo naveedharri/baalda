@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import type { Server as HttpServer } from "node:http";
 import { config } from "./config.js";
 import { createApp } from "./http/app.js";
-import { createSyncServer, disconnectDoc } from "./sync/hocuspocus.js";
+import { createSyncServer, disconnectDoc, evictDoc } from "./sync/hocuspocus.js";
 import { attachSyncUpgrade } from "./sync/http-upgrade.js";
 import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
@@ -88,6 +88,7 @@ async function main() {
 
   const app = createApp({
     disconnectDoc: (vaultId, docId) => disconnectDoc(sync, vaultId, docId),
+    evictDoc: (vaultId, docId) => evictDoc(sync, vaultId, docId),
     // Share create/revoke → subscribers re-evaluate their readable-doc set.
     onAclChanged: (vaultId) =>
       void vaultChannel.publishAclChanged(vaultId).catch(broadcastFailed("acl-changed")),

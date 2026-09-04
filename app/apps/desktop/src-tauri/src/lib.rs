@@ -111,6 +111,8 @@ pub fn run() {
             commands::save_yjs_snapshot,
             commands::save_yjs_state_vectors,
             commands::list_yjs_state_vectors,
+            commands::prune_yjs_docs,
+            commands::clear_yjs_doc,
             commands::read_binary_file,
             commands::write_binary_file,
             commands::list_attachments,

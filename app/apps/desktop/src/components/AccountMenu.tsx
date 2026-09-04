@@ -197,7 +197,7 @@ export function AccountMenu() {
   const presence =
     syncStatus === "no-access"
       ? "blocked"
-      : syncStatus === "connecting" || syncStatus === "error"
+      : syncStatus === "connecting" || syncStatus === "error" || syncStatus === "too-large"
         ? "idle"
         : connected
           ? // online → "active"; away/busy pass through; invisible → "offline".

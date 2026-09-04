@@ -22,6 +22,31 @@ import { redisExtensions } from "./redis-extension.js";
 // load echo apart from real client edits and skip persisting it.
 const LOAD_ORIGIN = "hocuspocus:load";
 
+/**
+ * WebSocket close code for "this doc's Yjs state is over `MAX_NOTE_MB`".
+ *
+ * In the private 4000–4999 range on purpose: those are reserved for application
+ * use and every WebSocket implementation lets an endpoint send them, where the
+ * protocol-level 1009 ("Message Too Big") is filtered by some stacks. Hocuspocus
+ * copies `code`/`reason` off a thrown error onto the close frame
+ * (`Connection.handleMessage`), which is how this reaches the client.
+ *
+ * The desktop client mirrors this constant in `src/lib/sync/syncManager.ts` and
+ * treats it as TERMINAL — no reconnect. Keep the two in lockstep.
+ */
+export const CLOSE_NOTE_TOO_LARGE = 4413;
+
+/** Thrown by `beforeHandleMessage`; shaped so Hocuspocus emits a close frame
+ *  the client can act on rather than a generic reset. */
+class NoteTooLargeError extends Error {
+  readonly code = CLOSE_NOTE_TOO_LARGE;
+  readonly reason = "note exceeds the maximum size";
+  constructor() {
+    super("note exceeds the maximum size");
+    this.name = "NoteTooLargeError";
+  }
+}
+
 export interface SyncContext {
   docId: string;
   vaultId: string;
@@ -81,6 +106,14 @@ export function createSyncServer(
      * duplicating the content on every bounce. Throwing rejects the message and
      * closes the connection BEFORE the update is applied or broadcast, so the
      * oversized state can neither persist nor fan out.
+     *
+     * The thrown error carries {@link CLOSE_NOTE_TOO_LARGE} so the close frame
+     * NAMES this cause. Hocuspocus otherwise falls back to `ResetConnection`
+     * (4205) — the same code a transient server-side reset uses — and a client
+     * cannot tell "retry me" from "I will refuse this doc forever". That
+     * ambiguity is the bug: the provider reconnected, re-sent the same
+     * oversized state, was closed again, and strobed the sync badge about once
+     * a second for as long as the app was open.
      */
     async beforeHandleMessage(data) {
       const cap = config.maxNoteMb * 1024 * 1024;
@@ -89,7 +122,7 @@ export function createSyncServer(
           `Rejecting oversized sync message for ${data.documentName}: ` +
             `${data.update.byteLength} bytes (cap ${cap})`,
         );
-        throw new Error("note exceeds the maximum size");
+        throw new NoteTooLargeError();
       }
     },
 
@@ -219,4 +252,26 @@ export function disconnectDoc(
   docId: string,
 ): void {
   server.hocuspocus.closeConnections(formatDocName(vaultId, docId));
+}
+
+/**
+ * Close every connection to a doc AND drop it from memory.
+ *
+ * `disconnectDoc` alone is not enough after the doc's rows change underneath the
+ * server: Hocuspocus keeps the loaded `Y.Doc` and would serve that cached copy
+ * to the next client, re-materialising the very state we just deleted. Unloading
+ * forces the next connect through `onLoadDocument`, i.e. back to Postgres.
+ *
+ * Order matters — `unloadDocument` no-ops while connections remain.
+ */
+export async function evictDoc(
+  server: Server<SyncContext>,
+  vaultId: string,
+  docId: string,
+): Promise<void> {
+  const name = formatDocName(vaultId, docId);
+  const hp = server.hocuspocus;
+  hp.closeConnections(name);
+  const doc = hp.documents.get(name);
+  if (doc) await hp.unloadDocument(doc);
 }

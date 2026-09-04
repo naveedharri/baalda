@@ -20,7 +20,27 @@ export type SyncStatus =
   | "synced" // read-write, converged with server
   | "read-only" // synced but the grant is view-only
   | "no-access" // server refused a token (403) — not shared with this user
+  | "too-large" // doc's Yjs state exceeds the server cap — TERMINAL, no retry
   | "error"; // transient failure (will retry)
+
+/**
+ * Close code the server sends when a doc's sync message is over `MAX_NOTE_MB`
+ * (`apps/server/src/sync/hocuspocus.ts` `CLOSE_NOTE_TOO_LARGE`). Keep in lockstep.
+ *
+ * This exists so the two failures that both arrive as "the server closed us" can
+ * be told apart. A generic reset means retry; this one means the server will
+ * refuse this doc identically every time, so retrying is an infinite loop —
+ * which is precisely what it did: reconnect → 17 MB message → close → reconnect,
+ * about once a second, flipping the badge Syncing/Synced for as long as the app
+ * stayed open.
+ */
+export const CLOSE_NOTE_TOO_LARGE = 4413;
+
+/** Statuses from which no reconnect will ever help. Reaching one must stop the
+ *  provider's own retry loop, not merely paint a different colour. */
+export function isTerminalSyncStatus(s: SyncStatus): boolean {
+  return s === "no-access" || s === "too-large";
+}
 
 export interface DocSyncOptions {
   api: ApiClient;
@@ -180,7 +200,7 @@ export class DocSync {
         // the server always rejects): reject → reconnect → reject, as fast as the
         // socket can cycle. That spins the CPU, floods the server log, and — since
         // each lap flips status error→connecting→error — strobes the sync badge.
-        if (!this.destroyed && this._status !== "no-access") {
+        if (!this.destroyed && !isTerminalSyncStatus(this._status)) {
           this.setStatus("error");
           this.scheduleAuthRetry();
         }
@@ -194,7 +214,29 @@ export class DocSync {
         // would keep its stale grant until the note is reopened. An open socket
         // is what distinguishes the in-band kick from a real disconnect (which
         // the provider's own backoff already handles).
-        if (this.destroyed || this._status === "no-access") return;
+        if (this.destroyed || isTerminalSyncStatus(this._status)) return;
+        // The server named this one: our Yjs state is over its cap. Reconnecting
+        // re-sends the same oversized state for the same close, forever. Go
+        // terminal and take the socket down so the provider's own backoff loop
+        // stops too — the status alone would not, and that loop is the strobe.
+        if (event.code === CLOSE_NOTE_TOO_LARGE) {
+          this.setStatus("too-large");
+          this.refresher.cancel();
+          // Anything awaiting a flush will never get one; failing them is what
+          // keeps this doc OUT of the pushed checkpoint (so it is reported, not
+          // silently claimed synced).
+          this.releaseFlushWaiters(false);
+          if (this.authRetryTimer) {
+            clearTimeout(this.authRetryTimer);
+            this.authRetryTimer = null;
+          }
+          try {
+            this.provider.configuration.websocketProvider?.disconnect();
+          } catch {
+            // Already gone — the terminal status is what matters.
+          }
+          return;
+        }
         const ws = this.provider.configuration.websocketProvider?.webSocket;
         if (event.code === 1000 && ws && ws.readyState === ws.OPEN) {
           this.reconnectWithFreshToken();
@@ -212,14 +254,14 @@ export class DocSync {
           // overwrite no-access, reopening the guard on every other handler here.
           // A doc we've been refused then retried forever: 403 → no-access →
           // "connecting" clears it → empty token → rejected → repeat, ~4×/second.
-          if (this._status === "no-access") return;
+          if (isTerminalSyncStatus(this._status)) return;
           this.setStatus("connecting");
         } else if (status === "disconnected") {
-          if (this._status !== "no-access") this.setStatus("offline");
+          if (!isTerminalSyncStatus(this._status)) this.setStatus("offline");
         }
       },
       onSynced: () => {
-        if (!this.destroyed && this._status !== "no-access") {
+        if (!this.destroyed && !isTerminalSyncStatus(this._status)) {
           this.noteAuthSuccess();
           this.setStatus(this._readOnly ? "read-only" : "synced");
         }
@@ -248,7 +290,7 @@ export class DocSync {
         if (this.settleTimer) clearTimeout(this.settleTimer);
         this.settleTimer = setTimeout(() => {
           this.settleTimer = null;
-          if (this.destroyed || this._status === "no-access") return;
+          if (this.destroyed || isTerminalSyncStatus(this._status)) return;
           const wasPending = this._pending;
           this.setPending(false);
           // Only stamp "synced just now" on the real pending→settled edge.
@@ -286,7 +328,7 @@ export class DocSync {
       this.provider.on("synced", onSynced);
       const timer = setTimeout(() => finish(resolve), timeoutMs); // resolve anyway → offline-first
       // If access was already refused, don't wait the full timeout.
-      if (this._status === "no-access") finish(() => reject(new Error("no access")));
+      if (isTerminalSyncStatus(this._status)) finish(() => reject(new Error(this._status)));
     });
   }
 
@@ -302,7 +344,7 @@ export class DocSync {
    */
   whenFlushed(timeoutMs = 30_000): Promise<boolean> {
     if (this.destroyed) return Promise.resolve(false);
-    if (this._status === "no-access") return Promise.resolve(false);
+    if (isTerminalSyncStatus(this._status)) return Promise.resolve(false);
     if (this.unsyncedCount === 0 && this.provider.isSynced) return Promise.resolve(true);
     return new Promise<boolean>((resolve) => {
       let done = false;
@@ -342,7 +384,7 @@ export class DocSync {
     this.authFailures++;
     this.authRetryTimer = setTimeout(() => {
       this.authRetryTimer = null;
-      if (this.destroyed || this._status === "no-access") return;
+      if (this.destroyed || isTerminalSyncStatus(this._status)) return;
       this.reconnectWithFreshToken();
     }, delay);
   }
@@ -368,7 +410,7 @@ export class DocSync {
       // then rejected still flashed success first. Read-only is a property of the
       // grant rather than the connection, so it's safe to reflect immediately;
       // "synced" now waits for onStatus/onSynced.
-      if (this._status !== "no-access" && res.readOnly) {
+      if (!isTerminalSyncStatus(this._status) && res.readOnly) {
         this.setStatus("read-only");
       }
       return res.token;
@@ -409,6 +451,10 @@ export class DocSync {
 
   private reconnectWithFreshToken(): void {
     if (this.destroyed || this.reconnectPending) return;
+    // Terminal means terminal, whoever calls: the token refresher, an auth
+    // retry, or an in-band kick. Without this the single guard in `onClose` is
+    // one missed caller away from the reconnect storm coming back.
+    if (isTerminalSyncStatus(this._status)) return;
     const wsp = this.provider.configuration.websocketProvider;
     // v4 gotcha: connect() silently no-ops while the socket status is still
     // "connected" — and disconnect()'s close event only flips it to

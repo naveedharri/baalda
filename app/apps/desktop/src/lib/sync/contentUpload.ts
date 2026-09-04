@@ -35,6 +35,7 @@
 // creation, timers) is injected, so the whole engine runs under vitest in Node.
 
 import type * as Y from "yjs";
+import { encodeStateAsUpdate } from "yjs";
 import type { NoteBridge } from "../bridge";
 import { UPLOAD_CONCURRENCY, runPool } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
@@ -78,8 +79,34 @@ export interface ContentUploadDeps {
  * the next `ready.empty` queued it again. Two such files in one production vault
  * cost a rejected socket apiece on every reconnect of every member, forever.
  * Here the doc fails ONCE, permanently, with a reason a person can act on.
+ *
+ * ── Measure the DOC, not just the file ───────────────────────────────────────
+ * The cap has to be applied to both, because they are different numbers and the
+ * server only ever sees one of them. What goes on the wire is the encoded Yjs
+ * state; the `.md` on disk is just the text that state currently serializes to.
+ * A doc carrying megabytes of CRDT history — duplication garbage from a past
+ * fork/ping-pong, say — can sit behind a file of ZERO bytes.
+ *
+ * Checking only the file is how this bug came back: four notes in a production
+ * vault held 10–17 MB of Yjs state behind 0-byte files, so the file check
+ * passed, a socket opened, the server rejected the ~17 MB message and closed the
+ * connection, the provider reconnected — about once a second, forever, strobing
+ * the sync badge. {@link crdtBytes} is the measurement that matches the server's.
  */
 export const MAX_NOTE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * What this doc would put on the wire: its full encoded Yjs state.
+ *
+ * Deliberately the conservative measure. The provider actually sends only the
+ * diff the server lacks, which can be smaller — but a doc whose ENTIRE state is
+ * over the cap is pathological for a markdown note however you slice it, and
+ * refusing it locally is strictly better than learning the same thing from a
+ * closed socket. Costs one encode per doc per run, on a doc already in memory.
+ */
+export function crdtBytes(doc: Y.Doc): number {
+  return encodeStateAsUpdate(doc).byteLength;
+}
 
 const utf8 = new TextEncoder();
 
@@ -327,6 +354,26 @@ export class ContentUploader {
     // any network work binds this doc to a collection that is no longer current.
     if (this.shouldStop()) {
       await this.releaseQuietly(docId);
+      return false;
+    }
+
+    // THE size ceiling, measured the way the server measures it: on the encoded
+    // Yjs state, which is what the socket would actually carry. Runs before the
+    // file checks below and independently of `readFile`, because a doc can be
+    // over the cap with no file at all (or, as in the production vault that
+    // brought this back, with a 0-byte one). See {@link MAX_NOTE_BYTES}.
+    const stateBytes = crdtBytes(bridge.doc);
+    if (stateBytes > MAX_NOTE_BYTES) {
+      await this.releaseQuietly(docId);
+      const mb = (stateBytes / (1024 * 1024)).toFixed(1);
+      const cap = Math.round(MAX_NOTE_BYTES / (1024 * 1024));
+      this.fail(
+        docId,
+        relPath,
+        `too large to sync (${mb} MB of edit history; the limit is ${cap} MB) — ` +
+          `reset this note's history to sync it again`,
+        { permanent: true },
+      );
       return false;
     }
 

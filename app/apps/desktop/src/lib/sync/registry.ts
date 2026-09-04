@@ -577,6 +577,20 @@ export class VaultRegistry {
     this.checkpoint?.touch();
   }
 
+  /**
+   * Forget that `docId`'s content is on the server.
+   *
+   * The counterpart to `markPushed`, for the one case where the server's copy
+   * genuinely goes away underneath a live checkpoint: a history reset
+   * (`SyncManager.resetNoteHistory`). Leaving the doc marked pushed there would
+   * skip it in every future content run, so the freshly-emptied server doc would
+   * never be re-filled from the file.
+   */
+  unmarkPushed(docId: string): void {
+    if (!this.pushed.delete(docId)) return;
+    this.checkpoint?.touch();
+  }
+
   /** Flush any owed checkpoint now (end of a phase / before teardown). */
   async flushCheckpoint(): Promise<void> {
     await this.checkpoint?.flush();

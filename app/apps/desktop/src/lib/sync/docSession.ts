@@ -20,6 +20,7 @@ import { colorForUser, presenceUser } from "../presence/color";
 import type { ActivityStatus } from "../prefs";
 import { AttachmentSync } from "./attachments";
 import { ContentUploader, type UploadFailure } from "./contentUpload";
+import { collectCrdtGarbage } from "./crdtGc";
 import { runPool } from "./pool";
 import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
@@ -338,7 +339,7 @@ export class SyncManager implements InboundHost {
       const state: DocSyncState =
         s === "synced" || s === "read-only"
           ? "synced"
-          : s === "no-access" || s === "error"
+          : s === "no-access" || s === "too-large" || s === "error"
             ? "error"
             : "syncing";
       this.reportOpenDocState(docId, state);
@@ -1021,6 +1022,15 @@ export class SyncManager implements InboundHost {
       // folder is open — exactly the state that merged two vaults.
       if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
       this.enabled = true;
+      // Sweep unreachable CRDT rows HERE and nowhere else: the registry map is
+      // complete as of the line above, and the download phase below has not yet
+      // begun to create docs. Fire-and-forget — a vault that cannot be tidied
+      // must still open. See `crdtGc.ts` for why the allow-list is built from
+      // two id spaces.
+      void collectCrdtGarbage(
+        { registryDocIds: () => this.registry.allDocIds() },
+        { epoch: scope.vaultEpoch ?? undefined, pinned: this.currentDocId ? [this.currentDocId] : [] },
+      );
       this.setupAttachments(scope);
       // Initial attachment reconcile (fire-and-forget; errors are logged rather
       // than left to surface as an unhandled rejection).
@@ -1053,6 +1063,61 @@ export class SyncManager implements InboundHost {
     // The disk probe behind a `ready` runs before the run it may start.
     while (this.emptyProbe) await this.emptyProbe;
     await (this.bulkRun ?? Promise.resolve());
+  }
+
+  /**
+   * Repair a note the server has permanently refused for being over its size cap.
+   *
+   * Nothing else can unstick such a note. It is rejected before a single update
+   * is applied, so it cannot be edited down; and its bulk is edit HISTORY, not
+   * text, so compaction cannot shrink it either. The only exit is to discard the
+   * history on both sides and start the doc again from the text.
+   *
+   * DESTRUCTIVE, and deliberately explicit: the note's text survives (the file on
+   * disk is the durable source of truth and is what re-seeds the doc), its
+   * history does not. Never call this automatically — a doc over the cap with a
+   * legitimately large file needs a smaller note, not a silently emptied one.
+   *
+   * ── Order is the whole correctness argument ─────────────────────────────────
+   *   1. SERVER first. While the server still holds the old state, any client —
+   *      including this one — can re-upload it.
+   *   2. LOCAL second. A surviving local CRDT merges the old state back on the
+   *      next connect, which is the fork this is undoing.
+   *   3. Re-seed from the file, then re-queue. The bridge rebuilds a fresh doc
+   *      with a new clientID and no shared history with the discarded one.
+   *
+   * Reversing 1 and 2 leaves a window where the local copy is gone but the
+   * server's is not, and the next pull restores the megabytes.
+   */
+  async resetNoteHistory(docId: string): Promise<{ bytesFreed: number }> {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) {
+      throw new Error("sync is not enabled for this vault");
+    }
+    const relPath = this.registry.pathForDocId(docId);
+    if (!relPath) throw new Error(`no note is mapped to ${docId}`);
+
+    // The file is the truth we re-seed from. An unreadable file is not a reason
+    // to reset to empty — bail instead, so a transient read error cannot be the
+    // thing that blanks a note.
+    const content = await ipc.readNote(relPath, scope.vaultEpoch ?? undefined);
+    if (!scope.isCurrent()) throw new Error("vault changed");
+
+    const { bytesBefore, bytesAfter } = await api.resetNoteHistory(docId, content);
+    if (!scope.isCurrent()) throw new Error("vault changed");
+    await ipc.clearYjsDoc(docId, scope.vaultEpoch ?? undefined);
+
+    // It is no longer permanently failed, and the server no longer has its
+    // content — so it must be re-queued rather than left believed-pushed.
+    this.permanentFailures.delete(docId);
+    this.registry.unmarkPushed(docId);
+    this.divergedDocs.add(docId);
+    console.info(
+      `[sync] reset history for ${relPath}: ` +
+        `${(bytesBefore / (1024 * 1024)).toFixed(1)} MB → ` +
+        `${(bytesAfter / 1024).toFixed(1)} KB`,
+    );
+    return { bytesFreed: Math.max(0, bytesBefore - bytesAfter) };
   }
 
   /**

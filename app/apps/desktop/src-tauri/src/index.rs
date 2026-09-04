@@ -1205,6 +1205,131 @@ impl Index {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    /// Drop every CRDT row whose `doc_id` is not in `live`, then report what went.
+    ///
+    /// The CRDT tables are the one part of the index that `rebuild` deliberately
+    /// never touches — that is what lets a rebuild preserve unsynced edits. The
+    /// cost of that safety is that nothing ever removed a doc's rows either, so
+    /// a vault accumulated the CRDT of every note it had ever held: notes
+    /// deleted, renamed into a new id, or forked by a past path collision. One
+    /// production vault carried 953 such docs inside a 900 MB `index.sqlite`.
+    ///
+    /// SAFETY: `live` is the caller's complete set of doc ids that still matter
+    /// (the registry map ∪ the local index ∪ anything open). An EMPTY set is
+    /// refused rather than obeyed — "I know of no live docs" is what a caller
+    /// looks like when it failed to load its map, and honouring it would erase
+    /// every unsynced edit in the vault. A caller that genuinely wants that
+    /// deletes the file.
+    pub fn prune_yjs_docs(&self, live: &[String]) -> AppResult<YjsPruneReport> {
+        if live.is_empty() {
+            return Err(AppError(
+                "refusing to prune CRDT rows against an empty live set".into(),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        // A temp table + anti-join keeps this one pass regardless of vault size;
+        // an `NOT IN (?,?,…)` with 6 000 binds would exceed SQLite's parameter
+        // limit long before it got slow.
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS _live_docs (doc_id TEXT PRIMARY KEY);
+             DELETE FROM _live_docs;",
+        )?;
+        {
+            let mut stmt = tx.prepare("INSERT OR IGNORE INTO _live_docs (doc_id) VALUES (?1)")?;
+            for id in live {
+                stmt.execute(params![id])?;
+            }
+        }
+        let snapshot_bytes: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(snapshot)), 0) FROM yjs_snapshot
+                 WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let update_bytes: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(\"update\")), 0) FROM yjs_updates
+                 WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let docs_removed = tx.execute(
+            "DELETE FROM yjs_snapshot WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
+            [],
+        )? as i64;
+        let updates_removed = tx.execute(
+            "DELETE FROM yjs_updates WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
+            [],
+        )? as i64;
+        tx.execute_batch("DROP TABLE IF EXISTS _live_docs;")?;
+        tx.commit()?;
+        Ok(YjsPruneReport {
+            docs_removed,
+            updates_removed,
+            bytes_reclaimed: snapshot_bytes + update_bytes,
+        })
+    }
+
+    /// Drop ONE doc's CRDT rows: its snapshot, state vector and update log.
+    ///
+    /// The local half of the oversized-note repair. Unlike `prune_yjs_docs` this
+    /// targets a doc that is still very much live — the caller is deliberately
+    /// discarding its history because the server has discarded the same history,
+    /// and leaving the local copy would merge the old state straight back in on
+    /// the next connect.
+    pub fn clear_yjs_doc(&self, doc_id: &str) -> AppResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM yjs_updates WHERE doc_id = ?1", params![doc_id])?;
+        tx.execute("DELETE FROM yjs_snapshot WHERE doc_id = ?1", params![doc_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `VACUUM` the index, returning the bytes the file gave back.
+    ///
+    /// Deleting rows only frees SQLite *pages*, which the file keeps. After a
+    /// prune that dropped hundreds of megabytes of blobs the file on disk is
+    /// unchanged until this runs, so the user sees no space back — which is the
+    /// entire point of the exercise.
+    ///
+    /// Cannot run inside a transaction, and rewrites the whole file, so it is a
+    /// maintenance operation and never part of a hot path.
+    pub fn vacuum(&self) -> AppResult<i64> {
+        let before = self.db_size_bytes();
+        self.conn.execute_batch("VACUUM;")?;
+        let after = self.db_size_bytes();
+        Ok((before - after).max(0))
+    }
+
+    /// Size of the SQLite file itself (page_count × page_size), so callers can
+    /// report reclaimed space without knowing where the file lives.
+    pub fn db_size_bytes(&self) -> i64 {
+        let page_count: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        let page_size: i64 = self
+            .conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap_or(0);
+        page_count * page_size
+    }
+}
+
+/// What one {@link Index::prune_yjs_docs} pass removed.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct YjsPruneReport {
+    /// Docs whose snapshot row was dropped.
+    pub docs_removed: i64,
+    /// Rows dropped from the update log.
+    pub updates_removed: i64,
+    /// Blob bytes freed inside the database (see `vacuum` for file bytes).
+    pub bytes_reclaimed: i64,
 }
 
 /// A doc's persisted CRDT state, as loaded from SQLite (spec 02 §4).
@@ -2039,6 +2164,62 @@ mod tests {
         // An empty batch is a no-op rather than an error.
         idx.save_yjs_state_vectors(&[]).unwrap();
         assert_eq!(idx.list_yjs_state_vectors().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn prune_yjs_docs_removes_only_unreachable_docs() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.append_yjs_update("live-a", &[1, 2, 3]).unwrap();
+        idx.append_yjs_update("live-b", &[4]).unwrap();
+        idx.append_yjs_update("dead", &[5, 6, 7, 8]).unwrap();
+        idx.save_yjs_snapshot("dead", &[9; 64], &[1]).unwrap();
+        idx.append_yjs_update("dead", &[11]).unwrap();
+        // Snapshotting truncates the doc's update log, so append AFTER it to
+        // give live-a both halves — the state a doc edited since its last
+        // compaction is really in.
+        idx.save_yjs_snapshot("live-a", &[7; 32], &[1]).unwrap();
+        idx.append_yjs_update("live-a", &[10]).unwrap();
+
+        let report = idx
+            .prune_yjs_docs(&["live-a".to_string(), "live-b".to_string()])
+            .unwrap();
+
+        assert_eq!(report.docs_removed, 1, "only the unreachable snapshot goes");
+        assert_eq!(report.updates_removed, 1, "only the unreachable update log goes");
+        assert!(report.bytes_reclaimed >= 64);
+        // The live docs keep BOTH halves of their state. A doc that lost its
+        // update log but kept its snapshot would silently lose recent edits.
+        assert_eq!(idx.load_yjs_state("live-a").unwrap().update_count, 1);
+        assert!(idx.load_yjs_state("live-a").unwrap().snapshot.is_some());
+        assert_eq!(idx.load_yjs_state("live-b").unwrap().update_count, 1);
+        let gone = idx.load_yjs_state("dead").unwrap();
+        assert!(gone.snapshot.is_none() && gone.updates.is_empty());
+    }
+
+    #[test]
+    fn prune_yjs_docs_refuses_an_empty_live_set() {
+        // "I know of no live docs" is what a caller looks like when its registry
+        // map failed to load. Obeying it would erase every unsynced edit in the
+        // vault, so this must be an error and not a very efficient wipe.
+        let idx = Index::open_in_memory().unwrap();
+        idx.append_yjs_update("doc-a", &[1, 2]).unwrap();
+        assert!(idx.prune_yjs_docs(&[]).is_err());
+        assert_eq!(idx.load_yjs_state("doc-a").unwrap().update_count, 1);
+    }
+
+    #[test]
+    fn clear_yjs_doc_drops_both_halves_of_one_doc() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.append_yjs_update("target", &[1, 2]).unwrap();
+        idx.save_yjs_snapshot("target", &[3; 16], &[1]).unwrap();
+        idx.append_yjs_update("target", &[4]).unwrap();
+        idx.append_yjs_update("bystander", &[5]).unwrap();
+
+        idx.clear_yjs_doc("target").unwrap();
+
+        let cleared = idx.load_yjs_state("target").unwrap();
+        assert!(cleared.snapshot.is_none() && cleared.updates.is_empty());
+        assert_eq!(idx.load_yjs_state("bystander").unwrap().update_count, 1);
     }
 
     #[test]

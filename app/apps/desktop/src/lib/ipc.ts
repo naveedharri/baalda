@@ -370,6 +370,32 @@ export const saveYjsStateVectors = (
   });
 
 /** Every state vector this vault holds, to rebuild the manifest on launch. */
+/** Discard one doc's local CRDT — the local half of an oversized-note repair.
+ *  Pair with `api.resetNoteHistory`, never on its own. */
+export const clearYjsDoc = (docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("clear_yjs_doc", { docId, expectedEpoch: expectedEpoch ?? null });
+
+/** What one CRDT garbage-collection pass removed (Rust `YjsPruneReport`). */
+export interface YjsPruneReport {
+  docsRemoved: number;
+  updatesRemoved: number;
+  /** Bytes the SQLite FILE gave back after the vacuum. */
+  bytesReclaimed: number;
+}
+
+/**
+ * Drop the CRDT of every doc not in `live`, then vacuum the index.
+ *
+ * `live` must be the COMPLETE set of doc ids still in use — Rust refuses an
+ * empty one rather than wiping the vault. The caller owns this list because the
+ * registry map (`.context/config.json`) is TS-side state; see `collectCrdtGarbage`.
+ */
+export const pruneYjsDocs = (live: string[], expectedEpoch?: VaultEpoch) =>
+  invoke<YjsPruneReport>("prune_yjs_docs", {
+    live,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
 export const listYjsStateVectors = (expectedEpoch?: VaultEpoch) =>
   invoke<{ docId: string; stateVector: number[] }[]>("list_yjs_state_vectors", {
     expectedEpoch: expectedEpoch ?? null,

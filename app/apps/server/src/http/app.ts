@@ -16,6 +16,7 @@ import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
 import { graphRoutes } from "./routes/graph.js";
 import { createMcpRoutes } from "./routes/mcp.js";
+import { createRepairRoutes } from "./routes/repair.js";
 import { createVersionRoutes } from "./routes/versions.js";
 import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
@@ -25,6 +26,15 @@ import type { DocWriter } from "../mcp/doc-writer.js";
 export interface AppDeps extends ShareDeps {
   /** Server-side note writer for the MCP tools (backed by the sync server). */
   docWriter: DocWriter;
+  /**
+   * Close every socket on a doc AND drop the server's cached copy of it.
+   *
+   * Stronger than `disconnectDoc`, and required by any route that rewrites a
+   * doc's rows underneath the sync server: without the unload, Hocuspocus keeps
+   * the loaded `Y.Doc` and hands that stale copy to the next client, undoing the
+   * write. Backed by `sync/hocuspocus.ts` `evictDoc`.
+   */
+  evictDoc: (vaultId: string, docId: string) => Promise<void> | void;
   /** Payment provider. Defaults to Polar; tests inject a fake. */
   billingProvider?: BillingProvider;
   /**
@@ -187,6 +197,7 @@ export function createApp(deps: AppDeps): Hono {
       onRegistryChanged: deps.onRegistryChanged,
     }),
   );
+  app.route("/api", createRepairRoutes({ evictDoc: deps.evictDoc }));
   app.route("/api", createShareRoutes(deps));
   app.route("/api", publicLinkApiRoutes);
   const billingProvider = deps.billingProvider ?? new PolarBillingProvider();
