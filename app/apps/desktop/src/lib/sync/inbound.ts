@@ -54,6 +54,15 @@ export interface InboundInput {
    * user re-created at the same path gets a fresh id and never matches.
    */
   localFolderIds?: Map<string, string>;
+  /**
+   * Server folder id → its CURRENT path. Lets the plan see a folder the server
+   * MOVED: the id we recorded at a local path now lives elsewhere. The old
+   * directory (emptied by the per-note renames) is then removed if empty, like a
+   * tombstoned one — otherwise it lingered as a trap: a file dropped into it
+   * later re-registered it as a brand-new server folder, and the folder move
+   * "came back" for the whole team as an empty twin.
+   */
+  serverFolderIds?: Map<string, string>;
 }
 
 export interface InboundRename {
@@ -265,6 +274,23 @@ export function planInbound(input: InboundInput): InboundPlan {
     plan.createFolders.push(path);
   }
   plan.createFolders.sort(byDepth);
+
+  // A local folder whose recorded server id now lives at ANOTHER path was moved
+  // remotely. Its notes move via their own renames; the emptied old directory
+  // is removed (empty-only, like a tombstone) so it can't be re-registered as
+  // a new folder on the next pass. Gated on the id still existing on the server
+  // (a deleted id is the tombstone case below) and on the old path not having
+  // been re-created server-side since.
+  if (input.serverFolderIds && input.localFolderIds) {
+    for (const [path, id] of input.localFolderIds) {
+      const now = input.serverFolderIds.get(id);
+      if (now === undefined || now === path) continue;
+      if (!input.localFolders.has(path)) continue; // already gone locally
+      if (input.serverFolders.has(path)) continue; // re-created server-side
+      if (!isSafeFolderPath(path)) continue;
+      plan.removeFolders.push(path);
+    }
+  }
 
   // A local folder whose recorded server id is tombstoned was deleted remotely.
   // Gated on the id match (a same-path successor has a fresh id and never

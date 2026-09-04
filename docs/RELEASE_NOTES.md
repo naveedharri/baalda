@@ -3,3 +3,4 @@
 - Editing while a sync is running no longer re-reads every note title on each change, so the sidebar stays responsive on large vaults
 - A file added to a folder that a teammate had moved on the server no longer fails to sync forever ("1 not synced"): the folder is re-created at its old path and the file registers normally
 - Empty leftover files of notes deleted on the server are now cleaned up instead of lingering as unsyncable stubs
+- After a teammate moves a folder, the emptied old folder is removed on your device instead of coming back for everyone as an empty duplicate

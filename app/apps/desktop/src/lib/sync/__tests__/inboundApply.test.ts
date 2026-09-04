@@ -530,6 +530,35 @@ describe("inbound folder deletion", () => {
     );
   });
 
+  it("removes the emptied old directory after a server-side folder move, and does not re-register it", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Projects");
+    disk.folders.add("Projects/vid");
+    disk.notes.set("Projects/vid/a.md", "d1");
+    const { api } = await twoPasses({
+      disk,
+      first: {
+        notes: [{ id: "d1", rel_path: "Projects/vid/a.md" }],
+        folders: [{ id: "fp", path: "Projects" }, { id: "f1", path: "Projects/vid" }],
+      },
+      then: {
+        notes: [{ id: "d1", rel_path: "Archive/vid/a.md" }],
+        folders: [
+          { id: "fp", path: "Projects" },
+          { id: "fa", path: "Archive" },
+          { id: "f1", path: "Archive/vid" },
+        ],
+      },
+    });
+    // The note followed the move, the emptied old directory is gone, and — the
+    // part that used to bite the whole team — no empty twin was created upstream.
+    expect(disk.notes.has("Archive/vid/a.md")).toBe(true);
+    expect(disk.folders.has("Projects/vid")).toBe(false);
+    expect(vi.mocked(api.createFolder)).not.toHaveBeenCalledWith(
+      expect.objectContaining({ path: "Projects/vid" }),
+    );
+  });
+
   it("re-creates a folder at a path the server MOVED away from, so a file left there registers", async () => {
     // Production case ("1 not synced", forever): the server moved
     // `Projects/vid` to `Archive/vid`. The old directory stayed on disk (it held

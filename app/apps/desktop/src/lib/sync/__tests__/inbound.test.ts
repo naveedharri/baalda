@@ -23,6 +23,7 @@ const empty = {
   localFolders: new Set<string>(),
   folderTombstones: new Set<string>() as Set<string> | null,
   localFolderIds: new Map<string, string>(),
+  serverFolderIds: new Map<string, string>(),
 };
 
 function plan(over: Partial<typeof empty>) {
@@ -98,6 +99,28 @@ describe("planInbound — folders", () => {
     const p = plan({
       localFolderIds: new Map([["A", "fa"]]),
       folderTombstones: new Set(["fa"]),
+    });
+    expect(p.removeFolders).toEqual([]);
+  });
+
+  it("removes the emptied old directory of a folder the server MOVED", () => {
+    // We recorded id f1 at "Projects/vid"; the server now has f1 at "Archive/vid".
+    const p = plan({
+      localFolders: new Set(["Projects", "Projects/vid"]),
+      localFolderIds: new Map([["Projects", "fp"], ["Projects/vid", "f1"]]),
+      serverFolders: new Set(["Projects", "Archive", "Archive/vid"]),
+      serverFolderIds: new Map([["fp", "Projects"], ["fa", "Archive"], ["f1", "Archive/vid"]]),
+    });
+    expect(p.removeFolders).toEqual(["Projects/vid"]);
+    expect(p.createFolders).toEqual(["Archive", "Archive/vid"]);
+  });
+
+  it("leaves a moved folder's old path alone once the server has re-created it there", () => {
+    const p = plan({
+      localFolders: new Set(["Projects/vid"]),
+      localFolderIds: new Map([["Projects/vid", "f1"]]),
+      serverFolders: new Set(["Projects/vid", "Archive/vid"]),
+      serverFolderIds: new Map([["f1", "Archive/vid"], ["f2", "Projects/vid"]]),
     });
     expect(p.removeFolders).toEqual([]);
   });

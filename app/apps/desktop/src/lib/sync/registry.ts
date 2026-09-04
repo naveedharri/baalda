@@ -629,7 +629,7 @@ export class VaultRegistry {
       folders: TreeNode[];
       notes: TreeNode[];
       titles: Array<{ path: string; id: string }>;
-      serverFolders: Array<{ path: string }>;
+      serverFolders: Array<{ id: string; path: string }>;
       serverNotes: RegisteredNote[];
       tombstones: string[] | null;
       folderTombstones: string[] | null;
@@ -693,6 +693,7 @@ export class VaultRegistry {
       baseline: this.baselineDocs,
       local,
       serverFolders: new Set(args.serverFolders.map((f) => f.path)),
+      serverFolderIds: new Map(args.serverFolders.map((f) => [f.id, f.path] as const)),
       localFolders: new Set(args.folders.map((f) => f.path)),
       folderTombstones: args.folderTombstones ? new Set(args.folderTombstones) : null,
       // The persisted path → server-folder-id join: an id match against a
