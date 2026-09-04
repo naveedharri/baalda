@@ -1348,29 +1348,83 @@ export class VaultRegistry {
     // it, and registered any note inside it with the MOVED folder's id. The server
     // rightly refused that as `path_folder_mismatch`, on every pull, forever:
     // "1 not synced" with nothing the user could do about it.
-    const serverFolderByPath = new Map(serverFolders.map((f) => [f.path, f.id] as const));
+    //
+    // Matched case-INSENSITIVELY, and the local spelling wins. macOS and Windows
+    // store one directory per case-insensitive name, so `Projects/community` on
+    // disk and `Projects/Community` on the server are the same folder — and after
+    // migration 023 merged the case-duplicated rows, that disagreement is exactly
+    // what a vault that had them looks like. Compared exactly, all 71 merged
+    // folders (and the 164 notes under them) read as "missing from the server" on
+    // every pass: the client registered them, the server adopted them
+    // case-insensitively and answered with ITS spelling, the client filed the
+    // mapping under that, and the local paths were still unmatched next pass.
+    // A 235-item wave that could never empty — "Syncing 225/235", restart, loop.
+    const serverFolderByPathCi = new Map(
+      serverFolders.map((f) => [f.path.toLowerCase(), f.id] as const),
+    );
     for (const [rp, id] of [...this.folderByPath]) {
-      if (serverFolderByPath.get(rp) !== id) this.folderByPath.delete(rp);
+      if (serverFolderByPathCi.get(rp.toLowerCase()) !== id) this.folderByPath.delete(rp);
     }
-    for (const f of serverFolders) this.folderByPath.set(f.path, f.id);
+    // The path we keep is the one on DISK: every other lookup in this class is
+    // made with a local path, so mapping the server's spelling instead would
+    // leave those lookups missing. The id is the identity; the spelling is ours.
+    const localFolderPathCi = new Map(folders.map((f) => [f.path.toLowerCase(), f.path] as const));
+    for (const f of serverFolders) {
+      this.folderByPath.set(localFolderPathCi.get(f.path.toLowerCase()) ?? f.path, f.id);
+    }
+    // …and drop the twin the merge left behind. Both spellings are in the
+    // persisted map for a vault that had case-duplicated rows, and neither is
+    // wrong enough for the prune above to remove (they carry the same id), so
+    // without this they stay in `config.json` for good.
+    for (const rp of [...this.folderByPath.keys()]) {
+      const onDisk = localFolderPathCi.get(rp.toLowerCase());
+      if (onDisk !== undefined && onDisk !== rp) {
+        this.folderByPath.delete(rp);
+        mutated = true;
+      }
+    }
     const missingFolders = folders.filter((f) => !this.folderByPath.has(f.path));
 
     // 3. Notes: adopt by relPath, create missing. Any first-run seeding happened
     //    in reconcile before this runs; the seeded files register here as docs.
+    // Case-insensitive for the same reason as the folders above, and again the
+    // local spelling is the one mapped.
+    const localNotePathCi = new Map(notes.map((n) => [n.path.toLowerCase(), n.path] as const));
+    /** Every path the server accounted for, in the spelling we MAPPED it under. */
     const resolvedNotePaths = new Set<string>();
+    /** The same set, lower-cased — what every membership test below compares on. */
+    const resolvedNotePathsCi = new Set<string>();
+    const resolveNote = (serverPath: string, docId: string) => {
+      const mapped = localNotePathCi.get(serverPath.toLowerCase()) ?? serverPath;
+      this.setMapping(mapped, docId, vaultId);
+      resolvedNotePaths.add(mapped);
+      resolvedNotePathsCi.add(mapped.toLowerCase());
+    };
     for (const n of serverNotes) {
       const rp = noteRelPath(n);
-      if (rp) {
-        this.setMapping(rp, noteDocId(n), vaultId);
-        resolvedNotePaths.add(rp);
-      }
+      if (rp) resolveNote(rp, noteDocId(n));
     }
+    // The note twin of the folder collapse above: a mapping under a spelling this
+    // pass did not resolve, whose case-variant it DID, is the leftover of a
+    // merged pair. `byDocId` already points at the spelling we kept, so only the
+    // path index needs the removal.
+    for (const [rp, m] of [...this.byPath]) {
+      if (resolvedNotePaths.has(rp)) continue;
+      if (!resolvedNotePathsCi.has(rp.toLowerCase())) continue;
+      if (m.vaultId !== vaultId) continue;
+      this.byPath.delete(rp);
+      this.notifyMapChanged();
+      mutated = true;
+    }
+
     // `inboundSuppressed` is what stops the ghost. A note the server has DELETED
     // (or that we've lost access to) is still on disk, so it looks "missing from
     // the server" here and used to be re-created — which the server answers 201 to
     // without clearing `deleted_at`, leaving a sidebar entry that can never sync.
     const missingNotes = notes.filter(
-      (n) => !resolvedNotePaths.has(n.path) && !this.inboundSuppressed.has(n.path),
+      (n) =>
+        !resolvedNotePathsCi.has(n.path.toLowerCase()) &&
+        !this.inboundSuppressed.has(n.path),
     );
 
     this.sink.phase("registering", missingFolders.length + missingNotes.length);
@@ -1445,8 +1499,11 @@ export class VaultRegistry {
           { isTerminal: isTerminalApiError, shouldStop: () => this.stopRun() },
         );
         if (out.ok) {
+          // Keep `rp` (the local spelling) even when the server adopted a
+          // case-variant and answered with its own — see `resolveNote`.
           this.setMapping(rp, noteDocId(out.value), vaultId);
           resolvedNotePaths.add(rp);
+          resolvedNotePathsCi.add(rp.toLowerCase());
           checkpoint.touch();
           mutated = true;
           this.sink.item("ok");
@@ -1480,7 +1537,7 @@ export class VaultRegistry {
     // 4. Prune mappings for notes that no longer exist anywhere (deleted on the
     //    server AND absent locally), then checkpoint the map.
     for (const [rp, m] of [...this.byPath]) {
-      if (!resolvedNotePaths.has(rp)) {
+      if (!resolvedNotePathsCi.has(rp.toLowerCase())) {
         this.byPath.delete(rp);
         this.byDocId.delete(m.docId);
         this.notifyMapChanged();
@@ -1519,8 +1576,13 @@ export class VaultRegistry {
     //    full tree itself, which fixes the wrong input; this call makes the same
     //    mistake non-destructive if it ever recurs. Both, deliberately: one bug
     //    here is worth a belt and braces.
-    const localNotePaths = new Set(notes.map((n) => n.path));
-    const toMaterialize = [...resolvedNotePaths].filter((rp) => !localNotePaths.has(rp));
+    // Case-insensitive, or a note whose server spelling differs from the one on
+    // disk would be "server-only" here and get an empty file written at the other
+    // spelling — which on a case-insensitive filesystem is the SAME file.
+    const localNotePaths = new Set(notes.map((n) => n.path.toLowerCase()));
+    const toMaterialize = [...resolvedNotePaths].filter(
+      (rp) => !localNotePaths.has(rp.toLowerCase()),
+    );
     this.sink.addTotal(toMaterialize.length);
     await runPool(
       toMaterialize,
