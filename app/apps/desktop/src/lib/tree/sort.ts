@@ -63,3 +63,48 @@ export function sortTree(nodes: TreeNode[], mode: TreeSort): TreeNode[] {
     n.children ? { ...n, children: sortTree(n.children, mode) } : n,
   );
 }
+
+/**
+ * Freeze the recency sort key of every file node we have already placed.
+ *
+ * `"recent"` sorts files by their `.md` file's mtime, and a sync run rewrites
+ * files: a bulk wave in a 1,560-note vault moved 1,372 mtimes inside three
+ * minutes (measured 2026-09-04). Every one of those writes re-sorted the folder
+ * it was in, and arborist positions rows absolutely — so the row under the
+ * pointer became a *different* row several times a second. That is the sidebar
+ * "blinking on hover" and the clicks that "land on the wrong thing / feel
+ * blocked" while something syncs: the highlight follows the cursor, but the
+ * content beneath it keeps being replaced.
+ *
+ * So while the sidebar is being used (or while a wave is in flight), sort by the
+ * mtime each row was FIRST seen with. `pins` is the caller's memory of that,
+ * keyed by path: a path already in it keeps its remembered key, a new path
+ * records its current one (so a note created mid-wave still appears at the top,
+ * where it belongs). Clearing `pins` thaws it, and the next sort is the true one.
+ *
+ * Folders are untouched — they sort by name in both modes.
+ */
+export function pinModified(nodes: TreeNode[], pins: Map<string, number>): TreeNode[] {
+  let changed = false;
+  const out = nodes.map((n) => {
+    if (n.isDir) {
+      if (!n.children) return n;
+      const kids = pinModified(n.children, pins);
+      if (kids === n.children) return n;
+      changed = true;
+      return { ...n, children: kids };
+    }
+    const live = n.modified ?? 0;
+    const pinned = pins.get(n.path);
+    if (pinned === undefined) {
+      pins.set(n.path, live);
+      return n;
+    }
+    if (pinned === live) return n;
+    changed = true;
+    return { ...n, modified: pinned };
+  });
+  // Identity is load-bearing: an unchanged level returns the SAME array, so a
+  // refresh that moved nothing cannot invalidate a memo downstream.
+  return changed ? out : nodes;
+}

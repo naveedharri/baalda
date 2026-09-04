@@ -207,6 +207,13 @@ export type SyncProgressPhase =
   | "done"
   | "error";
 
+/** True while a bulk run is actually moving work — i.e. not idle, finished or
+ *  failed. The UI uses it to hold still: the sidebar pins its row order for the
+ *  length of a wave rather than re-sorting under the pointer as each file lands. */
+export function isBulkPhase(phase: SyncProgressPhase | undefined | null): boolean {
+  return phase === "registering" || phase === "uploading" || phase === "downloading";
+}
+
 /** Counted progress for the current vault's sync run. `null` when none is running. */
 export interface SyncProgress {
   phase: SyncProgressPhase;

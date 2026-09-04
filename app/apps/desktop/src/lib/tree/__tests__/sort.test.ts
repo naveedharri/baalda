@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "../../ipc";
-import { sortTree } from "../sort";
+import { pinModified, sortTree } from "../sort";
 import { applyOrder } from "../../ordering";
 
 const dir = (name: string, modified: number, children: TreeNode[] = []): TreeNode => ({
@@ -105,5 +105,65 @@ describe("sortTree + applyOrder — the two layers", () => {
     // normally sit below.
     const out = applyOrder(sortTree(build(), "recent"), "", { "": ["loose.md"] });
     expect(names(out)).toEqual(["loose.md", "Alpha", "Beta"]);
+  });
+});
+
+describe("pinModified", () => {
+  it("keeps a row where it was when its mtime moves under the pointer", () => {
+    const pins = new Map<string, number>();
+    const before = [file("a.md", 10), file("b.md", 20), file("c.md", 30)];
+    // First pass records what each row was placed with.
+    expect(names(sortTree(pinModified(before, pins), "recent"))).toEqual([
+      "c.md",
+      "b.md",
+      "a.md",
+    ]);
+
+    // A sync run rewrites a.md, so the disk now says it is the newest file. With
+    // the order pinned, the rows do NOT move — which is the whole point: the row
+    // under the cursor stays the row the user aimed at.
+    const after = [file("a.md", 99), file("b.md", 20), file("c.md", 30)];
+    expect(names(sortTree(pinModified(after, pins), "recent"))).toEqual([
+      "c.md",
+      "b.md",
+      "a.md",
+    ]);
+
+    // Thawing (a fresh, empty memory) reveals the true order.
+    expect(names(sortTree(pinModified(after, new Map()), "recent"))).toEqual([
+      "a.md",
+      "c.md",
+      "b.md",
+    ]);
+  });
+
+  it("still places a file created mid-wave at its real position", () => {
+    const pins = new Map<string, number>();
+    pinModified([file("a.md", 10), file("b.md", 20)], pins);
+    const withNew = [file("a.md", 10), file("b.md", 20), file("new.md", 50)];
+    expect(names(sortTree(pinModified(withNew, pins), "recent"))).toEqual([
+      "new.md",
+      "b.md",
+      "a.md",
+    ]);
+  });
+
+  it("pins inside folders too, and leaves folder order alone", () => {
+    const pins = new Map<string, number>();
+    const level = [dir("Work", 1, [file("Work/x.md", 1), file("Work/y.md", 2)])];
+    pinModified(level, pins);
+    const moved = [dir("Work", 9, [file("Work/x.md", 99), file("Work/y.md", 2)])];
+    const sorted = sortTree(pinModified(moved, pins), "recent");
+    expect(names(sorted)).toEqual(["Work"]);
+    expect(names(sorted[0].children!)).toEqual(["Work/y.md", "Work/x.md"].map((p) =>
+      p.split("/").pop()!,
+    ));
+  });
+
+  it("returns the same arrays when nothing moved, so a memo downstream holds", () => {
+    const pins = new Map<string, number>();
+    const level = [dir("Work", 1, [file("Work/x.md", 1)]), file("a.md", 2)];
+    pinModified(level, pins);
+    expect(pinModified(level, pins)).toBe(level);
   });
 });
