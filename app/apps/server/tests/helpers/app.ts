@@ -66,6 +66,7 @@ export function memoryDocWriter(): MemoryDocWriter {
 export function testAppDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     disconnectDoc: () => {},
+    evictDoc: () => {},
     docWriter: memoryDocWriter(),
     onRegistryChanged: () => {},
     onAclChanged: () => {},
@@ -81,6 +82,8 @@ export interface RecordingAppDeps {
   aclBroadcasts: string[];
   /** Docs whose live sync sockets were force-closed. */
   disconnected: Array<{ vaultId: string; docId: string }>;
+  /** Docs closed AND dropped from the server's memory (see `AppDeps.evictDoc`). */
+  evicted: Array<{ vaultId: string; docId: string }>;
   docWriter: MemoryDocWriter;
   /** Clear all recordings (call from `beforeEach`). */
   reset(): void;
@@ -96,22 +99,26 @@ export function recordingAppDeps(overrides: Partial<AppDeps> = {}): RecordingApp
   const registryBroadcasts: RecordingAppDeps["registryBroadcasts"] = [];
   const aclBroadcasts: string[] = [];
   const disconnected: RecordingAppDeps["disconnected"] = [];
+  const evicted: RecordingAppDeps["evicted"] = [];
   const docWriter = memoryDocWriter();
   return {
     registryBroadcasts,
     aclBroadcasts,
     disconnected,
+    evicted,
     docWriter,
     reset() {
       registryBroadcasts.length = 0;
       aclBroadcasts.length = 0;
       disconnected.length = 0;
+      evicted.length = 0;
       docWriter.store.clear();
       docWriter.writes.length = 0;
     },
     deps: {
       docWriter,
       disconnectDoc: (vaultId, docId) => disconnected.push({ vaultId, docId }),
+      evictDoc: (vaultId, docId) => evicted.push({ vaultId, docId }),
       onRegistryChanged: (vaultId, originId) => registryBroadcasts.push({ vaultId, originId }),
       onAclChanged: (vaultId) => aclBroadcasts.push(vaultId),
       ...overrides,

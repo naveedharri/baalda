@@ -1071,6 +1071,47 @@ export class ApiClient {
     return data;
   }
 
+  /**
+   * How many bytes of CRDT the server holds for a note, and whether that puts it
+   * over the sync cap. Needs `edit` — it is only actionable by someone who could
+   * reset the doc. See `resetNoteHistory`.
+   */
+  async noteCrdtSize(
+    docId: string,
+  ): Promise<{ docId: string; bytes: number; capBytes: number; overCap: boolean }> {
+    const { data } = await this.request<{
+      docId: string;
+      bytes: number;
+      capBytes: number;
+      overCap: boolean;
+    }>("GET", `/api/notes/${encodeURIComponent(docId)}/crdt-size`);
+    return data;
+  }
+
+  /**
+   * Discard a note's edit history server-side and re-seed it from `content`.
+   *
+   * The repair for a note whose Yjs state has grown past the server's cap: it is
+   * refused on every connect, so it can never be edited back down through normal
+   * means. DESTRUCTIVE — the text survives (you are supplying it), the history
+   * does not. Callers must clear the LOCAL CRDT too, or the old state merges
+   * straight back in; `SyncManager.resetNoteHistory` does both in the right
+   * order.
+   */
+  async resetNoteHistory(
+    docId: string,
+    content: string,
+  ): Promise<{ docId: string; bytesBefore: number; bytesAfter: number }> {
+    const { data } = await this.request<{
+      docId: string;
+      bytesBefore: number;
+      bytesAfter: number;
+    }>("POST", `/api/notes/${encodeURIComponent(docId)}/reset-crdt`, {
+      body: { content },
+    });
+    return data;
+  }
+
   /** A note collection's checkpoints, newest first (any vault member). */
   async listCheckpoints(vaultId: string): Promise<VaultCheckpoint[]> {
     const { data } = await this.request<{ checkpoints: VaultCheckpoint[] }>(

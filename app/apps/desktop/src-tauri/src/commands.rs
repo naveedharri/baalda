@@ -6,8 +6,8 @@ use crate::attachments::{self, AttachmentMeta};
 use crate::error::{AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
-    Backlink, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsState,
-    YjsStateVector,
+    Backlink, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsPruneReport,
+    YjsState, YjsStateVector,
 };
 use crate::notefile;
 use crate::state::AppState;
@@ -1123,6 +1123,45 @@ pub async fn save_yjs_state_vectors(
     let (_, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
     guard.save_yjs_state_vectors(&entries)
+}
+
+/// Discard one doc's local CRDT (the local half of an oversized-note repair).
+#[tauri::command]
+pub async fn clear_yjs_doc(
+    state: State<'_, AppState>,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.clear_yjs_doc(&doc_id)
+}
+
+/// Collect dead CRDT docs, then reclaim the file.
+///
+/// `live` is the caller's COMPLETE set of doc ids still in use — the TS registry
+/// owns that map (`.context/config.json`), which is why this is driven from the
+/// UI layer rather than derived here: Rust's `notes.id` and the server's
+/// `doc_id` are not guaranteed to be the same value in a vault whose index was
+/// built before it was registered, so a Rust-side guess would delete live docs.
+///
+/// One command rather than two so a caller cannot prune and then skip the
+/// vacuum, which is the combination that frees nothing a user can see.
+#[tauri::command]
+pub async fn prune_yjs_docs(
+    state: State<'_, AppState>,
+    live: Vec<String>,
+    expected_epoch: Option<u64>,
+) -> AppResult<YjsPruneReport> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    let mut report = guard.prune_yjs_docs(&live)?;
+    // Only rewrite the file when the prune actually freed something; VACUUM on a
+    // clean 900 MB database is minutes of pointless I/O on every vault open.
+    if report.docs_removed > 0 || report.updates_removed > 0 {
+        report.bytes_reclaimed = guard.vacuum()?;
+    }
+    Ok(report)
 }
 
 /// Every state vector this vault holds, for the sync engine's `hello` manifest.

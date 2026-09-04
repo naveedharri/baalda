@@ -230,6 +230,51 @@ describe("ContentUploader — pre-network checks (readFile)", () => {
     expect(r.harness.fs.get("Placeholder.md")).toBe("content from a teammate");
   });
 
+  it("fails a note whose CRDT is over the ceiling behind a ZERO-BYTE file", async () => {
+    // The production regression (benai-os, Sept 2026). Four notes held 10–17 MB
+    // of Yjs history behind 0-byte files: the text had been truncated on disk
+    // while the duplication garbage from an earlier fork stayed in the doc.
+    //
+    // The file-bytes check passed (0 < 10 MB) and the empty-everywhere check
+    // did not fire (the DOC was not empty), so a socket opened, the server
+    // rejected the ~17 MB message and closed it, and the provider reconnected —
+    // about once a second, forever, strobing the sync badge. The cap has to be
+    // applied to what actually goes on the wire.
+    const r = rig({
+      files: { "Truncated.md": "", "Small.md": "fine" },
+      notes: [
+        { docId: "fat", relPath: "Truncated.md" },
+        { docId: "small", relPath: "Small.md" },
+      ],
+      readFile: true,
+      concurrency: 1,
+      failureStreakLimit: 1,
+    });
+    // Fat doc, empty file — exactly the production shape.
+    const bridge = await r.store.promote("fat", "Truncated.md", {
+      seedFromFile: false,
+      markRecent: false,
+      pin: true,
+    });
+    bridge.doc.getText("content").insert(0, "y".repeat(MAX_NOTE_BYTES + 1));
+    expect(r.harness.fs.get("Truncated.md")).toBe("");
+
+    const result = await r.uploader.run();
+
+    expect(r.uploader.failedDocs()).toEqual([
+      expect.objectContaining({
+        docId: "fat",
+        permanent: true,
+        reason: expect.stringContaining("edit history"),
+      }),
+    ]);
+    // The whole point: no socket was ever opened for it.
+    expect(r.connects).toEqual(["small"]);
+    // And it did not count toward the streak, so the run finished its work.
+    expect(result.aborted).toBe(false);
+    expect(r.marked).toEqual(["small"]);
+  });
+
   it("fails a note over the size ceiling permanently, without a socket or a streak hit", async () => {
     const huge = "x".repeat(MAX_NOTE_BYTES + 1);
     const r = rig({

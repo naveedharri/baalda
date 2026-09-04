@@ -300,3 +300,64 @@ export async function countUpdates(
   );
   return Number.parseInt(rows[0]?.count ?? "0", 10);
 }
+
+
+/**
+ * Discard a doc's entire CRDT history and re-seed it from `content`.
+ *
+ * The repair for a doc that has grown past `MAX_NOTE_MB`. Such a doc is stuck in
+ * a way nothing else here can undo: it is refused by `beforeHandleMessage` on
+ * every connect, so no client can ever edit it down, and its bulk is *history*
+ * (tombstones, duplicated inserts from a past fork) rather than text — one
+ * production doc decoded to 29 580 lines of which 68 were distinct.
+ *
+ * Discarding history is the point, not a side effect, so this is intentionally
+ * NOT `compact`: compaction merges the updates into a snapshot and keeps every
+ * tombstone, which is why a 44 MB doc stays 44 MB however often it compacts.
+ *
+ * The new doc gets a fresh clientID and no shared history with the old one, so
+ * every client MUST be evicted (see `evictDoc`) rather than left to merge —
+ * merging the old state back in is exactly the fork this undoes.
+ */
+export async function resetDocCrdt(
+  docId: string,
+  content: string,
+  db: Queryable = defaultPool,
+): Promise<{ bytes: number }> {
+  const doc = new Y.Doc();
+  try {
+    if (content.length > 0) doc.getText("content").insert(0, content);
+    const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc));
+    const stateVector = Buffer.from(Y.encodeStateVector(doc));
+    await db.query("DELETE FROM doc_updates WHERE doc_id = $1", [docId]);
+    await db.query(
+      `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at)
+       VALUES ($1, $2, $3, '0', now())
+       ON CONFLICT (doc_id) DO UPDATE
+         SET snapshot = EXCLUDED.snapshot,
+             state_vector = EXCLUDED.state_vector,
+             seq = EXCLUDED.seq,
+             updated_at = now()`,
+      [docId, snapshot, stateVector],
+    );
+    return { bytes: snapshot.byteLength };
+  } finally {
+    doc.destroy();
+  }
+}
+
+/** Total persisted bytes for a doc — snapshot plus its un-compacted update log.
+ *  The number the size cap is really about, reportable without loading the doc. */
+export async function docStoredBytes(
+  docId: string,
+  db: Queryable = defaultPool,
+): Promise<number> {
+  const { rows } = await db.query<{ bytes: string }>(
+    `SELECT (
+       COALESCE((SELECT SUM(octet_length(snapshot)) FROM doc_snapshots WHERE doc_id = $1), 0)
+     + COALESCE((SELECT SUM(octet_length(update))   FROM doc_updates   WHERE doc_id = $1), 0)
+     )::text AS bytes`,
+    [docId],
+  );
+  return Number(rows[0]?.bytes ?? 0);
+}
