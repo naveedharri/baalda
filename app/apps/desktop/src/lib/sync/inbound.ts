@@ -151,6 +151,19 @@ export interface InboundPlan {
 // doc map". Hence an explicit allowlist on this side.
 
 /** Mirrors `IGNORED_DIRS` in src-tauri/src/vault.rs. */
+/**
+ * Two vault paths that name the same file.
+ *
+ * Case-insensitively, because that is what the filesystems we ship on do:
+ * macOS/APFS and Windows store ONE entry per case-insensitive name, so
+ * `Projects/community/a.md` and `Projects/Community/a.md` are the same file, not
+ * two. The server agrees since migration 023 (case-insensitive unique paths), so
+ * treating them as distinct here only ever produced work that could not land.
+ */
+export function samePath(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 const IGNORED_DIRS = [".context", ".git"];
 /** Mirrors `DENIED_DIRS` in src-tauri/src/vault.rs. */
 const DENIED_DIRS = [
@@ -318,7 +331,7 @@ export function planInbound(input: InboundInput): InboundPlan {
   // ---- notes --------------------------------------------------------------
   // Every note path on disk, for the "we lost this doc's local identity" case
   // below. `input.local` is docId → path, so its values are exactly that set.
-  const localPaths = new Set(input.local.values());
+  const localPaths = new Set([...input.local.values()].map((p) => p.toLowerCase()));
   const docIds = new Set<string>([...input.baseline.keys(), ...input.server.keys()]);
   for (const docId of docIds) {
     const prev = input.baseline.get(docId);
@@ -329,7 +342,16 @@ export function planInbound(input: InboundInput): InboundPlan {
     if (srv !== undefined) {
       // Already where the server wants it (or we've never seen this doc, in which
       // case the existing materialize step writes it). Nothing to do.
-      if (loc === srv || loc === undefined) continue;
+      //
+      // Compared case-insensitively, because the filesystem is: `community/a.md`
+      // and `Community/a.md` are ONE file on macOS and Windows, so a spelling
+      // disagreement with the server is not a move and renaming to "fix" it
+      // moves the file onto itself. After migration 023 merged the
+      // case-duplicated server rows, a vault that had them disagrees on exactly
+      // that for every merged note — 164 renames a pass, each one a no-op or a
+      // refusal, on top of the re-registration wave. The server's own uniqueness
+      // is case-insensitive now too, so nothing is lost by matching it here.
+      if (loc === undefined || samePath(loc, srv)) continue;
       if (prev === undefined) {
         // On disk under one path, on the server under another, and no baseline to
         // say which one moved. Leave it: without a prior agreement, "the server
@@ -337,10 +359,10 @@ export function planInbound(input: InboundInput): InboundPlan {
         // guessing here would rename a file on a hunch.
         continue;
       }
-      if (loc === prev) {
+      if (samePath(loc, prev)) {
         // The server moved it and we didn't. THE rename-duplicate fix.
         pushRename(plan, docId, loc, srv);
-      } else if (srv === prev) {
+      } else if (samePath(srv, prev)) {
         // We moved it and the server didn't — outbound's job (`renamePath`), not
         // ours. Left alone rather than dragged back.
         continue;
@@ -367,7 +389,7 @@ export function planInbound(input: InboundInput): InboundPlan {
         // match we can't prove the file at that path is still this note, and a
         // wrong guess here deletes someone's work. It stays on disk as a purely
         // local note the user can remove themselves.
-        if (prev !== undefined && localPaths.has(prev)) {
+        if (prev !== undefined && localPaths.has(prev.toLowerCase())) {
           plan.suppress.add(prev);
           plan.stubs.push(prev);
         }
