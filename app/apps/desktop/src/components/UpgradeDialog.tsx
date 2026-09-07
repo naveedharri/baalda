@@ -130,9 +130,11 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
     if (!done) setPhase("timeout");
   };
 
-  // Portalled to <body> so the fixed backdrop escapes the Settings modal's
-  // containing block (its `.modal` keeps a transform from the rise-in
-  // animation, which would otherwise trap this dialog inside that card).
+  // Portalled to <body> so the fixed backdrop can never be trapped inside the
+  // Settings card this opens from: any transform/filter between here and <body>
+  // becomes this dialog's containing block, and settings is several nested cards
+  // deep. (Those cards animate opacity only for the same reason — see
+  // `components/SettingsModal.tsx`.)
   return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal upgrade-dialog" onClick={(e) => e.stopPropagation()}>

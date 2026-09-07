@@ -1,18 +1,24 @@
 import { useEffect, useState } from "react";
-import { ACTIVITY_STATUSES, type ActivityStatus } from "../lib/prefs";
+import { DEFAULT_SERVER_URL } from "../lib/api";
+import { authManager } from "../lib/auth/authManager";
+import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
+import { ACTIVITY_STATUSES, type ActivityStatus, writeServerChoice } from "../lib/prefs";
 import { checkForUpdate, currentVersion, installUpdate, useUpdateState } from "../lib/updater";
 import { useStore } from "../store";
 import { Avatar } from "./Identity";
+import { serverFailureMessage } from "./serverFailureMessage";
+import { SettingsModal } from "./SettingsModal";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
 
 /**
- * Account settings — a dedicated full page (sibling to Vault settings) for
- * everything that follows the *user* rather than any one vault: profile
- * (name/avatar), activity status, appearance, notifications, the server it syncs
- * against, and app updates. Profile fields are server-backed (Better Auth) so
- * they follow the account across devices; status/notifications/theme/server are
- * device-local preferences.
+ * Account settings — a centered modal over the app (sibling to Vault settings,
+ * and sharing its shell in {@link SettingsModal}) for everything that follows
+ * the *user* rather than any one vault: profile (name/avatar), activity status,
+ * appearance, notifications, the server it syncs against, and app updates.
+ * Profile fields are server-backed (Better Auth) so they follow the account
+ * across devices; status/notifications/theme/server are device-local
+ * preferences.
  */
 
 type AccountTab = "profile" | "status" | "appearance" | "notifications" | "connection" | "about";
@@ -85,20 +91,13 @@ export function AccountSettings({ onClose }: { onClose: () => void }) {
   const session = useStore((s) => s.session);
   const [tab, setTab] = useState<AccountTab>("profile");
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
+  // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
   if (!session) return null;
   const activeTab = ACCOUNT_TABS.find((t) => t.id === tab)!;
   const userLabel = session.user.name || session.user.email;
 
   return (
-    <div className="settings-page">
+    <SettingsModal label="Account settings" onClose={onClose}>
       <header className="settings-page-header">
         <div className="settings-title">
           <span className="settings-eyebrow">Account settings</span>
@@ -141,7 +140,7 @@ export function AccountSettings({ onClose }: { onClose: () => void }) {
           )}
         </section>
       </div>
-    </div>
+    </SettingsModal>
   );
 }
 
@@ -320,16 +319,33 @@ function ConnectionTab() {
   const [draft, setDraft] = useState(serverUrl);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => setDraft(serverUrl), [serverUrl]);
 
+  /**
+   * Check the address answers BEFORE adopting it. Changing the server is a
+   * de-facto sign-out (the session lives under a per-server keychain key), so a
+   * typo used to swap a working session for a signed-out app and no message at
+   * all — `save` had a `finally` and no `catch`.
+   */
   const save = async () => {
+    const url = normalizeServerUrl(draft);
+    if (!url) {
+      setError("That doesn't look like a server address — try https://notes.example.com");
+      return;
+    }
     setBusy(true);
     setSaved(false);
+    setError(null);
     try {
-      await useStore.getState().setServerUrl(draft.trim());
+      await authManager.api.health(url);
+      writeServerChoice(url === DEFAULT_SERVER_URL ? "managed" : "custom");
+      await useStore.getState().setServerUrl(url);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      setError(serverFailureMessage(e, url));
     } finally {
       setBusy(false);
     }
@@ -342,11 +358,15 @@ function ConnectionTab() {
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder="https://api.baalda.com"
+          placeholder="https://notes.example.com"
           spellCheck={false}
+          autoCapitalize="off"
         />
         <span className="field-hint">
-          The Baalda server this device syncs against. Use the managed service or point at your own.
+          The Baalda server this device syncs against — currently{" "}
+          <strong>{serverHost(serverUrl)}</strong>. Use the managed service or
+          point at your own. Your account is per-server, so switching signs you
+          in to that server's session instead.
         </span>
       </label>
       <div className="update-actions">
@@ -364,6 +384,7 @@ function ConnectionTab() {
           </span>
         )}
       </div>
+      {error && <div className="auth-error">{error}</div>}
     </div>
   );
 }

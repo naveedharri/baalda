@@ -30,13 +30,19 @@ import { statusTone } from "../lib/presence/color";
 import { AccessPanel } from "./AccessPanel";
 import { AccountSettings } from "./AccountSettings";
 import { AsyncButton } from "./AsyncButton";
+import { AuthDialog } from "./AuthDialog";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
 import { Avatar, SyncBadge } from "./Identity";
+import { SettingsModal } from "./SettingsModal";
 import { Switch } from "./Switch";
-import { Spinner } from "./Spinner";
 import { ThemeToggle } from "./ThemeToggle";
 import { UpgradeDialog } from "./UpgradeDialog";
+
+// The sign-in modal moved to its own file when it grew a server-choice step
+// (#91). It has three mount sites that import it from here, so it is
+// re-exported rather than chased across all of them.
+export { AuthDialog };
 
 /**
  * Account & vault menu (spec 04 §2/§6/§7), redesigned as the standard
@@ -709,30 +715,6 @@ function AccountPopover({
   );
 }
 
-/** Google's four-color "G" mark for the OAuth button. */
-function GoogleGlyph() {
-  return (
-    <svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
-      <path
-        fill="#4285F4"
-        d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.71-1.57 2.68-3.89 2.68-6.62z"
-      />
-      <path
-        fill="#34A853"
-        d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.02-3.7H.96v2.33A9 9 0 0 0 9 18z"
-      />
-      <path
-        fill="#FBBC05"
-        d="M3.98 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.02-2.33z"
-      />
-      <path
-        fill="#EA4335"
-        d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.47.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.02 2.33C4.68 5.16 6.66 3.58 9 3.58z"
-      />
-    </svg>
-  );
-}
-
 /**
  * Close the open vault and return to the welcome (home) screen. A full menu
  * row like its siblings (a corner icon on the section label read as cramped) —
@@ -771,263 +753,6 @@ function MenuIcon({ children }: { children: React.ReactNode }) {
     >
       {children}
     </svg>
-  );
-}
-
-/**
- * Focused sign-in / sign-up modal; closes itself once a session lands. When a
- * caller needs to act on a *successful* sign-in (vs. a cancel), it passes
- * `onSignedIn` — fired instead of `onClose` when the session arrives, so the
- * two outcomes stay distinguishable.
- *
- * `initialMode` picks which tab opens first. It defaults to sign-in, but the
- * welcome screen's "Join a team" route opens on sign-up: someone holding a
- * teammate's join code is usually here for the first time.
- */
-export function AuthDialog({
-  onClose,
-  onSignedIn,
-  initialMode = "sign-in",
-}: {
-  onClose: () => void;
-  onSignedIn?: () => void;
-  initialMode?: "sign-in" | "sign-up";
-}) {
-  const authStatus = useStore((s) => s.authStatus);
-  const authError = useStore((s) => s.authError);
-  const serverUrl = useStore((s) => s.serverUrl);
-
-  const [mode, setMode] = useState<"sign-in" | "sign-up">(initialMode);
-  const [name, setName] = useState("");
-  // Dev-only prefill of the local test account; production builds ship empty fields.
-  const [email, setEmail] = useState(import.meta.env.DEV ? "test@context.local" : "");
-  const [password, setPassword] = useState(import.meta.env.DEV ? "Context-Test-2026!" : "");
-  const [urlDraft, setUrlDraft] = useState(serverUrl);
-  const [busy, setBusy] = useState(false);
-  // Google sign-in runs in the system browser and the app just waits for the
-  // loopback handoff (up to a 3-min timeout). Its own busy flag lets us show a
-  // "waiting for your browser" state instead of a silently disabled button.
-  const [googleBusy, setGoogleBusy] = useState(false);
-  // Google is only offered when the server is configured for it; ask on open
-  // (and whenever the server changes) so a self-host without creds hides it.
-  const [googleAvailable, setGoogleAvailable] = useState(false);
-
-  useEffect(() => {
-    if (authStatus === "signed-in") {
-      if (onSignedIn) onSignedIn();
-      else onClose();
-    }
-  }, [authStatus, onClose, onSignedIn]);
-
-  useEffect(() => {
-    let cancelled = false;
-    authManager.api
-      .getAuthMethods()
-      .then((m) => {
-        if (!cancelled) setGoogleAvailable(m.google);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [serverUrl]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      if (mode === "sign-in") {
-        try {
-          await useStore.getState().signIn(email.trim(), password);
-        } catch (err) {
-          // Dev convenience: the prefilled test account self-provisions on a
-          // fresh database instead of dead-ending on "User not found".
-          if (import.meta.env.DEV && email.trim() === "test@context.local") {
-            await useStore.getState().signUp("Test User", email.trim(), password);
-          } else {
-            throw err;
-          }
-        }
-      } else {
-        await useStore.getState().signUp(name.trim(), email.trim(), password);
-      }
-      setPassword("");
-    } catch {
-      /* error surfaced via authError */
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Each Google attempt gets a generation number. Cancelling (or starting a new
-  // attempt) bumps it, so when an abandoned flow finally rejects — the loopback
-  // listener waits out its ~3-min timeout — we can drop that stale result instead
-  // of flashing a "timed out" error at someone who already moved on.
-  const googleFlow = useRef(0);
-
-  const googleSignIn = async () => {
-    const flow = ++googleFlow.current;
-    useStore.setState({ authError: null });
-    setGoogleBusy(true);
-    try {
-      await useStore.getState().signInWithGoogle();
-    } catch (e) {
-      if (flow === googleFlow.current) {
-        useStore.setState({ authError: e instanceof Error ? e.message : String(e) });
-      }
-      // else: cancelled or superseded — the user isn't waiting on this anymore.
-    } finally {
-      if (flow === googleFlow.current) setGoogleBusy(false);
-    }
-  };
-
-  // Stop waiting on the browser and return to the form so the user can retry or
-  // sign in with email instead. The abandoned loopback listener harmlessly times
-  // out on its own; its late result is ignored via the generation check above.
-  const cancelGoogleSignIn = () => {
-    googleFlow.current++;
-    setGoogleBusy(false);
-    useStore.setState({ authError: null });
-  };
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal auth-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span>{mode === "sign-in" ? "Welcome back" : "Create your account"}</span>
-          <button className="icon-btn" onClick={onClose} aria-label="Close">
-            ✕
-          </button>
-        </div>
-
-        <div className="segmented">
-          <button
-            className={mode === "sign-in" ? "active" : ""}
-            onClick={() => setMode("sign-in")}
-            type="button"
-          >
-            Sign in
-          </button>
-          <button
-            className={mode === "sign-up" ? "active" : ""}
-            onClick={() => setMode("sign-up")}
-            type="button"
-          >
-            Sign up
-          </button>
-        </div>
-
-        {googleAvailable && (
-          <>
-            <button
-              type="button"
-              className="oauth-btn google"
-              onClick={() => void googleSignIn()}
-              disabled={busy || googleBusy}
-              aria-busy={googleBusy}
-            >
-              <GoogleGlyph />
-              <span>{googleBusy ? "Waiting for your browser…" : "Continue with Google"}</span>
-              {googleBusy && <Spinner size="xs" tone="neutral" />}
-            </button>
-            {googleBusy && (
-              <p className="auth-hint">
-                <button type="button" className="link-btn" onClick={cancelGoogleSignIn}>
-                  Cancel
-                </button>
-              </p>
-            )}
-            <div className="auth-divider">
-              <span>or</span>
-            </div>
-          </>
-        )}
-
-        <form onSubmit={submit} className="auth-form">
-          {mode === "sign-up" && (
-            <input
-              placeholder="Name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoComplete="name"
-              required
-            />
-          )}
-          <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            autoFocus
-            required
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
-            minLength={8}
-            required
-          />
-          <button
-            className={`primary${busy ? " is-busy" : ""}`}
-            type="submit"
-            disabled={busy || googleBusy}
-            aria-busy={busy || undefined}
-          >
-            <span className="async-btn-label">
-              {mode === "sign-in" ? "Sign in" : "Create account"}
-            </span>
-            {busy && <Spinner size="xs" tone="on-accent" />}
-          </button>
-        </form>
-
-        {authError && <div className="auth-error">{authError}</div>}
-        {/* The one trap this form can't detect: an account created THROUGH
-            Google has no password at all, so email sign-in answers "Invalid
-            email or password" and sign-up answers "already exists" — a dead end
-            unless someone says the words. Shown only on that failure, and only
-            when Google is actually offered. */}
-        {authError != null &&
-          googleAvailable &&
-          mode === "sign-in" &&
-          /invalid email or password/i.test(authError) && (
-            <p className="auth-hint">
-              First joined with Google? That account has no password — use
-              “Continue with Google” above.
-            </p>
-          )}
-
-        <details className="server-config">
-          <summary>Server settings</summary>
-          <div className="server-config-body">
-            <input
-              value={urlDraft}
-              onChange={(e) => setUrlDraft(e.target.value)}
-              placeholder="https://api.baalda.com"
-              spellCheck={false}
-            />
-            <AsyncButton
-              type="button"
-              confirm
-              onClick={() => useStore.getState().setServerUrl(urlDraft.trim())}
-            >
-              Save
-            </AsyncButton>
-          </div>
-        </details>
-      </div>
-    </div>
   );
 }
 
@@ -1166,9 +891,10 @@ const BILLING_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
 };
 
 /**
- * Vault settings — a dedicated full page (not a modal): everything about
- * the vault lives here. Members (roster + join code + invites),
- * Permissions (RBAC locks), and Appearance (theme + item colors).
+ * Vault settings — a centered modal over the app (sharing its shell with
+ * Account settings via {@link SettingsModal}): everything about the vault lives
+ * here. Members (roster + join code + invites), Permissions (RBAC locks), and
+ * Appearance (theme + item colors).
  */
 function VaultSettingsDialog({
   onClose,
@@ -1189,14 +915,7 @@ function VaultSettingsDialog({
 
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
+  // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
   const activeOrg =
     organizations.find((o) => o.id === session?.activeOrganizationId) ?? null;
   // Is the vault we're looking at actually syncing to an org? A local
@@ -1226,7 +945,10 @@ function VaultSettingsDialog({
   const lockedTab = TEAM_TABS.has(activeTab.id) && !isSynced;
 
   return (
-    <div className="settings-page">
+    <SettingsModal
+      label={isSynced ? "Vault settings" : "Local vault settings"}
+      onClose={onClose}
+    >
       <header className="settings-page-header">
         <div className="settings-title">
           <span className="settings-eyebrow">
@@ -1305,7 +1027,7 @@ function VaultSettingsDialog({
           )}
         </section>
       </div>
-    </div>
+    </SettingsModal>
   );
 }
 

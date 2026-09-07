@@ -134,8 +134,9 @@ almost no manual configuration:
 5. Expose only the one HTTP port (Railway does this automatically from
    `PORT`); nothing else needs to be public.
 
-Point the desktop app at the deployed server via the server URL field in
-Settings.
+Then point the desktop app at it — see
+[Point the desktop app at your server](#point-the-desktop-app-at-your-server)
+for the first-run step, Settings → Connection, and the invite link.
 
 ### Option B (one-click)
 
@@ -171,8 +172,10 @@ note on every instance deployed from it. Nothing else is set: billing stays off
 (so there are **no** vault or member limits), Google sign-in stays hidden until
 you add OAuth credentials, and Redis is only needed to run several instances.
 
-Once it's up, put the generated `*.up.railway.app` URL into the desktop app's
-Server settings and create an account.
+Once it's up, open the desktop app: its first-run step asks whether your notes
+live on the managed service or **your own server**, and the generated
+`*.up.railway.app` URL goes there. You can also send your team
+`https://<that URL>/open/connect` and let them click it.
 
 ### Maintaining the template
 
@@ -264,6 +267,51 @@ confirm `/health` and a real sync round-trip, then promote.
 > otherwise a customer's second vault upgrade is rejected at checkout.
 
 See `app/apps/server/.env.example` for the same list with inline comments.
+
+## Point the desktop app at your server
+
+An account belongs to **one server**. A teammate who signs up on the managed
+instance by mistake gets an account and a vault there, and nobody notices until
+you cannot see them in Members — so the app asks which server before it takes a
+password.
+
+**On first run**, the sign-in dialog opens on *"Where do your notes live?"* with
+two options: the managed service, or **Your own server**. Choosing your own asks
+for the URL and checks `GET <url>/health` before it goes any further, so a typo
+is one inline sentence instead of a `Load failed` three screens later. The
+sign-in form that follows names the server it is about to post to, with a
+**Change** link back.
+
+**Later**, or on a device already signed in somewhere else: **Account settings →
+Connection**. Same health check, same rules. Changing the server is a de-facto
+sign-out — sessions are stored per server in the OS keychain — so the app lands
+on that server's session, or signed out if it has none.
+
+**Send one link instead of dictating a URL.** Your server serves
+
+```
+https://<your-server>/open/connect
+```
+
+which is clickable in chat (a bare `baalda://` scheme is not) and bounces into
+the app, where it asks the person to confirm before connecting. Nothing is
+applied without that click: the link decides where a password gets posted, so it
+is treated as untrusted input. Behind a reverse proxy with a path prefix, send
+`https://<your-server>/<prefix>/open/connect` and have the proxy set
+`X-Forwarded-Prefix` — that header is the only way the server can learn the
+prefix, since a prefix left on the forwarded path does not match the route.
+
+The page derives the address from the incoming request, honouring
+`X-Forwarded-Proto` and `X-Forwarded-Host`, and falls back to `BETTER_AUTH_URL`
+— so set that correctly (see the table above) if your proxy does not forward a
+usable `Host`.
+
+> **URLs accepted:** a bare host gets `https://` (never http, which would send
+> credentials in the clear); an explicit `http://` is honoured for a LAN or
+> localhost server; a path prefix is kept. **Packaged builds can only reach
+> plain `http://` on `localhost` / `127.0.0.1`** — the webview's
+> `connect-src` allows all `https:` but only loopback for `http:`, so a LAN
+> server at `http://192.168.x.x:3010` needs TLS or an SSH tunnel.
 
 ## Scaling & high availability (spec 05)
 

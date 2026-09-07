@@ -40,6 +40,10 @@ export class NoteBridge {
    *  run of oversized reads, so one runaway file logs once, not per watcher
    *  event. Cleared as soon as a normal-sized read comes through. */
   private oversizeReported = false;
+  /** Same one-report-per-run rule as {@link oversizeReported}, for the 0-byte
+   *  truncation refusal: a placeholder file that keeps being re-read must log
+   *  once, not per watcher event. */
+  private truncateReported = false;
   /** True once a recovery snapshot has been taken for a large diff. */
   private recoverySnapshotTaken = false;
   /** True once this doc has held non-empty text in this session. Guards egest:
@@ -324,6 +328,28 @@ export class NoteBridge {
       return false;
     }
 
+    // The ingest twin of the empty-egest clobber guard. A file that is
+    // COMPLETELY empty against a doc that still holds text is not an edit we can
+    // safely believe: the registry materializes a server-only note as a 0-byte
+    // placeholder, and on a device that already holds that note's CRDT the
+    // placeholder used to be diff-merged as a delete-all and then PUSHED — the
+    // server's copy of the note destroyed by a file the app itself had just
+    // created (#93). A genuine partial truncation still applies below; only
+    // all-or-nothing is refused. See `allowTruncateFromDisk`.
+    if (fileText.length === 0 && current.length > 0 && !this.cfg.allowTruncateFromDisk) {
+      if (!this.truncateReported) {
+        this.truncateReported = true;
+        this.reportError(
+          new Error(
+            `${this._path} is 0 bytes: refusing to clear a doc holding ${current.length} chars`,
+          ),
+          "ingest:truncate",
+        );
+      }
+      return false;
+    }
+    this.truncateReported = false;
+
     const diffs = computeDiff(current, fileText);
     const ratio = changeRatio(diffs, current.length, fileText.length);
 
@@ -475,6 +501,35 @@ export class NoteBridge {
     this.clearT(this.egestTimer);
     this.egestTimer = null;
     await this.drainEgest();
+  }
+
+  /**
+   * Write the doc's text to disk NOW, whether or not an egest is pending.
+   *
+   * `flushEgest` deliberately no-ops with no timer armed, and after `hydrate`
+   * there is none: applying persisted CRDT state fires no text observer, and the
+   * echo hash is baselined at the doc's own text. Both are right for the normal
+   * flow and wrong for the one case that has to write anyway — the registry
+   * materializing a note this device already holds the content for, where the
+   * file on disk is a 0-byte placeholder the doc must fill in
+   * (`SyncManager.materializeContent`).
+   *
+   * Still goes through `drainEgest`, so the empty-over-non-empty guard, the
+   * atomic write, the retry backoff and the echo-hash bookkeeping all apply.
+   * Resolves true iff the file now holds the doc's bytes.
+   */
+  async writeThrough(): Promise<boolean> {
+    if (this.destroyed) return false;
+    if (this.egestTimer != null) {
+      this.clearT(this.egestTimer);
+      this.egestTimer = null;
+    }
+    // Force the write past the "the file already holds these bytes" shortcut:
+    // that answer comes from `lastWrittenHash`, which hydrate set from the DOC,
+    // not from the file.
+    this.lastWrittenHash = null;
+    await this.drainEgest();
+    return this.egestFailures === 0;
   }
 
   // ---- Edit entry points -----------------------------------------------

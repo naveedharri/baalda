@@ -70,9 +70,15 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - Sync is always on in the background for the whole vault, not just the open note, so notes are
   already up to date before you click them.
 - What travels: binary change records, never whole files. Each device rebuilds its own `.md`.
-- Deleting a file on disk does not delete it for the team (deliberate safety rule). Delete inside
-  the app to remove it everywhere.
-- Renames and moves are tracked by a stable note id, so nothing forks or loses its history.
+- Deleting a note's file on disk (in Finder, with `rm`, or by asking an AI to tidy the vault) does
+  remove it for the team, a couple of seconds later. Your own copy of the text is kept in the
+  vault's hidden trash folder first, so a mistake is recoverable by hand.
+  Two things are never propagated: a delete of a note this device had not finished uploading, and a
+  mass disappearance (more than a fifth of the vault at once), because an unmounted drive or a
+  cloud-storage hiccup looks exactly like a bulk delete. Deleting inside the app is unchanged and
+  is still the clearest way to remove a note everywhere.
+- Renames and moves are tracked by a stable note id, so nothing forks or loses its history — that
+  holds for a rename done outside the app too.
 - Multiple vaults per account. Switch between them from the account menu.
 
 ## Team collaboration
@@ -148,8 +154,12 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 
 - **Local only**: no server, no account, free.
 - **Self-hosted server**: Node + Postgres. Railway one-click, Docker Compose, or plain Docker.
-  Set the server URL in the app's settings. No plan limits, and Google sign-in / billing are
-  optional switches.
+  The app asks which server before your first sign-in ("Baalda managed service" or "Your own
+  server"), and the URL is checked against the server before it is saved; you can change it
+  later in Account settings → Connection. An account belongs to one server, so the sign-in form
+  always names the server it is signing you in to. Admins can send teammates one link,
+  `https://<your-server>/open/connect`, which opens the app and asks them to confirm.
+  No plan limits, and Google sign-in / billing are optional switches.
 - **Managed server** at `https://api.baalda.com` (the default in the app). Same code as the
   self-hosted server. It is live and self-serve today: a team can sign up, sync and collaborate
   right away on the free tier, and upgrade from inside the app when they hit a cap.

@@ -121,6 +121,52 @@ server's SyncStep skips bootstrap, and the device diverges permanently. (memryno
 **Lifecycle ops** (create/rename/delete) are handled as metadata operations keyed by `doc_id`, not by
 content diff — a rename must never fork a doc. See [[02-database-architecture]] §5.
 
+## 5b. Editing the vault from outside the app (AI agents, scripts)
+
+The vault folder is a normal folder of `.md` files, and editing it from outside the app is a
+supported way to use Baalda — that is the whole point of the bridge. All four filesystem verbs
+are safe while the app is open on a synced vault, and each reaches the team live:
+
+| What you do on disk | What happens |
+|---|---|
+| **Create** a `.md` file | Unmapped path ⇒ a debounced registry pull registers it as a new note and uploads its content. |
+| **Edit** a `.md` file | Diff-merged into the note's `Y.Text` as operations (never an overwrite) and pushed, so it merges with whatever a teammate is typing. |
+| **Delete** a `.md` file | Propagated as a real soft delete after a **2.5 s grace window**: the note leaves the server and every teammate's device trashes its copy. Your own copy of the text is kept in `.context/trash/<timestamp>/`. |
+| **Rename or move** a `.md` file | Recognised as a rename, so the note keeps its `doc_id` — its history, its backlinks, and its shares all survive. |
+
+The grace window exists because a vanished file is not yet a delete: an editor that saves by
+unlinking and rewriting, a rename (which the OS reports as two unrelated events), and a
+`git checkout` that is about to restore the file all look identical for a few milliseconds. Inside
+the window a re-appearing file cancels the delete, and a file whose content matches a note that
+just vanished is paired with it as a rename.
+
+Three deliberate refusals, all of them protecting notes you did not mean to lose:
+
+- **A 0-byte file never clears a note.** Emptying a file completely is refused as an ingest (a
+  *partial* truncation is a normal edit and applies). Writing an empty placeholder is something
+  the app itself does when it materializes a note it hasn't downloaded yet, and treating that as
+  an edit would delete the note's content for everyone.
+- **A mass disappearance is never propagated.** More than a fifth of the vault vanishing in one
+  window (minimum five notes) abandons the whole batch and reports it, because an unmounted
+  volume, an evicted cloud folder or a branch switch looks exactly like a bulk delete.
+- **A note this device never finished uploading is never deleted from the server.** The only copy
+  of that work might be the one you just removed.
+
+Two things stay off-limits to outside writers:
+
+- **`.context/` is the app's own state** (`index.sqlite`, the CRDT store, `config.json`, the local
+  trash). It is excluded from the tree walk, the watcher and the index. Never write there, and
+  never restore a trashed note by moving it back — copy its text into a new note instead, or the
+  restored file re-registers as a brand-new note.
+- **Deletes at startup are not propagated.** Until the vault channel is connected *and* a structure
+  pull has completed, a missing file is read as "the disk isn't ready yet" and the note is
+  re-materialized (with its content, when this device has it) rather than deleted.
+
+For a *scripted* or agent-driven workflow that needs confirmation of each write rather than
+fire-and-forget filesystem semantics, use the MCP server instead ([[04-team-collaboration]]): its
+tools carry revisions, optimistic-concurrency checks and idempotency keys, and they broadcast the
+same way a teammate's edit does.
+
 ## 6. Test plan for the bridge (non-negotiable before Phase 2)
 
 - **Golden round-trip:** a corpus of markdown files → into `Y.Text` → serialize → byte-identical out.

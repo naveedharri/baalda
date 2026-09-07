@@ -159,14 +159,22 @@ function recordingHost() {
   const released: string[] = [];
   const renamed: Array<{ from: string; to: string }> = [];
   const removed: Array<{ path: string; trashedTo: string | null }> = [];
+  /** Paths the registry asked to fill in from a local CRDT after materializing.
+   *  This host has no doc store, so it answers "nothing to fill in" — which is
+   *  the fresh-device case, i.e. today's empty placeholder. */
+  const hydrated: Array<{ docId: string; path: string }> = [];
   const host: InboundHost = {
     releaseDoc: async (docId) => {
       released.push(docId);
     },
     notePathChanged: (_docId, from, to) => renamed.push({ from, to }),
     noteRemoved: (_docId, path, trashedTo) => removed.push({ path, trashedTo }),
+    materializeContent: async (docId, path) => {
+      hydrated.push({ docId, path });
+      return false;
+    },
   };
-  return { host, released, renamed, removed };
+  return { host, released, renamed, removed, hydrated };
 }
 
 /**

@@ -139,6 +139,23 @@ export interface InboundHost {
   notePathChanged(docId: string, from: string, to: string): void;
   /** The file is gone: close anything showing it. */
   noteRemoved(docId: string, path: string, trashedTo: string | null): void;
+  /**
+   * A server-only note was just materialized as a 0-byte placeholder at `path`.
+   * Fill it in from THIS DEVICE's local CRDT, if it has one, and resolve whether
+   * it did.
+   *
+   * The registry cannot do this itself: the content lives in a Y.Doc, and only
+   * the session owns bridges. Best-effort by contract — false leaves today's
+   * empty placeholder, which hydrates lazily on open (a fresh device has nothing
+   * to fill it with anyway).
+   *
+   * It matters because the placeholder is a real file write, so the watcher
+   * reports it and the local-change push diff-merges it into the note's CRDT. On
+   * a device that already holds the note, that merge was a delete-all — and it
+   * was pushed (#93). Writing the content the device already has removes the
+   * trigger instead of guarding against it.
+   */
+  materializeContent(docId: string, path: string): Promise<boolean>;
 }
 
 export interface ReconcileInput {
@@ -267,6 +284,18 @@ export class VaultRegistry {
   private host: InboundHost | null = null;
   /** Local note paths the current pass must not re-register (see `InboundPlan.suppress`). */
   private inboundSuppressed = new Set<string>();
+  /**
+   * Paths THIS device just created as materialized placeholders, awaiting their
+   * own watcher echo (see {@link consumeMaterialized}).
+   *
+   * `writeNoteIfMissing` is a real atomic write, so the watcher reports the file
+   * ~150ms later as `modified` for a path the registry maps — indistinguishable,
+   * from the sync layer's side, from an AI having just written it. Queuing a
+   * content push for it is how a 0-byte placeholder came to be diff-merged into a
+   * populated doc as a delete-all (#93). One entry is consumed per path by the
+   * first event that arrives for it.
+   */
+  private materialized = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
   /** Set when the server refused on a plan limit: the rest of the run is
@@ -488,6 +517,9 @@ export class VaultRegistry {
     this.baselineVaultId = null;
     this.failed = [];
     this.limitReached = null;
+    // Paths, so they belong to the vault we are leaving — and a stale entry would
+    // suppress the next vault's first watcher event for the same relative path.
+    this.materialized.clear();
     this.bound = null;
     this.progress = nullProgressSink;
   }
@@ -524,6 +556,25 @@ export class VaultRegistry {
   /** Vault-relative path for a docId, if mapped (reverse of getMapping). */
   pathForDocId(docId: string): string | null {
     return this.byDocId.get(docId) ?? null;
+  }
+
+  /**
+   * Was `relPath` created by this device's own materialize step, and is its
+   * watcher echo still owed? Consumes the entry, so the SECOND event for the
+   * path (a real external edit) is treated normally.
+   */
+  consumeMaterialized(relPath: string): boolean {
+    return this.materialized.delete(relPath);
+  }
+
+  /** Record a placeholder this pass created (see {@link materialized}). */
+  private markMaterialized(relPath: string): void {
+    // Bounded: an echo that never arrives (the write was outside the watcher's
+    // window, the vault was closed) would otherwise pin the entry forever. A
+    // vault's worth of placeholders is the natural high-water mark, so a set an
+    // order of magnitude past that is stale by definition.
+    if (this.materialized.size > 20_000) this.materialized.clear();
+    this.materialized.add(relPath);
   }
 
   /** All mapped doc ids (for the vault sync engine's initial doc set). */
@@ -617,7 +668,15 @@ export class VaultRegistry {
     return this.limitReached;
   }
 
-  private recordFailure(f: RegistryFailure): void {
+  /**
+   * Record something that could not be synced.
+   *
+   * Public because the session records failures too: a batch of disk deletes the
+   * blast-radius cap refused (`SyncManager.drainDiskDeletes`) has to reach the
+   * same "N items not synced" surface as a failed create, or a refusal that
+   * protected the user's notes would be invisible to them.
+   */
+  recordFailure(f: RegistryFailure): void {
     this.failed.push(f);
     if (f.code === "vault_limit_reached" || f.code === "member_limit_reached") {
       this.limitReached = f.code;
@@ -1576,11 +1635,18 @@ export class VaultRegistry {
 
     // 5. Materialize server-only notes locally. This is what makes a folder
     //    that's empty on this device (a just-joined vault, or a fresh
-    //    per-vault folder) actually show the vault's notes. We write an
-    //    empty file — `writeNoteIfMissing` creates any missing parent folders —
-    //    and the real content hydrates lazily when the note is opened
+    //    per-vault folder) actually show the vault's notes. We create the file
+    //    empty — `writeNoteIfMissing` creates any missing parent folders — and
+    //    then, when THIS DEVICE already holds the note's CRDT, immediately write
+    //    its text (`InboundHost.materializeContent`). Otherwise it stays a 0-byte
+    //    placeholder and hydrates lazily when the note is opened
     //    (pull-before-seed in docSession, which never seeds a non-empty server
-    //    doc from an empty file).
+    //    doc from an empty file) or when the vault channel backfills it.
+    //
+    //    The hydrate is not cosmetic. A local delete of a synced note used to
+    //    reach this step, be re-created as 0 bytes, and then have that emptiness
+    //    diff-merged into the note's still-populated CRDT and pushed — the
+    //    server's copy destroyed by a file the app had just written (#93).
     //
     //    CREATE-ONLY, never overwrite. `toMaterialize` is a *difference of two
     //    lists*, and the local side of that difference is only as complete as the
@@ -1606,8 +1672,28 @@ export class VaultRegistry {
         // slips past (this loop used to litter vault A's note paths through
         // vault B's folder).
         try {
-          await ipc.writeNoteIfMissing(rp, "", this.epoch());
+          // Create-only FIRST and unconditionally — that guard is what makes a
+          // wrong "server-only" verdict cost nothing (see above), and its boolean
+          // says whether THIS pass created the file, so an existing real note is
+          // never touched by the hydrate below.
+          const created = await ipc.writeNoteIfMissing(rp, "", this.epoch());
           mutated = true;
+          if (created) {
+            // Remember it for one watcher echo, so the sync layer does not treat
+            // our own placeholder as an external edit worth pushing.
+            this.markMaterialized(rp);
+            const docId = this.byPath.get(rp)?.docId ?? null;
+            // Fill it in from local CRDT when this device has it. Best effort: a
+            // failure leaves today's 0-byte placeholder, which is exactly the
+            // current behaviour, so this can never make things worse.
+            if (docId && this.host) {
+              try {
+                await this.host.materializeContent(docId, rp);
+              } catch (e) {
+                console.warn(`[registry] hydrating ${rp} from local CRDT failed`, e);
+              }
+            }
+          }
           this.sink.item("ok");
         } catch (e) {
           if (ipc.isVaultMismatch(e)) return; // the vault moved on — not a failure
