@@ -24,8 +24,8 @@ Then in the desktop app: **account menu → Server settings →** your
 
 The ordering is the point: `server` waits on `migrate` finishing successfully,
 which waits on Postgres being healthy. A deploy can therefore never briefly
-answer requests against an old schema. Same guarantee `railway.json` gets from
-its `preDeployCommand`.
+answer requests against an old schema. Same guarantee a Railway service gets from
+the `preDeployCommand` in `app/.railway/railway.ts`.
 
 **One port, not two.** The CRDT WebSocket is served on the HTTP port at `/sync`,
 so there is nothing else to open or route. The dedicated `HOCUSPOCUS_PORT` exists

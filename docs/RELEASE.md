@@ -148,6 +148,19 @@ overlay is ever fumbled.
 | Windows bundle | `.msi` + `.exe` | `.exe` (NSIS) only |
 | `cancel-in-progress` | `false` | `true` |
 
+### The staging server
+
+`STAGING_SERVER_URL` points at a **separate Railway project** whose server
+service deploys the `staging` branch (production deploys `main`); a push to
+`staging` therefore redeploys it. Its build and deploy settings — Dockerfile
+build, pre-deploy `node dist/db/migrate.js`, `/health`, restart policy, memory
+cap — come from the same checked-in `app/.railway/railway.ts` as production,
+applied once per settings change with `railway link` (pick the staging project)
+then `railway config apply` from `app/`. See [DEPLOY.md → Option B](DEPLOY.md#option-b-railway).
+Services created after mid-2026 do **not** read the legacy `railway.json`: a
+staging service that only had that file built with Railpack, skipped migrations,
+and answered every sign-in with HTTP 500 until the IaC was applied (2026-09-07).
+
 **The version is a semver prerelease** — `<base>-staging.<run_number>`, where base
 is `tauri.conf.json`'s version. It sorts *below* the base version, so nothing on
 the production channel would ever treat it as an upgrade, and it is monotonic
