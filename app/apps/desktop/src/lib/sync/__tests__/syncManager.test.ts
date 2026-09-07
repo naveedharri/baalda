@@ -35,13 +35,15 @@ describe("deriveWsUrl", () => {
 });
 
 describe("terminal sync statuses", () => {
-  it("treats both refusals as terminal, and nothing else", () => {
+  it("treats every refusal as terminal, and nothing else", () => {
     // The distinction this encodes: a status you can retry out of, versus one
     // where every retry produces the identical refusal. Reconnecting on the
-    // latter is an infinite loop — 403→reconnect→403 for `no-access`, and
-    // oversized-state→close→reconnect for `too-large`, which is what strobed
-    // the badge about once a second.
+    // latter is an infinite loop — 403→reconnect→403 for `no-access`,
+    // oversized-state→close→reconnect for `too-large`, and, for `deleted`,
+    // 404→empty token→rejected→reconnect, which is what strobed the badge about
+    // once a second after the OPEN note's file was deleted from disk (#93).
     expect(isTerminalSyncStatus("no-access")).toBe(true);
+    expect(isTerminalSyncStatus("deleted")).toBe(true);
     expect(isTerminalSyncStatus("too-large")).toBe(true);
     for (const s of ["offline", "connecting", "synced", "read-only", "error"] as const) {
       expect(isTerminalSyncStatus(s)).toBe(false);

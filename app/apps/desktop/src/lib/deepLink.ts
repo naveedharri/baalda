@@ -1,4 +1,5 @@
-// Receiving end of a shared note link (see `shareLink.ts` for the format).
+// Receiving end of the app's `baalda://` links: a shared note (`shareLink.ts`)
+// and a server invite (`connectLink.ts`).
 //
 // Two arrival paths, and both have to work or links are unreliable:
 //   - the app is already running → `onOpenUrl` fires (on Windows/Linux this
@@ -12,6 +13,7 @@
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../store";
+import { parseConnectLink } from "./connectLink";
 import { parseNoteLink } from "./shareLink";
 
 /** Bring the window forward — a link click means "show me this note". */
@@ -27,6 +29,19 @@ async function focusWindow(): Promise<void> {
 }
 
 async function handle(urls: string[] | null): Promise<void> {
+  // Connect links are considered across the WHOLE batch before any note link,
+  // not just earlier in the loop: a server invite is a precondition for opening
+  // anything on that server, so if both arrive together the address goes first.
+  // Nothing is applied here — `promptServerLink` only parks the URL and raises
+  // the confirm step, because a deep link decides where a password gets posted
+  // and must never be honoured without a click.
+  for (const url of urls ?? []) {
+    const serverUrl = parseConnectLink(url);
+    if (!serverUrl) continue;
+    await focusWindow();
+    useStore.getState().promptServerLink(serverUrl);
+    return;
+  }
   for (const url of urls ?? []) {
     if (!parseNoteLink(url)) continue;
     await focusWindow();

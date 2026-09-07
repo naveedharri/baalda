@@ -19,6 +19,13 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+/// How many times the background index rebuild retries a BUSY database, and the
+/// first backoff step (doubled per attempt: 500ms, 1s, 2s). See the retry loop in
+/// `open_vault_inner` for why a locked database is worth retrying rather than
+/// reporting.
+const REBUILD_BUSY_RETRIES: u32 = 3;
+const REBUILD_BUSY_BACKOFF_MS: u64 = 500;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultInfo {
@@ -242,7 +249,41 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
             let guard = bg_index.lock().unwrap();
             let _ = ready_tx.send(());
             let started = std::time::Instant::now();
-            let result = guard.rebuild(&bg_path);
+            // A busy database is a TIMING failure, not a broken vault, and it must
+            // not be permanent: this thread holds the process-wide index mutex, so
+            // `SQLITE_BUSY` here means a SECOND connection to the same file is
+            // mid-write — the previous open's `Index` (and its watcher drain
+            // thread) still winding down after a switch back to a vault. Past the
+            // 5s `busy_timeout` rusqlite surfaces that as an error, and a single
+            // attempt left the index stale for the rest of the session: titles,
+            // search and backlinks all answer from it, and a vault switch is
+            // exactly when it has the most catching up to do.
+            //
+            // `rebuild` is idempotent and preserves doc_ids, so retrying is safe.
+            // The sleeps deliberately keep the mutex: giving it up would let a UI
+            // reader see the stale index and render wrong titles, which is the
+            // thing the whole ready-handshake above exists to prevent.
+            let mut result = guard.rebuild(&bg_path);
+            for attempt in 1..=REBUILD_BUSY_RETRIES {
+                let busy = match &result {
+                    Ok(()) => false,
+                    Err(e) => {
+                        let m = e.to_string().to_ascii_lowercase();
+                        m.contains("locked") || m.contains("busy")
+                    }
+                };
+                if !busy {
+                    break;
+                }
+                eprintln!(
+                    "[index] rebuild found {} busy (attempt {attempt}/{REBUILD_BUSY_RETRIES}) — retrying",
+                    bg_path.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(
+                    REBUILD_BUSY_BACKOFF_MS << (attempt - 1),
+                ));
+                result = guard.rebuild(&bg_path);
+            }
             drop(guard);
             let ok = match result {
                 Ok(()) => true,
@@ -838,6 +879,59 @@ pub async fn read_note(
 ) -> AppResult<String> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
     notefile::read_note(&vault, &path)
+}
+
+/// Does a note file exist on disk right now?
+///
+/// A DISK question, unlike `get_note_meta`, which answers from the index. The
+/// sync layer re-asks it before propagating a disk-observed delete to the server:
+/// the watcher's report is up to 2.5 s old by then, and in that window an editor's
+/// unlink-and-rewrite save, a `git checkout`, or a re-created file all put the
+/// note back. `read_note` failing is the blunt instrument this replaces — it
+/// cannot tell "gone" from "unreadable", and it reads the whole file to find out.
+#[tauri::command]
+pub async fn note_exists(
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    // Epoch-pinned like every other vault-relative call behind a debounce: this
+    // one runs 2.5 s after the event that armed it, which is easily long enough
+    // for a vault switch.
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    let abs = vault::resolve_in_vault(&vault, &path)?;
+    Ok(abs.is_file())
+}
+
+/// Save a recovery copy of a deleted note's text into the vault's local trash
+/// (see `notefile::write_trash_copy`). The file itself is already gone.
+#[tauri::command]
+pub async fn write_trash_copy(
+    state: State<'_, AppState>,
+    path: String,
+    stamp: String,
+    content: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<String> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    notefile::write_trash_copy(&vault, &path, &stamp, &content)
+}
+
+/// Re-key the index row at `path` to `doc_id` after an out-of-app rename (see
+/// `Index::rebind_note_id`). Returns false when there is no row there, or when
+/// the id already belongs to another path.
+#[tauri::command]
+pub async fn rebind_note_id(
+    state: State<'_, AppState>,
+    path: String,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    // Epoch-pinned because the doc_id comes from the registry map of ONE vault;
+    // writing it into another vault's index would fork that vault's note.
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let rebound = index.lock().unwrap().rebind_note_id(&path, &doc_id);
+    rebound
 }
 
 #[tauri::command]

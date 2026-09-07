@@ -4,6 +4,7 @@
 // avatar) are NOT here — those are server-backed via Better Auth so they follow
 // the account across devices; see `ApiClient.updateUser`.
 
+import type { ServerChoice } from "./auth/serverChoice";
 import type { TreeSort } from "./tree/sort";
 
 export type ActivityStatus = "online" | "away" | "busy" | "invisible";
@@ -57,6 +58,40 @@ export function writeMentionSound(enabled: boolean): void {
     localStorage.setItem(MENTION_SOUND_KEY, enabled ? "on" : "off");
   } catch {
     /* localStorage unavailable — preference stays in-memory only */
+  }
+}
+
+// ---- Which server this device's account lives on -----------------------------
+
+const SERVER_CHOICE_KEY = "context.serverChoice";
+
+/**
+ * The answer to "managed service, or your own server?" — asked once, on the
+ * first sign-in this device ever sees (see `lib/auth/serverChoice.ts`).
+ *
+ * Device-local like the theme, and deliberately NOT the server URL itself: that
+ * lives in the Rust app config, because the auth manager needs it before any
+ * localStorage-backed UI exists. This only records whether the question has
+ * been answered, so the step stops appearing once it has.
+ *
+ * An absent or corrupted value reads as `null` — "never asked" — which is the
+ * safe direction: the worst case is asking a question again, never silently
+ * signing someone up on the wrong server.
+ */
+export function readServerChoice(): ServerChoice | null {
+  try {
+    const v = localStorage.getItem(SERVER_CHOICE_KEY);
+    return v === "managed" || v === "custom" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeServerChoice(choice: ServerChoice): void {
+  try {
+    localStorage.setItem(SERVER_CHOICE_KEY, choice);
+  } catch {
+    /* localStorage unavailable — the choice stays in-memory only */
   }
 }
 

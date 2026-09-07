@@ -92,13 +92,27 @@ function Banner({
   );
 }
 
+/**
+ * The file behind the open note vanished from disk (Finder, `rm`, a script, an
+ * AI tidying the vault).
+ *
+ * In a synced vault that is now a real delete: the sync layer keeps a recovery
+ * copy in `.context/trash/` and removes the note for the team, exactly like the
+ * sidebar's Delete (see `SyncManager.drainDiskDeletes`). The banner says so
+ * rather than implying the app lost track of the file — and it still only offers
+ * to close, because the editor may hold text the user has not saved anywhere.
+ */
 function RemovedBanner() {
   const noteRemoved = useStore((s) => s.noteRemoved);
   const openNote = useStore((s) => s.openNote);
+  // Latched when the file vanished, not read live: propagating the delete drops
+  // the note's mapping, which would otherwise re-word the banner mid-sentence.
+  const synced = useStore((s) => s.noteRemovedSynced);
   return (
     <Banner show={!!noteRemoved && !!openNote}>
       <span>
-        <strong>{openNote?.title}</strong> was deleted on disk.
+        <strong>{openNote?.title}</strong> was deleted on disk
+        {synced ? " and removed for the team. A copy is kept in the vault's trash." : "."}
       </span>
       <div className="banner-actions">
         <button
@@ -534,22 +548,30 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
 }
 
 /**
- * Sign-in dialog raised by a flow, not by a click — today only the shared-link
- * flow: a baalda:// link arrived while signed out, the link itself is queued in
- * lib/noteLinkFlow, and signing in here opens it automatically. Dismissing the
- * dialog abandons the link (and the vault-landing request it armed) so nothing
- * fires on a later, unrelated sign-in. Mounted in BOTH root branches — a
- * signed-out user can receive a link with or without a folder open.
+ * Sign-in dialog raised by a flow, not by a click. Two flows use it, both
+ * arriving as a `baalda://` deep link while the app is signed out:
+ *
+ *   - "note-link": a shared note. The link is queued in lib/noteLinkFlow and
+ *     signing in here opens it automatically.
+ *   - "server-link": a server invite (#91). The offered URL is parked in
+ *     `pendingServerLink` and the dialog opens on its confirm step, so a
+ *     self-hosting team can send one link instead of dictating a URL.
+ *
+ * Dismissing the dialog abandons whichever was pending (and, for a note link,
+ * the vault-landing request it armed) so nothing fires on a later, unrelated
+ * sign-in. Mounted in BOTH root branches — a signed-out user can receive a link
+ * with or without a folder open.
  */
 function PromptedAuthDialog() {
   const authPrompt = useStore((s) => s.authPrompt);
-  if (authPrompt !== "note-link") return null;
+  if (authPrompt !== "note-link" && authPrompt !== "server-link") return null;
   return (
     <AuthDialog
       onSignedIn={() => useStore.getState().setAuthPrompt(null)}
       onClose={() => {
         clearPendingNoteLink();
         requestOpenVault(null);
+        useStore.getState().clearServerLink();
         useStore.getState().setAuthPrompt(null);
       }}
     />
@@ -708,6 +730,14 @@ export default function App() {
               // and merges genuine external edits live into the open Y.Text.
               bridgeManager.handleFileChanged(e.path);
             }
+            // …and the sync layer sees it either way. Deleting the note you have
+            // open must reach the team exactly like deleting a closed one, and
+            // the `modified` half of a third-party atomic save is what CANCELS
+            // that delete inside its grace window — so skipping these events for
+            // the open note is what made an open note behave differently from
+            // every other one. The sync layer's own suppressed-doc guard keeps
+            // the open note out of the content-push queue.
+            forSync.push(e);
             continue;
           }
           // Everything that is NOT the open note goes to the sync layer: an

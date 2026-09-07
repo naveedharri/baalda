@@ -523,6 +523,59 @@ impl Index {
         Ok(())
     }
 
+    /// Re-key the note row at `rel` to `doc_id`, keeping its content.
+    ///
+    /// The counterpart to [`Self::rename_note`] for a rename this app did NOT
+    /// perform. When a file is renamed from outside (Finder, a script, an AI),
+    /// the watcher sees an unrelated `removed` + `modified` pair: the old row is
+    /// dropped and the new file is indexed under a FRESH `Uuid::new_v4()`
+    /// (`index_notes` reuses an id only via `id_for_path`). The sync layer pairs
+    /// the two halves by content hash and repairs the server mapping — this is
+    /// the local half, without which the same file carries one doc_id in
+    /// `.context/config.json` and another in the index, and the next thing to
+    /// read the index re-registers it as a second note.
+    ///
+    /// Returns false when there is no row at `rel`, or when `doc_id` is already
+    /// taken by a DIFFERENT path — never merging two rows, because that would
+    /// silently drop one note's index entry.
+    pub fn rebind_note_id(&self, rel: &str, doc_id: &str) -> AppResult<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let Some(current) = self.id_for_path(&tx, rel)? else {
+            return Ok(false);
+        };
+        if current == doc_id {
+            return Ok(true); // already correct (a re-run, or we indexed it ourselves)
+        }
+        let taken: Option<String> = tx
+            .query_row(
+                "SELECT path FROM notes WHERE id = ?1",
+                params![doc_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if taken.is_some() {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE notes SET id = ?1 WHERE id = ?2",
+            params![doc_id, current],
+        )?;
+        tx.execute(
+            "UPDATE note_tags SET note_id = ?1 WHERE note_id = ?2",
+            params![doc_id, current],
+        )?;
+        tx.execute(
+            "UPDATE links SET src_note_id = ?1 WHERE src_note_id = ?2",
+            params![doc_id, current],
+        )?;
+        // Inbound links point at the OLD id in `dst_note_id`; the pass recomputes
+        // every one of them from `dst_path_raw`, which is what keeps backlinks
+        // pointing at this note across the rebind.
+        self.resolve_links(&tx, LinkScope::All)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// The note row for a file over [`MAX_INDEX_BYTES`]: identity, title and
     /// mtime, with an EMPTY FTS body and no links or tags. Any body/link/tag rows
     /// a smaller earlier version left behind are cleared, so a note growing past
@@ -1941,6 +1994,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dangling, 1);
+    }
+
+    /// An out-of-app rename: the watcher drops the old row and indexes the new
+    /// file under a fresh uuid, so the sync layer has to put the registry's
+    /// doc_id back onto the row. Backlinks must survive the re-key.
+    #[test]
+    fn rebind_note_id_rekeys_a_row_and_keeps_backlinks() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let beta_id = idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id;
+
+        // Finder renames the file: the watcher removes the old row and indexes
+        // the new path as a brand-new note.
+        std::fs::rename(v.join("sub/Beta.md"), v.join("sub/Renamed.md")).unwrap();
+        idx.remove_note(&v, &v.join("sub/Beta.md")).unwrap();
+        idx.index_note(&v, &v.join("sub/Renamed.md")).unwrap();
+        let fresh_id = idx.get_note_meta("sub/Renamed.md").unwrap().unwrap().id;
+        assert_ne!(fresh_id, beta_id, "the watcher minted a new id");
+
+        assert!(idx.rebind_note_id("sub/Renamed.md", &beta_id).unwrap());
+        assert_eq!(
+            idx.get_note_meta("sub/Renamed.md").unwrap().unwrap().id,
+            beta_id
+        );
+        // Alpha's [[Beta]] resolves by title, so it points at the note's ORIGINAL
+        // doc_id again — which is the whole reason identity has to survive.
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();
+        let dst: Option<String> = idx
+            .conn
+            .query_row(
+                "SELECT dst_note_id FROM links WHERE src_note_id = ?1",
+                params![alpha.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dst.as_deref(), Some(beta_id.as_str()));
+
+        // Idempotent, and it refuses to merge two rows.
+        assert!(idx.rebind_note_id("sub/Renamed.md", &beta_id).unwrap());
+        let gamma_id = idx.get_note_meta("Gamma.md").unwrap().unwrap().id;
+        assert!(!idx.rebind_note_id("sub/Renamed.md", &gamma_id).unwrap());
+        assert!(!idx.rebind_note_id("sub/Nothing.md", &beta_id).unwrap());
     }
 
     #[test]

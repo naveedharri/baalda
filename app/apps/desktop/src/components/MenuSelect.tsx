@@ -21,11 +21,12 @@ import { placeMenu, type Placement } from "../lib/menuPlacement";
  * It is also PORTALLED to `document.body`, which `position: fixed` alone does
  * not achieve. Any ancestor with a transform becomes the containing block for
  * fixed descendants and clips them with its own overflow — and the settings
- * page has one by accident: `.settings-content` animates in with
- * `animation-fill-mode: both`, so its final keyframe's `transform: translateY(0)`
- * stays applied forever. The menu was landing inside that card's coordinate
- * space and being sliced by its scrollbar. A portal is immune to that whatever
- * gets styled above it later.
+ * surface had one by accident: `.settings-content` used to animate in with
+ * `rise-in` and `animation-fill-mode: both`, so its final keyframe's
+ * `transform: translateY(0)` stayed applied forever. The menu landed inside that
+ * card's coordinate space and got sliced by its scrollbar. Those animations are
+ * opacity-only now (see `SettingsModal.tsx`), but the portal stays: it is immune
+ * to whatever gets styled above it later.
  *
  * Self-contained dismissal (outside-mousedown + Escape), unlike FileTree's menu
  * which owns a window-level dismiss of its own.

@@ -82,6 +82,21 @@ export interface BridgeConfig {
    * note we also refuse to read back in. 0 disables the check.
    */
   maxIngestBytes: number;
+  /**
+   * Allow a 0-byte file to clear a doc that still holds text (default false).
+   *
+   * The ingest-side twin of the egest clobber guard. A file that reads as
+   * COMPLETELY empty against a populated doc is almost never an edit: it is the
+   * registry's own 0-byte placeholder landing on a note whose content this
+   * device already has (issue #93 — the placeholder was diff-merged as a
+   * delete-all and pushed, destroying the server's copy), or a truncated write
+   * caught mid-flight. Refusing costs a log line and a re-read; accepting costs
+   * the note, on every device.
+   *
+   * A PARTIAL truncation still applies — this is only the all-or-nothing case.
+   * Set true where clearing a note from disk must be honoured verbatim.
+   */
+  allowTruncateFromDisk: boolean;
   /** First retry delay after a failed egest write; doubles per consecutive
    *  failure up to `egestRetryMaxMs`. */
   egestRetryBaseMs: number;
@@ -108,6 +123,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   compactThreshold: 64,
   largeDiffRatio: 0.6,
   maxIngestBytes: 10 * 1024 * 1024,
+  allowTruncateFromDisk: false,
   egestRetryBaseMs: 1_000,
   egestRetryMaxMs: 30_000,
   // 500ms matches Yjs' own default and CodeMirror's `newGroupDelay`, so undo

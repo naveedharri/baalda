@@ -63,6 +63,15 @@ with specific people, and choose view or edit for each. Roles are owner, admin, 
 Yes. "Copy link" on a note offers a public link: a read-only web page anyone with the link can
 open. Revoke it any time. There is also a private link that only works for teammates with access.
 
+## Can I edit the vault folder from outside the app?
+Yes, and it is a supported way to work. Create, edit, delete, rename and move `.md` files with any
+tool — Finder, a script, an AI agent — and Baalda picks the change up and syncs it, merging an
+outside edit with whatever a teammate is typing rather than overwriting it. A delete on disk takes
+a couple of seconds to reach the team (long enough that an editor's save or a rename is not
+mistaken for one) and your copy of the text is kept in the vault's hidden trash folder first. The
+one folder to leave alone is the hidden `.context` folder inside the vault: that is Baalda's own
+index, sync state and trash.
+
 ## How does the AI part work?
 Two ways. (1) Local: because notes are plain files, any tool on your computer, for example
 Claude Code, can edit them directly; Baalda notices the change and syncs it. (2) Remote: Baalda
@@ -93,8 +102,11 @@ Not yet. Desktop only; iOS is on the roadmap. Public note links open in any brow
 
 ## Can I self-host?
 Yes. The server is Node + Postgres. One-click deploy to Railway, a Docker Compose bundle, or
-plain Docker; see `docs/DEPLOY.md`. Then paste your server URL into the app's settings.
-Self-hosted servers have no plan limits.
+plain Docker; see `docs/DEPLOY.md`. The app asks which server on first run — "managed
+service, or your own?" — and you enter your URL there; it is checked before it is saved.
+Later you can change it in Account settings → Connection. To save your team the typing,
+send them `https://<your-server>/open/connect`: clicking it opens Baalda and asks them to
+confirm connecting to your server. Self-hosted servers have no plan limits.
 
 ## What is NOT there (so you do not overpromise)?
 Rich WYSIWYG block editing, in-app AI chat, comments and @mentions, end-to-end encryption,

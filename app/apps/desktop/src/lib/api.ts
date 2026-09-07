@@ -349,6 +349,34 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A server address didn't check out. Thrown by {@link ApiClient.health}, which
+ * is the one probe in this file that must NOT fail closed.
+ *
+ * The two kinds are worth telling apart because they send the user to different
+ * places: `unreachable` means look at the URL, the DNS and whether the box is
+ * up; `not-baalda` means the address is fine and something else is answering on
+ * it (a proxy's default page, a different app, the wrong port).
+ */
+export class ServerCheckError extends Error {
+  constructor(
+    public kind: "unreachable" | "not-baalda",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ServerCheckError";
+  }
+}
+
+/** How long a server gets to answer `/health` before we call it unreachable. */
+export const HEALTH_TIMEOUT_MS = 6000;
+
+// The two things a person can actually act on. Kept as constants so the dialog
+// and Settings → Connection say the same words for the same failure.
+const UNREACHABLE_MESSAGE =
+  "Couldn't reach that server. Check the URL and that it's online.";
+const NOT_BAALDA_MESSAGE = "That address answered, but it isn't a Baalda server.";
+
 type FetchLike = typeof fetch;
 
 export interface ApiClientOptions {
@@ -478,6 +506,64 @@ export class ApiClient {
     }
 
     return { data: parsed as T, authToken };
+  }
+
+  // ---- Reachability -------------------------------------------------------
+
+  /**
+   * Is there a Baalda server at this address? Resolves if yes, throws a
+   * {@link ServerCheckError} if no.
+   *
+   * The ONE probe in this file that fails OPEN, and it exists precisely because
+   * the other two don't. `getAuthMethods` and `getBillingConfig` are capability
+   * probes: they swallow every failure and answer "not configured", which is
+   * right for deciding whether to draw a button and useless for telling someone
+   * their server URL is wrong. Building the onboarding check on either of them
+   * would report "connected" for a typo'd hostname.
+   *
+   * Takes an explicit `baseUrl` because it runs BEFORE the URL is adopted —
+   * validating a candidate must not disturb the client's current base or its
+   * token. It also sends no `Authorization`: `/health` is public, and the point
+   * is to test the address, not the session.
+   *
+   * `AbortController` rather than a bare `fetch`: a host that accepts the TCP
+   * connection and then says nothing (a firewall, a hung proxy) would otherwise
+   * leave the Connect button spinning indefinitely.
+   */
+  async health(baseUrl?: string): Promise<void> {
+    const base = stripTrailingSlash((baseUrl ?? this.baseUrl).trim());
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${base}/health`, {
+        method: "GET",
+        headers: { Accept: "application/json", [ORIGIN_HEADER]: this.clientId },
+        signal: controller.signal,
+      });
+    } catch {
+      // A timeout, DNS failure, refused connection and a CSP block all land
+      // here, and the webview reports the last one as a bare `TypeError: Load
+      // failed` — so the message stays about the address rather than guessing.
+      throw new ServerCheckError("unreachable", UNREACHABLE_MESSAGE);
+    } finally {
+      clearTimeout(timer);
+    }
+    // A 5xx is the server's own, or a proxy in front of it saying the app is
+    // down — "check it's online" is the useful thing to say, not "wrong app".
+    if (res.status >= 500) throw new ServerCheckError("unreachable", UNREACHABLE_MESSAGE);
+    if (!res.ok) throw new ServerCheckError("not-baalda", NOT_BAALDA_MESSAGE);
+    const text = await res.text();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // 200 with HTML: something is there, it just isn't us.
+      throw new ServerCheckError("not-baalda", NOT_BAALDA_MESSAGE);
+    }
+    const ok =
+      !!parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === true;
+    if (!ok) throw new ServerCheckError("not-baalda", NOT_BAALDA_MESSAGE);
   }
 
   // ---- Auth (Better Auth) -------------------------------------------------

@@ -42,3 +42,66 @@ describe("GET /open/note/:orgId/:docId", () => {
     }
   });
 });
+
+/**
+ * The server-invite landing page (`GET /open/connect`).
+ *
+ * The link an admin sends instead of dictating a URL (#91), so the property
+ * that matters is that the page names THIS server — the one the recipient just
+ * reached — rather than a build-time constant, including behind a
+ * TLS-terminating reverse proxy where the request itself arrives as plain http.
+ */
+describe("GET /open/connect", () => {
+  const app = createApp(testAppDeps());
+
+  it("deep-links back to the host the request came in on", async () => {
+    const res = await app.request("/open/connect", {
+      headers: { host: "notes.example.com" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const html = await res.text();
+    expect(html).toContain(
+      `baalda://connect?server=${encodeURIComponent("http://notes.example.com")}`,
+    );
+  });
+
+  it("trusts the forwarded proto and host over the local request", async () => {
+    const res = await app.request("/open/connect", {
+      headers: {
+        host: "internal-8080.railway.internal",
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "notes.example.com",
+      },
+    });
+    const html = await res.text();
+    expect(html).toContain(
+      `baalda://connect?server=${encodeURIComponent("https://notes.example.com")}`,
+    );
+    expect(html).not.toContain("railway.internal");
+  });
+
+  it("keeps the path prefix a reverse proxy announces", async () => {
+    const announced = await app.request("/open/connect", {
+      headers: {
+        host: "intranet.example.com",
+        "x-forwarded-proto": "https",
+        "x-forwarded-prefix": "/baalda",
+      },
+    });
+    expect(await announced.text()).toContain(
+      `server=${encodeURIComponent("https://intranet.example.com/baalda")}`,
+    );
+  });
+
+  it("is public, and a hostile host header can't smuggle markup in", async () => {
+    const res = await app.request("/open/connect", {
+      headers: { host: '"><script>alert(1)</script>' },
+    });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    // Falls back to the configured public URL rather than reflecting it.
+    expect(html).toContain("baalda://connect?server=");
+  });
+});
