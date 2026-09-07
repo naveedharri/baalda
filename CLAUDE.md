@@ -23,6 +23,13 @@ Three pieces; this open-source repo holds the first two.
   because the updater checks our minisign signature, not an OS certificate.
   There is no draft/review gate — pushing a `v*` tag ships to every running app on its next
   updater poll (Tauri updater polls `releases/latest`).
+  Because of that, review happens *before* main: PRs target the long-lived **`staging`** branch,
+  and every push to it runs `.github/workflows/staging-release.yml`, which publishes a separate
+  auto-updating **"Baalda Staging"** app (`com.baalda.context.staging`, version
+  `<base>-staging.<run#>`, server from the `STAGING_SERVER_URL` Actions variable) into one rolling
+  GitHub *prerelease* tagged `staging` — invisible to production's updater, which resolves
+  `releases/latest` and so skips prereleases. Promotion is a fast-forward `staging` → `main` plus
+  the four-file version bump; see `docs/RELEASE.md` → Staging.
 - **Backend server** (`app/apps/server`) — open source and self-hostable (Node + Postgres).
   The managed option runs this **same server code**, publicly reachable at
   `https://api.baalda.com`; users choose an instance via the server URL in Settings. There is

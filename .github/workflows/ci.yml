@@ -6,7 +6,12 @@ name: ci
 # themselves via the test harness (resetDb → runMigrations).
 on:
   push:
-    branches: [main, develop]
+    # `staging` is here for the same reason `main` is: a push to it ships an
+    # installable app (.github/workflows/staging-release.yml), so the suite has
+    # to have run against that exact commit. PRs are covered by `pull_request`
+    # whatever branch they target, but a fast-forward or a direct push to
+    # `staging` is not a PR.
+    branches: [main, staging, develop]
   pull_request:
   workflow_dispatch:
 

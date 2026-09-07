@@ -74,6 +74,179 @@ build Linux in a container — and update the `if:` on the Linux deps step to ma
 > a `v*` tag ships to all users. Flip `releaseDraft` back to `true` in
 > `release.yml` if you want to inspect bundles before they go out.
 
+## Staging
+
+There is no review gate on a production release, so the review happens *before*
+it: on a `staging` branch that produces its own installable, auto-updating app
+pointed at a **staging server**.
+
+### The branch model
+
+`staging` is long-lived and equals `main` plus whatever is under test.
+
+1. **PRs target `staging`**, not `main`.
+2. Merging one pushes `staging`, which builds **Baalda Staging** and replaces the
+   rolling `staging` prerelease. Testers' staging apps auto-update into it.
+3. When the batch is proven, **promote**: fast-forward `staging` onto `main` and
+   bump the four version files.
+
+```bash
+git checkout main && git pull
+git merge --ff-only staging     # refuses if main has commits staging lacks
+# bump the four version files (see the top of this doc), commit, then:
+git push origin main            # ← this is what ships to users
+git checkout staging && git merge --ff-only main && git push origin staging
+```
+
+`--ff-only` is the point of the model: if it refuses, something landed on `main`
+that never went through staging, and that is worth knowing before you ship. Fix it
+by merging `main` into `staging` first, letting CI and a tester see the result.
+
+Re-syncing `staging` onto `main` afterwards pushes `staging` again and so builds
+one more staging app, of code identical to what just shipped. Harmless, and it
+keeps the two branches from drifting.
+
+> ⚠️ **The version bump has to be in the commit that becomes `main`'s new tip.**
+> `release.yml`'s `gate` compares `tauri.conf.json`'s version against `HEAD^` —
+> the *parent commit*, not the previous `main`. Fast-forward a batch whose bump
+> sits three commits back and the gate sees an unchanged version between the last
+> two commits, reports "nothing to release", and ships nothing. Bumping on `main`
+> after the fast-forward (as above) always satisfies this. Bumping on `staging`
+> works too, but only as the batch's final commit — and one more merge after it
+> silently costs you the release. Recover with a `v<version>` tag push, which
+> forces a build regardless of the diff.
+
+Suggested branch protection: require `ci` on both `main` and `staging`, and allow
+only fast-forward merges into `main` (GitHub: linear history + no force pushes).
+
+### The rolling `staging` prerelease
+
+`.github/workflows/staging-release.yml` builds the same four platforms as
+production and publishes into **one GitHub prerelease permanently tagged
+`staging`**. A `prepare` job deletes that release *and its tag* before the matrix
+runs, so the first matrix job recreates both at the new commit and the other three
+upload into it. That is why the updater endpoint can be a fixed URL:
+
+```
+https://github.com/naveedharri/baalda/releases/download/staging/latest.json
+```
+
+The staging app polls that; production polls `releases/latest`. The two can never
+cross, and not only because the URLs differ — **`releases/latest` excludes
+prereleases**, and the staging release is one. That wall holds even if the config
+overlay is ever fumbled.
+
+| | Production | Staging |
+| --- | --- | --- |
+| Trigger | version bump merged to `main`, or a `v*` tag | any push to `staging` |
+| Tag | `v<version>`, one per release | `staging`, rolling (deleted + recreated) |
+| Version | `0.1.47` | `0.1.47-staging.<run number>` |
+| Product name | Baalda | Baalda Staging |
+| Bundle identifier | `com.baalda.context` | `com.baalda.context.staging` |
+| Server | built-in default (`api.baalda.com`) | `STAGING_SERVER_URL` variable |
+| Updater manifest | `releases/latest/download/latest.json` | `releases/download/staging/latest.json` |
+| Windows bundle | `.msi` + `.exe` | `.exe` (NSIS) only |
+| `cancel-in-progress` | `false` | `true` |
+
+**The version is a semver prerelease** — `<base>-staging.<run_number>`, where base
+is `tauri.conf.json`'s version. It sorts *below* the base version, so nothing on
+the production channel would ever treat it as an upgrade, and it is monotonic
+within the staging channel because `run_number` only increases (semver compares
+numeric prerelease identifiers numerically, so `-staging.9` < `-staging.10`).
+⚠️ **`run_number` resets if the workflow file is renamed.** Rename it and the next
+staging build looks *older* than the installed one; bump the base version at the
+same time if you ever do.
+
+**Windows is NSIS-only on staging.** An MSI cannot carry a non-numeric semver
+prerelease — `tauri-bundler`'s WiX path bails with *"optional pre-release
+identifier in app version must be numeric-only"* — while the NSIS path ignores the
+prerelease and synthesises the numeric `VIProductVersion` Windows wants. The cost
+is that staging does not rehearse production's Windows *update* path (which goes
+through the MSI); everything else about the app is identical.
+
+**One required piece of setup, and it is not in this repo:** a repo Actions
+**variable** named `STAGING_SERVER_URL` (Settings → Secrets and variables →
+Actions → Variables) holding the staging server's base URL. The workflow's
+`prepare` job fails with a clear message when it is empty, or when it points at
+`api.baalda.com` — a staging app that silently fell back to the production server
+would be worse than no staging channel. It is a *variable* rather than a secret
+because it cannot be kept secret: Vite inlines it into the JS bundle, and we
+publish that bundle. Treat the staging server as internet-facing.
+
+### How the app is turned into a different app
+
+`tauri build` takes a repeatable `-c/--config`, and the workflow passes two
+overlays that merge onto `tauri.conf.json` in order:
+
+- `app/apps/desktop/src-tauri/tauri.staging.conf.json` — **committed.** The
+  identity: `productName`, `identifier`, and the updater endpoint.
+- `src-tauri/tauri.staging.build.conf.json` — **generated per run** (gitignored).
+  The run-numbered `version` and this platform's `bundle.targets`.
+
+The merge is RFC 7386 JSON Merge Patch (`json_patch::merge`, via tauri-utils'
+`merge_config`), which means **arrays are replaced, not concatenated** — the
+overlay's one-element `endpoints` array *removes* production's endpoint rather
+than adding to it. Relative `--config` paths resolve against `app/apps/desktop`,
+which is both the CLI's working directory under tauri-action and the base
+tauri-action itself uses, so one relative path is right for both. tauri-action
+parses `--config` out of `args` on its own, which is how it learns the overlaid
+`productName` and `version` and so looks for the right artifact filenames and
+substitutes the right `__VERSION__`.
+
+The updater **signing key is deliberately shared** with production. The minisign
+public key is compiled into the app from `tauri.conf.json` and the overlay does
+not touch it, so staging builds must be signed by the same private key or they
+would reject their own updates. Channel separation is the endpoint, not the key.
+
+### Installing the staging app next to the real one
+
+Download the installer from the `staging` prerelease on the Releases page (it is
+marked *Pre-release*). Because the bundle identifier differs, macOS treats it as a
+separate application: it installs to `/Applications/Baalda Staging.app`, gets its
+own Dock icon, and Tauri hands it **its own app-config directory**
+(`~/Library/Application Support/com.baalda.context.staging`), so the vault path and
+server URL it remembers never mix with the released app's. macOS builds are
+Developer ID signed and notarized exactly like production, so the install is clean.
+
+Three things that are **not** isolated, in descending order of how much they can
+hurt you:
+
+1. **Vault folders.** A vault's `.context/config.json` binds that folder to one
+   server's vault id and doc-id map. Opening a folder you also use with the
+   released app points the same notes at two servers, and the result is not a
+   merge — it is divergence you cannot unpick. **Use a fresh, throwaway folder.**
+2. **The `baalda://` link scheme.** Both apps register it and the OS picks a single
+   handler, so a shared note link may open in the other app. This is not fixable
+   without breaking staging deep links outright, since the server mints
+   `baalda://` URLs.
+3. **The OS keychain service**, which is the frozen `com.baalda.context` in both
+   builds (see `keychain.rs`). Session items are keyed `session-v2:<serverUrl>`,
+   so a staging app on the staging server and a released app on the production
+   server never touch the same item — the different server URL is what separates
+   them, not the app. Point the staging app at the *production* server, though,
+   and both apps contend for one keychain item whose macOS ACL belongs to whichever
+   app created it, which is exactly how you earn the "Baalda wants to use your
+   confidential information" password prompt.
+
+### Notes on the staging workflow
+
+`concurrency: staging-release` has **`cancel-in-progress: true`**, the opposite of
+production. A superseded staging build is worth nothing — the tester wants the
+newest commit, and the rolling release only ever holds one version — so a newer
+push kills the older run. The cost is throwing away an Apple notarization already
+paid for in wall-clock, which is a fair trade on a test channel and not on a real
+one. Everything else matches production: `max-parallel: 1`, no `timeout-minutes`,
+and the same `notarize: false` escape hatch under Actions → *staging-release* →
+*Run workflow*.
+
+`release.yml` cannot be triggered by a `staging` push — it listens only on `main`
+and `v*` tags. `ci.yml` runs on pushes to `staging` as well as `main`, so the suite
+has seen the exact commit a tester is installing.
+
+A `workflow_dispatch` from a branch other than `staging` is allowed and is a handy
+way to get a single PR into a tester's hands; it logs a warning, because the
+`staging` tag then points at that ref.
+
 ## Signing and notarization are part of the release
 
 Two different things happen to the app, and only one of them is under our

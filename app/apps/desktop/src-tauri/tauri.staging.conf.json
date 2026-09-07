@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Baalda Staging",
+  "identifier": "com.baalda.context.staging",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/naveedharri/baalda/releases/download/staging/latest.json"
+      ]
+    }
+  }
+}

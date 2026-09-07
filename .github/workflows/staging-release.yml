@@ -1,0 +1,543 @@
+name: staging-release
+
+# The staging channel: every push to `staging` produces an installable,
+# auto-updating "Baalda Staging" desktop app that talks to the STAGING server.
+#
+# ── The branch model ─────────────────────────────────────────────────────────
+# `staging` is long-lived and equals `main` plus the PRs under test. PRs target
+# `staging`; when a batch is proven, `staging` fast-forwards onto `main` (plus
+# the four-file version bump) and `release.yml` ships the real thing. See
+# docs/RELEASE.md → "Staging".
+#
+# ── How this stays out of production's way (four independent walls) ──────────
+# 1. **Different bundle identifier** — `com.baalda.context.staging`, so macOS
+#    treats it as a different application (installs side by side with Baalda,
+#    its own Dock icon) and Tauri hands it its OWN app-config dir. The vault
+#    path and server URL the app remembers therefore never mix with production's.
+# 2. **Different updater endpoint** — a rolling GitHub *prerelease* tagged
+#    `staging`, not `releases/latest`. The overlay REPLACES production's
+#    endpoints array (see "Config overlay" below); it does not add to it.
+# 3. **`prerelease: true`** — GitHub's `releases/latest` (which is exactly what
+#    production's updater polls) *excludes* prereleases, so a production app can
+#    never see a staging build even by accident. This is the wall that matters
+#    most, because it holds even if someone fumbles the overlay.
+# 4. **A staging prerelease version** — `<base>-staging.<run_number>` sorts
+#    BELOW `<base>` under semver, so nothing on the production channel would
+#    consider it an upgrade.
+#
+# ── What still is NOT isolated (know this before testing) ────────────────────
+# * The **`baalda://` deep-link scheme** is registered by both apps and the OS
+#   picks exactly one handler for it. A shared note link may open in the wrong
+#   one. Nothing here can fix that without breaking staging deep links outright,
+#   since the server mints `baalda://` URLs.
+# * The **OS keychain service** is the frozen `com.baalda.context` in both apps.
+#   Session items are keyed `session-v2:<serverUrl>`, so a staging app on the
+#   staging server and a production app on the production server never touch the
+#   same item. Point the staging app at the PRODUCTION server, though, and both
+#   apps fight over one keychain item whose macOS ACL belongs to whichever app
+#   created it — which is how you earn the "wants to use your confidential
+#   information" password prompt. Don't do that; the gate below makes it hard to.
+# * **Vault folders are not isolated at all.** A vault's `.context/config.json`
+#   binds that folder to one server's vault id. Opening a production vault folder
+#   in the staging app is a genuine way to corrupt it. Use throwaway folders.
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Submit to Apple for notarization (off ships signed-only)'
+        type: boolean
+        default: true
+
+# Unlike `release.yml`, cancel-in-progress is TRUE here. A superseded staging
+# build is worth nothing — the tester wants the newest commit, and the rolling
+# `staging` release only ever holds one version, so two overlapping runs would
+# fight over the same tag. The cost is that a cancelled run throws away an Apple
+# notarization we already waited on; on a test channel that is a fair trade.
+concurrency:
+  group: staging-release
+  cancel-in-progress: true
+
+env:
+  # Master notarization switch for PUSH events; `workflow_dispatch` overrides it
+  # via the input above. Kept on by default so a tester gets a clean install with
+  # no Gatekeeper prompt — the whole point of a staging build is to rehearse the
+  # real install. Same escape hatch as production: Actions → staging-release →
+  # Run workflow → `notarize: false`.
+  NOTARIZE_ON_PUSH: 'yes'
+  # The rolling prerelease tag. Hardcoded in three places that must agree: here,
+  # `tagName` below, and the updater endpoint inside
+  # app/apps/desktop/src-tauri/tauri.staging.conf.json.
+  STAGING_TAG: staging
+
+jobs:
+  # ── Runs once, before the matrix ────────────────────────────────────────────
+  # Two jobs' worth of work that must happen exactly once: refuse to build if the
+  # staging server URL is missing, and reset the rolling release so tauri-action
+  # recreates it fresh. The matrix cannot do the reset itself — the four jobs are
+  # serial and the FIRST one is supposed to create the release the other three
+  # upload into, so a per-job delete would wipe the previous job's assets.
+  prepare:
+    name: Check config and reset the rolling staging release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      base: ${{ steps.ver.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Fail fast rather than ship a staging app pointed at production ──────
+      # STAGING_SERVER_URL is a repo Actions VARIABLE (Settings → Secrets and
+      # variables → Actions → Variables), deliberately not committed: this repo
+      # is public and our instances' addresses do not belong in it.
+      #
+      # It is a variable and not a secret because it is not one — a build BAKES
+      # it into the JS bundle (Vite inlines `import.meta.env.VITE_SERVER_URL`)
+      # and we publish that bundle as a public prerelease. Anyone who downloads
+      # the staging installer can read the URL out of it. Treat the staging
+      # server as internet-facing and protect it with real auth, exactly like
+      # production; the variable only keeps it out of git and out of these logs.
+      - name: Require a staging server URL
+        env:
+          STAGING_SERVER_URL: ${{ vars.STAGING_SERVER_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${STAGING_SERVER_URL:-}" ]; then
+            echo "::error title=STAGING_SERVER_URL is not set::Set the repo Actions variable STAGING_SERVER_URL (Settings -> Secrets and variables -> Actions -> Variables) to the staging server's base URL, e.g. https://staging.example. Refusing to build: without it the app would fall back to DEFAULT_SERVER_URL, which in a release build is the PRODUCTION server (app/apps/desktop/src/lib/api.ts)."
+            exit 1
+          fi
+
+          # Never print the value. Masking is per-job, so every job that reads
+          # the variable masks it again.
+          echo "::add-mask::$STAGING_SERVER_URL"
+
+          # Belt and braces on top of the empty check: an explicitly configured
+          # production URL is the same mistake, just typed out.
+          case "$STAGING_SERVER_URL" in
+            *api.baalda.com*)
+              echo "::error title=STAGING_SERVER_URL points at production::The staging channel must not build against the managed production server. Point STAGING_SERVER_URL at a separate instance (see docs/DEPLOY.md)."
+              exit 1
+              ;;
+          esac
+
+          case "$STAGING_SERVER_URL" in
+            http://*|https://*) ;;
+            *)
+              echo "::error title=STAGING_SERVER_URL is not a URL::It must start with http:// or https://."
+              exit 1
+              ;;
+          esac
+
+          echo "Staging server URL is set (value masked)." >> "$GITHUB_STEP_SUMMARY"
+
+      # ── The version ────────────────────────────────────────────────────────
+      # `<base>-staging.<run_number>`, where base is tauri.conf.json's version.
+      #
+      # A semver PRERELEASE, on purpose. Two properties we need:
+      #   * Monotonic within the staging channel. semver compares dot-separated
+      #     prerelease identifiers, numeric ones numerically, so
+      #     `-staging.9` < `-staging.10` < `-staging.11`. `github.run_number`
+      #     only ever increases for a given workflow file, so every staging build
+      #     looks newer than the last and the updater takes it.
+      #   * Below the base version. `0.1.47-staging.3` < `0.1.47`, so a staging
+      #     build can never masquerade as a production release.
+      #
+      # ⚠️ `run_number` RESETS if this workflow file is ever renamed, which would
+      # make the next staging build look older than the installed one. If you
+      # rename it, also bump the base version (or bump testers by hand).
+      - name: Compute the staging version
+        id: ver
+        run: |
+          set -euo pipefail
+          base=$(jq -r .version app/apps/desktop/src-tauri/tauri.conf.json)
+          if [ -z "$base" ] || [ "$base" = "null" ]; then
+            echo "::error::Could not read the version from tauri.conf.json"
+            exit 1
+          fi
+          version="${base}-staging.${{ github.run_number }}"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Baalda Staging \`$version\`"
+            echo "Base version \`$base\` · commit \`${{ github.sha }}\` · ref \`${{ github.ref_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A dispatch from another branch is allowed (it is a handy way to get one
+      # PR into a tester's hands), but say so loudly — the `staging` tag will
+      # end up pointing at that ref, not at the staging branch.
+      - name: Warn if this is not the staging branch
+        if: github.ref != 'refs/heads/staging'
+        run: |
+          echo "::warning title=Building from ${{ github.ref_name }}::The rolling 'staging' release and tag will point at ${{ github.ref_name }} (${{ github.sha }}), not at the staging branch."
+
+      # ── Reset the rolling release ──────────────────────────────────────────
+      # tauri-action reuses a release it finds by tag and only CREATES one when
+      # the tag has none, so an un-reset `staging` release would accumulate stale
+      # assets from older versions (the filenames carry the version, so nothing
+      # would overwrite them) and `latest.json` would sit in a release whose
+      # other assets are a mix of runs. Deleting release + tag first makes the
+      # first matrix job recreate both at this commit.
+      #
+      # Both deletes tolerate absence — the very first staging run has neither.
+      - name: Delete the previous staging release and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$STAGING_TAG" >/dev/null 2>&1; then
+            echo "Deleting release $STAGING_TAG"
+            gh release delete "$STAGING_TAG" --yes
+          else
+            echo "No existing $STAGING_TAG release"
+          fi
+
+          # `gh release delete --cleanup-tag` would do this, but only when a
+          # release exists. The tag can outlive its release (a cancelled run, a
+          # manual delete in the UI), and a leftover tag is worse than a leftover
+          # release: tauri-action's createRelease would then attach the new
+          # release to the OLD commit's tag.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${STAGING_TAG}" >/dev/null 2>&1; then
+            echo "Deleting tag $STAGING_TAG"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${STAGING_TAG}"
+          else
+            echo "No existing $STAGING_TAG tag"
+          fi
+
+          # Verify, because building for 40 minutes into a release that is still
+          # holding another run's assets is a silent, confusing failure.
+          if gh release view "$STAGING_TAG" >/dev/null 2>&1; then
+            echo "::error::The $STAGING_TAG release still exists after deletion"
+            exit 1
+          fi
+
+  build:
+    needs: prepare
+    permissions:
+      contents: write
+    # No `timeout-minutes`, same as release.yml: the job runs to GitHub's 6-hour
+    # default because the tail of a macOS build is Apple's notary queue, and a
+    # cap converts a slow success into a hard failure. See docs/RELEASE.md →
+    # "Slow is not the same as wedged".
+    strategy:
+      fail-fast: false
+      # Serial, for release.yml's two reasons: both macOS jobs would otherwise
+      # notarize concurrently under one Apple ID, and every job calls
+      # tauri-action, which creates the GitHub Release when it is missing — in
+      # parallel they race to create the same tag. Budget ~35-45 min.
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+            targets: '["app", "dmg"]'
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+            targets: '["app", "dmg"]'
+          - platform: 'ubuntu-22.04'
+            args: ''
+            targets: '["deb", "appimage"]'
+          - platform: 'windows-latest'
+            args: ''
+            targets: '["nsis"]'
+          # ── Why Windows is NSIS-only here, and production is not ────────────
+          # An MSI cannot carry a semver prerelease, and this is not a guess:
+          # tauri-bundler's `convert_version` (crates/tauri-bundler/src/bundle/
+          # windows/msi/mod.rs) parses the version and, when `version.pre` is
+          # non-empty, tries `version.pre.parse::<u64>()` — bailing with
+          # "optional pre-release identifier in app version must be numeric-only
+          # and cannot be greater than 65535 for msi target". Our prerelease is
+          # `staging.<n>`, which is not numeric-only, so the WiX target would
+          # fail every single staging build.
+          #
+          # NSIS has no such problem. `try_add_numeric_build_number` (the same
+          # crate's nsis/mod.rs) only inspects build METADATA and falls back to
+          # `major.minor.patch.0` for the numeric `VIProductVersion` Windows
+          # wants, while the displayed version keeps the full string. So Windows
+          # staging ships the `-setup.exe` and nothing else.
+          #
+          # Consequence to keep in mind: production's Windows updater path is the
+          # MSI and staging's is NSIS (`updaterJsonPreferNsis` below), so the
+          # staging app does not rehearse production's Windows *update* step.
+          # Everything else about the app is identical.
+          #
+          # macOS and Linux keep production's bundle set. `targets` is spelled
+          # out per platform rather than left at tauri.conf.json's `"all"` for
+          # one more reason: `"all"` on Linux includes RPM, whose Version field
+          # cannot contain the `-` our staging version has.
+          #
+          # Signing is production's, byte for byte: macOS gets Developer ID +
+          # notarized + stapled so a tester's install is clean; Linux and Windows
+          # ship unsigned and warn on a fresh download (SmartScreen). Auto-update
+          # is unaffected everywhere — the updater checks our minisign signature,
+          # not an OS certificate.
+          #
+          # Linux is pinned to ubuntu-22.04 for release.yml's glibc reason.
+          # ⚠️ GitHub begins deprecating that image 2026-09-17 and removes it
+          # 2027-04-17 (actions/runner-images#14254). Move both workflows
+          # together.
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Re-check the variable here as well. `prepare` already gated it, but
+      # "Re-run failed jobs" skips a job that succeeded, so a matrix retry can
+      # reach the build with `prepare`'s guard never re-evaluated. This step also
+      # establishes the log mask for this job (masking does not cross jobs).
+      - name: Re-check the staging server URL
+        shell: bash
+        env:
+          STAGING_SERVER_URL: ${{ vars.STAGING_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${STAGING_SERVER_URL:-}" ]; then
+            echo "::error title=STAGING_SERVER_URL is not set::Refusing to build a staging app that would default to the production server."
+            exit 1
+          fi
+          echo "::add-mask::$STAGING_SERVER_URL"
+
+      # Tauri v2's documented Ubuntu prerequisite set, plus patchelf (AppImage).
+      # webkit2gtk **4.1** and **ayatana**-appindicator: the 4.0 / plain
+      # libappindicator3-dev packages are Tauri v1's and do not link here.
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            curl wget file patchelf
+
+      # pnpm must be installed before setup-node: its pnpm cache support shells
+      # out to the pnpm binary. The version comes from the packageManager pin in
+      # app/package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './app/apps/desktop/src-tauri -> target'
+
+      - name: Install dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      # ── Config overlay: how a staging app becomes a different app ──────────
+      # `tauri build` takes `-c/--config <path-or-inline-JSON>`, repeatable, and
+      # merges each onto tauri.conf.json in order. tauri-action passes our `args`
+      # straight through AND parses `--config` out of them itself
+      # (src/inputs.ts declares `config: { short: 'c', multiple: true }`;
+      # src/utils.ts `getInfo` calls `mergeUserConfig` for each), which is the
+      # part that matters: that is how it learns the overlaid `productName` and
+      # `version` and therefore looks for the right artifact filenames and
+      # substitutes the right `__VERSION__`. Verified against tauri-action@v0's
+      # sources, not assumed.
+      #
+      # The merge is RFC 7386 JSON Merge Patch (`json_patch::merge`, reached via
+      # tauri-utils' `merge_config`), which means **arrays are REPLACED, never
+      # concatenated**. That is the load-bearing fact for wall #2 above: our
+      # overlay's single-element `plugins.updater.endpoints` array *replaces*
+      # production's endpoint rather than appending to it. Confirmed by reading
+      # json-patch 3.0.1 (`if !patch.is_object() { *doc = patch.clone() }`) and
+      # by experiment: merging `bundle.targets: ["bogus-target"]` then
+      # `["deb"]` builds cleanly, so the first array is gone rather than merged.
+      #
+      # Relative `--config` paths resolve against the CLI's cwd, which
+      # tauri-action sets to `projectPath` (app/apps/desktop) — the same base
+      # tauri-action itself uses (`path.join(projectPath, mergeConfig)`), so one
+      # relative path is correct for both. Also verified by experiment:
+      # `--config tauri.staging.conf.json` is "No such file or directory" while
+      # `--config src-tauri/tauri.staging.conf.json` parses.
+      #
+      # Two overlays, because they have different lifetimes:
+      #   * src-tauri/tauri.staging.conf.json — COMMITTED, reviewable, holds the
+      #     identity that makes this a separate app (productName, identifier,
+      #     updater endpoint).
+      #   * src-tauri/tauri.staging.build.conf.json — GENERATED per run, holds
+      #     the two things only CI knows: the run-numbered version and this
+      #     platform's bundle targets.
+      - name: Write the per-run config overlay
+        shell: bash
+        working-directory: app/apps/desktop
+        env:
+          STAGING_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > src-tauri/tauri.staging.build.conf.json <<JSON
+          {
+            "version": "${STAGING_VERSION}",
+            "bundle": {
+              "targets": ${{ matrix.targets }}
+            }
+          }
+          JSON
+          # Assert the version landed. Malformed JSON would be caught downstream
+          # (both the CLI and tauri-action's readCustomConfig throw), but a *valid*
+          # overlay whose version rendered wrong or empty would not be — it would
+          # quietly publish a staging build carrying production's version number.
+          node -e "const c=require('./src-tauri/tauri.staging.build.conf.json'); if(c.version!==process.env.STAGING_VERSION) { console.error('overlay version mismatch'); process.exit(1) } console.log(JSON.stringify(c))"
+
+      # Resolve the notarization switch once. A push reads NOTARIZE_ON_PUSH; a
+      # manual run reads the input.
+      - name: Resolve notarization mode
+        id: cfg
+        # REQUIRED on windows-latest, where the default shell is PowerShell and
+        # `if [ … ]; then` is a parse error.
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            want='${{ inputs.notarize }}'
+          else
+            want='${{ env.NOTARIZE_ON_PUSH == 'yes' }}'
+          fi
+          echo "notarize=$want" >> "$GITHUB_OUTPUT"
+          echo "Notarization: $want"
+
+      # The release body doubles as the in-app "what's new": the updater feeds it
+      # back as latest.json's `notes`. For staging that space is better spent on
+      # telling the tester what they are running and what not to open with it.
+      # Deliberately does NOT name the staging server — the URL stays in the
+      # Actions variable, out of this public repo and out of these logs.
+      - name: Release notes
+        id: relnotes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # A QUOTED heredoc (<<'NOTES'), so the markdown backticks below stay
+          # literal instead of being read as command substitution. The GitHub
+          # expressions inside it are still substituted, because GitHub renders
+          # them into the script text before bash ever sees it.
+          cat > "$RUNNER_TEMP/staging-notes.md" <<'NOTES'
+          **This is a STAGING build. It is not the released Baalda app.**
+
+          It talks to the **staging server** (`STAGING_SERVER_URL`), not to the
+          production one, and it auto-updates from this rolling `staging`
+          prerelease rather than from `releases/latest`.
+
+          - Staging version: `${{ needs.prepare.outputs.version }}`
+          - Base version: `${{ needs.prepare.outputs.base }}`
+          - Commit: `${{ github.sha }}` (`${{ github.ref_name }}`)
+
+          ### ⚠️ Do not open your production vaults with this app
+
+          A vault's `.context/config.json` binds that folder to one server's vault
+          id and doc-id map. Opening a folder you also use with the released app
+          points the same notes at two different servers, and the result is not a
+          merge — it is divergence you cannot unpick. Make a fresh, throwaway
+          folder for staging.
+
+          It installs alongside the released app (separate bundle identifier,
+          separate app-data directory), so you can keep both. One caveat: both apps
+          register the `baalda://` link scheme and the OS picks a single handler, so
+          a shared note link may open in the other one.
+
+          Windows here is the `-setup.exe` (NSIS) only; an MSI cannot carry a
+          prerelease version.
+          NOTES
+
+          {
+            echo 'body<<RELNOTES_EOF'
+            cat "$RUNNER_TEMP/staging-notes.md"
+            echo 'RELNOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # Two steps rather than one with conditional env, exactly as release.yml
+      # does: blanking APPLE_ID/PASSWORD/TEAM_ID does NOT disable notarization,
+      # because a GitHub expression yields an empty STRING, not an unset
+      # variable, and "set but empty" is the state that fails the macOS build.
+      # An `if:` on the whole step cannot misfire.
+
+      - name: Build, sign and notarize
+        if: steps.cfg.outputs.notarize == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This is what points the app at staging. api.ts's DEFAULT_SERVER_URL
+          # prefers `VITE_SERVER_URL` when Vite inlines one at build time, and
+          # falls back to the PRODUCTION url in a release build otherwise — which
+          # is why `prepare` refuses to run without it.
+          VITE_SERVER_URL: ${{ vars.STAGING_SERVER_URL }}
+          # Same minisign updater key as production, on purpose: the pubkey is
+          # compiled into tauri.conf.json and the overlay does not touch it, so
+          # the staging app must be signed by the same key or it would reject its
+          # own updates. Channel separation is the endpoint, not the key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS Developer ID signing + notarization. All six must be non-empty
+          # (see release.yml); the certificate is per-team, not per-bundle-id, so
+          # it signs `com.baalda.context.staging` without any extra setup.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: app/apps/desktop
+          # A literal tag, not `v__VERSION__`: this is one rolling prerelease
+          # that gets deleted and recreated every run, which is what makes the
+          # updater endpoint below a stable URL.
+          tagName: staging
+          releaseName: 'Baalda Staging __VERSION__'
+          releaseBody: ${{ steps.relnotes.outputs.body }}
+          releaseDraft: false
+          # Load-bearing (wall #3): GitHub's `releases/latest` excludes
+          # prereleases, so production's updater cannot reach this release.
+          prerelease: true
+          # Windows staging has no MSI, so point latest.json at the NSIS bundle.
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }} --config src-tauri/tauri.staging.conf.json --config src-tauri/tauri.staging.build.conf.json
+
+      # Same build, minus the three notarization variables. Tauri logs
+      # "skipping app notarization, no APPLE_ID & APPLE_PASSWORD & APPLE_TEAM_ID"
+      # and produces a Developer ID signed, hardened-runtime bundle — everything
+      # Gatekeeper wants except the ticket. Fresh downloads then prompt
+      # ("cannot be verified"; right-click → Open clears it); auto-update is
+      # unaffected, since the updater checks minisign, not Apple's ticket.
+      - name: Build and sign (notarization skipped)
+        if: steps.cfg.outputs.notarize != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VITE_SERVER_URL: ${{ vars.STAGING_SERVER_URL }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        with:
+          projectPath: app/apps/desktop
+          tagName: staging
+          releaseName: 'Baalda Staging __VERSION__'
+          releaseBody: ${{ steps.relnotes.outputs.body }}
+          releaseDraft: false
+          prerelease: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }} --config src-tauri/tauri.staging.conf.json --config src-tauri/tauri.staging.build.conf.json
