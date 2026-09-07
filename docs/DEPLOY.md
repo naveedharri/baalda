@@ -203,6 +203,37 @@ curl -sL https://railway.com/deploy/baalda-server | grep -o '<title>[^<]*</title
 > and publishing it would push a public marketplace template built from production
 > — env values, domain and all. Always compose the template fresh, as above.
 
+## A staging instance
+
+Nothing in the server distinguishes staging from production — a staging instance
+is just **a second deployment of this same server with its own database**, set up
+exactly as above. Give it its own `DATABASE_URL`, its own `JWT_SECRET` (sharing
+one would let a token minted on either instance authenticate on the other) and a
+`BETTER_AUTH_URL` matching its own public URL.
+
+The desktop side picks it up at **build** time rather than at runtime. The
+frontend's `DEFAULT_SERVER_URL` (`app/apps/desktop/src/lib/api.ts`) honours a
+`VITE_SERVER_URL` inlined by Vite, and `.github/workflows/staging-release.yml`
+sets that from a repo Actions variable named `STAGING_SERVER_URL`, so the
+**Baalda Staging** app it publishes defaults to your staging instance with nothing
+for the tester to configure. See `docs/RELEASE.md` → *Staging*.
+
+Two consequences worth stating plainly:
+
+- **A published staging build reveals its server URL.** Vite inlines the value
+  into the JS bundle and the installer is a public prerelease asset, so anyone who
+  downloads it can read the URL out. A staging instance is internet-facing and
+  needs the same auth posture as a production one — it is not protected by being
+  hard to find.
+- **Vaults do not move between instances.** A vault's `.context/config.json`
+  binds that folder to one server's vault id and doc-id map, so a folder used
+  against staging must not also be opened against production. Use separate
+  folders, not separate accounts.
+
+Migrations are idempotent and tracked in `_migrations`, so a staging instance is
+also the natural place to run a new migration first: deploy the branch there,
+confirm `/health` and a real sync round-trip, then promote.
+
 ## Environment variables
 
 | Variable | Required | Default | Notes |
