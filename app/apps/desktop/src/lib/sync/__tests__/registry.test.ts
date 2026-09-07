@@ -340,6 +340,120 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
     expect(vi.mocked(ipc.writeNote)).not.toHaveBeenCalled();
     expect(reg.hasFailures()).toBe(false);
   });
+
+  // ── Materializing WITH content (#93) ──────────────────────────────────────
+  // A placeholder is a real file write, so the watcher reports it and the sync
+  // layer treats it as an external edit. On a device that already holds the
+  // note's CRDT, that "edit" was the file being 0 bytes — diff-merged into the
+  // populated doc as a delete-all and pushed, destroying the server's copy. So
+  // the created file is filled in from the local CRDT when there is one, and
+  // left empty (to hydrate lazily) when there isn't.
+
+  it("fills a freshly created placeholder in from this device's own CRDT", async () => {
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Deleted.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    const hydrated: Array<{ docId: string; path: string }> = [];
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async (docId, path) => {
+        hydrated.push({ docId, path });
+        return true;
+      },
+    });
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    // Create-only first, ALWAYS — that guard is what makes a wrong "server-only"
+    // verdict cost nothing — and only then the content.
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Deleted.md", "", null);
+    expect(hydrated).toEqual([{ docId: "n1", path: "Deleted.md" }]);
+  });
+
+  it("does not ask for content when the file was already there", async () => {
+    // `writeNoteIfMissing` returning false means a real note occupies the path.
+    // Writing a doc's text over it is exactly the clobber the create-only guard
+    // exists to prevent.
+    vi.mocked(ipc.writeNoteIfMissing).mockResolvedValue(false);
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Mine.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    let asked = 0;
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async () => {
+        asked++;
+        return true;
+      },
+    });
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(asked).toBe(0);
+  });
+
+  it("keeps the empty placeholder when this device has no CRDT for the note", async () => {
+    // The fresh-device case: nothing to fill it with, so it stays 0 bytes and
+    // hydrates on open (or from the vault channel's backfill).
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Teammate.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async () => false,
+    });
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Teammate.md", "", null);
+    expect(reg.hasFailures()).toBe(false);
+  });
+
+  it("survives a host that throws while hydrating (the placeholder stands)", async () => {
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Broken.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async () => {
+        throw new Error("no store");
+      },
+    });
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    // Best-effort by contract: a failed hydrate leaves today's behaviour, which
+    // is a 0-byte placeholder — not a failed reconcile.
+    expect(reg.hasFailures()).toBe(false);
+  });
+
+  it("suppresses ONE watcher echo per created placeholder", async () => {
+    // The file the registry just wrote is not an external edit. One event per
+    // created path is consumed; the next one is real.
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Echo.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    expect(reg.consumeMaterialized("Echo.md")).toBe(true);
+    expect(reg.consumeMaterialized("Echo.md")).toBe(false);
+    expect(reg.consumeMaterialized("Never-written.md")).toBe(false);
+  });
 });
 
 describe("VaultRegistry.registerNote", () => {

@@ -205,8 +205,7 @@ button.primary.hero:hover:not(:disabled) {
 .modal input,
 .modal select,
 .account-popover input,
-.account-popover select,
-.server-config-body input {
+.account-popover select {
   background: var(--bg-subtle);
   border: 1px solid transparent;
   color: var(--text-primary);
@@ -233,8 +232,7 @@ button.primary.hero:hover:not(:disabled) {
 .modal input:focus,
 .modal select:focus,
 .account-popover input:focus,
-.account-popover select:focus,
-.server-config-body input:focus {
+.account-popover select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
@@ -1878,7 +1876,7 @@ body:has(.sidebar-resizer.dragging) {
   min-width: 150px;
 }
 /* Portalled to <body>, so it is no longer nested inside whatever opened it and
-   has to out-rank those layers by hand: the settings page is 200 and a modal
+   has to out-rank those layers by hand: the settings modal is 200 and a modal
    backdrop is 300. A popover always belongs above the surface it was opened
    from. */
 .context-menu.menu-portal {
@@ -3183,27 +3181,52 @@ body:has(.sidebar-resizer.dragging) {
 .auth-dialog .auth-error {
   margin-top: var(--sp-3);
 }
-.auth-dialog .server-config {
-  margin-top: var(--sp-4);
-}
-/* ---- Vault settings — dedicated full page ---- */
-.settings-page {
-  position: fixed;
-  inset: 0;
+/* ---- Account & vault settings — a centered modal over the app ----
+   Both surfaces render through `components/SettingsModal.tsx`: a dimmed
+   `.settings-backdrop` with this card inside it. `.settings-page` stays the
+   class name because input/select styling below is descendant-scoped on it. */
+/* Compound selector on purpose: this element ALSO carries `.modal-backdrop`,
+   whose own z-index (300) is declared later in this file and would win a
+   single-class tie. */
+.modal-backdrop.settings-backdrop {
+  /* Deliberately *below* the generic `.modal-backdrop` (300) so any dialog
+     opened from inside settings — Upgrade, Sign in, Share, a confirm — stacks
+     above this card no matter where it sits in the DOM. Also below the vault
+     setup prompt (`.vault-folder-backdrop`, 210), which the Turn-on-sync card
+     in here can raise. This is the layer the old full-window page occupied. */
   z-index: 200;
+}
+.settings-page {
   background: var(--bg-app);
   display: flex;
   flex-direction: column;
+}
+/* The card. No transform-based animation, on purpose: a transform — even the
+   settled `translateY(0)` that `rise-in`'s `both` fill leaves behind — makes
+   this a containing block and would trap the `position: fixed` dialogs the tab
+   bodies render (the revert-checkpoint confirm in Versioning, for one) inside
+   the card. Opacity only. */
+.settings-page.settings-modal {
+  position: relative;
+  width: min(1040px, 94vw);
+  height: min(760px, 90vh);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
   animation: fade-in var(--t-med) var(--ease) both;
+}
+.settings-page.settings-modal:focus-visible {
+  outline: none;
 }
 .settings-page-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
-  /* The page is fixed over the whole window, so on macOS (title bar overlay)
-     the header must clear the traffic lights floating in the top-left. */
-  padding: calc(var(--sp-5) + var(--titlebar-inset)) var(--sp-8) var(--sp-5);
+  /* No `--titlebar-inset` term: the card is centered in the window and no
+     longer covers the macOS traffic lights it used to have to clear. */
+  padding: var(--sp-5) var(--sp-6);
   border-bottom: 1px solid var(--border);
 }
 .settings-title {
@@ -3230,15 +3253,15 @@ body:has(.sidebar-resizer.dragging) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Fills the card below the header; scrolling happens inside
+   `.settings-content`, never on the card itself. */
 .settings-body {
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: var(--sp-6);
+  gap: var(--sp-5);
   width: 100%;
-  max-width: 1080px;
-  margin: 0 auto;
-  padding: var(--sp-6) var(--sp-8);
+  padding: var(--sp-5) var(--sp-6);
 }
 .settings-nav {
   width: 190px;
@@ -3246,18 +3269,27 @@ body:has(.sidebar-resizer.dragging) {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Vault settings can list ten sections; on a short window the card is
+     `90vh`, so the nav has to scroll rather than be clipped by the card's
+     `overflow: hidden`. */
+  min-height: 0;
+  overflow-y: auto;
 }
 .settings-content {
   flex: 1;
   min-width: 0;
-  align-self: flex-start;
-  max-height: 100%;
+  /* Stretches to the card's full height rather than hugging its content, so a
+     short tab doesn't leave the panel floating in a half-empty card. */
+  align-self: stretch;
   overflow-y: auto;
   background: var(--bg-surface);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
-  padding: var(--sp-6) var(--sp-8) var(--sp-8);
-  animation: rise-in var(--t-fast) var(--ease) both;
+  padding: var(--sp-6) var(--sp-6) var(--sp-8);
+  /* Opacity only — `rise-in` leaves a settled transform behind (its fill mode
+     is `both`), which made this a containing block and trapped the fixed
+     dialogs tab bodies render. See `components/SettingsModal.tsx`. */
+  animation: fade-in var(--t-fast) var(--ease) both;
 }
 /* A team section that isn't available until the vault is synced. Shown
    greyed in the nav (discoverable), with a lock glyph. */
@@ -4213,45 +4245,86 @@ body:has(.sidebar-resizer.dragging) {
   box-shadow: var(--shadow-lg, 0 8px 32px rgba(0, 0, 0, 0.3));
 }
 
-.server-config {
-  font-size: var(--fs-sm);
-}
-.server-config summary {
-  cursor: pointer;
-  color: var(--text-secondary);
-  list-style: none;
-  padding: var(--sp-1) 0;
-  transition: color var(--t-fast) var(--ease);
-}
-.server-config summary::-webkit-details-marker {
-  display: none;
-}
-.server-config summary::before {
-  content: "⚙";
-  margin-right: var(--sp-2);
-  color: var(--text-tertiary);
-}
-.server-config summary:hover {
-  color: var(--text-primary);
-}
-.server-config-body {
+/* ---- Server choice — the auth dialog's first step (#91) ----
+   The server URL used to be a collapsed <details> "Server settings" at the
+   bottom of this card, which is why self-hosting teams' members kept signing
+   up on the managed instance: it was the only option with any visual weight.
+   The two options here deliberately share one class so neither can read as
+   the default. */
+.server-choice {
   display: flex;
+  flex-direction: column;
   gap: var(--sp-2);
-  margin-top: var(--sp-2);
 }
-.server-config-body button {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  border-radius: var(--radius-pill);
-  padding: var(--sp-2) var(--sp-4);
+.server-choice-lede {
+  margin: 0 0 var(--sp-1);
+  color: var(--text-secondary);
   font-size: var(--fs-sm);
-  font-weight: 500;
-  white-space: nowrap;
-  transition: background var(--t-fast) var(--ease);
+  line-height: var(--lh-body);
 }
-.server-config-body button:hover {
-  background: var(--bg-hover);
+.server-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: var(--sp-3);
+  text-align: left;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease);
+}
+.server-option:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+}
+.server-option.active {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.server-option-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.server-option-hint {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+.server-connect-row {
+  margin-top: var(--sp-1);
+}
+/* The address an invite link is offering. Wraps rather than truncating: the
+   whole point of this card is that the user can read the URL before saying
+   yes to it. */
+.server-link-url {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+}
+/* Caption under the sign-in form naming the server it is about to post to. */
+.auth-server-note {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin: var(--sp-3) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.auth-server-note strong {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 /* Members + shares lists */
@@ -4477,8 +4550,9 @@ button.sync-badge-retry:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* Above the full-screen settings page (z-index 200) so a modal opened from
-     within Settings — e.g. Sign in from the Turn-on-sync card — sits on top. */
+  /* Above the settings modal's own backdrop (`.settings-backdrop`, 200) so a
+     dialog opened from within Settings — Sign in from the Turn-on-sync card,
+     Upgrade, a confirm — sits on top of it regardless of DOM order. */
   z-index: 300;
   animation: fade-in var(--t-med) var(--ease) both;
 }
@@ -4765,7 +4839,7 @@ button.sync-badge-retry:hover {
   background: rgba(220, 38, 38, 0.14);
 }
 
-/* "Set up this vault" folder prompt. Sits above the settings page. */
+/* "Set up this vault" folder prompt. Sits above the settings modal (200). */
 .vault-folder-backdrop {
   z-index: 210;
 }

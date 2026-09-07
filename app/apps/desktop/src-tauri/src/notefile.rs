@@ -174,15 +174,7 @@ pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<()> {
 /// `stamp` comes from the caller: there's no date crate in this binary, and one
 /// stamp per reconciliation pass keeps a multi-note delete together in one folder.
 pub fn trash_note(vault: &Path, rel: &str, stamp: &str) -> AppResult<String> {
-    // The stamp is joined into a path, so it must be exactly one ordinary segment.
-    if stamp.is_empty()
-        || stamp.starts_with('.')
-        || !stamp
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-    {
-        return Err(AppError::new("invalid trash stamp"));
-    }
+    validate_trash_stamp(stamp)?;
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new(
             "refusing to trash a path inside an ignored dir",
@@ -208,6 +200,50 @@ pub fn trash_note(vault: &Path, rel: &str, stamp: &str) -> AppResult<String> {
     // which is the safe outcome.
     std::fs::rename(&abs, &dest)?;
     Ok(dest_rel)
+}
+
+/// Write `content` into `.context/trash/<stamp>/<rel>` — the recovery copy for a
+/// note whose FILE IS ALREADY GONE.
+///
+/// [`trash_note`] cannot serve this case: it renames the source file, and refuses
+/// outright when the source does not exist. A disk-observed delete (someone
+/// removed the `.md` in Finder, a script, `git checkout`) is propagated to the
+/// server as a real delete, and the only surviving copy of the text at that
+/// moment is the doc the caller holds in memory — so it is written here first,
+/// under the same `.context/trash/<stamp>/` layout an inbound delete uses, and
+/// with the same suffixing when a name inside the stamp is taken.
+///
+/// Returns the trash-relative destination that was written.
+pub fn write_trash_copy(vault: &Path, rel: &str, stamp: &str, content: &str) -> AppResult<String> {
+    validate_trash_stamp(stamp)?;
+    if crate::vault::rel_path_is_ignored(rel) {
+        return Err(AppError::new(
+            "refusing to trash a path inside an ignored dir",
+        ));
+    }
+    let dest_rel = unique_trash_dest(vault, &format!(".context/trash/{stamp}/{rel}"))?;
+    let dest = resolve_in_vault(vault, &dest_rel)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Not `write_note`: that resolves a vault-relative path and re-indexes, and
+    // nothing inside `.context/` may enter the note pipeline. fsync'd, because
+    // this IS the only copy at the instant it is written.
+    write_atomic_fsync(&dest, content.as_bytes())?;
+    Ok(dest_rel)
+}
+
+/// The stamp is joined into a path, so it must be exactly one ordinary segment.
+fn validate_trash_stamp(stamp: &str) -> AppResult<()> {
+    if stamp.is_empty()
+        || stamp.starts_with('.')
+        || !stamp
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(AppError::new("invalid trash stamp"));
+    }
+    Ok(())
 }
 
 /// `x.md` → `x (2).md` when the destination inside this stamp is already taken.
@@ -490,6 +526,64 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         assert!(trash_note(tmp.path(), "../escape.md", "s1").is_err());
         assert!(trash_note(tmp.path(), "nope.md", "s1").is_err());
+    }
+
+    // ---- write_trash_copy -------------------------------------------------
+    //
+    // The recovery copy for a note whose file is ALREADY gone (someone deleted
+    // the `.md` outside the app). `trash_note` refuses that case by design — it
+    // renames a source file — so this is the only way those bytes survive the
+    // delete we are about to propagate to the server.
+
+    #[test]
+    fn write_trash_copy_saves_content_for_a_file_that_is_already_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No source file anywhere: `trash_note` cannot help here.
+        assert!(trash_note(tmp.path(), "Notes/bye.md", "s1").is_err());
+
+        let dest = write_trash_copy(tmp.path(), "Notes/bye.md", "s1", "# Bye\n\ntext").unwrap();
+        assert_eq!(dest, ".context/trash/s1/Notes/bye.md");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".context/trash/s1/Notes/bye.md")).unwrap(),
+            "# Bye\n\ntext"
+        );
+        // Nothing appeared back at the note's own path — a recovery copy must
+        // never resurrect the file the user deleted.
+        assert!(!tmp.path().join("Notes/bye.md").exists());
+    }
+
+    #[test]
+    fn write_trash_copy_disambiguates_within_one_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            write_trash_copy(tmp.path(), "a.md", "s1", "first").unwrap(),
+            ".context/trash/s1/a.md"
+        );
+        assert_eq!(
+            write_trash_copy(tmp.path(), "a.md", "s1", "second").unwrap(),
+            ".context/trash/s1/a (2).md"
+        );
+        // The first copy is intact: a second delete of the same path in one
+        // window must not overwrite the bytes of the first.
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".context/trash/s1/a.md")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn write_trash_copy_rejects_a_bad_stamp_and_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["", ".", "..", "a/b", "with space", ".hidden"] {
+            assert!(
+                write_trash_copy(tmp.path(), "a.md", bad, "x").is_err(),
+                "stamp {bad:?} should be rejected"
+            );
+        }
+        assert!(write_trash_copy(tmp.path(), "../escape.md", "s1", "x").is_err());
+        // A path already inside `.context` would nest the app's own state dir
+        // inside the trash.
+        assert!(write_trash_copy(tmp.path(), ".context/config.json", "s1", "x").is_err());
     }
 
     #[test]

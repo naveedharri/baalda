@@ -107,11 +107,14 @@ Errors: single `AppError(String)` (`error.rs`).
   FTS5 `notes_fts`, `tags`/`note_tags`, `links`, `folders`, `yjs_updates`, `yjs_snapshot`. Notes keyed by
   `doc_id`; `rebuild` preserves ids and never wipes the CRDT tables; `rename_note` rewrites paths by id so
   backlinks survive moves.
-- `watcher.rs` — `notify` recursive watcher, 150ms-debounced, emits `file-changed {path, kind}`.
+- `watcher.rs` — `notify` recursive watcher, 150ms-debounced (1000ms ceiling), emits ONE batched
+  `files-changed {changes: [{path, kind}]}` per drain. `kind` is `modified` | `removed` | `tree`, derived
+  from an existence check rather than forwarded from `notify` (whose event kinds and rename pairing we
+  deliberately ignore); a rename therefore arrives as an unpaired `removed` + `modified` in one batch.
 - `attachments.rs` — path-validated binary I/O under `attachments/`; never enters the note/CRDT pipeline.
 - `keychain.rs` — `keyring` crate, service `com.baalda.context`; trait-based so tests use a fake.
 
-Tauri events to the UI: **`vault-opened`** and **`file-changed`** (the only two).
+Tauri events to the UI: **`vault-opened`** and **`files-changed`** (the only two).
 
 ### Desktop — the bridge (`src/lib/bridge/`)
 Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.ts` wires production I/O.
@@ -140,15 +143,32 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 - `startup.ts` (`decideSeed`) — **split-brain rule**: when signed in, pull from server FIRST, then seed a
   local orphan only if the doc is still empty. Reversing this causes permanent divergence.
 - `registry.ts` — reconciles local vault ↔ server vault/folders/notes, persists the doc-id map to
-  `.context/config.json`, materializes server-only notes as empty files (hydrate lazily).
+  `.context/config.json`, materializes server-only notes create-only (`write_note_if_missing`) and then
+  fills them in from THIS device's local CRDT when it has one (`InboundHost.materializeContent` →
+  `NoteBridge.writeThrough`); with no local CRDT the file stays 0 bytes and hydrates lazily on open or
+  from the vault channel's backfill. Each path it creates is remembered for exactly one watcher echo
+  (`consumeMaterialized`), so the app's own placeholder is never mistaken for an external edit.
 - `tokenRefresh.ts` — re-mint 60s before JWT expiry. `attachments.ts` — content-hash (sha256) diff, upload/download.
 - **External writers are first-class** (`handleLocalFileChanged` in `docSession.ts`): a watcher event for a
   non-open note routes to the sync layer — unmapped/structural changes trigger the debounced registry pull
   (register + upload), mapped notes get a debounced `ContentUploader` run with `force` + `ingestFromFile`
   (diff-merge the file into the CRDT via `NoteBridge.ingestNow`, echo-guarded fast-path skips our own egest
   echoes; the `divergedDocs` set forces a connect for out-of-band merges by resident bridges / cold applies).
-  `NoteBridge.hydrate` also ingests the file on reopen when it moved on while the doc was closed. Disk
-  deletions are deliberately NOT propagated to the server.
+  `NoteBridge.hydrate` also ingests the file on reopen when it moved on while the doc was closed.
+- **Disk deletes ARE propagated** (`SyncManager.drainDiskDeletes`, #93), after a `DISK_DELETE_GRACE_MS`
+  (2.5 s) window that filters everything which merely looks like a delete: a `modified` for the same path
+  cancels it (an editor's unlink-and-rewrite save, a rename-back), the file is re-checked on disk
+  (`ipc.noteExists`), and a pending delete whose doc text hashes equal to an unmapped file that appeared in
+  the same window is a RENAME — `registry.renamePath` + `ipc.rebindNoteId` keep the `doc_id` (a batch that
+  queued a delete also defers its registry pull, or the new path would register as a second note first).
+  Survivors write the doc's text to `.context/trash/<stamp>/` (`ipc.writeTrashCopy`) and then call
+  `registry.deletePath` — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
+  is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
+  that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
+  startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window —
+  which abandons the whole batch and reports it, because an unmounted volume looks exactly like a bulk
+  delete. The ingest side is guarded too: a 0-byte file never clears a populated doc
+  (`allowTruncateFromDisk`, default false).
 - **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
   readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing
   to push — it is marked pushed + badged synced and never queued (a vault with 307 zero-byte `_Index.md`

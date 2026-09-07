@@ -12,12 +12,13 @@
 
 import { Awareness } from "y-protocols/awareness";
 import type { NoteBridge } from "../bridge";
-import { bridgeManager, createTauriBridgeIO } from "../bridge/adapter";
+import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
 import type { NoteLastEdited, SessionInfo } from "../api";
 import * as ipc from "../ipc";
 import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
 import type { ActivityStatus } from "../prefs";
+import { toast } from "../toast";
 import { AttachmentSync } from "./attachments";
 import { ContentUploader, type UploadFailure } from "./contentUpload";
 import { collectCrdtGarbage } from "./crdtGc";
@@ -51,6 +52,11 @@ function baseName(relPath: string): string {
   return i === -1 ? relPath : relPath.slice(i + 1);
 }
 
+/** Human-readable cause, for a failure the UI will show. */
+function reasonOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * Coalescing window for the {relPath → docId} mirror pushed to the UI.
  *
@@ -69,6 +75,39 @@ const REGISTRY_MAP_PUBLISH_MS = 100;
 const LOCAL_CHANGE_DEBOUNCE_MS = 800;
 /** Re-check interval while a bulk run holds the uploader slot. */
 const LOCAL_CHANGE_RETRY_MS = 2_000;
+/**
+ * Grace window before a disk-observed delete is propagated to the server.
+ *
+ * A vanished `.md` is not yet a delete. Three ordinary things look exactly like
+ * one for a moment: an editor that saves by unlinking and rewriting, a rename
+ * (which arrives as an unpaired `removed` + `modified` in the same batch), and a
+ * `git checkout` that is about to put the file back. All three resolve in
+ * milliseconds, so a window measured in seconds turns them into no-ops — while
+ * still being far below the point where a user would notice their delete
+ * "taking a while" to reach a teammate.
+ */
+const DISK_DELETE_GRACE_MS = 2_500;
+/**
+ * Cap on how many notes ONE grace window may delete on the server: a fifth of
+ * the vault, never fewer than five.
+ *
+ * The failure this exists for is not a user deleting notes — it is the vault
+ * folder going away underneath us: an unmounted volume, a Dropbox/iCloud
+ * eviction, `git checkout` of a branch without that folder, a sync client
+ * mid-repair. Those arrive as hundreds of removals in one batch, and every one
+ * of them looks individually legitimate. Past the cap the whole batch is
+ * abandoned — nothing is propagated, and the refusal is reported — because "the
+ * disk just lost a fifth of the vault" is never a delete a person meant.
+ */
+function diskDeleteCap(mappedCount: number): number {
+  return Math.max(5, Math.ceil(mappedCount * 0.2));
+}
+/** One `.context/trash/<stamp>/` folder per drained window, so everything a
+ *  single delete removed is recoverable together (same shape the inbound trash
+ *  executor uses). */
+function trashStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
 /**
  * How long the download phase may wait for the vault channel's `ready` before
  * the run stops reporting "Syncing…" and admits the channel is unreachable.
@@ -199,6 +238,44 @@ export class SyncManager implements InboundHost {
    *  (an AI writing many files) coalesces into one run. */
   private localChanges = new Map<string, string>();
   private localChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Disk deletes seen by the watcher, awaiting {@link DISK_DELETE_GRACE_MS}
+   * (docId → the path that vanished). Drained by {@link drainDiskDeletes}.
+   *
+   * Nothing here is committed to: an entry is cancelled by a `modified` event
+   * for the same path (an atomic save, a rename-back), by the file simply being
+   * there again at drain time, and by pairing with a rename.
+   */
+  private pendingDiskDeletes = new Map<string, { relPath: string; seenAt: number }>();
+  /** Reverse index of {@link pendingDiskDeletes}: the watcher cancels by PATH. */
+  private pendingDeleteByPath = new Map<string, string>();
+  private diskDeleteTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Unmapped paths that appeared while a delete was pending — the other half of
+   * a possible rename (`relPath → seenAt`).
+   *
+   * `notify` exposes no rename pairing (measured: two `Modify(Name(Any))`
+   * events, one per path, nothing linking them), so the pair is reconstructed by
+   * content hash at drain time. Until then the new path is only a candidate.
+   */
+  private renameCandidates = new Map<string, number>();
+  /** A batch asked for a registry pull but also queued a disk delete, so the
+   *  pull waits for the drain: pulling first would register the new half of a
+   *  rename as a brand-new note (a fresh doc_id, forked history, lost backlinks)
+   *  seconds before the drain could recognise the rename. */
+  private pullAfterDiskDeletes = false;
+  /**
+   * When this session became LIVE: the vault channel has reached `synced` AND a
+   * structure pull has completed. Null until then, and on teardown.
+   *
+   * Only a live session may propagate a disk delete. A file missing at the FIRST
+   * reconcile is a different animal — an unmounted drive, a fresh clone, a
+   * `.context/` restored from backup — and those re-materialize (with content,
+   * see {@link materializeContent}) rather than deleting a team's notes.
+   */
+  private liveSince: number | null = null;
+  private channelSynced = false;
+  private pulledOnce = false;
   /** Docs holding local-only ops from an out-of-band merge (a resident bridge
    *  or a cold apply ingested an external edit). For these, "file == doc" does
    *  NOT mean "nothing to send", so the push must connect regardless. Cleared
@@ -530,6 +607,11 @@ export class SyncManager implements InboundHost {
         .pull()
         .then((changed) => {
           if (!scope.isCurrent()) return;
+          // A completed structure pull is half of "this session is live" (the
+          // other half is the channel reaching `synced`). Until both hold, a
+          // missing file is a disk that isn't ready, not a delete.
+          this.pulledOnce = true;
+          this.markLive();
           // Only poke the sidebar when the pull actually changed something it
           // can see. A refresh replaces the tree's row objects, which reads as
           // a flicker under the pointer — needless on the common "nothing new"
@@ -547,8 +629,29 @@ export class SyncManager implements InboundHost {
   }
 
   /**
-   * One watcher `files-changed` BATCH, minus the open note (App routes the open
-   * note's events into its bridge, whose own provider pushes).
+   * Promote the session to LIVE once the vault channel is `synced` AND a
+   * structure pull has completed — the point from which a watcher event is
+   * genuinely news rather than the app catching up with the disk.
+   *
+   * One-way: a later disconnect does not un-live the session. A delete observed
+   * while the channel is down simply fails to reach the server and is recorded
+   * as a failure, which is the same treatment every other write gets.
+   */
+  private markLive(): void {
+    if (this.liveSince != null) return;
+    if (!this.channelSynced || !this.pulledOnce) return;
+    this.liveSince = Date.now();
+  }
+
+  /** True once a disk delete would be propagated (tests / diagnostics). */
+  isLive(): boolean {
+    return this.liveSince != null;
+  }
+
+  /**
+   * One watcher `files-changed` BATCH, including the open note's own events
+   * (App routes those into its bridge as well, and the uploader's suppressed-doc
+   * guard keeps the open note out of the content-push queue).
    *
    * This is what makes an external writer a first-class editor: people open the
    * vault folder in an AI tool (Claude, Cursor, a script) that creates and edits
@@ -563,9 +666,13 @@ export class SyncManager implements InboundHost {
    *    — uploads its content;
    *  - a change to a note we DO map → a debounced content push that diff-merges
    *    the file into the note's CRDT and sends it (`runLocalChangePush`);
-   *  - a removal → nothing. Deleting a server note stays an explicit act (UI or
-   *    MCP): auto-propagating disk deletions would let `git checkout`-style tree
-   *    churn delete a team's notes.
+   *  - a removal of a mapped, confirmed note in a LIVE session → a real server
+   *    delete, after a {@link DISK_DELETE_GRACE_MS} grace window and under a
+   *    blast-radius cap (`drainDiskDeletes`). Deleting a note in Finder, or with
+   *    `rm`, or by telling an AI to tidy the vault, now means what it says.
+   *    Everything that merely LOOKS like a delete for a moment — an editor's
+   *    unlink-and-rewrite save, a rename, `git checkout` churn, an unmounted
+   *    volume — is filtered inside that window instead.
    */
   handleLocalFilesChanged(
     changes: ReadonlyArray<{ path: string; kind: "modified" | "removed" | "tree" }>,
@@ -577,14 +684,52 @@ export class SyncManager implements InboundHost {
     // used to re-enter `handleRegistryChanged` 200 times per batch — 200 timer
     // teardowns for the single pull that was always going to happen.
     let pullRegistry = false;
+    let queuedDelete = false;
+    // REMOVALS FIRST, in their own pass. The watcher sorts a batch by path, so
+    // whether a rename's `removed` half arrives before its `modified` half is
+    // pure alphabetical luck ("New.md" sorts before "Old.md") — and the second
+    // pass below decides what a `modified` means by asking whether a delete is
+    // pending. Deciding that against half a batch is how an external rename
+    // would randomly propagate as a delete plus a brand-new note.
     for (const { path: relPath, kind } of changes) {
-      if (kind === "removed") continue;
+      if (kind !== "removed") continue;
+      if (this.queueDiskDelete(scope, relPath)) queuedDelete = true;
+    }
+    for (const { path: relPath, kind } of changes) {
+      if (kind === "removed") continue; // handled above
       if (kind === "tree") {
+        // Folders are NOT handled here, deliberately.
+        //
+        // `notify` is configured for file-level events, so removing a folder full
+        // of notes reports the notes themselves and each one arrives as its own
+        // `removed` above — which is also the only way the blast-radius cap can
+        // see how much actually disappeared. Driving deletes off the folder event
+        // instead would mean expanding a directory into "every note under this
+        // prefix", i.e. deciding to delete notes no event ever mentioned.
+        //
+        // The case that reports ONLY the directory is a folder rename/move, where
+        // the children never vanish at all. Nothing is deleted there; the pull
+        // below reconciles the paths, and anything it re-materializes now comes
+        // back WITH its content. Both outcomes are the safe direction.
         pullRegistry = true;
         continue;
       }
+      // Our own materialized placeholder echoing back. NOT an external edit:
+      // pushing it is how a 0-byte file came to be merged into a populated doc
+      // as a delete-all (#93). One event per created path.
+      if (this.registry.consumeMaterialized(relPath)) continue;
+      // New bytes at a path with a delete pending: the second half of an atomic
+      // save, or a rename-back. The delete is off — this single line is what
+      // makes third-party editors safe.
+      this.cancelDiskDelete(relPath);
       const mapping = this.registry.getMapping(relPath);
       if (!mapping) {
+        // Possibly the arrival half of a rename whose departure half is pending.
+        // Recorded either way; `drainDiskDeletes` decides by content hash.
+        if (this.pendingDiskDeletes.size > 0) {
+          this.renameCandidates.set(relPath, Date.now());
+          queuedDelete = true; // hold the pull until the drain has decided
+        }
         pullRegistry = true;
         continue;
       }
@@ -613,7 +758,329 @@ export class SyncManager implements InboundHost {
           .catch((e) => console.warn("[sync] resident ingest failed", e));
       }
     }
-    if (pullRegistry) this.handleRegistryChanged();
+    if (pullRegistry) {
+      // A pull that runs BEFORE the drain would register the new half of a
+      // rename as a brand-new note — a second doc_id for the same file, and a
+      // 0-byte ghost materialized back at the old path. The drain re-arms it.
+      if (queuedDelete) this.pullAfterDiskDeletes = true;
+      else this.handleRegistryChanged();
+    }
+  }
+
+  /**
+   * A `.md` vanished. Queue it as a candidate delete, and say whether we did.
+   *
+   * Four gates, each of which is a way to destroy something that must not be
+   * destroyed:
+   *  - unmapped ⇒ the server has no note to delete;
+   *  - not `isPushed` ⇒ this device never confirmed the content upstream, so the
+   *    only copy of that work may be local (the same rule the inbound trash
+   *    executor applies before it takes a file away);
+   *  - not live ⇒ startup, where a missing file means "the disk isn't ready",
+   *    not "the user deleted it" (see {@link liveSince});
+   *  - no session/scope ⇒ nothing to propagate to.
+   */
+  private queueDiskDelete(scope: VaultScope, relPath: string): boolean {
+    if (this.liveSince == null) return false;
+    const mapping = this.registry.getMapping(relPath);
+    if (!mapping) return false;
+    if (!this.registry.isPushed(mapping.docId)) {
+      console.info(
+        `[sync] ${relPath} was deleted on disk but its content was never confirmed on the server — not propagating`,
+      );
+      return false;
+    }
+    this.pendingDiskDeletes.set(mapping.docId, { relPath, seenAt: Date.now() });
+    this.pendingDeleteByPath.set(relPath, mapping.docId);
+    this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
+    return true;
+  }
+
+  /** The file is back at `relPath` — drop any delete pending for it. */
+  private cancelDiskDelete(relPath: string): void {
+    const docId = this.pendingDeleteByPath.get(relPath);
+    if (docId === undefined) return;
+    this.pendingDeleteByPath.delete(relPath);
+    this.pendingDiskDeletes.delete(docId);
+  }
+
+  private armDiskDeleteDrain(scope: VaultScope, delayMs: number): void {
+    if (this.diskDeleteTimer) clearTimeout(this.diskDeleteTimer);
+    this.diskDeleteTimer = setTimeout(() => {
+      this.diskDeleteTimer = null;
+      if (!scope.isCurrent()) return;
+      void this.drainDiskDeletes(scope).catch((e) =>
+        console.warn("[sync] disk delete drain failed", e),
+      );
+    }, delayMs);
+  }
+
+  /**
+   * Propagate the disk deletes that survived their grace window.
+   *
+   * Ordered so that nothing irreversible happens before everything reversible:
+   *
+   *   1. re-verify on DISK. The watcher's report is seconds old; anything that
+   *      put the file back (a save, a checkout, a re-create) wins.
+   *   2. pair renames. A pending delete whose text hashes equal to an unmapped
+   *      file that appeared in the same window IS that file: the mapping moves
+   *      (`registry.renamePath` + `ipc.rebindNoteId`) and no delete happens, so
+   *      the doc_id — and with it the note's history and its backlinks —
+   *      survives a rename done outside the app.
+   *   3. cap the blast radius (see {@link diskDeleteCap}).
+   *   4. keep the bytes: the doc's text goes into `.context/trash/<stamp>/` BEFORE
+   *      the server is told, so a mistaken delete is recoverable by hand.
+   *   5. tell the server — `registry.deletePath`, the SAME call the sidebar's
+   *      delete makes (a soft delete: the row, doc_id and Yjs state survive) and
+   *      the same broadcast, so every teammate's device trashes its own copy
+   *      through the existing inbound path. Never `ipc.deletePath`: the file is
+   *      already gone, and the registry bookkeeping this does is what stops the
+   *      next pull materializing the path back as a ghost.
+   */
+  private async drainDiskDeletes(scope: VaultScope): Promise<void> {
+    if (!this.enabled || !scope.isCurrent()) return;
+    const pending = [...this.pendingDiskDeletes].map(([docId, e]) => ({
+      docId,
+      relPath: e.relPath,
+    }));
+    this.pendingDiskDeletes.clear();
+    this.pendingDeleteByPath.clear();
+    const candidates = [...this.renameCandidates.keys()];
+    this.renameCandidates.clear();
+    try {
+      if (pending.length === 0) return;
+
+      // 1. Still gone?
+      const gone: Array<{ docId: string; relPath: string }> = [];
+      for (const item of pending) {
+        let missing = false;
+        try {
+          missing = !(await ipc.noteExists(item.relPath, scope.vaultEpoch));
+        } catch {
+          missing = false; // couldn't ask ⇒ never assume a delete
+        }
+        if (!scope.isCurrent()) return;
+        if (missing) gone.push(item);
+      }
+      if (gone.length === 0) return;
+
+      // 2. Renames. Each candidate pairs with at most one pending delete.
+      const unpaired = new Set(candidates);
+      const deletes: Array<{ docId: string; relPath: string; text: string }> = [];
+      for (const item of gone) {
+        const text = await this.docText(item.docId, item.relPath);
+        if (!scope.isCurrent()) return;
+        const renamedTo =
+          text == null ? null : await this.matchRename(text, item.relPath, unpaired, scope);
+        if (!scope.isCurrent()) return;
+        if (renamedTo) {
+          unpaired.delete(renamedTo);
+          await this.applyDiskRename(item.docId, item.relPath, renamedTo, scope);
+          if (!scope.isCurrent()) return;
+          continue;
+        }
+        deletes.push({ docId: item.docId, relPath: item.relPath, text: text ?? "" });
+      }
+      if (deletes.length === 0) return;
+
+      // 3. Blast radius, against the vault size as it stands right now — nothing
+      //    has been removed yet, so the mapped count still includes these.
+      const cap = diskDeleteCap(this.registry.mappedNotes().length);
+      if (deletes.length > cap) {
+        const paths = deletes.map((d) => d.relPath);
+        console.warn(
+          `[sync] ${deletes.length} notes disappeared from disk at once (cap ${cap}) — not removed from the server`,
+          paths.slice(0, 10),
+        );
+        toast(
+          `${deletes.length} notes disappeared from disk at once — they were NOT removed from the server. ` +
+            `If the folder was unmounted or checked out, reopening the vault restores them.`,
+          "error",
+        );
+        for (const d of deletes) {
+          this.registry.recordFailure({
+            kind: "inbound",
+            path: d.relPath,
+            docId: d.docId,
+            reason:
+              `${deletes.length} notes vanished from disk in one window (cap ${cap}) — ` +
+              `left on the server deliberately`,
+            code: null,
+          });
+        }
+        return;
+      }
+
+      // 4 + 5. Recovery copy, then the server.
+      const stamp = trashStamp();
+      for (const d of deletes) {
+        if (!scope.isCurrent()) return;
+        if (d.text.length > 0) {
+          try {
+            const dest = await ipc.writeTrashCopy(d.relPath, stamp, d.text, scope.vaultEpoch);
+            console.info(`[sync] ${d.relPath} deleted on disk — copy kept at ${dest}`);
+          } catch (e) {
+            if (ipc.isVaultMismatch(e)) return;
+            // The bytes could not be saved, so do NOT make them unrecoverable.
+            this.registry.recordFailure({
+              kind: "inbound",
+              path: d.relPath,
+              docId: d.docId,
+              reason: `couldn't keep a local copy before removing it from the server (${reasonOf(e)})`,
+              code: null,
+            });
+            continue;
+          }
+        }
+        if (!scope.isCurrent()) return;
+        try {
+          await this.registry.deletePath(d.relPath);
+        } catch (e) {
+          // Offline, or the server refused (no edit grant). The mapping is
+          // untouched, so a later pull re-materializes the file WITH its content
+          // — the delete simply did not happen, which is the honest outcome.
+          this.registry.recordFailure({
+            kind: "inbound",
+            path: d.relPath,
+            docId: d.docId,
+            reason: `deleted on disk, but the server refused to remove it (${reasonOf(e)})`,
+            code: null,
+          });
+          continue;
+        }
+        if (!scope.isCurrent()) return;
+        // The OPEN note keeps its bridge deliberately. The editor is still
+        // mounted (the banner offers to close it), and destroying the Y.Doc
+        // under CodeMirror throws on the next keystroke — which is why the
+        // inbound trash path closes the note in the store FIRST. If the user
+        // does type into a note they deleted from disk, the egest recreates the
+        // file and the next pull registers it as a new note: a resurrection they
+        // asked for, with no ghost and nothing lost.
+        //
+        // Its badge, its queue entries and its empty-doc verdicts all describe a
+        // note that no longer exists here.
+        this.localChanges.delete(d.docId);
+        this.divergedDocs.delete(d.docId);
+        this.serverEmpty.delete(d.docId);
+        this.emptyEverywhere.delete(d.docId);
+        this.permanentFailures.delete(d.docId);
+        this.progress?.forgetDoc(d.docId);
+      }
+      this.progress?.flush();
+      await this.registry.flushCheckpoint();
+    } finally {
+      // Whatever happened above, a batch that asked for a pull gets one now.
+      if (this.pullAfterDiskDeletes && scope.isCurrent()) {
+        this.pullAfterDiskDeletes = false;
+        this.handleRegistryChanged();
+      }
+    }
+  }
+
+  /**
+   * The doc's current text, from whichever bridge already owns it.
+   *
+   * Never opens a SECOND bridge for a doc that has one: two bridges on one
+   * doc_id both persist, both egest, and their histories merge into doubled
+   * text. Falls back to a transient promote (hydrating from the local CRDT log)
+   * for a doc nothing holds, and to null when there is no store at all.
+   */
+  private async docText(docId: string, relPath: string): Promise<string | null> {
+    const open = bridgeManager.currentBridge();
+    if (open && open.docId === docId) return open.serialize();
+    const store = this.docStore;
+    if (!store) return null;
+    const resident = store.peekResident(docId);
+    if (resident) return resident.serialize();
+    try {
+      const bridge = await store.promote(docId, relPath, {
+        seedFromFile: false, // the file is gone; the CRDT is all there is
+        markRecent: false,
+        pin: true,
+      });
+      try {
+        return bridge.serialize();
+      } finally {
+        await store.demote(docId);
+      }
+    } catch (e) {
+      console.warn(`[sync] couldn't read the doc behind ${relPath}`, e);
+      return null;
+    }
+  }
+
+  /**
+   * Which candidate path (if any) holds exactly this text?
+   *
+   * By content hash, against the sha256 the Rust index already computed when it
+   * indexed the new file — the watcher indexes a batch BEFORE it emits the event
+   * that got us here, so the row is there. A file over the index's size cap
+   * stores no hash; those fall back to basename equality, which paired with "a
+   * note of the same name vanished in this very window" is decisive enough for
+   * the only alternative on offer (delete it and register a twin).
+   */
+  private async matchRename(
+    text: string,
+    from: string,
+    candidates: Set<string>,
+    scope: VaultScope,
+  ): Promise<string | null> {
+    if (candidates.size === 0) return null;
+    const wanted = await sha256Hex(text);
+    if (!scope.isCurrent()) return null;
+    let byName: string | null = null;
+    for (const candidate of candidates) {
+      let meta: Awaited<ReturnType<typeof ipc.getNoteMeta>> = null;
+      try {
+        meta = await ipc.getNoteMeta(candidate);
+      } catch {
+        continue;
+      }
+      if (!scope.isCurrent()) return null;
+      if (meta?.sha256) {
+        if (meta.sha256 === wanted) return candidate;
+        continue;
+      }
+      // No hash stored (oversized file): basename equality is the only signal.
+      if (baseName(candidate) === baseName(from)) byName = candidate;
+    }
+    return byName;
+  }
+
+  /**
+   * A rename done outside the app: move the mapping instead of deleting a note.
+   *
+   * Both halves matter. `registry.renamePath` moves the SERVER row (and the
+   * local path map) by doc_id, and `ipc.rebindNoteId` puts that doc_id back on
+   * the index row the watcher minted a fresh uuid for. Without the second, the
+   * same file carries one identity in `.context/config.json` and another in
+   * `index.sqlite`, and the next pass registers it a second time.
+   */
+  private async applyDiskRename(
+    docId: string,
+    from: string,
+    to: string,
+    scope: VaultScope,
+  ): Promise<void> {
+    console.info(`[sync] ${from} → ${to} (renamed on disk; keeping doc ${docId})`);
+    try {
+      await this.registry.renamePath(from, to);
+    } catch (e) {
+      console.warn(`[sync] couldn't move the mapping ${from} → ${to}`, e);
+      return;
+    }
+    if (!scope.isCurrent()) return;
+    try {
+      await ipc.rebindNoteId(to, docId, scope.vaultEpoch);
+    } catch (e) {
+      if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't rebind ${to} to ${docId}`, e);
+    }
+    if (!scope.isCurrent()) return;
+    // The file at the new path may hold edits made in the same breath as the
+    // rename, and the note's row moved, so both surfaces need telling.
+    this.localChanges.set(docId, to);
+    this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+    this.onNotePathChanged?.(docId, from, to);
   }
 
   /** Single-event form of {@link handleLocalFilesChanged}, for call sites that
@@ -720,6 +1187,52 @@ export class SyncManager implements InboundHost {
 
   notePathChanged(docId: string, from: string, to: string): void {
     this.onNotePathChanged?.(docId, from, to);
+  }
+
+  /**
+   * Fill a freshly materialized placeholder from THIS DEVICE's local CRDT.
+   *
+   * The reported case for #93 needs no network at all: the note's text is
+   * already in `.context/index.sqlite` (`yjs_updates` / `yjs_snapshot`), because
+   * this device is the one that wrote it. `loadYjsState` is the cheap "do we hold
+   * this doc" question; when the answer is no — a genuinely fresh device — we
+   * leave the 0-byte placeholder and let the existing lazy paths (open, or the
+   * vault channel's backfill) hydrate it.
+   *
+   * `promote` → write → `demote` is the same three-step the content uploader and
+   * the cold-apply path already use, so no new way of touching a doc is invented
+   * here. The write goes through the bridge rather than `ipc.writeNote` so the
+   * echo hash is set: the watcher event for this write is then recognised as our
+   * own and no content push is queued for it.
+   */
+  async materializeContent(docId: string, path: string): Promise<boolean> {
+    const scope = this.scope;
+    const store = this.docStore;
+    if (!scope || !scope.isCurrent() || !store) return false;
+    try {
+      const state = await ipc.loadYjsState(docId, scope.vaultEpoch);
+      if (!state.snapshot && state.updates.length === 0) return false;
+    } catch {
+      return false; // no local CRDT (or it can't be read) ⇒ hydrate lazily
+    }
+    if (!scope.isCurrent()) return false;
+    // Whichever bridge already owns this doc does the write — a second bridge on
+    // one doc_id is the doubling bug.
+    const open = bridgeManager.currentBridge();
+    if (open && open.docId === docId) return open.writeThrough();
+    const resident = store.peekResident(docId);
+    if (resident) return resident.writeThrough();
+    const bridge = await store.promote(docId, path, {
+      seedFromFile: false, // the file is the 0-byte placeholder we just made
+      markRecent: false, // a 500-note pull must not evict the real recency list
+      pin: true,
+    });
+    try {
+      if (bridge.serialize().length === 0) return false; // nothing to write
+      return await bridge.writeThrough();
+    } finally {
+      await store.demote(docId);
+    }
   }
 
   noteRemoved(docId: string, path: string, trashedTo: string | null): void {
@@ -1022,6 +1535,11 @@ export class SyncManager implements InboundHost {
       // folder is open — exactly the state that merged two vaults.
       if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
       this.enabled = true;
+      // The reconcile IS this session's first structure pull: every file the
+      // server knows about has been accounted for, so from here a vanished file
+      // is news (see `markLive` for the other half of the condition).
+      this.pulledOnce = true;
+      this.markLive();
       // Sweep unreachable CRDT rows HERE and nowhere else: the registry map is
       // complete as of the line above, and the download phase below has not yet
       // begun to create docs. Fire-and-forget — a vault that cannot be tidied
@@ -1386,7 +1904,23 @@ export class SyncManager implements InboundHost {
       clearTimeout(this.localChangeTimer);
       this.localChangeTimer = null;
     }
+    if (this.diskDeleteTimer) {
+      clearTimeout(this.diskDeleteTimer);
+      this.diskDeleteTimer = null;
+    }
     this.localChanges.clear();
+    // A pending disk delete belongs to the vault we are leaving, and its paths
+    // would name a DIFFERENT file in the next one. Dropping them is also the
+    // conservative direction: the delete simply doesn't propagate, and the next
+    // session re-materializes the note with its content.
+    this.pendingDiskDeletes.clear();
+    this.pendingDeleteByPath.clear();
+    this.renameCandidates.clear();
+    this.pullAfterDiskDeletes = false;
+    // The next vault starts un-live: its own reconcile + channel decide.
+    this.liveSince = null;
+    this.channelSynced = false;
+    this.pulledOnce = false;
     this.divergedDocs.clear();
     // Scoped to the vault like everything else here: another vault's empty-doc
     // list would put ITS doc ids at the head of this vault's upload queue.
@@ -1630,7 +2164,11 @@ export class SyncManager implements InboundHost {
         // here. Without this, those changes surfaced only on the next sign-in or
         // relaunch. Debounced + idempotent, so the extra pull on a healthy
         // connect costs one listing round trip.
-        if (s === "synced") this.handleRegistryChanged();
+        if (s === "synced") {
+          this.channelSynced = true;
+          this.markLive();
+          this.handleRegistryChanged();
+        }
       },
       // An ACL change in this vault may have flipped the open note's grant
       // (view↔edit, lock/unlock). Re-mint its token so the editor becomes

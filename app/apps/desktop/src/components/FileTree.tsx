@@ -29,6 +29,7 @@ import {
   renameInOrder,
 } from "../lib/ordering";
 import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
+import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
 import { previewKind } from "../lib/preview";
 import {
@@ -521,6 +522,25 @@ export function FileTree() {
     return () => window.removeEventListener("click", close);
   }, []);
 
+  /**
+   * Open the context menu scoped to the vault ROOT, from a right-click on the
+   * tree's blank space.
+   *
+   * A null node is the whole of what makes it a root menu: every node-specific
+   * item is already gated on `menu.node`, and `menuDir` already falls back to
+   * `""` (the vault root) without one — which also means the frozen-root
+   * refusal (`menuCreateBlocked`) applies here for free.
+   *
+   * The sort popover closes first for the same reason its own opener closes
+   * this menu: the two are separate floating layers and only one should be up.
+   * Re-opening while a menu is already showing is just another `setMenu`, so
+   * the placement effect re-measures at the new cursor.
+   */
+  function openRootMenu(x: number, y: number) {
+    setSortOpen(false);
+    setMenu({ x, y, node: null });
+  }
+
   // Measure the menu, then decide where it actually goes. This has to be a
   // LAYOUT effect: it runs (and the re-render it schedules runs) before the
   // browser paints, so the menu is never visibly drawn at the unplaced position.
@@ -759,6 +779,28 @@ export function FileTree() {
       await ipc.revealInFileManager(`${root}/${node.data.path}`);
     } catch (e) {
       console.error("reveal failed", e);
+      toast("Couldn't open that in the file manager", "error");
+    }
+  }
+
+  /**
+   * Open the vault's own folder — the root menu's counterpart to `revealNode`,
+   * and the same thing the sidebar header's button does.
+   *
+   * `openInFileManager`, deliberately not `revealInFileManager`: opening the
+   * vault means stepping INSIDE the folder to see the notes, where revealing
+   * would select it in its parent. The two helpers have mirrored fallback
+   * orders for that reason (see `lib/ipc.ts`), and this one's fallback is what
+   * covers a vault living on an external volume.
+   */
+  async function openVaultRoot() {
+    setMenu(null);
+    const root = useStore.getState().vault?.path;
+    if (!root) return;
+    try {
+      await ipc.openInFileManager(root);
+    } catch (e) {
+      console.error("open vault failed", e);
       toast("Couldn't open that in the file manager", "error");
     }
   }
@@ -1321,6 +1363,21 @@ export function FileTree() {
       // toolbar, must not thaw the order and re-sort mid-aim.
       onPointerEnter={() => setPointerInTree(true)}
       onPointerLeave={() => setPointerInTree(false)}
+      // Right-click on blank space gets the vault-root menu. On the CONTAINER,
+      // not the scroll area: with an empty vault there is no `<Tree>` at all,
+      // only `.filetree-empty`, and that is exactly the case where "New note"
+      // needs to be reachable.
+      //
+      // Rows also `stopPropagation` in their own `onContextMenu`, so this can
+      // never double-fire for one — but that coupling is implicit, so
+      // `isBlankTreeTarget` re-states the rule in a form that survives the
+      // stopPropagation call being removed. `contextmenu` is not `click`, so
+      // the window-level dismiss above does not fire alongside it.
+      onContextMenu={(e) => {
+        if (!isBlankTreeTarget(e.target as Element | null)) return;
+        e.preventDefault();
+        openRootMenu(e.clientX, e.clientY);
+      }}
     >
       <div className="filetree-head">
         <span className="section-label">Notes</span>
@@ -1621,6 +1678,13 @@ export function FileTree() {
           >
             Import folder…
           </li>
+          {/* Root menu only, and it sits where a row's reveal item sits, so the
+              "get me to this on disk" action is always in the same place. */}
+          {!menu.node && (
+            <li className="menu-sep-item" onClick={() => void openVaultRoot()}>
+              {ipc.openVaultLabel()}
+            </li>
+          )}
           {menu.node && (
             <li onClick={() => void exportNode(menu.node!)}>Export…</li>
           )}

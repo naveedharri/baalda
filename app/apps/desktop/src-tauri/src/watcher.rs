@@ -377,6 +377,37 @@ mod tests {
         );
     }
 
+    /// A rename from OUTSIDE the app is two unpaired `notify` events — measured
+    /// on macOS/FSEvents as `Modify(Name(Any))` for the old path and another for
+    /// the new one, with no rename cookie exposed — and both land inside one
+    /// 150 ms drain. This pins what the TS side is therefore entitled to assume:
+    /// ONE batch carrying `removed` for the old path and `modified` for the new,
+    /// with nothing linking them. The sync layer pairs them by content hash
+    /// (`SyncManager.drainDiskDeletes`), which is only sound because they arrive
+    /// together; if this ever became two batches, an external rename would
+    /// propagate as a delete plus a brand-new note.
+    #[test]
+    fn plan_reports_an_external_rename_as_removed_plus_modified_in_one_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Old.md", "# Same bytes").unwrap();
+        // The rename itself: the file is at the new path by the time we plan.
+        std::fs::rename(v.join("Old.md"), v.join("New.md")).unwrap();
+
+        let batch: HashSet<PathBuf> = [v.join("Old.md"), v.join("New.md")].into_iter().collect();
+        let plan = plan_batch(&v, batch);
+
+        assert_eq!(
+            kinds(&plan),
+            vec![
+                ("New.md".to_string(), "modified"),
+                ("Old.md".to_string(), "removed"),
+            ]
+        );
+        assert_eq!(plan.modified, vec![v.join("New.md")]);
+        assert_eq!(plan.removed, vec![v.join("Old.md")]);
+    }
+
     #[test]
     fn plan_drops_ignored_and_out_of_vault_paths() {
         let tmp = tempfile::tempdir().unwrap();

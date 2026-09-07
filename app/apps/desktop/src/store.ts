@@ -111,6 +111,15 @@ interface AppStore {
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
   /**
+   * Was that note SYNCED when its file vanished — i.e. is the disk delete being
+   * propagated to the team (see `SyncManager.drainDiskDeletes`)?
+   *
+   * Latched by `setNoteRemoved` rather than read live, because propagating the
+   * delete drops the note's `docIdByPath` entry: a live read would re-word the
+   * banner a couple of seconds after it appeared.
+   */
+  noteRemovedSynced: boolean;
+  /**
    * Set when the note that was open was deleted by a TEAMMATE (or an AI) and we
    * applied that locally: the trash-relative path the local copy was moved to, so
    * the UI can say where it went. Distinct from `noteRemoved`, which means "the
@@ -128,13 +137,28 @@ interface AppStore {
   serverUrl: string;
   authError: string | null;
   /**
-   * A flow needs the sign-in dialog on screen NOW (currently only "note-link":
-   * a shared link arrived while signed out, and the link is queued to open
-   * right after the sign-in succeeds). App.tsx mounts AuthDialog off this in
-   * both root branches; dismissing the dialog clears the queued link too.
+   * A flow needs the sign-in dialog on screen NOW. Two of them:
+   *   - "note-link": a shared link arrived while signed out, and the link is
+   *     queued to open right after the sign-in succeeds;
+   *   - "server-link": a `baalda://connect` invite arrived, offering a server
+   *     to point this device at (see `pendingServerLink`).
+   * App.tsx mounts AuthDialog off this in both root branches; dismissing the
+   * dialog clears the queued link / offered server too.
    */
-  authPrompt: "note-link" | null;
-  setAuthPrompt: (prompt: "note-link" | null) => void;
+  authPrompt: "note-link" | "server-link" | null;
+  setAuthPrompt: (prompt: "note-link" | "server-link" | null) => void;
+  /**
+   * A server URL an invite link is offering, awaiting the user's explicit yes.
+   *
+   * Parked here rather than applied on arrival because a deep link is untrusted
+   * input and this particular value decides where a password gets posted — so
+   * nothing calls `setServerUrl` until someone clicks Connect.
+   */
+  pendingServerLink: string | null;
+  /** Park an inbound connect link and raise the auth dialog on its confirm step. */
+  promptServerLink: (serverUrl: string) => void;
+  /** Drop the offer (declined, or already adopted) without closing the dialog. */
+  clearServerLink: () => void;
   /**
    * A sign-in has landed but we're still resolving which vault to open (and
    * possibly creating it, its folder, and its starter notes — a few seconds).
@@ -911,6 +935,7 @@ export const useStore = create<AppStore>((set, get) => ({
   tree: null,
   openNote: null,
   noteRemoved: false,
+  noteRemovedSynced: false,
   noteRemovedByTeammate: null,
   backlinks: [],
   titles: [],
@@ -921,6 +946,10 @@ export const useStore = create<AppStore>((set, get) => ({
   authError: null,
   authPrompt: null,
   setAuthPrompt: (prompt) => set({ authPrompt: prompt }),
+  pendingServerLink: null,
+  promptServerLink: (serverUrl) =>
+    set({ pendingServerLink: serverUrl, authPrompt: "server-link" }),
+  clearServerLink: () => set({ pendingServerLink: null }),
   landingVault: false,
   switchingVault: null,
   openingNotePath: null,
@@ -1242,6 +1271,7 @@ export const useStore = create<AppStore>((set, get) => ({
       set((s) => ({
         openNote: { path, id: meta?.id ?? null, title },
         noteRemoved: false,
+        noteRemovedSynced: false,
         // Every open gets (or keeps) a tab; switching tabs re-runs this path,
         // so membership is checked rather than blindly appended.
         openTabs: s.openTabs.includes(path) ? s.openTabs : [...s.openTabs, path],
@@ -1357,7 +1387,14 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  setNoteRemoved: (removed) => set({ noteRemoved: removed }),
+  setNoteRemoved: (removed) =>
+    set((s) => ({
+      noteRemoved: removed,
+      // Latched here: the sync layer drops the note's mapping when it propagates
+      // the disk delete, so `noteRemovedSynced` has to be sampled at the moment
+      // the file vanished rather than read off the map later.
+      noteRemovedSynced: removed ? !!s.docIdByPath[s.openNote?.path ?? ""] : false,
+    })),
 
   /**
    * A teammate moved the note we have open; the file has already moved on disk.
@@ -1384,7 +1421,13 @@ export const useStore = create<AppStore>((set, get) => ({
 
   closeNote: () => {
     syncManager.setViewing(null);
-    set({ openNote: null, backlinks: [], noteRemoved: false, noteRemovedByTeammate: null });
+    set({
+      openNote: null,
+      backlinks: [],
+      noteRemoved: false,
+      noteRemovedSynced: false,
+      noteRemovedByTeammate: null,
+    });
   },
 
   closeTab: (path) => {
@@ -1625,6 +1668,9 @@ export const useStore = create<AppStore>((set, get) => ({
       session: null,
       authStatus: "signed-out",
       authPrompt: null,
+      // Ditto an unanswered connect offer: it belongs to the flow that raised
+      // it, not to whoever signs in next.
+      pendingServerLink: null,
       landingVault: false,
       organizations: [],
       members: [],
@@ -1642,6 +1688,7 @@ export const useStore = create<AppStore>((set, get) => ({
       openNote: null,
       backlinks: [],
       noteRemoved: false,
+      noteRemovedSynced: false,
       itemColors: readItemColors(undefined),
       itemOrder: readItemOrder(undefined),
     });

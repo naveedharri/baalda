@@ -53,6 +53,21 @@ export function revealLabel(): string {
   return "Show in file manager";
 }
 
+/**
+ * What to call "open the vault's own folder" on this platform.
+ *
+ * A different verb from {@link revealLabel} on purpose, and it pairs with
+ * {@link openInFileManager}: revealing selects an item in its parent, which is
+ * right for one note but wrong for the vault — there the user wants to step
+ * inside the folder and see their notes.
+ */
+export function openVaultLabel(): string {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  if (/Mac|iPhone|iPad/i.test(ua)) return "Open vault in Finder";
+  if (/Win/i.test(ua)) return "Open vault in Explorer";
+  return "Open vault in file manager";
+}
+
 // ---- Types (mirror the Rust structs, serialized camelCase) ---------------
 
 export interface VaultInfo {
@@ -244,6 +259,46 @@ export const listChildren = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<TreeNode[]>("list_children", { path, expectedEpoch: expectedEpoch ?? null });
 export const readNote = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<string>("read_note", { path, expectedEpoch: expectedEpoch ?? null });
+/**
+ * Is this note file on disk RIGHT NOW? A disk question, not an index one.
+ *
+ * The sync layer re-asks it before propagating a disk-observed delete: the
+ * watcher's report is a couple of seconds old by then, and an editor's
+ * unlink-then-rewrite save (or a re-created file) puts the note back inside that
+ * window.
+ */
+export const noteExists = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("note_exists", { path, expectedEpoch: expectedEpoch ?? null });
+/**
+ * Save a deleted note's text into `.context/trash/<stamp>/<rel>` and return the
+ * trash-relative destination.
+ *
+ * The counterpart to {@link trashNote} for a file that is ALREADY gone: nothing
+ * can be moved, so the doc's in-memory text is written instead. Same stamped
+ * layout, so a disk delete lands in the trash next to a teammate's.
+ */
+export const writeTrashCopy = (
+  path: string,
+  stamp: string,
+  content: string,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<string>("write_trash_copy", {
+    path,
+    stamp,
+    content,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+/**
+ * Put `docId` back on the index row at `path` after a rename done OUTSIDE the
+ * app. Resolves false when no row is there, or the id belongs to another path.
+ *
+ * An external rename reaches us as an unpaired removed+modified pair, and the
+ * watcher indexes the new file under a fresh uuid. Without this the same file
+ * carries one doc_id in the registry map and another in the index.
+ */
+export const rebindNoteId = (path: string, docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("rebind_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
 export const writeNote = (path: string, content: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("write_note", { path, content, expectedEpoch: expectedEpoch ?? null });
 /** Create a note only if the path is free. Resolves true when it was created,
