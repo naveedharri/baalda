@@ -390,6 +390,11 @@ export class VaultSyncEngine {
 
   private setStatus(s: VaultSyncStatus): void {
     if (this.status === s) return;
+    // One line per transition: a reconnect loop is invisible without it, since
+    // neither the connect nor the drop otherwise logs anything.
+    console.info(
+      `[vault-sync] ${this.vaultId.slice(0, 8)} ${this.status} → ${s} (attempt ${this.attempt})`,
+    );
     this.status = s;
     this.onStatus?.(s);
   }
@@ -408,8 +413,17 @@ export class VaultSyncEngine {
 
     ws.onopen = () => void this.onOpen();
     ws.onmessage = (ev) => void this.onMessage(ev.data);
-    ws.onclose = () => this.onDisconnect();
-    ws.onerror = () => this.onDisconnect();
+    ws.onclose = (ev) => {
+      const e = ev as { code?: number; reason?: string; wasClean?: boolean } | undefined;
+      console.warn(
+        `[vault-sync] socket closed code=${e?.code ?? "?"} reason=${JSON.stringify(e?.reason ?? "")} clean=${e?.wasClean ?? "?"}`,
+      );
+      this.onDisconnect();
+    };
+    ws.onerror = () => {
+      console.warn("[vault-sync] socket error");
+      this.onDisconnect();
+    };
   }
 
   private async onOpen(): Promise<void> {

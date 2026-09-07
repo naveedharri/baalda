@@ -1,0 +1,33 @@
+// Dev-only: mirror the webview console into the Tauri process's stdout via the
+// log plugin (its Stdout target is configured in src-tauri/src/lib.rs), so sync
+// diagnostics can be read from the `tauri dev` terminal instead of only from the
+// Web Inspector. A no-op in production builds.
+import { error, info, warn } from "@tauri-apps/plugin-log";
+
+export function mirrorConsoleToTerminal(): void {
+  if (!import.meta.env.DEV) return;
+  const fmt = (args: unknown[]) =>
+    args
+      .map((a) => {
+        if (a instanceof Error) return `${a.name}: ${a.message}`;
+        if (typeof a === "string") return a;
+        try {
+          return JSON.stringify(a);
+        } catch {
+          return String(a);
+        }
+      })
+      .join(" ")
+      .slice(0, 2000);
+  const wrap = (name: "log" | "info" | "warn" | "error", sink: (s: string) => Promise<void>) => {
+    const orig = console[name].bind(console);
+    console[name] = (...args: unknown[]) => {
+      orig(...args);
+      void sink(fmt(args)).catch(() => {});
+    };
+  };
+  wrap("log", info);
+  wrap("info", info);
+  wrap("warn", warn);
+  wrap("error", error);
+}

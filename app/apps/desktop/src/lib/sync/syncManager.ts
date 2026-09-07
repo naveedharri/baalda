@@ -20,6 +20,7 @@ export type SyncStatus =
   | "synced" // read-write, converged with server
   | "read-only" // synced but the grant is view-only
   | "no-access" // server refused a token (403) — not shared with this user
+  | "deleted" // server has no such doc (404) — deleted/unregistered, TERMINAL
   | "too-large" // doc's Yjs state exceeds the server cap — TERMINAL, no retry
   | "error"; // transient failure (will retry)
 
@@ -39,7 +40,32 @@ export const CLOSE_NOTE_TOO_LARGE = 4413;
 /** Statuses from which no reconnect will ever help. Reaching one must stop the
  *  provider's own retry loop, not merely paint a different colour. */
 export function isTerminalSyncStatus(s: SyncStatus): boolean {
-  return s === "no-access" || s === "too-large";
+  return s === "no-access" || s === "deleted" || s === "too-large";
+}
+
+/**
+ * What a failed token mint means for this doc's connection.
+ *
+ * Extracted so the one decision that separates "retry" from "give up" is
+ * testable without a socket. The 404 line is the one that was missing: a doc the
+ * server does not know — soft-deleted (`sync-token.ts` filters
+ * `deleted_at IS NULL`), or never registered — can never mint a token, so the
+ * old `error` verdict turned it into a permanent loop. `mintToken` returns null
+ * on failure and the provider's token function then sends `""`, which the server
+ * rejects on every single connect: reject → reconnect → 404 → `""` → reject, for
+ * as long as the note stays open. That is exactly what happened when the OPEN
+ * note's file was deleted from disk and the delete propagated (#93): dozens of
+ * `[onAuthenticate] rejected … (token length 0)` a minute, and a sync badge
+ * strobing Synced/Syncing.
+ *
+ * 401 stays non-terminal-but-quiet: the session, not the doc, is the problem, so
+ * a re-login fixes it without reopening the note.
+ */
+export function mintFailureStatus(httpStatus: number | undefined): SyncStatus {
+  if (httpStatus === 403) return "no-access";
+  if (httpStatus === 404) return "deleted";
+  if (httpStatus === 401) return "offline";
+  return "error";
 }
 
 export interface DocSyncOptions {
@@ -242,12 +268,33 @@ export class DocSync {
           this.reconnectWithFreshToken();
         }
       },
+      onAuthenticated: () => {
+        // The server accepted THIS connection's token. This is the success edge
+        // that ends a failure streak — not the socket opening (see `onStatus`).
+        if (this.destroyed) return;
+        this.noteAuthSuccess();
+      },
       onStatus: ({ status }) => {
         if (this.destroyed) return;
         if (status === "connected") {
-          // Connected means the server accepted our token, so the streak is over.
-          this.noteAuthSuccess();
-          this.setStatus(this._readOnly ? "read-only" : "synced");
+          // The SOCKET is up. That is all this means: Hocuspocus authenticates
+          // IN-BAND after the connection opens, so this fires before the server
+          // has even seen our token — and both things it used to do here were
+          // therefore wrong.
+          //
+          //  • It reported "synced", so a token the server was about to reject
+          //    still flashed a green "Synced · just now" on every lap of a
+          //    rejection loop. That is the blinking badge from #93.
+          //  • It called noteAuthSuccess(), which zeroes the auth-failure streak
+          //    — pinning `scheduleAuthRetry`'s exponential backoff at its first
+          //    step forever. A doc that can never mint a token (an open note
+          //    whose file was deleted from disk, so the server soft-deleted it)
+          //    cycled reject → connect → reject about once a second instead of
+          //    backing off to 30s.
+          //
+          // `onAuthenticated`/`onSynced` are the honest success edges and both
+          // set the status themselves.
+          if (!isTerminalSyncStatus(this._status)) this.setStatus("connecting");
         } else if (status === "connecting") {
           // `no-access` is TERMINAL and must survive this. The provider runs its
           // own reconnect loop, and each lap emits "connecting" — which used to
@@ -415,14 +462,21 @@ export class DocSync {
       }
       return res.token;
     } catch (e) {
-      if (e instanceof ApiError && e.status === 403) {
-        this.setStatus("no-access");
+      // One verdict for every mint failure (see `mintFailureStatus`), so 403 and
+      // 404 cannot drift apart: both are refusals no reconnect can talk its way
+      // out of. A 401 means the stored session is no longer valid (expired, or
+      // the user no longer exists on this server) — not this doc's fault, so it
+      // reads as offline and lets the backoff stretch instead of retrying hard.
+      const status = mintFailureStatus(e instanceof ApiError ? e.status : undefined);
+      this.setStatus(status);
+      if (isTerminalSyncStatus(status)) {
         this.refresher.cancel();
-        // Refusal is terminal: anything waiting on a flush will never get one.
+        // Terminal: anything waiting on a flush will never get one.
         this.releaseFlushWaiters(false);
         // Guards alone can't stop this: HocuspocusProvider reconnects on its own
-        // schedule, so a refused doc would keep opening sockets (and keep getting
-        // rejected) for as long as the note stayed open. Refusal is terminal until
+        // schedule, so a doc we can never mint a token for would keep opening
+        // sockets — and keep being rejected, because the token function falls
+        // back to `""` — for as long as the note stayed open. Terminal until
         // something re-opens the note or an ACL change calls refreshAccess(), so
         // take the socket down instead of leaving it to cycle.
         try {
@@ -430,12 +484,7 @@ export class DocSync {
         } catch {
           /* provider already torn down */
         }
-        return null;
       }
-      // A 401 means the stored session is no longer valid (expired, or the user
-      // no longer exists on this server). Re-minting cannot fix that, so treat it
-      // as offline and let the backoff stretch out instead of retrying hard.
-      this.setStatus(e instanceof ApiError && e.status === 401 ? "offline" : "error");
       return null;
     }
   }

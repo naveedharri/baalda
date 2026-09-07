@@ -206,14 +206,21 @@ vi.mock("../vaultDocStore", () => ({
 }));
 
 /** The per-note provider. Records the connect ORDER — which, at concurrency 1,
- *  is the queue the uploader actually built. */
-const connects = vi.hoisted(() => ({ order: [] as string[] }));
+ *  is the queue the uploader actually built — and every teardown, so a test can
+ *  assert that the provider for a doc the server no longer has is STOPPED rather
+ *  than left to re-mint against a tombstone. */
+const connects = vi.hoisted(() => ({ order: [] as string[], destroyed: [] as string[] }));
 
 vi.mock("../syncManager", () => ({
   DocSync: class {
     readonly readOnly = false;
     isSynced = false;
+    readonly status = "connecting";
+    readonly docId: string;
+    /** Enough of a y-protocols Awareness for `openDoc`'s presence stamp. */
+    readonly awareness = { setLocalStateField() {}, destroy() {} };
     constructor(input: { docId: string }) {
+      this.docId = input.docId;
       connects.order.push(input.docId);
     }
     async whenSynced() {
@@ -222,7 +229,9 @@ vi.mock("../syncManager", () => ({
     async whenFlushed() {
       return true;
     }
-    destroy() {}
+    destroy() {
+      connects.destroyed.push(this.docId);
+    }
     refreshAccess() {}
   },
 }));
@@ -277,6 +286,7 @@ beforeEach(() => {
   storeHooks.open = null;
   storeHooks.promoted = [];
   connects.order = [];
+  connects.destroyed = [];
 });
 
 describe("SyncManager — download before upload", () => {
@@ -642,6 +652,32 @@ describe("SyncManager.handleLocalFilesChanged", () => {
  * The window is the whole design, and each test below is one thing it has to
  * survive.
  */
+describe("SyncManager — a burst of registry frames is ONE pull", () => {
+  it("never lets a stream of frames push the debounced pull back indefinitely", async () => {
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    await enable(sm);
+    fakeRegistry.pull.mockClear();
+
+    // The server coalesces its own structural broadcasts into ~8 windows a second
+    // (`REGISTRY_COALESCE_MS`), and one window can carry BOTH `reauth` and
+    // `registry` — so during a delete drain or a bulk register, frames arrive
+    // faster than the 250ms debounce for as long as the storm lasts. Every frame
+    // used to clear and re-arm that timer, which is starvation, not coalescing:
+    // the pull ran only once the storm stopped.
+    for (let i = 0; i < 40; i++) {
+      engineHooks.opts!.onRegistryChanged?.();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+
+    // Four seconds of unbroken frames: the pull has actually run…
+    expect(fakeRegistry.pull).toHaveBeenCalled();
+    // …and a handful of times, not once per frame.
+    expect(fakeRegistry.pull.mock.calls.length).toBeLessThanOrEqual(6);
+    vi.useRealTimers();
+  });
+});
+
 describe("SyncManager — disk deletes propagate under a grace window", () => {
   /** Sync enabled AND live: the channel is `synced` and a pull has landed, which
    *  is the point from which a vanished file is news rather than a disk still
@@ -839,6 +875,41 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Old.md");
+    vi.useRealTimers();
+  });
+
+  it("takes the OPEN note's provider down with the delete, not just its file", async () => {
+    // The bridge deliberately survives — CodeMirror is still mounted and the
+    // banner offers to close the note — but the network provider must not. The
+    // server has just tombstoned this doc, so `POST /api/sync-token` answers 404
+    // for it from here on (the route filters `deleted_at IS NULL`), the mint
+    // fails, and the provider's token function falls back to `""`, which the
+    // server rejects on every connect. Live in #93 that was dozens of
+    // `[onAuthenticate] rejected … (token length 0)` a minute and a sync badge
+    // strobing Synced/Syncing for as long as the note stayed open.
+    const sm = new SyncManager();
+    mapOne("Open.md", "d-open");
+    await live(sm);
+
+    const bridge = {
+      docId: "d-open",
+      doc: new Y.Doc(),
+      serialize: () => "content",
+      async seedFromFileIfEmpty() {},
+    };
+    await sm.openDoc(bridge as never, "Open.md");
+    expect(connects.order).toContain("d-open");
+    expect(connects.destroyed).toEqual([]);
+
+    sm.handleLocalFilesChanged([{ path: "Open.md", kind: "removed" }]);
+    await drain();
+
+    expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Open.md");
+    // The provider is gone…
+    expect(connects.destroyed).toEqual(["d-open"]);
+    expect(sm.currentSync()).toBeNull();
+    // …and nothing opened a replacement for a doc that no longer exists.
+    expect(connects.order.filter((d) => d === "d-open")).toHaveLength(1);
     vi.useRealTimers();
   });
 });
