@@ -26,6 +26,9 @@ importers:
 
   .:
     devDependencies:
+      railway:
+        specifier: ^3.11.0
+        version: 3.11.0
       turbo:
         specifier: ^2.10.5
         version: 2.10.5
@@ -880,6 +883,11 @@ packages:
   '@fontsource/radio-canada-big@5.2.7':
     resolution: {integrity: sha512-FbFwPzj/PsWA9s0/V5Zol4GlfECeFHYby9f6UkX5+vG7IL40SXQff0SpzlR5984gXQ77NXlOffV7gmtC9g1nvw==}
 
+  '@graphql-typed-document-node/core@3.2.0':
+    resolution: {integrity: sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ==}
+    peerDependencies:
+      graphql: ^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0
+
   '@hocuspocus/common@4.4.0':
     resolution: {integrity: sha512-cPSlPu/ws2JzBHW6OzctyaQMyDCq/YUS4nhXSbyMdkQwJzhjCkvfmmRnVtcmgLR3TBLaNwToNDwR/mNaJFOYsg==}
 
@@ -1678,6 +1686,10 @@ packages:
     resolution: {integrity: sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg==}
     engines: {node: '>=6.9.0'}
 
+  graphql@16.14.2:
+    resolution: {integrity: sha512-Chq1s4CY7jmh8gO2qvLIJyfCDIN+EHLFW/9iShnp1z8FjBQMoodWP1kDC36VAMXXIvAjj4ARa7ntfAV2BrjsbA==}
+    engines: {node: ^12.22.0 || ^14.16.0 || ^16.0.0 || >=17.0.0}
+
   hoist-non-react-statics@3.3.2:
     resolution: {integrity: sha512-/gGivxi8JPKWNm/W0jSmzcMPpfpPLc3dY/6GxhX2hQ9iGj3aDfklV4ET7NjKpSinLpJ5vafa9iiGIEZg10SfBw==}
 
@@ -1873,6 +1885,11 @@ packages:
   punycode@2.3.1:
     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
     engines: {node: '>=6'}
+
+  railway@3.11.0:
+    resolution: {integrity: sha512-ehLFHCxV+gITWeBlIVaXulXaVRg4LCxqm0bq64iXSwYL1DESd0pUeLYMP/BMBhnZWeFFBYyJCREaq+Nka7Wgmw==}
+    engines: {node: '>=22'}
+    hasBin: true
 
   react-arborist@3.13.2:
     resolution: {integrity: sha512-Qa5h2MwBGflTZXsg8vXOHOonF04w31u6DyPL06iyboe+A8CMqxRxgI/Imd5mwTo679iNNJ4e7CuinJGe3rGqgg==}
@@ -2792,6 +2809,10 @@ snapshots:
 
   '@fontsource/radio-canada-big@5.2.7': {}
 
+  '@graphql-typed-document-node/core@3.2.0(graphql@16.14.2)':
+    dependencies:
+      graphql: 16.14.2
+
   '@hocuspocus/common@4.4.0':
     dependencies:
       lib0: 0.2.117
@@ -3462,6 +3483,8 @@ snapshots:
 
   gensync@1.0.0-beta.2: {}
 
+  graphql@16.14.2: {}
+
   hoist-non-react-statics@3.3.2:
     dependencies:
       react-is: 16.13.1
@@ -3650,6 +3673,12 @@ snapshots:
       xtend: 4.0.2
 
   punycode@2.3.1: {}
+
+  railway@3.11.0:
+    dependencies:
+      '@graphql-typed-document-node/core': 3.2.0(graphql@16.14.2)
+      graphql: 16.14.2
+      tsx: 4.23.1
 
   react-arborist@3.13.2(@types/node@24.13.3)(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
     dependencies:

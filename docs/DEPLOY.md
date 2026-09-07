@@ -112,27 +112,48 @@ Generate a real `JWT_SECRET` for anything beyond local testing:
 
 ## Option B: Railway
 
-The repo ships a checked-in `railway.json` at the repo root, so Railway needs
-almost no manual configuration:
+The server's Railway settings are checked in as Infrastructure as Code at
+`app/.railway/railway.ts` — Dockerfile build, pre-deploy migration, `/health`
+check, restart policy and a 1 GiB memory cap — so Railway needs almost no manual
+configuration:
 
-1. Create a new Railway project and deploy from this repo. Railway
-   reads `railway.json` and builds `app/apps/server/Dockerfile` with the repo
-   root as build context.
-2. Add a **Postgres** database service to the project (Railway's own Postgres
-   plugin works fine).
-3. On the server service, set the environment variables:
+1. Create a new Railway project, add a **Postgres** database service, and add a
+   service that deploys this repo from GitHub.
+2. On the server service, set the environment variables:
    - `DATABASE_URL`: reference the Postgres service's connection string
      (Railway lets you wire this as a variable reference instead of copying
      a literal value).
    - `JWT_SECRET`: generate one with `openssl rand -base64 32`.
    - `BETTER_AUTH_URL`: the server's public HTTPS URL (Railway gives you a
      `*.up.railway.app` domain, or attach your own).
-4. Deploy. `railway.json`'s `deploy.preDeployCommand` runs
-   `node dist/db/migrate.js` before every deploy, and `deploy.healthcheckPath`
-   is `/health`, so Railway won't cut over traffic until migrations have run
-   and the server is answering.
+3. Apply the checked-in settings from a clone. Needs the Railway CLI 5.42 or
+   newer and a `pnpm install` in `app/` (which brings the `railway` SDK):
+
+   ```bash
+   cd app
+   railway link            # choose the project, its environment and the server service
+   railway config plan     # preview — only that service's build/deploy settings change
+   railway config apply
+   ```
+
+   The file is scoped to the server service (`export const partial`), keeps every
+   variable the service already has (`preserve()`) and never touches Postgres,
+   volumes or domains. It pins the GitHub source to `naveedharri/baalda` (a
+   project whose name contains "staging" deploys the `staging` branch, anything
+   else `main`); a fork changes that one string. The settings then live on the
+   service, so this is only re-run when the file changes.
+4. Deploy (`apply` triggers one). `preDeployCommand` runs `node dist/db/migrate.js`
+   before every deploy and the health check is `/health`, so Railway won't cut
+   over traffic until migrations have run and the server is answering.
 5. Expose only the one HTTP port (Railway does this automatically from
    `PORT`); nothing else needs to be public.
+
+> **`railway.json` is legacy.** The repo-root `railway.json` is Railway's older
+> "Config as Code" form of the same settings. Only services created before
+> mid-2026 still read it, and Railway stops reading it everywhere on 2026-12-01;
+> a newer service that has nothing but `railway.json` builds with Railpack, runs
+> no migrations, and answers every sign-in with HTTP 500 (`relation "user" does
+> not exist`). Keep the two files in step until `railway.json` is removed.
 
 Then point the desktop app at it — see
 [Point the desktop app at your server](#point-the-desktop-app-at-your-server)
@@ -180,8 +201,8 @@ live on the managed service or **your own server**, and the generated
 ### Maintaining the template
 
 The service config lives in Railway's template editor, **not** in this repo — the
-only parts version-controlled here are `railway.json` (builder, pre-deploy
-migration, healthcheck) and the Dockerfile. Changing the required env vars means
+only parts version-controlled here are `app/.railway/railway.ts` (builder,
+pre-deploy migration, healthcheck) and the Dockerfile. Changing the required env vars means
 editing the template in the dashboard too, or one-click deploys will boot
 misconfigured.
 
