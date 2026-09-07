@@ -28,6 +28,12 @@ import type { VaultDocStoreOptions } from "../vaultDocStore";
 
 const OPEN_DOC = "doc-open";
 
+// Captured before any `vi.useFakeTimers()` runs: the drain helpers below need a
+// REAL event-loop turn (crypto.subtle.digest resolves off the threadpool, which
+// fake timers cannot advance), and setImmediate is faked by default too.
+const realSetTimeout = globalThis.setTimeout;
+const realTick = () => new Promise<void>((r) => realSetTimeout(r, 1));
+
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
     vaultId: "collection-1" as string | null,
@@ -653,7 +659,12 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
    *  `advanceTimersByTimeAsync` past the window can return with the drain still
    *  mid-flight. Repeated small advances give it real event-loop turns. */
   async function drain() {
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(300);
+    for (let i = 0; i < 12; i++) {
+      await vi.advanceTimersByTimeAsync(300);
+      // A real turn, not a faked one: without it the digest can still be
+      // in flight when the loop ends, and a slow CI runner shows exactly that.
+      await realTick();
+    }
   }
 
   function mapOne(relPath: string, docId = "d1") {
