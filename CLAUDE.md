@@ -194,7 +194,9 @@ script/style/iframe, strip `on*`/`javascript:`).
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
 Hocuspocus instance is also served on the HTTP port at `/sync` (`sync/http-upgrade.ts`) so the whole
 server runs behind a single port/domain — that's what production deploys use (Dockerfile +
-`railway.json` + `docs/DEPLOY.md`; migrations run pre-deploy via `node dist/db/migrate.js`). MCP writes
+Railway IaC in `app/.railway/railway.ts`, applied with `railway config apply` from `app/` — the repo-root
+`railway.json` is the legacy copy new Railway services ignore — + `docs/DEPLOY.md`; migrations run
+pre-deploy via `node dist/db/migrate.js`). MCP writes
 flow through the same sync server via `createDocWriter` so AI edits persist/broadcast like human edits.
 - `auth/auth.ts` — Better Auth; **argon2id** (overrides default scrypt) via `@node-rs/argon2`; `bearer` +
   `organization` plugins (org = **vault**, the user-facing unified entity — Local / Synced / Remote states;
