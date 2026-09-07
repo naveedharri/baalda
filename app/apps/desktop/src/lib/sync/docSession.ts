@@ -117,6 +117,42 @@ function trashStamp(): string {
  */
 const CHANNEL_WATCHDOG_MS = 30_000;
 
+/**
+ * Longest a burst of `registry`/`reauth` frames may push the debounced pull back.
+ *
+ * The 250ms debounce coalesces, but on its own it also STARVES: every frame
+ * cleared and re-armed the timer, and the server coalesces its own structural
+ * broadcasts into ~8 windows a second (see `REGISTRY_COALESCE_MS`), so a delete
+ * drain or a bulk register kept the pull permanently 250ms away and it ran only
+ * once the storm stopped. Past this cap the armed timer is left to fire, so a
+ * burst of N frames is exactly one pull — promptly.
+ */
+const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
+
+/**
+ * Why a registry pull was asked for. Named rather than inferred from a stack
+ * frame: the debounced pull is the one place in the sync layer where several
+ * unrelated triggers converge, so "which one is firing over and over" is the
+ * first question a loop raises — and a transformed stack frame answers it in
+ * line numbers nobody can read.
+ *
+ *  - `channel-synced`     the vault channel reached `synced` (every (re)connect)
+ *  - `registry-frame`     the server's `registry` control frame — a real structural change
+ *  - `reauth`             the server's `reauth` frame (ACL moved; the readable SET may have too)
+ *  - `watcher`            a local batch held an unmapped path or a `tree` event
+ *  - `disk-delete-drain`  the delete drain deferred a batch's pull until it had decided
+ *  - `register-failed`    a note opened unregistered, so nothing of it reaches the server yet
+ *  - `revert`             a checkpoint revert re-pathed/restored rows server-side
+ */
+export type RegistryPullReason =
+  | "channel-synced"
+  | "registry-frame"
+  | "reauth"
+  | "watcher"
+  | "disk-delete-drain"
+  | "register-failed"
+  | "revert";
+
 export interface OpenedDoc {
   awareness: Awareness;
   sync: DocSync | null;
@@ -197,6 +233,9 @@ export class SyncManager implements InboundHost {
   private onColors?: (colors: Record<string, string>) => void;
   private mapPublishTimer: ReturnType<typeof setTimeout> | null = null;
   private registryPullTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the currently-armed pull's burst started (see
+   *  {@link REGISTRY_PULL_MAX_WAIT_MS}); 0 when no pull is armed. */
+  private registryPullBurstAt = 0;
   private attachments: AttachmentSync | null = null;
   /** The vault generation everything below belongs to; null while disabled. */
   private scope: VaultScope | null = null;
@@ -416,7 +455,7 @@ export class SyncManager implements InboundHost {
       const state: DocSyncState =
         s === "synced" || s === "read-only"
           ? "synced"
-          : s === "no-access" || s === "too-large" || s === "error"
+          : s === "no-access" || s === "deleted" || s === "too-large" || s === "error"
             ? "error"
             : "syncing";
       this.reportOpenDocState(docId, state);
@@ -592,16 +631,33 @@ export class SyncManager implements InboundHost {
    * Public like `handleAttachmentChanged` — both are "an external signal for this
    * vault arrived"; the vault engine wires this one in `startVaultEngine`.
    */
-  handleRegistryChanged(): void {
+  handleRegistryChanged(reason: RegistryPullReason): void {
+    // Which trigger asked for this pull. A pull that keeps re-arming itself is
+    // invisible without this line — the badge just blinks "Syncing" — and the
+    // NAME is the whole value: `reauth` vs `registry-frame` is what separated
+    // "the server told us the structure moved" from "the server told us to
+    // re-mint a token, and we pulled anyway" in #93.
+    console.info(`[sync] registry pull requested (${reason})`);
     // A signal that arrives once sync is down (or for the vault we just left) must
     // not even ARM the timer — an armed timer is the thing that outlived the switch
     // in the first place. Requiring a live, current scope is strictly stronger than
     // checking `isCurrent()` on a possibly-null one.
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
-    if (this.registryPullTimer) clearTimeout(this.registryPullTimer);
+    const now = Date.now();
+    if (this.registryPullTimer) {
+      // Already armed. Re-arming is the coalescing, but only up to a point: past
+      // REGISTRY_PULL_MAX_WAIT_MS the frames are a storm, not a burst, and
+      // pushing the pull back again would starve it for the storm's duration.
+      // Leave the armed timer alone and let this frame ride the pull it will run.
+      if (now - this.registryPullBurstAt >= REGISTRY_PULL_MAX_WAIT_MS) return;
+      clearTimeout(this.registryPullTimer);
+    } else {
+      this.registryPullBurstAt = now;
+    }
     this.registryPullTimer = setTimeout(() => {
       this.registryPullTimer = null;
+      this.registryPullBurstAt = 0;
       if (!scope.isCurrent()) return;
       void this.registry
         .pull()
@@ -763,7 +819,7 @@ export class SyncManager implements InboundHost {
       // rename as a brand-new note — a second doc_id for the same file, and a
       // 0-byte ghost materialized back at the old path. The drain re-arms it.
       if (queuedDelete) this.pullAfterDiskDeletes = true;
-      else this.handleRegistryChanged();
+      else this.handleRegistryChanged("watcher");
     }
   }
 
@@ -957,6 +1013,18 @@ export class SyncManager implements InboundHost {
         // file and the next pull registers it as a new note: a resurrection they
         // asked for, with no ghost and nothing lost.
         //
+        // Its network PROVIDER is a different matter and must go. The server has
+        // just tombstoned this doc, so `POST /api/sync-token` answers 404 for it
+        // from now on (`sync-token.ts` filters `deleted_at IS NULL`); the mint
+        // fails, the provider's token function falls back to `""`, and the server
+        // rejects every connect — a reject/reconnect cycle that outlived the note
+        // for as long as it stayed open, flooding the server log with
+        // `[onAuthenticate] rejected … (token length 0)` and strobing the sync
+        // badge, which follows the open note's provider. `closeCurrent` takes down
+        // the DocSync and its awareness only; the bridge, the editor and the
+        // banner are untouched.
+        if (this.currentDocId === d.docId) this.closeCurrent();
+        //
         // Its badge, its queue entries and its empty-doc verdicts all describe a
         // note that no longer exists here.
         this.localChanges.delete(d.docId);
@@ -972,7 +1040,7 @@ export class SyncManager implements InboundHost {
       // Whatever happened above, a batch that asked for a pull gets one now.
       if (this.pullAfterDiskDeletes && scope.isCurrent()) {
         this.pullAfterDiskDeletes = false;
-        this.handleRegistryChanged();
+        this.handleRegistryChanged("disk-delete-drain");
       }
     }
   }
@@ -1900,6 +1968,7 @@ export class SyncManager implements InboundHost {
       clearTimeout(this.registryPullTimer);
       this.registryPullTimer = null;
     }
+    this.registryPullBurstAt = 0;
     if (this.localChangeTimer) {
       clearTimeout(this.localChangeTimer);
       this.localChangeTimer = null;
@@ -2167,7 +2236,7 @@ export class SyncManager implements InboundHost {
         if (s === "synced") {
           this.channelSynced = true;
           this.markLive();
-          this.handleRegistryChanged();
+          this.handleRegistryChanged("channel-synced");
         }
       },
       // An ACL change in this vault may have flipped the open note's grant
@@ -2182,13 +2251,13 @@ export class SyncManager implements InboundHost {
         // access to from their disk, and without it the removal would wait for
         // the next structural change or an app restart - long enough to look
         // like the revocation hadn't worked.
-        this.handleRegistryChanged();
+        this.handleRegistryChanged("reauth");
         // ...and the UI's lock overlay refreshes, so the NEXT open of a
         // just-locked note starts read-only from its first frame.
         this.onAclChangedListener?.();
       },
       // A teammate changed the folder/note structure — re-pull + refresh tree.
-      onRegistryChanged: () => this.handleRegistryChanged(),
+      onRegistryChanged: () => this.handleRegistryChanged("registry-frame"),
       // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.

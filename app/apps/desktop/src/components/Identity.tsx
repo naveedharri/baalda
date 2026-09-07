@@ -131,6 +131,10 @@ export function syncBadgeLabel(args: {
   // Saying "Syncing…" over a doc the server has permanently refused is the lie
   // the whole badge exists to avoid.
   if (status === "too-large") return "Too large to sync";
+  // The server has no such doc any more (its row is soft-deleted, or it was
+  // never registered), so no reconnect can sync it. One stable word beats the
+  // Synced/Syncing strobe this state used to produce.
+  if (status === "deleted") return "Deleted";
   if (progress && isSyncRunActive(progress)) {
     if (progress.total <= 0) return "Syncing…";
     // One verb for every phase. The old per-phase labels ("Uploading",
@@ -178,8 +182,8 @@ export function syncBadgeTone(args: {
   if (noteOpen !== false && (status === "no-access" || status === "read-only")) {
     return status;
   }
-  // Red, not amber: nothing about this resolves on its own.
-  if (status === "too-large") return "error";
+  // Red, not amber: nothing about these resolves on its own.
+  if (status === "too-large" || status === "deleted") return "error";
   if (isSyncRunActive(progress)) return "connecting";
   if (progress?.phase === "error") return "error";
   if (noteOpen === false) {

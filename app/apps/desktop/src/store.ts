@@ -1252,7 +1252,7 @@ export const useStore = create<AppStore>((set, get) => ({
           // the sidebar counts unmapped notes as unsynced), and the same
           // debounced registry pull a teammate's change triggers is armed here,
           // which registers the note and uploads its content when it runs.
-          syncManager.handleRegistryChanged();
+          syncManager.handleRegistryChanged("register-failed");
           // Say so once per note. Skipped while the vault channel itself is down:
           // the connection indicator already reads "Retrying…", and a toast per
           // opened note while offline would only bury it.
@@ -2565,7 +2565,7 @@ export const useStore = create<AppStore>((set, get) => ({
     // server broadcasts `registry-changed` to everyone including us, but pulling
     // here means the vault we just reverted converges on this device without
     // waiting for that round trip.
-    syncManager.handleRegistryChanged();
+    syncManager.handleRegistryChanged("revert");
     return result;
   },
 
@@ -2595,21 +2595,31 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // ---- Sync ----
 
-  setSyncStatus: (status) =>
-    set(
+  setSyncStatus: (status) => {
+    if (get().syncStatus !== status) console.info(`[sync] badge status ${get().syncStatus} → ${status}`);
+    return set(
       status === "synced"
         ? { syncStatus: status, lastSyncedAt: Date.now() }
         : // Leaving "synced" (new doc connecting, offline, error…) clears any
           // stale "Saving…" — pending only makes sense while connected.
           { syncStatus: status, syncPending: false },
-    ),
+    );
+  },
 
   setSyncPending: (pending) => set({ syncPending: pending }),
 
   // A server ack of all pending changes: this is the real "synced just now".
   markSynced: () => set({ lastSyncedAt: Date.now(), syncPending: false }),
 
-  setSyncProgress: (progress) => set({ syncProgress: progress }),
+  setSyncProgress: (progress) => {
+    const prev = get().syncProgress;
+    if (prev?.phase !== progress?.phase) {
+      console.info(
+        `[sync] badge progress ${prev?.phase ?? "null"} → ${progress?.phase ?? "null"} ${JSON.stringify(progress ?? null).slice(0, 160)}`,
+      );
+    }
+    return set({ syncProgress: progress });
+  },
 
   // Merged rather than replaced: per-doc transitions arrive one (or a batch) at a
   // time over a long run, so a writer never has to hold the whole map. Keys are

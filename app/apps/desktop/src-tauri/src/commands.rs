@@ -19,6 +19,13 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+/// How many times the background index rebuild retries a BUSY database, and the
+/// first backoff step (doubled per attempt: 500ms, 1s, 2s). See the retry loop in
+/// `open_vault_inner` for why a locked database is worth retrying rather than
+/// reporting.
+const REBUILD_BUSY_RETRIES: u32 = 3;
+const REBUILD_BUSY_BACKOFF_MS: u64 = 500;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultInfo {
@@ -242,7 +249,41 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
             let guard = bg_index.lock().unwrap();
             let _ = ready_tx.send(());
             let started = std::time::Instant::now();
-            let result = guard.rebuild(&bg_path);
+            // A busy database is a TIMING failure, not a broken vault, and it must
+            // not be permanent: this thread holds the process-wide index mutex, so
+            // `SQLITE_BUSY` here means a SECOND connection to the same file is
+            // mid-write — the previous open's `Index` (and its watcher drain
+            // thread) still winding down after a switch back to a vault. Past the
+            // 5s `busy_timeout` rusqlite surfaces that as an error, and a single
+            // attempt left the index stale for the rest of the session: titles,
+            // search and backlinks all answer from it, and a vault switch is
+            // exactly when it has the most catching up to do.
+            //
+            // `rebuild` is idempotent and preserves doc_ids, so retrying is safe.
+            // The sleeps deliberately keep the mutex: giving it up would let a UI
+            // reader see the stale index and render wrong titles, which is the
+            // thing the whole ready-handshake above exists to prevent.
+            let mut result = guard.rebuild(&bg_path);
+            for attempt in 1..=REBUILD_BUSY_RETRIES {
+                let busy = match &result {
+                    Ok(()) => false,
+                    Err(e) => {
+                        let m = e.to_string().to_ascii_lowercase();
+                        m.contains("locked") || m.contains("busy")
+                    }
+                };
+                if !busy {
+                    break;
+                }
+                eprintln!(
+                    "[index] rebuild found {} busy (attempt {attempt}/{REBUILD_BUSY_RETRIES}) — retrying",
+                    bg_path.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(
+                    REBUILD_BUSY_BACKOFF_MS << (attempt - 1),
+                ));
+                result = guard.rebuild(&bg_path);
+            }
             drop(guard);
             let ok = match result {
                 Ok(()) => true,
