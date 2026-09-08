@@ -33,6 +33,7 @@
     "jose": "^6.2.3",
     "kysely": "^0.29.3",
     "pg": "^8.22.0",
+    "standardwebhooks": "^1.0.0",
     "ws": "^8.21.0",
     "yjs": "catalog:"
   },
@@ -41,7 +42,6 @@
     "@types/node": "^24.10.0",
     "@types/pg": "^8.15.6",
     "@types/ws": "^8.18.1",
-    "standardwebhooks": "^1.0.0",
     "tsx": "^4.20.6",
     "typescript": "catalog:",
     "vitest": "catalog:",
