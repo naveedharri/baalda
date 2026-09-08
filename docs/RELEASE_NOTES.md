@@ -1,1 +1,1 @@
-- Upgrading a vault to Pro now unlocks right after checkout: the server no longer rejects Polar's payment confirmations, so a finished payment shows up in Billing within seconds instead of leaving you on Free
+- Minor billing fixes and clearer plan-limit messages
