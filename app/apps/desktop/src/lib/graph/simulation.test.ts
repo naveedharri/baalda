@@ -215,7 +215,9 @@ describe("ambient flow", () => {
       return worst;
     };
     expect(wander(true)).toBeLessThan(wander(false) * 1.35);
-  });
+    // Two 90-second simulated sessions ≈ 10k ticks of a real force layout; a
+    // busy CI runner has blown vitest's default 5 s (2026-09-08), so give it room.
+  }, 30_000);
 
   it("scales the entrance above the resting drift", () => {
     const calm = settled();
