@@ -61,6 +61,17 @@ export function SidebarHeader() {
           </motion.span>
         </AnimatePresence>
         {switching && <Spinner size="xs" tone="accent" className="vault-switch-spinner" />}
+      </div>
+      <div className="vault-line" title={vault.path}>
+        {/* The path is the one thing that is genuinely still the OLD vault's
+            while switching — the folder hasn't swapped yet. Say so rather than
+            showing a path that contradicts the name above it. */}
+        <span className="vault-path">
+          {switching ? "Switching…" : displayPath(vault.path)}
+        </span>
+        {/* Reveal-in-file-manager sits on the path row — it acts on the path,
+            so it belongs beside it — and stays visible: an affordance that only
+            appears on hover is one nobody finds. */}
         <button
           className="icon-btn vault-reveal"
           title={`Open ${vault.path} in your file manager`}
@@ -84,14 +95,6 @@ export function SidebarHeader() {
             <path d="M2 18l2.5-6h17L19 18a2 2 0 0 1-1.9 1.4H4" />
           </svg>
         </button>
-      </div>
-      <div className="vault-line" title={vault.path}>
-        {/* The path is the one thing that is genuinely still the OLD vault's
-            while switching — the folder hasn't swapped yet. Say so rather than
-            showing a path that contradicts the name above it. */}
-        <span className="vault-path">
-          {switching ? "Switching…" : displayPath(vault.path)}
-        </span>
       </div>
     </div>
   );

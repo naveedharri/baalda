@@ -1577,47 +1577,97 @@ function VaultsTab() {
         })}
       </ul>
 
-      <div className="row vault-tab-actions">
+      <div className="vault-tab-actions">
         {creating ? (
-          <div className="menu-create-org">
+          <form
+            className="vault-tab-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void createOrg();
+            }}
+          >
             <input
               autoFocus
               placeholder="Vault name"
               value={orgName}
               onChange={(e) => setOrgName(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") void createOrg();
                 if (e.key === "Escape") setCreating(false);
               }}
             />
-            <button className="primary sm" disabled={busy} onClick={() => void createOrg()}>
+            <button
+              type="submit"
+              className="primary"
+              disabled={busy || !orgName.trim()}
+            >
               Create
             </button>
-          </div>
+            <button
+              type="button"
+              className="ghost-pill"
+              disabled={busy}
+              onClick={() => setCreating(false)}
+            >
+              Cancel
+            </button>
+          </form>
         ) : joining ? (
-          <div className="menu-create-org">
+          <form
+            className="vault-tab-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void joinByCode();
+            }}
+          >
             <input
               autoFocus
+              className="vault-tab-code"
               placeholder="Join code, e.g. K7MPX2RA"
               value={joinCode}
               spellCheck={false}
+              autoCapitalize="characters"
               onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
               onKeyDown={(e) => {
-                if (e.key === "Enter") void joinByCode();
                 if (e.key === "Escape") setJoining(false);
               }}
             />
-            <button className="primary sm" disabled={busy} onClick={() => void joinByCode()}>
+            <button
+              type="submit"
+              className="primary"
+              disabled={busy || !joinCode.trim()}
+            >
               Join
             </button>
-          </div>
+            <button
+              type="button"
+              className="ghost-pill"
+              disabled={busy}
+              onClick={() => setJoining(false)}
+            >
+              Cancel
+            </button>
+          </form>
         ) : (
           <>
-            <button className="link-btn" onClick={() => setCreating(true)}>
-              + New vault
+            <button
+              type="button"
+              className="ghost-pill vault-tab-add"
+              onClick={() => setCreating(true)}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              <span>New vault</span>
             </button>
-            <button className="link-btn" onClick={() => setJoining(true)}>
-              # Join with code
+            <button
+              type="button"
+              className="ghost-pill vault-tab-add"
+              onClick={() => setJoining(true)}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />
+              </svg>
+              <span>Join with code</span>
             </button>
           </>
         )}
@@ -2245,7 +2295,7 @@ function VersioningTab({ canManage }: { canManage: boolean }) {
               value={label}
               onChange={(e) => setLabel(e.target.value)}
             />
-            <AsyncButton className="primary sm" onClick={create}>
+            <AsyncButton className="primary" onClick={create}>
               Create
             </AsyncButton>
           </div>

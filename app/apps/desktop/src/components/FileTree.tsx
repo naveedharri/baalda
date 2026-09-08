@@ -224,7 +224,12 @@ export function FileTree() {
   const [menuPos, setMenuPos] = useState<Placement | null>(null);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   // Which way the fold toggle points: false → "collapse all", true → "expand all".
-  const [treeCollapsed, setTreeCollapsed] = useState(false);
+  // Folders start closed (`openByDefault={false}` on the Tree), so the toggle
+  // starts out offering "expand". Kept in step with the real tree on every
+  // click and fold, so it never takes a dead click to get in sync.
+  const [treeCollapsed, setTreeCollapsed] = useState(true);
+  const anyFolderOpen = () =>
+    treeRef.current?.visibleNodes.some((n) => n.isInternal && n.isOpen) ?? false;
   // The sort popover under the toolbar's sort button.
   const [sortOpen, setSortOpen] = useState(false);
   // True while an OS drag hovers the tree, for the drop-target highlight.
@@ -407,6 +412,8 @@ export function FileTree() {
     if (node?.isDir && node.childrenLoaded !== true) {
       void useStore.getState().loadChildren(id);
     }
+    // Arborist applies the fold after this callback; read it next frame.
+    requestAnimationFrame(() => setTreeCollapsed(!anyFolderOpen()));
   };
 
   function toggleSelect(path: string) {
@@ -1416,9 +1423,13 @@ export function FileTree() {
               treeCollapsed ? "Expand all folders" : "Collapse all folders"
             }
             onClick={() => {
-              if (treeCollapsed) treeRef.current?.openAll();
-              else treeRef.current?.closeAll();
-              setTreeCollapsed(!treeCollapsed);
+              // Decide from the tree, not from our flag: if anything is open,
+              // collapse; otherwise expand. A flag that drifted from the tree
+              // is what made the first click do nothing.
+              const open = anyFolderOpen();
+              if (open) treeRef.current?.closeAll();
+              else treeRef.current?.openAll();
+              setTreeCollapsed(open);
             }}
           >
             <span className="fold-icon fold-collapse" aria-hidden="true">
@@ -2082,6 +2093,13 @@ function SidebarPresence({ peers }: { peers: VaultPeer[] }) {
   );
 }
 
+/** Second click on the same row within this window = rename. Fixed rather than
+ *  the OS double-click interval; see the row's onClick. Very tight on purpose:
+ *  only a snappy, deliberate double-click gets in, while opening a folder and
+ *  closing it again "fast" is a pair of separate clicks that must NOT rename. */
+const RENAME_DOUBLE_CLICK_MS = 180;
+let lastRowClick: { path: string; at: number } | null = null;
+
 function Node({
   node,
   style,
@@ -2156,14 +2174,25 @@ function Node({
       }}
       onClick={() => {
         if (isDir) node.toggle();
-      }}
-      onDoubleClick={(e) => {
-        // Double-click a row to rename it in place (Finder-style). Stop the
-        // event so a folder's toggle doesn't fight the rename that follows.
-        // Disabled while selecting — a double-click there is just two picks.
-        if (selectMode) return;
-        e.stopPropagation();
-        node.edit();
+        // Double-click a row to rename it in place (Finder-style) — but timed
+        // by us, not by the browser's `dblclick`. That event honours the OS
+        // "double-click speed" setting, which on a slow setting pairs two
+        // clicks more than a second apart, so re-clicking a note you already
+        // had open kept dropping people into rename. Two clicks on the SAME
+        // row inside a fixed short window, nothing else. Disabled while
+        // selecting — a double-click there is just two picks.
+        const now = performance.now();
+        const prev = lastRowClick;
+        lastRowClick = { path: node.data.path, at: now };
+        if (
+          !selectMode &&
+          prev &&
+          prev.path === node.data.path &&
+          now - prev.at < RENAME_DOUBLE_CLICK_MS
+        ) {
+          lastRowClick = null;
+          node.edit();
+        }
       }}
     >
       {selectMode && (
