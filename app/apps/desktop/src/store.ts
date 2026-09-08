@@ -12,7 +12,7 @@ import {
   readItemColors,
   writeItemColors,
 } from "./lib/appearance";
-import { readItemOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
+import { readItemOrder, renameInOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
 import { loadedFolderPaths, mergeChildren, nodeAt, setChildrenAt } from "./lib/tree/lazyTree";
 import { applyTitlePatch } from "./lib/tree/titles";
 import {
@@ -128,6 +128,13 @@ interface AppStore {
   noteRemovedByTeammate: string | null;
   /** Follow an inbound rename: re-point the open note (and its descendants). */
   followNoteRename: (from: string, to: string) => void;
+  /**
+   * Rename/move a note's file and carry everything that hangs off the path
+   * with it: server registry (doc_id preserved), sidebar order, open tabs and
+   * the open note. Picks a free name (`Name 1`, `Name 2`, …) when `newPath` is
+   * taken. Resolves to the path actually used, or null if none was free.
+   */
+  renameNoteFile: (oldPath: string, newPath: string) => Promise<string | null>;
   backlinks: ipc.Backlink[];
   titles: ipc.NoteTitle[];
 
@@ -173,7 +180,9 @@ interface AppStore {
    * chrome can rename itself to the destination immediately instead of showing
    * the outgoing vault until the folder finally swaps.
    */
-  switchingVault: { orgId: string; name: string } | null;
+  /** A vault switch in flight: who we're going to, for the chrome to name at
+   *  once. `orgId` is null for a switch to a plain local folder. */
+  switchingVault: { orgId: string | null; name: string } | null;
   /**
    * The note path currently being opened, if the open hasn't landed yet. Opening
    * a note in a synced vault registers it server-side first (`openNoteByPath`),
@@ -1405,6 +1414,31 @@ export const useStore = create<AppStore>((set, get) => ({
    * content is intact. Cursor position and undo history are lost; for a move
    * someone else initiated that's an acceptable trade for not forking the note.
    */
+  renameNoteFile: async (oldPath, newPath) => {
+    const epoch = get().vault?.epoch;
+    const m = /^(.*?)(\.[^./]+)?$/.exec(newPath);
+    const base = m?.[1] ?? newPath;
+    const ext = m?.[2] ?? "";
+    let target = newPath;
+    for (let i = 1; i <= 20 && (await ipc.noteExists(target, epoch)); i++) {
+      target = `${base} ${i}${ext}`;
+    }
+    if (await ipc.noteExists(target, epoch)) return null;
+    // Epoch-pinned: this spans awaits, so a vault switch mid-rename must be
+    // refused by Rust rather than applied to the other vault.
+    await ipc.renamePath(oldPath, target, epoch);
+    try {
+      await syncManager.registry.renamePath(oldPath, target);
+    } catch (e) {
+      console.warn("[sync] renamePath failed", oldPath, e);
+    }
+    get().setItemOrder(renameInOrder(get().itemOrder, oldPath, target));
+    get().followNoteRename(oldPath, target);
+    await get().refreshTree();
+    await get().refreshTitles();
+    return target;
+  },
+
   followNoteRename: (from, to) => {
     // Background tabs follow the move too, open note or not — a stale tab path
     // would reopen a file that no longer exists.
@@ -2268,8 +2302,24 @@ export const useStore = create<AppStore>((set, get) => ({
     // Prefer this entry point over `adoptOpenedVault` wherever the caller controls
     // the open, precisely because it can tear down first; `adoptOpenedVault` exists
     // for the picker commands, which open the vault themselves as part of picking.
-    leaveVaultSync();
-    await get().adoptOpenedVault(await ipc.openVault(path));
+    // Announce the switch to the chrome (header rename + app-wide overlay) the
+    // same way an org switch does — but only when there IS a vault to switch
+    // from; a first open from the picker has its own busy state.
+    const isSwitch = get().vault != null;
+    if (isSwitch) {
+      const name = path.split(/[\\/]/).filter(Boolean).pop() ?? "vault";
+      set({ switchingVault: { orgId: null, name } });
+    }
+    try {
+      leaveVaultSync();
+      await get().adoptOpenedVault(await ipc.openVault(path));
+    } finally {
+      // Clear only our own claim: an org switch that started meanwhile owns
+      // the flag now.
+      if (isSwitch && get().switchingVault?.orgId === null) {
+        set({ switchingVault: null });
+      }
+    }
   },
 
   removeLocalVault: async (path) => {

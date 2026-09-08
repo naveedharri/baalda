@@ -8,6 +8,7 @@ import { remoteCursors } from "../lib/editor/remoteCursors";
 import type { Awareness } from "y-protocols/awareness";
 import { createEditorState } from "../lib/editor";
 import { setActiveView } from "../lib/editor/activeView";
+import { firstHeading, planTitleRename } from "../lib/editor/titleFollow";
 import { saveAttachment } from "../lib/attachments";
 import { bridgeManager, type NoteBridge } from "../lib/bridge";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
@@ -344,6 +345,8 @@ export function Editor() {
   // The open note's bridge — kept so the syncStatus effect can roll back
   // keystrokes the server rejected (typed before its read-only verdict landed).
   const bridgeRef = useRef<NoteBridge | null>(null);
+  // Set by the open effect; lets the cleanup commit a pending title rename.
+  const titleCommitRef = useRef<(() => void) | null>(null);
   // True once the server has confirmed edit access for THIS note session. Gates
   // the rollback above: a live mid-session lock must never undo edits the
   // server already accepted.
@@ -485,6 +488,33 @@ export function Editor() {
       const editable = new Compartment();
       editableRef.current = editable;
 
+      // Title follows heading (Obsidian-style): edit the `# Title` line and the
+      // file is renamed to match, as long as it was still named after that
+      // heading. Committed when the caret LEAVES line 1 (or the note closes),
+      // never while typing — the rename reopens the editor at the new path,
+      // which would drop the caret mid-word. Only OUR keystrokes arm it: a
+      // teammate's edit to the heading is theirs to commit, or two clients
+      // would race to rename the same file.
+      //
+      // `lastHeading` is read from the doc as it was BEFORE the first keystroke
+      // that touches line 1 — not at open: in a synced vault the text arrives
+      // after the editor mounts, so reading it here would see an empty doc.
+      let lastHeading: string | null = null;
+      let headingDirty = false;
+      const commitTitle = (doc: EditorState["doc"]) => {
+        headingDirty = false;
+        const heading = firstHeading(doc.line(1).text);
+        const to = planTitleRename({ path: notePath, lastHeading, heading });
+        if (!to) return;
+        void useStore
+          .getState()
+          .renameNoteFile(notePath, to)
+          .catch((e) => console.warn("[title] rename failed", notePath, e));
+      };
+      titleCommitRef.current = () => {
+        if (headingDirty && view) commitTitle(view.state.doc);
+      };
+
       const state = createEditorState({
         doc: bridge.text.toString(),
         collab: true,
@@ -506,6 +536,23 @@ export function Editor() {
             if (!u.selectionSet && !u.docChanged && !u.focusChanged) return;
             const line = u.state.doc.lineAt(u.state.selection.main.head).number;
             awareness?.setLocalStateField("activity", { line, at: Date.now() });
+            // Title-follow bookkeeping (see commitTitle above).
+            if (
+              u.docChanged &&
+              u.transactions.some(
+                (tr) =>
+                  tr.isUserEvent("input") ||
+                  tr.isUserEvent("delete") ||
+                  tr.isUserEvent("move"),
+              ) &&
+              u.changes.touchesRange(0, u.startState.doc.line(1).to)
+            ) {
+              if (!headingDirty) lastHeading = firstHeading(u.startState.doc.line(1).text);
+              headingDirty = true;
+            }
+            if (headingDirty && (line !== 1 || (u.focusChanged && !u.view.hasFocus))) {
+              commitTitle(u.state.doc);
+            }
           }),
           // View-only grants / locks: the editor cannot be typed into (spec
           // 04 §4). Compartmented so a live lock change can reconfigure it.
@@ -543,6 +590,9 @@ export function Editor() {
 
     return () => {
       cancelled = true;
+      // A heading edited and then abandoned by switching notes still counts.
+      titleCommitRef.current?.();
+      titleCommitRef.current = null;
       if (onAwarenessChange && awareness) awareness.off("change", onAwarenessChange);
       setActiveView(null);
       setViewMounted(false);

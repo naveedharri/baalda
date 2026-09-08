@@ -38,6 +38,38 @@ function GoogleGlyph() {
   );
 }
 
+/** Cloud mark for the managed-service card. */
+function CloudGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none"
+      stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17.5 19a4.5 4.5 0 0 0 .6-8.96A6 6 0 0 0 6.3 9.2 4.5 4.5 0 0 0 7 18.99h10.5Z" />
+    </svg>
+  );
+}
+
+/** Rack-server mark for the self-hosted card. */
+function ServerGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none"
+      stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="7" rx="2" />
+      <rect x="3" y="13" width="18" height="7" rx="2" />
+      <path d="M7 7.5h.01M7 16.5h.01" />
+    </svg>
+  );
+}
+
+/** Trailing chevron on a card; rotates when the card is expanded. */
+function ChevronGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m9 6 6 6-6 6" />
+    </svg>
+  );
+}
+
 /**
  * Focused sign-in / sign-up modal; closes itself once a session lands. When a
  * caller needs to act on a *successful* sign-in (vs. a cancel), it passes
@@ -294,49 +326,77 @@ export function AuthDialog({
               className="server-option"
               onClick={() => void chooseManaged()}
             >
-              <span className="server-option-title">Baalda managed service</span>
-              <span className="server-option-hint">{serverHost(DEFAULT_SERVER_URL)}</span>
-            </button>
-            <button
-              type="button"
-              className={`server-option${ownOpen ? " active" : ""}`}
-              aria-expanded={ownOpen}
-              onClick={() => {
-                setOwnOpen(true);
-                setServerError(null);
-              }}
-            >
-              <span className="server-option-title">Your own server</span>
-              <span className="server-option-hint">
-                Self-hosted — you'll enter its URL
+              <span className="server-option-head">
+                <span className="server-option-icon">
+                  <CloudGlyph />
+                </span>
+                <span className="server-option-text">
+                  <span className="server-option-title">Baalda managed service</span>
+                  <span className="server-option-hint">
+                    Hosted for you at {serverHost(DEFAULT_SERVER_URL)}
+                  </span>
+                </span>
+                <span className="server-option-chevron">
+                  <ChevronGlyph />
+                </span>
               </span>
             </button>
-            {ownOpen && (
-              <div className="row server-connect-row">
-                <input
-                  autoFocus
-                  value={urlDraft}
-                  onChange={(e) => setUrlDraft(e.target.value)}
-                  placeholder="https://notes.example.com"
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void connectTo(urlDraft);
-                    }
-                  }}
-                />
-                <AsyncButton
-                  type="button"
-                  className="primary sm"
-                  onClick={() => connectTo(urlDraft)}
-                >
-                  Connect
-                </AsyncButton>
-              </div>
-            )}
-            {serverError && <div className="auth-error">{serverError}</div>}
+            {/* A div, not a button: once open, this card holds the URL input
+                and the Connect button, and interactive content can't nest
+                inside a <button>. The header row stays the clickable part. */}
+            <div className={`server-option${ownOpen ? " active" : ""}`}>
+              <button
+                type="button"
+                className="server-option-head"
+                aria-expanded={ownOpen}
+                onClick={() => {
+                  setOwnOpen(true);
+                  setServerError(null);
+                }}
+              >
+                <span className="server-option-icon">
+                  <ServerGlyph />
+                </span>
+                <span className="server-option-text">
+                  <span className="server-option-title">Your own server</span>
+                  <span className="server-option-hint">
+                    Self-hosted — enter the address your team gave you
+                  </span>
+                </span>
+                <span className="server-option-chevron">
+                  <ChevronGlyph />
+                </span>
+              </button>
+              {ownOpen && (
+                <div className="server-option-body">
+                  <div className="row server-connect-row">
+                    <input
+                      autoFocus
+                      value={urlDraft}
+                      onChange={(e) => setUrlDraft(e.target.value)}
+                      placeholder="https://notes.example.com"
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void connectTo(urlDraft);
+                        }
+                      }}
+                    />
+                    <AsyncButton
+                      type="button"
+                      className="primary"
+                      disabled={urlDraft.trim() === ""}
+                      onClick={() => connectTo(urlDraft)}
+                    >
+                      Connect
+                    </AsyncButton>
+                  </div>
+                  {serverError && <div className="auth-error">{serverError}</div>}
+                </div>
+              )}
+            </div>
           </div>
         ) : step === "confirm-link" ? (
           <div className="server-choice">

@@ -28,6 +28,10 @@ export function ShareNoteButton({ docId }: { docId: string }) {
   const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Which row was just copied, for an inline tick. The menu stays OPEN after a
+  // copy — closing it read as the click having failed, and left no way to grab
+  // the other link without reopening — so the row itself has to confirm.
+  const [copiedKind, setCopiedKind] = useState<"private" | "public" | null>(null);
   const [existing, setExisting] = useState<PublicLink | null | "loading">(null);
   const [publicBusy, setPublicBusy] = useState(false);
   // Clipboard write failed after the link was minted: show the url as a
@@ -40,11 +44,15 @@ export function ShareNoteButton({ docId }: { docId: string }) {
   // leaves a stale "copied" on a link nobody copied.
   useEffect(() => {
     if (!copied) return;
-    const id = window.setTimeout(() => setCopied(false), 1600);
+    const id = window.setTimeout(() => {
+      setCopied(false);
+      setCopiedKind(null);
+    }, 1600);
     return () => window.clearTimeout(id);
   }, [copied]);
   useEffect(() => {
     setCopied(false);
+    setCopiedKind(null);
     setOpen(false);
     setFallbackUrl(null);
     setFallbackCopied(false);
@@ -100,7 +108,7 @@ export function ShareNoteButton({ docId }: { docId: string }) {
     const link = buildNoteLink({ orgId, docId }, useStore.getState().serverUrl);
     if (await copyText(link)) {
       setCopied(true);
-      setOpen(false);
+      setCopiedKind("private");
       toast("Link copied — anyone on your team with access can open it");
     } else {
       toast("Couldn't copy the link", "error");
@@ -121,7 +129,7 @@ export function ShareNoteButton({ docId }: { docId: string }) {
         return;
       }
       setCopied(true);
-      setOpen(false);
+      setCopiedKind("public");
       toast("Public link copied — anyone with this link can view this note");
     } catch (e) {
       toast(
@@ -182,7 +190,13 @@ export function ShareNoteButton({ docId }: { docId: string }) {
         <div className="account-popover share-popover" role="menu">
           <button className="menu-item" onClick={() => void copyPrivate()}>
             <span className="menu-item-label">Copy private link</span>
-            <span className="menu-hint">Team members with access</span>
+            {copiedKind === "private" ? (
+              <span className="menu-hint share-copied">
+                <CheckMark size="xs" /> Copied
+              </span>
+            ) : (
+              <span className="menu-hint">Team members with access</span>
+            )}
           </button>
           <button
             className="menu-item"
@@ -192,6 +206,10 @@ export function ShareNoteButton({ docId }: { docId: string }) {
             <span className="menu-item-label">Copy public link</span>
             {publicBusy ? (
               <Spinner size="xs" />
+            ) : copiedKind === "public" ? (
+              <span className="menu-hint share-copied">
+                <CheckMark size="xs" /> Copied
+              </span>
             ) : (
               <span className="menu-hint">Anyone with the link can view</span>
             )}

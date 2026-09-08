@@ -204,17 +204,24 @@ export function VaultPicker() {
   // to make the drive itself the vault is to say so in text (#75).
   const [pathOpen, setPathOpen] = useState(false);
   const [manualPath, setManualPath] = useState("");
+  // Its own error, not the card's shared one: the form is a modal, and an
+  // error rendered on the card underneath would sit behind the backdrop.
+  const [pathError, setPathError] = useState<string | null>(null);
+  function closePathOpen() {
+    setPathOpen(false);
+    setPathError(null);
+  }
   async function openByPath() {
     const path = manualPath.trim();
     if (!path) return;
     setBusy(true);
-    setError(null);
+    setPathError(null);
     try {
       // `openLocalVault`, not `adoptOpenedVault`: WE control this open, so the
       // store can tear down any active vault sync before Rust swaps the slot.
       await useStore.getState().openLocalVault(path);
     } catch (e) {
-      setError(String(e));
+      setPathError(String(e));
     } finally {
       setBusy(false);
     }
@@ -809,43 +816,6 @@ export function VaultPicker() {
           </motion.p>
         )}
 
-        {/* The escape hatch itself. Plain conditional (no enter animation): it
-            appears in direct response to the link above, and motion between a
-            question and its answer reads as lag. */}
-        {!inFlow && pathOpen && (
-          <form
-            className="open-by-path"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void openByPath();
-            }}
-          >
-            {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
-            <input
-              className="new-vault-input open-by-path-input"
-              autoFocus
-              value={manualPath}
-              disabled={busy}
-              onChange={(e) => setManualPath(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setPathOpen(false);
-              }}
-              placeholder={"Full folder or drive path, e.g. D:\\ or /Volumes/Notes"}
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <button
-              type="submit"
-              className={`primary sm${busy ? " is-busy" : ""}`}
-              disabled={busy || !manualPath.trim()}
-              aria-busy={busy || undefined}
-            >
-              <span className="async-btn-label">{busy ? "Opening…" : "Open"}</span>
-              {busy && <Spinner size="xs" tone="on-accent" />}
-            </button>
-          </form>
-        )}
-
         {/*
           Sign-in lives with the hint text, under the primary actions, because
           that is where someone looks after deciding the two buttons above
@@ -899,6 +869,70 @@ export function VaultPicker() {
           the centered card (see the showAllVaults comment above). Rows are the
           same recent-cards as the inline list, so opening/removing behaves
           identically. */}
+      {/* "Open by path" — the escape hatch for what the native folder dialog
+          can't select (a drive root as the vault, #75). A modal like "Show all":
+          revealing a form in place reflowed the centered card. */}
+      {pathOpen && (
+        <div className="modal-backdrop" onClick={closePathOpen}>
+          <div
+            className="modal open-by-path-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <span>Open by path</span>
+              <button className="icon-btn" aria-label="Close" onClick={closePathOpen}>
+                ✕
+              </button>
+            </div>
+            <form
+              className="open-by-path"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void openByPath();
+              }}
+            >
+              <p className="open-by-path-hint">
+                Type the full path of a folder of <code>.md</code> files. This
+                also works for a drive root or mounted volume the folder picker
+                can't select, like <code>D:\</code> or <code>/Volumes/Notes</code>.
+              </p>
+              {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+              <input
+                autoFocus
+                value={manualPath}
+                disabled={busy}
+                onChange={(e) => setManualPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") closePathOpen();
+                }}
+                placeholder="Folder path"
+                spellCheck={false}
+                autoComplete="off"
+              />
+              {pathError && <div className="auth-error">{pathError}</div>}
+              <div className="open-by-path-actions">
+                <button
+                  type="button"
+                  className="ghost-pill"
+                  disabled={busy}
+                  onClick={closePathOpen}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className={`primary${busy ? " is-busy" : ""}`}
+                  disabled={busy || !manualPath.trim()}
+                  aria-busy={busy || undefined}
+                >
+                  <span className="async-btn-label">{busy ? "Opening…" : "Open"}</span>
+                  {busy && <Spinner size="xs" tone="on-accent" />}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       {showAllVaults && (
         <div className="modal-backdrop" onClick={() => setShowAllVaults(false)}>
           <div
