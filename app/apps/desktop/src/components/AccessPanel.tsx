@@ -20,6 +20,7 @@ import {
 import { lockScopesByPath, resourceIdsByPath } from "../lib/locks";
 import { syncManager } from "../lib/sync/docSession";
 import { useStore } from "../store";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { Avatar } from "./Identity";
 import { MenuSelect, type MenuSelectOption } from "./MenuSelect";
 import { Spinner } from "./Spinner";
@@ -190,6 +191,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
    * someone who is halfway through configuring a note inside it.
    */
   const [selected, setSelected] = useState<Resource | null>(null);
+  // A "make private" waiting on a yes. Private is the one access change that
+  // REMOVES data from teammates' devices (their local copy of the note/folder
+  // goes with the access), so it is confirmed rather than applied on click.
+  const [confirm, setConfirm] = useState<{
+    title: string;
+    body: React.ReactNode;
+    label: string;
+    apply: () => void;
+  } | null>(null);
   const selectedKey = selected?.key ?? "";
   /** Folder paths currently open in the list. */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -476,6 +486,33 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   // is no baseline edit to cap, and a grant is what GIVES the team read).
   const setGeneral = (mode: Mode) => {
     if (!selected || mode === generalMode || inheritedOrgLock || privateSource) return;
+    if (mode === "private") {
+      const what = selected.kind === "folder" ? "folder" : "note";
+      setConfirm({
+        title: `Make “${selected.name}” private?`,
+        label: "Make private",
+        apply: () => applyGeneral(mode),
+        body: (
+          <>
+            <p>
+              The team loses access to this {what}
+              {selected.kind === "folder" ? " and everything inside it" : ""}. It is
+              removed from their devices, <strong>including the local copy on disk</strong>.
+            </p>
+            <p>
+              You, the vault's owners and admins, and anyone you have shared it with by
+              name keep it. Setting it back to Shared restores access.
+            </p>
+          </>
+        ),
+      });
+      return;
+    }
+    applyGeneral(mode);
+  };
+
+  const applyGeneral = (mode: Mode) => {
+    if (!selected) return;
     void run(async () => {
       await clearResourceOrgRows();
       if (mode === "private") {
@@ -525,6 +562,29 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   // the same (resource, principal) key.
   const setVaultPosture = (mode: Mode) => {
     if (!orgId || mode === wsPosture) return;
+    if (mode === "private") {
+      setConfirm({
+        title: "Make this vault private?",
+        label: "Make vault private",
+        apply: () => applyVaultPosture(mode),
+        body: (
+          <>
+            <p>
+              Members will only see notes they created or that you share with them by
+              name. Everything else is removed from their devices,{" "}
+              <strong>including the local copies on disk</strong>.
+            </p>
+            <p>Owners and admins keep the whole vault. You can switch back to Shared at any time.</p>
+          </>
+        ),
+      });
+      return;
+    }
+    applyVaultPosture(mode);
+  };
+
+  const applyVaultPosture = (mode: Mode) => {
+    if (!orgId) return;
     void run(async () => {
       if (wsGrant) await authManager.api.revokeShare(wsGrant.id);
       if (mode !== "private") {
@@ -566,7 +626,32 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     return "default";
   };
 
-  const setMember = (userId: string, choice: MemberChoice) => {
+  const setMember = (userId: string, choice: MemberChoice, who = "this person") => {
+    if (!selected) return;
+    if (choice === "none") {
+      const what = selected.kind === "folder" ? "folder" : "note";
+      setConfirm({
+        title: `Hide “${selected.name}” from ${who}?`,
+        label: "Hide from them",
+        apply: () => applyMember(userId, choice),
+        body: (
+          <>
+            <p>
+              {who} loses access to this {what}
+              {selected.kind === "folder" ? " and everything inside it" : ""}. It is
+              removed from their devices, <strong>including the local copy on disk</strong>
+              {" "}— even if they created it.
+            </p>
+            <p>Setting them back to Default restores their access.</p>
+          </>
+        ),
+      });
+      return;
+    }
+    applyMember(userId, choice);
+  };
+
+  const applyMember = (userId: string, choice: MemberChoice) => {
     if (!selected) return;
     void run(async () => {
       // Clear any existing direct rows for this user on this resource — the
@@ -657,6 +742,19 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       )}
 
       {error && <div className="auth-error">{error}</div>}
+      {confirm && (
+        <ConfirmDialog
+          title={confirm.title}
+          confirmLabel={confirm.label}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => {
+            confirm.apply();
+            setConfirm(null);
+          }}
+        >
+          {confirm.body}
+        </ConfirmDialog>
+      )}
 
       <div className="access-body">
         {/* master list */}
@@ -921,7 +1019,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                           <MenuSelect
                             value={choice}
                             options={memberOptions(everyoneReadonly)}
-                            onSelect={(next) => setMember(m.userId, next)}
+                            onSelect={(next) => setMember(m.userId, next, m.name || m.email || "this person")}
                             disabled={busy}
                             ariaLabel={`Access for ${m.name || m.email || m.userId}`}
                             triggerClassName="access-choice-trigger"

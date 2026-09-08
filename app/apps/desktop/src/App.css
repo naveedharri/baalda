@@ -5816,6 +5816,70 @@ button.is-done:disabled {
   color: var(--success);
 }
 
+/* ---- Confirm dialog (destructive access changes, etc.) ---- */
+.confirm-dialog {
+  width: 440px;
+  padding: var(--sp-8) var(--sp-8) var(--sp-6);
+  text-align: center;
+}
+.confirm-badge {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto var(--sp-4);
+  border-radius: var(--radius-lg);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.confirm-dialog.tone-accent .confirm-badge {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.confirm-title {
+  margin: 0 0 var(--sp-3);
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.confirm-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0 auto var(--sp-6);
+  max-width: 38ch;
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+}
+.confirm-body p {
+  margin: 0;
+}
+.confirm-body strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+.confirm-actions .primary,
+.confirm-actions .ghost-pill {
+  min-width: 128px;
+  padding: var(--sp-3) var(--sp-5);
+  font-size: var(--fs-md);
+}
+.confirm-actions .primary.danger {
+  background: var(--danger);
+}
+.confirm-actions .primary.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, black);
+}
+
 /* ---- Vault switching ---- */
 /* The header renames itself to the destination at once; these two rules are the
    supporting evidence that the rename is a *pending* claim, not a finished one. */
