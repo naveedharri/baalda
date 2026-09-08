@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Webhook } from "standardwebhooks";
 import { createApp } from "../src/http/app.js";
-import { PolarBillingProvider } from "../src/billing/polar.js";
+import { PolarBillingProvider, verifyWebhookSignature } from "../src/billing/polar.js";
 import {
   canAddMember,
   canCreateOrganization,
@@ -447,6 +447,65 @@ describe("billing", () => {
         body: JSON.parse(payload),
       });
       expect(res.status).toBe(202);
+    });
+
+    it("verifies BOTH Polar key derivations for a whsec_ secret (regression: 2026-09-08 prod 403s)", () => {
+      // Polar signs new endpoints the Standard-Webhooks way (strip `whsec_`,
+      // base64-decode) and old ones with base64(utf8(secret)). The SDK only
+      // knew the latter, so every real delivery to a new endpoint was 403'd.
+      const secret = "whsec_" + Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+      const payload = JSON.stringify({ type: "product.created", data: { id: "p" } });
+      const at = new Date();
+      const sign = (wh: Webhook, id: string) => ({
+        "webhook-id": id,
+        "webhook-timestamp": String(Math.floor(at.getTime() / 1000)),
+        "webhook-signature": wh.sign(id, at, payload),
+      });
+      const standard = sign(new Webhook(secret), "msg_std");
+      const legacy = sign(new Webhook(Buffer.from(secret, "utf-8").toString("base64")), "msg_legacy");
+      expect(verifyWebhookSignature(payload, standard, secret)).toEqual(JSON.parse(payload));
+      expect(verifyWebhookSignature(payload, legacy, secret)).toEqual(JSON.parse(payload));
+      // Same headers, wrong secret → rejected under both derivations.
+      const other = "whsec_" + Buffer.from("ffffffffffffffffffffffffffffffff").toString("base64");
+      expect(() => verifyWebhookSignature(payload, standard, other)).toThrow(/signature/i);
+      expect(() => verifyWebhookSignature(payload, legacy, other)).toThrow(/signature/i);
+    });
+
+    it("upgrades the vault from a signed, Polar-shaped (snake_case) subscription.active event (real provider)", async () => {
+      const owner = await signUp("wire@billing.com");
+      const org = await createOrg(owner, "Wire", "wire-org");
+      const periodEnd = new Date(Date.now() + 30 * 86400_000).toISOString();
+      // Trimmed to the fields we read; Polar sends many more, which must not matter.
+      const payload = JSON.stringify({
+        type: "subscription.active",
+        timestamp: new Date().toISOString(),
+        data: {
+          id: "sub_wire",
+          created_at: new Date().toISOString(),
+          modified_at: null,
+          status: "active",
+          customer_id: "cus_wire",
+          current_period_end: periodEnd,
+          cancel_at_period_end: false,
+          metadata: { organization_id: org.id, user_id: owner.userId },
+        },
+      });
+      const { headers } = signWebhook(payload);
+      const res = await req(realApp, "POST", "/api/billing/webhook", {
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.parse(payload),
+      });
+      expect(res.status).toBe(200);
+      const ent = await getEntitlement(org.id);
+      expect(ent.active).toBe(true);
+      expect(ent.plan).toBe("pro");
+      const { rows } = await pool.query(
+        "SELECT provider_subscription_id, provider_customer_id, current_period_end FROM subscriptions WHERE organization_id = $1",
+        [org.id],
+      );
+      expect(rows[0].provider_subscription_id).toBe("sub_wire");
+      expect(rows[0].provider_customer_id).toBe("cus_wire");
+      expect(new Date(rows[0].current_period_end).toISOString()).toBe(periodEnd);
     });
 
     it("upserts a subscription and is idempotent on replay (fake provider)", async () => {

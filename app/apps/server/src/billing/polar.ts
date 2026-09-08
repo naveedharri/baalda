@@ -1,5 +1,5 @@
 import { Polar } from "@polar-sh/sdk";
-import { validateEvent, WebhookVerificationError } from "@polar-sh/sdk/webhooks";
+import { Webhook, WebhookVerificationError } from "standardwebhooks";
 import { config } from "../config.js";
 import {
   WebhookSignatureError,
@@ -21,9 +21,19 @@ import {
  *  - `polar.customerSessions.create({ customerId })` → `{ customerPortalUrl }`
  *    (hosted manage/cancel page).
  *  - `polar.subscriptions.revoke({ id })` — cancel immediately (org delete).
- *  - `validateEvent(body, headers, secret)` from `@polar-sh/sdk/webhooks`
- *    (Standard-Webhooks based) → typed payload; throws
- *    `WebhookVerificationError` on a bad signature.
+ *  - Webhook signatures are verified HERE with `standardwebhooks` directly
+ *    (see `verifyWebhookSignature`), NOT with the SDK's `validateEvent`. Polar
+ *    changed how it derives the signing key: endpoints whose secret was
+ *    generated after their cutoff are signed the Standard-Webhooks way (strip
+ *    the `whsec_` prefix, base64-decode the rest), older ones with the legacy
+ *    key `base64(utf8(secret))`. The SDK (0.48 and current main) only knows the
+ *    legacy derivation, so every delivery to a freshly created endpoint fails
+ *    with 403 "invalid signature" — that is exactly what took production down
+ *    on 2026-09-08 (paid, Polar shows an active subscription, app stays Free:
+ *    all 30 retries answered 403). We try both derivations, so an endpoint of
+ *    either generation verifies, and we read the few fields we need from the
+ *    verified JSON ourselves instead of running it through the SDK's strict
+ *    schema (which silently turned any payload drift into a 202-and-drop).
  */
 
 /** Metadata keys we stamp on checkout so the subscription webhooks self-identify. */
@@ -163,58 +173,53 @@ export class PolarBillingProvider implements BillingProvider {
       throw new Error("Polar webhook secret not configured");
     }
 
-    // validateEvent throws WebhookVerificationError on a bad signature (→ 403)
-    // and SDKValidationError for an unknown/unparseable event type. We map the
-    // former to our neutral WebhookSignatureError and swallow the latter into a
-    // `null` (valid signature, event we don't act on → the route answers 202).
-    let event: { type: string; data: Record<string, unknown> };
-    try {
-      event = validateEvent(rawBody, headers, config.polarWebhookSecret) as {
-        type: string;
-        data: Record<string, unknown>;
-      };
-    } catch (err) {
-      if (err instanceof WebhookVerificationError) {
-        throw new WebhookSignatureError(err.message);
-      }
-      // Unknown event type / parse error on a verified body: ignore it.
-      return null;
-    }
+    // Throws WebhookSignatureError (→ 403) unless one of the two key
+    // derivations verifies the signature (and the timestamp is fresh).
+    const parsed = verifyWebhookSignature(rawBody, headers, config.polarWebhookSecret);
 
+    // Valid signature but not an event envelope we understand → ignore (202).
+    if (!parsed || typeof parsed !== "object") return null;
+    const event = parsed as { type?: unknown; data?: unknown };
+    if (typeof event.type !== "string") return null;
     const type = normalizeType(event.type);
     if (!type) return null;
+    if (!event.data || typeof event.data !== "object") return null;
 
-    const sub = event.data as {
-      id: string;
-      customerId: string;
-      status: string;
-      currentPeriodEnd: Date | string | null;
-      cancelAtPeriodEnd: boolean;
-      modifiedAt?: Date | string | null;
-      metadata?: Record<string, unknown> | null;
-    };
+    // Polar's wire format is snake_case; accept camelCase too so a payload
+    // that already went through the SDK's parser (tests, future refactors)
+    // normalizes identically.
+    const sub = event.data as Record<string, unknown>;
+    const pick = (snake: string, camel: string): unknown => sub[snake] ?? sub[camel];
+    const metadata = (pick("metadata", "metadata") ?? null) as Record<string, unknown> | null;
 
-    const orgId = String(sub.metadata?.[META_ORG] ?? "");
+    const orgId = String(metadata?.[META_ORG] ?? "");
     if (!orgId) {
       // A subscription with no vault (org) metadata isn't ours to act on.
       return null;
     }
 
+    const rawStatus = String(pick("status", "status") ?? "");
     // A revoked subscription always drops the org to a canceled/free state,
     // regardless of the raw Polar status.
-    const status = type === "subscription_revoked" ? "canceled" : normalizeStatus(sub.status);
+    const status = type === "subscription_revoked" ? "canceled" : normalizeStatus(rawStatus);
+    const modifiedAt = pick("modified_at", "modifiedAt") as Date | string | null | undefined;
+    const currentPeriodEnd = pick("current_period_end", "currentPeriodEnd") as
+      | Date
+      | string
+      | null
+      | undefined;
 
     return {
-      eventId: this.eventId(event, headers),
-      occurredAt: this.occurredAt(sub.modifiedAt, headers),
+      eventId: this.eventId(event.type, sub, headers),
+      occurredAt: this.occurredAt(modifiedAt, headers),
       type,
       organizationId: orgId,
-      providerCustomerId: sub.customerId,
-      providerSubscriptionId: sub.id,
+      providerCustomerId: String(pick("customer_id", "customerId") ?? ""),
+      providerSubscriptionId: String(sub.id ?? ""),
       plan: "pro",
       status,
-      currentPeriodEnd: sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd) : null,
-      cancelAtPeriodEnd: Boolean(sub.cancelAtPeriodEnd),
+      currentPeriodEnd: currentPeriodEnd ? new Date(currentPeriodEnd) : null,
+      cancelAtPeriodEnd: Boolean(pick("cancel_at_period_end", "cancelAtPeriodEnd")),
     };
   }
 
@@ -225,14 +230,15 @@ export class PolarBillingProvider implements BillingProvider {
    * composite of type + subscription id + last-modified so replays still dedupe.
    */
   private eventId(
-    event: { type: string; data: Record<string, unknown> },
+    type: string,
+    data: Record<string, unknown>,
     headers: Record<string, string>,
   ): string {
     const webhookId = headers["webhook-id"] ?? headers["Webhook-Id"];
     if (webhookId) return webhookId;
-    const data = event.data as { id?: string; modifiedAt?: unknown };
-    const modified = data.modifiedAt ? String(data.modifiedAt) : "";
-    return `${event.type}:${String(data.id ?? "")}:${modified}`;
+    const modifiedRaw = data.modified_at ?? data.modifiedAt;
+    const modified = modifiedRaw ? String(modifiedRaw) : "";
+    return `${type}:${String(data.id ?? "")}:${modified}`;
   }
 
   /**
@@ -255,4 +261,50 @@ export class PolarBillingProvider implements BillingProvider {
     }
     return new Date();
   }
+}
+
+/**
+ * Verify a Standard-Webhooks signature the way Polar produces it, for BOTH
+ * generations of Polar secret, and return the parsed JSON body.
+ *
+ *  1. Standard derivation — `new Webhook(secret)`: strips a `whsec_` prefix and
+ *     base64-decodes the remainder into the raw HMAC key. This is how Polar
+ *     signs for endpoints whose secret was generated after its cutoff (see
+ *     `sign_webhook` / `uses_standard_webhook_signature` in polarsource/polar).
+ *  2. Legacy derivation — `new Webhook(base64(utf8(secret)))`: the HMAC key is
+ *     the secret's own UTF-8 bytes. Older endpoints, and what
+ *     `@polar-sh/sdk`'s `validateEvent` does exclusively.
+ *
+ * The library also enforces the ±5 min timestamp tolerance. Any derivation
+ * that cannot even build a key (a non-base64 legacy secret under #1) is simply
+ * skipped. Exported for tests.
+ */
+export function verifyWebhookSignature(
+  rawBody: string,
+  headers: Record<string, string>,
+  secret: string,
+): unknown {
+  const derivations: Array<() => Webhook> = [
+    () => new Webhook(secret),
+    () => new Webhook(Buffer.from(secret, "utf-8").toString("base64")),
+  ];
+  let lastMessage = "invalid signature";
+  for (const make of derivations) {
+    let wh: Webhook;
+    try {
+      wh = make();
+    } catch {
+      continue; // secret not decodable under this derivation
+    }
+    try {
+      return wh.verify(rawBody, headers);
+    } catch (err) {
+      if (err instanceof WebhookVerificationError) {
+        lastMessage = err.message;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new WebhookSignatureError(lastMessage);
 }
