@@ -2196,13 +2196,12 @@ function LimitNudge({
   const freeLimits = useStore((s) => s.billingConfig?.freeLimits);
   // The server is the authority (the 402 carries `limit`, and billingConfig
   // reports both caps); these are last-resort defaults for a nudge rendered
-  // before either arrived. They differ per kind — one shared number was right
-  // only while the two caps happened to be equal, and would have quietly
-  // claimed a 10-seat vault allows 3.
+  // before either arrived. Kept separate per kind so the two caps can move
+  // independently (members were 10 for a while; both are 3 since 2026-09-09).
   const n =
     limit ??
     (kind === "member_limit"
-      ? (freeLimits?.membersPerVault ?? 10)
+      ? (freeLimits?.membersPerVault ?? 3)
       : (freeLimits?.vaultsPerUser ?? 3));
   const message =
     kind === "member_limit"

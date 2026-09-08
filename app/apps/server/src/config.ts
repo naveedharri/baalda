@@ -153,11 +153,13 @@ export const config = {
    *  to this many UNSUBSCRIBED vaults; each unsubscribed vault may hold
    *  up to this many members (incl. pending invitations).
    *
-   *  Members sit well above vaults on purpose: a free vault should be able to
-   *  hold a real team, so the upgrade prompt arrives when a group outgrows the
-   *  product rather than the moment it stops being a pair. */
+   *  3 × 3 since 2026-09-09 (members were 10 from 2026-08-07 to then). The
+   *  member cap gates only NEW seats — invitations and join-code redemptions
+   *  (`canAddMember`) — so a free vault that already holds more than the cap
+   *  keeps every existing member and simply cannot add another until it goes
+   *  Pro; nobody is removed or locked out by lowering this number. */
   freeMaxVaults: int("FREE_MAX_VAULTS", 3),
-  freeMaxMembers: int("FREE_MAX_MEMBERS", 10),
+  freeMaxMembers: int("FREE_MAX_MEMBERS", 3),
   /** Hard ceiling on a single note-sync message / note body, in MB. Real notes
    *  are tiny (production p99 ≈ 600 kB; the largest legitimate page ≈ 7 MB), so
    *  anything past this is a runaway — most likely a forked-note feedback loop

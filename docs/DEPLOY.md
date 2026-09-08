@@ -281,7 +281,7 @@ confirm `/health` and a real sync round-trip, then promote.
 | `POLAR_PRODUCT_YEARLY_ID` | with billing | unset | Polar product id for the yearly plan. |
 | `POLAR_SERVER` | no | `sandbox` | `sandbox` or `production` Polar environment. |
 | `FREE_MAX_VAULTS` | no | `3` | Free-tier cap on unsubscribed vaults per user (only enforced when billing is enabled). |
-| `FREE_MAX_MEMBERS` | no | `10` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). |
+| `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). Gates new invitations and join-code redemptions only; lowering it never removes existing members. |
 
 > Billing note: the Polar organization must have **allow multiple subscriptions per customer** enabled
 > (Organization settings, or `PATCH /v1/organizations/:id` with `subscription_settings.allow_multiple_subscriptions: true`),

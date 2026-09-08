@@ -18,7 +18,7 @@
     {
       "id": 1,
       "prompt": "My team of 6 uses Obsidian with a shared Dropbox folder and it keeps making conflicted copies. Would Baalda fix that? Do we all need to pay, and can we keep our existing vault?",
-      "expected_output": "Yes: live merge, no conflicted copies; existing Obsidian vault opens as-is (plugins don't carry over); free locally/self-hosted; managed service free up to 3 vaults/10 members, then Pro $10/vault/month or $97/year bought in-app; team can start today.",
+      "expected_output": "Yes: live merge, no conflicted copies; existing Obsidian vault opens as-is (plugins don't carry over); free locally/self-hosted; managed service free up to 3 vaults/3 members, then Pro $10/vault/month or $97/year bought in-app; team can start today.",
       "files": [],
       "assertions": [
         "Says conflicted copies do not happen because edits merge automatically",

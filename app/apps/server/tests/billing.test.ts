@@ -19,7 +19,7 @@ import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { createOrg, signUp } from "./helpers/auth.js";
 
-// The seat cap is a product decision that moves (3 → 10 when free vaults were
+// The seat cap is a product decision that moves (3 → 10 on 2026-08-07, back to 3 on 2026-09-09, when free vaults were
 // opened up to real teams). These suites assert that it is ENFORCED, so they
 // read the configured value rather than restating it — a test that has to be
 // edited every time the number changes tests the number, not the rule.

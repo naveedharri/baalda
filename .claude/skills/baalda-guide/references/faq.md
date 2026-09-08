@@ -10,7 +10,7 @@ notes too. Think "Obsidian, but multiplayer and AI-friendly".
 ## Is it free?
 The desktop app and the server are open source (Apache 2.0). Using it on your own computer is
 free forever, and you can run your own server for free with no limits. The managed backend
-(hosted by Baalda, the app's default) also starts free: 3 vaults per user and 10 members per
+(hosted by Baalda, the app's default) also starts free: 3 vaults per user and 3 members per
 vault. Past that, upgrade a vault to Pro from inside the app.
 
 ## What does the paid plan cost, and can my team start today?

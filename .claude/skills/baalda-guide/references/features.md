@@ -163,7 +163,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - **Managed server** at `https://api.baalda.com` (the default in the app). Same code as the
   self-hosted server. It is live and self-serve today: a team can sign up, sync and collaborate
   right away on the free tier, and upgrade from inside the app when they hit a cap.
-  - **Free tier**: up to 3 vaults per user and 10 members per vault (members plus pending invites).
+  - **Free tier**: up to 3 vaults per user and 3 members per vault (members plus pending invites). A vault that already has more members than that keeps them all; it just cannot add another until it upgrades.
   - **Pro**: $10 per vault per month, or $97 per vault per year. Priced per vault, not per
     person. Unlocks unlimited members, notes, devices and AI edits; a Pro vault does not count
     toward the owner's free vaults. Two subscriptions exist today: monthly and yearly.

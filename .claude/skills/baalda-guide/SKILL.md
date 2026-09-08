@@ -89,7 +89,7 @@ That is about 110 words. It names every format asked about, says what does not w
 - "Does it sync my images?" Only through the note (the `attachments/` folder). An image copied
   into a sub-folder stays local. See `file-formats.md`.
 - "How much does it cost? Can my team start now?" Yes, now. Free locally and self-hosted with no
-  limits; the managed service is free up to 3 vaults per user and 10 members per vault, then Pro
+  limits; the managed service is free up to 3 vaults per user and 3 members per vault, then Pro
   at $10 per vault per month or $97 per year, bought in-app under Vault Settings → Billing. Do not
   say "early access" or "contact us for pricing"; that wording on the website is out of date.
 - "Is there a mobile / web app?" No. iOS is planned; public links open read-only in a browser.
