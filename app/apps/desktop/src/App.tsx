@@ -12,6 +12,7 @@ import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
+import { Spinner } from "./components/Spinner";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { TabBar } from "./components/TabBar";
 import { Toasts } from "./components/Toasts";
@@ -198,6 +199,40 @@ function MemberJoinedBanner() {
 }
 
 /**
+ * App-wide "switching vault" overlay. A switch is many round trips (activate
+ * org → session → roster → open the folder → re-enable sync → reconcile), and
+ * for that stretch the window is a mix of the vault you left and the one you're
+ * going to. Rather than a spinner in one corner, cover the whole app with a
+ * calm card that names the destination, so nothing half-updated can be read or
+ * clicked in the meantime. Sits above every modal (Settings is where most
+ * switches start) and below only the update wall.
+ *
+ * Fades in after a short delay (CSS) so a near-instant local switch never
+ * flashes it.
+ */
+function VaultSwitchOverlay() {
+  const switching = useStore((s) => s.switchingVault);
+  if (!switching) return null;
+  return (
+    <div className="vault-switch-overlay" role="status" aria-live="polite">
+      <div className="vault-switch-card">
+        <Spinner size="md" tone="accent" />
+        <div className="vault-switch-text">
+          <span className="vault-switch-title">
+            Switching to <strong>{switching.name}</strong>
+          </span>
+          <span className="vault-switch-sub">
+            {switching.orgId
+              ? "Opening its folder and catching up on sync…"
+              : "Opening its folder…"}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Shown when a vault is active but has no local folder yet (freshly created
  * or joined). Rather than silently reusing whatever folder is open, ask the
  * user to point this vault at its own folder — or start with an empty one.
@@ -244,8 +279,14 @@ function VaultFolderPrompt() {
             generic pitch — both at once read as a wall of text. */}
         {pending.reason ? (
           <div className="wf-notice" role="alert">
-            <p>{pending.reason.text}</p>
-            {pending.reason.path && <code>{pending.reason.path}</code>}
+            <svg className="wf-notice-glyph" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+              <path d="M12 9v4M12 17h.01" />
+            </svg>
+            <div className="wf-notice-body">
+              <p>{pending.reason.text}</p>
+              {pending.reason.path && <code>{pending.reason.path}</code>}
+            </div>
           </div>
         ) : (
           <p className="wf-desc">
@@ -335,8 +376,17 @@ function UpdateGate() {
   return (
     <div className="update-gate" role="alertdialog" aria-modal="true" aria-label="Update required">
       <div className="update-gate-card">
-        {version && <span className="update-gate-version">Version {version}</span>}
-        <h1>Update required</h1>
+        <div className="update-gate-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 4v11" />
+            <path d="m7 10 5 5 5-5" />
+            <path d="M4 19h16" />
+          </svg>
+        </div>
+        <div className="update-gate-heading">
+          <h1>Update required</h1>
+          {version && <span className="update-gate-version">v{version}</span>}
+        </div>
         {update.phase === "available" && (
           <>
             <p>
@@ -897,6 +947,7 @@ export default function App() {
       {/* Window-global, above the sidebar+main split: a new release must be
           visible the moment the poll finds it, whatever is on screen. */}
       <UpdateGate />
+      <VaultSwitchOverlay />
       <PromptedAuthDialog />
       <div
         className="app"

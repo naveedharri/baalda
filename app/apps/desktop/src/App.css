@@ -454,20 +454,35 @@ button.primary.hero:hover:not(:disabled) {
   outline: none;
   border-color: var(--accent);
 }
-/* "Open by path" — the picker's escape hatch for what the native folder dialog
-   can't select (a drive root as the vault). Sits under the hint that reveals it. */
+/* "Open by path" modal — rides the shared .modal; only the form layout is ours. */
 .open-by-path {
   display: flex;
-  gap: var(--sp-2);
-  align-items: stretch;
-  justify-content: center;
-  width: min(420px, 84vw);
-  margin: var(--sp-2) auto 0;
+  flex-direction: column;
+  gap: var(--sp-3);
+  text-align: left;
 }
-.open-by-path-input {
-  flex: 1;
-  min-width: 0;
+.open-by-path-hint {
+  margin: 0;
   font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+.open-by-path-hint code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  background: var(--bg-hover);
+  padding: 1px var(--sp-1);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+.open-by-path .auth-error {
+  margin: 0;
+}
+.open-by-path-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
 }
 .new-vault-loc {
   font-size: var(--fs-sm);
@@ -846,27 +861,26 @@ body:has(.sidebar-resizer.dragging) {
   font-weight: 600;
   color: var(--text-tertiary);
 }
-/* "Open in file manager" — a quiet companion to the title, not a second
-   focal point, so it only gains colour on hover of the header. */
+/* "Open in file manager" — sits at the end of the path row, always visible
+   but quiet: tertiary until hovered, so it reads as part of the path line
+   rather than a second focal point next to the title. */
 .vault-reveal {
   flex-shrink: 0;
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
   color: var(--text-tertiary);
-  opacity: 0;
   transition:
     color var(--t-fast) var(--ease),
-    opacity var(--t-fast) var(--ease);
+    background var(--t-fast) var(--ease);
 }
-.vault-reveal svg {
-  width: 15px;
-  height: 15px;
+/* Scoped past the generic `.vault-line svg` (12px) rule below. */
+.vault-line .vault-reveal svg {
+  width: 14px;
+  height: 14px;
 }
-.sidebar-header:hover .vault-reveal,
+.vault-reveal:hover,
 .vault-reveal:focus-visible {
-  opacity: 1;
-}
-.vault-reveal:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
 }
@@ -884,10 +898,14 @@ body:has(.sidebar-resizer.dragging) {
 .vault-line {
   display: flex;
   align-items: center;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
   min-width: 0;
   color: var(--text-tertiary);
   font-size: var(--fs-sm);
+}
+.vault-line .vault-path {
+  flex: 1;
+  min-width: 0;
 }
 .vault-line svg {
   width: 12px;
@@ -3175,6 +3193,16 @@ body:has(.sidebar-resizer.dragging) {
 }
 
 /* ---- Auth + members dialogs ---- */
+/* Roomier than the stock 420px `.modal`: the server-choice cards carry an
+   icon tile + two lines each, and the sign-in form has a Google button, a
+   divider and a caption — both breathe better with a little more width. */
+.auth-dialog {
+  width: 468px;
+  padding: var(--sp-8);
+}
+.auth-dialog .modal-header {
+  margin-bottom: var(--sp-6);
+}
 .auth-dialog .segmented {
   margin-bottom: var(--sp-4);
 }
@@ -3208,8 +3236,8 @@ body:has(.sidebar-resizer.dragging) {
    the card. Opacity only. */
 .settings-page.settings-modal {
   position: relative;
-  width: min(1040px, 94vw);
-  height: min(760px, 90vh);
+  width: min(1200px, 94vw);
+  height: min(860px, 90vh);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
@@ -3278,9 +3306,12 @@ body:has(.sidebar-resizer.dragging) {
 .settings-content {
   flex: 1;
   min-width: 0;
-  /* Stretches to the card's full height rather than hugging its content, so a
-     short tab doesn't leave the panel floating in a half-empty card. */
-  align-self: stretch;
+  /* Hugs its content: a two-line Updates tab gets a short panel, a long
+     Members list grows until it hits the card and then scrolls inside. The
+     card's own height stays fixed so switching tabs never resizes the modal;
+     the area below a short panel is the card's grey ground, not empty white. */
+  align-self: flex-start;
+  max-height: 100%;
   overflow-y: auto;
   background: var(--bg-surface);
   border-radius: var(--radius-xl);
@@ -4254,7 +4285,7 @@ body:has(.sidebar-resizer.dragging) {
 .server-choice {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
 }
 .server-choice-lede {
   margin: 0 0 var(--sp-1);
@@ -4262,41 +4293,130 @@ body:has(.sidebar-resizer.dragging) {
   font-size: var(--fs-sm);
   line-height: var(--lh-body);
 }
+/* One card = an icon tile, a title + hint, and a trailing chevron. `.server-option`
+   is the card shell (a <button> for managed, a <div> for self-hosted so the URL
+   form can live inside it); `.server-option-head` is the clickable row. */
 .server-option {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
   width: 100%;
-  padding: var(--sp-3);
+  padding: 0;
   text-align: left;
-  background: var(--bg-surface);
+  background: var(--bg-subtle);
   color: var(--text-primary);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius-lg);
+  overflow: hidden;
   transition:
     background var(--t-fast) var(--ease),
     border-color var(--t-fast) var(--ease),
     box-shadow var(--t-fast) var(--ease);
 }
 .server-option:hover {
-  background: var(--bg-subtle);
-  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+.server-option:focus-visible,
+.server-option-head:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .server-option.active {
+  background: var(--accent-soft);
   border-color: var(--accent);
-  box-shadow: var(--focus-ring);
+}
+.server-option-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-4);
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  border-radius: var(--radius-lg);
+}
+.server-option-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-sm);
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.server-option:hover .server-option-icon,
+.server-option.active .server-option-icon {
+  color: var(--accent);
+}
+.server-option-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .server-option-title {
   font-size: var(--fs-md);
   font-weight: 600;
+  line-height: var(--lh-tight);
 }
 .server-option-hint {
   color: var(--text-secondary);
   font-size: var(--fs-sm);
+  line-height: var(--lh-tight);
+}
+.server-option-chevron {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--text-tertiary);
+  transition:
+    transform var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.server-option:hover .server-option-chevron {
+  color: var(--text-secondary);
+}
+.server-option.active .server-option-chevron {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+/* The self-hosted card's URL form, revealed inside the card so the input can
+   only read as belonging to that option. */
+.server-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-4) var(--sp-4);
+  animation: fade-in var(--t-med) var(--ease) both;
+}
+.server-option-body input {
+  background: var(--bg-surface);
+  border-color: var(--border);
+  padding: var(--sp-2) var(--sp-3);
+}
+.server-option-body input:hover {
+  border-color: var(--border-strong);
+}
+.server-option-body input:focus {
+  border-color: var(--accent);
+}
+.server-option-body .auth-error {
+  margin: 0;
 }
 .server-connect-row {
   margin-top: var(--sp-1);
+}
+.server-connect-row .primary {
+  flex: none;
 }
 /* The address an invite link is offering. Wraps rather than truncating: the
    whole point of this card is that the user can read the URL before saying
@@ -4317,7 +4437,7 @@ body:has(.sidebar-resizer.dragging) {
   justify-content: space-between;
   gap: var(--sp-2);
   flex-wrap: wrap;
-  margin: var(--sp-3) 0 0;
+  margin: var(--sp-5) 0 0;
   color: var(--text-secondary);
   font-size: var(--fs-sm);
   line-height: var(--lh-body);
@@ -4679,9 +4799,47 @@ button.sync-badge-retry:hover {
   flex-shrink: 0;
   white-space: nowrap;
 }
+/* Under the account's vault list: two quiet pill buttons that swap for an
+   inline form (input + primary + cancel) when pressed. */
 .vault-tab-actions {
-  gap: var(--sp-4);
-  margin-top: var(--sp-2);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.vault-tab-add {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.vault-tab-add svg {
+  flex: none;
+  color: var(--text-secondary);
+}
+.vault-tab-form {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  max-width: 480px;
+}
+.vault-tab-form input {
+  flex: 1;
+  min-width: 0;
+}
+.vault-tab-form .vault-tab-code {
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.vault-tab-form .vault-tab-code::placeholder {
+  font-family: var(--font-body);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.vault-tab-form .primary,
+.vault-tab-form .ghost-pill {
+  flex: none;
 }
 .vault-root-path {
   flex: 1;
@@ -4846,11 +5004,11 @@ button.sync-badge-retry:hover {
 
 /* The vault setup prompt gets a bespoke, minimal layout rather than the
    generic modal-header/hero-button treatment: an accent folder badge, tight
-   type hierarchy, and two calm buttons (gradient primary + outlined ghost). */
+   type hierarchy, and two calm buttons (gradient primary + filled secondary). */
 .vault-folder-prompt {
   position: relative;
-  width: 400px;
-  padding: var(--sp-6) var(--sp-6) var(--sp-5);
+  width: 440px;
+  padding: var(--sp-8) var(--sp-8) var(--sp-6);
   text-align: center;
   border: 1px solid var(--border);
 }
@@ -4860,8 +5018,8 @@ button.sync-badge-retry:hover {
   right: var(--sp-3);
 }
 .wf-badge {
-  width: 46px;
-  height: 46px;
+  width: 52px;
+  height: 52px;
   margin: 0 auto var(--sp-4);
   display: flex;
   align-items: center;
@@ -4870,8 +5028,12 @@ button.sync-badge-retry:hover {
   background: var(--accent-soft);
   border-radius: var(--radius-lg);
 }
+.wf-badge svg {
+  width: 24px;
+  height: 24px;
+}
 .wf-title {
-  margin: 0 0 var(--sp-2);
+  margin: 0 0 var(--sp-5);
   font-family: var(--font-display);
   font-size: var(--fs-xl);
   font-weight: 600;
@@ -4882,22 +5044,33 @@ button.sync-badge-retry:hover {
   font-weight: 600;
 }
 .wf-desc {
-  margin: 0 auto var(--sp-6);
+  margin: calc(-1 * var(--sp-2)) auto var(--sp-6);
   max-width: 34ch;
   color: var(--text-secondary);
   font-size: var(--fs-md);
   line-height: var(--lh-body);
 }
 /* "Why am I seeing this" callout (folder moved / failed to open): a calm
-   left-aligned well with the folder path typeset on its own line, so a long
-   absolute path doesn't shred the sentence around it. */
+   left-aligned well with a warning glyph and the folder path typeset on its
+   own line, so a long absolute path doesn't shred the sentence around it. */
 .wf-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
   margin: 0 0 var(--sp-6);
   padding: var(--sp-3) var(--sp-4);
   text-align: left;
   background: var(--warning-soft);
-  border: 1px solid var(--border);
   border-radius: var(--radius-md);
+}
+.wf-notice-glyph {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warning);
+}
+.wf-notice-body {
+  flex: 1;
+  min-width: 0;
 }
 .wf-notice p {
   margin: 0;
@@ -4908,6 +5081,9 @@ button.sync-badge-retry:hover {
 .wf-notice code {
   display: block;
   margin-top: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--text-secondary);
@@ -4926,8 +5102,9 @@ button.sync-badge-retry:hover {
   width: 100%;
   padding: var(--sp-3) var(--sp-4);
   border: 1px solid transparent;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-pill);
   font: inherit;
+  font-size: var(--fs-md);
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -4935,6 +5112,14 @@ button.sync-badge-retry:hover {
     border-color var(--t-fast) var(--ease),
     transform var(--t-fast) var(--ease),
     box-shadow var(--t-fast) var(--ease);
+}
+/* AsyncButton wraps the children in one inline `.async-btn-label` span, so the
+   button's own flex alignment never reaches the icon — it rode the text
+   baseline. Make the label the flex row instead. */
+.wf-btn .async-btn-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
 }
 .wf-btn svg {
   flex: none;
@@ -4949,21 +5134,20 @@ button.sync-badge-retry:hover {
   box-shadow: var(--shadow-sm);
 }
 .wf-btn-primary:hover:not(:disabled) {
-  transform: translateY(-1px);
+  filter: brightness(1.05);
   box-shadow: var(--shadow-md);
 }
 .wf-btn-primary:active:not(:disabled) {
-  transform: translateY(0);
+  transform: translateY(1px);
   box-shadow: var(--shadow-sm);
 }
 .wf-btn-ghost {
-  background: transparent;
-  color: var(--text-secondary);
-  border-color: var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border-color: var(--border);
 }
 .wf-btn-ghost:hover:not(:disabled) {
-  color: var(--text-primary);
-  background: var(--bg-subtle);
+  background: var(--bg-hover);
   border-color: var(--border-strong);
 }
 .wf-btn-ghost:active:not(:disabled) {
@@ -5624,6 +5808,14 @@ button.is-done:disabled {
   gap: 0;
 }
 
+/* Share menu: the row just copied says so inline (the menu stays open). */
+.share-popover .share-copied {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--success);
+}
+
 /* ---- Vault switching ---- */
 /* The header renames itself to the destination at once; these two rules are the
    supporting evidence that the rename is a *pending* claim, not a finished one. */
@@ -5655,6 +5847,50 @@ button.is-done:disabled {
   pointer-events: none;
   filter: saturate(0.6);
 }
+/* App-wide switching overlay. Above every modal (300) — Settings is where most
+   switches start — and below the update wall (400). The delayed fade-in means a
+   sub-200ms local switch never shows it at all. */
+.vault-switch-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 350;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: fade-in var(--t-med) var(--ease) 180ms both;
+}
+.vault-switch-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  animation: rise-in var(--t-med) var(--ease) 180ms both;
+}
+.vault-switch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.vault-switch-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.vault-switch-title strong {
+  font-weight: 700;
+}
+.vault-switch-sub {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
 
 /* ---- A row whose note is being opened ---- */
 /* Selection is applied optimistically on click, so the row highlights before
@@ -5676,69 +5912,98 @@ button.is-done:disabled {
   z-index: 400;
   display: grid;
   place-items: center;
-  background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  padding: var(--sp-6);
+  background: color-mix(in srgb, var(--bg-app) 82%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: fade-in var(--t-med) var(--ease) both;
 }
 .update-gate-card {
-  position: relative;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--sp-4);
-  max-width: 440px;
-  padding: var(--sp-9, 44px) var(--sp-8) var(--sp-8);
+  width: min(420px, 100%);
+  padding: var(--sp-8) var(--sp-8) var(--sp-6);
   text-align: center;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
+  animation: rise-in var(--t-med) var(--ease) both;
 }
-/* A thin accent thread across the top — enough identity without a logo. */
-.update-gate-card::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-}
-.update-gate-version {
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+/* Accent tile with a download arrow — the one graphic on the card; no logo. */
+.update-gate-badge {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
   color: var(--accent);
   background: var(--accent-soft);
-  padding: 3px 12px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-lg);
+}
+.update-gate-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
 }
 .update-gate-card h1 {
   margin: 0;
+  font-family: var(--font-display);
   font-size: var(--fs-xl);
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.update-gate-version {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
 }
 .update-gate-card p {
   margin: 0;
   color: var(--text-secondary);
-  line-height: 1.55;
-  max-width: 36ch;
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+  max-width: 34ch;
+}
+.update-gate-card p strong {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 .update-gate-actions {
   display: flex;
-  align-items: center;
-  gap: var(--sp-3);
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-2);
+  width: 100%;
   margin-top: var(--sp-2);
 }
 .update-gate-cta {
-  min-width: 160px;
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-md);
+}
+/* Reload is the escape hatch, not a peer of Install: a quiet text button. */
+.update-gate-actions .ghost-pill {
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.update-gate-actions .ghost-pill:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-subtle);
 }
 .update-gate .update-progress {
-  width: 240px;
+  width: 100%;
+  max-width: 260px;
   flex: none;
+  margin-top: var(--sp-1);
 }
 
 /* ---- Update download progress ---- */
@@ -5749,7 +6014,7 @@ button.is-done:disabled {
   max-width: 240px;
   height: 4px;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  background: var(--accent-soft);
   overflow: hidden;
 }
 .update-progress-fill {
