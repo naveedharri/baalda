@@ -458,6 +458,12 @@ interface AppStore {
    * without a reload.
    */
   handleAccountLink: (kind: AccountLinkKind) => Promise<void>;
+  /**
+   * A `baalda://billing/upgraded?org=…` hand-off arrived from the checkout
+   * success page: the server has confirmed the payment, so re-read billing and
+   * say so. `orgId` is the vault that was upgraded, when the page knew it.
+   */
+  handleBillingLink: (orgId: string | null) => Promise<void>;
   /** Remove a member from the active vault (owner/admin), then refresh. */
   removeMember: (userId: string) => Promise<void>;
   /** Change a member's role in the active vault (owner/admin), then refresh. */
@@ -2481,6 +2487,35 @@ export const useStore = create<AppStore>((set, get) => ({
     if (get().authStatus === "signed-in") await get().signOut();
     set({ authPrompt: "sign-in" });
     toast("Password updated — sign in with your new password.", "success");
+  },
+
+  handleBillingLink: async (orgId) => {
+    if (get().authStatus !== "signed-in") {
+      toast("Payment received. Sign in to see your Pro vault.", "neutral");
+      return;
+    }
+    // Both readers of the fact: the active vault's badge/limits and the
+    // Subscriptions list. The Upgrade dialog, if it is still open, watches
+    // these and flips to its success screen on its own.
+    await Promise.all([get().refreshOrgBilling(), get().refreshMyBilling()]);
+    const active = get().session?.activeOrganizationId ?? null;
+    const target = orgId ?? active;
+    const row = target ? get().myBilling?.vaults.find((v) => v.orgId === target) : undefined;
+    const isPro =
+      row?.plan === "pro" ||
+      (target !== null && target === active && get().orgBilling?.status === "active");
+    if (isPro) {
+      const name = row?.name;
+      toast(
+        name ? `${name} is now on Pro — unlimited team members.` : "You're on Pro — this vault is now unlimited.",
+        "success",
+      );
+      return;
+    }
+    // Paid, but the confirmation hasn't landed yet (provider still processing,
+    // or a webhook on its way). Polling in the Upgrade dialog and the next
+    // Billing visit pick it up; say so rather than nothing.
+    toast("Payment received — your subscription will show up in a moment.", "neutral");
   },
 
   removeMember: async (userId) => {

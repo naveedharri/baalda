@@ -3422,6 +3422,85 @@ body:has(.sidebar-resizer.dragging) {
 }
 .settings-page .subhead {
   margin: var(--sp-4) 0 var(--sp-2);
+  /* `--text-tertiary` is our "this is off / unavailable" grey — it's what a
+     locked nav item and a disabled control use. On a settings panel these
+     eyebrows are the section HEADINGS, so at tertiary the whole page read as
+     greyed out. Secondary keeps them quieter than body text without looking
+     switched off. The header's `.settings-eyebrow` is a different class and
+     stays tertiary: it labels the card, it doesn't head a section. */
+  color: var(--text-secondary);
+}
+/* Same reasoning for a row's explanatory line (the freeze-root rule, the
+   server-URL caption, the activity-status hints): it carries meaning the
+   reader has to act on, so it can't be painted in the disabled grey. */
+.settings-page .field-hint {
+  color: var(--text-secondary);
+}
+
+/* ── One vertical rhythm for every settings tab ────────────────────────────
+   A `.subhead` is a section LABEL, not a paragraph: it wants a clear gap
+   above (so the eye reads "new section") and almost none below (so it reads
+   as belonging to the list under it). Tabs are written as fragments, so their
+   sections are direct children of `.settings-content` and this one rule
+   spaces all ten of them instead of each tab inventing its own margins.
+
+   Only direct children take part — plus `.versioning-tab`, the one tab that
+   wraps itself in a plain div. A `.subhead` nested inside a card
+   (`.billing-card`, `.mcp-new-token`, `.update-detail`) sits in a FLEX
+   container whose `gap` already spaces it, and a margin there would add to
+   the gap rather than collapse with it. The tab's own `<h2>` already carries
+   the lead-in, so the first subhead after it takes nothing extra. */
+.settings-content > .subhead,
+.settings-content > .versioning-tab > .subhead {
+  margin: var(--sp-8) 0 var(--sp-3);
+}
+.settings-content > .settings-section-title + .subhead,
+.settings-content > .subhead:first-child,
+.settings-content > .versioning-tab > .subhead:first-child {
+  margin-top: 0;
+}
+/* When a hairline draws the break, the hairline IS the section gap: the
+   subhead keeps the separator's own spacing so the line sits centred between
+   the two sections instead of hugging the one below it. */
+.settings-content .menu-sep + .subhead {
+  margin-top: var(--sp-6);
+}
+/* `.menu-sep` is dimensioned for the account popover (4px of air, bleeding
+   8px into that surface's narrower padding). Inside a settings panel it
+   separates two full-width sections, so: symmetric air, no bleed. */
+.settings-content > .menu-sep,
+.settings-content > .versioning-tab > .menu-sep {
+  margin: var(--sp-6) 0;
+}
+/* A section's one-line description sits between its label and its list. The
+   label is already tight against it; the list below needs air. */
+.settings-content > .subhead + .muted,
+.settings-content > .subhead + .billing-section-note,
+.settings-content > .versioning-tab > .subhead + .muted {
+  margin-bottom: var(--sp-3);
+}
+/* A summary row that CLOSES a list ("Free vaults · 3 of 3 used"). Without the
+   rule above it, it reads as one more item in the list it is summarising.
+   Side padding is dropped so its hairline spans the same width as the list's
+   own row dividers. */
+.settings-content .menu-row.settings-footer-row {
+  margin-top: var(--sp-5);
+  padding: var(--sp-4) 0 0;
+  border-top: 1px solid var(--border);
+}
+/* Settings list rows carry a name, up to two pills and up to three actions.
+   At the popover's 4px spacing they read as one paragraph of text, so here
+   each row gets real height and a hairline between rows — one divider style
+   for every list in settings (vaults, members, invitations, subscriptions).
+   The dividers do the separating, so the list drops its own gap. */
+.settings-content .member-list {
+  gap: 0;
+}
+.settings-content .member-list > li {
+  padding: var(--sp-2) 0;
+}
+.settings-content .member-list > li + li {
+  border-top: 1px solid var(--border);
 }
 
 /* Import / Export tab — airy, minimal vertical rhythm. */
@@ -3454,9 +3533,11 @@ body:has(.sidebar-resizer.dragging) {
   gap: var(--sp-2);
   margin: var(--sp-1) 0;
 }
+/* A footnote about what an action will actually do — readable, not greyed.
+   `--fs-xs` is what keeps it under `.io-desc` now that both are secondary. */
 .io-hint {
   margin: 0;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: var(--fs-xs);
   line-height: var(--lh-body);
 }
@@ -3525,13 +3606,16 @@ body:has(.sidebar-resizer.dragging) {
   flex-direction: column;
   gap: var(--sp-4);
 }
+/* The Access tab's own eyebrows. Same role as `.subhead`, so the same colour
+   reasoning: tertiary is the disabled grey, and a section heading is not
+   disabled. */
 .access-listlabel,
 .access-seclabel {
   font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 600;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   margin: 0 0 var(--sp-2);
 }
 
@@ -3764,7 +3848,10 @@ body:has(.sidebar-resizer.dragging) {
   gap: var(--sp-3);
   padding: var(--sp-8) var(--sp-4);
   text-align: center;
-  color: var(--text-tertiary);
+  /* The copy explains why the panel is empty and what to do about it, so it
+     reads at secondary; the glyph below keeps its own tertiary + opacity
+     because that one IS decoration. */
+  color: var(--text-secondary);
 }
 .access-empty p {
   margin: 0;
@@ -4907,11 +4994,13 @@ button.sync-badge-retry:hover {
 }
 /* Under the account's vault list: two quiet pill buttons that swap for an
    inline form (input + primary + cancel) when pressed. */
+/* New vault / Join with code. It closes the vault list above it and opens the
+   next section, so it needs more air above than below. */
 .vault-tab-actions {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-top: var(--sp-3);
+  margin: var(--sp-4) 0 var(--sp-2);
 }
 .vault-tab-add {
   display: inline-flex;
@@ -5433,12 +5522,20 @@ button.secondary:disabled {
 .switch.is-disabled .switch-input {
   cursor: not-allowed;
 }
+/* The OFF track has to read as a control that is off, not as a control that
+   is disabled. `--bg-subtle` over a `--bg-surface` card is almost the same
+   white, and `--border` at 9% alpha didn't draw an edge, so the switch
+   disappeared and only the knob's shadow hinted at it. `--bg-active` is the
+   deepest neutral fill we have and `--border-strong` gives it a real rim; in
+   dark both tokens flip to lighter values against the darker card, so the
+   contrast survives the theme without the track glowing. Disabled stays
+   distinguishable because `.switch.is-disabled` dims the whole control. */
 .switch-track {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-pill);
-  background: var(--bg-subtle);
-  box-shadow: inset 0 0 0 1px var(--border);
+  background: var(--bg-active);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   transition:
     background var(--t-med) var(--ease),
     box-shadow var(--t-med) var(--ease);
@@ -5451,7 +5548,13 @@ button.secondary:disabled {
   height: 18px;
   border-radius: 50%;
   background: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
+  /* A rim as well as a drop shadow: the knob is `--bg-surface`, and now that
+     the off track is a real fill the two are close together in dark mode
+     (where a shadow alone reads as nothing). The ring is what keeps the thumb
+     visible on the off track AND on the accent one, in both themes. */
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 0 0 1px var(--border-strong);
   /* The knob is what makes the change read as a decision rather than a blink,
      so it gets a slight overshoot on the way across. */
   transition: transform var(--t-med) cubic-bezier(0.34, 1.4, 0.64, 1);
@@ -5532,6 +5635,16 @@ button.secondary:disabled {
   background: var(--bg-active);
   color: var(--text-secondary);
 }
+/* Inside the plan card the card's own `gap` is the rhythm, so the two things
+   that carry their own outer margins for other surfaces (the settings eyebrow,
+   the upgrade dialog's feature list) hand it back here — otherwise their
+   margins ADD to the gap instead of collapsing with it. */
+.billing-card .subhead {
+  margin: var(--sp-2) 0 0;
+}
+.billing-card .upgrade-features {
+  margin: 0;
+}
 .billing-action {
   align-self: flex-start;
   display: inline-flex;
@@ -5543,9 +5656,15 @@ button.secondary:disabled {
 /* ---- Subscriptions list (#109) ----
    A `.member-list` row that has to carry a second line (renewal, price, seats)
    under the vault name, so its name cell stops being one ellipsised span.
-   Everything else on the row is the existing pill and action vocabulary. */
-.billing-sub-row {
-  align-items: flex-start;
+   Everything else on the row is the existing pill and action vocabulary.
+
+   This is the list where someone checks what they are paying for, so the row
+   is taller than the settings default and the vault NAME leads it at display
+   size. Pills and actions centre against the two-line block rather than
+   hanging off its first line. */
+.settings-content .member-list > li.billing-sub-row {
+  align-items: center;
+  padding: var(--sp-4) 0;
 }
 .billing-sub-name {
   flex: 1;
@@ -5555,11 +5674,28 @@ button.secondary:disabled {
   gap: var(--sp-1);
   color: var(--text-primary);
 }
+/* The name line: the vault name plus, at most, a "Current" pill. A flex row
+   so the pill keeps its size while the name is the part that ellipsises. */
 .billing-sub-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.billing-sub-vault {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.billing-sub-title .member-role {
+  flex-shrink: 0;
+}
+/* Every fact about the subscription on ONE line, joined with " · ": renewal,
+   price, seats, and who pays when that isn't the reader. Three stacked lines
+   made a row taller than the card above it. */
 .billing-sub-meta {
   font-size: var(--fs-sm);
   color: var(--text-secondary);
