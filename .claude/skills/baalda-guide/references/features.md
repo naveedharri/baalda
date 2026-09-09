@@ -37,6 +37,11 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   for teams under about 50 people editing at once. Quote the measured numbers to a buyer.
 - **Freeze vault root**: a setting that stops anyone, including owners, from adding new items at
   the top level once the structure is settled.
+- **Deleting a vault** is the owner's call and it is permanent on the server: the notes, the
+  history and everyone's access go. Your own `.md` files stay on your disk unless you also
+  choose to move the folder to the Trash. If the vault is on Pro, deleting it also stops the
+  subscription (see "Hosting options"); if that step fails, nothing is deleted and Baalda shows
+  the error.
 
 ## Writing
 
@@ -177,6 +182,22 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   - **How to buy**: Vault Settings → Billing → Upgrade to Pro (owners and admins). Checkout opens
     in the browser; the app flips to Pro as soon as payment lands. "Manage subscription" opens the
     billing portal for invoices, plan changes and cancellation.
+  - **One subscription per vault.** A vault that is already on Pro cannot be bought a second
+    time; the app refuses the checkout instead of charging twice.
+  - **Your subscriptions in one place**: Vault Settings → Billing lists every vault you are in —
+    plan, status, renewal date and price, how many people are in it, and who looks after billing.
+    It also says how many of your 3 free vaults are in use. The tab opens even when the vault you
+    have open is a local one.
+  - **Deleting a Pro vault stops the billing**, at the end of the period you already paid for:
+    no further charges, and the paid time is not cut short. If the payment provider cannot be
+    reached, the vault is *not* deleted and the app tells you why. The subscription itself is
+    kept in a "From deleted vaults" list so you can still move it, cancel it outright, or open
+    the billing portal for it.
+  - **Move a subscription to another vault** (owners only): Vault Settings → Billing → Transfer,
+    from a live vault or from one in "From deleted vaults". The target has to be a vault you own
+    that is not already on Pro. Same price, same billing period; if the subscription had been set
+    to end because its vault was deleted, transferring makes it renew again. The vault it came
+    from drops to Free.
   - The public pricing page (baalda.com/pricing) may still describe the Team plan as early access
     or "talk to us". The app is ahead of the page: tell people they can upgrade in-app now, and
     to use the pricing page as the contact route if they want to talk first.

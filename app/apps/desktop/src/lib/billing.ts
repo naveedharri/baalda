@@ -50,3 +50,110 @@ export function limitFromError(e: unknown): number | null {
   }
   return null;
 }
+
+// ---- Subscriptions list (#109) -------------------------------------------
+//
+// The Billing tab lists every vault the user belongs to plus any subscription
+// left behind by a deleted vault, and each row needs the same derived facts:
+// what to say about its state, what to call its plan, and which vaults a
+// transfer could move it to. They live here rather than in the component so
+// they stay testable without React, the store, or a server.
+
+/** The subset of a billing row these helpers actually read. */
+export interface SubscriptionFacts {
+  status: "none" | "active" | "past_due" | "canceled";
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  interval: "month" | "year" | null;
+  amount: number | null;
+  currency: string | null;
+}
+
+/**
+ * How a row's date and price get written. Injected rather than imported:
+ * `formatDate` (AccountMenu) and `formatPrice`/`perLabel` (UpgradeDialog)
+ * already exist, and a second copy of "how we write a price" is exactly the
+ * drift to avoid. It also keeps this module free of `Intl`, whose output is
+ * locale-dependent and therefore untestable as a fixed string.
+ */
+export interface SubscriptionLineFormat {
+  date: (iso: string) => string;
+  price: (amount: number, currency: string, interval: "month" | "year" | null) => string;
+}
+
+/**
+ * The secondary line under a vault in the Subscriptions list — "Renews 3 Oct
+ * 2026 · $10/mo", "Ends 3 Oct 2026", "Past due" — or null when there is
+ * nothing to say (a free vault).
+ *
+ * Order matters: `past_due` outranks everything (the money is the problem, not
+ * the date), and a cancelling subscription reads as an end date, never a
+ * renewal — telling someone their cancelled plan "renews" is the worst thing
+ * this line could do.
+ */
+export function subscriptionStatusLine(
+  row: SubscriptionFacts,
+  fmt: SubscriptionLineFormat,
+): string | null {
+  if (row.status === "none") return null;
+  if (row.status === "past_due") return "Past due";
+  if (row.status === "canceled") {
+    return row.currentPeriodEnd ? `Ended ${fmt.date(row.currentPeriodEnd)}` : "Canceled";
+  }
+  if (row.cancelAtPeriodEnd) {
+    return row.currentPeriodEnd
+      ? `Ends ${fmt.date(row.currentPeriodEnd)}`
+      : "Ends at the end of the current period";
+  }
+  const parts: string[] = [];
+  if (row.currentPeriodEnd) parts.push(`Renews ${fmt.date(row.currentPeriodEnd)}`);
+  if (row.amount != null && row.currency) {
+    parts.push(fmt.price(row.amount, row.currency, row.interval));
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * Text for a row's plan pill. Pro carries its status when that status is worth
+ * interrupting for; a healthy Pro just says Pro, because the line under it
+ * already carries the renewal.
+ */
+export function planPillLabel(row: {
+  plan: "free" | "pro";
+  status: SubscriptionFacts["status"];
+}): string {
+  if (row.plan !== "pro") return "Free";
+  if (row.status === "past_due") return "Past due";
+  if (row.status === "canceled") return "Canceled";
+  return "Pro";
+}
+
+/** The shape {@link transferTargets} filters on — a `MyBillingVault`, loosened
+ *  so the helper doesn't drag the API types into its tests. */
+export interface TransferCandidate {
+  orgId: string;
+  role: "owner" | "admin" | "member";
+  plan: "free" | "pro";
+  status: SubscriptionFacts["status"];
+}
+
+/**
+ * Vaults a subscription could be moved to: another vault the caller OWNS
+ * (admin isn't enough — this changes who pays for what) that isn't already
+ * paying. The `status` guard is belt-and-braces for the server's
+ * `target_already_subscribed`: a target whose row is merely `canceled` still
+ * reads as free and is a legal destination.
+ */
+export function transferTargets<T extends TransferCandidate>(
+  vaults: readonly T[],
+  sourceOrgId: string,
+): T[] {
+  return vaults.filter(
+    (v) =>
+      v.orgId !== sourceOrgId &&
+      v.role === "owner" &&
+      v.plan === "free" &&
+      v.status !== "active" &&
+      v.status !== "past_due",
+  );
+}

@@ -101,12 +101,14 @@ n/a = synchronous or sub-100ms by construction.
 | Join by code | join → switch → reconcile | 1–5s | ✅ existing busy state |
 | New vault (menu) | create org → folder → seed | 1–3s | ✅ existing busy state |
 | Remove from device | local teardown | 0.2–1s | ✅ spinner |
-| Delete vault (permanent) | server delete + local teardown | 0.5–3s | ✅ spinner, behind a confirm |
+| Delete vault (permanent) | provider cancel-at-period-end (Pro only) → server delete + local teardown | 0.5–4s | ✅ spinner, behind a confirm that names the subscription end |
 | Delete local vault files | move folder to Trash | 0.2–2s | ✅ spinner, behind a confirm |
 | Invite member | server write + roster refresh | 0.3–1s | ✅ existing busy state |
 | Remove member | server write + ACL broadcast | 0.3–1s | ✅ spinner, behind a confirm |
 | Copy join code | clipboard | instant | ✅ existing "Copied" |
 | Manage subscription | billing portal + browser handoff | 1–4s | ✅ spinner |
+| Transfer subscription | server write + provider round trip (re-target, un-cancel) | 1–4s | ✅ spinner, behind a confirm |
+| Cancel subscription now | server write + provider round trip | 1–4s | ✅ spinner, behind a confirm |
 | Create / revoke MCP token | server write | 0.3–1s | ✅ spinner |
 | Import files / folder / Export vault | disk walk + registry | 1s–minutes | ✅ existing busy + counts |
 | Change vaults root | native picker + config write | fast | n/a |

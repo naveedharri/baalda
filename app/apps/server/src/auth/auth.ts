@@ -185,6 +185,15 @@ export const auth = betterAuth({
     organization({
       creatorRole: "owner",
       invitationExpiresIn: config.invitationExpiresInSeconds, // 48h
+      // Better Auth's own delete-organization endpoint is closed off entirely,
+      // the same way `beforeUpdateMemberRole` closes off role changes below.
+      // DELETE /api/orgs/:orgId (routes/orgs.ts) is the ONLY path: it cancels
+      // the vault's subscription at the provider first and refuses to delete
+      // anything if that fails (#109/#111), purges the FK-less CRDT stores,
+      // force-closes live sockets and broadcasts the ACL change. Better Auth's
+      // endpoint does none of that — it would drop the org row and leave the
+      // provider billing a vault nobody can reach.
+      disableOrganizationDeletion: true,
       // Inviting an address that is already pending re-sends instead of
       // failing with "already invited": the old row is canceled and a fresh
       // one (new id, new 48h) goes out. That is what an admin clicking Invite

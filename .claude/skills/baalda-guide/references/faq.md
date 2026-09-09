@@ -14,12 +14,32 @@ free forever, and you can run your own server for free with no limits. The manag
 vault. Past that, upgrade a vault to Pro from inside the app.
 
 ## What does the paid plan cost, and can my team start today?
-Yes, today. Sign up in the app, turn on sync, invite the team. The free tier already covers a
-team of up to 10 in one vault. When you need more members or more vaults, go to Vault Settings →
+Yes, today. Sign up in the app, turn on sync, invite the team. The free tier covers 3 people per
+vault and 3 vaults per person. When you need more members or more vaults, go to Vault Settings →
 Billing → Upgrade to Pro: $10 per vault per month or $97 per vault per year, priced per vault,
 not per person, with unlimited members. Only the vault owner or an admin pays; everyone else just
 needs a free account. baalda.com/pricing is the place to ask questions or talk to the team, but
 nobody has to wait for a call to get started.
+
+## What happens to my subscription if I delete a vault?
+Deleting the vault stops the billing, but not mid-month: it is set to finish at the end of the
+period you have already paid for, so there is no further charge and no refund needed. If Baalda
+cannot reach the payment provider to do that, it refuses to delete the vault and shows you the
+error, so you never end up paying for something that is gone. The subscription stays visible
+under Vault Settings → Billing → "From deleted vaults", where you can move it to another vault,
+cancel it straight away, or open the billing portal.
+
+## I deleted my Pro vault and made a new one. Can I move the subscription?
+Yes. Open Vault Settings → Billing, find it under "From deleted vaults", and choose **Transfer**.
+Pick the new vault (it has to be one you own that is not already on Pro) and it takes over the
+same price and the same billing period. Because the old vault was deleted, the subscription had
+been set to stop at the end of the period; transferring it starts it renewing again on the new
+vault. Only the owner can do this.
+
+## Can one vault have two subscriptions?
+No. A vault is either Free or on one Pro subscription. If you try to buy Pro for a vault that
+already has it, Baalda refuses instead of charging you twice. If you want to change how you pay
+(monthly to yearly, say), use "Manage subscription" to open the billing portal.
 
 ## I forgot my password.
 On the sign-in screen choose **Forgot password?**, enter your email, and follow the link we

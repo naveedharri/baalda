@@ -3,13 +3,22 @@ import {
   type McpToolInfo,
   type McpTokenRow,
   type Member,
+  type MyBillingVault,
+  type OrgBilling,
   type VaultCheckpoint,
 } from "../lib/api";
 import { toast } from "../lib/toast";
 import { agoFromIso, checkpointTitle, noteCountLabel } from "./versionFormat";
 import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
-import { classifyLimitError, type LimitKind, limitFromError } from "../lib/billing";
+import {
+  classifyLimitError,
+  type LimitKind,
+  limitFromError,
+  planPillLabel,
+  subscriptionStatusLine,
+  transferTargets,
+} from "../lib/billing";
 import * as ipc from "../lib/ipc";
 import type { RecentVault } from "../lib/ipc";
 import {
@@ -32,13 +41,15 @@ import { AccessPanel } from "./AccessPanel";
 import { AccountSettings } from "./AccountSettings";
 import { AsyncButton } from "./AsyncButton";
 import { AuthDialog } from "./AuthDialog";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { MenuSelect } from "./MenuSelect";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
 import { Avatar, SyncBadge } from "./Identity";
 import { SettingsModal } from "./SettingsModal";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
-import { UpgradeDialog } from "./UpgradeDialog";
+import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
 
 // The sign-in modal moved to its own file when it grew a server-choice step
 // (#91). It has three mount sites that import it from here, so it is
@@ -802,9 +813,14 @@ type SettingsTab =
 
 // Sections that only make sense once the vault is synced to an org. On a
 // local vault they're shown but locked, with a "Turn on sync" gate.
+//
+// Billing is deliberately NOT one of them (#109). Someone working in a local
+// folder can still own vaults that are billing, and a subscription left behind
+// by a DELETED vault has to be reachable from somewhere or the money is
+// unrecoverable. Only the per-vault card at the top of that tab needs a synced
+// vault, and it says so itself.
 const TEAM_TABS = new Set<SettingsTab>([
   "members",
-  "billing",
   "access",
   "mcp",
   "versioning",
@@ -1043,7 +1059,7 @@ function VaultSettingsDialog({
           ) : tab === "members" ? (
             <MembersTab canManage={canManage} />
           ) : tab === "billing" ? (
-            <BillingTab canManage={canManage} />
+            <BillingTab canManage={canManage} isSynced={isSynced} />
           ) : tab === "access" ? (
             <AccessPanel canManage={canManage} />
           ) : tab === "mcp" ? (
@@ -1319,6 +1335,7 @@ function VaultsTab() {
   const members = useStore((s) => s.members);
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
+  const billingEnabled = useStore((s) => s.billingConfig?.enabled === true);
   // Bumped after a local remove/delete so the recents list re-fetches.
   const [localsNonce, setLocalsNonce] = useState(0);
   const locals = useLocalVaults(localsNonce);
@@ -1334,6 +1351,12 @@ function VaultsTab() {
   const [busy, setBusy] = useState(false);
   // orgId whose permanent deletion is awaiting a second confirming click.
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // A vault that is actually PAYING, whose deletion needs the full dialog
+  // instead: the two-click row has nowhere to say what happens to the money
+  // (#111). Its billing snapshot rides along so the copy can name the date.
+  const [subDelete, setSubDelete] = useState<
+    { orgId: string; name: string; billing: OrgBilling } | null
+  >(null);
   // local-vault path whose file deletion is awaiting a second confirming click.
   const [confirmDeleteLocal, setConfirmDeleteLocal] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1415,17 +1438,61 @@ function VaultsTab() {
     }
   };
 
-  // Permanently delete a vault everywhere (owner only, two-click confirm).
+  /**
+   * Ask before deleting. A vault that is actually paying gets the full
+   * ConfirmDialog, because "Delete everything?" cannot say the one thing its
+   * owner needs to know: the subscription stops at the END of the current
+   * period, and until then it can be moved to another vault (#111). Every
+   * other vault keeps today's two-click row.
+   *
+   * A billing lookup that fails is treated as free — an unreachable billing
+   * endpoint must not block a delete the user is entitled to make.
+   */
+  const askDelete = async (orgId: string, name: string) => {
+    setActionError(null);
+    if (!billingEnabled) {
+      setConfirmDelete(orgId);
+      return;
+    }
+    let billing: OrgBilling | null = null;
+    try {
+      billing = await authManager.api.getOrgBilling(orgId);
+    } catch {
+      billing = null;
+    }
+    if (billing && (billing.status === "active" || billing.status === "past_due")) {
+      setSubDelete({ orgId, name, billing });
+    } else {
+      setConfirmDelete(orgId);
+    }
+  };
+
+  // Permanently delete a vault everywhere (owner only, confirmed above).
   const deletePermanently = async (orgId: string) => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
     try {
-      await useStore.getState().deleteRemoteVault(orgId);
+      const result = await useStore.getState().deleteRemoteVault(orgId);
       setBound(readOrgVaults());
       setConfirmDelete(null);
+      setSubDelete(null);
+      if (result.subscription) {
+        // Neutral, not success: the vault is gone, but the user is still paying
+        // for the rest of the period and that time is recoverable.
+        const ends = result.subscription.currentPeriodEnd;
+        toast(
+          ends
+            ? `Vault deleted. Pro ends on ${formatDate(ends)} — move it from Billing if you want to keep it.`
+            : "Vault deleted. Pro ends when the current period does — move it from Billing if you want to keep it.",
+          "neutral",
+        );
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      // Covers the 502 `subscription_cancel_failed` case: the server's message
+      // rides `ApiError.message`, and NOTHING was deleted. The dialog stays
+      // open (only success clears it) so the error has somewhere to show.
       setActionError(message);
       // Destructive path: a failure here must never look like a success (#85).
       toast(`Couldn't delete the vault — ${message}`, "error");
@@ -1590,17 +1657,14 @@ function VaultsTab() {
                     Remove from device
                   </AsyncButton>
                   {canDelete(o.id) && (
-                    <button
+                    <AsyncButton
                       className="link-btn danger"
                       disabled={busy}
                       title="Permanently delete this vault and all its notes for everyone"
-                      onClick={() => {
-                        setActionError(null);
-                        setConfirmDelete(o.id);
-                      }}
+                      onClick={() => askDelete(o.id, o.name)}
                     >
                       Delete
-                    </button>
+                    </AsyncButton>
                   )}
                 </span>
               )}
@@ -1825,6 +1889,35 @@ function VaultsTab() {
       )}
 
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
+
+      {subDelete && (
+        <ConfirmDialog
+          title={`Delete ${subDelete.name}?`}
+          confirmLabel="Delete vault"
+          onCancel={() => setSubDelete(null)}
+          onConfirm={() => deletePermanently(subDelete.orgId)}
+        >
+          <p>
+            This vault is on <strong>Pro</strong>
+            {subDelete.billing.currentPeriodEnd
+              ? subDelete.billing.cancelAtPeriodEnd
+                ? `, ending ${formatDate(subDelete.billing.currentPeriodEnd)}`
+                : `, renewing ${formatDate(subDelete.billing.currentPeriodEnd)}`
+              : ""}
+            .
+          </p>
+          <p>
+            Deleting it stops the subscription at the end of the current period.
+            You won't be charged again, and until then you can move the
+            subscription to another vault from <strong>Billing</strong>.
+          </p>
+          <p>
+            Every note, folder and attachment in this vault is deleted for
+            everyone. That part can't be undone.
+          </p>
+          {actionError && <div className="auth-error">{actionError}</div>}
+        </ConfirmDialog>
+      )}
     </>
   );
 }
@@ -2174,31 +2267,63 @@ function MembersTab({ canManage }: { canManage: boolean }) {
 }
 
 /**
- * BillingTab: this vault's plan + seat usage (spec 04). Facts are visible to
- * every member (read-only); the Upgrade/Manage actions are gated to owners/admins
- * the same way MembersTab gates its controls. Only rendered when the server has
- * billing enabled (the tab itself is hidden otherwise).
+ * BillingTab: the current vault's plan and seats, then every subscription the
+ * signed-in user can act on (spec 04, #109/#110).
+ *
+ * Three sections, in the order someone reaching for this page needs them:
+ * this vault (what am I on?), all my vaults (what am I paying for?), and
+ * subscriptions from deleted vaults (what am I paying for that no longer
+ * exists?). Facts are visible to every member; each action is gated to the
+ * role the server will actually accept — Upgrade and Manage for owners and
+ * admins, Transfer for owners only, because it changes who pays for what.
+ *
+ * Only the first section needs a synced vault; the other two are account-wide,
+ * which is why this tab is no longer in TEAM_TABS.
  */
-function BillingTab({ canManage }: { canManage: boolean }) {
+function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boolean }) {
   const billingConfig = useStore((s) => s.billingConfig);
   const orgBilling = useStore((s) => s.orgBilling);
+  const myBilling = useStore((s) => s.myBilling);
   const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
 
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
+  // The vault the upgrade dialog should charge: the active one from the card
+  // at the top, or any owned free vault picked out of the list below.
+  const [upgradeOrg, setUpgradeOrg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A transfer waiting to be confirmed. It moves money between vaults, so it
+  // never fires straight off the picker.
+  const [transfer, setTransfer] = useState<{
+    sourceOrgId: string;
+    sourceLabel: string;
+    targetOrgId: string;
+    targetName: string;
+  } | null>(null);
+  // An orphaned subscription waiting on a "cancel now" confirmation.
+  const [cancelling, setCancelling] = useState<{ orgId: string; label: string } | null>(
+    null,
+  );
 
-  // Refresh seat usage / plan whenever this tab is opened.
+  // Refresh this vault's seats AND the account-wide list whenever the tab opens.
   useEffect(() => {
     void useStore.getState().refreshOrgBilling();
+    void useStore.getState().refreshMyBilling();
   }, []);
 
-  const manage = async () => {
-    if (!orgId || busy) return;
+  const refreshAll = async () => {
+    await Promise.all([
+      useStore.getState().refreshMyBilling(),
+      useStore.getState().refreshOrgBilling(),
+    ]);
+  };
+
+  /** Open a vault's provider portal in the OS browser (owner/admin). */
+  const openPortal = async (portalOrgId: string) => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      const { url } = await authManager.api.getBillingPortalUrl(orgId);
+      const { url } = await authManager.api.getBillingPortalUrl(portalOrgId);
       await ipc.openExternal(url);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2207,29 +2332,104 @@ function BillingTab({ canManage }: { canManage: boolean }) {
     }
   };
 
+  // Both confirmed actions leave their dialog OPEN on failure and report into
+  // it, rather than closing over an error nobody sees. Neither re-throws — the
+  // dialog's own AsyncButton has finished reporting by then.
+  const runTransfer = async () => {
+    if (!transfer) return;
+    const { sourceOrgId, targetOrgId, targetName } = transfer;
+    setError(null);
+    try {
+      await authManager.api.transferSubscription(sourceOrgId, targetOrgId);
+      setTransfer(null);
+      await refreshAll();
+      toast(`Pro moved to ${targetName}.`);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      toast(`Couldn't move the subscription — ${message}`, "error");
+    }
+  };
+
+  const runCancelNow = async () => {
+    if (!cancelling) return;
+    const { orgId: target, label } = cancelling;
+    setError(null);
+    try {
+      await authManager.api.cancelSubscription(target, "now");
+      setCancelling(null);
+      await refreshAll();
+      toast(`Subscription for ${label} canceled.`);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      toast(`Couldn't cancel the subscription — ${message}`, "error");
+    }
+  };
+
   if (!billingConfig?.enabled) {
     return (
       <div className="muted perm-empty">Billing isn't enabled on this server.</div>
     );
   }
-  if (!orgId) {
+
+  const vaults = myBilling?.vaults ?? [];
+  const orphaned = myBilling?.orphaned ?? [];
+  const freeLimits = myBilling?.freeLimits ?? null;
+
+  /**
+   * The Transfer control for one row: a picker over the eligible targets, or a
+   * disabled button that says why there are none. `value` is a LABEL, not a
+   * selection — nothing is currently chosen here, and MenuSelect renders the
+   * raw value whenever no option matches it.
+   */
+  const transferControl = (sourceOrgId: string, sourceLabel: string) => {
+    const targets = transferTargets(vaults, sourceOrgId);
+    if (targets.length === 0) {
+      return (
+        <button
+          className="link-btn"
+          disabled
+          title="Nowhere to move it — you need another vault you own that isn't already on Pro."
+        >
+          Transfer
+        </button>
+      );
+    }
     return (
-      <div className="muted perm-empty">
-        Billing needs an active vault — create or switch to one first.
-      </div>
+      <MenuSelect
+        value={TRANSFER_TRIGGER_LABEL}
+        options={targets.map((t) => ({ value: t.orgId, label: t.name }))}
+        onSelect={(targetOrgId) => {
+          const target = targets.find((t) => t.orgId === targetOrgId);
+          if (!target) return;
+          setError(null);
+          setTransfer({ sourceOrgId, sourceLabel, targetOrgId, targetName: target.name });
+        }}
+        disabled={busy}
+        ariaLabel={`Move ${sourceLabel}'s subscription to another vault`}
+        triggerClassName="link-btn billing-transfer-trigger"
+        menuClassName="billing-transfer-menu"
+      />
     );
-  }
-  if (!orgBilling) {
-    return <div className="muted">Loading…</div>;
-  }
+  };
 
-  const isPro = orgBilling.plan === "pro";
-  const { members, pendingInvitations, limit } = orgBilling.seats;
-  const used = members + pendingInvitations;
+  /** Section 1 — the vault currently open. A plain render helper, NOT a nested
+   *  component: a component declared in here would remount its whole subtree
+   *  on every state change of this page. */
+  const renderVaultCard = () => {
+    if (!isSynced || !orgId) {
+      return (
+        <div className="muted perm-empty">
+          This vault isn't synced, so it has no plan of its own. The vaults on
+          your account are listed below.
+        </div>
+      );
+    }
+    if (!orgBilling) return <div className="muted">Loading…</div>;
 
-  return (
-    <>
-      {isPro ? (
+    if (orgBilling.plan === "pro") {
+      return (
         <div className="billing-card plan-pro">
           <div className="billing-plan-head">
             <span className="billing-plan-name">Pro</span>
@@ -2257,12 +2457,11 @@ function BillingTab({ canManage }: { canManage: boolean }) {
               </span>
             </div>
           )}
-          {error && <div className="auth-error">{error}</div>}
           {canManage ? (
             <AsyncButton
               className="secondary billing-action"
               disabled={busy}
-              onClick={manage}
+              onClick={() => openPortal(orgId)}
             >
               Manage subscription
             </AsyncButton>
@@ -2270,45 +2469,218 @@ function BillingTab({ canManage }: { canManage: boolean }) {
             <div className="muted">Ask an owner or admin to manage the subscription.</div>
           )}
         </div>
-      ) : (
-        <div className="billing-card">
-          <div className="billing-plan-head">
-            <span className="billing-plan-name">Free</span>
+      );
+    }
+
+    const { members, pendingInvitations, limit } = orgBilling.seats;
+    const used = members + pendingInvitations;
+    return (
+      <div className="billing-card">
+        <div className="billing-plan-head">
+          <span className="billing-plan-name">Free</span>
+        </div>
+        <div className="menu-row">
+          <span className="menu-row-label">Members</span>
+          <span>
+            {used} of {limit ?? "∞"}
+            {limit != null && used >= limit ? " · full" : ""}
+          </span>
+        </div>
+        {pendingInvitations > 0 && (
+          <div className="muted">
+            Includes {pendingInvitations} pending invitation
+            {pendingInvitations === 1 ? "" : "s"}.
           </div>
-          <div className="menu-row">
-            <span className="menu-row-label">Members</span>
-            <span>
-              {used} of {limit ?? "∞"}
-              {limit != null && used >= limit ? " · full" : ""}
+        )}
+
+        <div className="subhead">Upgrade to Pro unlocks</div>
+        <ul className="upgrade-features">
+          <li>Unlimited team members</li>
+          <li>Unlimited notes, devices &amp; AI edits</li>
+          <li>Doesn't count toward your free vaults</li>
+          <li>Priority support</li>
+        </ul>
+
+        {canManage ? (
+          <button className="primary billing-action" onClick={() => setUpgradeOrg(orgId)}>
+            Upgrade to Pro
+          </button>
+        ) : (
+          <div className="muted">Ask an owner or admin to upgrade this vault.</div>
+        )}
+      </div>
+    );
+  };
+
+  /** One row of section 2. */
+  const renderVaultRow = (v: MyBillingVault) => {
+    const line = subscriptionStatusLine(v, LINE_FORMAT);
+    const seatsUsed = v.seats.members + v.seats.pendingInvitations;
+    return (
+      <li key={v.orgId} className="billing-sub-row">
+        <span className="billing-sub-name">
+          <span className="billing-sub-title">
+            {v.name}
+            {v.orgId === orgId && <span className="muted"> · Current</span>}
+          </span>
+          {line && <span className="billing-sub-meta">{line}</span>}
+          <span className="billing-sub-meta">
+            {seatsUsed} of {v.seats.limit ?? "∞"} member{seatsUsed === 1 ? "" : "s"}
+          </span>
+          {!v.canManage && v.billingOwner && (
+            <span className="billing-sub-meta">
+              Billing managed by {v.billingOwner.name}
             </span>
+          )}
+        </span>
+        <span className={`member-role ${v.role}`}>{v.role}</span>
+        <span className={`billing-status ${v.status}`}>{planPillLabel(v)}</span>
+        <span className="vault-row-actions">
+          {v.canManage && v.plan === "free" && (
+            <AsyncButton
+              className="link-btn"
+              disabled={busy}
+              onClick={() => setUpgradeOrg(v.orgId)}
+            >
+              Upgrade
+            </AsyncButton>
+          )}
+          {v.canManage && v.plan === "pro" && (
+            <AsyncButton
+              className="link-btn"
+              disabled={busy}
+              onClick={() => openPortal(v.orgId)}
+            >
+              Manage
+            </AsyncButton>
+          )}
+          {v.canTransfer && transferControl(v.orgId, v.name)}
+        </span>
+      </li>
+    );
+  };
+
+  return (
+    <>
+      {renderVaultCard()}
+
+      {/* ---- 2. Every vault on the account ---- */}
+      <div className="subhead">Subscriptions</div>
+      {vaults.length === 0 ? (
+        <div className="muted perm-empty">
+          {myBilling ? "No vaults on this account yet." : "Loading…"}
+        </div>
+      ) : (
+        <ul className="member-list">{vaults.map(renderVaultRow)}</ul>
+      )}
+
+      {/* ---- 3. Tombstones: paid time that outlived its vault ---- */}
+      {orphaned.length > 0 && (
+        <>
+          <div className="subhead">From deleted vaults</div>
+          <div className="billing-section-note">
+            These subscriptions belonged to vaults that were deleted. They still
+            bill until they end — move one to a vault to use the time you've paid
+            for, or cancel it now.
           </div>
-          {pendingInvitations > 0 && (
-            <div className="muted">
-              Includes {pendingInvitations} pending invitation
-              {pendingInvitations === 1 ? "" : "s"}.
-            </div>
-          )}
-
-          <div className="subhead">Upgrade to Pro unlocks</div>
-          <ul className="upgrade-features">
-            <li>Unlimited team members</li>
-            <li>Unlimited notes, devices &amp; AI edits</li>
-            <li>Doesn't count toward your free vaults</li>
-            <li>Priority support</li>
+          <ul className="member-list">
+            {orphaned.map((o) => {
+              const label = o.orgName ?? "Deleted vault";
+              const line = subscriptionStatusLine(o, LINE_FORMAT);
+              return (
+                <li key={o.orgId} className="billing-sub-row">
+                  <span className="billing-sub-name">
+                    <span className="billing-sub-title">
+                      {label}
+                      <span className="muted"> · deleted {formatDate(o.deletedAt)}</span>
+                    </span>
+                    {line && <span className="billing-sub-meta">{line}</span>}
+                  </span>
+                  <span className={`billing-status ${o.status}`}>
+                    {o.status === "past_due" ? "Past due" : "Pro"}
+                  </span>
+                  <span className="vault-row-actions">
+                    {transferControl(o.orgId, label)}
+                    <AsyncButton
+                      className="link-btn danger"
+                      disabled={busy}
+                      onClick={() => {
+                        setError(null);
+                        setCancelling({ orgId: o.orgId, label });
+                      }}
+                    >
+                      Cancel now
+                    </AsyncButton>
+                    <AsyncButton
+                      className="link-btn"
+                      disabled={busy}
+                      onClick={() => openPortal(o.orgId)}
+                    >
+                      Manage
+                    </AsyncButton>
+                  </span>
+                </li>
+              );
+            })}
           </ul>
+        </>
+      )}
 
-          {error && <div className="auth-error">{error}</div>}
-          {canManage ? (
-            <button className="primary billing-action" onClick={() => setUpgradeOpen(true)}>
-              Upgrade to Pro
-            </button>
-          ) : (
-            <div className="muted">Ask an owner or admin to upgrade this vault.</div>
-          )}
+      {/* ---- 4. What the free tier allows ---- */}
+      {freeLimits && (
+        <div className="menu-row">
+          <span className="menu-row-label">Free vaults</span>
+          <span>
+            {freeLimits.freeVaultsUsed} of {freeLimits.vaultsPerUser} used
+          </span>
         </div>
       )}
 
-      {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
+      {error && <div className="auth-error">{error}</div>}
+
+      {upgradeOrg && (
+        <UpgradeDialog orgId={upgradeOrg} onClose={() => setUpgradeOrg(null)} />
+      )}
+
+      {transfer && (
+        <ConfirmDialog
+          tone="accent"
+          title={`Move Pro to ${transfer.targetName}?`}
+          confirmLabel="Move subscription"
+          onCancel={() => setTransfer(null)}
+          onConfirm={runTransfer}
+        >
+          <p>
+            <strong>{transfer.targetName}</strong> becomes Pro immediately, on the
+            same billing period and price.
+          </p>
+          <p>
+            <strong>{transfer.sourceLabel}</strong> drops to Free — its members and
+            notes stay, but free-plan limits apply to it again.
+          </p>
+          {error && <div className="auth-error">{error}</div>}
+        </ConfirmDialog>
+      )}
+
+      {cancelling && (
+        <ConfirmDialog
+          title={`Cancel the subscription for ${cancelling.label}?`}
+          confirmLabel="Cancel subscription"
+          cancelLabel="Keep it"
+          onCancel={() => setCancelling(null)}
+          onConfirm={runCancelNow}
+        >
+          <p>
+            Billing stops now and the rest of the period is given up. There is no
+            vault left to use it on, so nothing else is lost.
+          </p>
+          <p>
+            If you'd rather keep the time you've paid for, move it to another vault
+            instead.
+          </p>
+          {error && <div className="auth-error">{error}</div>}
+        </ConfirmDialog>
+      )}
     </>
   );
 }
@@ -2319,6 +2691,24 @@ function formatDate(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
+
+/**
+ * The MenuSelect trigger label for a transfer picker. Typed `string` rather
+ * than the literal so it can never collide with an org-id option — it is a
+ * label, not a value that could be selected.
+ */
+const TRANSFER_TRIGGER_LABEL: string = "Transfer";
+
+/**
+ * How a subscription row writes its date and price. Both formatters already
+ * exist — reused here rather than re-implemented so `lib/billing.ts` can stay
+ * pure and there is exactly one definition of how we print money.
+ */
+const LINE_FORMAT = {
+  date: formatDate,
+  price: (amount: number, currency: string, interval: "month" | "year" | null) =>
+    `${formatPrice({ amount, currency })}${interval ? perLabel(interval) : ""}`,
+};
 
 /**
  * Inline upgrade nudge shown in the create-vault / invite-member error slot

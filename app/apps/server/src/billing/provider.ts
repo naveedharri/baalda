@@ -59,11 +59,50 @@ export interface NormalizedBillingEvent {
   providerSubscriptionId: string;
   /** Our internal plan id (currently always "pro"). */
   plan: string;
+  /**
+   * The user who started this checkout (from the same metadata), when the
+   * provider still carries it. Needed because a webhook can arrive for a vault
+   * we have already deleted: the `member` rows are gone, so this is the only
+   * remaining answer to "whose subscription is this" (#109).
+   */
+  userId: string | null;
   /** Normalized status to persist: "active" | "past_due" | "canceled". */
   status: string;
   /** End of the current paid period, if known. */
   currentPeriodEnd: Date | null;
   cancelAtPeriodEnd: boolean;
+  /** Billing period the subscription renews on, when the provider reports one. */
+  interval: BillingInterval | null;
+  /** Price in minor units (cents), as the provider charges it. */
+  amount: number | null;
+  /** ISO-4217-ish currency code, lowercased by the provider (e.g. "usd"). */
+  currency: string | null;
+}
+
+/**
+ * The provider's authoritative view of one subscription, returned by every
+ * mutation so the caller can write it straight into our row.
+ *
+ * The rule this exists to enforce: Polar and our Postgres must never disagree.
+ * A mutation that only said "ok" would leave us waiting on a webhook that may
+ * be delayed, mis-signed, or dropped — which is how a canceled subscription
+ * kept showing as Pro. Every call therefore hands back the full state, and it
+ * goes through the SAME upsert (and the same `event_ts` ordering guard) the
+ * webhook uses, so a snapshot and a webhook racing each other still converge.
+ */
+export interface SubscriptionSnapshot {
+  providerSubscriptionId: string;
+  providerCustomerId: string;
+  /** Normalized the same way as the webhook: "active" | "past_due" | "canceled". */
+  status: "active" | "past_due" | "canceled";
+  currentPeriodEnd: Date | null;
+  cancelAtPeriodEnd: boolean;
+  interval: BillingInterval | null;
+  /** Price in minor units (cents). */
+  amount: number | null;
+  currency: string | null;
+  /** Provider `modifiedAt` — used as `event_ts` for the ordering guard. */
+  modifiedAt: Date;
 }
 
 export interface CreateCheckoutArgs {
@@ -80,8 +119,44 @@ export interface BillingProvider {
   createCheckout(args: CreateCheckoutArgs): Promise<{ url: string }>;
   /** Create a customer-portal session (manage / cancel) and return its URL. */
   getPortalUrl(args: { customerId: string }): Promise<{ url: string }>;
-  /** Cancel a subscription at the provider (best-effort on org delete). */
-  cancelSubscription(providerSubscriptionId: string): Promise<void>;
+  /**
+   * Stop a subscription.
+   *
+   *  - `"period_end"` — no further charges, access kept until the paid period
+   *    runs out. What vault deletion and the Cancel action use: the owner has
+   *    already paid for this month, so ending it early would be a refund we
+   *    never promised.
+   *  - `"now"` — revoke immediately (the deliberate "stop billing me today"
+   *    choice, and the only way to clear a tombstone the owner no longer wants).
+   */
+  cancelSubscription(
+    providerSubscriptionId: string,
+    mode: "period_end" | "now",
+  ): Promise<SubscriptionSnapshot>;
+  /**
+   * Un-cancel a subscription that is set to end at period end, putting it back
+   * on renewal. Transfer needs this: the "delete a vault, make a new one, move
+   * the subscription across" story has to end with a live Pro, not one that
+   * quietly lapses at the end of the month.
+   */
+  resumeSubscription(providerSubscriptionId: string): Promise<SubscriptionSnapshot>;
+  /**
+   * Read one subscription's current state. `null` means the provider does not
+   * know this id (404) — the row is referring to something that no longer
+   * exists, so the caller leaves it alone rather than inventing a status.
+   */
+  getSubscription(providerSubscriptionId: string): Promise<SubscriptionSnapshot | null>;
+  /**
+   * Re-point a subscription's `organization_id` / `user_id` metadata after a
+   * transfer. Best-effort: the caller logs and carries on, because our own row
+   * is the source of truth and webhooks resolve by provider subscription id
+   * before they ever look at metadata.
+   */
+  setSubscriptionOrg(
+    providerSubscriptionId: string,
+    orgId: string,
+    userId: string,
+  ): Promise<void>;
   /**
    * Verify a raw webhook body + headers and normalize it. Returns `null` for a
    * valid signature carrying an event we don't act on (caller answers 202).
