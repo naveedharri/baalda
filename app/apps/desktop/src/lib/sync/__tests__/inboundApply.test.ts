@@ -47,6 +47,8 @@ class FakeDisk {
   /** relPath → body, for the emptiness check on unconfirmed notes. */
   bodies = new Map<string, string>();
   trashed: Array<{ from: string; to: string }> = [];
+  /** Paths removed outright (revocations) — never in the trash. */
+  deleted: string[] = [];
 
   tree(): TreeNode {
     const dirs = [...this.folders].map((f) => ({
@@ -116,6 +118,12 @@ function install(disk: FakeDisk) {
     disk.folders.delete(p);
     return true;
   }) as never);
+  vi.mocked(ipc.deletePath).mockImplementation((async (p: string) => {
+    if (!disk.notes.has(p)) throw new Error("path does not exist");
+    disk.notes.delete(p);
+    disk.bodies.delete(p);
+    disk.deleted.push(p);
+  }) as never);
   vi.mocked(ipc.trashNote).mockImplementation((async (p: string, stamp: string) => {
     if (!disk.notes.has(p)) throw new Error("path does not exist");
     disk.notes.delete(p);
@@ -160,7 +168,7 @@ function fakeApi(state: ServerState) {
 function recordingHost() {
   const released: string[] = [];
   const renamed: Array<{ from: string; to: string }> = [];
-  const removed: Array<{ path: string; trashedTo: string | null }> = [];
+  const removed: Array<{ path: string; trashedTo: string | null; reason: string }> = [];
   /** Paths the registry asked to fill in from a local CRDT after materializing.
    *  This host has no doc store, so it answers "nothing to fill in" — which is
    *  the fresh-device case, i.e. today's empty placeholder. */
@@ -170,7 +178,7 @@ function recordingHost() {
       released.push(docId);
     },
     notePathChanged: (_docId, from, to) => renamed.push({ from, to }),
-    noteRemoved: (_docId, path, trashedTo) => removed.push({ path, trashedTo }),
+    noteRemoved: (_docId, path, trashedTo, reason) => removed.push({ path, trashedTo, reason }),
     materializeContent: async (docId, path) => {
       hydrated.push({ docId, path });
       return false;
@@ -404,11 +412,13 @@ describe("inbound delete", () => {
     expect(ipc.trashNote).not.toHaveBeenCalled();
   });
 
-  it("REMOVES a file whose access was revoked, and stops re-registering it", async () => {
+  it("REMOVES a file whose access was revoked outright, and stops re-registering it", async () => {
     // `GET /api/notes` is ACL-filtered, so a revoked share looks like a delete;
-    // the tombstone set is what tells them apart. Both end with the file in the
-    // vault's recoverable trash — a revocation that leaves a readable `.md`
-    // behind is cosmetic, since the ex-reader can open it in any editor forever.
+    // the tombstone set is what tells them apart. A DELETED note goes to the
+    // vault trash (the undo for a deliberate removal); a REVOKED one is removed
+    // outright — a copy in `.context/trash` would hand the ex-reader exactly the
+    // readable `.md` the revocation exists to take away, and the server still
+    // holds the content, so nothing is lost.
     const disk = new FakeDisk();
     disk.notes.set("shared.md", "d1");
     const r = await twoPasses({
@@ -418,7 +428,11 @@ describe("inbound delete", () => {
     });
 
     expect(disk.notes.has("shared.md")).toBe(false);
-    expect(ipc.trashNote).toHaveBeenCalledWith("shared.md", expect.any(String), null);
+    expect(disk.deleted).toEqual(["shared.md"]);
+    expect(disk.trashed).toEqual([]);
+    expect(ipc.trashNote).not.toHaveBeenCalled();
+    // The UI learns WHY, so it can say "access removed" rather than "deleted".
+    expect(r.removed).toEqual([{ path: "shared.md", trashedTo: null, reason: "revoked" }]);
     // And it is NOT re-registered on the way out, which would resurrect it as an
     // unsyncable ghost.
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
@@ -559,7 +573,8 @@ describe("inbound folder deletion", () => {
       then: { notes: [], tombstones: [], folders: [], folderTombstones: [] },
     });
 
-    expect(disk.trashed.map((t) => t.from)).toEqual(["Getting Started/welcome.md"]);
+    expect(disk.deleted).toEqual(["Getting Started/welcome.md"]);
+    expect(disk.trashed).toEqual([]);
     expect(disk.folders.has("Getting Started")).toBe(false);
     expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
   });

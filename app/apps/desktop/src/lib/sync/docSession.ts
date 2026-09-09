@@ -223,7 +223,12 @@ export class SyncManager implements InboundHost {
   private onRegistryChanged?: () => void;
   private onAclChangedListener?: () => void;
   private onNotePathChanged?: (docId: string, from: string, to: string) => void;
-  private onNoteRemoved?: (docId: string, path: string, trashedTo: string | null) => void;
+  private onNoteRemoved?: (
+    docId: string,
+    path: string,
+    trashedTo: string | null,
+    reason: "deleted" | "revoked",
+  ) => void;
   private onMemberJoined?: (name: string) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
@@ -1326,14 +1331,24 @@ export class SyncManager implements InboundHost {
     }
   }
 
-  noteRemoved(docId: string, path: string, trashedTo: string | null): void {
-    this.onNoteRemoved?.(docId, path, trashedTo);
+  noteRemoved(
+    docId: string,
+    path: string,
+    trashedTo: string | null,
+    reason: "deleted" | "revoked",
+  ): void {
+    this.onNoteRemoved?.(docId, path, trashedTo, reason);
   }
 
   /** Called after an inbound rename lands on disk (store re-points the editor). */
   setInboundListeners(listeners: {
     onNotePathChanged?: (docId: string, from: string, to: string) => void;
-    onNoteRemoved?: (docId: string, path: string, trashedTo: string | null) => void;
+    onNoteRemoved?: (
+      docId: string,
+      path: string,
+      trashedTo: string | null,
+      reason: "deleted" | "revoked",
+    ) => void;
   }): void {
     this.onNotePathChanged = listeners.onNotePathChanged;
     this.onNoteRemoved = listeners.onNoteRemoved;

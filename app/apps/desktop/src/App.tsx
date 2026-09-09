@@ -142,11 +142,17 @@ function RemovedBanner() {
  * where the local copy went, which is the difference between a scare and a note.
  */
 function DeletedByTeammateBanner() {
-  const trashedTo = useStore((s) => s.noteRemovedByTeammate);
+  const removed = useStore((s) => s.noteRemovedByTeammate);
   return (
-    <Banner show={!!trashedTo}>
+    <Banner show={!!removed}>
       <span>
-        A teammate deleted this note. Your copy was moved to <code>{trashedTo}</code>.
+        {removed?.reason === "revoked" ? (
+          <>Your access to this note was removed. It is no longer on this device.</>
+        ) : (
+          <>
+            A teammate deleted this note. Your copy was moved to <code>{removed?.trashedTo}</code>.
+          </>
+        )}
       </span>
       <div className="banner-actions">
         <button

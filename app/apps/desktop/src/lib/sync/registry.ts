@@ -137,8 +137,18 @@ export interface InboundHost {
   releaseDoc(docId: string): Promise<void>;
   /** The file moved: re-point anything showing it (e.g. the open editor). */
   notePathChanged(docId: string, from: string, to: string): void;
-  /** The file is gone: close anything showing it. */
-  noteRemoved(docId: string, path: string, trashedTo: string | null): void;
+  /**
+   * The file is gone: close anything showing it. `trashedTo` is the vault-trash
+   * path for a `deleted` note; a `revoked` note is removed outright (the server
+   * still holds it, and an ex-reader must not keep a readable copy), so it is
+   * `null`.
+   */
+  noteRemoved(
+    docId: string,
+    path: string,
+    trashedTo: string | null,
+    reason: "deleted" | "revoked",
+  ): void;
   /**
    * A server-only note was just materialized as a 0-byte placeholder at `path`.
    * Fill it in from THIS DEVICE's local CRDT, if it has one, and resolve whether
@@ -925,12 +935,24 @@ export class VaultRegistry {
       await this.host?.releaseDoc(gone.docId);
       if (this.stale()) return { changedDisk, suppress: plan.suppress };
       try {
-        const dest = await ipc.trashNote(gone.path, stamp, this.epoch());
+        // A DELETED note goes to the vault's recoverable trash: someone chose to
+        // remove it, and the trash is the undo. A REVOKED note is removed
+        // outright: nothing was deleted (the server still holds every byte, and
+        // the note comes straight back if access is restored), while a copy in
+        // `.context/trash` would leave the ex-reader with exactly the readable
+        // `.md` the revocation exists to take away. `deletePath` is the same
+        // epoch-pinned Rust call the sidebar's own Delete uses.
+        let dest: string | null = null;
+        if (gone.reason === "revoked") {
+          await ipc.deletePath(gone.path, this.epoch());
+        } else {
+          dest = await ipc.trashNote(gone.path, stamp, this.epoch());
+        }
         changedDisk = true;
         // The file left, so the baseline entry goes with it — otherwise every
-        // later pass would keep trying to trash a path that isn't there.
+        // later pass would keep trying to remove a path that isn't there.
         this.baselineDocs.delete(gone.docId);
-        this.host?.noteRemoved(gone.docId, gone.path, dest);
+        this.host?.noteRemoved(gone.docId, gone.path, dest, gone.reason);
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
         this.recordFailure({
