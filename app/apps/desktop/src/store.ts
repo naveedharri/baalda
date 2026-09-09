@@ -144,12 +144,15 @@ interface AppStore {
    */
   noteRemovedSynced: boolean;
   /**
-   * Set when the note that was open was deleted by a TEAMMATE (or an AI) and we
-   * applied that locally: the trash-relative path the local copy was moved to, so
-   * the UI can say where it went. Distinct from `noteRemoved`, which means "the
-   * file vanished from under us" (a Finder delete) and offers no recovery hint.
+   * Set when the note that was open left because of a TEAMMATE (or an AI) and we
+   * applied that locally. `deleted`: they deleted it, and `trashedTo` is the
+   * trash-relative path the local copy was moved to, so the UI can say where it
+   * went. `revoked`: our access was taken away — the file is removed outright
+   * (no local copy is kept; the server still has it) and `trashedTo` is `null`.
+   * Distinct from `noteRemoved`, which means "the file vanished from under us"
+   * (a Finder delete) and offers no recovery hint.
    */
-  noteRemovedByTeammate: string | null;
+  noteRemovedByTeammate: { reason: "deleted" | "revoked"; trashedTo: string | null } | null;
   /** Follow an inbound rename: re-point the open note (and its descendants). */
   followNoteRename: (from: string, to: string) => void;
   /**
@@ -1776,12 +1779,12 @@ export const useStore = create<AppStore>((set, get) => ({
     // CodeMirror bound to a destroyed Y.Doc throws on the next keystroke.
     syncManager.setInboundListeners({
       onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
-      onNoteRemoved: (_docId, path, trashedTo) => {
+      onNoteRemoved: (_docId, path, trashedTo, reason) => {
         get().pruneTabs([path]);
         const open = get().openNote;
         if (open && (open.path === path || open.path.startsWith(path + "/"))) {
           get().closeNote();
-          set({ noteRemovedByTeammate: trashedTo });
+          set({ noteRemovedByTeammate: { reason, trashedTo } });
         }
       },
     });
