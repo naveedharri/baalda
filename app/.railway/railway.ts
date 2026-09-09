@@ -62,6 +62,12 @@ const SERVER_ENV = [
   "POLAR_PRODUCT_MONTHLY_ID",
   "POLAR_PRODUCT_YEARLY_ID",
   "POLAR_WEBHOOK_SECRET",
+  // Outbound email (issue #99): EMAIL_FROM + one of SMTP_URL / RESEND_API_KEY
+  // turns on password reset, sign-up verification and invitation emails.
+  "EMAIL_FROM",
+  "SMTP_URL",
+  "RESEND_API_KEY",
+  "EMAIL_TRANSPORT",
 ] as const;
 
 export default defineRailway((ctx) => {
