@@ -1,1 +1,1 @@
-- Minor billing fixes and clearer plan-limit messages
+- Forgot password? by email, invitation emails with one-click join, and clearer sign-up and invite feedback
