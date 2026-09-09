@@ -105,12 +105,41 @@ export interface SubscriptionSnapshot {
   modifiedAt: Date;
 }
 
+/**
+ * The provider's view of one hosted checkout session, read back by id after
+ * the customer lands on the success page.
+ *
+ * This is the webhook-independent path to "did they pay?". The success redirect
+ * is the one moment we KNOW the customer is looking at us, so instead of hoping
+ * a webhook arrives (an endpoint that was never registered for this deployment,
+ * a mis-signed secret, an outage — every one of them has happened) the success
+ * route asks the provider for the checkout by id and writes what it says. The
+ * id comes off the redirect URL, but nothing in it is trusted: everything below
+ * is what the provider answered over its authenticated API.
+ */
+export interface CheckoutSnapshot {
+  /** Provider status: only `"succeeded"` means the money is in. */
+  status: "open" | "expired" | "confirmed" | "succeeded" | "failed";
+  /** The vault this checkout was started for (`metadata.organization_id`). */
+  orgId: string | null;
+  /** The user who started it (`metadata.user_id`). */
+  userId: string | null;
+  /** Set once the checkout has produced a subscription. */
+  providerSubscriptionId: string | null;
+  providerCustomerId: string | null;
+}
+
 export interface CreateCheckoutArgs {
   orgId: string;
   userId: string;
   email: string;
   interval: BillingInterval;
-  /** Absolute URL the provider redirects to after successful payment. */
+  /**
+   * Absolute URL the provider redirects to after successful payment. May carry
+   * the provider's checkout-id placeholder (Polar: `{CHECKOUT_ID}`), which the
+   * provider substitutes on redirect so the success page can confirm the
+   * payment by id (see {@link BillingProvider.getCheckout}).
+   */
   successUrl: string;
 }
 
@@ -146,6 +175,13 @@ export interface BillingProvider {
    * exists, so the caller leaves it alone rather than inventing a status.
    */
   getSubscription(providerSubscriptionId: string): Promise<SubscriptionSnapshot | null>;
+  /**
+   * Read one checkout session by the id the provider put on the success
+   * redirect. `null` means the provider does not know this id — the URL was
+   * malformed, guessed, or for another account — and the caller must treat it
+   * as "nothing to confirm", never as a failure of the page.
+   */
+  getCheckout(checkoutId: string): Promise<CheckoutSnapshot | null>;
   /**
    * Re-point a subscription's `organization_id` / `user_id` metadata after a
    * transfer. Best-effort: the caller logs and carries on, because our own row

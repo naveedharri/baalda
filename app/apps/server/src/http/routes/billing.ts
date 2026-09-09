@@ -31,6 +31,14 @@ import {
 import { successPageHtml } from "./billing-success.js";
 
 /**
+ * Shape of the checkout id Polar substitutes for `{CHECKOUT_ID}` on the success
+ * redirect (a UUID today). Anything else on the query string is ignored rather
+ * than sent to the provider — the page must render for everyone who lands on
+ * it, including someone who arrives with a mangled link.
+ */
+const CHECKOUT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
  * Subscription billing routes (frozen API contract).
  *
  *  GET  /api/billing/config               — public; advertises plans + limits.
@@ -41,7 +49,9 @@ import { successPageHtml } from "./billing-success.js";
  *  POST /api/billing/orgs/:orgId/cancel   — owner: stop at period end, or now.
  *  POST /api/billing/orgs/:orgId/transfer — owner: move a sub to another vault.
  *  POST /api/billing/webhook              — provider webhook (raw body, idempotent).
- *  GET  /api/billing/success              — checkout success landing page.
+ *  GET  /api/billing/success              — checkout success landing page; confirms
+ *                                            the checkout with the provider by id
+ *                                            and bounces into the desktop app.
  *
  * When billing is disabled (no provider token), /config reports
  * `{ enabled: false }` and every other route 404s — self-host stays unlimited.
@@ -152,10 +162,80 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
   });
 
   // ── success landing page (checkout success_url) ─────────────────────────────
-  billing.get("/billing/success", (c) => {
+  //
+  // Two jobs. First, CONFIRM: the redirect carries Polar's checkout id, so we
+  // read the checkout back over Polar's API and, if it succeeded, write the
+  // subscription row right here. This is the path that does not depend on a
+  // webhook — the staging server, whose URL Polar had no endpoint for, showed
+  // exactly why: the customer paid, landed on this page, and the app polled
+  // "free" for three minutes because nothing ever told the server (2026-09-09).
+  // The webhook, when it does arrive, hits the same upsert and its ordering
+  // guard, so the two paths converge instead of fighting. Second, HAND BACK:
+  // bounce into the desktop app on this deployment's URL scheme — the same
+  // hand-off the account pages use — so nobody is left staring at a browser tab
+  // wondering whether the app noticed.
+  billing.get("/billing/success", async (c) => {
     if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
-    return c.html(successPageHtml);
+    const checkoutId = c.req.query("checkout_id") ?? "";
+    let orgId: string | null = null;
+    if (CHECKOUT_ID_RE.test(checkoutId)) {
+      // Best-effort and never fatal: the page is the customer's receipt and
+      // must render even when the provider is unreachable — the app's polling
+      // and the webhook are still behind it.
+      try {
+        orgId = await confirmCheckout(checkoutId);
+      } catch (err) {
+        console.warn(
+          `billing success: could not confirm checkout ${checkoutId}:`,
+          (err as Error).message,
+        );
+      }
+    }
+    const deepLink =
+      `${config.deepLinkScheme}://billing/upgraded` +
+      (orgId ? `?org=${encodeURIComponent(orgId)}` : "");
+    return c.html(successPageHtml({ deepLink }));
   });
+
+  /**
+   * Read a checkout back from the provider and, if it has succeeded, persist
+   * its subscription. Returns the vault id the checkout was for (when known),
+   * whether or not anything was written.
+   *
+   * Nothing from the URL is trusted beyond "which checkout to ask about": the
+   * vault, the user, the subscription and its state all come from the
+   * provider's authenticated answer, exactly as they would off a webhook.
+   */
+  async function confirmCheckout(checkoutId: string): Promise<string | null> {
+    const checkout = await deps.provider.getCheckout(checkoutId);
+    if (!checkout) return null;
+    if (checkout.status !== "succeeded" || !checkout.providerSubscriptionId) {
+      return checkout.orgId;
+    }
+    const snap = await deps.provider.getSubscription(checkout.providerSubscriptionId);
+    if (!snap) return checkout.orgId;
+
+    // Same resolution as the webhook: a row that already holds this provider
+    // subscription wins over the checkout's metadata (a transfer may have moved
+    // it since), then the vault the checkout was started for.
+    const existing = await findByProviderSubscription(pool, checkout.providerSubscriptionId);
+    const orgId = existing?.organization_id ?? checkout.orgId;
+    if (!orgId) return null;
+
+    // The vault may have been deleted between paying and landing here. Record
+    // the tombstone the webhook would have, so the owner can still see, cancel
+    // or transfer what they are paying for (#109).
+    let deletedAt: Date | null | undefined;
+    if (!existing) {
+      const { rowCount } = await pool.query("SELECT 1 FROM organization WHERE id = $1", [orgId]);
+      if (rowCount === 0) deletedAt = new Date();
+    }
+    await applySubscriptionState(pool, {
+      ...stateFromSnapshot(orgId, snap, { deletedAt, ownerUserId: checkout.userId }),
+      providerCustomerId: snap.providerCustomerId || checkout.providerCustomerId,
+    });
+    return orgId;
+  }
 
   // ── webhook (raw body, signature-verified, idempotent) ─────────────────────
   // Registered before the gate below only conceptually; the gate short-circuits
@@ -502,7 +582,10 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     const body = (await c.req.json().catch(() => ({}))) as { interval?: unknown };
     const interval: BillingInterval = body.interval === "year" ? "year" : "month";
 
-    const successUrl = `${config.betterAuthUrl}/api/billing/success`;
+    // `{CHECKOUT_ID}` is Polar's placeholder, substituted on redirect; the
+    // success page reads the checkout back by that id to confirm the payment
+    // without waiting on a webhook.
+    const successUrl = `${config.betterAuthUrl}/api/billing/success?checkout_id={CHECKOUT_ID}`;
     try {
       const { url } = await deps.provider.createCheckout({
         orgId,

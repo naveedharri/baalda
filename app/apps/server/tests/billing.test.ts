@@ -10,7 +10,7 @@ import {
   seatCount,
 } from "../src/billing/entitlements.js";
 import { testAppDeps } from "./helpers/app.js";
-import { makeFakeProvider } from "./helpers/billing-provider.js";
+import { makeFakeProvider, makeSnapshot } from "./helpers/billing-provider.js";
 import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
@@ -279,6 +279,11 @@ describe("billing", () => {
       expect(res.status).toBe(200);
       expect((await res.json()) as { url: string }).toEqual({ url: "https://polar.test/checkout/year" });
       expect((fakeProvider.lastCheckout as { interval: string }).interval).toBe("year");
+      // The success URL must carry Polar's checkout-id placeholder, or the
+      // success page has nothing to confirm the payment with.
+      expect((fakeProvider.lastCheckout as { successUrl: string }).successUrl).toBe(
+        `${config.betterAuthUrl}/api/billing/success?checkout_id={CHECKOUT_ID}`,
+      );
     });
 
     it("a plain member cannot start checkout (403)", async () => {
@@ -338,6 +343,111 @@ describe("billing", () => {
       const res = await req(app, "POST", `/api/billing/orgs/${org.id}/portal`, { token: owner.token });
       expect(res.status).toBe(200);
       expect((await res.json()) as { url: string }).toEqual({ url: "https://polar.test/portal/cus_po" });
+    });
+  });
+
+  // ── success page: confirm by checkout id, bounce into the app ──────────────
+  describe("success page", () => {
+    it("confirms a succeeded checkout with the provider and grants Pro before any webhook", async () => {
+      const owner = await signUp("succ@billing.com");
+      const org = await createOrg(owner, "Succ", "succ-org");
+      fakeProvider.checkouts.set("co_paid", {
+        status: "succeeded",
+        orgId: org.id,
+        userId: owner.userId,
+        providerSubscriptionId: "sub_paid",
+        providerCustomerId: "cus_paid",
+      });
+      // The subscription's own state is what gets written — the checkout only
+      // says which subscription to read.
+      fakeProvider.getResults.set(
+        "sub_paid",
+        makeSnapshot({ providerSubscriptionId: "sub_paid", providerCustomerId: "cus_paid" }),
+      );
+      const res = await req(app, "GET", "/api/billing/success?checkout_id=co_paid");
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      // The hand-off names the vault so the app can refresh the right one.
+      expect(html).toContain(`baalda://billing/upgraded?org=${encodeURIComponent(org.id)}`);
+      expect(fakeProvider.checkoutsFetched).toEqual(["co_paid"]);
+      expect(fakeProvider.fetched).toEqual(["sub_paid"]);
+      // The row exists and is active — this is what the app's polling sees.
+      const billing = await req(app, "GET", `/api/billing/orgs/${org.id}`, { token: owner.token });
+      const body = (await billing.json()) as { plan: string; status: string };
+      expect(body.plan).toBe("pro");
+      expect(body.status).toBe("active");
+      const { rows } = await pool.query(
+        "SELECT provider_subscription_id, provider_customer_id FROM subscriptions WHERE organization_id = $1",
+        [org.id],
+      );
+      expect(rows[0].provider_subscription_id).toBe("sub_paid");
+      expect(rows[0].provider_customer_id).toBe("cus_paid");
+    });
+
+    it("writes nothing for a checkout that has not succeeded", async () => {
+      const owner = await signUp("open@billing.com");
+      const org = await createOrg(owner, "Open", "open-org");
+      fakeProvider.checkouts.set("co_open", {
+        status: "confirmed",
+        orgId: org.id,
+        userId: owner.userId,
+        providerSubscriptionId: null,
+        providerCustomerId: null,
+      });
+      const res = await req(app, "GET", "/api/billing/success?checkout_id=co_open");
+      expect(res.status).toBe(200);
+      // Still hands back to the app, still names the vault it was for.
+      expect(await res.text()).toContain(`baalda://billing/upgraded?org=${encodeURIComponent(org.id)}`);
+      expect(fakeProvider.fetched).toEqual([]);
+      const { rowCount } = await pool.query(
+        "SELECT 1 FROM subscriptions WHERE organization_id = $1",
+        [org.id],
+      );
+      expect(rowCount).toBe(0);
+    });
+
+    it("renders for an unknown, malformed or missing checkout id (never a dead end)", async () => {
+      for (const path of [
+        "/api/billing/success?checkout_id=co_nobody_knows",
+        "/api/billing/success?checkout_id=%3Cscript%3E",
+        "/api/billing/success",
+      ]) {
+        const res = await req(app, "GET", path);
+        expect(res.status).toBe(200);
+        const html = await res.text();
+        expect(html).toContain('href="baalda://billing/upgraded"');
+        expect(html).not.toContain("<script>alert");
+      }
+      // The malformed id was never sent to the provider.
+      expect(fakeProvider.checkoutsFetched).toEqual(["co_nobody_knows"]);
+    });
+
+    it("still renders when the provider is down", async () => {
+      fakeProvider.failGet = new Error("polar is down");
+      const res = await req(app, "GET", "/api/billing/success?checkout_id=co_whatever");
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("baalda://billing/upgraded");
+    });
+
+    it("a checkout for a vault deleted in the meantime lands as a tombstone", async () => {
+      const owner = await signUp("gone@billing.com");
+      fakeProvider.checkouts.set("co_gone", {
+        status: "succeeded",
+        orgId: "org-that-was-deleted",
+        userId: owner.userId,
+        providerSubscriptionId: "sub_gone",
+        providerCustomerId: "cus_gone",
+      });
+      const res = await req(app, "GET", "/api/billing/success?checkout_id=co_gone");
+      expect(res.status).toBe(200);
+      const { rows } = await pool.query(
+        "SELECT deleted_at, owner_user_id, status FROM subscriptions WHERE organization_id = $1",
+        ["org-that-was-deleted"],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].deleted_at).not.toBeNull();
+      expect(rows[0].owner_user_id).toBe(owner.userId);
+      expect(rows[0].status).toBe("active");
     });
   });
 

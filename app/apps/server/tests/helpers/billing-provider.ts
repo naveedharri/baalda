@@ -1,5 +1,6 @@
 import type {
   BillingProvider,
+  CheckoutSnapshot,
   NormalizedBillingEvent,
   SubscriptionSnapshot,
 } from "../../src/billing/provider.js";
@@ -40,6 +41,10 @@ export interface FakeProvider extends BillingProvider {
   snapshot: SubscriptionSnapshot;
   /** Per-subscription overrides for `getSubscription` (null ⇒ 404 at Polar). */
   getResults: Map<string, SubscriptionSnapshot | null>;
+  /** Scripted checkouts for `getCheckout`, by id (absent ⇒ 404 at Polar). */
+  checkouts: Map<string, CheckoutSnapshot>;
+  /** Every checkout id the success page asked about. */
+  checkoutsFetched: string[];
   failCancel: Error | null;
   failResume: Error | null;
   failGet: Error | null;
@@ -72,6 +77,8 @@ export function makeFakeProvider(): FakeProvider {
     metadataWrites: [],
     snapshot: makeSnapshot(),
     getResults: new Map(),
+    checkouts: new Map(),
+    checkoutsFetched: [],
     failCancel: null,
     failResume: null,
     failGet: null,
@@ -86,6 +93,8 @@ export function makeFakeProvider(): FakeProvider {
       this.metadataWrites = [];
       this.snapshot = makeSnapshot();
       this.getResults = new Map();
+      this.checkouts = new Map();
+      this.checkoutsFetched = [];
       this.failCancel = null;
       this.failResume = null;
       this.failGet = null;
@@ -131,6 +140,12 @@ export function makeFakeProvider(): FakeProvider {
       this.fetched.push(id);
       if (this.getResults.has(id)) return this.getResults.get(id) ?? null;
       return { ...this.snapshot, providerSubscriptionId: id, modifiedAt: new Date() };
+    },
+
+    async getCheckout(id) {
+      if (this.failGet) throw this.failGet;
+      this.checkoutsFetched.push(id);
+      return this.checkouts.get(id) ?? null;
     },
 
     async setSubscriptionOrg(id, orgId, userId) {

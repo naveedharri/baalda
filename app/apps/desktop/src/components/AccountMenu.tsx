@@ -2755,7 +2755,9 @@ function LimitNudge({
   const message =
     kind === "member_limit"
       ? `Free plan limit reached — this vault allows ${n} member${n === 1 ? "" : "s"}.`
-      : `You have ${n} free vault${n === 1 ? "" : "s"}. Upgrade a vault to Pro to create more.`;
+      : // The cap counts FREE vaults only: a Pro vault leaves the count, so
+        // upgrading one of them opens a slot for another free vault.
+        `You're using all ${n} free vault${n === 1 ? "" : "s"}. Upgrade one to Pro — Pro vaults don't count toward that limit — and you can create another.`;
   return (
     <div className="limit-nudge">
       <span>{message}</span>

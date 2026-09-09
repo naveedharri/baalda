@@ -5,6 +5,7 @@ import {
   WebhookSignatureError,
   type BillingInterval,
   type BillingProvider,
+  type CheckoutSnapshot,
   type CreateCheckoutArgs,
   type NormalizedBillingEvent,
   type SubscriptionSnapshot,
@@ -26,6 +27,10 @@ import {
  *    — schedule a cancellation at period end, or take one back (uncancel).
  *  - `polar.subscriptions.revoke({ id })` — cancel immediately.
  *  - `polar.subscriptions.get({ id })` — reconcile a row we suspect is stale.
+ *  - `polar.checkouts.get({ id })` — confirm a checkout from the success
+ *    redirect. Polar substitutes `{CHECKOUT_ID}` in `successUrl`, and the
+ *    checkout carries `subscription_id` + our metadata once it has succeeded,
+ *    so the success page can grant Pro without waiting on a webhook.
  *    Each of those returns the full `Subscription`, which `toSnapshot` maps to
  *    a `SubscriptionSnapshot` the caller writes straight into our row: after a
  *    mutation Polar's answer IS the state, so we never wait on a webhook to
@@ -281,6 +286,42 @@ export class PolarBillingProvider implements BillingProvider {
       if (err instanceof PolarNotFoundError) return null;
       throw err;
     }
+  }
+
+  async getCheckout(checkoutId: string): Promise<CheckoutSnapshot | null> {
+    let raw: unknown;
+    try {
+      raw = await polarCall("checkouts.get", () => client().checkouts.get({ id: checkoutId }));
+    } catch (err) {
+      // A guessed or stale id: nothing to confirm, and not an error the success
+      // page should ever surface.
+      if (err instanceof PolarNotFoundError) return null;
+      throw err;
+    }
+    // Same defensive read as `toSnapshot`: the SDK's declared type is not
+    // trusted over what actually arrived (see the 2026-09-08 note above).
+    const co = (raw ?? {}) as Record<string, unknown>;
+    const pick = (snake: string, camel: string): unknown => co[snake] ?? co[camel];
+    const metadata = (pick("metadata", "metadata") ?? null) as Record<string, unknown> | null;
+    const status = String(pick("status", "status") ?? "");
+    const known: CheckoutSnapshot["status"][] = [
+      "open",
+      "expired",
+      "confirmed",
+      "succeeded",
+      "failed",
+    ];
+    const str = (v: unknown): string | null => (v ? String(v) : null);
+    return {
+      // An unknown status is never read as paid.
+      status: (known as string[]).includes(status)
+        ? (status as CheckoutSnapshot["status"])
+        : "open",
+      orgId: str(metadata?.[META_ORG]),
+      userId: str(metadata?.[META_USER]),
+      providerSubscriptionId: str(pick("subscription_id", "subscriptionId")),
+      providerCustomerId: str(pick("customer_id", "customerId")),
+    };
   }
 
   async setSubscriptionOrg(
