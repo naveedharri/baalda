@@ -70,7 +70,12 @@ class FakeWs extends EventEmitter {
 }
 
 function diffFor(docId: string): DocDiff {
-  return { update: new Uint8Array([docId.charCodeAt(0)]), serverStateVector: new Uint8Array(), upToDate: false };
+  return {
+    update: new Uint8Array([docId.charCodeAt(0)]),
+    serverStateVector: new Uint8Array(),
+    upToDate: false,
+    clientAhead: false,
+  };
 }
 
 async function waitFor(fn: () => boolean, ms = 1000): Promise<void> {
@@ -91,6 +96,7 @@ const noEmpty = async () => ({ empty: [] as string[], truncated: false });
 function channelWith(
   readable: () => Set<string>,
   listEmpty: VaultChannelDeps["listEmpty"] = noEmpty,
+  loadDiff: (docId: string) => Promise<DocDiff | null> = async (docId) => diffFor(docId),
 ): { channel: VaultChannel; pubsub: InMemoryPubSub } {
   const pubsub = new InMemoryPubSub();
   pubsubs.push(pubsub);
@@ -101,7 +107,7 @@ function channelWith(
       return { userId: "u1", vaultId: "v1" };
     },
     listReadableDocs: async () => readable(),
-    loadDiff: async (docId: string) => diffFor(docId),
+    loadDiff: loadDiff as VaultChannelDeps["loadDiff"],
     listEmpty,
     backfillConcurrency: 4,
   });
@@ -544,6 +550,30 @@ describe("ready.empty (server-side-empty notes)", () => {
     );
     const ws = await connectAndWait(channel);
     expect(readyFrame(ws)).toEqual({ t: "ready" });
+  });
+
+  it("names the docs the backfill found the CLIENT ahead on (`behind`), and sends them no frame", async () => {
+    // "B" is a doc this device holds unpushed ops for: the server's copy is a
+    // strict subset, so there is nothing to send down — but the client has to be
+    // told to push, or those ops stay on one machine forever while every connect
+    // re-computes an empty diff for the doc (the 40-notes-per-reload bug).
+    const { channel } = channelWith(
+      () => new Set(["A", "B"]),
+      noEmpty,
+      async (docId) =>
+        docId === "B"
+          ? { update: new Uint8Array(0), serverStateVector: new Uint8Array(), upToDate: true, clientAhead: true }
+          : diffFor(docId),
+    );
+    const ws = await connectAndWait(channel);
+    expect(readyFrame(ws)).toEqual({ t: "ready", behind: ["B"] });
+    expect(ws.updates().map((u) => u.docId)).toEqual(["A"]);
+  });
+
+  it("omits `behind` when no client is ahead — the common frame is unchanged", async () => {
+    const { channel } = channelWith(() => new Set(["A"]));
+    const ws = await connectAndWait(channel);
+    expect("behind" in readyFrame(ws)!).toBe(false);
   });
 
   it("sends `ready` after the backfill frames, never before", async () => {

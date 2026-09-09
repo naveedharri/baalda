@@ -688,6 +688,16 @@ describe("parseServerControl — ready", () => {
     ).toEqual({ t: "ready", empty: ["a"], emptyTruncated: true });
   });
 
+  it("reads the `behind` list (docs this device holds unpushed ops for) and its flag", () => {
+    expect(parseServerControl(JSON.stringify({ t: "ready", behind: ["x", 3, ""] }))).toEqual({
+      t: "ready",
+      behind: ["x"],
+    });
+    expect(
+      parseServerControl(JSON.stringify({ t: "ready", empty: ["a"], behind: ["b"], behindTruncated: true })),
+    ).toEqual({ t: "ready", empty: ["a"], behind: ["b"], behindTruncated: true });
+  });
+
   it("tolerates an older server that omits both fields", () => {
     expect(parseServerControl(JSON.stringify({ t: "ready" }))).toEqual({ t: "ready" });
   });

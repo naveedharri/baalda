@@ -67,6 +67,7 @@ function channelWith(readable: () => Set<string>): {
       update: new Uint8Array([docId.charCodeAt(0)]),
       serverStateVector: new Uint8Array(),
       upToDate: false,
+      clientAhead: false,
     }),
     listEmpty: async () => ({ empty: [] as string[], truncated: false }),
     backfillConcurrency: 4,

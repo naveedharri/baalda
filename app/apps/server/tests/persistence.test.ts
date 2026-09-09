@@ -290,6 +290,51 @@ describe("loadDocDiff (vault-channel backfill)", () => {
     expect(diff!.serverStateVector).toEqual(Y.encodeStateVector(doc));
   });
 
+  it("a client that is AHEAD of the server is up to date, not behind — and is named as ahead", async () => {
+    // One vault re-downloaded "40 notes" on every reload: each held an edit the
+    // server had never received, so the vectors were unequal, so the diff was
+    // computed — and it was EMPTY (2 bytes), applied to nothing, and computed
+    // again on the next connect. Unequal is not behind; covered is up to date.
+    const doc = await seedDoc("shared");
+    await compact(DOC, pool); // probe path: state_vector present, log empty
+
+    const client = new Y.Doc();
+    Y.applyUpdate(client, Y.encodeStateAsUpdate(doc));
+    client.getText("content").insert(6, " + local only"); // never reached the server
+    const aheadSv = Y.encodeStateVector(client);
+
+    const { db, sql } = countingDb();
+    const diff = await loadDocDiff(DOC, aheadSv, db);
+    expect(diff!.upToDate).toBe(true);
+    expect(diff!.update.length).toBe(0);
+    expect(diff!.clientAhead).toBe(true);
+    // Answered by the probe: the snapshot BYTEA was never read for it.
+    expect(sql.some((q) => q.includes(SNAPSHOT_READ))).toBe(false);
+
+    // The slow path (a pending logged update) reaches the same verdict, and a
+    // client that is BOTH ahead and behind gets the ops it lacks plus the flag.
+    const later: Uint8Array[] = [];
+    doc.on("update", (u: Uint8Array) => later.push(u));
+    doc.getText("content").insert(0, "# ");
+    for (const u of later) await appendUpdate(DOC, u, pool, 1000);
+    const both = await loadDocDiff(DOC, aheadSv);
+    expect(both!.upToDate).toBe(false);
+    expect(both!.clientAhead).toBe(true);
+    Y.applyUpdate(client, both!.update);
+    expect(client.getText("content").toString()).toBe("# shared + local only");
+  });
+
+  it("an equal or merely behind client is not `clientAhead`", async () => {
+    const doc = await seedDoc("base");
+    const equal = await loadDocDiff(DOC, Y.encodeStateVector(doc));
+    expect(equal!.upToDate).toBe(true);
+    expect(equal!.clientAhead).toBe(false);
+    const behind = await loadDocDiff(DOC, Y.encodeStateVector(new Y.Doc()));
+    expect(behind!.upToDate).toBe(false);
+    expect(behind!.clientAhead).toBe(false);
+    expect((await loadDocDiff(DOC, null))!.clientAhead).toBe(false);
+  });
+
   it("a client with no state vector gets the full state", async () => {
     const doc = await seedDoc("# Full\nbody");
     const diff = await loadDocDiff(DOC, null);

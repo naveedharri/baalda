@@ -379,6 +379,41 @@ describe("SyncManager — ready.empty is the authority", () => {
     expect(engineHooks.refreshes).toBe(0); // nothing was truncated
   });
 
+  it("pushes a doc the server says this device is AHEAD on, despite the local checkpoint", async () => {
+    // The other way the checkpoint lies: the server HAS the note, but not all of
+    // it — this device holds ops (an edit typed offline, a push cut short) the
+    // server never received. `pushed` says done; the server's `ready.behind`
+    // outranks it. Before this, such a doc was badged synced forever, its edits
+    // never left the machine, and every connect re-delivered a 2-byte empty diff
+    // for it — 40 of them made one vault "sync 40 notes" on every reload.
+    fakeRegistry.mappedNotes.mockReturnValue([
+      { docId: "same", relPath: "Same.md" },
+      { docId: "ahead", relPath: "Ahead.md" },
+    ]);
+    fakeRegistry.pushed.add("same");
+    fakeRegistry.pushed.add("ahead");
+    const sm = new SyncManager();
+    await enable(sm);
+    engineHooks.settled = true;
+
+    // The server's `ready`: `behind` lands right before `empty`, as the engine
+    // delivers them.
+    engineHooks.opts!.onServerBehind?.(["ahead"]);
+    engineHooks.opts!.onServerEmpty?.([], false);
+    await sm.whenBulkSyncSettled();
+    await flush();
+
+    expect(connects.order).toEqual(["ahead"]);
+
+    // Confirmed by that push: the next `ready` that no longer names it queues
+    // nothing — no loop.
+    engineHooks.opts!.onServerBehind?.([]);
+    engineHooks.opts!.onServerEmpty?.([], false);
+    await sm.whenBulkSyncSettled();
+    await flush();
+    expect(connects.order).toEqual(["ahead"]);
+  });
+
   it("settles a server-empty doc whose local file is empty too - no push, ever", async () => {
     // The production loop behind "310 files re-syncing on every reload": the
     // vault holds hundreds of zero-byte placeholder notes. The server has no
