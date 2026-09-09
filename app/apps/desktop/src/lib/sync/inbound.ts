@@ -80,8 +80,11 @@ export interface InboundTrash {
    * `deleted` — the server tombstoned it: someone deleted the note.
    * `revoked` — it left the caller's readable set: access was taken away.
    *
-   * They execute identically (release the doc, move it to the vault trash) but
-   * carry different risk, so they get separate safety caps and separate
+   * Both release the doc and take the file off disk, but differently: a deleted
+   * note goes to the vault's recoverable trash (the undo for a deliberate
+   * removal), a revoked one is removed outright (the server still holds it, and
+   * a trash copy would keep the readable `.md` the revocation takes away). They
+   * also carry different risk, so they get separate safety caps and separate
    * wording when one is refused. A wrong `deleted` is a server bug destroying
    * work; a mass `revoked` is a routine admin action that happens to look the
    * same from here.

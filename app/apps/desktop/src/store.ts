@@ -144,12 +144,15 @@ interface AppStore {
    */
   noteRemovedSynced: boolean;
   /**
-   * Set when the note that was open was deleted by a TEAMMATE (or an AI) and we
-   * applied that locally: the trash-relative path the local copy was moved to, so
-   * the UI can say where it went. Distinct from `noteRemoved`, which means "the
-   * file vanished from under us" (a Finder delete) and offers no recovery hint.
+   * Set when the note that was open left because of a TEAMMATE (or an AI) and we
+   * applied that locally. `deleted`: they deleted it, and `trashedTo` is the
+   * trash-relative path the local copy was moved to, so the UI can say where it
+   * went. `revoked`: our access was taken away — the file is removed outright
+   * (no local copy is kept; the server still has it) and `trashedTo` is `null`.
+   * Distinct from `noteRemoved`, which means "the file vanished from under us"
+   * (a Finder delete) and offers no recovery hint.
    */
-  noteRemovedByTeammate: string | null;
+  noteRemovedByTeammate: { reason: "deleted" | "revoked"; trashedTo: string | null } | null;
   /** Follow an inbound rename: re-point the open note (and its descendants). */
   followNoteRename: (from: string, to: string) => void;
   /**
@@ -494,14 +497,16 @@ interface AppStore {
   closeLocalVault: () => void;
 
   // Resolving a vault's local folder (when none is bound yet)
-  /** Bind `path` to `orgId`, open it, and enable sync. */
-  /** Open `path` as `orgId`'s folder and bind them. `create` gates the mkdir —
+  /** Open `path` as `orgId`'s folder, bind them, paint the tree, and start sync
+   *  in the background (never awaited — see the body). `create` gates the mkdir —
    *  only paths that deliberately mint a NEW folder pass true; reopening a
-   *  remembered binding must not resurrect a folder the user moved away. */
+   *  remembered binding must not resurrect a folder the user moved away.
+   *  `deferSync` leaves sync to the caller, for the one path that has to
+   *  activate the org AFTER opening the folder (`setActiveOrganization`). */
   applyVaultFolder: (
     orgId: string,
     path: string,
-    opts?: { create?: boolean; seedIfEmpty?: boolean },
+    opts?: { create?: boolean; seedIfEmpty?: boolean; deferSync?: boolean },
   ) => Promise<void>;
   /**
    * Adopt a vault Rust has ALREADY opened (the native-picker commands open as
@@ -1776,12 +1781,12 @@ export const useStore = create<AppStore>((set, get) => ({
     // CodeMirror bound to a destroyed Y.Doc throws on the next keystroke.
     syncManager.setInboundListeners({
       onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
-      onNoteRemoved: (_docId, path, trashedTo) => {
+      onNoteRemoved: (_docId, path, trashedTo, reason) => {
         get().pruneTabs([path]);
         const open = get().openNote;
         if (open && (open.path === path || open.path.startsWith(path + "/"))) {
           get().closeNote();
-          set({ noteRemovedByTeammate: trashedTo });
+          set({ noteRemovedByTeammate: { reason, trashedTo } });
         }
       },
     });
@@ -2246,9 +2251,11 @@ export const useStore = create<AppStore>((set, get) => ({
     const gen = ++orgSwitchGen;
     const superseded = () => orgSwitchGen !== gen;
 
-    // Announce the destination BEFORE the first await. A switch is many round
-    // trips (activate org → re-read session → roster → billing → open the folder
-    // → re-enable sync → reconcile), and until the folder actually swaps, the
+    // Announce the destination BEFORE the first await. A vault already on this
+    // device swaps its folder in a few IPCs (the fast path in `switchToOrg`),
+    // too quickly for the overlay's fade-in; one without a folder yet is many
+    // round trips (activate org → re-read session → roster → billing →
+    // rediscover or mint a folder), and until the folder actually swaps, the
     // sidebar still shows the vault you just left. Clicking a vault and watching
     // the old one sit there is indistinguishable from the click not registering,
     // so the chrome reads this and renames itself to the target at once.
@@ -2303,19 +2310,69 @@ export const useStore = create<AppStore>((set, get) => ({
       leaveVaultSync();
       set(vaultScopedSyncReset());
 
+      // FAST PATH — the vault is already on this device. Each vault owns its
+      // own local folder; when that folder is bound and still on disk, open it
+      // and paint its tree BEFORE any network round trip. The switch itself is
+      // local work (the folder IS the vault); activating the org, refreshing
+      // the roster and reconciling sync are what FOLLOW it, not what it waits
+      // for. Until this reordering the overlay stayed up through six serial
+      // requests plus the whole registry reconcile, so switching to a synced
+      // vault took seconds and grew with vault size while a local switch was
+      // instant.
+      //
+      // `deferSync`: sync must not start in there — `enableSyncForVault` reads
+      // the org from `session.activeOrganizationId`, which still names the
+      // vault we are LEAVING until the two calls below land. (Rust's
+      // `vault-opened` event meanwhile scopes the folder to that stale org via
+      // `setVault`; nothing reads a scope's org, and `syncManager.enable`
+      // re-begins the scope with the right one before any sync work.)
+      //
+      // A folder that is present but won't open falls through to the SAME
+      // prompt as before, but only after the org is active: the prompt's
+      // resolution enables sync from the session, so it must name this vault.
+      const bound = readOrgVaults()[organizationId];
+      const boundOk = !!bound && (await ipc.folderExists(bound).catch(() => false));
+      if (superseded()) return;
+      let openError: unknown = null;
+      if (boundOk) {
+        try {
+          await get().applyVaultFolder(organizationId, bound, { deferSync: true });
+        } catch (e) {
+          openError = e ?? new Error("open failed");
+        }
+        if (superseded()) return;
+        // The folder is open and the tree is painted: the switch is done as far
+        // as the user can tell. Lower the overlay now, not after the network
+        // tail (the `finally` above then has nothing left to do).
+        if (openError === null) set({ switchingVault: null });
+      }
+
       await authManager.api.setActiveOrganization(organizationId);
       if (superseded()) return;
       const session = await authManager.currentSession();
       if (superseded()) return;
       set({ session });
+
+      if (boundOk && openError === null) {
+        // Roster + seat usage feed the members and billing panels, not the tree,
+        // and the reconcile is the part that scales with the vault: none of them
+        // is worth making the user wait for. Each swallows its own errors and
+        // gates its state writes on this still being the open vault.
+        void get().refreshVault();
+        void get().refreshOrgBilling();
+        void get()
+          .enableSyncForVault()
+          .catch((e) => console.warn("[sync] enable after switch failed", e));
+        return;
+      }
+
       await get().refreshVault();
       if (superseded()) return;
       // Seat usage + plan are per-vault, so refresh on every switch.
       await get().refreshOrgBilling();
       if (superseded()) return;
 
-      // Each vault owns its own local folder. If one is already bound and still
-      // on disk, swap to it. If not, do NOT reuse the folder that's currently
+      // No local folder opened above. Do NOT reuse the folder that's currently
       // open — rediscover this vault's existing folder, or mint one.
       const org = get().organizations.find((o) => o.id === organizationId);
       const orgName = org?.name ?? "New vault";
@@ -2332,28 +2389,21 @@ export const useStore = create<AppStore>((set, get) => ({
         });
       };
 
-      const bound = readOrgVaults()[organizationId];
-      if (bound && (await ipc.folderExists(bound).catch(() => false))) {
-        if (superseded()) return;
-        try {
-          await get().applyVaultFolder(organizationId, bound);
-          return;
-        } catch (e) {
-          // The folder is present but wouldn't open (locked index, permissions,
-          // transient I/O). This used to fall through to the auto-folder path,
-          // which minted a full duplicate copy of the vault under the vaults
-          // root AND re-pointed the binding at it — a hiccup made permanent.
-          // Ask instead; the binding stays on the user's real folder.
-          console.warn("[vault] bound folder failed to open", e);
-          if (superseded()) return;
-          askForFolder({
-            text: `This vault's folder couldn't be opened: ${e instanceof Error ? e.message : String(e)}`,
-            path: bound,
-          });
-          return;
-        }
+      if (boundOk) {
+        // The folder is present but wouldn't open (locked index, permissions,
+        // transient I/O). This used to fall through to the auto-folder path,
+        // which minted a full duplicate copy of the vault under the vaults
+        // root AND re-pointed the binding at it — a hiccup made permanent.
+        // Ask instead; the binding stays on the user's real folder.
+        console.warn("[vault] bound folder failed to open", openError);
+        askForFolder({
+          text: `This vault's folder couldn't be opened: ${
+            openError instanceof Error ? openError.message : String(openError)
+          }`,
+          path: bound,
+        });
+        return;
       }
-      if (superseded()) return;
 
       // No binding, or the bound path is gone (folder moved/renamed in Finder,
       // cleared webview storage, another device). Before minting a folder, look
@@ -2747,14 +2797,31 @@ export const useStore = create<AppStore>((set, get) => ({
     });
     rememberOrgVault(orgId, v.path);
     rememberLastVault(orgId);
-    // Turn sync on BEFORE the tree reads. Those two awaits were the window in
-    // which another vault switch (or a `vault-opened` event, or StrictMode's
-    // double-open in dev) could make this call stale and skip sync entirely,
-    // leaving a freshly joined vault sitting there not syncing. The staleness
-    // check still guards the call itself — `enableSyncForVault` re-checks the
-    // epoch internally — but it is no longer gated behind work it doesn't need.
-    if (sameVault(get, v.epoch)) {
-      await get().enableSyncForVault({ seedIfEmpty: opts?.seedIfEmpty });
+    // Start sync BEFORE the tree reads, but never WAIT for it.
+    //
+    // Starting first: the two tree awaits were the window in which another
+    // vault switch (or a `vault-opened` event, or StrictMode's double-open in
+    // dev) could make this call stale and skip sync entirely, leaving a freshly
+    // joined vault sitting there not syncing. `enableSyncForVault` re-checks the
+    // epoch internally, so the staleness check still guards the call itself.
+    //
+    // Not waiting: this used to be awaited, so the sidebar kept showing the
+    // vault being LEFT until the whole registry reconcile had finished — a full
+    // walk of the vault plus several server listings, i.e. seconds that grew
+    // with vault size — while a local vault switched instantly. The folder on
+    // disk IS the vault; the tree below is a top-level directory listing that
+    // needs nothing from the server. Every state write the reconcile makes is
+    // epoch-gated, and it re-reads the tree itself to surface the notes it
+    // materialized, so nothing here depends on it finishing. (A note opened
+    // before it lands is re-attached by the editor when `syncEnabled` flips.)
+    //
+    // `deferSync`: `enableSyncForVault` reads the org from the SESSION, so the
+    // caller that opens the folder before activating the org must start sync
+    // itself once the session names the new vault.
+    if (!opts?.deferSync && sameVault(get, v.epoch)) {
+      void get()
+        .enableSyncForVault({ seedIfEmpty: opts?.seedIfEmpty })
+        .catch((e) => console.warn("[sync] enable failed", e));
     }
     await get().refreshTree();
     await get().refreshTitles();
