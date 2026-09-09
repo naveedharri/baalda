@@ -1,7 +1,7 @@
 // Receiving end of the app's `baalda://` links: a shared note (`shareLink.ts`),
-// a server address (`connectLink.ts`), a team invitation (`inviteLink.ts`) and
-// the account hand-offs after email confirmation / password reset
-// (`accountLink.ts`).
+// a server address (`connectLink.ts`), a team invitation (`inviteLink.ts`), the
+// account hand-offs after email confirmation / password reset
+// (`accountLink.ts`) and the checkout success hand-off (`billingLink.ts`).
 //
 // Two arrival paths, and both have to work or links are unreliable:
 //   - the app is already running → `onOpenUrl` fires (on Windows/Linux this
@@ -17,6 +17,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../store";
 import { parseConnectLink } from "./connectLink";
 import { parseAccountLink } from "./accountLink";
+import { parseBillingLink } from "./billingLink";
 import { parseInviteDeepLink } from "./inviteLink";
 import { parseNoteLink } from "./shareLink";
 
@@ -69,6 +70,19 @@ async function handle(urls: string[] | null): Promise<void> {
       await useStore.getState().handleAccountLink(kind);
     } catch (e) {
       console.error("[deeplink] account link failed", url, e);
+    }
+    return;
+  }
+  // The checkout success page's hand-off: the server has already confirmed the
+  // payment, so all this does is make the app look at billing again.
+  for (const url of urls ?? []) {
+    const billing = parseBillingLink(url);
+    if (!billing) continue;
+    await focusWindow();
+    try {
+      await useStore.getState().handleBillingLink(billing.orgId);
+    } catch (e) {
+      console.error("[deeplink] billing link failed", url, e);
     }
     return;
   }

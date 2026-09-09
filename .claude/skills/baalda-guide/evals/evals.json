@@ -42,6 +42,33 @@
         "Gives at least one concrete in-app location (e.g. right-click → Share, Vault Settings → MCP)",
         "Under 300 words"
       ]
+    },
+    {
+      "id": 3,
+      "prompt": "I deleted my paid Baalda vault last week and started a fresh one. Am I still being charged, and can I just move the subscription over instead of paying again?",
+      "expected_output": "Billing was set to stop at the end of the already-paid period when the vault was deleted, so no new charge; the subscription is kept under Vault Settings → Billing → \"From deleted vaults\" and Transfer moves it to another vault the person owns that is not already on Pro, at the same price and period, and it starts renewing again.",
+      "files": [],
+      "assertions": [
+        "Says deleting the vault stopped the billing at the end of the period already paid for, not immediately",
+        "Says the subscription can be transferred to the new vault instead of buying again",
+        "Names the in-app location: Vault Settings → Billing, under \"From deleted vaults\", Transfer",
+        "States that the target vault must be one they own and not already on Pro",
+        "Does not claim a refund is issued",
+        "Under 250 words"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Two admins on my vault both clicked Upgrade to Pro. Are we paying twice, and what happens if the payment provider is down when I try to delete a vault?",
+      "expected_output": "No double charge: a vault can hold only one subscription and a second checkout is refused. If the payment provider cannot be reached to stop billing, the vault is not deleted at all and the app shows the error.",
+      "files": [],
+      "assertions": [
+        "Says a vault can have only one subscription and the second purchase is refused",
+        "Says deleting a Pro vault cancels the subscription at the end of the current period first",
+        "Says that if the provider cannot be reached the vault is not deleted and an error is shown",
+        "Points at Vault Settings → Billing for checking the current plan",
+        "Does not use the words CRDT, Yjs, or Hocuspocus"
+      ]
     }
   ]
 }

@@ -100,8 +100,11 @@ export interface InboundPlan {
   /** Folder paths to create locally, parents before children. */
   createFolders: string[];
   /**
-   * Local folder paths the server has DELETED (tombstoned by id), children
-   * before parents. The executor removes each one only if it is empty by then —
+   * Local folder paths that must leave this disk, children before parents: the
+   * server DELETED them (tombstoned by id), MOVED them elsewhere (the emptied
+   * old directory), or took this user's access away (the id vanished from the
+   * permission-filtered listing without a tombstone — a folder made private).
+   * The executor removes each one only if it is empty by then —
    * the notes inside leave via their own tombstones in {@link trash} first, and
    * a folder still holding anything (an unconfirmed orphan, a stray image, a
    * new local note) stays on disk and re-registers under a fresh id, which is
@@ -340,6 +343,54 @@ export function planInbound(input: InboundInput): InboundPlan {
         continue;
       }
       plan.removeFolders.push(path);
+    }
+  }
+  // A local folder whose recorded server id is neither listed nor tombstoned
+  // has left this user's VISIBLE set: the folder (or the share that made it
+  // reachable) was made private. `GET /api/folders` is permission-filtered, so
+  // the folder simply stops being listed — no tombstone, because nothing was
+  // deleted. Its notes leave via their own `revoked` entries below, and without
+  // this rule the emptied directory stayed in the sidebar forever ("Getting
+  // Started", contents gone, folder still there) and the outbound half kept
+  // re-adopting its hidden id on every pull.
+  //
+  // Same gates as a note revocation: the id must be one WE recorded (a folder
+  // with no server id was never agreed ours — absence then proves nothing), the
+  // server must have answered about deletions at all (`null` tombstones means
+  // "I don't know", and a truncated listing looks exactly like a mass revoke),
+  // and the path must not have been re-created server-side under a fresh id.
+  // Removal is still empty-only, so a folder holding anything the note pass
+  // refused to trash stays on disk. Capped like note revocations.
+  if (input.folderTombstones && input.serverFolderIds && input.localFolderIds) {
+    const revoked: string[] = [];
+    for (const [path, id] of input.localFolderIds) {
+      if (input.serverFolderIds.has(id)) continue; // listed (or moved) — handled above
+      if (input.folderTombstones.has(id)) continue; // deleted — handled above
+      if (!localFoldersCi.has(path.toLowerCase())) continue; // already gone locally
+      if (serverFoldersCi.has(path.toLowerCase())) continue; // re-created server-side
+      if (!isSafeFolderPath(path)) {
+        plan.rejected.push({
+          kind: "folder",
+          path,
+          docId: null,
+          reason: "unsafe local folder path",
+        });
+        continue;
+      }
+      revoked.push(path);
+    }
+    const cap = revokeCap(input.localFolderIds.size);
+    if (revoked.length > cap) {
+      for (const path of revoked) {
+        plan.rejected.push({
+          kind: "folder",
+          path,
+          docId: null,
+          reason: `refused: ${revoked.length} folder access removals in one pass exceeds the ${cap} safety limit`,
+        });
+      }
+    } else {
+      plan.removeFolders.push(...revoked);
     }
   }
   // Children before parents, so an emptied subtree unwinds bottom-up.

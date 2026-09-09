@@ -8,22 +8,60 @@ import {
   type BillingInterval,
   type BillingProvider,
   type NormalizedBillingEvent,
+  type SubscriptionSnapshot,
 } from "../../billing/provider.js";
-import { getEntitlement, seatCount } from "../../billing/entitlements.js";
+import {
+  getEntitlement,
+  normalizeIntervalForApi,
+  seatCount,
+  countOwnedUnsubscribedOrgs,
+  type Entitlement,
+} from "../../billing/entitlements.js";
+import {
+  ACTIVE_SUBSCRIPTION_STATUSES,
+  SUBSCRIPTION_COLUMNS,
+  applySubscriptionState,
+  canManageSubscriptionRow,
+  findByOrg,
+  findByProviderSubscription,
+  isActiveStatus,
+  type SubscriptionRow,
+  type SubscriptionState,
+} from "../../billing/store.js";
 import { successPageHtml } from "./billing-success.js";
+
+/**
+ * Shape of the checkout id Polar substitutes for `{CHECKOUT_ID}` on the success
+ * redirect (a UUID today). Anything else on the query string is ignored rather
+ * than sent to the provider — the page must render for everyone who lands on
+ * it, including someone who arrives with a mangled link.
+ */
+const CHECKOUT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
  * Subscription billing routes (frozen API contract).
  *
- *  GET  /api/billing/config              — public; advertises plans + limits.
- *  GET  /api/billing/orgs/:orgId         — member: this vault's plan/seats.
+ *  GET  /api/billing/config               — public; advertises plans + limits.
+ *  GET  /api/billing/mine                 — every vault I'm in + orphaned subs.
+ *  GET  /api/billing/orgs/:orgId          — member: this vault's plan/seats.
  *  POST /api/billing/orgs/:orgId/checkout — owner/admin: hosted checkout URL.
  *  POST /api/billing/orgs/:orgId/portal   — owner/admin: manage/cancel URL.
- *  POST /api/billing/webhook             — provider webhook (raw body, idempotent).
- *  GET  /api/billing/success             — checkout success landing page.
+ *  POST /api/billing/orgs/:orgId/cancel   — owner: stop at period end, or now.
+ *  POST /api/billing/orgs/:orgId/transfer — owner: move a sub to another vault.
+ *  POST /api/billing/webhook              — provider webhook (raw body, idempotent).
+ *  GET  /api/billing/success              — checkout success landing page; confirms
+ *                                            the checkout with the provider by id
+ *                                            and bounces into the desktop app.
  *
  * When billing is disabled (no provider token), /config reports
  * `{ enabled: false }` and every other route 404s — self-host stays unlimited.
+ *
+ * A subscription can OUTLIVE its vault (#109/#111). Deleting a vault leaves a
+ * **tombstone** row (`deleted_at` set) so the owner can still see, cancel or
+ * transfer what they are paying for, and so a webhook that arrives afterwards
+ * has somewhere to land instead of 500ing on a foreign key forever. Every
+ * per-org route below therefore accepts the tombstone's recorded owner as well
+ * as the live vault's members: `:orgId` may name a vault that no longer exists.
  */
 export interface BillingDeps {
   provider: BillingProvider;
@@ -33,6 +71,78 @@ const PLANS = [
   { id: "pro-monthly", label: "Pro", amount: 1000, currency: "usd", interval: "month" },
   { id: "pro-yearly", label: "Pro", amount: 9700, currency: "usd", interval: "year" },
 ] as const;
+
+/**
+ * How stale an active row may get before `GET /mine` re-reads it from the
+ * provider. Webhooks are the fast path; this is the backstop for the ones that
+ * never arrive (a mis-signed endpoint, a delivery dropped during an outage —
+ * 2026-09-08 was exactly that), so the two sides cannot stay diverged for
+ * longer than one visit to the Billing tab.
+ */
+const RECONCILE_STALE_MINUTES = 10;
+/** Cap the provider calls one request may make, so the tab can't hang on Polar. */
+const RECONCILE_MAX_PER_REQUEST = 5;
+
+/** Map a provider snapshot onto the shape `applySubscriptionState` persists. */
+function stateFromSnapshot(
+  orgId: string,
+  snap: SubscriptionSnapshot,
+  extra: Pick<SubscriptionState, "deletedAt" | "ownerUserId"> = {},
+): SubscriptionState {
+  return {
+    organizationId: orgId,
+    providerCustomerId: snap.providerCustomerId || null,
+    providerSubscriptionId: snap.providerSubscriptionId || null,
+    plan: "pro",
+    status: snap.status,
+    currentPeriodEnd: snap.currentPeriodEnd,
+    cancelAtPeriodEnd: snap.cancelAtPeriodEnd,
+    eventTs: snap.modifiedAt,
+    interval: snap.interval,
+    amount: snap.amount,
+    currency: snap.currency,
+    ...extra,
+  };
+}
+
+/** The `GET /api/billing/orgs/:orgId` body — shared with cancel and transfer. */
+function orgBillingBody(
+  ent: Entitlement,
+  seats: { members: number; pendingInvitations: number },
+) {
+  return {
+    plan: ent.plan,
+    status: ent.status,
+    currentPeriodEnd: ent.currentPeriodEnd,
+    cancelAtPeriodEnd: ent.cancelAtPeriodEnd,
+    interval: ent.interval,
+    amount: ent.amount,
+    currency: ent.currency,
+    seats: {
+      members: seats.members,
+      pendingInvitations: seats.pendingInvitations,
+      // Active subscription ⇒ unlimited (null); otherwise the free-tier cap.
+      limit: ent.active ? null : config.freeMaxMembers,
+    },
+  };
+}
+
+/** Read the billing view for one org (works for a tombstone: seats come back 0). */
+async function readOrgBilling(orgId: string) {
+  const [ent, seats] = await Promise.all([getEntitlement(orgId), seatCount(orgId)]);
+  return orgBillingBody(ent, seats);
+}
+
+/**
+ * Does this user own the tombstone for `orgId`? The fallback authority for
+ * every per-org route: the vault is gone, so `orgRole` has nothing to answer
+ * with, but the person still being charged must not be locked out of the
+ * subscription they are paying for.
+ */
+async function ownsTombstone(orgId: string, userId: string): Promise<boolean> {
+  const row = await findByOrg(pool, orgId);
+  return !!row && !!row.deleted_at && row.owner_user_id === userId;
+}
 
 export function createBillingRoutes(deps: BillingDeps): Hono {
   const billing = new Hono();
@@ -52,10 +162,80 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
   });
 
   // ── success landing page (checkout success_url) ─────────────────────────────
-  billing.get("/billing/success", (c) => {
+  //
+  // Two jobs. First, CONFIRM: the redirect carries Polar's checkout id, so we
+  // read the checkout back over Polar's API and, if it succeeded, write the
+  // subscription row right here. This is the path that does not depend on a
+  // webhook — the staging server, whose URL Polar had no endpoint for, showed
+  // exactly why: the customer paid, landed on this page, and the app polled
+  // "free" for three minutes because nothing ever told the server (2026-09-09).
+  // The webhook, when it does arrive, hits the same upsert and its ordering
+  // guard, so the two paths converge instead of fighting. Second, HAND BACK:
+  // bounce into the desktop app on this deployment's URL scheme — the same
+  // hand-off the account pages use — so nobody is left staring at a browser tab
+  // wondering whether the app noticed.
+  billing.get("/billing/success", async (c) => {
     if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
-    return c.html(successPageHtml);
+    const checkoutId = c.req.query("checkout_id") ?? "";
+    let orgId: string | null = null;
+    if (CHECKOUT_ID_RE.test(checkoutId)) {
+      // Best-effort and never fatal: the page is the customer's receipt and
+      // must render even when the provider is unreachable — the app's polling
+      // and the webhook are still behind it.
+      try {
+        orgId = await confirmCheckout(checkoutId);
+      } catch (err) {
+        console.warn(
+          `billing success: could not confirm checkout ${checkoutId}:`,
+          (err as Error).message,
+        );
+      }
+    }
+    const deepLink =
+      `${config.deepLinkScheme}://billing/upgraded` +
+      (orgId ? `?org=${encodeURIComponent(orgId)}` : "");
+    return c.html(successPageHtml({ deepLink }));
   });
+
+  /**
+   * Read a checkout back from the provider and, if it has succeeded, persist
+   * its subscription. Returns the vault id the checkout was for (when known),
+   * whether or not anything was written.
+   *
+   * Nothing from the URL is trusted beyond "which checkout to ask about": the
+   * vault, the user, the subscription and its state all come from the
+   * provider's authenticated answer, exactly as they would off a webhook.
+   */
+  async function confirmCheckout(checkoutId: string): Promise<string | null> {
+    const checkout = await deps.provider.getCheckout(checkoutId);
+    if (!checkout) return null;
+    if (checkout.status !== "succeeded" || !checkout.providerSubscriptionId) {
+      return checkout.orgId;
+    }
+    const snap = await deps.provider.getSubscription(checkout.providerSubscriptionId);
+    if (!snap) return checkout.orgId;
+
+    // Same resolution as the webhook: a row that already holds this provider
+    // subscription wins over the checkout's metadata (a transfer may have moved
+    // it since), then the vault the checkout was started for.
+    const existing = await findByProviderSubscription(pool, checkout.providerSubscriptionId);
+    const orgId = existing?.organization_id ?? checkout.orgId;
+    if (!orgId) return null;
+
+    // The vault may have been deleted between paying and landing here. Record
+    // the tombstone the webhook would have, so the owner can still see, cancel
+    // or transfer what they are paying for (#109).
+    let deletedAt: Date | null | undefined;
+    if (!existing) {
+      const { rowCount } = await pool.query("SELECT 1 FROM organization WHERE id = $1", [orgId]);
+      if (rowCount === 0) deletedAt = new Date();
+    }
+    await applySubscriptionState(pool, {
+      ...stateFromSnapshot(orgId, snap, { deletedAt, ownerUserId: checkout.userId }),
+      providerCustomerId: snap.providerCustomerId || checkout.providerCustomerId,
+    });
+    return orgId;
+  }
 
   // ── webhook (raw body, signature-verified, idempotent) ─────────────────────
   // Registered before the gate below only conceptually; the gate short-circuits
@@ -115,37 +295,57 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
         return c.body(null, 200); // already processed
       }
 
-      // Ordering guard: webhooks aren't delivery-ordered, so only apply when the
-      // incoming event is at least as new as the row we hold (event_ts). A stale
-      // redelivery is still recorded as processed (claim above) but must NOT
-      // overwrite newer state — the WHERE turns it into a no-op on conflict.
-      await client.query(
-        `INSERT INTO subscriptions (
-           organization_id, provider, provider_customer_id, provider_subscription_id,
-           plan, status, current_period_end, cancel_at_period_end, event_ts, updated_at
-         ) VALUES ($1, 'polar', $2, $3, $4, $5, $6, $7, $8, now())
-         ON CONFLICT (organization_id) DO UPDATE SET
-           provider_customer_id     = EXCLUDED.provider_customer_id,
-           provider_subscription_id = EXCLUDED.provider_subscription_id,
-           plan                     = EXCLUDED.plan,
-           status                   = EXCLUDED.status,
-           current_period_end       = EXCLUDED.current_period_end,
-           cancel_at_period_end     = EXCLUDED.cancel_at_period_end,
-           event_ts                 = EXCLUDED.event_ts,
-           updated_at               = now()
-         WHERE subscriptions.event_ts IS NULL
-            OR EXCLUDED.event_ts >= subscriptions.event_ts`,
-        [
-          event.organizationId,
-          event.providerCustomerId,
-          event.providerSubscriptionId,
-          event.plan,
-          event.status,
-          event.currentPeriodEnd,
-          event.cancelAtPeriodEnd,
-          event.occurredAt,
-        ],
+      // Which row does this subscription belong to? The provider subscription
+      // id wins over `metadata.organization_id`: after a transfer Polar's
+      // metadata can still name the vault the subscription came FROM, and
+      // following it would move a live subscription back onto a vault that no
+      // longer holds it.
+      const existing = await findByProviderSubscription(
+        client,
+        event.providerSubscriptionId,
       );
+      const orgId = existing?.organization_id ?? event.organizationId;
+
+      // No row yet and no such org ⇒ the vault was deleted and this event is
+      // about a subscription that outlived it. Record a tombstone and answer
+      // 200. Before migration 024 this hit the FK, rolled back the idempotency
+      // claim with it and 500'd, so Polar retried the same event forever (#109).
+      let deletedAt: Date | null | undefined;
+      if (!existing) {
+        const { rowCount } = await client.query(
+          "SELECT 1 FROM organization WHERE id = $1",
+          [orgId],
+        );
+        if (rowCount === 0) {
+          deletedAt = new Date();
+          console.warn(
+            `billing webhook for deleted vault ${orgId}: recorded as tombstone`,
+          );
+        }
+      }
+
+      // Ordering guard (inside applySubscriptionState): webhooks aren't
+      // delivery-ordered, so provider state only applies when the incoming
+      // event is at least as new as the row we hold. A stale redelivery is
+      // still recorded as processed by the claim above but must NOT overwrite
+      // newer state.
+      await applySubscriptionState(client, {
+        organizationId: orgId,
+        providerCustomerId: event.providerCustomerId,
+        providerSubscriptionId: event.providerSubscriptionId,
+        plan: event.plan,
+        status: event.status,
+        currentPeriodEnd: event.currentPeriodEnd,
+        cancelAtPeriodEnd: event.cancelAtPeriodEnd,
+        eventTs: event.occurredAt,
+        interval: event.interval,
+        amount: event.amount,
+        currency: event.currency,
+        deletedAt,
+        // With the org gone there are no `member` rows to derive an owner from,
+        // so checkout's `metadata.user_id` is the only remaining answer.
+        ownerUserId: event.userId,
+      });
 
       await client.query("COMMIT");
       return c.body(null, 200);
@@ -157,7 +357,189 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     }
   });
 
-  // ── status for a vault (any member) ─────────────────────────────────────────
+  // ── every vault I'm in, plus subscriptions whose vault is gone ─────────────
+  billing.get("/billing/mine", async (c) => {
+    if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const userId = session.userId;
+
+    const { rows: memberships } = await pool.query<{
+      org_id: string;
+      name: string;
+      role: string;
+    }>(
+      `SELECT o.id AS org_id, o.name AS name, m.role AS role
+         FROM member m
+         JOIN organization o ON o.id = m."organizationId"
+        WHERE m."userId" = $1
+        ORDER BY o.name ASC`,
+      [userId],
+    );
+
+    // Reconcile before assembling, so what we return is what Polar says. Only
+    // rows this user can actually act on, only ones that claim to be live, and
+    // only after they have gone stale — a fresh row was just written by a
+    // webhook or a mutation and re-reading it would be a wasted round trip.
+    const manageableOrgIds = memberships
+      .filter((m) => m.role === "owner" || m.role === "admin")
+      .map((m) => m.org_id);
+    const { rows: stale } = await pool.query<SubscriptionRow>(
+      `SELECT ${SUBSCRIPTION_COLUMNS} FROM subscriptions
+        WHERE (organization_id = ANY($1::text[])
+               OR (owner_user_id = $2 AND deleted_at IS NOT NULL))
+          AND status = ANY($3::text[])
+          AND provider_subscription_id IS NOT NULL
+          AND updated_at < now() - ($4 || ' minutes')::interval
+        ORDER BY updated_at ASC
+        LIMIT ${RECONCILE_MAX_PER_REQUEST}`,
+      [
+        manageableOrgIds,
+        userId,
+        ACTIVE_SUBSCRIPTION_STATUSES as unknown as string[],
+        String(RECONCILE_STALE_MINUTES),
+      ],
+    );
+    // Best-effort and never fatal: a provider outage must still render the tab.
+    await Promise.allSettled(
+      stale.map(async (row) => {
+        const subId = row.provider_subscription_id;
+        if (!subId) return;
+        try {
+          const snap = await deps.provider.getSubscription(subId);
+          if (!snap) {
+            // Unknown at Polar. Not "canceled" — our row points at something
+            // that isn't there, which is a data question for a human.
+            console.warn(
+              `billing reconcile: provider does not know subscription ${subId} (vault ${row.organization_id})`,
+            );
+            return;
+          }
+          await applySubscriptionState(pool, stateFromSnapshot(row.organization_id, snap));
+        } catch (err) {
+          console.warn(
+            `billing reconcile failed for vault ${row.organization_id}:`,
+            (err as Error).message,
+          );
+        }
+      }),
+    );
+
+    const orgIds = memberships.map((m) => m.org_id);
+    const subsByOrg = new Map<string, SubscriptionRow>();
+    const memberCounts = new Map<string, number>();
+    const inviteCounts = new Map<string, number>();
+    const owners = new Map<string, { userId: string; name: string; email: string }>();
+    if (orgIds.length) {
+      const [subs, members, invites, ownerRows] = await Promise.all([
+        pool.query<SubscriptionRow>(
+          `SELECT ${SUBSCRIPTION_COLUMNS} FROM subscriptions
+            WHERE organization_id = ANY($1::text[])`,
+          [orgIds],
+        ),
+        pool.query<{ org_id: string; c: number }>(
+          `SELECT "organizationId" AS org_id, count(*)::int AS c FROM member
+            WHERE "organizationId" = ANY($1::text[]) GROUP BY 1`,
+          [orgIds],
+        ),
+        pool.query<{ org_id: string; c: number }>(
+          `SELECT "organizationId" AS org_id, count(*)::int AS c FROM invitation
+            WHERE "organizationId" = ANY($1::text[])
+              AND status = 'pending' AND "expiresAt" > now()
+            GROUP BY 1`,
+          [orgIds],
+        ),
+        pool.query<{ org_id: string; user_id: string; name: string; email: string }>(
+          `SELECT m."organizationId" AS org_id, u.id AS user_id, u.name AS name, u.email AS email
+             FROM member m JOIN "user" u ON u.id = m."userId"
+            WHERE m."organizationId" = ANY($1::text[]) AND m.role = 'owner'
+            ORDER BY m."createdAt" ASC`,
+          [orgIds],
+        ),
+      ]);
+      for (const r of subs.rows) subsByOrg.set(r.organization_id, r);
+      for (const r of members.rows) memberCounts.set(r.org_id, Number(r.c));
+      for (const r of invites.rows) inviteCounts.set(r.org_id, Number(r.c));
+      // First owner by join time wins — the vault's creator, who pays for it.
+      for (const r of ownerRows.rows) {
+        if (!owners.has(r.org_id)) {
+          owners.set(r.org_id, { userId: r.user_id, name: r.name, email: r.email });
+        }
+      }
+    }
+
+    const vaults = memberships.map((m) => {
+      const row = subsByOrg.get(m.org_id);
+      const active = !!row && isActiveStatus(row.status);
+      const role = (m.role === "owner" || m.role === "admin" ? m.role : "member") as
+        | "owner"
+        | "admin"
+        | "member";
+      return {
+        orgId: m.org_id,
+        name: m.name,
+        role,
+        plan: (active ? "pro" : "free") as "free" | "pro",
+        status: apiStatus(row?.status),
+        currentPeriodEnd: row?.current_period_end
+          ? new Date(row.current_period_end).toISOString()
+          : null,
+        cancelAtPeriodEnd: row?.cancel_at_period_end ?? false,
+        interval: normalizeIntervalForApi(row?.interval ?? null),
+        amount: row?.amount === undefined || row.amount === null ? null : Number(row.amount),
+        currency: row?.currency ?? null,
+        seats: {
+          members: memberCounts.get(m.org_id) ?? 0,
+          pendingInvitations: inviteCounts.get(m.org_id) ?? 0,
+          limit: active ? null : config.freeMaxMembers,
+        },
+        billingOwner: owners.get(m.org_id) ?? null,
+        // Upgrade / Manage — the same owner-or-admin gate as checkout/portal.
+        canManage: role === "owner" || role === "admin",
+        // Moving money is the owner's alone, and only while there is something
+        // live to move.
+        canTransfer: role === "owner" && active,
+      };
+    });
+
+    // Tombstones this user owns that are STILL being charged. A canceled
+    // tombstone is history and deliberately not listed — there is nothing left
+    // to act on and it would only clutter the tab.
+    const { rows: orphanRows } = await pool.query<SubscriptionRow>(
+      `SELECT ${SUBSCRIPTION_COLUMNS} FROM subscriptions
+        WHERE owner_user_id = $1
+          AND deleted_at IS NOT NULL
+          AND status = ANY($2::text[])
+        ORDER BY deleted_at DESC`,
+      [userId, ACTIVE_SUBSCRIPTION_STATUSES as unknown as string[]],
+    );
+    const orphaned = orphanRows.map((row) => ({
+      orgId: row.organization_id,
+      orgName: row.org_name,
+      deletedAt: new Date(row.deleted_at as Date).toISOString(),
+      status: row.status as "active" | "past_due",
+      currentPeriodEnd: row.current_period_end
+        ? new Date(row.current_period_end).toISOString()
+        : null,
+      cancelAtPeriodEnd: row.cancel_at_period_end,
+      interval: normalizeIntervalForApi(row.interval),
+      amount: row.amount === null ? null : Number(row.amount),
+      currency: row.currency,
+    }));
+
+    return c.json({
+      vaults,
+      orphaned,
+      freeLimits: {
+        // Frozen wire field names, as in /config.
+        vaultsPerUser: config.freeMaxVaults,
+        membersPerVault: config.freeMaxMembers,
+        freeVaultsUsed: await countOwnedUnsubscribedOrgs(userId),
+      },
+    });
+  });
+
+  // ── status for a vault (any member, or a tombstone's owner) ────────────────
   billing.get("/billing/orgs/:orgId", async (c) => {
     if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
     const session = await getSession(c);
@@ -165,22 +547,11 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
 
     const orgId = c.req.param("orgId");
     const role = await orgRole(orgId, session.userId);
-    if (!role) return c.json({ error: "Not a member of this vault" }, 403);
+    if (!role && !(await ownsTombstone(orgId, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
 
-    const ent = await getEntitlement(orgId);
-    const seats = await seatCount(orgId);
-    return c.json({
-      plan: ent.plan,
-      status: ent.status,
-      currentPeriodEnd: ent.currentPeriodEnd,
-      cancelAtPeriodEnd: ent.cancelAtPeriodEnd,
-      seats: {
-        members: seats.members,
-        pendingInvitations: seats.pendingInvitations,
-        // Active subscription ⇒ unlimited (null); otherwise the free-tier cap.
-        limit: ent.active ? null : config.freeMaxMembers,
-      },
-    });
+    return c.json(await readOrgBilling(orgId));
   });
 
   // ── create checkout (owner/admin) ──────────────────────────────────────────
@@ -195,10 +566,26 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
       return c.json({ error: "Only vault owner/admin can start checkout" }, 403);
     }
 
+    // One vault, one subscription — always. `subscriptions` is keyed by
+    // organization_id, so a second checkout would charge the card again and
+    // then have nowhere to land: whichever subscription lost the upsert would
+    // be invisible to us while Polar kept billing for it (the #109 shape of
+    // problem, arrived at from the other direction). Refuse before the provider
+    // is ever asked, so no checkout session exists to be paid for. Changing
+    // plan or payment method goes through the portal; canceling goes through
+    // /cancel.
+    const existing = await findByOrg(pool, orgId);
+    if (existing && isActiveStatus(existing.status)) {
+      return c.json({ error: "already_subscribed" }, 409);
+    }
+
     const body = (await c.req.json().catch(() => ({}))) as { interval?: unknown };
     const interval: BillingInterval = body.interval === "year" ? "year" : "month";
 
-    const successUrl = `${config.betterAuthUrl}/api/billing/success`;
+    // `{CHECKOUT_ID}` is Polar's placeholder, substituted on redirect; the
+    // success page reads the checkout back by that id to confirm the payment
+    // without waiting on a webhook.
+    const successUrl = `${config.betterAuthUrl}/api/billing/success?checkout_id={CHECKOUT_ID}`;
     try {
       const { url } = await deps.provider.createCheckout({
         orgId,
@@ -213,7 +600,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     }
   });
 
-  // ── customer portal (owner/admin) ──────────────────────────────────────────
+  // ── customer portal (owner/admin, or a tombstone's owner) ─────────────────
   billing.post("/billing/orgs/:orgId/portal", async (c) => {
     if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
     const session = await getSession(c);
@@ -221,7 +608,11 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
 
     const orgId = c.req.param("orgId");
     const role = await orgRole(orgId, session.userId);
-    if (role !== "owner" && role !== "admin") {
+    const allowed =
+      role === "owner" ||
+      role === "admin" ||
+      (await ownsTombstone(orgId, session.userId));
+    if (!allowed) {
       return c.json({ error: "Only vault owner/admin can manage billing" }, 403);
     }
 
@@ -239,5 +630,170 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
     }
   });
 
+  // ── cancel (owner only; admins use the provider portal) ───────────────────
+  // `period_end` keeps the paid period the owner already bought; `now` revokes
+  // outright, which is the only way to stop paying for a vault that is gone.
+  billing.post("/billing/orgs/:orgId/cancel", async (c) => {
+    if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+
+    const orgId = c.req.param("orgId");
+    const row = await findByOrg(pool, orgId);
+    if (!row) return c.json({ error: "no_subscription" }, 404);
+    if (!(await canManageSubscriptionRow(session.userId, row))) {
+      return c.json({ error: "Only the vault owner can cancel the subscription" }, 403);
+    }
+    if (!isActiveStatus(row.status) || !row.provider_subscription_id) {
+      return c.json({ error: "no_subscription" }, 404);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as { mode?: unknown };
+    const mode: "period_end" | "now" = body.mode === "now" ? "now" : "period_end";
+
+    let snap: SubscriptionSnapshot;
+    try {
+      snap = await deps.provider.cancelSubscription(row.provider_subscription_id, mode);
+    } catch (err) {
+      return c.json(
+        {
+          error: "subscription_cancel_failed",
+          message: (err as Error).message || "provider cancel failed",
+        },
+        502,
+      );
+    }
+    // The provider's answer IS the state — write it now rather than waiting on
+    // a webhook that may be delayed or dropped.
+    await applySubscriptionState(pool, stateFromSnapshot(orgId, snap));
+    return c.json(await readOrgBilling(orgId));
+  });
+
+  // ── transfer a subscription to another vault I own (#110) ──────────────────
+  // `:orgId` is the SOURCE and may be a tombstone: "delete the vault, make a
+  // new one, move the subscription across" is the story this exists for, and
+  // the subscription is only reachable through its tombstone by then.
+  billing.post("/billing/orgs/:orgId/transfer", async (c) => {
+    if (!billingEnabled()) return c.json({ error: "Not found" }, 404);
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+
+    const sourceOrgId = c.req.param("orgId");
+    const body = (await c.req.json().catch(() => ({}))) as { targetOrgId?: unknown };
+    const targetOrgId = typeof body.targetOrgId === "string" ? body.targetOrgId : "";
+    if (!targetOrgId) return c.json({ error: "targetOrgId required" }, 400);
+
+    const source = await findByOrg(pool, sourceOrgId);
+    if (!source || !source.provider_subscription_id) {
+      return c.json({ error: "no_subscription" }, 404);
+    }
+    if (!(await canManageSubscriptionRow(session.userId, source))) {
+      return c.json({ error: "Only the vault owner can transfer the subscription" }, 403);
+    }
+    if (!isActiveStatus(source.status)) {
+      return c.json({ error: "subscription_not_active" }, 409);
+    }
+    // Checked before the target lookup: when source === target and the source
+    // is a tombstone, the target "org" doesn't exist either, and a 404 would
+    // hide the actual mistake.
+    if (targetOrgId === sourceOrgId) {
+      return c.json({ error: "same_vault" }, 400);
+    }
+
+    const { rows: targetOrgRows } = await pool.query<{ name: string }>(
+      "SELECT name FROM organization WHERE id = $1",
+      [targetOrgId],
+    );
+    const targetName = targetOrgRows[0]?.name;
+    if (targetName === undefined) return c.json({ error: "unknown_vault" }, 404);
+    if ((await orgRole(targetOrgId, session.userId)) !== "owner") {
+      return c.json({ error: "Only the target vault's owner can receive a subscription" }, 403);
+    }
+    const targetRow = await findByOrg(pool, targetOrgId);
+    if (targetRow && isActiveStatus(targetRow.status)) {
+      return c.json({ error: "target_already_subscribed" }, 409);
+    }
+
+    // Provider first, so a refusal changes nothing on our side. Un-cancel when
+    // the subscription was scheduled to lapse (which is exactly what deleting
+    // the source vault did to it) — otherwise the transfer would hand over a
+    // subscription that quietly dies at the end of the month.
+    let snap: SubscriptionSnapshot | null = null;
+    if (source.cancel_at_period_end) {
+      try {
+        snap = await deps.provider.resumeSubscription(source.provider_subscription_id);
+      } catch (err) {
+        return c.json(
+          {
+            error: "subscription_resume_failed",
+            message: (err as Error).message || "provider resume failed",
+          },
+          502,
+        );
+      }
+    }
+    // Best-effort: keep Polar's metadata honest for anyone reading it there.
+    // Our row decides ownership, and webhooks resolve by provider subscription
+    // id before they consult metadata, so a failure here costs us nothing.
+    try {
+      await deps.provider.setSubscriptionOrg(
+        source.provider_subscription_id,
+        targetOrgId,
+        session.userId,
+      );
+    } catch (err) {
+      console.error(
+        `billing transfer: could not re-point provider metadata for ${source.provider_subscription_id}:`,
+        (err as Error).message,
+      );
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // A stale (canceled / none) row on the target would collide with the
+      // primary key; it holds nothing worth keeping.
+      if (targetRow) {
+        await client.query("DELETE FROM subscriptions WHERE organization_id = $1", [
+          targetOrgId,
+        ]);
+      }
+      await client.query(
+        `UPDATE subscriptions SET
+           organization_id = $2,
+           deleted_at      = NULL,
+           org_name        = $3,
+           owner_user_id   = $4,
+           updated_at      = now()
+         WHERE organization_id = $1`,
+        [sourceOrgId, targetOrgId, targetName, session.userId],
+      );
+      if (snap) {
+        await applySubscriptionState(
+          client,
+          stateFromSnapshot(targetOrgId, snap, { deletedAt: null }),
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    return c.json({
+      transferred: true,
+      orgId: targetOrgId,
+      billing: await readOrgBilling(targetOrgId),
+    });
+  });
+
   return billing;
+}
+
+/** Row status → the four values the wire contract allows. */
+function apiStatus(status: string | undefined): "none" | "active" | "past_due" | "canceled" {
+  if (status === "active" || status === "past_due" || status === "canceled") return status;
+  return "none";
 }

@@ -1,21 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { type BillingPlan } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 
 /** Poll cadence + budget while waiting for the checkout webhook to land. */
 const POLL_INTERVAL_MS = 3_000;
-const POLL_BUDGET_MS = 3 * 60 * 1000;
+const POLL_BUDGET_MS = 10 * 60 * 1000;
 
-/** Format a plan's amount (minor units) as a compact price, e.g. "$10", "$97". */
-function formatPrice(plan: BillingPlan): string {
-  const major = plan.amount / 100;
+/**
+ * Format an amount (minor units) as a compact price, e.g. "$10", "$97".
+ *
+ * Takes the two fields it reads rather than a `BillingPlan` so the
+ * Subscriptions list can price a row from the provider snapshot on it
+ * (`amount`/`currency`), which is not a plan (#109).
+ */
+export function formatPrice(money: { amount: number; currency: string }): string {
+  const major = money.amount / 100;
   try {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
-      currency: plan.currency.toUpperCase(),
+      currency: money.currency.toUpperCase(),
       maximumFractionDigits: Number.isInteger(major) ? 0 : 2,
     }).format(major);
   } catch {
@@ -24,17 +29,38 @@ function formatPrice(plan: BillingPlan): string {
   }
 }
 
-const perLabel = (interval: "month" | "year") => (interval === "month" ? "/mo" : "/yr");
+export const perLabel = (interval: "month" | "year") =>
+  interval === "month" ? "/mo" : "/yr";
 
 /**
  * Upgrade-to-Pro flow (ShareDialog modal pattern). Shows the plan card with a
  * monthly/yearly toggle built from `billingConfig.plans`, kicks off a hosted
  * checkout, then WAITS: the browser redirect is never treated as proof of
  * payment — only a `status: "active"` from polling `getOrgBilling` unlocks Pro.
+ *
+ * `orgId` names the vault being upgraded, defaulting to the active one. The
+ * Subscriptions list passes it explicitly: it can upgrade any vault the user
+ * owns, including one they are not currently working in (#109).
  */
-export function UpgradeDialog({ onClose }: { onClose: () => void }) {
+export function UpgradeDialog({
+  onClose,
+  orgId: orgIdProp,
+}: {
+  onClose: () => void;
+  orgId?: string;
+}) {
   const billingConfig = useStore((s) => s.billingConfig);
-  const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const activeOrgId = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const orgId = orgIdProp ?? activeOrgId;
+  // The store's own view of this vault's plan. The checkout success page hands
+  // back into the app with a deep link that refreshes both of these, so while
+  // we are waiting they can turn "pro" before our next 3-second poll — and the
+  // dialog should not keep a spinner up over a fact the rest of the app shows.
+  const storeSaysPro = useStore((s) => {
+    if (!orgId) return false;
+    if (s.myBilling?.vaults.some((v) => v.orgId === orgId && v.plan === "pro")) return true;
+    return orgId === activeOrgId && s.orgBilling?.status === "active";
+  });
 
   const plans = billingConfig?.plans ?? [];
   const monthly = plans.find((p) => p.interval === "month");
@@ -73,6 +99,16 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
+  // Waiting (or timed out), and the store already knows this vault is Pro:
+  // that is the success we were polling for — stop polling and show it.
+  useEffect(() => {
+    if (!storeSaysPro) return;
+    if (phase !== "waiting" && phase !== "timeout") return;
+    cancelledRef.current = true;
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    setPhase("success");
+  }, [storeSaysPro, phase]);
+
   /** One billing check: on `active`, flip to success + refresh the store. */
   const checkActive = async (): Promise<boolean> => {
     if (!orgId) return false;
@@ -81,6 +117,10 @@ export function UpgradeDialog({ onClose }: { onClose: () => void }) {
       if (b.status === "active") {
         setPhase("success");
         await useStore.getState().refreshOrgBilling();
+        // The Subscriptions list this may have been opened from is a second
+        // reader of the same fact — leaving it stale would show the vault we
+        // just upgraded as Free.
+        await useStore.getState().refreshMyBilling();
         return true;
       }
     } catch {

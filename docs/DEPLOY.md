@@ -292,6 +292,20 @@ confirm `/health` and a real sync round-trip, then promote.
 > (Organization settings, or `PATCH /v1/organizations/:id` with `subscription_settings.allow_multiple_subscriptions: true`),
 > otherwise a customer's second vault upgrade is rejected at checkout.
 
+Billing needs no manual cleanup, and in particular none after a vault is deleted.
+`DELETE /api/orgs/:orgId` asks the provider to cancel at the **end of the current
+period** *before* it deletes anything: if the provider refuses, the vault is kept
+and the route answers `502 subscription_cancel_failed`. The `subscriptions` row
+then outlives the vault as a **tombstone** (migration 024 dropped the cascade
+from `organization` and added `deleted_at` / `org_name` / `owner_user_id`), so a
+late `subscription.*` webhook is stored and acknowledged instead of failing on a
+foreign key and being retried by the provider forever. Webhooks resolve their row
+by provider subscription id first, which is also what makes a transferred
+subscription land on the vault that now holds it. Tombstones are what the owner
+sees under "From deleted vaults", and `GET /api/billing/mine` re-reads stale
+active rows from the provider, so our Postgres and the provider converge on their
+own — never edit `subscriptions` by hand to fix a mismatch.
+
 See `app/apps/server/.env.example` for the same list with inline comments.
 
 ## Outbound email (password reset, invitations)

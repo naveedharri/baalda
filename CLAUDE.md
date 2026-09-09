@@ -214,10 +214,18 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   roles owner/admin/member; 48h invitations). Session token is
   opaque (instant revocation), stored client-side only in the OS keychain.
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
-  `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`,
+  `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
   read-only page — token is the capability; renders via the escape-first `render/note-html.ts`,
   no renderer deps).
+- `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
+  always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
+  Deleting a vault cancels **at period end first** and aborts the delete if the provider refuses (502
+  `subscription_cancel_failed`; Better Auth's own org-delete is off via `disableOrganizationDeletion`).
+  The row then outlives the org as a **tombstone** — migration 024 dropped the cascade and added
+  `deleted_at`/`org_name`/`owner_user_id` — so a late webhook is stored, not FK-failed and retried
+  forever. Webhooks resolve by `provider_subscription_id` first, then metadata, which is what lets
+  `POST /api/billing/orgs/:orgId/transfer` (owner; un-cancels at Polar) move one; `/mine` reconciles.
 - `sync/hocuspocus.ts` — `onAuthenticate` verifies the per-doc JWT & sets `readOnly` for view grants;
   `onChange` appends the binary update + schedules re-index. `disconnectDoc` force-closes sockets on revoke.
 - `yjs/persistence.ts` — binary-only store: `doc_updates` append log + `doc_snapshots` (compact past

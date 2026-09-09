@@ -370,8 +370,80 @@ export interface OrgBilling {
   status: "none" | "active" | "past_due" | "canceled";
   currentPeriodEnd: string | null;
   cancelAtPeriodEnd: boolean;
+  /** Cadence + price of the live subscription, straight from the provider's
+   *  snapshot — so a row can be priced without matching it back to a
+   *  `BillingPlan`. All three are null on a vault with no subscription
+   *  (#109). `amount` is minor units, like {@link BillingPlan.amount}. */
+  interval: "month" | "year" | null;
+  amount: number | null;
+  currency: string | null;
   /** `limit: null` = unlimited (paid). */
   seats: { members: number; pendingInvitations: number; limit: number | null };
+}
+
+/** One row of the Subscriptions list: a vault the caller belongs to. */
+export interface MyBillingVault {
+  orgId: string;
+  name: string;
+  role: "owner" | "admin" | "member";
+  plan: "free" | "pro";
+  status: "none" | "active" | "past_due" | "canceled";
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  interval: "month" | "year" | null;
+  amount: number | null;
+  currency: string | null;
+  seats: { members: number; pendingInvitations: number; limit: number | null };
+  /** The vault's owner — who to point a member at when they can't act. */
+  billingOwner: { userId: string; name: string; email: string } | null;
+  /** Owner or admin: may upgrade this vault or open its portal. */
+  canManage: boolean;
+  /** Owner AND the subscription is live: may move it to another vault. */
+  canTransfer: boolean;
+}
+
+/**
+ * A subscription whose vault is gone. Deleting a vault cancels its
+ * subscription at the period end rather than instantly, so the paid time the
+ * user already bought survives the vault — and has to be reachable from
+ * somewhere (#109/#111). The server keeps the row as a tombstone; this is it.
+ */
+export interface OrphanedSubscription {
+  orgId: string;
+  orgName: string | null;
+  deletedAt: string;
+  status: "active" | "past_due";
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  interval: "month" | "year" | null;
+  amount: number | null;
+  currency: string | null;
+}
+
+/**
+ * Every subscription the caller can see or act on, in one shot. The per-vault
+ * `GET /api/billing/orgs/:orgId` can't answer this: role is only known for the
+ * active org and plan is only known one org at a time.
+ */
+export interface MyBilling {
+  vaults: MyBillingVault[];
+  orphaned: OrphanedSubscription[];
+  freeLimits: {
+    vaultsPerUser: number;
+    membersPerVault: number;
+    /** Owned vaults with no subscription — what counts against the cap. */
+    freeVaultsUsed: number;
+  };
+}
+
+/** What `DELETE /api/orgs/:orgId` reports back. */
+export interface VaultDeleteResult {
+  deleted: boolean;
+  vaults: number;
+  docs: number;
+  /** Set when the deleted vault carried a live subscription: the server told
+   *  the provider to stop at the period end, and this is when that is. */
+  subscription: { cancelAtPeriodEnd: boolean; currentPeriodEnd: string | null } | null;
 }
 
 /** A rejected server response — carries the HTTP status for callers to branch on. */
@@ -935,11 +1007,14 @@ export class ApiClient {
    * cascades members/note-collections/folders/notes/shares and purges the FK-less
    * CRDT stores. Throws ApiError 403 if the caller isn't the owner.
    * (The vault's server identity is the Better Auth organization id.)
+   *
+   * A vault on Pro is cancelled at the provider FIRST, at the period end; if
+   * the provider refuses, nothing is deleted and this throws 502
+   * `subscription_cancel_failed` (#111). On success `subscription` says when
+   * the paid period runs out — until then it can be moved to another vault.
    */
-  async deleteRemoteVault(
-    organizationId: string,
-  ): Promise<{ deleted: boolean; vaults: number; docs: number }> {
-    const { data } = await this.request<{ deleted: boolean; vaults: number; docs: number }>(
+  async deleteRemoteVault(organizationId: string): Promise<VaultDeleteResult> {
+    const { data } = await this.request<VaultDeleteResult>(
       "DELETE",
       `/api/orgs/${encodeURIComponent(organizationId)}`,
     );
@@ -1090,6 +1165,56 @@ export class ApiClient {
       "POST",
       `/api/billing/orgs/${encodeURIComponent(orgId)}/portal`,
     );
+    return data;
+  }
+
+  /**
+   * Every vault the caller belongs to with its plan/seats/role, plus any
+   * subscription left behind by a deleted vault. One request rather than an
+   * N+1 over {@link getOrgBilling}: the server also reconciles stale rows
+   * against the provider while it is in there.
+   */
+  async getMyBilling(): Promise<MyBilling> {
+    const { data } = await this.request<MyBilling>("GET", "/api/billing/mine");
+    return data;
+  }
+
+  /**
+   * Cancel a vault's subscription (owner only; admins use the portal).
+   * `period_end` keeps the paid time and stops the next charge; `now` revokes
+   * immediately — which is what a subscription from an already-deleted vault
+   * wants, since there is no vault left to spend the rest of the period on.
+   */
+  async cancelSubscription(
+    orgId: string,
+    mode: "period_end" | "now",
+  ): Promise<OrgBilling> {
+    const { data } = await this.request<OrgBilling>(
+      "POST",
+      `/api/billing/orgs/${encodeURIComponent(orgId)}/cancel`,
+      { body: { mode } },
+    );
+    return data;
+  }
+
+  /**
+   * Move a live subscription from one vault to another the caller owns. The
+   * source may be a deleted vault's tombstone, which is the whole point: it
+   * turns "I deleted the wrong vault" into a recoverable mistake instead of a
+   * refund request. Un-cancels at the provider when the source was set to
+   * cancel at the period end.
+   */
+  async transferSubscription(
+    sourceOrgId: string,
+    targetOrgId: string,
+  ): Promise<{ transferred: boolean; orgId: string; billing: OrgBilling }> {
+    const { data } = await this.request<{
+      transferred: boolean;
+      orgId: string;
+      billing: OrgBilling;
+    }>("POST", `/api/billing/orgs/${encodeURIComponent(sourceOrgId)}/transfer`, {
+      body: { targetOrgId },
+    });
     return data;
   }
 

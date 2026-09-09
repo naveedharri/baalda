@@ -1,12 +1,13 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { config, billingEnabled } from "../config.js";
+import type { BillingInterval } from "./provider.js";
 
 /**
  * Entitlement checks. These read ONLY our own tables (`subscriptions`, `member`,
  * `invitation`) — never the payment provider — so they're cheap and correct on
  * the request path. The `subscriptions` table is the single source of truth,
- * written only by webhook processing.
+ * written only through `billing/store.ts`.
  *
  * Every gate returns "allowed" when billing is disabled (self-host = unlimited).
  */
@@ -26,6 +27,16 @@ export interface Entitlement {
   providerSubscriptionId: string | null;
   /** True when the org has an active (or past_due grace) subscription. */
   active: boolean;
+  /**
+   * Price the provider is actually charging, persisted from its snapshots so
+   * "Subscriptions" can render a real figure without a provider round trip on
+   * the request path. Null on rows written before migration 024, and on any
+   * row the provider never reported a price for.
+   */
+  interval: BillingInterval | null;
+  /** Minor units (cents). */
+  amount: number | null;
+  currency: string | null;
 }
 
 interface SubRow {
@@ -35,16 +46,27 @@ interface SubRow {
   cancel_at_period_end: boolean;
   provider_customer_id: string | null;
   provider_subscription_id: string | null;
+  interval: string | null;
+  amount: number | null;
+  currency: string | null;
 }
 
-/** Read the current entitlement for an org from OUR subscriptions table. */
+/**
+ * Read the current entitlement for an org from OUR subscriptions table.
+ *
+ * A tombstone row (`deleted_at` set, the vault deleted) resolves exactly like a
+ * live one on purpose: the subscription is still real and still being charged,
+ * which is the whole point of keeping the row (#109). Callers that care about
+ * the difference read `deleted_at` through `billing/store.ts` instead.
+ */
 export async function getEntitlement(
   orgId: string,
   db: Queryable = defaultPool,
 ): Promise<Entitlement> {
   const { rows } = await db.query<SubRow>(
     `SELECT plan, status, current_period_end, cancel_at_period_end,
-            provider_customer_id, provider_subscription_id
+            provider_customer_id, provider_subscription_id,
+            interval, amount, currency
        FROM subscriptions WHERE organization_id = $1`,
     [orgId],
   );
@@ -58,6 +80,9 @@ export async function getEntitlement(
       providerCustomerId: null,
       providerSubscriptionId: null,
       active: false,
+      interval: null,
+      amount: null,
+      currency: null,
     };
   }
   const active = (ACTIVE_STATUSES as readonly string[]).includes(row.status);
@@ -71,6 +96,9 @@ export async function getEntitlement(
     providerCustomerId: row.provider_customer_id,
     providerSubscriptionId: row.provider_subscription_id,
     active,
+    interval: normalizeIntervalForApi(row.interval),
+    amount: row.amount === null ? null : Number(row.amount),
+    currency: row.currency,
   };
 }
 
@@ -79,6 +107,11 @@ function normalizeStatusForApi(status: string): Entitlement["status"] {
     return status;
   }
   return "none";
+}
+
+/** Only the two intervals we sell survive to the wire; anything else is null. */
+export function normalizeIntervalForApi(interval: string | null): BillingInterval | null {
+  return interval === "month" || interval === "year" ? interval : null;
 }
 
 /** Does the org have an active (unlimited-members) subscription right now? */

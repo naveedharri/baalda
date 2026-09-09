@@ -21,6 +21,7 @@ import {
   type Invitation,
   type InvitationPreview,
   type Member,
+  type MyBilling,
   type NoteLastEdited,
   type NoteVersion,
   type OrgBilling,
@@ -28,6 +29,7 @@ import {
   type SessionInfo,
   type Share,
   type VaultCheckpoint,
+  type VaultDeleteResult,
   type VaultRevertResult,
   vaultOrgId,
   vaultRootFrozen,
@@ -320,6 +322,11 @@ interface AppStore {
   billingConfig: BillingConfig | null;
   /** The active vault's subscription state + seat usage; null when unknown. */
   orgBilling: OrgBilling | null;
+  /** Every vault's plan plus the subscriptions left behind by deleted vaults —
+   *  what the Billing tab's Subscriptions list renders. This can't be derived
+   *  from `organizations` + `orgBilling`: role is only known for the active
+   *  org, and `orgBilling` covers one vault at a time (#109). */
+  myBilling: MyBilling | null;
 
   // ---- Account-level preferences (follow the app, not any vault) ----
   /** The user's chosen activity status; broadcast to teammates via presence. */
@@ -451,6 +458,12 @@ interface AppStore {
    * without a reload.
    */
   handleAccountLink: (kind: AccountLinkKind) => Promise<void>;
+  /**
+   * A `baalda://billing/upgraded?org=…` hand-off arrived from the checkout
+   * success page: the server has confirmed the payment, so re-read billing and
+   * say so. `orgId` is the vault that was upgraded, when the page knew it.
+   */
+  handleBillingLink: (orgId: string | null) => Promise<void>;
   /** Remove a member from the active vault (owner/admin), then refresh. */
   removeMember: (userId: string) => Promise<void>;
   /** Change a member's role in the active vault (owner/admin), then refresh. */
@@ -460,8 +473,11 @@ interface AppStore {
   /** Detach a vault from THIS device (forget its folder, stop syncing it).
    *  Server data and membership are untouched — it can be re-opened later. */
   removeVaultLocally: (organizationId: string) => Promise<void>;
-  /** Permanently delete a vault everywhere (owner only), then detach it. */
-  deleteRemoteVault: (organizationId: string) => Promise<void>;
+  /** Permanently delete a vault everywhere (owner only), then detach it.
+   *  Hands back the server's report so the caller can say what became of the
+   *  vault's subscription — deleting a Pro vault stops it at the END of the
+   *  period rather than instantly, and that date is the whole message (#111). */
+  deleteRemoteVault: (organizationId: string) => Promise<VaultDeleteResult>;
 
   /** Open a plain local folder as the current (unsynced) vault — leaving any
    *  synced vault's sync context behind. Used by the switcher's local rows
@@ -536,6 +552,8 @@ interface AppStore {
   refreshBillingConfig: () => Promise<void>;
   /** Refresh the active vault's subscription state + seats. */
   refreshOrgBilling: () => Promise<void>;
+  /** Refresh every vault's plan + any subscription from a deleted vault. */
+  refreshMyBilling: () => Promise<void>;
 
   // Sync
   setSyncStatus: (status: SyncStatus) => void;
@@ -1113,6 +1131,7 @@ export const useStore = create<AppStore>((set, get) => ({
   rootFrozen: false,
   billingConfig: null,
   orgBilling: null,
+  myBilling: null,
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
   treeSort: readTreeSort(),
@@ -1960,6 +1979,7 @@ export const useStore = create<AppStore>((set, get) => ({
       pendingVaultFolder: null,
       billingConfig: null,
       orgBilling: null,
+      myBilling: null,
       // Close the open vault so the app returns to the VaultPicker "home" screen
       // (choose / reopen a vault) instead of leaving the old vault's files
       // on screen after sign-out.
@@ -2007,7 +2027,7 @@ export const useStore = create<AppStore>((set, get) => ({
       if (peekPendingInvite()) await consumeQueuedInvite(get, set);
     } else {
       syncManager.disable();
-      set({ syncEnabled: false, billingConfig: null, orgBilling: null });
+      set({ syncEnabled: false, billingConfig: null, orgBilling: null, myBilling: null });
       // Same invitation, no session on the new server: raise the sign-in card
       // for it rather than leaving the queue to be discovered by the next
       // unrelated sign-in.
@@ -2469,6 +2489,35 @@ export const useStore = create<AppStore>((set, get) => ({
     toast("Password updated — sign in with your new password.", "success");
   },
 
+  handleBillingLink: async (orgId) => {
+    if (get().authStatus !== "signed-in") {
+      toast("Payment received. Sign in to see your Pro vault.", "neutral");
+      return;
+    }
+    // Both readers of the fact: the active vault's badge/limits and the
+    // Subscriptions list. The Upgrade dialog, if it is still open, watches
+    // these and flips to its success screen on its own.
+    await Promise.all([get().refreshOrgBilling(), get().refreshMyBilling()]);
+    const active = get().session?.activeOrganizationId ?? null;
+    const target = orgId ?? active;
+    const row = target ? get().myBilling?.vaults.find((v) => v.orgId === target) : undefined;
+    const isPro =
+      row?.plan === "pro" ||
+      (target !== null && target === active && get().orgBilling?.status === "active");
+    if (isPro) {
+      const name = row?.name;
+      toast(
+        name ? `${name} is now on Pro — unlimited team members.` : "You're on Pro — this vault is now unlimited.",
+        "success",
+      );
+      return;
+    }
+    // Paid, but the confirmation hasn't landed yet (provider still processing,
+    // or a webhook on its way). Polling in the Upgrade dialog and the next
+    // Billing visit pick it up; say so rather than nothing.
+    toast("Payment received — your subscription will show up in a moment.", "neutral");
+  },
+
   removeMember: async (userId) => {
     const activeOrgId = get().session?.activeOrganizationId;
     if (!activeOrgId) throw new Error("No active vault");
@@ -2567,9 +2616,14 @@ export const useStore = create<AppStore>((set, get) => ({
 
   deleteRemoteVault: async (organizationId) => {
     // Permanent, server-side, owner-only. 403s here if the caller isn't owner.
-    await authManager.api.deleteRemoteVault(organizationId);
+    // A vault on Pro is cancelled at the provider FIRST, so a 502 here means
+    // nothing was deleted — which is also why the result is handed back rather
+    // than swallowed: only the caller can tell the user when the paid period
+    // ends and that it can still be moved to another vault until then (#111).
+    const result = await authManager.api.deleteRemoteVault(organizationId);
     // Then tear down the same local state as a device-level removal.
     await get().removeVaultLocally(organizationId);
+    return result;
   },
 
   // ---- Vault folder resolution ----
@@ -2957,6 +3011,24 @@ export const useStore = create<AppStore>((set, get) => ({
     } catch (e) {
       console.warn("[billing] refresh failed", e);
       set({ orgBilling: null });
+    }
+  },
+
+  refreshMyBilling: async () => {
+    // Account-wide, so it needs a session rather than an active vault — the
+    // Billing tab is reachable from a local vault now. Failures are swallowed
+    // like refreshOrgBilling's: the list simply doesn't render, it never takes
+    // the settings page down with it.
+    if (!get().session || !get().billingConfig?.enabled) {
+      set({ myBilling: null });
+      return;
+    }
+    try {
+      const myBilling = await authManager.api.getMyBilling();
+      set({ myBilling });
+    } catch (e) {
+      console.warn("[billing] mine refresh failed", e);
+      set({ myBilling: null });
     }
   },
 
