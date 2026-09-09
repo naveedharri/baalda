@@ -95,8 +95,8 @@ n/a = synchronous or sub-100ms by construction.
 
 | Action | Work | Latency | Feedback |
 | --- | --- | --- | --- |
-| Switch vault (menu row) | 6+ round trips, then folder swap | 1–5s | ✅ sidebar renames to target + spinner; tree fades and stops taking clicks |
-| Switch vault (settings) | same | 1–5s | ✅ per-button spinner + the above |
+| Switch vault (menu row) | folder already on device: 3 IPCs, tree swaps first; org activation + roster + reconcile follow in the background. No folder yet: 6+ round trips, then rediscover/mint | <0.2s (on-device) / 1–5s (no folder) | ✅ sidebar renames to target + spinner; tree fades and stops taking clicks (only visible on the no-folder path — the overlay's 180ms fade-in outlasts an on-device switch) |
+| Switch vault (settings) | same | same | ✅ per-button spinner + the above |
 | Accept invitation | accept → switch → bind folder → reconcile | 1–5s | ✅ spinner |
 | Join by code | join → switch → reconcile | 1–5s | ✅ existing busy state |
 | New vault (menu) | create org → folder → seed | 1–3s | ✅ existing busy state |
