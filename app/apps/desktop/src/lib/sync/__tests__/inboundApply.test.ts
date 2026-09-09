@@ -84,7 +84,9 @@ function install(disk: FakeDisk) {
   vi.mocked(ipc.readNote).mockImplementation((async (p: string) =>
     disk.bodies.get(p) ?? "") as never);
   vi.mocked(ipc.ensureFolder).mockImplementation((async (p: string) => {
+    if (disk.folders.has(p)) return false; // already there — not a disk change
     disk.folders.add(p);
+    return true;
   }) as never);
   vi.mocked(ipc.writeNoteIfMissing).mockImplementation((async (p: string) => {
     if (disk.notes.has(p)) return false;
@@ -105,7 +107,7 @@ function install(disk: FakeDisk) {
     return to;
   }) as never);
   vi.mocked(ipc.deleteFolderIfEmpty).mockImplementation((async (p: string) => {
-    if (!disk.folders.has(p)) return true; // already gone — the goal state
+    if (!disk.folders.has(p)) return false; // already gone — nothing removed
     const prefix = p + "/";
     const occupied =
       [...disk.notes.keys()].some((n) => n.startsWith(prefix)) ||

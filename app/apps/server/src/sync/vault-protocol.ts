@@ -75,13 +75,27 @@ export type ServerControl =
    * client's cue to seed from its own disk. `emptyTruncated` means the list hit
    * the server's cap and another pass is needed.
    *
-   * Both fields are OMITTED when nothing is empty, so the overwhelmingly common
-   * frame stays byte-identical to `{"t":"ready"}`. Old clients ignore unknown
-   * keys (`parseServerControl` switches on `t` and reads only what it knows),
-   * which is why this could be added without a capability flag — unlike a new
-   * *binary* frame, see {@link HelloFrame.caps}.
+   * `behind` names the readable docs for which the CLIENT'S manifest ran ahead
+   * of the server — it holds ops we have never received (an edit typed while
+   * offline and never flushed, a push cut short). The backfill is downstream
+   * only, so this is the client's cue to push those docs over their per-doc
+   * sockets; without it they stayed local forever while every connect
+   * re-delivered an empty diff for them (see `DocDiff.clientAhead`).
+   * `behindTruncated` means the list hit the cap.
+   *
+   * Every field is OMITTED when it has nothing to say, so the overwhelmingly
+   * common frame stays byte-identical to `{"t":"ready"}`. Old clients ignore
+   * unknown keys (`parseServerControl` switches on `t` and reads only what it
+   * knows), which is why these could be added without a capability flag —
+   * unlike a new *binary* frame, see {@link HelloFrame.caps}.
    */
-  | { t: "ready"; empty?: string[]; emptyTruncated?: true }
+  | {
+      t: "ready";
+      empty?: string[];
+      emptyTruncated?: true;
+      behind?: string[];
+      behindTruncated?: true;
+    }
   | { t: "drop"; docId: string } // access lost / doc removed -> client evicts
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token
   | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry

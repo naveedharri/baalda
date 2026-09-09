@@ -325,9 +325,12 @@ export const createFolder = (parent: string, name: string, expectedEpoch?: Vault
 // opened.
 export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch) =>
   invoke<string>("rename_path", { from, to, expectedEpoch: expectedEpoch ?? null });
-/** Idempotent folder create — safe to call on every reconcile. */
+/** Idempotent folder create — safe to call on every reconcile. Resolves true
+ *  when THIS call created the directory (the watcher will echo it), false when
+ *  it already existed — including under another spelling on a case-insensitive
+ *  filesystem. */
 export const ensureFolder = (path: string, expectedEpoch?: VaultEpoch) =>
-  invoke<void>("ensure_folder", { path, expectedEpoch: expectedEpoch ?? null });
+  invoke<boolean>("ensure_folder", { path, expectedEpoch: expectedEpoch ?? null });
 /**
  * Move a note into `.context/trash/<stamp>/…` instead of deleting it, and return
  * the trash-relative destination. Used for remote deletes, so applying a
@@ -339,8 +342,9 @@ export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_path", { path, expectedEpoch: expectedEpoch ?? null });
 /**
  * Remove a folder the server has deleted — only if it is empty by now. Resolves
- * true when removed (or already gone); false when anything still lives inside,
- * in which case the folder stays, deliberately.
+ * true only when THIS call removed it (the watcher will echo that); false when
+ * it was already gone, or when anything still lives inside, in which case the
+ * folder stays, deliberately.
  */
 export const deleteFolderIfEmpty = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("delete_folder_if_empty", { path, expectedEpoch: expectedEpoch ?? null });

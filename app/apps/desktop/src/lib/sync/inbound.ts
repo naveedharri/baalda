@@ -273,8 +273,24 @@ export function planInbound(input: InboundInput): InboundPlan {
   // folder id, exactly like note tombstones) is what makes the delete provable;
   // without it, a device still holding the folder locally re-registered it on
   // its next pull and the deleted folder came back for the whole team.
+  //
+  // Every comparison here is case-insensitive, exactly like the notes below
+  // (`samePath`), because the filesystem is: on macOS and Windows
+  // `Projects/community` and `Projects/Community` are ONE directory. Comparing
+  // spellings instead of directories made a vault whose disk and server
+  // disagreed on one letter (a rename-by-case on one device, or migration 023
+  // merging case-duplicated rows) loop forever: `Content/pipeline` — an EMPTY
+  // server folder under the mis-cased parent — read as "missing locally", so
+  // pull N `ensureFolder`ed it (create_dir_all lands inside the existing
+  // directory regardless of case); the watcher's `tree` event requested pull
+  // N+1, which now saw the local spelling of that same id "moved" to the
+  // server's spelling and removed the empty directory again; the watcher
+  // requested pull N+2… One idle client pulled the whole registry (450 KB)
+  // every 1.5 s for days, with the sync badge blinking Syncing/Synced (#98).
+  const localFoldersCi = new Set([...input.localFolders].map((p) => p.toLowerCase()));
+  const serverFoldersCi = new Set([...input.serverFolders].map((p) => p.toLowerCase()));
   for (const path of input.serverFolders) {
-    if (input.localFolders.has(path)) continue;
+    if (localFoldersCi.has(path.toLowerCase())) continue;
     if (!isSafeFolderPath(path)) {
       plan.rejected.push({
         kind: "folder",
@@ -297,9 +313,10 @@ export function planInbound(input: InboundInput): InboundPlan {
   if (input.serverFolderIds && input.localFolderIds) {
     for (const [path, id] of input.localFolderIds) {
       const now = input.serverFolderIds.get(id);
-      if (now === undefined || now === path) continue;
-      if (!input.localFolders.has(path)) continue; // already gone locally
-      if (input.serverFolders.has(path)) continue; // re-created server-side
+      // A spelling disagreement is not a move: same directory on disk.
+      if (now === undefined || samePath(now, path)) continue;
+      if (!localFoldersCi.has(path.toLowerCase())) continue; // already gone locally
+      if (serverFoldersCi.has(path.toLowerCase())) continue; // re-created server-side
       if (!isSafeFolderPath(path)) continue;
       plan.removeFolders.push(path);
     }
@@ -311,8 +328,8 @@ export function planInbound(input: InboundInput): InboundPlan {
   if (input.folderTombstones && input.localFolderIds) {
     for (const [path, id] of input.localFolderIds) {
       if (!input.folderTombstones.has(id)) continue;
-      if (!input.localFolders.has(path)) continue; // already gone locally
-      if (input.serverFolders.has(path)) continue; // re-created server-side
+      if (!localFoldersCi.has(path.toLowerCase())) continue; // already gone locally
+      if (serverFoldersCi.has(path.toLowerCase())) continue; // re-created server-side
       if (!isSafeFolderPath(path)) {
         plan.rejected.push({
           kind: "folder",

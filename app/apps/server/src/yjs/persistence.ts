@@ -90,7 +90,58 @@ function mergeParts(
 export interface DocDiff {
   update: Uint8Array;
   serverStateVector: Uint8Array;
+  /** The client already holds every op the server has; `update` is empty. */
   upToDate: boolean;
+  /**
+   * The CLIENT holds ops the server has never seen — its state vector runs past
+   * ours for at least one client id. Nothing here can fetch those (this is a
+   * downstream feed), so the vault channel names such docs on `ready.behind`
+   * and the client pushes them over its per-doc socket.
+   *
+   * This is also why `upToDate` is "covered", not "equal": a client that is
+   * strictly ahead has NOTHING to receive, and treating the unequal vectors as
+   * "behind" shipped it a 2-byte empty diff on every connect — 40 docs holding
+   * unpushed edits made one vault re-download "40 notes" on every reload,
+   * forever, while the edits themselves never went anywhere.
+   */
+  clientAhead: boolean;
+}
+
+/**
+ * How a client's state vector relates to the server's. `serverCovered` means
+ * the client has at least the server's clock for every client id the server
+ * knows (the backfill diff would be empty); `clientAhead` means the client has a
+ * clock the server lacks (it holds ops we have never received). Both can be true.
+ * A vector that fails to decode is treated as unknown: not covered, not ahead —
+ * the caller then ships the full diff, which is the safe direction.
+ */
+export function compareStateVectors(
+  client: Uint8Array,
+  server: Uint8Array,
+): { serverCovered: boolean; clientAhead: boolean } {
+  let c: Map<number, number>;
+  let s: Map<number, number>;
+  try {
+    c = Y.decodeStateVector(client);
+    s = Y.decodeStateVector(server);
+  } catch {
+    return { serverCovered: false, clientAhead: false };
+  }
+  let serverCovered = true;
+  for (const [id, clock] of s) {
+    if ((c.get(id) ?? 0) < clock) {
+      serverCovered = false;
+      break;
+    }
+  }
+  let clientAhead = false;
+  for (const [id, clock] of c) {
+    if ((s.get(id) ?? 0) < clock) {
+      clientAhead = true;
+      break;
+    }
+  }
+  return { serverCovered, clientAhead };
 }
 
 export async function loadDocDiff(
@@ -120,7 +171,18 @@ export async function loadDocDiff(
   } else if (row.state_vector && !row.pending && clientStateVector) {
     const serverStateVector = new Uint8Array(row.state_vector);
     if (bytesEqual(clientStateVector, serverStateVector)) {
-      return { update: new Uint8Array(0), serverStateVector, upToDate: true };
+      return { update: new Uint8Array(0), serverStateVector, upToDate: true, clientAhead: false };
+    }
+    // Unequal is not "behind": a client that is a superset of us has nothing to
+    // receive either, and the probe can say so without touching the snapshot.
+    const cmp = compareStateVectors(clientStateVector, serverStateVector);
+    if (cmp.serverCovered) {
+      return {
+        update: new Uint8Array(0),
+        serverStateVector,
+        upToDate: true,
+        clientAhead: cmp.clientAhead,
+      };
     }
   }
   // Fall through: uncompacted doc, a pre-`state_vector` snapshot row (the column
@@ -140,14 +202,18 @@ export async function loadDocDiff(
 
   const merged = mergeParts(snapshotBuf, updates.rows);
   const serverStateVector = Y.encodeStateVectorFromUpdate(merged);
-  const upToDate =
-    clientStateVector != null && bytesEqual(clientStateVector, serverStateVector);
+  const cmp = clientStateVector
+    ? bytesEqual(clientStateVector, serverStateVector)
+      ? { serverCovered: true, clientAhead: false }
+      : compareStateVectors(clientStateVector, serverStateVector)
+    : { serverCovered: false, clientAhead: false };
+  const upToDate = cmp.serverCovered;
   const update = upToDate
     ? new Uint8Array(0)
     : clientStateVector
       ? Y.diffUpdate(merged, clientStateVector)
       : merged;
-  return { update, serverStateVector, upToDate };
+  return { update, serverStateVector, upToDate, clientAhead: cmp.clientAhead };
 }
 
 /**

@@ -843,8 +843,13 @@ export class VaultRegistry {
     for (const path of plan.createFolders) {
       if (this.stopRun()) break;
       try {
-        await ipc.ensureFolder(path, this.epoch());
-        changedDisk = true;
+        // Only a directory this call actually created is a disk change — and it
+        // is OUR change, so its watcher echo is remembered and consumed rather
+        // than read as an external edit that needs another pull (#98).
+        if (await ipc.ensureFolder(path, this.epoch())) {
+          changedDisk = true;
+          this.markMaterialized(path);
+        }
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return none;
         this.recordFailure({
@@ -1013,7 +1018,10 @@ export class VaultRegistry {
       if (this.stopRun()) break;
       try {
         const removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
-        if (removed) changedDisk = true;
+        if (removed) {
+          changedDisk = true;
+          this.markMaterialized(path); // our removal; one watcher echo to swallow
+        }
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
         this.recordFailure({
@@ -1677,8 +1685,11 @@ export class VaultRegistry {
           // says whether THIS pass created the file, so an existing real note is
           // never touched by the hydrate below.
           const created = await ipc.writeNoteIfMissing(rp, "", this.epoch());
-          mutated = true;
+          // A path that already held a file is not a change: claiming one made a
+          // pull with nothing to do report "changed" (and re-read the registry,
+          // and refresh the UI) on every pass it ran.
           if (created) {
+            mutated = true;
             // Remember it for one watcher echo, so the sync layer does not treat
             // our own placeholder as an external edit worth pushing.
             this.markMaterialized(rp);
