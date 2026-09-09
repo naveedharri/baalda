@@ -304,19 +304,27 @@ things switch on together:
 
 - **Password reset** — "Forgot password?" in the app (and on `/oauth/login`)
   emails a single-use link, valid for one hour, to `<BETTER_AUTH_URL>/reset-password`,
-  a page this server renders itself. Setting a new password signs out every
-  other session. The answer is the same whether or not the address exists.
+  a page this server renders itself; setting the password there bounces back
+  into the app's sign-in card. Setting a new password signs out every other
+  session. The request reports what happened — sent, no account for that
+  address on this server, or the provider's error — rather than a neutral
+  "check your inbox" (sign-up already reveals whether an address is taken, so
+  the neutral answer protected nothing and hid wrong-server mistakes).
   An account created through Google has no password; the same flow lets it set one.
 - **Sign-up verification** — a confirmation email on sign-up, recorded when the
-  link is clicked. It does not gate sign-in yet (accounts created before this
-  shipped were never verified, and locking them out would be worse than the
-  problem it solves).
+  link is clicked; the confirmation page bounces back into the app, which shows
+  the verified state under Account settings → Email without a reload (and offers
+  a resend). It does not gate sign-in yet (accounts created before this shipped
+  were never verified, and locking them out would be worse than the problem it
+  solves).
 - **Invitation emails** — inviting a teammate emails them a link to
   `<BETTER_AUTH_URL>/invite/<id>`, which opens the desktop app on that
   invitation: sign in (or sign up) with the invited address and they land in the
-  vault. Inviting an address that is already pending re-sends. A teammate who
-  was invited by email but joins with the vault's **join code** ends up in the
-  same state — the invited role, invitation marked accepted.
+  vault. Members says "Invitation emailed" only once the provider accepted the
+  message; if it refused, the reason is shown with the link to share instead.
+  Inviting an address that is already pending re-sends. A teammate who was
+  invited by email but joins with the vault's **join code** ends up in the same
+  state — the invited role, invitation marked accepted.
 
 Links are built from `BETTER_AUTH_URL`, so it must be the address people can
 reach from outside. A half-configured setup (a transport without `EMAIL_FROM`,

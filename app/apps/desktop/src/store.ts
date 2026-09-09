@@ -60,6 +60,7 @@ import { viewingDocId } from "./lib/presence/viewingDocId";
 import { dismissToast, toast } from "./lib/toast";
 import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
+import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
 import {
   acceptInviteFailureMessage,
@@ -109,6 +110,16 @@ export interface PendingVaultFolder {
   /** The vault was JUST created, so the folder it lands in may receive
    *  first-run starter content if empty. Never set for existing vaults. */
   seedIfEmpty?: boolean;
+}
+
+/** What `inviteMember` reports back to the Members tab. */
+export interface InviteResult {
+  invitation: Invitation;
+  /** True when the server accepted the email for delivery. */
+  emailed: boolean;
+  /** Why it wasn't emailed, when the server tried and failed. Null when this
+   *  server simply doesn't send email (then the link is the delivery). */
+  emailError: string | null;
 }
 
 interface AppStore {
@@ -161,12 +172,15 @@ interface AppStore {
    *   - "server-link": a `baalda://connect` invite arrived, offering a server
    *     to point this device at (see `pendingServerLink`);
    *   - "invite": a team invitation arrived while signed out, and the dialog
-   *     says which vault and which address it is for (see `invitePrompt`).
+   *     says which vault and which address it is for (see `invitePrompt`);
+   *   - "sign-in": a password was just reset in the browser (`baalda://signin`),
+   *     this device's session died with it, and the card opens ready for the
+   *     new password.
    * App.tsx mounts AuthDialog off this in both root branches; dismissing the
    * dialog clears the queued link / offered server / queued invite too.
    */
-  authPrompt: "note-link" | "server-link" | "invite" | null;
-  setAuthPrompt: (prompt: "note-link" | "server-link" | "invite" | null) => void;
+  authPrompt: "note-link" | "server-link" | "invite" | "sign-in" | null;
+  setAuthPrompt: (prompt: "note-link" | "server-link" | "invite" | "sign-in" | null) => void;
   /**
    * The invitation the sign-in dialog is currently about, when one arrived
    * while signed out.
@@ -423,10 +437,20 @@ interface AppStore {
     organizationId: string,
     opts?: { seedIfEmpty?: boolean },
   ) => Promise<void>;
-  /** Invite an email to the active vault. RETURNS the created invitation so the
-   *  caller can show its link — a server that can't send email leaves the link
-   *  as the only way the invitation ever reaches the person. */
-  inviteMember: (email: string, role: "member" | "admin") => Promise<Invitation>;
+  /** Invite an email to the active vault, then ask the server to email it.
+   *  RETURNS the invitation AND whether the email actually went out: a server
+   *  that can't send, or a provider that refused, leaves the link as the only
+   *  way the invitation ever reaches the person — so the UI must know. */
+  inviteMember: (email: string, role: "member" | "admin") => Promise<InviteResult>;
+  /** Re-send the sign-up confirmation email to the signed-in address. */
+  resendVerificationEmail: () => Promise<void>;
+  /**
+   * A `baalda://verified` / `baalda://signin` hand-off arrived from one of the
+   * server's account pages: re-read the session so the app reflects what just
+   * happened in the browser (address confirmed / sessions revoked by a reset)
+   * without a reload.
+   */
+  handleAccountLink: (kind: AccountLinkKind) => Promise<void>;
   /** Remove a member from the active vault (owner/admin), then refresh. */
   removeMember: (userId: string) => Promise<void>;
   /** Change a member's role in the active vault (owner/admin), then refresh. */
@@ -1881,6 +1905,19 @@ export const useStore = create<AppStore>((set, get) => ({
         await get().refreshOrgBilling();
         if (!joined) await get().openWelcomeIfPresent();
         await consumeQueuedNoteLink(get);
+        // The dialog closes the instant the session lands, so this is the only
+        // place the person hears that a confirmation email went out. Raised
+        // AFTER landing, because <Toasts /> only mounts once a vault is open —
+        // raised earlier it would tick down unseen. Only when the server can
+        // send email at all; otherwise nothing was sent and there is nothing to
+        // say.
+        const methods = await authManager.api.getAuthMethods();
+        if (methods.passwordReset && session.user.emailVerified === false) {
+          toast(
+            `Account created. We sent a confirmation email to ${session.user.email} — click its link to confirm your address.`,
+            "neutral",
+          );
+        }
       }
     } catch (e) {
       set({ authError: errMsg(e) });
@@ -2376,11 +2413,60 @@ export const useStore = create<AppStore>((set, get) => ({
       role,
       organizationId: activeOrgId,
     });
+    // Creating the row sends nothing by itself — the explicit send is what
+    // lets us say "emailed" only when the provider actually took the message,
+    // and show the link instead when it didn't.
+    let emailed = false;
+    let emailError: string | null = null;
+    const methods = await authManager.api.getAuthMethods();
+    if (methods.invitationEmail) {
+      try {
+        await authManager.api.sendInvitationEmail(invitation.id);
+        emailed = true;
+      } catch (e) {
+        const body = e instanceof ApiError && e.body && typeof e.body === "object" ? (e.body as { message?: unknown }) : null;
+        emailError =
+          (typeof body?.message === "string" && body.message) ||
+          (e instanceof Error ? e.message : String(e));
+      }
+    }
     await get().refreshVault();
     // Returned, not just refreshed into `pendingInvitations`: the caller needs
     // THIS invitation's id to build its link, and the roster list is keyed by
     // email with no promise about which row is the one just created.
-    return invitation;
+    return { invitation, emailed, emailError };
+  },
+
+  resendVerificationEmail: async () => {
+    const email = get().session?.user.email;
+    if (!email) throw new Error("Not signed in");
+    await authManager.api.sendVerificationEmail(email);
+  },
+
+  handleAccountLink: async (kind) => {
+    if (kind === "verified") {
+      // The browser just flipped `emailVerified`; re-read the session so the
+      // account screen (and anything else keyed on it) updates in place.
+      if (get().authStatus !== "signed-in") {
+        toast("Email confirmed. Sign in to continue.", "neutral");
+        return;
+      }
+      const session = await authManager.currentSession();
+      if (session) set({ session });
+      toast("Email confirmed — thanks!", "success");
+      return;
+    }
+    // "signin": a password reset in the browser revoked every session for that
+    // account, this device's included. Re-check rather than assume — the reset
+    // may have been for a different account than the one signed in here.
+    const session = await authManager.currentSession().catch(() => null);
+    if (session) {
+      toast("Password updated.", "success");
+      return;
+    }
+    if (get().authStatus === "signed-in") await get().signOut();
+    set({ authPrompt: "sign-in" });
+    toast("Password updated — sign in with your new password.", "success");
   },
 
   removeMember: async (userId) => {

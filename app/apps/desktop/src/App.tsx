@@ -606,6 +606,9 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
  *   - "server-link": a server invite (#91). The offered URL is parked in
  *     `pendingServerLink` and the dialog opens on its confirm step, so a
  *     self-hosting team can send one link instead of dictating a URL.
+ *   - "invite": a team invitation link; the card names the vault + address.
+ *   - "sign-in": a password was reset in the browser and this device's session
+ *     went with it; the card opens ready for the new password.
  *
  * Dismissing the dialog abandons whichever was pending (and, for a note link,
  * the vault-landing request it armed) so nothing fires on a later, unrelated
@@ -614,7 +617,12 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
  */
 function PromptedAuthDialog() {
   const authPrompt = useStore((s) => s.authPrompt);
-  if (authPrompt !== "note-link" && authPrompt !== "server-link" && authPrompt !== "invite") {
+  if (
+    authPrompt !== "note-link" &&
+    authPrompt !== "server-link" &&
+    authPrompt !== "invite" &&
+    authPrompt !== "sign-in"
+  ) {
     return null;
   }
   return (

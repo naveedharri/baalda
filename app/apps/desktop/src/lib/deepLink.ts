@@ -1,5 +1,7 @@
 // Receiving end of the app's `baalda://` links: a shared note (`shareLink.ts`),
-// a server address (`connectLink.ts`) and a team invitation (`inviteLink.ts`).
+// a server address (`connectLink.ts`), a team invitation (`inviteLink.ts`) and
+// the account hand-offs after email confirmation / password reset
+// (`accountLink.ts`).
 //
 // Two arrival paths, and both have to work or links are unreliable:
 //   - the app is already running → `onOpenUrl` fires (on Windows/Linux this
@@ -14,6 +16,7 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../store";
 import { parseConnectLink } from "./connectLink";
+import { parseAccountLink } from "./accountLink";
 import { parseInviteDeepLink } from "./inviteLink";
 import { parseNoteLink } from "./shareLink";
 
@@ -53,6 +56,19 @@ async function handle(urls: string[] | null): Promise<void> {
       await useStore.getState().openInviteLink(url);
     } catch (e) {
       console.error("[deeplink] invite failed", url, e);
+    }
+    return;
+  }
+  // Account hand-offs (`baalda://verified`, `baalda://signin`) carry no data;
+  // they just tell the app to look at its session again.
+  for (const url of urls ?? []) {
+    const kind = parseAccountLink(url);
+    if (!kind) continue;
+    await focusWindow();
+    try {
+      await useStore.getState().handleAccountLink(kind);
+    } catch (e) {
+      console.error("[deeplink] account link failed", url, e);
     }
     return;
   }

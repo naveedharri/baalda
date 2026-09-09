@@ -12,8 +12,10 @@ import { invitationState, loadInvitation } from "../../registry/invitations.js";
  * they work on api.baalda.com and on any self-host with no web frontend:
  *
  *   GET /forgot-password         ask for the reset email (linked from /oauth/login)
- *   GET /reset-password?token=…  choose a new password (the emailed link)
- *   GET /email-verified          where the verification link lands
+ *   GET /reset-password?token=…  choose a new password (the emailed link), then
+ *                                bounces into `baalda://signin`
+ *   GET /email-verified          where the verification link lands; bounces into
+ *                                `baalda://verified` so the app refreshes itself
  *   GET /invite/:id              where an invitation email lands: bounces into
  *                                the desktop app's `baalda://invite/…` deep link
  *
@@ -25,6 +27,15 @@ export const accountPageRoutes = new Hono();
 
 /** Better Auth ids (and anything else we'd put in a URL): one conservative shape. */
 const ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Deep links back into the desktop app (`lib/accountLink.ts` on the desktop
+ * side). Neither carries data: `verified` makes the app re-read its session so
+ * the verified state appears without a reload; `signin` makes it re-check the
+ * (now revoked) session and open the sign-in card.
+ */
+const VERIFIED_DEEP_LINK = "baalda://verified";
+const SIGNIN_DEEP_LINK = "baalda://signin";
 
 function notAvailable() {
   return page({
@@ -48,7 +59,7 @@ accountPageRoutes.get("/forgot-password", (c) => {
       <button type="submit" class="primary">Email me a reset link</button>
     </form>
     <div id="done" style="display:none">
-      <div class="ok">If an account exists for <b id="who"></b>, a reset link is on its way. Check your inbox (and spam) — the link is valid for one hour.</div>
+      <div class="ok">Reset link sent to <b id="who"></b>. Check your inbox (and spam) — the link is valid for one hour.</div>
     </div>
     <p class="foot"><a class="plain" href="/oauth/login">Back to sign in</a></p>
     <script>
@@ -61,11 +72,15 @@ accountPageRoutes.get("/forgot-password", (c) => {
         const email = document.getElementById('email').value.trim();
         btn.disabled = true; btn.textContent = 'Sending…';
         try {
-          const res = await fetch('/api/auth/request-password-reset', {
+          const res = await fetch('/api/password-reset/request', {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ email })
           });
-          if (!res.ok) { const j = await res.json().catch(()=>({})); throw new Error(j.message || 'Could not send the email'); }
+          if (!res.ok) {
+            const j = await res.json().catch(()=>({}));
+            if (j.error === 'no_account') throw new Error('There is no account for ' + email + ' on this server. Check the address — or the server, if your team runs its own.');
+            throw new Error(j.message || 'Could not send the email');
+          }
           document.getElementById('who').textContent = email;
           form.style.display = 'none';
           document.getElementById('done').style.display = 'block';
@@ -103,10 +118,14 @@ accountPageRoutes.get("/reset-password", (c) => {
       <button type="submit" class="primary">Set new password</button>
     </form>
     <div id="done" style="display:none">
-      <div class="ok">Your password is updated. Open ${esc(BRAND_NAME)} and sign in with it.</div>
+      <div class="ok">Your password is updated. Opening ${esc(BRAND_NAME)} so you can sign in with it…</div>
+      <a class="btn primary" href="${esc(SIGNIN_DEEP_LINK)}" style="display:block;text-decoration:none">Open ${esc(
+        BRAND_NAME,
+      )}</a>
     </div>
     <script>
       const TOKEN = ${JSON.stringify(token)};
+      const SIGNIN = ${JSON.stringify(SIGNIN_DEEP_LINK)};
       const errEl = document.getElementById('err');
       function showErr(m){ errEl.textContent = m; errEl.style.display='block'; }
       document.getElementById('f').addEventListener('submit', async (e) => {
@@ -131,6 +150,9 @@ accountPageRoutes.get("/reset-password", (c) => {
           }
           form.style.display = 'none';
           document.getElementById('done').style.display = 'block';
+          // Hand off to the app, which re-checks its session (revoked by the
+          // reset) and opens the sign-in card. The button stays as the fallback.
+          setTimeout(() => { location.href = SIGNIN; }, 600);
         } catch (err) {
           showErr(err.message || 'Could not set the password'); btn.disabled=false; btn.textContent='Set new password';
         }
@@ -153,12 +175,18 @@ accountPageRoutes.get("/email-verified", (c) => {
       400,
     );
   }
+  // Same hand-off as the invite page: bounce into the app, which refreshes its
+  // session so the verified state shows without a reload; button as fallback.
   return c.html(
     page({
       title: "Email confirmed",
-      body: `<h1>Email confirmed</h1><p class="sub">Thanks — your address is verified. You can close this tab and go back to ${esc(
+      body: `<h1>Email confirmed</h1><p class="sub">Thanks — your address is verified. Taking you back to ${esc(
         BRAND_NAME,
-      )}.</p>`,
+      )}…</p>
+      <a class="btn primary" href="${esc(VERIFIED_DEEP_LINK)}" style="display:block;text-decoration:none">Open ${esc(
+        BRAND_NAME,
+      )}</a>
+      <script>location.href = ${JSON.stringify(VERIFIED_DEEP_LINK)};</script>`,
     }),
   );
 });

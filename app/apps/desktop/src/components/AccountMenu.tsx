@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  type Invitation,
   type McpToolInfo,
   type McpTokenRow,
   type Member,
@@ -19,7 +18,7 @@ import {
   installUpdate,
   useUpdateState,
 } from "../lib/updater";
-import { readKnownVaults, readOrgVaults, useStore } from "../store";
+import { readKnownVaults, readOrgVaults, useStore, type InviteResult } from "../store";
 import {
   POPOVER_VAULT_ROWS,
   recentVaultRows,
@@ -1843,14 +1842,10 @@ function MembersTab({ canManage }: { canManage: boolean }) {
   const [busy, setBusy] = useState(false);
   const [code, setCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  // Does this server send invitation email? If not, the link IS the delivery
-  // mechanism and the admin has to be told to send it — an invitation that
-  // silently never arrives is the whole failure this notice prevents.
-  const [invitationEmail, setInvitationEmail] = useState(false);
   // The invitation just created, so its link can be shown. Not read out of
   // `pendingInvitations`: that list is keyed by email and makes no promise
   // about which row is the one this click produced.
-  const [created, setCreated] = useState<Invitation | null>(null);
+  const [created, setCreated] = useState<InviteResult | null>(null);
   // Which link was copied, by invitation id ("new" for the notice above the
   // list) — one shared flag would tick every row at once.
   const [copiedLink, setCopiedLink] = useState<string | null>(null);
@@ -1926,24 +1921,6 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     };
   }, [canManage]);
 
-  // Whether the server emails invitations. Fails closed like every capability
-  // probe in api.ts, which is the safe direction here: an admin told to share
-  // the link when the server would have emailed it has still delivered the
-  // invitation, where the reverse leaves it undelivered.
-  useEffect(() => {
-    if (!canManage) return;
-    let cancelled = false;
-    authManager.api
-      .getAuthMethods()
-      .then((m) => {
-        if (!cancelled) setInvitationEmail(m.invitationEmail);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [canManage]);
-
   const copyCode = async () => {
     if (!code) return;
     try {
@@ -1975,7 +1952,7 @@ function MembersTab({ canManage }: { canManage: boolean }) {
       setConfirmRevokeId(null);
       // Drop the just-created notice if it was about this invitation — its link
       // is dead now, and offering to copy it would be worse than saying nothing.
-      setCreated((c) => (c?.id === invitationId ? null : c));
+      setCreated((c) => (c?.invitation.id === invitationId ? null : c));
       await useStore.getState().refreshVault();
     } catch (e) {
       setInviteError(e instanceof Error ? e.message : String(e));
@@ -1988,10 +1965,7 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     setInviteError(null);
     setLimitNudge(null);
     try {
-      const invitation = await useStore
-        .getState()
-        .inviteMember(inviteEmail.trim(), inviteRole);
-      setCreated(invitation);
+      setCreated(await useStore.getState().inviteMember(inviteEmail.trim(), inviteRole));
       setInviteEmail("");
     } catch (e) {
       // A 402 member-cap rejection becomes an upgrade nudge; anything else is a
@@ -2050,20 +2024,23 @@ function MembersTab({ canManage }: { canManage: boolean }) {
           corner toast carrying a link the admin has to COPY is a link they will
           lose. */}
       {created && (
-        <div className="invite-notice">
-          {invitationEmail ? (
-            <span>Invitation emailed to {created.email}.</span>
+        <div className={`invite-notice${created.emailError ? " is-warning" : ""}`}>
+          {created.emailed ? (
+            // A fact, not a hope: the server only says so once the mail
+            // provider has accepted the message.
+            <span>Invitation emailed to {created.invitation.email}.</span>
           ) : (
             <>
               <span>
-                Invitation created — this server doesn't send email, so share this link
-                with {created.email}:
+                {created.emailError
+                  ? `Invitation created, but the email to ${created.invitation.email} couldn't be sent (${created.emailError}). Share this link instead:`
+                  : `Invitation created — this server doesn't send email, so share this link with ${created.invitation.email}:`}
               </span>
               <div className="invite-notice-link">
-                <code>{buildInviteLink(serverUrl, created.id) ?? ""}</code>
+                <code>{buildInviteLink(serverUrl, created.invitation.id) ?? ""}</code>
                 <button
                   className="link-btn"
-                  onClick={() => void copyInviteLink(created.id, "new")}
+                  onClick={() => void copyInviteLink(created.invitation.id, "new")}
                 >
                   {copiedLink === "new" ? "Copied ✓" : "Copy"}
                 </button>

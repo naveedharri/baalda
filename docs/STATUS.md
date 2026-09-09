@@ -202,15 +202,22 @@ Six changes that together make a vault something a team can actually govern.
   on the Google-OAuth pattern: unconfigured servers offer none of it, `GET /api/auth-methods`
   advertises `passwordReset` / `invitationEmail`, and the desktop keys its controls off that.
 - [x] **Password reset**: "Forgot password?" in the desktop dialog and on `/oauth/login` →
-  `request-password-reset` (neutral answer) → emailed single-use, 1-hour link to the server-rendered
-  `/reset-password` page → `reset-password` (revokes other sessions; creates the credential for a
-  Google-only account, so the same flow sets a first password). Admin escape hatch for servers
-  without email: `pnpm run set-password -- <email>`.
+  `POST /api/password-reset/request` (ours, not Better Auth's neutral endpoint: it answers sent /
+  `no_account` / `send_failed` with the provider's reason, so a wrong-server address or a refused
+  send is said out loud) → emailed single-use, 1-hour link to the server-rendered `/reset-password`
+  page → Better Auth `reset-password` (revokes other sessions; creates the credential for a
+  Google-only account, so the same flow sets a first password) → `baalda://signin` bounces back into
+  the app, which notices its revoked session and opens the sign-in card. Admin escape hatch for
+  servers without email: `pnpm run set-password -- <email>`.
 - [x] **Sign-up verification email** (soft): sent on sign-up, `emailVerified` set on click, lands on
-  `/email-verified`. Not yet required to sign in — pre-existing accounts were never verified.
-- [x] **Invitation emails** → `/invite/:id` landing page → `baalda://invite/<id>?server=` deep link →
-  the app signs in/up with the invited address and accepts. Members shows a Copy-link + Revoke per
-  pending invitation (the link works without email). Re-inviting a pending address re-sends.
+  `/email-verified` → `baalda://verified` → the app re-reads its session; Account settings shows
+  "Email confirmed ✓" / a Resend button. Not yet required to sign in — pre-existing accounts were
+  never verified.
+- [x] **Invitation emails** → `POST /api/invitations/:id/send` (explicit, reports sent/failed; not a
+  Better Auth hook, which swallows send errors) → `/invite/:id` landing page →
+  `baalda://invite/<id>?server=` deep link → the app signs in/up with the invited address and
+  accepts. Members shows "Invitation emailed" only on a confirmed send, the provider's error + the
+  link otherwise, plus Copy-link + Revoke per pending invitation. Re-inviting re-sends.
 - [x] **Invite inbox actually works**: Better Auth's `list-user-invitations` 403s for any unverified
   email (= every password sign-up), so the in-app inbox had been empty for almost everyone.
   `GET /api/invitations/mine` reads the table directly; the desktop uses it first.

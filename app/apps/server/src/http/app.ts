@@ -7,6 +7,7 @@ import { auth } from "../auth/auth.js";
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
+import { passwordResetRoutes } from "./routes/password-reset.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { blobRoutes } from "./routes/blobs.js";
@@ -100,7 +101,8 @@ function allowedOrigins(): string[] {
  *  - /api/notes/:docId/public-link → mint/inspect/revoke a public note link
  *  - /p/:token → public read-only note page (no auth; token is the capability)
  *  - /api/orgs/join-code, /api/orgs/join → vault join codes
- *  - /api/invitations/mine, /api/invitations/:id/preview → invitation inbox/preview
+ *  - /api/invitations/mine, /api/invitations/:id/{preview,send} → invitation inbox/preview/email
+ *  - /api/password-reset/request → emailed reset link (reports the outcome)
  *  - /forgot-password, /reset-password, /email-verified, /invite/:id → account pages
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
  *  - /api/mcp → Model Context Protocol endpoint (AI clients); /api/mcp/tokens → token mgmt
@@ -190,6 +192,9 @@ export function createApp(deps: AppDeps): Hono {
   // Invitation preview (public, by unguessable id) + the signed-in inbox that
   // sidesteps Better Auth's verified-email gate on list-user-invitations.
   app.route("/api", invitationRoutes);
+  // Password reset request that reports sent / no account / failed (Better
+  // Auth's own endpoint is neutral and swallows send errors).
+  app.route("/api", passwordResetRoutes);
   app.route("/api", syncTokenRoutes);
   app.route("/api", vaultTokenRoutes);
   app.route(

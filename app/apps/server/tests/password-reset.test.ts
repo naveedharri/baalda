@@ -4,7 +4,8 @@ import { testAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { signIn, signUp } from "./helpers/auth.js";
-import { memoryOutbox } from "../src/email/mailer.js";
+import { __setMailerForTests, memoryOutbox } from "../src/email/mailer.js";
+import { __clearResetThrottle } from "../src/http/routes/password-reset.js";
 
 /**
  * Password reset end to end (issue #99): request → emailed link → branded page
@@ -35,6 +36,7 @@ describe("password reset", () => {
   beforeEach(async () => {
     await resetDb();
     memoryOutbox.length = 0;
+    __clearResetThrottle();
   });
   afterAll(async () => {
     await pool.end();
@@ -48,8 +50,9 @@ describe("password reset", () => {
   it("emails a single-use link that sets a new password and revokes old sessions", async () => {
     const alice = await signUp("alice@reset.io", "old-password-1");
 
-    const req = await post("/api/auth/request-password-reset", { email: "alice@reset.io" });
+    const req = await post("/api/password-reset/request", { email: "Alice@Reset.io" });
     expect(req.status).toBe(200);
+    expect(await req.json()).toEqual({ sent: true });
     const token = lastResetToken("alice@reset.io");
 
     // The emailed page renders (and never reflects the token unescaped).
@@ -82,10 +85,42 @@ describe("password reset", () => {
     expect(replay.status).toBe(400);
   });
 
-  it("answers neutrally for an unknown address and sends nothing", async () => {
-    const res = await post("/api/auth/request-password-reset", { email: "nobody@reset.io" });
-    expect(res.status).toBe(200);
+  it("says plainly when there is no account for the address, and sends nothing", async () => {
+    const res = await post("/api/password-reset/request", { email: "nobody@reset.io" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "no_account" });
     expect(memoryOutbox.filter((m) => m.to === "nobody@reset.io")).toHaveLength(0);
+    // Better Auth's own neutral endpoint is closed (no sendResetPassword hook),
+    // so there is exactly one way to ask for a reset.
+    expect((await post("/api/auth/request-password-reset", { email: "nobody@reset.io" })).status).toBe(400);
+  });
+
+  it("reports a mail-provider failure instead of pretending the email went out", async () => {
+    await signUp("carol@reset.io");
+    __setMailerForTests({
+      kind: "memory",
+      async send() {
+        throw new Error("550 mailbox unavailable");
+      },
+    });
+    try {
+      const res = await post("/api/password-reset/request", { email: "carol@reset.io" });
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({
+        error: "send_failed",
+        message: expect.stringContaining("550 mailbox unavailable"),
+      });
+    } finally {
+      __setMailerForTests(null);
+    }
+  });
+
+  it("throttles repeated requests for one address", async () => {
+    await signUp("dave@reset.io");
+    for (let i = 0; i < 5; i++) {
+      expect((await post("/api/password-reset/request", { email: "dave@reset.io" })).status).toBe(200);
+    }
+    expect((await post("/api/password-reset/request", { email: "dave@reset.io" })).status).toBe(429);
   });
 
   it("lets an account with no password (Google-only) set one via reset", async () => {
@@ -96,7 +131,7 @@ describe("password reset", () => {
     );
     expect(rows[0].id).toBe("u-google");
 
-    expect((await post("/api/auth/request-password-reset", { email: "g@reset.io" })).status).toBe(200);
+    expect((await post("/api/password-reset/request", { email: "g@reset.io" })).status).toBe(200);
     const token = lastResetToken("g@reset.io");
     expect((await post("/api/auth/reset-password", { newPassword: "chosen-password-9", token })).status).toBe(200);
 
@@ -113,10 +148,27 @@ describe("password reset", () => {
 
   it("serves the forgot-password and email-verified pages", async () => {
     expect((await app.request("/forgot-password")).status).toBe(200);
-    expect((await app.request("/email-verified")).status).toBe(200);
+    const verified = await app.request("/email-verified");
+    expect(verified.status).toBe(200);
+    // Bounces back into the app, like the invite page does.
+    expect(await verified.text()).toContain("baalda://verified");
+    expect(await (await app.request("/reset-password?token=abc")).text()).toContain("baalda://signin");
     expect((await app.request("/email-verified?error=invalid_token")).status).toBe(400);
     // The MCP login page links to it when email is on.
     expect(await (await app.request("/oauth/login")).text()).toContain("/forgot-password");
+  });
+
+  it("refuses a duplicate sign-up with a clear error and sends no second email", async () => {
+    await signUp("erin@verify.io");
+    const before = memoryOutbox.filter((m) => m.to === "erin@verify.io").length;
+    const res = await post("/api/auth/sign-up/email", {
+      email: "Erin@verify.io",
+      password: "another-password-1",
+      name: "Erin again",
+    });
+    expect(res.status).toBe(422);
+    expect(await res.text()).toMatch(/already exists/i);
+    expect(memoryOutbox.filter((m) => m.to === "erin@verify.io")).toHaveLength(before);
   });
 
   it("sends a verification email on sign-up and the link verifies the address", async () => {

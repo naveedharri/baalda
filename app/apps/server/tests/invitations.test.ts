@@ -5,7 +5,7 @@ import { testAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, bearerHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { memoryOutbox } from "../src/email/mailer.js";
+import { __setMailerForTests, memoryOutbox } from "../src/email/mailer.js";
 
 /**
  * Invitations by email (issue #99): the invite email, the landing page it links
@@ -20,6 +20,14 @@ async function invite(owner: TestUser, orgId: string, email: string, role: "memb
     headers: bearerHeaders(owner),
     body: { email, role, organizationId: orgId },
   })) as { id: string; email: string; role: string; expiresAt: string | Date };
+}
+
+/** What the desktop does right after invite-member: ask the server to email it. */
+function send(user: TestUser, invitationId: string) {
+  return app.request(`/api/invitations/${invitationId}/send`, {
+    method: "POST",
+    headers: authHeaders(user),
+  });
 }
 
 async function joinCode(owner: TestUser): Promise<string> {
@@ -56,6 +64,12 @@ describe("invitation emails + landing page", () => {
     const owner = await signUp("owner@inv.io", "password12345", "Olive Owner");
     const org = await createOrg(owner, "Acme Notes", "acme-inv1");
     const inv = await invite(owner, org.id, "Teammate@Inv.io", "admin");
+    // Creating the row sends nothing by itself (the only mail so far is the
+    // owner's own sign-up confirmation); the explicit send reports.
+    expect(memoryOutbox.filter((m) => m.to === "teammate@inv.io")).toHaveLength(0);
+    const sent = await send(owner, inv.id);
+    expect(sent.status).toBe(200);
+    expect(await sent.json()).toEqual({ sent: true });
 
     const mail = memoryOutbox.find((m) => m.to === "teammate@inv.io");
     expect(mail).toBeDefined();
@@ -143,7 +157,34 @@ describe("invitation emails + landing page", () => {
     expect(second.id).not.toBe(first.id);
     expect((await invitationRow(first.id)).status).toBe("canceled");
     expect((await invitationRow(second.id)).status).toBe("pending");
-    expect(memoryOutbox.filter((m) => m.to === "again@inv4.io")).toHaveLength(2);
+    // The replaced invitation can no longer be sent; the live one can.
+    expect((await send(owner, first.id)).status).toBe(410);
+    expect((await send(owner, second.id)).status).toBe(200);
+    expect(memoryOutbox.filter((m) => m.to === "again@inv4.io")).toHaveLength(1);
+  });
+
+  it("send is owner/admin only and reports provider failures", async () => {
+    const owner = await signUp("owner@inv8.io");
+    const org = await createOrg(owner, "Acme", "acme-inv8");
+    const inv = await invite(owner, org.id, "x@inv8.io");
+    const stranger = await signUp("stranger@inv8.io");
+    expect((await send(stranger, inv.id)).status).toBe(403);
+    expect((await app.request(`/api/invitations/${inv.id}/send`, { method: "POST" })).status).toBe(401);
+    expect((await send(owner, "does-not-exist")).status).toBe(404);
+
+    __setMailerForTests({
+      kind: "memory",
+      async send() {
+        throw new Error("connection refused");
+      },
+    });
+    try {
+      const res = await send(owner, inv.id);
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ error: "send_failed", message: expect.stringContaining("connection refused") });
+    } finally {
+      __setMailerForTests(null);
+    }
   });
 
   it("join code consumes a pending invitation: same role, invitation marked accepted", async () => {

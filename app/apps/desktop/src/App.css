@@ -4592,6 +4592,9 @@ body:has(.sidebar-resizer.dragging) {
   font-size: var(--fs-sm);
   line-height: var(--lh-body);
 }
+.invite-notice.is-warning {
+  background: var(--warning-soft);
+}
 .invite-notice-link {
   display: flex;
   align-items: center;

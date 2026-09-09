@@ -690,17 +690,41 @@ export class ApiClient {
   }
 
   /**
-   * Ask the server to email a password-reset link.
+   * Ask the server to email a password-reset link — and learn what happened.
    *
-   * Deliberately sends NO `redirectTo`: the server builds its own link, so a
-   * value from this client can never be turned into an open redirect off the
-   * back of a reset token. The response is the same 200 whether or not an
-   * account exists — the caller must not try to infer one from the other, and
-   * the confirmation copy is worded to match.
+   * Our own route, not Better Auth's `request-password-reset`: that one answers
+   * the same neutral sentence whether the address is unknown, the send failed
+   * or the mail went out. This one resolves only when the provider accepted the
+   * message, and otherwise throws an `ApiError` whose body carries `error`:
+   * `no_account` (404), `send_failed` (502), `too_many_requests` (429) or
+   * `email_not_configured` (400). `lib/resetFlow.ts` turns those into copy.
    */
   async requestPasswordReset(email: string): Promise<void> {
-    await this.request<unknown>("POST", "/api/auth/request-password-reset", {
+    await this.request<unknown>("POST", "/api/password-reset/request", {
       body: { email },
+    });
+  }
+
+  /**
+   * Email an invitation's link to its address. Resolves when the provider took
+   * the message; throws `ApiError` with body `error` = `send_failed` (502),
+   * `email_not_configured` (400) or `invitation_not_pending` (410). Called
+   * right after {@link inviteMember} — creating the invitation sends nothing by
+   * itself, precisely so the admin can be told whether the email went out.
+   */
+  async sendInvitationEmail(invitationId: string): Promise<void> {
+    await this.request<unknown>(
+      "POST",
+      `/api/invitations/${encodeURIComponent(invitationId)}/send`,
+    );
+  }
+
+  /** Re-send the sign-up confirmation email for the signed-in address. */
+  async sendVerificationEmail(email: string): Promise<void> {
+    // The server builds its own link and ignores callbackURL, but Better Auth's
+    // schema requires the field.
+    await this.request<unknown>("POST", "/api/auth/send-verification-email", {
+      body: { email, callbackURL: "/email-verified" },
     });
   }
 

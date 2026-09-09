@@ -9,6 +9,7 @@ import {
   serverHost,
 } from "../lib/auth/serverChoice";
 import { readServerChoice, writeServerChoice } from "../lib/prefs";
+import { passwordResetFailureMessage } from "../lib/resetFlow";
 import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { serverFailureMessage } from "./serverFailureMessage";
@@ -295,9 +296,10 @@ export function AuthDialog({
   };
 
   /**
-   * Ask for a reset email. Always reports the same neutral outcome, whether or
-   * not the address has an account — the server answers 200 either way, and
-   * telling the difference here would turn this form into an account oracle.
+   * Ask for a reset email and say what happened. The server resolves only when
+   * the provider accepted the message; "no account on this server" and "the
+   * provider refused it" come back as distinct errors, because both were being
+   * hidden behind a neutral "check your inbox" that nothing ever arrived for.
    */
   const requestReset = async () => {
     const addr = email.trim();
@@ -307,7 +309,7 @@ export function AuthDialog({
       await authManager.api.requestPasswordReset(addr);
       setResetSent(addr);
     } catch (e) {
-      setResetError(e instanceof Error ? e.message : String(e));
+      setResetError(passwordResetFailureMessage(e, { email: addr, serverHost: serverHost(serverUrl) }));
     }
   };
 
@@ -545,13 +547,13 @@ export function AuthDialog({
 
             {mode === "reset" ? (
               resetSent ? (
-                // Deliberately neutral about whether the account exists: the
-                // server answers the same 200 either way, and saying more here
-                // would make this form an account oracle.
+                // Shown only after the server confirmed the provider took the
+                // message, so this sentence is a fact rather than a hope.
                 <div className="auth-reset-done">
                   <p>
-                    If an account exists for <strong>{resetSent}</strong>, a reset link is on
-                    its way. Check your inbox (and spam) — the link is valid for one hour.
+                    Reset link sent to <strong>{resetSent}</strong>. Check your inbox (and
+                    spam) — the link is valid for one hour. Setting a new password there
+                    brings you back here to sign in.
                   </p>
                   <button type="button" className="link-btn" onClick={backToSignIn}>
                     Back to sign in
@@ -701,6 +703,43 @@ export function AuthDialog({
                 email or password" and sign-up answers "already exists" — a dead end
                 unless someone says the words. Shown only on that failure, and only
                 when Google is actually offered. */}
+            {/* Sign-up for an address that already has an account: the server
+                refuses (and sends nothing), but "User already exists" alone
+                leaves the person retyping. Offer the two exits. */}
+            {authError != null && mode === "sign-up" && /already exists/i.test(authError) && (
+              <p className="auth-hint">
+                An account with this email already exists.{" "}
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => {
+                    useStore.setState({ authError: null });
+                    setMode("sign-in");
+                  }}
+                >
+                  Sign in instead
+                </button>
+                {resetAvailable && (
+                  <>
+                    {" "}
+                    or{" "}
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        useStore.setState({ authError: null });
+                        setResetError(null);
+                        setResetSent(null);
+                        setMode("reset");
+                      }}
+                    >
+                      reset your password
+                    </button>
+                  </>
+                )}
+                .
+              </p>
+            )}
             {authError != null &&
               googleAvailable &&
               mode === "sign-in" &&

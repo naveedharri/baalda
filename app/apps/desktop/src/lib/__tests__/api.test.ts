@@ -201,7 +201,7 @@ describe("ApiClient against a mocked fetch", () => {
     const { impl, calls } = fakeFetch(() => ({ json: { status: true, message: "ok" } }));
     const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
     await api.requestPasswordReset("ada@team.com");
-    expect(calls[0].url).toContain("/api/auth/request-password-reset");
+    expect(calls[0].url).toContain("/api/password-reset/request");
     expect(calls[0].method).toBe("POST");
     expect(calls[0].body).toEqual({ email: "ada@team.com" });
   });
