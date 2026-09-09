@@ -54,9 +54,67 @@ describe("planInbound — folders", () => {
 
   it("never deletes a local folder the server merely no longer lists", () => {
     // The folder listing is permission-filtered, so "absent" alone is
-    // irreducibly ambiguous — only a tombstone proves a delete.
+    // irreducibly ambiguous for a folder we never recorded a server id for: it
+    // could be a brand-new local folder. Only an id WE recorded (see the
+    // revocation cases below) or a tombstone lets the plan act.
     const p = plan({ localFolders: new Set(["Gone"]) });
     expect(p).toMatchObject({ createFolders: [], removeFolders: [], trash: [], renames: [] });
+  });
+
+  it("removes a recorded folder that left the listing without a tombstone — access revoked", () => {
+    // THE leftover-folder bug: an admin made "Getting Started" private. Its
+    // notes left as `revoked`, but the folder was neither tombstoned nor moved,
+    // so the emptied directory stayed in the teammate's sidebar forever.
+    const p = plan({
+      localFolders: new Set(["Getting Started", "Getting Started/Deep", "Concepts"]),
+      localFolderIds: new Map([
+        ["Getting Started", "f-gs"],
+        ["Getting Started/Deep", "f-deep"],
+        ["Concepts", "f-c"],
+      ]),
+      serverFolders: new Set(["Concepts"]),
+      serverFolderIds: new Map([["f-c", "Concepts"]]),
+    });
+    // Children first, so the subtree unwinds bottom-up.
+    expect(p.removeFolders).toEqual(["Getting Started/Deep", "Getting Started"]);
+    expect(p.rejected).toEqual([]);
+  });
+
+  it("leaves a revoked folder alone when the server did not answer about folder deletions", () => {
+    // `null` tombstones = "I don't know" — a truncated listing looks exactly
+    // like a mass revoke, and the safe reading of absence is then nothing.
+    const p = plan({
+      localFolders: new Set(["Getting Started"]),
+      localFolderIds: new Map([["Getting Started", "f-gs"]]),
+      folderTombstones: null,
+    });
+    expect(p.removeFolders).toEqual([]);
+  });
+
+  it("does not read a revoked folder as revoked once the server re-created its path", () => {
+    // Someone made a NEW "Getting Started" (fresh id) after ours went private:
+    // the directory on disk is now that folder's, and the outbound half adopts it.
+    const p = plan({
+      localFolders: new Set(["Getting Started"]),
+      localFolderIds: new Map([["Getting Started", "f-old"]]),
+      serverFolders: new Set(["Getting Started"]),
+      serverFolderIds: new Map([["f-new", "Getting Started"]]),
+    });
+    expect(p.removeFolders).toEqual([]);
+  });
+
+  it("refuses a mass folder revocation past the safety limit, and reports every one", () => {
+    const localFolders = new Set<string>();
+    const localFolderIds = new Map<string, string>();
+    for (let i = 0; i < 21; i++) {
+      localFolders.add(`F${i}`);
+      localFolderIds.set(`F${i}`, `f${i}`);
+    }
+    const p = plan({ localFolders, localFolderIds });
+    expect(p.removeFolders).toEqual([]);
+    expect(p.rejected).toHaveLength(21);
+    expect(p.rejected[0]).toMatchObject({ kind: "folder", path: "F0" });
+    expect(p.rejected[0].reason).toMatch(/exceeds the 20 safety limit/);
   });
 
   it("removes a local folder whose recorded id is tombstoned, children first", () => {
@@ -69,6 +127,10 @@ describe("planInbound — folders", () => {
         ["A/B", "fb"],
         ["Keep", "fk"],
       ]),
+      // `Keep` is still listed; a recorded id that is NEITHER listed nor
+      // tombstoned would be a revocation (its own cases above).
+      serverFolders: new Set(["Keep"]),
+      serverFolderIds: new Map([["fk", "Keep"]]),
       folderTombstones: new Set(["fa", "fb"]),
     });
     expect(p.removeFolders).toEqual(["A/B", "A"]);

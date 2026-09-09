@@ -1008,12 +1008,14 @@ export class VaultRegistry {
       }
     }
 
-    // Folders the server has deleted, children before parents, AFTER the trash
-    // loop above has moved their notes out. Empty-only removal (`remove_dir`,
-    // never recursive): a folder still holding anything stays on disk and — its
-    // dead mapping dropped below — re-registers under a fresh id, because
-    // content must live somewhere. Either way the stale id leaves the map, so
-    // nothing can later rename/color/re-register against a deleted server row.
+    // Folders the server has deleted, moved away from, or taken this user's
+    // access to (made private: absent from the permission-filtered listing with
+    // no tombstone), children before parents, AFTER the trash loop above has
+    // moved their notes out. Empty-only removal (`remove_dir`, never recursive):
+    // a folder still holding anything stays on disk and — its dead mapping
+    // dropped below — re-registers under a fresh id, because content must live
+    // somewhere. Either way the stale id leaves the map, so nothing can later
+    // rename/color/re-register against a deleted server row.
     for (const path of plan.removeFolders) {
       if (this.stopRun()) break;
       try {

@@ -540,6 +540,50 @@ describe("inbound folder deletion", () => {
     );
   });
 
+  it("removes a folder made private along with its notes, and does not re-adopt it", async () => {
+    // The reported bug: the Access page set "Getting Started" to Private. On the
+    // teammate's device the notes left as revoked, but the folder — neither
+    // tombstoned nor moved, merely absent from the permission-filtered listing —
+    // stayed in the sidebar as an empty shell, and the outbound half re-adopted
+    // its hidden id on every pull.
+    const disk = new FakeDisk();
+    disk.folders.add("Getting Started");
+    disk.notes.set("Getting Started/welcome.md", "d1");
+    const { api } = await twoPasses({
+      disk,
+      first: {
+        notes: [{ id: "d1", rel_path: "Getting Started/welcome.md" }],
+        folders: [{ id: "f1", path: "Getting Started" }],
+      },
+      // Nothing deleted: both tombstone lists are answered and empty.
+      then: { notes: [], tombstones: [], folders: [], folderTombstones: [] },
+    });
+
+    expect(disk.trashed.map((t) => t.from)).toEqual(["Getting Started/welcome.md"]);
+    expect(disk.folders.has("Getting Started")).toBe(false);
+    expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
+  });
+
+  it("keeps a private folder that still holds unconfirmed content", async () => {
+    // Access can be taken away mid-edit. The note pass refuses to trash work this
+    // device never confirmed upstream, and the folder around it must then stay too.
+    const disk = new FakeDisk();
+    disk.folders.add("Getting Started");
+    disk.notes.set("Getting Started/mine.md", "d1");
+    disk.bodies.set("Getting Started/mine.md", "words nobody else has");
+    await twoPasses({
+      disk,
+      first: {
+        notes: [{ id: "d1", rel_path: "Getting Started/mine.md" }],
+        folders: [{ id: "f1", path: "Getting Started" }],
+      },
+      then: { notes: [], tombstones: [], folders: [], folderTombstones: [] },
+    });
+
+    expect(disk.trashed).toEqual([]);
+    expect(disk.folders.has("Getting Started")).toBe(true);
+  });
+
   it("removes the emptied old directory after a server-side folder move, and does not re-register it", async () => {
     const disk = new FakeDisk();
     disk.folders.add("Projects");
