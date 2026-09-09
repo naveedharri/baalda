@@ -1,1 +1,1 @@
-- Forgot password? by email, invitation emails with one-click join, and clearer sign-up and invite feedback
+- Fixed the sync badge flickering forever and re-syncing the same notes on every reload; edits that were stuck on one device now upload automatically
