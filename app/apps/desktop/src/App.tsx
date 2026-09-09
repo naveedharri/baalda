@@ -614,14 +614,24 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
  */
 function PromptedAuthDialog() {
   const authPrompt = useStore((s) => s.authPrompt);
-  if (authPrompt !== "note-link" && authPrompt !== "server-link") return null;
+  if (authPrompt !== "note-link" && authPrompt !== "server-link" && authPrompt !== "invite") {
+    return null;
+  }
   return (
     <AuthDialog
+      // An invitee usually has no account yet — the link is often the first
+      // time they hear of us — so the invite card opens on sign-up.
+      initialMode={authPrompt === "invite" ? "sign-up" : "sign-in"}
       onSignedIn={() => useStore.getState().setAuthPrompt(null)}
       onClose={() => {
         clearPendingNoteLink();
         requestOpenVault(null);
         useStore.getState().clearServerLink();
+        // Dismissing the card declines for now: drop the queued invitation too,
+        // or the next unrelated sign-in would surprise-join a vault.
+        // Unconditional, because an invitation can be parked behind the
+        // "server-link" prompt as well — the invite that offered the server.
+        useStore.getState().clearInvitePrompt();
         useStore.getState().setAuthPrompt(null);
       }}
     />

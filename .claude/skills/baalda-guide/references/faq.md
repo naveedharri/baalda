@@ -21,6 +21,13 @@ not per person, with unlimited members. Only the vault owner or an admin pays; e
 needs a free account. baalda.com/pricing is the place to ask questions or talk to the team, but
 nobody has to wait for a call to get started.
 
+## I forgot my password.
+On the sign-in screen choose **Forgot password?**, enter your email, and follow the link we
+send (valid for one hour). Setting a new password signs out every other device. If you first
+joined with Google, the same link lets you add a password. On a self-hosted server without
+email set up, ask the person running it: they can set a new password from the server
+(`pnpm run set-password`).
+
 ## Do I need an account?
 No. You can open a folder and start writing with no account and no internet. An account is only
 needed for sync between devices, team collaboration, and the hosted AI endpoint.

@@ -98,6 +98,43 @@ export interface Invitation {
   organizationId: string;
   inviterId?: string;
   expiresAt?: string;
+  /** Present on our own `/api/invitations/*` routes, absent on Better Auth's —
+   *  which is why every consumer treats both as optional and falls back. */
+  organizationName?: string;
+  inviterName?: string;
+}
+
+/**
+ * What an invitation id resolves to for someone who is not (yet) signed in as
+ * the invitee — the public shoulder-tap an invite deep link lands on.
+ *
+ * Public because the id IS the capability: an unguessable UUID that only ever
+ * reaches the invitee's inbox. It carries the vault name and who invited them
+ * so the sign-in card can say what the person is joining instead of asking for
+ * a password against an unexplained modal.
+ */
+export interface InvitationPreview {
+  id: string;
+  email: string;
+  role: string;
+  status: "pending" | "accepted" | "rejected" | "canceled" | "expired";
+  organizationId: string;
+  organizationName: string;
+  inviterName: string | null;
+  expiresAt?: string;
+}
+
+/**
+ * Which sign-in routes the server actually offers. Every field is a capability,
+ * so every field fails CLOSED — see {@link ApiClient.getAuthMethods}.
+ */
+export interface AuthMethods {
+  emailPassword: boolean;
+  google: boolean;
+  /** Server can send a "choose a new password" email. */
+  passwordReset: boolean;
+  /** Server delivers invitations by email (otherwise the admin shares a link). */
+  invitationEmail: boolean;
 }
 
 export interface Vault {
@@ -618,14 +655,24 @@ export class ApiClient {
 
   // ---- Google sign-in (social, via desktop loopback) ----------------------
 
-  /** Which sign-in methods the server offers (Google is config-gated). */
-  async getAuthMethods(): Promise<{ emailPassword: boolean; google: boolean }> {
+  /**
+   * Which sign-in methods the server offers (Google, password reset and invite
+   * email are all config-gated).
+   *
+   * Every field beyond `emailPassword` is read with `!!`, so an OLDER server
+   * that answers only `{ emailPassword, google }` reports the new capabilities
+   * as absent — which is the right answer for it, and the reason the UI hides
+   * "Forgot password?" rather than offering a route that silently does nothing.
+   */
+  async getAuthMethods(): Promise<AuthMethods> {
     try {
-      const { data } = await this.request<{ emailPassword: boolean; google: boolean }>(
-        "GET",
-        "/api/auth-methods",
-      );
-      return { emailPassword: data.emailPassword !== false, google: !!data.google };
+      const { data } = await this.request<Partial<AuthMethods>>("GET", "/api/auth-methods");
+      return {
+        emailPassword: data.emailPassword !== false,
+        google: !!data.google,
+        passwordReset: !!data.passwordReset,
+        invitationEmail: !!data.invitationEmail,
+      };
     } catch {
       // Fails CLOSED, and deliberately so: an older/self-hosted server without
       // this endpoint should hide the Google button rather than offer a route
@@ -633,8 +680,28 @@ export class ApiClient {
       // (server down, wrong URL, CSP blocking us) is indistinguishable here from
       // "Google not configured", so a hidden Google button is not proof the
       // server lacks it. Check /api/auth-methods with curl before believing it.
-      return { emailPassword: true, google: false };
+      return {
+        emailPassword: true,
+        google: false,
+        passwordReset: false,
+        invitationEmail: false,
+      };
     }
+  }
+
+  /**
+   * Ask the server to email a password-reset link.
+   *
+   * Deliberately sends NO `redirectTo`: the server builds its own link, so a
+   * value from this client can never be turned into an open redirect off the
+   * back of a reset token. The response is the same 200 whether or not an
+   * account exists — the caller must not try to infer one from the other, and
+   * the confirmation copy is worded to match.
+   */
+  async requestPasswordReset(email: string): Promise<void> {
+    await this.request<unknown>("POST", "/api/auth/request-password-reset", {
+      body: { email },
+    });
   }
 
   /**
@@ -750,8 +817,54 @@ export class ApiClient {
     return Array.isArray(data) ? data : (data?.invitations ?? []);
   }
 
-  /** Invitations addressed to the signed-in user (invitee view). */
+  /** Kill a pending invitation (owner/admin). The link stops working at once. */
+  async cancelInvitation(invitationId: string): Promise<void> {
+    await this.request<unknown>("POST", "/api/auth/organization/cancel-invitation", {
+      body: { invitationId },
+    });
+  }
+
+  /**
+   * What an invitation id names — vault, inviter, invited address, status.
+   *
+   * Public on the server (the id is the capability), so this works signed out
+   * and on whatever server the app is currently pointed at. A bearer header
+   * still rides along when we have one; the route ignores it.
+   *
+   * Throws `ApiError` 404 for an id the server doesn't know, which is what the
+   * caller maps to "expired or already used" — an unknown id and a consumed
+   * one must stay indistinguishable.
+   */
+  async previewInvitation(invitationId: string): Promise<InvitationPreview> {
+    const { data } = await this.request<InvitationPreview>(
+      "GET",
+      `/api/invitations/${encodeURIComponent(invitationId)}/preview`,
+    );
+    return data;
+  }
+
+  /**
+   * Invitations addressed to the signed-in user (invitee view).
+   *
+   * Our own `/api/invitations/mine` FIRST, Better Auth's route only as a 404
+   * fallback for an older self-hosted server. Better Auth's
+   * `list-user-invitations` answers 403 for any user whose email isn't
+   * verified — which is every password sign-up — so the in-app invite inbox was
+   * silently empty for exactly the people who most needed it.
+   */
   async listUserInvitations(): Promise<Invitation[]> {
+    try {
+      const { data } = await this.request<{ invitations: Invitation[] } | Invitation[]>(
+        "GET",
+        "/api/invitations/mine",
+      );
+      return Array.isArray(data) ? data : (data?.invitations ?? []);
+    } catch (e) {
+      // Only a missing ROUTE falls back. A 403/500 from our own endpoint is a
+      // real failure and must not be papered over with a call that returns 403
+      // for the same user anyway.
+      if (!(e instanceof ApiError) || e.status !== 404) throw e;
+    }
     const { data } = await this.request<{ invitations: Invitation[] } | Invitation[]>(
       "GET",
       "/api/auth/organization/list-user-invitations",

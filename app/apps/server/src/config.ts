@@ -134,6 +134,21 @@ export const config = {
    *  on email+password alone. Set only via env (never committed). */
   googleClientId: optional("GOOGLE_CLIENT_ID"),
   googleClientSecret: optional("GOOGLE_CLIENT_SECRET"),
+  // ---- Outbound email (issue #99) ----
+  /** Sender address, e.g. `Baalda <no-reply@example.com>`. Required to send
+   *  anything; with it and ONE transport below, password reset + sign-up
+   *  verification + invitation emails switch on. Unset ⇒ email off, and every
+   *  feature that needs it is simply not offered. Resolution + validation live
+   *  in `email/mailer.ts` (`resolveEmailConfig`), which throws at startup on a
+   *  half-configured setup rather than offering reset links that never arrive. */
+  emailFrom: optional("EMAIL_FROM"),
+  /** SMTP connection URL: `smtp://user:pass@host:587` or `smtps://…:465`. */
+  smtpUrl: optional("SMTP_URL"),
+  /** Resend API key (https://resend.com) — the HTTP alternative to SMTP. */
+  resendApiKey: optional("RESEND_API_KEY"),
+  /** Force a transport (`smtp` | `resend` | `log` | `memory`). Normally inferred
+   *  from which credential is set; `log`/`memory` are dev/test only. */
+  emailTransport: optional("EMAIL_TRANSPORT"),
   // ---- Subscription billing (Polar) ----
   /** Polar organization access token. Its presence is the ON switch for the
    *  whole billing feature (see `billingEnabled` below): unset ⇒ billing is

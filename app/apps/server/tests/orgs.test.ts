@@ -75,6 +75,7 @@ describe("vault join codes", () => {
       organizationId: org.id,
       name: "Acme",
       alreadyMember: false,
+      role: "member",
     });
 
     // Member row created with role 'member'.

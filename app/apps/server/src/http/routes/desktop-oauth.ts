@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { auth, googleEnabled } from "../../auth/auth.js";
+import { emailEnabled } from "../../email/mailer.js";
 import { mintDesktopCode, redeemDesktopCode } from "../../tokens/desktop-code.js";
 
 /**
@@ -23,10 +24,20 @@ export const desktopOauthRoutes = new Hono();
  * Which sign-in methods this server offers. Email+password is always on; Google
  * is on only when the server is configured with OAuth creds. The desktop uses
  * this to decide whether to render the "Continue with Google" button.
+ *
+ * `passwordReset` / `invitationEmail` (issue #99) are both simply "can this
+ * server send email" — kept as two flags so the client keys off the one it
+ * needs (a "Forgot password?" link; "Invitation emailed" vs "copy this link").
  */
-desktopOauthRoutes.get("/auth-methods", (c) =>
-  c.json({ emailPassword: true, google: googleEnabled }),
-);
+desktopOauthRoutes.get("/auth-methods", (c) => {
+  const email = emailEnabled();
+  return c.json({
+    emailPassword: true,
+    google: googleEnabled,
+    passwordReset: email,
+    invitationEmail: email,
+  });
+});
 
 /**
  * Only ever redirect back to a loopback address — this endpoint hands out a

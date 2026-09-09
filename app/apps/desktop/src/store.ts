@@ -19,6 +19,7 @@ import {
   ApiError,
   type BillingConfig,
   type Invitation,
+  type InvitationPreview,
   type Member,
   type NoteLastEdited,
   type NoteVersion,
@@ -58,6 +59,16 @@ import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
 import { dismissToast, toast } from "./lib/toast";
 import { parseNoteLink } from "./lib/shareLink";
+import { parseInviteDeepLink } from "./lib/inviteLink";
+import { normalizeServerUrl } from "./lib/auth/serverChoice";
+import {
+  acceptInviteFailureMessage,
+  clearPendingInvite,
+  INVITE_GONE_MESSAGE,
+  peekPendingInvite,
+  queueInvite,
+  takePendingInvite,
+} from "./lib/inviteFlow";
 import {
   clearPendingNoteLink,
   hasPendingNoteLink,
@@ -144,16 +155,29 @@ interface AppStore {
   serverUrl: string;
   authError: string | null;
   /**
-   * A flow needs the sign-in dialog on screen NOW. Two of them:
+   * A flow needs the sign-in dialog on screen NOW. Three of them:
    *   - "note-link": a shared link arrived while signed out, and the link is
    *     queued to open right after the sign-in succeeds;
    *   - "server-link": a `baalda://connect` invite arrived, offering a server
-   *     to point this device at (see `pendingServerLink`).
+   *     to point this device at (see `pendingServerLink`);
+   *   - "invite": a team invitation arrived while signed out, and the dialog
+   *     says which vault and which address it is for (see `invitePrompt`).
    * App.tsx mounts AuthDialog off this in both root branches; dismissing the
-   * dialog clears the queued link / offered server too.
+   * dialog clears the queued link / offered server / queued invite too.
    */
-  authPrompt: "note-link" | "server-link" | null;
-  setAuthPrompt: (prompt: "note-link" | "server-link" | null) => void;
+  authPrompt: "note-link" | "server-link" | "invite" | null;
+  setAuthPrompt: (prompt: "note-link" | "server-link" | "invite" | null) => void;
+  /**
+   * The invitation the sign-in dialog is currently about, when one arrived
+   * while signed out.
+   *
+   * Store state (unlike the queued invite in `inviteFlow`) because this is
+   * exactly what the dialog RENDERS: the vault name, who invited them, and the
+   * address the invitation was sent to — without which the card is an
+   * unexplained password prompt raised by a link click.
+   */
+  invitePrompt: InvitationPreview | null;
+  clearInvitePrompt: () => void;
   /**
    * A server URL an invite link is offering, awaiting the user's explicit yes.
    *
@@ -332,6 +356,13 @@ interface AppStore {
    * membership and ACL decide whether the note is there to open.
    */
   openNoteLink: (url: string) => Promise<void>;
+  /**
+   * Follow a `baalda://invite/<id>?server=<url>` link: confirm the server if it
+   * names a different one, look the invitation up, then accept it (signed in)
+   * or raise the sign-in dialog for it (signed out). Grants nothing on its own
+   * — the server re-checks the invitation on accept.
+   */
+  openInviteLink: (url: string) => Promise<void>;
   refreshBacklinks: () => Promise<void>;
   setNoteRemoved: (removed: boolean) => void;
   closeNote: () => void;
@@ -392,7 +423,10 @@ interface AppStore {
     organizationId: string,
     opts?: { seedIfEmpty?: boolean },
   ) => Promise<void>;
-  inviteMember: (email: string, role: "member" | "admin") => Promise<void>;
+  /** Invite an email to the active vault. RETURNS the created invitation so the
+   *  caller can show its link — a server that can't send email leaves the link
+   *  as the only way the invitation ever reaches the person. */
+  inviteMember: (email: string, role: "member" | "admin") => Promise<Invitation>;
   /** Remove a member from the active vault (owner/admin), then refresh. */
   removeMember: (userId: string) => Promise<void>;
   /** Change a member's role in the active vault (owner/admin), then refresh. */
@@ -808,6 +842,52 @@ async function consumeQueuedNoteLink(get: () => AppStore): Promise<void> {
   if (url) await get().openNoteLink(url);
 }
 
+/**
+ * Accept the team invitation that was parked while sign-in (or a server switch)
+ * happened. A no-op when nothing is queued.
+ *
+ * The invitation's vault is where the user LANDS — `acceptInvitation` switches
+ * into it, binds its folder and turns sync on — so every caller skips the plain
+ * `landInLastVault` while an invite is queued. If acceptance fails (the classic
+ * case: signed in as the wrong address) the caller falls back to the ordinary
+ * landing, because being stranded on the welcome screen with an error is worse
+ * than being in some vault with an error.
+ */
+async function consumeQueuedInvite(
+  get: () => AppStore,
+  set: (partial: Partial<AppStore>) => void,
+): Promise<boolean> {
+  const invite = takePendingInvite();
+  if (!invite) return false;
+  // The preview may already be in the store (the signed-out prompt fetched it);
+  // re-reading it is only for the failure message's "sent to" address, so a
+  // failed fetch degrades the copy rather than the flow.
+  let inviteEmail = get().invitePrompt?.email ?? null;
+  if (!inviteEmail) {
+    try {
+      inviteEmail = (await authManager.api.previewInvitation(invite.invitationId)).email;
+    } catch {
+      /* copy-only */
+    }
+  }
+  try {
+    await get().acceptInvitation(invite.invitationId);
+    return true;
+  } catch (e) {
+    set({ invitePrompt: null });
+    toast(
+      acceptInviteFailureMessage(e, {
+        inviteEmail,
+        sessionEmail: get().session?.user.email ?? null,
+      }),
+      // `error` is already sticky in `toast` — an accept failure the user
+      // blinked past is one they report as "the link did nothing".
+      "error",
+    );
+    return false;
+  }
+}
+
 /** A link is queued but there's no session: put the sign-in dialog up and say
  *  why (shared by initAuth's signed-out and error endings). */
 function promptSignInForQueuedLink(
@@ -815,6 +895,32 @@ function promptSignInForQueuedLink(
 ): void {
   set({ authPrompt: "note-link" });
   toast("Sign in to open this shared note — it will open right after you sign in", "neutral");
+}
+
+/**
+ * The invite equivalent: an invitation is queued and there is no session, so
+ * put the sign-in dialog up WITH the invitation's details.
+ *
+ * The preview is re-fetched rather than assumed, because this path is reached
+ * from `initAuth` — where the link LAUNCHED the app and nothing has looked the
+ * invitation up yet. A preview we can't read means an invitation the user
+ * can't use, so the queue is dropped and the reason said out loud instead of
+ * raising a card about nothing.
+ */
+async function promptSignInForQueuedInvite(
+  set: (partial: Partial<AppStore>) => void,
+): Promise<void> {
+  const invite = peekPendingInvite();
+  if (!invite) return;
+  try {
+    const preview = await authManager.api.previewInvitation(invite.invitationId);
+    if (preview.status !== "pending") throw new Error(INVITE_GONE_MESSAGE);
+    set({ invitePrompt: preview, authPrompt: "invite" });
+  } catch {
+    clearPendingInvite();
+    set({ invitePrompt: null });
+    toast(INVITE_GONE_MESSAGE, "error");
+  }
 }
 
 /** Auto-dismiss timer for the member-joined celebration (module-scoped so a
@@ -959,6 +1065,11 @@ export const useStore = create<AppStore>((set, get) => ({
   promptServerLink: (serverUrl) =>
     set({ pendingServerLink: serverUrl, authPrompt: "server-link" }),
   clearServerLink: () => set({ pendingServerLink: null }),
+  invitePrompt: null,
+  clearInvitePrompt: () => {
+    clearPendingInvite();
+    set({ invitePrompt: null });
+  },
   landingVault: false,
   switchingVault: null,
   openingNotePath: null,
@@ -1382,6 +1493,76 @@ export const useStore = create<AppStore>((set, get) => ({
     await get().openNoteByPath(path);
   },
 
+  openInviteLink: async (url) => {
+    const link = parseInviteDeepLink(url);
+    if (!link) return;
+
+    // 1. Wrong server? Park the invite and ask. A deep link must never repoint
+    // this device on its own — that value decides where a password gets posted
+    // (the same rule `promptServerLink` exists for). `setServerUrl` picks the
+    // invite back up when the user clicks Connect.
+    const sameServer =
+      link.server == null ||
+      normalizeServerUrl(link.server) === normalizeServerUrl(get().serverUrl);
+    if (!sameServer) {
+      queueInvite(link);
+      get().promptServerLink(link.server!);
+      return;
+    }
+
+    // 2. What is this invitation? Public route, so this works signed out — and
+    // it is what lets the sign-in card name the vault instead of appearing for
+    // no stated reason.
+    let preview: InvitationPreview;
+    try {
+      preview = await authManager.api.previewInvitation(link.invitationId);
+    } catch {
+      // 404 (unknown id) and any other failure alike: an invitation we cannot
+      // read is one the user cannot use, and an unknown id must stay
+      // indistinguishable from a consumed one.
+      toast(INVITE_GONE_MESSAGE, "error");
+      return;
+    }
+    // 3. Accepted, declined, revoked or expired: the same sentence as an
+    // unknown id, because to the person holding the link they are one situation
+    // — and distinguishing them would leak whether an id was ever real.
+    if (preview.status !== "pending") {
+      toast(INVITE_GONE_MESSAGE, "error");
+      return;
+    }
+
+    const authStatus = get().authStatus;
+    if (authStatus === "signed-in") {
+      // 4. Accept now. `acceptInvitation` switches into the vault, binds its
+      // folder and celebrates — accepting an invitation IS asking to work there.
+      try {
+        await get().acceptInvitation(link.invitationId);
+      } catch (e) {
+        toast(
+          acceptInviteFailureMessage(e, {
+            inviteEmail: preview.email,
+            sessionEmail: get().session?.user.email ?? null,
+          }),
+          "error",
+        );
+      }
+      return;
+    }
+
+    queueInvite(link);
+    if (authStatus === "signed-out") {
+      // 5. Raise the dialog, carrying the preview so the card can say who
+      // invited them, to what, and at which address.
+      set({ invitePrompt: preview, authPrompt: "invite" });
+      return;
+    }
+    // 6. "unknown" — the click LAUNCHED the app and `initAuth` is still
+    // restoring the session. Stay silent: initAuth consumes the queue on the
+    // signed-in path and raises the prompt on the signed-out one, and guessing
+    // here would either flash a sign-in card at someone who has a session or
+    // accept against a session that doesn't exist yet.
+  },
+
   refreshBacklinks: async () => {
     const note = get().openNote;
     if (!note?.id) {
@@ -1600,18 +1781,26 @@ export const useStore = create<AppStore>((set, get) => ({
         set({ session, authStatus: "signed-in", authError: null });
         await get().refreshVault();
         await get().refreshBillingConfig();
-        await landInLastVault(get);
+        // An invitation link may have LAUNCHED the app too, and the vault it
+        // names is where the user must land — so the ordinary landing is
+        // skipped while one is queued (landing elsewhere first would bind a
+        // folder and reconcile a vault nobody asked for, then do it again).
+        // A FAILED accept falls back to it rather than stranding the user.
+        const joined = peekPendingInvite() != null && (await consumeQueuedInvite(get, set));
+        if (!joined) await landInLastVault(get);
         await get().refreshOrgBilling();
         // A share link may have LAUNCHED the app: its deep-link replay raced
         // this restore while authStatus was still "unknown" and got queued.
         await consumeQueuedNoteLink(get);
       } else {
         set({ session: null, authStatus: "signed-out" });
-        if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
+        if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
+        else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
       }
     } catch (e) {
       set({ authStatus: "signed-out", authError: errMsg(e) });
-      if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
+      if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
+      else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
     }
   },
 
@@ -1624,12 +1813,19 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshVault();
         await get().refreshBillingConfig();
-        // Open the vault they last used, rather than making them pick one — and
-        // if the account has none yet, make one. Signing in never dead-ends back
-        // on the welcome screen.
-        await landInLastVault(get);
+        // An invitation waiting on this sign-in owns the landing: its vault is
+        // the one the user is joining. Only a failed accept falls through to
+        // the ordinary landing (below), so an email mismatch still leaves them
+        // somewhere usable with the reason on screen.
+        const joined = peekPendingInvite() != null && (await consumeQueuedInvite(get, set));
+        if (!joined) {
+          // Open the vault they last used, rather than making them pick one — and
+          // if the account has none yet, make one. Signing in never dead-ends back
+          // on the welcome screen.
+          await landInLastVault(get);
+        }
         await get().refreshOrgBilling();
-        await get().openWelcomeIfPresent();
+        if (!joined) await get().openWelcomeIfPresent();
         // A shared link queued while signed out supersedes Welcome — the
         // landing already switched into its vault via requestOpenVault.
         await consumeQueuedNoteLink(get);
@@ -1651,11 +1847,12 @@ export const useStore = create<AppStore>((set, get) => ({
     if (session) {
       await get().refreshVault();
       await get().refreshBillingConfig();
-      // Same as email sign-in: land in a vault, creating the first one if the
-      // account has none.
-      await landInLastVault(get);
+      // Same as email sign-in: a queued invitation owns the landing, otherwise
+      // land in a vault, creating the first one if the account has none.
+      const joined = peekPendingInvite() != null && (await consumeQueuedInvite(get, set));
+      if (!joined) await landInLastVault(get);
       await get().refreshOrgBilling();
-      await get().openWelcomeIfPresent();
+      if (!joined) await get().openWelcomeIfPresent();
       await consumeQueuedNoteLink(get);
     }
   },
@@ -1669,13 +1866,20 @@ export const useStore = create<AppStore>((set, get) => ({
       if (session) {
         await get().refreshVault();
         await get().refreshBillingConfig();
-        // A brand-new account has nothing to restore, so this is what actually
-        // creates their first vault and opens it. Sign-up used to skip landing
-        // entirely, which is why signing up from the welcome screen returned you
-        // to the welcome screen.
-        await landInLastVault(get);
+        // The commonest invite case by far: the invitee had no account, so they
+        // sign UP from the invite card. Accepting is the landing — and it also
+        // stops `landInLastVault` from inventing a private "My Vault" first,
+        // which is what made joining a team look like starting alone.
+        const joined = peekPendingInvite() != null && (await consumeQueuedInvite(get, set));
+        if (!joined) {
+          // A brand-new account has nothing to restore, so this is what actually
+          // creates their first vault and opens it. Sign-up used to skip landing
+          // entirely, which is why signing up from the welcome screen returned you
+          // to the welcome screen.
+          await landInLastVault(get);
+        }
         await get().refreshOrgBilling();
-        await get().openWelcomeIfPresent();
+        if (!joined) await get().openWelcomeIfPresent();
         await consumeQueuedNoteLink(get);
       }
     } catch (e) {
@@ -1698,10 +1902,15 @@ export const useStore = create<AppStore>((set, get) => ({
     await authManager.signOut();
     // A queued shared link belongs to the account that clicked it.
     clearPendingNoteLink();
+    // Ditto a queued invitation and the card describing it: an invitation is
+    // addressed to ONE email, so carrying it across a sign-out would offer it
+    // to whoever signs in next — and get a recipient-mismatch error for it.
+    clearPendingInvite();
     set({
       session: null,
       authStatus: "signed-out",
       authPrompt: null,
+      invitePrompt: null,
       // Ditto an unanswered connect offer: it belongs to the flow that raised
       // it, not to whoever signs in next.
       pendingServerLink: null,
@@ -1754,9 +1963,18 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().refreshBillingConfig();
       await get().refreshOrgBilling();
       await get().enableSyncForVault();
+      // An invitation link that named THIS server parked itself here waiting
+      // for the user's Connect click (`openInviteLink` step 2). The click has
+      // landed, so pick it back up — otherwise confirming the server silently
+      // drops the invitation that asked for it.
+      if (peekPendingInvite()) await consumeQueuedInvite(get, set);
     } else {
       syncManager.disable();
       set({ syncEnabled: false, billingConfig: null, orgBilling: null });
+      // Same invitation, no session on the new server: raise the sign-in card
+      // for it rather than leaving the queue to be discovered by the next
+      // unrelated sign-in.
+      if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
     }
   },
 
@@ -2153,8 +2371,16 @@ export const useStore = create<AppStore>((set, get) => ({
 
   inviteMember: async (email, role) => {
     const activeOrgId = get().session?.activeOrganizationId ?? undefined;
-    await authManager.api.inviteMember({ email, role, organizationId: activeOrgId });
+    const invitation = await authManager.api.inviteMember({
+      email,
+      role,
+      organizationId: activeOrgId,
+    });
     await get().refreshVault();
+    // Returned, not just refreshed into `pendingInvitations`: the caller needs
+    // THIS invitation's id to build its link, and the roster list is keyed by
+    // email with no promise about which row is the one just created.
+    return invitation;
   },
 
   removeMember: async (userId) => {
@@ -2199,6 +2425,11 @@ export const useStore = create<AppStore>((set, get) => ({
     if (orgId) {
       await get().setActiveOrganization(orgId);
     }
+    // The invite card is spent — leaving it up would offer to accept an
+    // invitation that no longer exists. Only the CARD: the queue is cleared by
+    // whoever consumed it, so an invitation parked for a different flow (a
+    // pending server switch) is not eaten by an unrelated accept.
+    set({ invitePrompt: null });
     // The joiner celebrates locally too (they connect after the server push).
     const me = get().session?.user;
     get().celebrateMemberJoined(me?.name || me?.email || "You");

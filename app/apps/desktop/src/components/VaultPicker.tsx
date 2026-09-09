@@ -100,6 +100,13 @@ function tidyPath(path: string): string {
 
 export function VaultPicker() {
   const authStatus = useStore((s) => s.authStatus);
+  // A link-driven prompt (shared note / server invite / team invitation) mounts
+  // its OWN AuthDialog from App.tsx, over this same welcome screen. Two stacked
+  // sign-in modals is not a hypothetical: an invitation link clicked while the
+  // picker's own dialog is open would put one card on top of the other, each
+  // with its own idea of what happens after sign-in. The prompted one wins —
+  // it is the one that arrived with a reason attached.
+  const authPrompt = useStore((s) => s.authPrompt);
   // The live vault list. Signed in, this is the truth and the cache below is
   // only its mirror; signed out it is empty and the cache is all we have.
   const organizations = useStore((s) => s.organizations);
@@ -969,7 +976,7 @@ export function VaultPicker() {
         </div>
       )}
 
-      {signInOpen && (
+      {signInOpen && !authPrompt && (
         <AuthDialog
           // Someone arriving with a join code most likely has no account yet.
           initialMode={signInFor === "join" ? "sign-up" : "sign-in"}

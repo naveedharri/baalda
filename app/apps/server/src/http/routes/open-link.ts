@@ -145,7 +145,7 @@ const PREFIX_RE = /^(?:\/[A-Za-z0-9._~-]{1,64})*$/;
  * confirms before honouring either way. The shape checks exist so a hostile
  * value can't smuggle a path or markup into the link, not as an authz boundary.
  */
-function publicBaseUrl(c: Context): string {
+export function publicBaseUrl(c: Context): string {
   const hdr = (name: string) => c.req.header(name)?.split(",")[0]?.trim() || undefined;
   const host = hdr("x-forwarded-host") ?? hdr("host");
   let base = config.betterAuthUrl;

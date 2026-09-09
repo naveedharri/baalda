@@ -84,6 +84,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 ## Team collaboration
 
 - **Invite** teammates by email, or hand out a **join code**. Invitations expire after 48 hours.
+  On a server with email configured (the managed service does) the invitee gets an email with a
+  link that opens Baalda on the invitation; otherwise Members shows a **Copy link** for each
+  pending invitation to paste into chat. Someone invited by email who uses the join code instead
+  ends up in exactly the same place, with the invited role.
 - **Roles**: owner, admin, member.
 - **Live presence**: coloured cursors and selections in the note, "who is viewing" avatars,
   and small presence dots in the sidebar showing who is in which note or folder. Ping a
@@ -103,7 +107,7 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - **Losing access** removes the note from the ex-reader's other devices (moved to trash, never
   destroyed); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom
-  roles, SSO/SAML, two-factor authentication, email verification at sign-up.
+  roles, SSO/SAML, two-factor authentication, mandatory email verification.
 - **Public links**: turn a note into a read-only web page anyone with the link can read. Revoke
   any time. **Private links** (`baalda://note/...`) open a note for teammates who already have
   access; they carry no access themselves.
@@ -133,8 +137,11 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 ## Accounts and security
 
 - Email + password accounts (argon2id hashing). Google sign-in is available when the server has
-  it configured (the managed service does). There is no email verification step yet and no
-  two-factor authentication.
+  it configured (the managed service does). **Forgot password?** on the sign-in screen emails a
+  one-hour reset link when the server has email configured (the managed service does; a
+  self-hosted server needs `EMAIL_FROM` + SMTP or Resend). An account created with Google can use
+  the same link to set a password. Sign-up sends a confirmation email but it isn't required to
+  sign in yet. No two-factor authentication.
 - Session token lives in the operating system keychain, never in a file.
 - Server stores binary sync records, not `.md` files; but it can reconstruct note text for
   search, public links and MCP, so it is **not end-to-end encrypted**. At-rest encryption is

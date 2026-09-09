@@ -14,7 +14,9 @@ import type { BillingProvider } from "../../billing/provider.js";
  *  - GET    /api/orgs/join-code → owner/admin fetch (lazily generates) the code
  *    for their active vault, so they can share it.
  *  - POST   /api/orgs/join {code} → any signed-in user redeems a code and becomes
- *    a 'member' of that vault (idempotent if already a member).
+ *    a 'member' of that vault (idempotent if already a member). A pending email
+ *    invitation for the same address is consumed on the way in — same role,
+ *    same end state as accepting it.
  *  - DELETE /api/orgs/:orgId → the vault **owner** permanently deletes the
  *    vault everywhere: members, invitations, note collections, folders, notes, files,
  *    shares, join codes, and MCP tokens cascade from the `organization` row;
@@ -144,19 +146,54 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ organizationId, name: target.name, alreadyMember: true });
     }
 
-    // Free-tier seat cap. This path bypasses Better Auth entirely, so the same
-    // limit the invite hook enforces must be checked here before the INSERT.
-    // No-op when billing is off (canAddMember returns allowed).
-    const seat = await canAddMember(organizationId);
-    if (!seat.allowed) {
-      return c.json({ error: "member_limit_reached", limit: seat.limit }, 402);
+    // A code and an email invitation must land the same person in the same
+    // place. If this vault already holds a pending invitation for the joiner's
+    // address, the code is just the door they happened to walk through: they
+    // get the ROLE the admin chose for them (an invited admin who joins by code
+    // is an admin), the invitation is marked accepted so it stops showing as
+    // "pending" in Members and stops holding a seat, and the seat cap is not
+    // re-checked — their seat was already counted when the invitation was made.
+    const invited = await pool.query<{ id: string; role: string | null; live: boolean }>(
+      `SELECT id, role, ("expiresAt" > now()) AS live
+         FROM invitation
+        WHERE "organizationId" = $1 AND lower(email) = lower($2) AND status = 'pending'
+        ORDER BY "createdAt" DESC`,
+      [organizationId, session.email],
+    );
+    const liveInvite = invited.rows.find((r) => r.live);
+    const role = liveInvite?.role === "admin" ? "admin" : "member";
+
+    if (!liveInvite) {
+      // Free-tier seat cap. This path bypasses Better Auth entirely, so the same
+      // limit the invite hook enforces must be checked here before the INSERT.
+      // No-op when billing is off (canAddMember returns allowed).
+      const seat = await canAddMember(organizationId);
+      if (!seat.allowed) {
+        return c.json({ error: "member_limit_reached", limit: seat.limit }, 402);
+      }
     }
 
-    await pool.query(
-      `INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
-       VALUES ($1, $2, $3, 'member', now())`,
-      [randomUUID(), organizationId, session.userId],
-    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
+         VALUES ($1, $2, $3, $4, now())`,
+        [randomUUID(), organizationId, session.userId, role],
+      );
+      if (invited.rows.length) {
+        await client.query(
+          `UPDATE invitation SET status = 'accepted' WHERE id = ANY($1)`,
+          [invited.rows.map((r) => r.id)],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
 
     // Announce to teammates already live in the vault (this path bypasses
     // Better Auth, so its hooks never fire — we do it explicitly here).
@@ -167,7 +204,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     const displayName = who.rows[0]?.name?.trim() || session.email;
     void announceMemberJoined(organizationId, displayName);
 
-    return c.json({ organizationId, name: target.name, alreadyMember: false });
+    return c.json({ organizationId, name: target.name, alreadyMember: false, role });
   });
 
   // Permanently delete a vault (owner only). Everything with a FK to the

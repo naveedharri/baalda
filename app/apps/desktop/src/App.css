@@ -4447,6 +4447,53 @@ body:has(.sidebar-resizer.dragging) {
   font-weight: 600;
 }
 
+/* Why the sign-in card is on screen when a team invitation raised it. */
+.auth-invite-lede {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--accent-soft);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.auth-invite-lede strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* "Forgot password?" — right-aligned under the password field, so it reads as
+   belonging to it rather than as a second submit action. */
+.auth-forgot {
+  display: flex;
+  justify-content: flex-end;
+  margin: calc(-1 * var(--sp-1)) 0 0;
+  font-size: var(--fs-sm);
+}
+.auth-reset-lede {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+/* The reset form's terminal state: no form left, just what happens next. */
+.auth-reset-done {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.auth-reset-done p {
+  margin: 0;
+}
+.auth-reset-done strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 /* Members + shares lists */
 .member-list,
 .share-list {
@@ -4501,11 +4548,67 @@ body:has(.sidebar-resizer.dragging) {
   align-items: center;
   gap: var(--sp-2);
 }
-.invite-row .muted {
+/* Two lines: what you'd be joining, and who asked. Takes the row's spare width
+   so the Accept/Decline buttons keep their intrinsic size. */
+.invite-row-meta {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+}
+.invite-row-title {
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* The old rule this replaces stretched a direct `.muted` child of the row.
+   The row's text now lives in `.invite-row-meta`, a COLUMN — `flex: 1` there
+   would grow the caption vertically instead of taking the row's width. */
+.invite-row-meta .muted {
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+
+/* Confirmation after an invite is created (Members tab). Neutral, not an
+   error — and it holds the link when the server can't send email, which is
+   why it is inline and persistent rather than a toast. */
+.invite-notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.invite-notice-link {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.invite-notice-link code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-2);
 }
 
 /* Avatars — circular, deterministic color, initials */

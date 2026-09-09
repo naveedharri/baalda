@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  type Invitation,
   type McpToolInfo,
   type McpTokenRow,
   type Member,
@@ -25,6 +26,7 @@ import {
   unboundRecents,
   type VaultRow,
 } from "../lib/vaultRows";
+import { buildInviteLink } from "../lib/inviteLink";
 import { configOrgId } from "../lib/vault/rediscover";
 import { statusTone } from "../lib/presence/color";
 import { AccessPanel } from "./AccessPanel";
@@ -55,6 +57,8 @@ export { AuthDialog };
 export function AccountMenu() {
   const authStatus = useStore((s) => s.authStatus);
   const session = useStore((s) => s.session);
+  // See the guard on this component's own AuthDialog below.
+  const authPrompt = useStore((s) => s.authPrompt);
   const organizations = useStore((s) => s.organizations);
   const userInvitations = useStore((s) => s.userInvitations);
   const syncStatus = useStore((s) => s.syncStatus);
@@ -178,7 +182,10 @@ export function AccountMenu() {
             }}
           />
         )}
-        {authOpen && <AuthDialog onClose={() => setAuthOpen(false)} />}
+        {/* Same rule as VaultPicker: a link-driven prompt mounts its own
+            AuthDialog from App.tsx, and two stacked sign-in cards is a bug.
+            The prompted one wins while it is up; this one comes back after. */}
+        {authOpen && !authPrompt && <AuthDialog onClose={() => setAuthOpen(false)} />}
         {membersOpen && (
           <VaultSettingsDialog
             onClose={() => setMembersOpen(false)}
@@ -612,8 +619,20 @@ function AccountPopover({
           <div className="subhead">You're invited</div>
           {userInvitations.map((inv) => (
             <div key={inv.id} className="invite-row">
-              <span className="muted" title={inv.organizationId}>
-                Vault invitation · {inv.role}
+              {/* The vault's NAME and the inviter's, not "Vault invitation" with
+                  an org id hidden in a title attribute — nobody recognises a
+                  vault by its id, and this row is the whole basis for deciding
+                  whether to accept. Both fields come from our own
+                  /api/invitations/mine; Better Auth's fallback route has
+                  neither, hence the plain-language defaults. */}
+              <span className="invite-row-meta">
+                <span className="invite-row-title">
+                  Join {inv.organizationName ?? "a vault"}
+                </span>
+                <span className="muted">
+                  {inv.inviterName ? `invited by ${inv.inviterName} · ` : ""}
+                  {inv.role}
+                </span>
               </span>
               {/* Accepting is: accept → re-read session → roster → switch into
                   the vault → bind a folder → reconcile. Easily seconds, and it
@@ -624,6 +643,20 @@ function AccountPopover({
                 onClick={() => useStore.getState().acceptInvitation(inv.id)}
               >
                 Accept
+              </AsyncButton>
+              {/* Declining is a real answer, and without it the only way to
+                  clear the row is to join a vault you were never joining. */}
+              <AsyncButton
+                className="link-btn"
+                onClick={async () => {
+                  try {
+                    await authManager.api.rejectInvitation(inv.id);
+                  } finally {
+                    await useStore.getState().refreshVault();
+                  }
+                }}
+              >
+                Decline
               </AsyncButton>
             </div>
           ))}
@@ -1801,12 +1834,29 @@ function MembersTab({ canManage }: { canManage: boolean }) {
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
   const pendingInvitations = useStore((s) => s.pendingInvitations);
+  // Invite links are built against the server this vault lives on, not a
+  // constant: a self-hosted vault's invitation only resolves on its own server.
+  const serverUrl = useStore((s) => s.serverUrl);
 
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"member" | "admin">("member");
   const [busy, setBusy] = useState(false);
   const [code, setCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Does this server send invitation email? If not, the link IS the delivery
+  // mechanism and the admin has to be told to send it — an invitation that
+  // silently never arrives is the whole failure this notice prevents.
+  const [invitationEmail, setInvitationEmail] = useState(false);
+  // The invitation just created, so its link can be shown. Not read out of
+  // `pendingInvitations`: that list is keyed by email and makes no promise
+  // about which row is the one this click produced.
+  const [created, setCreated] = useState<Invitation | null>(null);
+  // Which link was copied, by invitation id ("new" for the notice above the
+  // list) — one shared flag would tick every row at once.
+  const [copiedLink, setCopiedLink] = useState<string | null>(null);
+  // Revoking is destructive and unprompted-recoverable only by re-inviting, so
+  // it gets the same inline "Revoke → Confirm" as member removal.
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   // Invite errors had no home before — surface them here (silent-failure fix).
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
@@ -1876,6 +1926,24 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     };
   }, [canManage]);
 
+  // Whether the server emails invitations. Fails closed like every capability
+  // probe in api.ts, which is the safe direction here: an admin told to share
+  // the link when the server would have emailed it has still delivered the
+  // invitation, where the reverse leaves it undelivered.
+  useEffect(() => {
+    if (!canManage) return;
+    let cancelled = false;
+    authManager.api
+      .getAuthMethods()
+      .then((m) => {
+        if (!cancelled) setInvitationEmail(m.invitationEmail);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [canManage]);
+
   const copyCode = async () => {
     if (!code) return;
     try {
@@ -1887,13 +1955,43 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     }
   };
 
+  /** Copy one invitation's https link. `tag` keys the "Copied ✓" to its row. */
+  const copyInviteLink = async (invitationId: string, tag: string) => {
+    const link = buildInviteLink(serverUrl, invitationId);
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopiedLink(tag);
+      window.setTimeout(() => setCopiedLink((c) => (c === tag ? null : c)), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+
+  const revoke = async (invitationId: string) => {
+    setInviteError(null);
+    try {
+      await authManager.api.cancelInvitation(invitationId);
+      setConfirmRevokeId(null);
+      // Drop the just-created notice if it was about this invitation — its link
+      // is dead now, and offering to copy it would be worse than saying nothing.
+      setCreated((c) => (c?.id === invitationId ? null : c));
+      await useStore.getState().refreshVault();
+    } catch (e) {
+      setInviteError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const invite = async () => {
     if (!inviteEmail.trim()) return;
     setBusy(true);
     setInviteError(null);
     setLimitNudge(null);
     try {
-      await useStore.getState().inviteMember(inviteEmail.trim(), inviteRole);
+      const invitation = await useStore
+        .getState()
+        .inviteMember(inviteEmail.trim(), inviteRole);
+      setCreated(invitation);
       setInviteEmail("");
     } catch (e) {
       // A 402 member-cap rejection becomes an upgrade nudge; anything else is a
@@ -1914,6 +2012,8 @@ function MembersTab({ canManage }: { canManage: boolean }) {
             <span className="subhead">Join code</span>
             <span className="muted">
               Teammates pick “Join with code” in their account menu after signing in.
+              Someone who was also invited by email lands with the invited role either
+              way.
             </span>
           </div>
           <code className="join-code">{code}</code>
@@ -1946,6 +2046,32 @@ function MembersTab({ canManage }: { canManage: boolean }) {
         </div>
       )}
       {inviteError && <div className="auth-error">{inviteError}</div>}
+      {/* Inline, not a toast: this modal has its own error/notice slots, and a
+          corner toast carrying a link the admin has to COPY is a link they will
+          lose. */}
+      {created && (
+        <div className="invite-notice">
+          {invitationEmail ? (
+            <span>Invitation emailed to {created.email}.</span>
+          ) : (
+            <>
+              <span>
+                Invitation created — this server doesn't send email, so share this link
+                with {created.email}:
+              </span>
+              <div className="invite-notice-link">
+                <code>{buildInviteLink(serverUrl, created.id) ?? ""}</code>
+                <button
+                  className="link-btn"
+                  onClick={() => void copyInviteLink(created.id, "new")}
+                >
+                  {copiedLink === "new" ? "Copied ✓" : "Copy"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
       {limitNudge && (
         <LimitNudge
           kind={limitNudge.kind}
@@ -2021,6 +2147,44 @@ function MembersTab({ canManage }: { canManage: boolean }) {
                 <Avatar label={inv.email} />
                 <span className="member-name">{inv.email}</span>
                 <span className="member-role pending">{inv.role} · pending</span>
+                {canManage && (
+                  <>
+                    {/* The link is useful long after the invite was sent: the
+                        email may have bounced, or this server may not send any. */}
+                    <button
+                      className="link-btn"
+                      onClick={() => void copyInviteLink(inv.id, inv.id)}
+                    >
+                      {copiedLink === inv.id ? "Copied ✓" : "Copy link"}
+                    </button>
+                    {confirmRevokeId === inv.id ? (
+                      <>
+                        <AsyncButton
+                          className="link-btn danger"
+                          onClick={() => revoke(inv.id)}
+                        >
+                          Confirm
+                        </AsyncButton>
+                        <button
+                          className="link-btn"
+                          onClick={() => setConfirmRevokeId(null)}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="link-btn danger"
+                        onClick={() => {
+                          setInviteError(null);
+                          setConfirmRevokeId(inv.id);
+                        }}
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </>
+                )}
               </li>
             ))}
           </ul>

@@ -106,13 +106,31 @@ export function AuthDialog({
   const authError = useStore((s) => s.authError);
   const serverUrl = useStore((s) => s.serverUrl);
   const pendingServerLink = useStore((s) => s.pendingServerLink);
+  // A team invitation brought this card up. It changes what the card SAYS
+  // rather than what it does: an invitee arriving from a link has no idea why a
+  // password prompt appeared unless it names the vault and who invited them.
+  const invitePrompt = useStore((s) => s.invitePrompt);
 
-  const [mode, setMode] = useState<"sign-in" | "sign-up">(initialMode);
+  // "reset" is a third mode, not a separate dialog: it needs the same server
+  // context, the same error slot and the same close behaviour, and someone who
+  // remembers their password mid-way has to be able to step back to sign-in.
+  const [mode, setMode] = useState<"sign-in" | "sign-up" | "reset">(
+    // An invitee usually has no account yet, so the invite card opens on
+    // sign-up whatever the caller asked for.
+    invitePrompt ? "sign-up" : initialMode,
+  );
   const [name, setName] = useState("");
   // Dev-only prefill of the local test account; production builds ship empty fields.
-  const [email, setEmail] = useState(import.meta.env.DEV ? "test@context.local" : "");
+  const [email, setEmail] = useState(
+    invitePrompt?.email ?? (import.meta.env.DEV ? "test@context.local" : ""),
+  );
   const [password, setPassword] = useState(import.meta.env.DEV ? "Context-Test-2026!" : "");
   const [busy, setBusy] = useState(false);
+  // Password reset: its own busy/error/sent state, because the outcome is not a
+  // session — the form is replaced by a confirmation and the person leaves for
+  // their inbox.
+  const [resetSent, setResetSent] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
   // Google sign-in runs in the system browser and the app just waits for the
   // loopback handoff (up to a 3-min timeout). Its own busy flag lets us show a
   // "waiting for your browser" state instead of a silently disabled button.
@@ -120,6 +138,9 @@ export function AuthDialog({
   // Google is only offered when the server is configured for it; ask on open
   // (and whenever the server changes) so a self-host without creds hides it.
   const [googleAvailable, setGoogleAvailable] = useState(false);
+  // Same probe, same fail-closed rule: a server that cannot send email must not
+  // offer "Forgot password?", or the link is a promise nothing keeps.
+  const [resetAvailable, setResetAvailable] = useState(false);
 
   // ---- server step ---------------------------------------------------------
 
@@ -164,6 +185,15 @@ export function AuthDialog({
   useEffect(() => {
     if (pendingServerLink) setStep("confirm-link");
   }, [pendingServerLink]);
+
+  // An invitation can likewise land on an already-open card (the person was
+  // mid-sign-in when they clicked the link). Adopt its address and open on
+  // sign-up, same as if it had raised the card itself.
+  useEffect(() => {
+    if (!invitePrompt) return;
+    setMode("sign-up");
+    setEmail(invitePrompt.email);
+  }, [invitePrompt?.id]);
 
   const chooseManaged = async () => {
     setServerError(null);
@@ -219,7 +249,9 @@ export function AuthDialog({
     authManager.api
       .getAuthMethods()
       .then((m) => {
-        if (!cancelled) setGoogleAvailable(m.google);
+        if (cancelled) return;
+        setGoogleAvailable(m.google);
+        setResetAvailable(m.passwordReset);
       })
       .catch(() => {});
     return () => {
@@ -262,6 +294,30 @@ export function AuthDialog({
     }
   };
 
+  /**
+   * Ask for a reset email. Always reports the same neutral outcome, whether or
+   * not the address has an account — the server answers 200 either way, and
+   * telling the difference here would turn this form into an account oracle.
+   */
+  const requestReset = async () => {
+    const addr = email.trim();
+    if (!addr) return;
+    setResetError(null);
+    try {
+      await authManager.api.requestPasswordReset(addr);
+      setResetSent(addr);
+    } catch (e) {
+      setResetError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  /** Back to sign-in from the reset form or its confirmation. */
+  const backToSignIn = () => {
+    setResetSent(null);
+    setResetError(null);
+    setMode("sign-in");
+  };
+
   // Each Google attempt gets a generation number. Cancelling (or starting a new
   // attempt) bumps it, so when an abandoned flow finally rejects — the loopback
   // listener waits out its ~3-min timeout — we can drop that stale result instead
@@ -298,9 +354,11 @@ export function AuthDialog({
       ? "Where do your notes live?"
       : step === "confirm-link"
         ? `Connect to ${serverHost(pendingServerLink ?? serverUrl)}?`
-        : mode === "sign-in"
-          ? "Welcome back"
-          : "Create your account";
+        : mode === "reset"
+          ? "Reset your password"
+          : mode === "sign-in"
+            ? "Welcome back"
+            : "Create your account";
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -428,24 +486,36 @@ export function AuthDialog({
           </div>
         ) : (
           <>
-            <div className="segmented">
-              <button
-                className={mode === "sign-in" ? "active" : ""}
-                onClick={() => setMode("sign-in")}
-                type="button"
-              >
-                Sign in
-              </button>
-              <button
-                className={mode === "sign-up" ? "active" : ""}
-                onClick={() => setMode("sign-up")}
-                type="button"
-              >
-                Sign up
-              </button>
-            </div>
+            {/* Why this card is on screen. Without it an invitation link opens
+                an unexplained password prompt, and the one thing the person
+                needs to know — use the invited address — is unsaid. */}
+            {invitePrompt && (
+              <p className="auth-invite-lede">
+                <strong>{invitePrompt.inviterName ?? "A teammate"}</strong> invited you to
+                join <strong>{invitePrompt.organizationName}</strong>. Sign in — or create an
+                account — with <strong>{invitePrompt.email}</strong> to accept.
+              </p>
+            )}
+            {mode !== "reset" && (
+              <div className="segmented">
+                <button
+                  className={mode === "sign-in" ? "active" : ""}
+                  onClick={() => setMode("sign-in")}
+                  type="button"
+                >
+                  Sign in
+                </button>
+                <button
+                  className={mode === "sign-up" ? "active" : ""}
+                  onClick={() => setMode("sign-up")}
+                  type="button"
+                >
+                  Sign up
+                </button>
+              </div>
+            )}
 
-            {googleAvailable && (
+            {mode !== "reset" && googleAvailable && (
               <>
                 <button
                   type="button"
@@ -473,46 +543,127 @@ export function AuthDialog({
               </>
             )}
 
-            <form onSubmit={submit} className="auth-form">
-              {mode === "sign-up" && (
+            {mode === "reset" ? (
+              resetSent ? (
+                // Deliberately neutral about whether the account exists: the
+                // server answers the same 200 either way, and saying more here
+                // would make this form an account oracle.
+                <div className="auth-reset-done">
+                  <p>
+                    If an account exists for <strong>{resetSent}</strong>, a reset link is on
+                    its way. Check your inbox (and spam) — the link is valid for one hour.
+                  </p>
+                  <button type="button" className="link-btn" onClick={backToSignIn}>
+                    Back to sign in
+                  </button>
+                </div>
+              ) : (
+                <form
+                  className="auth-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void requestReset();
+                  }}
+                >
+                  <p className="auth-reset-lede">
+                    Enter your email and we'll send a link to choose a new password.
+                  </p>
+                  <input
+                    type="email"
+                    placeholder="Email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    autoComplete="email"
+                    autoFocus
+                    required
+                  />
+                  {/* `type="button"`, not submit: a submit button fires its
+                      own onClick AND the form's onSubmit, which would ask for
+                      two reset emails per click. The form's onSubmit is still
+                      there for the Enter key. */}
+                  <AsyncButton
+                    type="button"
+                    className="primary"
+                    disabled={email.trim() === ""}
+                    onClick={requestReset}
+                  >
+                    Email me a reset link
+                  </AsyncButton>
+                  <button type="button" className="link-btn" onClick={backToSignIn}>
+                    Back to sign in
+                  </button>
+                </form>
+              )
+            ) : (
+              <form onSubmit={submit} className="auth-form">
+                {mode === "sign-up" && (
+                  <input
+                    placeholder="Name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    autoComplete="name"
+                    required
+                  />
+                )}
                 <input
-                  placeholder="Name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  autoComplete="name"
+                  type="email"
+                  placeholder="Email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                  autoFocus
                   required
                 />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
+                  minLength={8}
+                  required
+                />
+                {mode === "sign-in" && resetAvailable && (
+                  <p className="auth-forgot">
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        setResetError(null);
+                        setResetSent(null);
+                        setMode("reset");
+                      }}
+                    >
+                      Forgot password?
+                    </button>
+                  </p>
+                )}
+                <button
+                  className={`primary${busy ? " is-busy" : ""}`}
+                  type="submit"
+                  disabled={busy || googleBusy}
+                  aria-busy={busy || undefined}
+                >
+                  <span className="async-btn-label">
+                    {mode === "sign-in" ? "Sign in" : "Create account"}
+                  </span>
+                  {busy && <Spinner size="xs" tone="on-accent" />}
+                </button>
+              </form>
+            )}
+            {resetError && <div className="auth-error">{resetError}</div>}
+            {/* The invitation is bound to ONE address. Said, not enforced: the
+                person may legitimately hold an account under another email, and
+                the server's mismatch error explains that case properly. */}
+            {invitePrompt &&
+              mode !== "reset" &&
+              email.trim() !== "" &&
+              email.trim().toLowerCase() !== invitePrompt.email.toLowerCase() && (
+                <p className="auth-hint">
+                  This invitation was sent to {invitePrompt.email}. Use that address, or it
+                  can't be accepted.
+                </p>
               )}
-              <input
-                type="email"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                autoComplete="email"
-                autoFocus
-                required
-              />
-              <input
-                type="password"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
-                minLength={8}
-                required
-              />
-              <button
-                className={`primary${busy ? " is-busy" : ""}`}
-                type="submit"
-                disabled={busy || googleBusy}
-                aria-busy={busy || undefined}
-              >
-                <span className="async-btn-label">
-                  {mode === "sign-in" ? "Sign in" : "Create account"}
-                </span>
-                {busy && <Spinner size="xs" tone="on-accent" />}
-              </button>
-            </form>
 
             {/* Which server this form is about to post to. An account is
                 per-server, so on a team that self-hosts this line is the
@@ -520,7 +671,11 @@ export function AuthDialog({
                 vault on someone else's instance. */}
             <p className="auth-server-note">
               <span>
-                {mode === "sign-in" ? "Signing in to " : "Creating your account on "}
+                {mode === "reset"
+                  ? "Resetting your password on "
+                  : mode === "sign-in"
+                    ? "Signing in to "
+                    : "Creating your account on "}
                 <strong>{serverHost(serverUrl)}</strong>
               </span>
               <button
@@ -537,7 +692,10 @@ export function AuthDialog({
               </button>
             </p>
 
-            {authError && <div className="auth-error">{authError}</div>}
+            {/* Gated on the mode: a sign-in failure still sitting in the store
+                would otherwise render under the reset form as if the reset had
+                failed. */}
+            {mode !== "reset" && authError && <div className="auth-error">{authError}</div>}
             {/* The one trap this form can't detect: an account created THROUGH
                 Google has no password at all, so email sign-in answers "Invalid
                 email or password" and sign-up answers "already exists" — a dead end
@@ -549,7 +707,10 @@ export function AuthDialog({
               /invalid email or password/i.test(authError) && (
                 <p className="auth-hint">
                   First joined with Google? That account has no password — use
-                  “Continue with Google” above.
+                  “Continue with Google” above
+                  {resetAvailable
+                    ? ", or use “Forgot password?” to set one."
+                    : "."}
                 </p>
               )}
           </>

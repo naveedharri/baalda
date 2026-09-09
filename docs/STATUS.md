@@ -192,9 +192,30 @@ Six changes that together make a vault something a team can actually govern.
   with no verification at sign-up, someone can register an address they don't own, and linking then
   joins the real owner to the squatter's account rather than locking them out. Accepted because the
   squat is already possible without linking and Google's verified email is the strongest signal we
-  have. **Email verification at sign-up is the real fix** and is still owed.
+  have. **Email verification at sign-up is the real fix** — it now ships (soft) when email is
+  configured, see below; requiring it is still owed.
 - [x] Pinned by a config test — the failure mode was a silent default, so the three options that
   have to agree (`enabled`, `trustedProviders`, `requireLocalEmailVerified`) are asserted together.
+
+### Password reset, verification + invitation emails ✔ (#99)
+- [x] Outbound email is opt-in via env (`EMAIL_FROM` + `SMTP_URL` or `RESEND_API_KEY`; `email/mailer.ts`),
+  on the Google-OAuth pattern: unconfigured servers offer none of it, `GET /api/auth-methods`
+  advertises `passwordReset` / `invitationEmail`, and the desktop keys its controls off that.
+- [x] **Password reset**: "Forgot password?" in the desktop dialog and on `/oauth/login` →
+  `request-password-reset` (neutral answer) → emailed single-use, 1-hour link to the server-rendered
+  `/reset-password` page → `reset-password` (revokes other sessions; creates the credential for a
+  Google-only account, so the same flow sets a first password). Admin escape hatch for servers
+  without email: `pnpm run set-password -- <email>`.
+- [x] **Sign-up verification email** (soft): sent on sign-up, `emailVerified` set on click, lands on
+  `/email-verified`. Not yet required to sign in — pre-existing accounts were never verified.
+- [x] **Invitation emails** → `/invite/:id` landing page → `baalda://invite/<id>?server=` deep link →
+  the app signs in/up with the invited address and accepts. Members shows a Copy-link + Revoke per
+  pending invitation (the link works without email). Re-inviting a pending address re-sends.
+- [x] **Invite inbox actually works**: Better Auth's `list-user-invitations` 403s for any unverified
+  email (= every password sign-up), so the in-app inbox had been empty for almost everyone.
+  `GET /api/invitations/mine` reads the table directly; the desktop uses it first.
+- [x] **Join code = email invite**: redeeming a code consumes a pending invitation for the same address
+  (invited role honoured, invitation marked accepted, seat not double-counted).
 
 ### Phase 4: Polish / upgrades _(deferred)_ ⬜
 - [ ] Structural rich-text CRDT (y-prosemirror / `Y.XmlFragment`) for full WYSIWYG.

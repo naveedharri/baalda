@@ -5,6 +5,8 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-a
 import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
+import { accountPageRoutes } from "./routes/account-pages.js";
+import { invitationRoutes } from "./routes/invitations.js";
 import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { blobRoutes } from "./routes/blobs.js";
@@ -98,6 +100,8 @@ function allowedOrigins(): string[] {
  *  - /api/notes/:docId/public-link → mint/inspect/revoke a public note link
  *  - /p/:token → public read-only note page (no auth; token is the capability)
  *  - /api/orgs/join-code, /api/orgs/join → vault join codes
+ *  - /api/invitations/mine, /api/invitations/:id/preview → invitation inbox/preview
+ *  - /forgot-password, /reset-password, /email-verified, /invite/:id → account pages
  *  - /api/vaults/:id/graph, /api/vaults/:id/search → note index (links+vectors)
  *  - /api/mcp → Model Context Protocol endpoint (AI clients); /api/mcp/tokens → token mgmt
  */
@@ -165,6 +169,9 @@ export function createApp(deps: AppDeps): Hono {
   );
   // The human-facing login + consent screens of that OAuth flow.
   app.route("/", oauthConnectRoutes);
+  // Account pages the emails link to: forgot/reset password, email verified,
+  // and the invitation landing page (bounces into the app's deep link).
+  app.route("/", accountPageRoutes);
 
   // Clickable share links: https://<server>/open/note/… bounces into the app's
   // baalda:// deep link. Public — the URL carries identity, never access.
@@ -180,6 +187,9 @@ export function createApp(deps: AppDeps): Hono {
   // Desktop Google sign-in handoff — deliberately NOT under /api/auth (the
   // catch-all above would shadow it). See desktop-oauth.ts.
   app.route("/api", desktopOauthRoutes);
+  // Invitation preview (public, by unguessable id) + the signed-in inbox that
+  // sidesteps Better Auth's verified-email gate on list-user-invitations.
+  app.route("/api", invitationRoutes);
   app.route("/api", syncTokenRoutes);
   app.route("/api", vaultTokenRoutes);
   app.route(

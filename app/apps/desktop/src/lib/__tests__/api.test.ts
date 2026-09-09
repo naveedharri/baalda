@@ -156,7 +156,127 @@ describe("ApiClient against a mocked fetch", () => {
   it("getAuthMethods falls back to email-only when the endpoint 404s", async () => {
     const { impl } = fakeFetch(() => ({ status: 404, json: { error: "not found" } }));
     const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
-    expect(await api.getAuthMethods()).toEqual({ emailPassword: true, google: false });
+    expect(await api.getAuthMethods()).toEqual({
+      emailPassword: true,
+      google: false,
+      passwordReset: false,
+      invitationEmail: false,
+    });
+  });
+
+  it("getAuthMethods reads an older server's two-field answer as no new capabilities", async () => {
+    // The whole point of failing closed per FIELD: a server that predates
+    // password reset must not be offered as one that can send the email.
+    const { impl } = fakeFetch(() => ({ json: { emailPassword: true, google: true } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    expect(await api.getAuthMethods()).toEqual({
+      emailPassword: true,
+      google: true,
+      passwordReset: false,
+      invitationEmail: false,
+    });
+  });
+
+  it("getAuthMethods passes through the full capability set", async () => {
+    const { impl } = fakeFetch(() => ({
+      json: {
+        emailPassword: true,
+        google: false,
+        passwordReset: true,
+        invitationEmail: true,
+      },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    expect(await api.getAuthMethods()).toEqual({
+      emailPassword: true,
+      google: false,
+      passwordReset: true,
+      invitationEmail: true,
+    });
+  });
+
+  it("requestPasswordReset posts only the email — never a redirectTo", async () => {
+    // A client-supplied redirect target on a reset flow is an open redirect
+    // wearing a reset token; the server builds its own link.
+    const { impl, calls } = fakeFetch(() => ({ json: { status: true, message: "ok" } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    await api.requestPasswordReset("ada@team.com");
+    expect(calls[0].url).toContain("/api/auth/request-password-reset");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].body).toEqual({ email: "ada@team.com" });
+  });
+
+  it("cancelInvitation posts the id to Better Auth's cancel route", async () => {
+    const { impl, calls } = fakeFetch(() => ({ json: { invitation: { id: "inv_1" } } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+    await api.cancelInvitation("inv_1");
+    expect(calls[0].url).toContain("/api/auth/organization/cancel-invitation");
+    expect(calls[0].body).toEqual({ invitationId: "inv_1" });
+  });
+
+  it("previewInvitation reads the public preview and surfaces a 404 as ApiError", async () => {
+    const preview = {
+      id: "inv_1",
+      email: "ada@team.com",
+      role: "member",
+      status: "pending",
+      organizationId: "org_1",
+      organizationName: "Team Vault",
+      inviterName: "Grace",
+    };
+    const ok = fakeFetch(() => ({ json: preview }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: ok.impl });
+    expect(await api.previewInvitation("inv_1")).toEqual(preview);
+    expect(ok.calls[0].url).toBe("http://localhost:3010/api/invitations/inv_1/preview");
+
+    const missing = fakeFetch(() => ({ status: 404, json: { error: "not found" } }));
+    const api2 = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: missing.impl });
+    await expect(api2.previewInvitation("inv_x")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 404,
+    });
+  });
+
+  /**
+   * The invite inbox's whole bug: Better Auth's `list-user-invitations` answers
+   * 403 for any user whose email isn't verified — every password sign-up — so
+   * our own route has to be tried FIRST, and the legacy route only when the
+   * server is too old to have ours.
+   */
+  it("listUserInvitations prefers /api/invitations/mine", async () => {
+    const { impl, calls } = fakeFetch((call) => {
+      if (call.url.includes("/api/invitations/mine")) {
+        return { json: [{ id: "inv_1", email: "a@b.co", role: "member", status: "pending", organizationId: "org_1", organizationName: "Team" }] };
+      }
+      throw new Error(`unexpected call to ${call.url}`);
+    });
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+    const invs = await api.listUserInvitations();
+    expect(invs).toHaveLength(1);
+    expect(invs[0].organizationName).toBe("Team");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("listUserInvitations falls back to the Better Auth route on a 404", async () => {
+    const { impl, calls } = fakeFetch((call) => {
+      if (call.url.includes("/api/invitations/mine")) {
+        return { status: 404, json: { error: "not found" } };
+      }
+      return { json: { invitations: [{ id: "inv_2", email: "a@b.co", role: "member", status: "pending", organizationId: "org_1" }] } };
+    });
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+    const invs = await api.listUserInvitations();
+    expect(invs.map((i) => i.id)).toEqual(["inv_2"]);
+    expect(calls[1].url).toContain("/api/auth/organization/list-user-invitations");
+  });
+
+  it("listUserInvitations does NOT fall back on a non-404 failure", async () => {
+    // A 403 from our own route is a real failure. Retrying the legacy route
+    // would answer 403 for the same user and hide the problem as "no invites".
+    const { impl, calls } = fakeFetch(() => ({ status: 403, json: { error: "nope" } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+    await expect(api.listUserInvitations()).rejects.toMatchObject({ status: 403 });
+    expect(calls).toHaveLength(1);
   });
 
   it("public links: create POSTs, get maps {link:null}, revoke DELETEs", async () => {

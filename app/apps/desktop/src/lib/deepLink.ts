@@ -1,5 +1,5 @@
-// Receiving end of the app's `baalda://` links: a shared note (`shareLink.ts`)
-// and a server invite (`connectLink.ts`).
+// Receiving end of the app's `baalda://` links: a shared note (`shareLink.ts`),
+// a server address (`connectLink.ts`) and a team invitation (`inviteLink.ts`).
 //
 // Two arrival paths, and both have to work or links are unreliable:
 //   - the app is already running → `onOpenUrl` fires (on Windows/Linux this
@@ -14,6 +14,7 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../store";
 import { parseConnectLink } from "./connectLink";
+import { parseInviteDeepLink } from "./inviteLink";
 import { parseNoteLink } from "./shareLink";
 
 /** Bring the window forward — a link click means "show me this note". */
@@ -40,6 +41,19 @@ async function handle(urls: string[] | null): Promise<void> {
     if (!serverUrl) continue;
     await focusWindow();
     useStore.getState().promptServerLink(serverUrl);
+    return;
+  }
+  // Then invitations, ahead of note links: an invitation is what puts the
+  // person in the vault a shared note lives in, so if both arrive together
+  // joining has to happen first or the note link only reports no access.
+  for (const url of urls ?? []) {
+    if (!parseInviteDeepLink(url)) continue;
+    await focusWindow();
+    try {
+      await useStore.getState().openInviteLink(url);
+    } catch (e) {
+      console.error("[deeplink] invite failed", url, e);
+    }
     return;
   }
   for (const url of urls ?? []) {

@@ -282,12 +282,59 @@ confirm `/health` and a real sync round-trip, then promote.
 | `POLAR_SERVER` | no | `sandbox` | `sandbox` or `production` Polar environment. |
 | `FREE_MAX_VAULTS` | no | `3` | Free-tier cap on unsubscribed vaults per user (only enforced when billing is enabled). |
 | `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). Gates new invitations and join-code redemptions only; lowering it never removes existing members. |
+| `EMAIL_FROM` | for email | unset | **Outbound email (optional).** Sender address, e.g. `Baalda <no-reply@example.com>`. With this and ONE transport below, password reset ("Forgot password?"), sign-up verification and invitation emails switch on. Unset ⇒ email off and none of those is offered (invitations are shared as a link instead). |
+| `SMTP_URL` | one transport | unset | Any SMTP server: `smtp://user:pass@host:587` (STARTTLS) or `smtps://user:pass@host:465` (TLS). |
+| `RESEND_API_KEY` | one transport | unset | [Resend](https://resend.com) API key — the HTTPS alternative to SMTP. |
+| `EMAIL_TRANSPORT` | no | inferred | Force `smtp` \| `resend` \| `log` \| `memory` instead of inferring from the credential set. `log` prints emails to stdout (local dev); `memory` is the test suite's; both are refused in production. |
 
 > Billing note: the Polar organization must have **allow multiple subscriptions per customer** enabled
 > (Organization settings, or `PATCH /v1/organizations/:id` with `subscription_settings.allow_multiple_subscriptions: true`),
 > otherwise a customer's second vault upgrade is rejected at checkout.
 
 See `app/apps/server/.env.example` for the same list with inline comments.
+
+## Outbound email (password reset, invitations)
+
+Email is opt-in, on the same pattern as Google sign-in: leave it unconfigured
+and the server never tries to send anything — the desktop hides "Forgot
+password?", `POST /api/auth/request-password-reset` answers 400, and Members
+offers **Copy link** on each invitation so an admin can paste it into chat.
+Configure `EMAIL_FROM` plus either `SMTP_URL` or `RESEND_API_KEY` and three
+things switch on together:
+
+- **Password reset** — "Forgot password?" in the app (and on `/oauth/login`)
+  emails a single-use link, valid for one hour, to `<BETTER_AUTH_URL>/reset-password`,
+  a page this server renders itself. Setting a new password signs out every
+  other session. The answer is the same whether or not the address exists.
+  An account created through Google has no password; the same flow lets it set one.
+- **Sign-up verification** — a confirmation email on sign-up, recorded when the
+  link is clicked. It does not gate sign-in yet (accounts created before this
+  shipped were never verified, and locking them out would be worse than the
+  problem it solves).
+- **Invitation emails** — inviting a teammate emails them a link to
+  `<BETTER_AUTH_URL>/invite/<id>`, which opens the desktop app on that
+  invitation: sign in (or sign up) with the invited address and they land in the
+  vault. Inviting an address that is already pending re-sends. A teammate who
+  was invited by email but joins with the vault's **join code** ends up in the
+  same state — the invited role, invitation marked accepted.
+
+Links are built from `BETTER_AUTH_URL`, so it must be the address people can
+reach from outside. A half-configured setup (a transport without `EMAIL_FROM`,
+or the other way round) is a startup error on purpose: offering reset links
+that never arrive is worse than offering none.
+
+**No email and someone is locked out?** From the server's shell, with the
+server's environment (`DATABASE_URL`):
+
+```bash
+cd app/apps/server
+pnpm run set-password -- someone@example.com                # prints a generated password
+pnpm run set-password -- someone@example.com --password '…'  # or set a chosen one
+```
+
+It writes a fresh argon2id hash (creating the credential for a Google-only
+account) and revokes the account's live sessions. In Docker, run the compiled
+copy inside the container: `docker exec -it <container> node dist/scripts/set-password.js someone@example.com`.
 
 ## Point the desktop app at your server
 

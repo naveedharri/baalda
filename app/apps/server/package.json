@@ -18,6 +18,7 @@
     "seed:demo:reset": "tsx scripts/demo/seed-demo-org.ts --reset",
     "demo:activity": "tsx scripts/demo/simulate-activity.ts",
     "demo": "tsx scripts/demo/seed-demo-org.ts --reset && tsx scripts/demo/simulate-activity.ts",
+    "set-password": "tsx src/scripts/set-password.ts",
     "test": "vitest run"
   },
   "dependencies": {
@@ -32,6 +33,7 @@
     "ioredis": "^5.11.1",
     "jose": "^6.2.3",
     "kysely": "^0.29.3",
+    "nodemailer": "^7.0.13",
     "pg": "^8.22.0",
     "standardwebhooks": "^1.0.0",
     "ws": "^8.21.0",
@@ -40,6 +42,7 @@
   "devDependencies": {
     "@hocuspocus/provider": "catalog:",
     "@types/node": "^24.10.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.15.6",
     "@types/ws": "^8.18.1",
     "tsx": "^4.20.6",
