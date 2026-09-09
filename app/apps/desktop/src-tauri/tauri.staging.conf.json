@@ -3,6 +3,11 @@
   "productName": "Baalda Staging",
   "identifier": "com.baalda.context.staging",
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["baalda-staging"]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/naveedharri/baalda/releases/download/staging/latest.json"

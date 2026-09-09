@@ -37,7 +37,7 @@ openLinkRoutes.get("/open/note/:orgId/:docId", (c) => {
   }
   // Re-encoded on the way out even after the shape check, so the deep link is
   // inert as markup no matter what future id shapes are allowed through.
-  const deepLink = `baalda://note/${encodeURIComponent(orgId)}/${encodeURIComponent(docId)}`;
+  const deepLink = `${config.deepLinkScheme}://note/${encodeURIComponent(orgId)}/${encodeURIComponent(docId)}`;
   return c.html(`<!doctype html>
 <html lang="en">
 <head>
@@ -89,7 +89,7 @@ openLinkRoutes.get("/open/note/:orgId/:docId", (c) => {
  */
 openLinkRoutes.get("/open/connect", (c) => {
   const server = publicBaseUrl(c);
-  const deepLink = `baalda://connect?server=${encodeURIComponent(server)}`;
+  const deepLink = `${config.deepLinkScheme}://connect?server=${encodeURIComponent(server)}`;
   return c.html(`<!doctype html>
 <html lang="en">
 <head>

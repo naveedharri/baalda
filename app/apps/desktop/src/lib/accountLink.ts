@@ -9,6 +9,8 @@
 // deliver `baalda://verified` with host "verified", others `baalda:///verified`
 // with it in the path.
 
+import { isAppProtocol } from "./deepLinkScheme";
+
 export type AccountLinkKind = "verified" | "signin";
 
 export function parseAccountLink(url: string): AccountLinkKind | null {
@@ -18,7 +20,7 @@ export function parseAccountLink(url: string): AccountLinkKind | null {
   } catch {
     return null;
   }
-  if (parsed.protocol !== "baalda:") return null;
+  if (!isAppProtocol(parsed.protocol)) return null;
   const segments = [parsed.host, ...parsed.pathname.split("/")].filter((s) => s.length > 0);
   if (segments.length !== 1) return null;
   return segments[0] === "verified" || segments[0] === "signin" ? segments[0] : null;

@@ -12,9 +12,10 @@
 // CONTENT (only http(s) survives `normalizeServerUrl`).
 
 import { normalizeServerUrl } from "./auth/serverChoice";
+import { APP_SCHEME, isAppProtocol } from "./deepLinkScheme";
 
-/** URL scheme registered by the desktop app (tauri.conf.json → deep-link). */
-export const CONNECT_SCHEME = "baalda";
+/** URL scheme this build registers (tauri.conf.json → deep-link; staging differs). */
+export const CONNECT_SCHEME = APP_SCHEME;
 
 /**
  * Build the deep link an admin shares. The server also serves an https mirror
@@ -43,7 +44,7 @@ export function parseConnectLink(url: string): string | null {
   } catch {
     return null;
   }
-  if (parsed.protocol !== `${CONNECT_SCHEME}:`) return null;
+  if (!isAppProtocol(parsed.protocol)) return null;
   const segments = [parsed.host, ...parsed.pathname.split("/")].filter(
     (s) => s.length > 0,
   );

@@ -11,6 +11,10 @@ describe("parseAccountLink", () => {
     expect(parseAccountLink("baalda:///signin/")).toBe("signin");
   });
 
+  it("accepts the Staging app's scheme too", () => {
+    expect(parseAccountLink("baalda-staging://verified")).toBe("verified");
+  });
+
   it("refuses anything else", () => {
     for (const bad of [
       "baalda://verified/extra",

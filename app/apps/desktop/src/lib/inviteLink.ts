@@ -13,9 +13,10 @@
 // and the server re-checks it on accept; this module only routes.
 
 import { normalizeServerUrl } from "./auth/serverChoice";
+import { APP_SCHEME, isAppProtocol } from "./deepLinkScheme";
 
-/** URL scheme registered by the desktop app (tauri.conf.json → deep-link). */
-export const INVITE_SCHEME = "baalda";
+/** URL scheme this build registers (tauri.conf.json → deep-link; staging differs). */
+export const INVITE_SCHEME = APP_SCHEME;
 
 /**
  * The shape an invitation id may take. Better Auth emits UUIDs, but ids are
@@ -66,7 +67,7 @@ export function parseInviteDeepLink(url: string): InviteDeepLink | null {
   } catch {
     return null;
   }
-  if (parsed.protocol !== `${INVITE_SCHEME}:`) return null;
+  if (!isAppProtocol(parsed.protocol)) return null;
   const segments = [parsed.host, ...parsed.pathname.split("/")]
     .filter((s) => s.length > 0)
     .map((s) => decodeURIComponent(s));
