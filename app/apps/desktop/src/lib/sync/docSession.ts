@@ -780,6 +780,14 @@ export class SyncManager implements InboundHost {
         // the children never vanish at all. Nothing is deleted there; the pull
         // below reconciles the paths, and anything it re-materializes now comes
         // back WITH its content. Both outcomes are the safe direction.
+        //
+        // …unless the directory is one the pull itself just created or removed.
+        // That echo is not an external change, and treating it as one is how a
+        // pull that (wrongly) created a folder its successor removed became a
+        // self-sustaining loop: every pass's own disk write requested the next
+        // pass, ~1.5 s apart, for days (#98). The plan bug is fixed too, but no
+        // planner asymmetry may ever be able to chain pulls through us again.
+        if (this.registry.consumeMaterialized(relPath)) continue;
         pullRegistry = true;
         continue;
       }

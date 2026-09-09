@@ -662,6 +662,32 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     vi.useRealTimers();
   });
 
+  it("ignores the watcher echo of a folder the pull itself created or removed — no pull chain", async () => {
+    // #98's engine. A pull created (or removed) a directory; the watcher reported
+    // it as a `tree` change; `tree` meant "structural, pull again"; that pull
+    // undid the first one's write… Each pass's own disk write requested the next,
+    // ~1.5 s apart, for days. The pull now remembers the folders it touches and
+    // their echo is consumed here, so no planner mistake can chain pulls again.
+    vi.useFakeTimers();
+    fakeRegistry.materialized = new Set(["Projects/Community/Content/pipeline"]);
+    const sm = new SyncManager();
+    await enable(sm);
+    fakeRegistry.pull.mockClear();
+
+    sm.handleLocalFilesChanged([{ path: "Projects/Community/Content/pipeline", kind: "tree" }]);
+    expect(sm.hasPendingRegistryPull()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fakeRegistry.pull).not.toHaveBeenCalled();
+    expect(fakeRegistry.materialized.size).toBe(0); // one echo, consumed
+
+    // The same path changing AGAIN is a real structural change and pulls.
+    sm.handleLocalFilesChanged([{ path: "Projects/Community/Content/pipeline", kind: "tree" }]);
+    expect(sm.hasPendingRegistryPull()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
   it("the single-event form still routes exactly like one batch of one", async () => {
     vi.useFakeTimers();
     const sm = new SyncManager();
