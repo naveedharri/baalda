@@ -54,6 +54,15 @@ function int(name: string, fallback: number): number {
   return n;
 }
 
+/** `DEEP_LINK_SCHEME`, validated to the shape a URL scheme may take. */
+function deepLinkScheme(): string {
+  const v = optional("DEEP_LINK_SCHEME") ?? "baalda";
+  if (!/^[a-z][a-z0-9+.-]{0,63}$/.test(v)) {
+    throw new Error(`DEEP_LINK_SCHEME must be a URL scheme like "baalda" (got "${v}")`);
+  }
+  return v;
+}
+
 /** An env var that may be absent; empty string is treated as unset. */
 function optional(name: string): string | undefined {
   const v = process.env[name];
@@ -134,6 +143,14 @@ export const config = {
    *  on email+password alone. Set only via env (never committed). */
   googleClientId: optional("GOOGLE_CLIENT_ID"),
   googleClientSecret: optional("GOOGLE_CLIENT_SECRET"),
+  /**
+   * URL scheme of the desktop app this server's pages bounce into (`/open/*`,
+   * `/invite/:id`, `/email-verified`, `/reset-password`). The released app
+   * registers `baalda`; the Staging app registers `baalda-staging`, so a staging
+   * server must say so or its links open whichever app grabbed `baalda://` last
+   * on a machine that has both installed.
+   */
+  deepLinkScheme: deepLinkScheme(),
   // ---- Outbound email (issue #99) ----
   /** Sender address, e.g. `Baalda <no-reply@example.com>`. Required to send
    *  anything; with it and ONE transport below, password reset + sign-up

@@ -484,6 +484,9 @@ jobs:
           # falls back to the PRODUCTION url in a release build otherwise — which
           # is why `prepare` refuses to run without it.
           VITE_SERVER_URL: ${{ vars.STAGING_SERVER_URL }}
+          # The scheme this build registers (tauri.staging.conf.json) — the JS
+          # side builds its own links with it (src/lib/deepLinkScheme.ts).
+          VITE_DEEP_LINK_SCHEME: baalda-staging
           # Same minisign updater key as production, on purpose: the pubkey is
           # compiled into tauri.conf.json and the overlay does not touch it, so
           # the staging app must be signed by the same key or it would reject its
@@ -527,6 +530,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VITE_SERVER_URL: ${{ vars.STAGING_SERVER_URL }}
+          # The scheme this build registers (tauri.staging.conf.json) — the JS
+          # side builds its own links with it (src/lib/deepLinkScheme.ts).
+          VITE_DEEP_LINK_SCHEME: baalda-staging
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}

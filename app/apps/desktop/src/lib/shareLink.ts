@@ -14,7 +14,9 @@
 // `setActiveOrganization` takes.
 
 /** URL scheme registered by the desktop app (tauri.conf.json → deep-link). */
-export const SHARE_SCHEME = "baalda";
+import { APP_SCHEME, isAppProtocol } from "./deepLinkScheme";
+
+export const SHARE_SCHEME = APP_SCHEME;
 
 export interface NoteLinkTarget {
   /** Better Auth organization id — the user-facing vault. */
@@ -64,7 +66,7 @@ export function parseNoteLink(url: string): NoteLinkTarget | null {
   } catch {
     return null;
   }
-  const isScheme = parsed.protocol === `${SHARE_SCHEME}:`;
+  const isScheme = isAppProtocol(parsed.protocol);
   const isWeb = parsed.protocol === "https:" || parsed.protocol === "http:";
   if (!isScheme && !isWeb) return null;
   // `baalda://note/<org>/<doc>` parses with host "note" and pathname
