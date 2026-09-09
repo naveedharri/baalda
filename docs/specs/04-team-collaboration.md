@@ -50,7 +50,8 @@ invitation   (id, organization_id, email, role, inviter_id,
 ```
 
 Roles for MVP — keep exactly three (matches Notion/Outline/Docmost): **owner** (billing, delete/
-transfer the vault), **admin** (manage members, invitations, settings), **member** (basic access).
+transfer the vault, and transfer the subscription between vaults they own), **admin** (manage
+members, invitations, settings), **member** (basic access).
 
 ## 3. Sharing & permissions
 

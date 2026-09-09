@@ -19,6 +19,9 @@ tags: [baalda, status, roadmap]
   port at `/sync` (single-port topology), and the repo ships a Dockerfile, Railway IaC at
   `app/.railway/railway.ts` (Dockerfile build, pre-deploy migrations + healthcheck), and [[DEPLOY]]. The managed backend is live at
   `https://api.baalda.com`; desktop releases ship via `v*` tags → signed installers → Tauri updater.
+- **Billing:** 🟢 Per-vault Pro via Polar, with the full subscription lifecycle (2026-09-09, #109–#111):
+  deleting a vault cancels at period end before it deletes, subscriptions survive as tombstones, and an
+  owner can transfer one between their vaults from Vault Settings → Billing.
 - **Next action:** Phase 4 polish / launch decisions (WYSIWYG, vector search, OAuth, iOS).
 
 > **Requirement coverage:** Phases 0–3 deliver **10 of the 12** core requirements,

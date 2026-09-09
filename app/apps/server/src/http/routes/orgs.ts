@@ -4,6 +4,11 @@ import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
 import { getSession } from "../session.js";
 import { canAddMember } from "../../billing/entitlements.js";
+import {
+  applySubscriptionState,
+  findByOrg,
+  isActiveStatus,
+} from "../../billing/store.js";
 import { announceMemberJoined } from "../../sync/member-events.js";
 import { billingEnabled } from "../../config.js";
 import type { BillingProvider } from "../../billing/provider.js";
@@ -23,6 +28,14 @@ import type { BillingProvider } from "../../billing/provider.js";
  *    the binary CRDT stores and derived caches (which have no FK) are purged by
  *    hand first. Non-owners cannot delete — they just remove it from their
  *    device client-side.
+ *
+ *    A paid vault stops billing FIRST, and the delete is abandoned if the
+ *    provider won't confirm it (502 `subscription_cancel_failed`) — a provider
+ *    outage used to delete the vault anyway and leave Polar charging for
+ *    something nobody could see (#109/#111). The `subscriptions` row then
+ *    SURVIVES the delete as a tombstone (`deleted_at` set, vault name + owner
+ *    snapshotted) so the owner can still cancel or transfer it from Billing,
+ *    and so a webhook arriving afterwards has somewhere to land.
  */
 export interface OrgDeps {
   /** Force-close live sync sockets for a doc (so a purge isn't re-populated). */
@@ -41,8 +54,16 @@ export interface OrgDeps {
    * a non-member with no shares — and drop every doc immediately.
    */
   onAclChanged: (vaultId: string) => void;
-  /** Billing provider for best-effort subscription cancellation on org delete.
-   *  Absent (self-host / billing off) ⇒ deletion just relies on FK cascade. */
+  /**
+   * Billing provider, used to STOP a paid vault's subscription before the vault
+   * is deleted. NOT best-effort any more: if the provider refuses, the delete
+   * refuses too (#109/#111). Deleting a vault whose subscription is still live
+   * leaves someone paying for something they can no longer see, and — with the
+   * row gone — no way for anyone to notice or retry.
+   *
+   * Absent (self-host / billing off) ⇒ there is nothing to cancel, and deletion
+   * relies on the FK cascade alone.
+   */
   billingProvider?: BillingProvider;
 }
 
@@ -223,6 +244,70 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "Only the vault owner can delete it" }, 403);
     }
 
+    // Stop the money BEFORE anything is destroyed. `period_end` keeps the paid
+    // period the owner already bought; if the provider refuses we abandon the
+    // whole delete with 502 rather than leave a live subscription that nothing
+    // records (#109/#111). This deliberately runs ahead of the socket teardown
+    // and the purge, so a 502 here costs nothing.
+    const { rows: orgNameRows } = await pool.query<{ name: string }>(
+      "SELECT name FROM organization WHERE id = $1",
+      [orgId],
+    );
+    const orgName = orgNameRows[0]?.name ?? null;
+
+    let subscription: {
+      cancelAtPeriodEnd: boolean;
+      currentPeriodEnd: string | null;
+    } | null = null;
+    if (billingEnabled() && deps.billingProvider) {
+      const row = await findByOrg(pool, orgId);
+      const subId = row?.provider_subscription_id;
+      if (row && subId && isActiveStatus(row.status)) {
+        // Always ask, even when our row already says "ending": the flag is
+        // idempotent at the provider, and our copy can be stale — an owner who
+        // un-cancelled in Polar's portal while that webhook went missing would
+        // otherwise have the vault deleted and the subscription still renewing.
+        // The provider's answer is what we record and report.
+        try {
+          const snap = await deps.billingProvider.cancelSubscription(subId, "period_end");
+          // The provider's answer IS the state — persist it through the same
+          // upsert (and the same ordering guard) the webhook uses, so a
+          // webhook describing this very change can't fight it.
+          await applySubscriptionState(pool, {
+            organizationId: orgId,
+            providerCustomerId: snap.providerCustomerId,
+            providerSubscriptionId: snap.providerSubscriptionId,
+            plan: "pro",
+            status: snap.status,
+            currentPeriodEnd: snap.currentPeriodEnd,
+            cancelAtPeriodEnd: snap.cancelAtPeriodEnd,
+            eventTs: snap.modifiedAt,
+            interval: snap.interval,
+            amount: snap.amount,
+            currency: snap.currency,
+          });
+          subscription = {
+            cancelAtPeriodEnd: snap.cancelAtPeriodEnd,
+            currentPeriodEnd: snap.currentPeriodEnd
+              ? snap.currentPeriodEnd.toISOString()
+              : null,
+          };
+        } catch (err) {
+          console.error(
+            `org-delete: refusing to delete vault ${orgId} — the provider would not cancel subscription ${subId}:`,
+            (err as Error).message,
+          );
+          return c.json(
+            {
+              error: "subscription_cancel_failed",
+              message: (err as Error).message || "provider cancel failed",
+            },
+            502,
+          );
+        }
+      }
+    }
+
     // `vaults` here = the org's note-collection rows (storage children), not the
     // user-facing vault (the organization) being deleted.
     const vaults = await pool.query<{ id: string }>(
@@ -244,27 +329,6 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     // Instant-kill live sockets so onChange can't resurrect purged doc_updates.
     for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
 
-    // Best-effort: cancel any live subscription at the provider so we don't keep
-    // billing a deleted vault. The subscriptions row itself is removed by FK
-    // cascade below; a provider failure must NOT block the delete (log + carry on).
-    if (billingEnabled() && deps.billingProvider) {
-      const sub = await pool.query<{ provider_subscription_id: string | null }>(
-        "SELECT provider_subscription_id FROM subscriptions WHERE organization_id = $1",
-        [orgId],
-      );
-      const subId = sub.rows[0]?.provider_subscription_id;
-      if (subId) {
-        try {
-          await deps.billingProvider.cancelSubscription(subId);
-        } catch (err) {
-          console.error(
-            `org-delete: failed to cancel subscription ${subId} for org ${orgId}:`,
-            (err as Error).message,
-          );
-        }
-      }
-    }
-
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -277,6 +341,16 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
         await client.query("DELETE FROM note_index WHERE vault_id = ANY($1)", [vaultIds]);
         await client.query("DELETE FROM note_links WHERE vault_id = ANY($1)", [vaultIds]);
       }
+      // The subscription row is NOT cascaded away any more (migration 024 drops
+      // the FK). Turn whatever is there into a tombstone — including a canceled
+      // row, where it is harmless — so a webhook arriving after this has
+      // somewhere to land and the owner can still see what they were paying for.
+      await client.query(
+        `UPDATE subscriptions
+            SET deleted_at = now(), org_name = $2, owner_user_id = $3, updated_at = now()
+          WHERE organization_id = $1`,
+        [orgId, orgName, session.userId],
+      );
       // Cascades: member, invitation, vaults→(folders, notes, files), shares,
       // org_join_codes, mcp_tokens.
       await client.query("DELETE FROM organization WHERE id = $1", [orgId]);
@@ -294,7 +368,12 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     // streaming content from a deleted vault until their tokens expired.
     for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
 
-    return c.json({ deleted: true, vaults: vaultIds.length, docs: docIds.length });
+    return c.json({
+      deleted: true,
+      vaults: vaultIds.length,
+      docs: docIds.length,
+      subscription,
+    });
   });
 
   // Remove a member from a vault (owner/admin). Revokes access on both paths

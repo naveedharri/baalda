@@ -3,9 +3,11 @@ import { Webhook, WebhookVerificationError } from "standardwebhooks";
 import { config } from "../config.js";
 import {
   WebhookSignatureError,
+  type BillingInterval,
   type BillingProvider,
   type CreateCheckoutArgs,
   type NormalizedBillingEvent,
+  type SubscriptionSnapshot,
 } from "./provider.js";
 
 /**
@@ -20,7 +22,17 @@ import {
  *    subscription webhooks — that's how we key entitlements without a lookup.
  *  - `polar.customerSessions.create({ customerId })` → `{ customerPortalUrl }`
  *    (hosted manage/cancel page).
- *  - `polar.subscriptions.revoke({ id })` — cancel immediately (org delete).
+ *  - `polar.subscriptions.update({ id, subscriptionUpdate: { cancelAtPeriodEnd } })`
+ *    — schedule a cancellation at period end, or take one back (uncancel).
+ *  - `polar.subscriptions.revoke({ id })` — cancel immediately.
+ *  - `polar.subscriptions.get({ id })` — reconcile a row we suspect is stale.
+ *    Each of those returns the full `Subscription`, which `toSnapshot` maps to
+ *    a `SubscriptionSnapshot` the caller writes straight into our row: after a
+ *    mutation Polar's answer IS the state, so we never wait on a webhook to
+ *    learn what we just did.
+ *  - `PATCH /v1/subscriptions/:id` by raw fetch for metadata (see
+ *    `setSubscriptionOrg`): SDK 0.48.1's `SubscriptionUpdate` union has no
+ *    `metadata` variant even though the REST API accepts one.
  *  - Webhook signatures are verified HERE with `standardwebhooks` directly
  *    (see `verifyWebhookSignature`), NOT with the SDK's `validateEvent`. Polar
  *    changed how it derives the signing key: endpoints whose secret was
@@ -39,6 +51,18 @@ import {
 /** Metadata keys we stamp on checkout so the subscription webhooks self-identify. */
 const META_ORG = "organization_id";
 const META_USER = "user_id";
+
+/**
+ * Polar answered 404 for the id we asked about. Its own class so
+ * `getSubscription` can turn it into `null` while every other caller still
+ * sees a plain failure.
+ */
+class PolarNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PolarNotFoundError";
+  }
+}
 
 /**
  * Run one Polar SDK call, converting its errors into something diagnosable.
@@ -68,6 +92,14 @@ async function polarCall<T>(op: string, fn: () => Promise<T>): Promise<T> {
       rawValue?: unknown;
       pretty?: () => string;
     };
+    // A 404 is not a failure for every caller: reconciliation asks about ids
+    // that may have been deleted at Polar and must be able to tell "gone" from
+    // "call broke". Every Polar error class extends `PolarError`, which carries
+    // `statusCode`, so this fires before the neutral-Error rewrite below —
+    // otherwise the status would only survive inside a prose message.
+    if (e.statusCode === 404) {
+      throw new PolarNotFoundError(`Polar ${op}: not found (HTTP 404)`);
+    }
     if (typeof e.pretty === "function") {
       const body = typeof e.body === "string" ? e.body.slice(0, 2000) : "";
       console.error(
@@ -93,7 +125,7 @@ function client(): Polar {
 }
 
 /** Map a Polar subscription status to the status we persist. */
-function normalizeStatus(polarStatus: string): string {
+function normalizeStatus(polarStatus: string): SubscriptionSnapshot["status"] {
   switch (polarStatus) {
     case "active":
     case "trialing":
@@ -104,6 +136,47 @@ function normalizeStatus(polarStatus: string): string {
       // canceled, unpaid, incomplete, incomplete_expired → treated as canceled.
       return "canceled";
   }
+}
+
+/** Map Polar's `recurringInterval` to our two-value interval (or null). */
+function normalizeInterval(raw: unknown): BillingInterval | null {
+  return raw === "month" || raw === "year" ? raw : null;
+}
+
+/** A finite number or null — Polar sends `amount` as an int, but not always. */
+function normalizeAmount(raw: unknown): number | null {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Map a Polar `Subscription` (the read model returned by get/update/revoke)
+ * onto our neutral snapshot. Reads defensively through `unknown` rather than
+ * the SDK's declared type: the same shape arrives from the webhook JSON in
+ * snake_case, and the 2026-09-08 outage was caused by trusting the SDK's strict
+ * parse of a payload that had drifted.
+ */
+function toSnapshot(raw: unknown): SubscriptionSnapshot {
+  const sub = (raw ?? {}) as Record<string, unknown>;
+  const pick = (snake: string, camel: string): unknown => sub[snake] ?? sub[camel];
+  const periodEnd = pick("current_period_end", "currentPeriodEnd") as
+    | Date
+    | string
+    | null
+    | undefined;
+  const modified = pick("modified_at", "modifiedAt") as Date | string | null | undefined;
+  const modifiedAt = modified ? new Date(modified) : new Date();
+  return {
+    providerSubscriptionId: String(sub.id ?? ""),
+    providerCustomerId: String(pick("customer_id", "customerId") ?? ""),
+    status: normalizeStatus(String(pick("status", "status") ?? "")),
+    currentPeriodEnd: periodEnd ? new Date(periodEnd) : null,
+    cancelAtPeriodEnd: Boolean(pick("cancel_at_period_end", "cancelAtPeriodEnd")),
+    interval: normalizeInterval(pick("recurring_interval", "recurringInterval")),
+    amount: normalizeAmount(pick("amount", "amount")),
+    currency: pick("currency", "currency") ? String(pick("currency", "currency")) : null,
+    modifiedAt: Number.isNaN(modifiedAt.getTime()) ? new Date() : modifiedAt,
+  };
 }
 
 /** Map a Polar webhook `type` to our normalized event type (or null to ignore). */
@@ -159,10 +232,95 @@ export class PolarBillingProvider implements BillingProvider {
     return { url: session.customerPortalUrl };
   }
 
-  async cancelSubscription(providerSubscriptionId: string): Promise<void> {
-    await polarCall("subscriptions.revoke", () =>
-      client().subscriptions.revoke({ id: providerSubscriptionId }),
+  async cancelSubscription(
+    providerSubscriptionId: string,
+    mode: "period_end" | "now",
+  ): Promise<SubscriptionSnapshot> {
+    if (mode === "now") {
+      const sub = await polarCall("subscriptions.revoke", () =>
+        client().subscriptions.revoke({ id: providerSubscriptionId }),
+      );
+      return toSnapshot(sub);
+    }
+    // `cancelAtPeriodEnd: true` is Polar's "stop renewing but keep access"
+    // switch — the same one their customer portal flips, so a cancel we make
+    // and a cancel the owner makes end up in identical provider state.
+    const sub = await polarCall("subscriptions.update(cancelAtPeriodEnd)", () =>
+      client().subscriptions.update({
+        id: providerSubscriptionId,
+        subscriptionUpdate: { cancelAtPeriodEnd: true },
+      }),
     );
+    return toSnapshot(sub);
+  }
+
+  async resumeSubscription(providerSubscriptionId: string): Promise<SubscriptionSnapshot> {
+    // Same field, other way round: Polar documents `cancelAtPeriodEnd: false`
+    // as "uncancel a subscription currently set to be revoked at period end".
+    const sub = await polarCall("subscriptions.update(uncancel)", () =>
+      client().subscriptions.update({
+        id: providerSubscriptionId,
+        subscriptionUpdate: { cancelAtPeriodEnd: false },
+      }),
+    );
+    return toSnapshot(sub);
+  }
+
+  async getSubscription(
+    providerSubscriptionId: string,
+  ): Promise<SubscriptionSnapshot | null> {
+    try {
+      const sub = await polarCall("subscriptions.get", () =>
+        client().subscriptions.get({ id: providerSubscriptionId }),
+      );
+      return toSnapshot(sub);
+    } catch (err) {
+      // Unknown at Polar. Reconciliation must not read that as "canceled" —
+      // it means our row points at something that is simply not there, which
+      // is a data question for a human, not a status to write.
+      if (err instanceof PolarNotFoundError) return null;
+      throw err;
+    }
+  }
+
+  async setSubscriptionOrg(
+    providerSubscriptionId: string,
+    orgId: string,
+    userId: string,
+  ): Promise<void> {
+    // Raw PATCH, not the SDK: `SubscriptionUpdate` in 0.48.1 is a six-way union
+    // (seats / billing period / cancel / revoke / clear-pending / base) and not
+    // one variant carries `metadata`, even though Polar's REST API accepts it
+    // on `SubscriptionUpdateBase`. Keeping Polar's metadata truthful is a
+    // courtesy — our own row decides who owns the subscription, and the webhook
+    // resolves by provider subscription id before consulting metadata — so the
+    // caller logs a failure and carries on.
+    if (!config.polarAccessToken) {
+      throw new Error("Polar access token not configured");
+    }
+    const base =
+      config.polarServer === "production"
+        ? "https://api.polar.sh"
+        : "https://sandbox-api.polar.sh";
+    const res = await fetch(
+      `${base}/v1/subscriptions/${encodeURIComponent(providerSubscriptionId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${config.polarAccessToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          metadata: { [META_ORG]: orgId, [META_USER]: userId },
+        }),
+      },
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `Polar PATCH /v1/subscriptions/${providerSubscriptionId} failed (HTTP ${res.status}): ${body.slice(0, 500)}`,
+      );
+    }
   }
 
   verifyAndNormalizeWebhook(
@@ -209,17 +367,27 @@ export class PolarBillingProvider implements BillingProvider {
       | null
       | undefined;
 
+    // The user who checked out. Rides in the same metadata and is the ONLY
+    // remaining answer to "whose subscription is this" once the vault has been
+    // deleted and its `member` rows have cascaded away (#109).
+    const userIdRaw = String(metadata?.[META_USER] ?? "");
+    const currency = pick("currency", "currency");
+
     return {
       eventId: this.eventId(event.type, sub, headers),
       occurredAt: this.occurredAt(modifiedAt, headers),
       type,
       organizationId: orgId,
+      userId: userIdRaw || null,
       providerCustomerId: String(pick("customer_id", "customerId") ?? ""),
       providerSubscriptionId: String(sub.id ?? ""),
       plan: "pro",
       status,
       currentPeriodEnd: currentPeriodEnd ? new Date(currentPeriodEnd) : null,
       cancelAtPeriodEnd: Boolean(pick("cancel_at_period_end", "cancelAtPeriodEnd")),
+      interval: normalizeInterval(pick("recurring_interval", "recurringInterval")),
+      amount: normalizeAmount(pick("amount", "amount")),
+      currency: currency ? String(currency) : null,
     };
   }
 

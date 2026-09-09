@@ -5540,6 +5540,52 @@ button.secondary:disabled {
   margin-top: var(--sp-1);
 }
 
+/* ---- Subscriptions list (#109) ----
+   A `.member-list` row that has to carry a second line (renewal, price, seats)
+   under the vault name, so its name cell stops being one ellipsised span.
+   Everything else on the row is the existing pill and action vocabulary. */
+.billing-sub-row {
+  align-items: flex-start;
+}
+.billing-sub-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  color: var(--text-primary);
+}
+.billing-sub-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.billing-sub-meta {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+/* Up to three actions plus two pills — more than the vault list carries. Let
+   them wrap rather than squeeze the vault name down to an ellipsis. */
+.billing-sub-row .vault-row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.billing-transfer-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+/* Vault names are names: the role menu's `capitalize` would rewrite them. */
+.context-menu.billing-transfer-menu li {
+  text-transform: none;
+}
+/* One line of prose introducing a section's list. */
+.billing-section-note {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+
 /* ============================================================
    Upgrade dialog — first-class plan-selection surface
    ============================================================ */

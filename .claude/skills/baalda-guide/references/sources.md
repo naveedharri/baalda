@@ -63,6 +63,7 @@ Do a targeted read of one file, never a sweep. Good entry points:
 | Drag-drop / paste attachment behaviour | `app/apps/desktop/src/lib/attachments.ts` |
 | Server limits and free-tier caps | `app/apps/server/src/config.ts`, `app/apps/server/.env.example` |
 | Paid plan prices and checkout | `app/apps/server/src/http/routes/billing.ts`, `app/apps/desktop/src/components/UpgradeDialog.tsx` |
+| Subscription state, cancel/transfer, deleted-vault tombstones | `app/apps/server/src/billing/store.ts`, `app/apps/server/migrations/024_subscription_tombstones.sql` |
 | Attachment size limit | `app/apps/server/src/http/routes/blobs.ts` |
 | Permission rules | `app/apps/server/src/permissions/resolver.ts` |
 | MCP tools list | `app/apps/server/src/mcp/` |

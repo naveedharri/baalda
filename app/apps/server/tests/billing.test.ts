@@ -9,11 +9,8 @@ import {
   getEntitlement,
   seatCount,
 } from "../src/billing/entitlements.js";
-import type {
-  BillingProvider,
-  NormalizedBillingEvent,
-} from "../src/billing/provider.js";
 import { testAppDeps } from "./helpers/app.js";
+import { makeFakeProvider } from "./helpers/billing-provider.js";
 import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
@@ -45,33 +42,9 @@ const WEBHOOK_SECRET = "test-polar-webhook-secret";
 
 // ── A controllable fake provider (no network). verifyAndNormalizeWebhook is
 //    scripted per-test via `fakeProvider.nextEvent`. Real signature checking is
-//    exercised separately with the actual PolarBillingProvider. ───────────────
-interface FakeProvider extends BillingProvider {
-  nextEvent: NormalizedBillingEvent | null;
-  lastCheckout: unknown;
-  canceled: string[];
-}
-function makeFakeProvider(): FakeProvider {
-  return {
-    nextEvent: null,
-    lastCheckout: null,
-    canceled: [],
-    async createCheckout(args) {
-      this.lastCheckout = args;
-      return { url: `https://polar.test/checkout/${args.interval}` };
-    },
-    async getPortalUrl(args) {
-      return { url: `https://polar.test/portal/${args.customerId}` };
-    },
-    async cancelSubscription(id) {
-      this.canceled.push(id);
-    },
-    verifyAndNormalizeWebhook() {
-      return this.nextEvent;
-    },
-  };
-}
-
+//    exercised separately with the actual PolarBillingProvider. It lives in
+//    tests/helpers so billing-lifecycle.test.ts shares exactly this fake and
+//    the two suites cannot drift. ─────────────────────────────────────────────
 const fakeProvider = makeFakeProvider();
 const app = createApp(testAppDeps({ billingProvider: fakeProvider }));
 const realApp = createApp(testAppDeps({ billingProvider: new PolarBillingProvider() }));
@@ -120,8 +93,7 @@ async function seedSubscription(
 describe("billing", () => {
   beforeEach(async () => {
     await resetDb();
-    fakeProvider.nextEvent = null;
-    fakeProvider.canceled = [];
+    fakeProvider.reset();
     process.env.POLAR_ACCESS_TOKEN = "test-polar-access-token"; // billing ON
   });
   afterEach(() => {
@@ -325,6 +297,39 @@ describe("billing", () => {
       expect(res.status).toBe(403);
     });
 
+    it("refuses a second checkout while the vault already pays (409)", async () => {
+      // One vault, one subscription: `subscriptions` is keyed by
+      // organization_id, so a second paid checkout would bill twice and the
+      // losing subscription would be invisible to us while Polar charged for
+      // it. The refusal must land BEFORE the provider is asked, so there is no
+      // checkout session for anyone to pay.
+      const owner = await signUp("co-dup@billing.com");
+      const org = await createOrg(owner, "Co3", "co-org3");
+
+      for (const status of ["active", "past_due"]) {
+        await seedSubscription(org.id, status, { subId: "sub_dup" });
+        const res = await req(app, "POST", `/api/billing/orgs/${org.id}/checkout`, {
+          token: owner.token,
+          body: { interval: "month" },
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()) as { error: string }).toEqual({
+          error: "already_subscribed",
+        });
+        expect(fakeProvider.lastCheckout).toBeNull();
+      }
+
+      // A row that is no longer paying is not a blocker — re-subscribing after
+      // a cancellation is the whole point of the Upgrade button still being there.
+      await seedSubscription(org.id, "canceled", { subId: "sub_dup" });
+      const again = await req(app, "POST", `/api/billing/orgs/${org.id}/checkout`, {
+        token: owner.token,
+        body: { interval: "month" },
+      });
+      expect(again.status).toBe(200);
+      expect(fakeProvider.lastCheckout).not.toBeNull();
+    });
+
     it("portal returns a URL when a customer exists, 400 otherwise", async () => {
       const owner = await signUp("po@billing.com");
       const org = await createOrg(owner, "Po", "po-org");
@@ -514,6 +519,10 @@ describe("billing", () => {
 
       fakeProvider.nextEvent = {
         eventId: "evt_active_1",
+        userId: owner.userId,
+        interval: "month",
+        amount: 1000,
+        currency: "usd",
         occurredAt: new Date(),
         type: "subscription_active",
         organizationId: org.id,
@@ -545,6 +554,10 @@ describe("billing", () => {
 
       fakeProvider.nextEvent = {
         eventId: "evt_active_2",
+        userId: owner.userId,
+        interval: "month",
+        amount: 1000,
+        currency: "usd",
         occurredAt: new Date(Date.now() - 60_000),
         type: "subscription_active",
         organizationId: org.id,
@@ -560,6 +573,10 @@ describe("billing", () => {
 
       fakeProvider.nextEvent = {
         eventId: "evt_revoked_2",
+        userId: owner.userId,
+        interval: "month",
+        amount: 1000,
+        currency: "usd",
         occurredAt: new Date(),
         type: "subscription_revoked",
         organizationId: org.id,
@@ -587,6 +604,10 @@ describe("billing", () => {
       // Newer event lands first: subscription revoked at t1.
       fakeProvider.nextEvent = {
         eventId: "evt_revoked_3",
+        userId: owner.userId,
+        interval: "month",
+        amount: 1000,
+        currency: "usd",
         occurredAt: t1,
         type: "subscription_revoked",
         organizationId: org.id,
@@ -605,6 +626,10 @@ describe("billing", () => {
       // so the canceled org does NOT silently regain Pro.
       fakeProvider.nextEvent = {
         eventId: "evt_active_3_stale",
+        userId: owner.userId,
+        interval: "month",
+        amount: 1000,
+        currency: "usd",
         occurredAt: t0,
         type: "subscription_active",
         organizationId: org.id,
@@ -623,17 +648,42 @@ describe("billing", () => {
     });
   });
 
-  // ── org delete cancels the subscription (best-effort) ───────────────────────
-  it("DELETE /api/orgs/:orgId cancels the provider subscription", async () => {
+  // ── org delete stops billing and leaves a tombstone (#109/#111) ────────────
+  //    The old contract was the opposite of this: cancel best-effort, then let
+  //    the FK cascade wipe the row. See tests/billing-lifecycle.test.ts for the
+  //    provider-refuses, already-canceling and free-vault variants.
+  it("DELETE /api/orgs/:orgId cancels at period end and keeps a tombstone", async () => {
     const owner = await signUp("del@billing.com");
     const org = await createOrg(owner, "Del", "del-org");
     await seedSubscription(org.id, "active", { subId: "sub_del" });
     const res = await req(app, "DELETE", `/api/orgs/${org.id}`, { token: owner.token });
     expect(res.status).toBe(200);
-    expect(fakeProvider.canceled).toContain("sub_del");
-    // FK cascade removed the subscriptions row.
-    const { rows } = await pool.query("SELECT 1 FROM subscriptions WHERE organization_id = $1", [org.id]);
-    expect(rows.length).toBe(0);
+    const body = (await res.json()) as {
+      subscription: { cancelAtPeriodEnd: boolean } | null;
+    };
+    // Period end, not revoke: the owner already paid for this month.
+    expect(fakeProvider.canceled).toEqual([{ id: "sub_del", mode: "period_end" }]);
+    expect(body.subscription?.cancelAtPeriodEnd).toBe(true);
+    // The row SURVIVES so the owner can still see, cancel or transfer it.
+    const { rows } = await pool.query<{
+      deleted_at: Date | null;
+      owner_user_id: string | null;
+      cancel_at_period_end: boolean;
+    }>(
+      `SELECT deleted_at, owner_user_id, cancel_at_period_end
+         FROM subscriptions WHERE organization_id = $1`,
+      [org.id],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].deleted_at).not.toBeNull();
+    expect(rows[0].owner_user_id).toBe(owner.userId);
+    expect(rows[0].cancel_at_period_end).toBe(true);
+    // And the vault itself really is gone.
+    const { rows: orgRows } = await pool.query(
+      "SELECT 1 FROM organization WHERE id = $1",
+      [org.id],
+    );
+    expect(orgRows.length).toBe(0);
   });
 });
 
