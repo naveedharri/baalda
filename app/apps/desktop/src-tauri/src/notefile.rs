@@ -295,10 +295,28 @@ pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
     if !abs.is_dir() {
         return Ok(false); // a file lives at this path; not ours to remove
     }
+    // Finder drops a `.DS_Store` into any folder it has shown, and Explorer
+    // does the same with `desktop.ini`/`Thumbs.db`. None of those is vault
+    // content — the walker never surfaces them — yet `remove_dir` refuses a
+    // directory holding one, which is exactly how a folder whose notes had all
+    // left kept sitting in the sidebar. Sweep ONLY those names, so a folder that
+    // holds anything else still stays put.
+    if let Ok(entries) = std::fs::read_dir(&abs) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if OS_METADATA_FILES.iter().any(|m| name == *m) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
     // Any failure (non-empty, permissions, races) means "leave it": a folder
     // that lingers is cosmetic, a reconcile pass that fails over it is not.
     Ok(std::fs::remove_dir(&abs).is_ok())
 }
+
+/// Per-folder metadata the OS's file browser writes on its own. Never vault
+/// content, so an otherwise-empty folder holding only these counts as empty.
+const OS_METADATA_FILES: &[&str] = &[".DS_Store", "desktop.ini", "Thumbs.db"];
 
 /// Delete a file or folder (recursively for folders).
 pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
@@ -643,5 +661,22 @@ mod tests {
         // Ignored dirs and traversal are refused loudly.
         assert!(delete_folder_if_empty(tmp.path(), ".context/trash").is_err());
         assert!(delete_folder_if_empty(tmp.path(), "../up").is_err());
+    }
+
+    #[test]
+    fn delete_folder_if_empty_treats_os_metadata_as_empty() {
+        // Finder had shown the folder, so `.DS_Store` is in it. That is not
+        // content: the folder is still removed. Any OTHER dotfile still blocks.
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_folder(tmp.path(), "Getting Started").unwrap();
+        std::fs::write(tmp.path().join("Getting Started/.DS_Store"), b"\0").unwrap();
+        assert!(delete_folder_if_empty(tmp.path(), "Getting Started").unwrap());
+        assert!(!tmp.path().join("Getting Started").exists());
+
+        ensure_folder(tmp.path(), "Other").unwrap();
+        std::fs::write(tmp.path().join("Other/.DS_Store"), b"\0").unwrap();
+        std::fs::write(tmp.path().join("Other/.hidden-note"), "mine").unwrap();
+        assert!(!delete_folder_if_empty(tmp.path(), "Other").unwrap());
+        assert!(tmp.path().join("Other/.hidden-note").exists());
     }
 }
