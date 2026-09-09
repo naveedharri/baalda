@@ -2419,10 +2419,15 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
    *  on every state change of this page. */
   const renderVaultCard = () => {
     if (!isSynced || !orgId) {
+      // A card, not a bare line: this slot holds the Pro/Free card in every
+      // other state, and a naked sentence there left the tab starting on
+      // nothing and the Subscriptions list looking like the whole page.
       return (
-        <div className="muted perm-empty">
-          This vault isn't synced, so it has no plan of its own. The vaults on
-          your account are listed below.
+        <div className="billing-card">
+          <div className="muted">
+            This vault isn't synced, so it has no plan of its own. The vaults on
+            your account are listed below.
+          </div>
         </div>
       );
     }
@@ -2514,26 +2519,32 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
 
   /** One row of section 2. */
   const renderVaultRow = (v: MyBillingVault) => {
-    const line = subscriptionStatusLine(v, LINE_FORMAT);
     const seatsUsed = v.seats.members + v.seats.pendingInvitations;
+    // One meta line, not three: renewal + price (already joined by
+    // `subscriptionStatusLine`), then seats, then who pays when that isn't the
+    // reader. A row is a name and a fact line, so the list scans vertically.
+    const meta = [
+      subscriptionStatusLine(v, LINE_FORMAT),
+      `${seatsUsed} of ${v.seats.limit ?? "∞"} member${seatsUsed === 1 ? "" : "s"}`,
+      !v.canManage && v.billingOwner ? `Billed to ${v.billingOwner.name}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     return (
       <li key={v.orgId} className="billing-sub-row">
         <span className="billing-sub-name">
           <span className="billing-sub-title">
-            {v.name}
-            {v.orgId === orgId && <span className="muted"> · Current</span>}
+            <span className="billing-sub-vault">{v.name}</span>
+            {/* A pill, not muted trailing text: it labels the row the reader
+                arrived from, so it has to survive the name's ellipsis. */}
+            {v.orgId === orgId && <span className="member-role">Current</span>}
           </span>
-          {line && <span className="billing-sub-meta">{line}</span>}
-          <span className="billing-sub-meta">
-            {seatsUsed} of {v.seats.limit ?? "∞"} member{seatsUsed === 1 ? "" : "s"}
-          </span>
-          {!v.canManage && v.billingOwner && (
-            <span className="billing-sub-meta">
-              Billing managed by {v.billingOwner.name}
-            </span>
-          )}
+          {meta && <span className="billing-sub-meta">{meta}</span>}
         </span>
-        <span className={`member-role ${v.role}`}>{v.role}</span>
+        {/* Owner is the default for a vault you are billed for, and the row
+            already carries Current + plan pills plus up to three actions — so
+            the role pill only appears when the role is worth saying. */}
+        {v.role !== "owner" && <span className={`member-role ${v.role}`}>{v.role}</span>}
         <span className={`billing-status ${v.status}`}>{planPillLabel(v)}</span>
         <span className="vault-row-actions">
           {v.canManage && v.plan === "free" && (
@@ -2586,15 +2597,22 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
           <ul className="member-list">
             {orphaned.map((o) => {
               const label = o.orgName ?? "Deleted vault";
-              const line = subscriptionStatusLine(o, LINE_FORMAT);
+              // Same two-line shape as a live vault row: the name leads, and
+              // when it was deleted is a fact on the meta line, not a
+              // parenthetical that competes with the name for the ellipsis.
+              const meta = [
+                `Deleted ${formatDate(o.deletedAt)}`,
+                subscriptionStatusLine(o, LINE_FORMAT),
+              ]
+                .filter(Boolean)
+                .join(" · ");
               return (
                 <li key={o.orgId} className="billing-sub-row">
                   <span className="billing-sub-name">
                     <span className="billing-sub-title">
-                      {label}
-                      <span className="muted"> · deleted {formatDate(o.deletedAt)}</span>
+                      <span className="billing-sub-vault">{label}</span>
                     </span>
-                    {line && <span className="billing-sub-meta">{line}</span>}
+                    <span className="billing-sub-meta">{meta}</span>
                   </span>
                   <span className={`billing-status ${o.status}`}>
                     {o.status === "past_due" ? "Past due" : "Pro"}
@@ -2628,7 +2646,7 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
 
       {/* ---- 4. What the free tier allows ---- */}
       {freeLimits && (
-        <div className="menu-row">
+        <div className="menu-row settings-footer-row">
           <span className="menu-row-label">Free vaults</span>
           <span>
             {freeLimits.freeVaultsUsed} of {freeLimits.vaultsPerUser} used
