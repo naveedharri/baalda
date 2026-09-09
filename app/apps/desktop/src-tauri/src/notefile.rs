@@ -150,15 +150,24 @@ pub fn rename_path(vault: &Path, old_rel: &str, new_rel: &str) -> AppResult<Stri
 /// registry change and must be a no-op the second time. Sniffing
 /// `create_folder`'s error string across the IPC boundary to tell "already there"
 /// from a real failure is how idempotency quietly breaks.
-pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<()> {
+///
+/// Returns true when THIS call created the directory, false when it already
+/// existed. The caller (an inbound registry pull) uses that to tell a real disk
+/// change — one the watcher is about to echo — from a no-op: counting every
+/// `ensure_folder` as a change made a pull that changed nothing report "disk
+/// changed", re-read the registry, and refresh the whole UI on every pass.
+pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<bool> {
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new(
             "refusing to create a folder in an ignored dir",
         ));
     }
     let abs = resolve_in_vault(vault, rel)?;
+    if abs.is_dir() {
+        return Ok(false);
+    }
     std::fs::create_dir_all(&abs)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Move a note OUT of the note pipeline into `.context/trash/<stamp>/<rel>`
@@ -279,7 +288,9 @@ pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
     }
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
-        return Ok(true); // already gone — the goal state
+        // Already gone — the goal state, but NOT something this call did: the
+        // caller counts `true` as a disk change the watcher will echo.
+        return Ok(false);
     }
     if !abs.is_dir() {
         return Ok(false); // a file lives at this path; not ours to remove
@@ -589,11 +600,17 @@ mod tests {
     #[test]
     fn ensure_folder_is_idempotent_and_makes_parents() {
         let tmp = tempfile::tempdir().unwrap();
-        ensure_folder(tmp.path(), "A/B/C").unwrap();
+        assert!(ensure_folder(tmp.path(), "A/B/C").unwrap());
         assert!(tmp.path().join("A/B/C").is_dir());
         // Unlike `create_folder`, a second call is a no-op rather than an error —
-        // reconciliation runs on every registry change.
-        ensure_folder(tmp.path(), "A/B/C").unwrap();
+        // reconciliation runs on every registry change — and says so.
+        assert!(!ensure_folder(tmp.path(), "A/B/C").unwrap());
+        // On a case-insensitive filesystem a spelling variant IS the same dir, so
+        // it too is a no-op — the report must not claim a change that never
+        // happened (that claim is what kept a registry pull loop alive, #98).
+        if tmp.path().join("a/b/c").is_dir() {
+            assert!(!ensure_folder(tmp.path(), "a/b/c").unwrap());
+        }
     }
 
     #[test]
@@ -617,8 +634,8 @@ mod tests {
         assert!(delete_folder_if_empty(tmp.path(), "A/B").unwrap());
         assert!(delete_folder_if_empty(tmp.path(), "A").unwrap());
         assert!(!tmp.path().join("A").exists());
-        // Already gone is the goal state, not an error.
-        assert!(delete_folder_if_empty(tmp.path(), "A").unwrap());
+        // Already gone is the goal state, not an error — but nothing was removed.
+        assert!(!delete_folder_if_empty(tmp.path(), "A").unwrap());
         // A FILE at the path is not ours to remove.
         std::fs::write(tmp.path().join("f.md"), "x").unwrap();
         assert!(!delete_folder_if_empty(tmp.path(), "f.md").unwrap());

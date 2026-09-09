@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { BRAND_NAME } from "../../brand.js";
+import { config } from "../../config.js";
 import { emailEnabled } from "../../email/mailer.js";
 import { esc, page } from "../pages.js";
 import { publicBaseUrl } from "./open-link.js";
@@ -30,12 +31,13 @@ const ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 /**
  * Deep links back into the desktop app (`lib/accountLink.ts` on the desktop
- * side). Neither carries data: `verified` makes the app re-read its session so
+ * side); the scheme is `DEEP_LINK_SCHEME` (staging apps register their own).
+ * Neither carries data: `verified` makes the app re-read its session so
  * the verified state appears without a reload; `signin` makes it re-check the
  * (now revoked) session and open the sign-in card.
  */
-const VERIFIED_DEEP_LINK = "baalda://verified";
-const SIGNIN_DEEP_LINK = "baalda://signin";
+const VERIFIED_DEEP_LINK = `${config.deepLinkScheme}://verified`;
+const SIGNIN_DEEP_LINK = `${config.deepLinkScheme}://signin`;
 
 function notAvailable() {
   return page({
@@ -226,7 +228,7 @@ accountPageRoutes.get("/invite/:id", async (c) => {
   }
 
   const server = publicBaseUrl(c);
-  const deepLink = `baalda://invite/${encodeURIComponent(id)}?server=${encodeURIComponent(server)}`;
+  const deepLink = `${config.deepLinkScheme}://invite/${encodeURIComponent(id)}?server=${encodeURIComponent(server)}`;
   const who = inv.inviterName?.trim() || "A teammate";
   const body = `
     <h1>Join ${esc(inv.organizationName)}</h1>

@@ -58,6 +58,20 @@ export type ServerControl =
       /** The server had more empty docs than it would name in one frame (cap
        *  2000), so another `hello` is needed to fetch the next batch. */
       emptyTruncated?: boolean;
+      /**
+       * Readable docIds for which OUR manifest ran ahead of the server: this
+       * device holds ops the server has never received (typed offline and never
+       * flushed, a push cut short, a mint that failed). The backfill is
+       * downstream-only, so these must be pushed over their per-doc sockets —
+       * whatever the local `pushed` checkpoint claims. Until the server said so,
+       * such a doc re-downloaded an empty diff on every connect (40 notes
+       * "syncing" on every reload of one vault) and its edits stayed local.
+       *
+       * Absent when there are none.
+       */
+      behind?: string[];
+      /** More than one frame would name (cap 2000). */
+      behindTruncated?: boolean;
     }
   | { t: "drop"; docId: string }
   | { t: "reauth" }
@@ -97,13 +111,16 @@ export function parseServerControl(text: string): ServerControl | null {
     // future one may widen it. Anything that isn't an array of non-empty strings
     // is dropped rather than trusted — a bad entry here would put a bogus docId
     // at the FRONT of the upload queue.
-    const empty = Array.isArray(o.empty)
-      ? o.empty.filter((d): d is string => typeof d === "string" && d.length > 0)
-      : null;
+    const ids = (v: unknown): string[] | null =>
+      Array.isArray(v) ? v.filter((d): d is string => typeof d === "string" && d.length > 0) : null;
+    const empty = ids(o.empty);
+    const behind = ids(o.behind);
     return {
       t: "ready",
       ...(empty && empty.length > 0 ? { empty } : {}),
       ...(o.emptyTruncated === true ? { emptyTruncated: true } : {}),
+      ...(behind && behind.length > 0 ? { behind } : {}),
+      ...(o.behindTruncated === true ? { behindTruncated: true } : {}),
     };
   }
   if (t === "reauth") return { t: "reauth" };

@@ -282,6 +282,7 @@ confirm `/health` and a real sync round-trip, then promote.
 | `POLAR_SERVER` | no | `sandbox` | `sandbox` or `production` Polar environment. |
 | `FREE_MAX_VAULTS` | no | `3` | Free-tier cap on unsubscribed vaults per user (only enforced when billing is enabled). |
 | `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). Gates new invitations and join-code redemptions only; lowering it never removes existing members. |
+| `DEEP_LINK_SCHEME` | no | `baalda` | URL scheme of the desktop app the server's pages bounce into. Set `baalda-staging` on the server behind the Staging app so production and staging links open the right app on a machine that has both. |
 | `EMAIL_FROM` | for email | unset | **Outbound email (optional).** Sender address, e.g. `Baalda <no-reply@example.com>`. With this and ONE transport below, password reset ("Forgot password?"), sign-up verification and invitation emails switch on. Unset ⇒ email off and none of those is offered (invitations are shared as a link instead). |
 | `SMTP_URL` | one transport | unset | Any SMTP server: `smtp://user:pass@host:587` (STARTTLS) or `smtps://user:pass@host:465` (TLS). |
 | `RESEND_API_KEY` | one transport | unset | [Resend](https://resend.com) API key — the HTTPS alternative to SMTP. |

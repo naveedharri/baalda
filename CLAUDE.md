@@ -182,6 +182,17 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   stubs used to "re-sync 307 notes" on every reload). Files over `MAX_NOTE_BYTES` (10 MB, the server's
   `MAX_NOTE_MB`) fail once, permanently, without a socket (`permanentFailures`) instead of being rejected
   by the server on every reconnect.
+- **`ready.behind` is the other authority** (`SyncManager.handleServerBehind`, #98): the server's backfill
+  diff (`loadDocDiff`) treats a client whose state vector *covers* the server's as up to date — unequal is
+  not behind — and flags `clientAhead` when the client holds ops the server never received; those docs are
+  named on `ready.behind` and queued for a push exactly like `ready.empty` ones. Before this, 40 notes with
+  unflushed local edits re-downloaded a 2-byte empty diff on every connect ("Syncing 40/40" on each
+  reload) and the edits never left the device.
+- **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
+  the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
+  said `Projects/community` while the server said `Projects/Community` (with empty server folders under
+  it) used to create and remove the same directories on alternate pulls, each pass re-triggering the next
+  through the watcher's `tree` event: one idle client pulled the full registry every ~1.5 s (#98).
 
 ### Desktop — React (`src/`)
 `store.ts` is a Zustand **UI view-state mirror only** (vault, tree, open note, auth/session, org members,

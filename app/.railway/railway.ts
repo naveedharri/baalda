@@ -68,6 +68,9 @@ const SERVER_ENV = [
   "SMTP_URL",
   "RESEND_API_KEY",
   "EMAIL_TRANSPORT",
+  // Desktop URL scheme the server's pages bounce into; `baalda-staging` on the
+  // staging project so its links open the Staging app, not the released one.
+  "DEEP_LINK_SCHEME",
 ] as const;
 
 export default defineRailway((ctx) => {

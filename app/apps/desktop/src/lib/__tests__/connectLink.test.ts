@@ -17,6 +17,12 @@ describe("parseConnectLink", () => {
     expect(parseConnectLink(link!)).toBe("https://notes.example.com");
   });
 
+  it("accepts the Staging app's scheme (the two builds must not share one)", () => {
+    expect(parseConnectLink("baalda-staging://connect?server=https%3A%2F%2Fnotes.example.com")).toBe(
+      "https://notes.example.com",
+    );
+  });
+
   it("accepts the path-folded form some platforms deliver", () => {
     expect(parseConnectLink("baalda:///connect?server=https%3A%2F%2Fnotes.example.com")).toBe(
       "https://notes.example.com",

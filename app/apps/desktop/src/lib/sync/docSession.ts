@@ -334,6 +334,19 @@ export class SyncManager implements InboundHost {
    *  names, so another `hello` is owed once this run drains them. */
   private serverEmptyTruncated = false;
   /**
+   * docIds the SERVER says this device is AHEAD on (`ready.behind`): our
+   * manifest carries ops it has never received. Replaced on every `ready`.
+   *
+   * The second authority the run keys off, for the opposite failure of
+   * `serverEmpty`: the server HAS content, but not all of ours. `pushed` cannot
+   * see this either — an edit typed offline and never flushed, a push cut short
+   * by a failed mint — so the doc sat "synced" with local-only bytes while every
+   * connect re-delivered a 2-byte empty diff for it (the "40 notes syncing on
+   * every reload"). Named docs are queued exactly like `serverEmpty` ones; the
+   * per-doc socket's sync then carries the missing ops up.
+   */
+  private serverBehind = new Set<string>();
+  /**
    * Docs named by `ready.empty` whose LOCAL file is empty too — nothing anywhere.
    *
    * `ready.empty` is the authority on what the server lacks, but it cannot know
@@ -767,6 +780,14 @@ export class SyncManager implements InboundHost {
         // the children never vanish at all. Nothing is deleted there; the pull
         // below reconciles the paths, and anything it re-materializes now comes
         // back WITH its content. Both outcomes are the safe direction.
+        //
+        // …unless the directory is one the pull itself just created or removed.
+        // That echo is not an external change, and treating it as one is how a
+        // pull that (wrongly) created a folder its successor removed became a
+        // self-sustaining loop: every pass's own disk write requested the next
+        // pass, ~1.5 s apart, for days (#98). The plan bug is fixed too, but no
+        // planner asymmetry may ever be able to chain pulls through us again.
+        if (this.registry.consumeMaterialized(relPath)) continue;
         pullRegistry = true;
         continue;
       }
@@ -1030,6 +1051,7 @@ export class SyncManager implements InboundHost {
         this.localChanges.delete(d.docId);
         this.divergedDocs.delete(d.docId);
         this.serverEmpty.delete(d.docId);
+        this.serverBehind.delete(d.docId);
         this.emptyEverywhere.delete(d.docId);
         this.permanentFailures.delete(d.docId);
         this.progress?.forgetDoc(d.docId);
@@ -1210,6 +1232,7 @@ export class SyncManager implements InboundHost {
       markPushed: (docId) => {
         this.registry.markPushed(docId);
         this.divergedDocs.delete(docId); // its local-only ops are now on the server
+        this.serverBehind.delete(docId);
       },
       skip: (docId) => store.suppressedDoc() === docId,
       force: true,
@@ -1395,7 +1418,12 @@ export class SyncManager implements InboundHost {
     if (!progress) return;
     const open = this.docStore?.suppressedDoc() ?? null;
     for (const { docId } of this.registry.mappedNotes()) {
-      if (docId !== open && this.registry.isPushed(docId) && !this.serverEmpty.has(docId)) {
+      if (
+        docId !== open &&
+        this.registry.isPushed(docId) &&
+        !this.serverEmpty.has(docId) &&
+        !this.serverBehind.has(docId)
+      ) {
         progress.doc(docId, "synced");
       }
     }
@@ -1423,8 +1451,22 @@ export class SyncManager implements InboundHost {
           // fix — neither is work (see the field comments).
           !this.emptyEverywhere.has(n.docId) &&
           !this.permanentFailures.has(n.docId) &&
-          (!this.registry.isPushed(n.docId) || this.serverEmpty.has(n.docId)),
+          (!this.registry.isPushed(n.docId) ||
+            this.serverEmpty.has(n.docId) ||
+            this.serverBehind.has(n.docId)),
       );
+  }
+
+  /**
+   * A `ready` frame named the readable docs this device holds ops the server
+   * lacks for. Arrives right before the same frame's `empty` list, whose
+   * handler starts the run — so by then these are already in the work list.
+   * Also recorded as diverged: "file == doc" is not "nothing to send" for them.
+   */
+  private handleServerBehind(docIds: string[], scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    this.serverBehind = new Set(docIds);
+    for (const docId of docIds) this.divergedDocs.add(docId);
   }
 
   /**
@@ -1776,7 +1818,9 @@ export class SyncManager implements InboundHost {
       // The server's word beats our checkpoint: a doc it holds no content for is
       // queued even when `pushed` claims it, which is the only way a note
       // stranded by a crashed run (or a restored `.context/`) is ever recovered.
-      include: (docId) => this.serverEmpty.has(docId),
+      // …or one it holds an incomplete copy of (`ready.behind`): the missing
+      // ops are on this device and nowhere else.
+      include: (docId) => this.serverEmpty.has(docId) || this.serverBehind.has(docId),
       // …and it goes FIRST. Those notes have nothing at all on the server, so if
       // the run is cut short they are the work that had to happen.
       priority: (docId) => this.serverEmpty.has(docId),
@@ -1784,6 +1828,7 @@ export class SyncManager implements InboundHost {
         this.registry.markPushed(docId);
         this.divergedDocs.delete(docId); // a confirmed push carries any merged ops
         this.serverEmpty.delete(docId); // the server has its content now
+        this.serverBehind.delete(docId); // …all of it
       },
       // Never touch the open note: its editor session owns a provider for that doc.
       skip: (docId) => store.suppressedDoc() === docId,
@@ -1995,6 +2040,7 @@ export class SyncManager implements InboundHost {
     // list would put ITS doc ids at the head of this vault's upload queue.
     this.serverEmpty.clear();
     this.serverEmptyTruncated = false;
+    this.serverBehind.clear();
     this.emptyEverywhere.clear();
     this.permanentFailures.clear();
     this.emptyProbe = null; // a probe still in flight sees a stale scope and drops
@@ -2272,6 +2318,9 @@ export class SyncManager implements InboundHost {
       // `ready`, so it also re-arms a run the uploader's failure streak paused.
       onServerEmpty: (docIds, truncated) =>
         this.handleServerEmpty(docIds, truncated, scope),
+      // Which readable docs THIS device holds ops the server lacks for. Fired
+      // right before `onServerEmpty`, so the run that starts sees them queued.
+      onServerBehind: (docIds) => this.handleServerBehind(docIds, scope),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).

@@ -379,6 +379,41 @@ describe("SyncManager — ready.empty is the authority", () => {
     expect(engineHooks.refreshes).toBe(0); // nothing was truncated
   });
 
+  it("pushes a doc the server says this device is AHEAD on, despite the local checkpoint", async () => {
+    // The other way the checkpoint lies: the server HAS the note, but not all of
+    // it — this device holds ops (an edit typed offline, a push cut short) the
+    // server never received. `pushed` says done; the server's `ready.behind`
+    // outranks it. Before this, such a doc was badged synced forever, its edits
+    // never left the machine, and every connect re-delivered a 2-byte empty diff
+    // for it — 40 of them made one vault "sync 40 notes" on every reload.
+    fakeRegistry.mappedNotes.mockReturnValue([
+      { docId: "same", relPath: "Same.md" },
+      { docId: "ahead", relPath: "Ahead.md" },
+    ]);
+    fakeRegistry.pushed.add("same");
+    fakeRegistry.pushed.add("ahead");
+    const sm = new SyncManager();
+    await enable(sm);
+    engineHooks.settled = true;
+
+    // The server's `ready`: `behind` lands right before `empty`, as the engine
+    // delivers them.
+    engineHooks.opts!.onServerBehind?.(["ahead"]);
+    engineHooks.opts!.onServerEmpty?.([], false);
+    await sm.whenBulkSyncSettled();
+    await flush();
+
+    expect(connects.order).toEqual(["ahead"]);
+
+    // Confirmed by that push: the next `ready` that no longer names it queues
+    // nothing — no loop.
+    engineHooks.opts!.onServerBehind?.([]);
+    engineHooks.opts!.onServerEmpty?.([], false);
+    await sm.whenBulkSyncSettled();
+    await flush();
+    expect(connects.order).toEqual(["ahead"]);
+  });
+
   it("settles a server-empty doc whose local file is empty too - no push, ever", async () => {
     // The production loop behind "310 files re-syncing on every reload": the
     // vault holds hundreds of zero-byte placeholder notes. The server has no
@@ -624,6 +659,32 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(storeHooks.promoted).toContain("f1");
     fakeRegistry.getMapping.mockReturnValue(null);
+    vi.useRealTimers();
+  });
+
+  it("ignores the watcher echo of a folder the pull itself created or removed — no pull chain", async () => {
+    // #98's engine. A pull created (or removed) a directory; the watcher reported
+    // it as a `tree` change; `tree` meant "structural, pull again"; that pull
+    // undid the first one's write… Each pass's own disk write requested the next,
+    // ~1.5 s apart, for days. The pull now remembers the folders it touches and
+    // their echo is consumed here, so no planner mistake can chain pulls again.
+    vi.useFakeTimers();
+    fakeRegistry.materialized = new Set(["Projects/Community/Content/pipeline"]);
+    const sm = new SyncManager();
+    await enable(sm);
+    fakeRegistry.pull.mockClear();
+
+    sm.handleLocalFilesChanged([{ path: "Projects/Community/Content/pipeline", kind: "tree" }]);
+    expect(sm.hasPendingRegistryPull()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fakeRegistry.pull).not.toHaveBeenCalled();
+    expect(fakeRegistry.materialized.size).toBe(0); // one echo, consumed
+
+    // The same path changing AGAIN is a real structural change and pulls.
+    sm.handleLocalFilesChanged([{ path: "Projects/Community/Content/pipeline", kind: "tree" }]);
+    expect(sm.hasPendingRegistryPull()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
 

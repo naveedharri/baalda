@@ -81,6 +81,9 @@ export interface VaultChannelDeps {
  *  ~1,100 per-subscriber ACL recomputes) and a handful. */
 export const REGISTRY_COALESCE_MS = 120;
 
+/** Most docs one `ready.behind` names — the same bound `ready.empty` uses. */
+export const BEHIND_CAP = 2000;
+
 export class VaultChannel {
   private readonly pubsub: PubSub;
   private readonly listReadableDocs: typeof listReadableDocsInVault;
@@ -471,12 +474,18 @@ class VaultConnection {
     } catch (err) {
       console.error("Vault channel empty-doc probe failed:", err);
     }
+    // Docs the backfill found this client AHEAD on — it holds ops the server has
+    // never received. Named so the client pushes them; the feed itself cannot.
+    const behind = this.behind;
+    const behindTruncated = this.behindTruncated;
     this.send({
       t: "ready",
       // Omitted when nothing is empty, so the common frame is byte-identical to
       // what every shipped client already parses.
       ...(empty.length > 0 ? { empty } : {}),
       ...(empty.length > 0 && emptyTruncated ? { emptyTruncated: true as const } : {}),
+      ...(behind.length > 0 ? { behind } : {}),
+      ...(behind.length > 0 && behindTruncated ? { behindTruncated: true as const } : {}),
     });
   }
 
@@ -588,8 +597,19 @@ class VaultConnection {
     return true;
   }
 
+  /**
+   * Docs whose backfill found the CLIENT ahead of the server (see
+   * `DocDiff.clientAhead`), collected during {@link backfill} and named on the
+   * `ready` that terminates it. Capped like `ready.empty`: one frame must stay
+   * bounded however large the vault.
+   */
+  private behind: string[] = [];
+  private behindTruncated = false;
+
   /** Stream missing ops for every readable doc, priority docs first. */
   private async backfill(manifest: Record<string, string>, priority: string[]): Promise<void> {
+    this.behind = [];
+    this.behindTruncated = false;
     const prioritized = priority.filter((d) => this.readable.has(d));
     const prioritySet = new Set(prioritized);
     const rest = [...this.readable].filter((d) => !prioritySet.has(d));
@@ -616,6 +636,10 @@ class VaultConnection {
     } catch (err) {
       console.error(`Vault channel backfill failed for ${docId}:`, err);
       return;
+    }
+    if (diff?.clientAhead) {
+      if (this.behind.length < BEHIND_CAP) this.behind.push(docId);
+      else this.behindTruncated = true;
     }
     if (!diff || diff.upToDate) return; // nothing new for this client
     this.sendBinary(encodeWsUpdate(docId, diff.update));

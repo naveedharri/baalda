@@ -1019,10 +1019,9 @@ pub async fn ensure_folder(
     state: State<'_, AppState>,
     path: String,
     expected_epoch: Option<u64>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    notefile::ensure_folder(&vault, &path)?;
-    Ok(())
+    notefile::ensure_folder(&vault, &path)
 }
 
 /// Move a note into the vault's recoverable trash (see `notefile::trash_note`).
