@@ -15,11 +15,6 @@ import { AsyncButton } from "./AsyncButton";
 import { LazyAvatar } from "./Face";
 import { MenuIcon } from "./MenuIcon";
 
-// The sign-in modal moved to its own file when it grew a server-choice step
-// (#91). It is re-exported from here for the mount sites that still ask this
-// module for it; each of them wraps it in its own Suspense.
-export { AuthDialog } from "./AuthDialog";
-
 /* The settings surface is a whole second app (nine tabs, billing, MCP tokens,
    access) and nothing in it is on the first screen, so all three dialogs load
    on demand. `null` is the right fallback for a modal: the popover stays put

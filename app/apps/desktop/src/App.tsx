@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import "./App.css";
-import { AccountMenu, AuthDialog } from "./components/AccountMenu";
+import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
@@ -16,7 +16,6 @@ import { SidebarResizer } from "./components/SidebarResizer";
 import { TabBar } from "./components/TabBar";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
-import { VaultPicker } from "./components/VaultPicker";
 import { VersionPanel } from "./components/VersionPanel";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
@@ -40,6 +39,22 @@ import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
+
+/* Lazy chunks. Each of these is either a rare deliberate action (the graph),
+   a modal (settings, auth), or big enough that the first paint should not wait
+   on it (the editor carries CodeMirror + lezer). `lib/prefetch.ts` warms the
+   editor right after the first paint, so the first note click is still
+   instant. */
+const Editor = lazy(() => import("./components/Editor").then((m) => ({ default: m.Editor })));
+const GraphView = lazy(() =>
+  import("./components/GraphView").then((m) => ({ default: m.GraphView })),
+);
+const VaultPicker = lazy(() =>
+  import("./components/VaultPicker").then((m) => ({ default: m.VaultPicker })),
+);
+const AuthDialog = lazy(() =>
+  import("./components/AuthDialog").then((m) => ({ default: m.AuthDialog })),
+);
 
 /** How often a running app re-checks for a new release (it also checks at
  *  launch). The check is one cheap GET of the release's static `latest.json`
@@ -631,35 +646,27 @@ function PromptedAuthDialog() {
     return null;
   }
   return (
-    <AuthDialog
-      // An invitee usually has no account yet — the link is often the first
-      // time they hear of us — so the invite card opens on sign-up.
-      initialMode={authPrompt === "invite" ? "sign-up" : "sign-in"}
-      onSignedIn={() => useStore.getState().setAuthPrompt(null)}
-      onClose={() => {
-        clearPendingNoteLink();
-        requestOpenVault(null);
-        useStore.getState().clearServerLink();
-        // Dismissing the card declines for now: drop the queued invitation too,
-        // or the next unrelated sign-in would surprise-join a vault.
-        // Unconditional, because an invitation can be parked behind the
-        // "server-link" prompt as well — the invite that offered the server.
-        useStore.getState().clearInvitePrompt();
-        useStore.getState().setAuthPrompt(null);
-      }}
-    />
+    <Suspense fallback={null}>
+      <AuthDialog
+        // An invitee usually has no account yet — the link is often the first
+        // time they hear of us — so the invite card opens on sign-up.
+        initialMode={authPrompt === "invite" ? "sign-up" : "sign-in"}
+        onSignedIn={() => useStore.getState().setAuthPrompt(null)}
+        onClose={() => {
+          clearPendingNoteLink();
+          requestOpenVault(null);
+          useStore.getState().clearServerLink();
+          // Dismissing the card declines for now: drop the queued invitation too,
+          // or the next unrelated sign-in would surprise-join a vault.
+          // Unconditional, because an invitation can be parked behind the
+          // "server-link" prompt as well — the invite that offered the server.
+          useStore.getState().clearInvitePrompt();
+          useStore.getState().setAuthPrompt(null);
+        }}
+      />
+    </Suspense>
   );
 }
-
-/* Lazy chunks. Each of these is either a rare deliberate action (the graph),
-   a modal (settings, auth), or big enough that the first paint should not wait
-   on it (the editor carries CodeMirror + lezer). `lib/prefetch.ts` warms the
-   editor right after the first paint, so the first note click is still
-   instant. */
-const Editor = lazy(() => import("./components/Editor").then((m) => ({ default: m.Editor })));
-const GraphView = lazy(() =>
-  import("./components/GraphView").then((m) => ({ default: m.GraphView })),
-);
 
 export default function App() {
   const vault = useStore((s) => s.vault);
@@ -968,7 +975,11 @@ export default function App() {
     return (
       <div className="app-shell">
         <UpdateGate />
-        <VaultPicker />
+        {/* Reusing `.booting` means the loading→welcome hand-off reads as one
+            continuous boot rather than a flash of a second loader. */}
+        <Suspense fallback={<div className="booting">Loading…</div>}>
+          <VaultPicker />
+        </Suspense>
         <VaultFolderPrompt />
         <PromptedAuthDialog />
       </div>

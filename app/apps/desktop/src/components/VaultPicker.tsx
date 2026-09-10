@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import type { VaultInfo, RecentVault } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
@@ -9,10 +9,13 @@ import {
   requestOpenVault,
   useStore,
 } from "../store";
-import { AuthDialog } from "./AccountMenu";
 import { Wordmark } from "./Logo";
 import { Spinner } from "./Spinner";
 import { configOrgId } from "../lib/vault/rediscover";
+
+/* Its own handle on the same chunk every other sign-in mount uses — the
+   welcome screen must not drag the auth modal in just by rendering. */
+const AuthDialog = lazy(() => import("./AuthDialog").then((m) => ({ default: m.AuthDialog })));
 
 /**
  * A row in the welcome-screen list: either a local folder (a recent vault on
@@ -977,26 +980,28 @@ export function VaultPicker() {
       )}
 
       {signInOpen && !authPrompt && (
-        <AuthDialog
-          // Someone arriving with a join code most likely has no account yet.
-          initialMode={signInFor === "join" ? "sign-up" : "sign-in"}
-          // Success: for the "open" route, keep the pending open target — the
-          // store's post-sign-in landing opens exactly that vault, so just
-          // dismiss. For the "join" route the landing was suppressed on
-          // purpose, and this screen is still up: show the code step.
-          onSignedIn={() => {
-            setSignInOpen(false);
-            if (signInFor === "join") setJoining(true);
-          }}
-          // Cancel: drop whichever intent sent us here, so a later sign-in from
-          // elsewhere doesn't surprise-open a vault or strand itself waiting on
-          // a code that is never coming.
-          onClose={() => {
-            if (signInFor === "join") cancelJoin();
-            else requestOpenVault(null);
-            setSignInOpen(false);
-          }}
-        />
+        <Suspense fallback={null}>
+          <AuthDialog
+            // Someone arriving with a join code most likely has no account yet.
+            initialMode={signInFor === "join" ? "sign-up" : "sign-in"}
+            // Success: for the "open" route, keep the pending open target — the
+            // store's post-sign-in landing opens exactly that vault, so just
+            // dismiss. For the "join" route the landing was suppressed on
+            // purpose, and this screen is still up: show the code step.
+            onSignedIn={() => {
+              setSignInOpen(false);
+              if (signInFor === "join") setJoining(true);
+            }}
+            // Cancel: drop whichever intent sent us here, so a later sign-in from
+            // elsewhere doesn't surprise-open a vault or strand itself waiting on
+            // a code that is never coming.
+            onClose={() => {
+              if (signInFor === "join") cancelJoin();
+              else requestOpenVault(null);
+              setSignInOpen(false);
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );
