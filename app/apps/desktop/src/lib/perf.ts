@@ -14,6 +14,25 @@
 const t0 = performance.now();
 let first = true;
 
+// The dev terminal mirror (devConsole.ts) attaches asynchronously, so the
+// earliest marks — `script`, `react-mount`, the ones that say how long the
+// bundle took — would otherwise only ever reach the Web Inspector. Keep them
+// until a sink attaches, then replay; marks after that ride the wrapped console.
+const early: string[] = [];
+let attached = false;
+
+/** Called once by the dev terminal mirror when it is ready to forward lines. */
+export function attachEarlySink(sink: (line: string) => void): void {
+  attached = true;
+  for (const line of early) sink(line);
+  early.length = 0;
+}
+
+function emit(line: string): void {
+  console.info(line);
+  if (!attached) early.push(line);
+}
+
 export function mark(name: string): void {
   const at = performance.now();
   try {
@@ -25,11 +44,11 @@ export function mark(name: string): void {
     first = false;
     // How long the webview itself took before our first line of JS ran; it is
     // not ours to optimize, but it is part of what the user waits for.
-    console.info(
+    emit(
       `[boot] webview-start +${Math.round(t0)}ms (timeOrigin ${Math.round(
         performance.timeOrigin,
       )})`,
     );
   }
-  console.info(`[boot] ${name} +${Math.round(at - t0)}ms`);
+  emit(`[boot] ${name} +${Math.round(at - t0)}ms`);
 }

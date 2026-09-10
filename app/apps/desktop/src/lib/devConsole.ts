@@ -3,6 +3,8 @@
 // diagnostics can be read from the `tauri dev` terminal instead of only from the
 // Web Inspector. A no-op in production builds.
 
+import { attachEarlySink } from "./perf";
+
 type Sink = (message: string) => Promise<void>;
 
 export function mirrorConsoleToTerminal(): void {
@@ -38,5 +40,8 @@ function install(info: Sink, warn: Sink, error: Sink): void {
   wrap("log", info);
   wrap("info", info);
   wrap("warn", warn);
+  // Boot marks logged before this mirror was installed: replay them now so the
+  // terminal timeline starts at the first line of JS, not at the mirror.
+  attachEarlySink((line) => void info(line).catch(() => {}));
   wrap("error", error);
 }
