@@ -7,6 +7,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **Billing → Transfer is a dialog, not a one-item menu.** Clicking Transfer on
+  a Pro vault now opens a dialog that names the vault the subscription is
+  leaving, lists every eligible destination as a selectable card with its seat
+  count and Free plan, pre-selects the only candidate when there is just one,
+  and explains what happens to both vaults before the confirm. When some owned
+  vaults are missing it says why (already on Pro). `ConfirmDialog` gained a
+  `confirmDisabled` prop so the confirm waits for a pick.
+
 ### Added
 - **Tabs for open files.** Every note you open now stays open as a tab in a
   strip under the header — click to switch, × or middle-click to close, and
