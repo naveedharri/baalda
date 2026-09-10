@@ -265,6 +265,8 @@ impl Index {
         let mut seen_notes: HashSet<String> = HashSet::new();
         let mut seen_folders: HashSet<String> = HashSet::new();
         let mut changed = false;
+        let mut folders_written = 0usize;
+        let mut stale = 0usize;
 
         for entry in WalkDir::new(vault)
             .into_iter()
@@ -280,6 +282,7 @@ impl Index {
                 if entry.depth() > 0 {
                     seen_folders.insert(rel_from_abs(vault, abs)?);
                     self.upsert_folder(&tx, vault, abs)?;
+                    folders_written += 1;
                 }
                 continue;
             }
@@ -317,6 +320,7 @@ impl Index {
             if !seen_notes.contains(path) {
                 Self::delete_note_rows(&tx, id, *rowid)?;
                 changed = true;
+                stale += 1;
             }
         }
 
@@ -331,6 +335,7 @@ impl Index {
         for path in stale_folders {
             tx.execute("DELETE FROM folders WHERE path = ?1", params![path])?;
             changed = true;
+            stale += 1;
         }
 
         // Link targets only need re-resolving when the note set changed. Full
@@ -340,7 +345,13 @@ impl Index {
             self.resolve_links(&tx, LinkScope::All)?;
         }
         tx.commit()?;
-        log_batch("rebuild", touched, started);
+        // Unconditional, unlike `log_batch`, which stays silent below
+        // `BATCH_LOG_MIN` — a clean reopen (0 touched notes) is exactly the case
+        // worth seeing, because it is what every launch pays. One line per open.
+        log::info!(
+            "[index] rebuild: {touched} notes, {folders_written} folder writes, {stale} stale, {} ms",
+            started.elapsed().as_millis()
+        );
         Ok(())
     }
 
@@ -642,7 +653,7 @@ impl Index {
         // a note too big to upload is also a note too big to fully index.
         let size = std::fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
         if size > MAX_INDEX_BYTES {
-            eprintln!(
+            log::info!(
                 "[index] {} is {:.1} MB (> {} MB cap): indexing title only, skipping body + links",
                 rel,
                 size as f64 / (1024.0 * 1024.0),
@@ -1427,7 +1438,7 @@ fn log_batch(label: &str, files: usize, started: Instant) {
         return;
     }
     let ms = started.elapsed().as_millis();
-    eprintln!(
+    log::info!(
         "[index] {label}: {files} files in {ms} ms ({:.2} ms/file)",
         ms as f64 / files as f64
     );

@@ -83,6 +83,26 @@ export interface VaultInfo {
    * `getLastVault` reports the epoch that was current before it opened anything.
    */
   epoch: number;
+  /**
+   * Per-phase timings of the open that produced this info (Rust `OpenTiming`),
+   * absent on the infos that open nothing (`getLastVault`). Rust logs one line
+   * per open too, but only debug builds carry the log plugin — this is how a
+   * shipped install can report where an open went.
+   */
+  timing?: OpenTiming;
+}
+
+/** How long each phase of one `open_vault` took, in whole ms. */
+export interface OpenTiming {
+  /** Opening + migrating `.context/index.sqlite`. */
+  indexOpenMs: number;
+  /** Starting the recursive filesystem watcher. */
+  watcherMs: number;
+  /** Handing the index to the background rebuild and publishing it. */
+  publishMs: number;
+  /** Reading + rewriting the app config's recents list. */
+  configMs: number;
+  totalMs: number;
 }
 
 /**

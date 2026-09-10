@@ -26,6 +26,27 @@ use tauri_plugin_dialog::DialogExt;
 const REBUILD_BUSY_RETRIES: u32 = 3;
 const REBUILD_BUSY_BACKOFF_MS: u64 = 500;
 
+/// Per-phase timings of one `open_vault`, in whole ms.
+///
+/// Returned on `VaultInfo` rather than only logged: `log::info!` reaches the
+/// `tauri dev` terminal (tauri_plugin_log is registered for debug builds only,
+/// see lib.rs), and the numbers that decide anything are the ones a shipped
+/// install can report. `None` on the infos that open nothing (`get_last_vault`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenTiming {
+    /// `Index::open` + `migrate`.
+    pub index_open_ms: u64,
+    /// `watcher::start` — creating the recursive `notify` watch.
+    pub watcher_ms: u64,
+    /// Spawning the rebuild thread and waiting for it to hold the index lock
+    /// (the `ready` handshake in `open_vault_inner`).
+    pub publish_ms: u64,
+    /// Reading + rewriting the app config's recents list.
+    pub config_ms: u64,
+    pub total_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultInfo {
@@ -37,6 +58,11 @@ pub struct VaultInfo {
     /// caller can pin every follow-up write to *this* vault. Purely
     /// informational for `get_last_vault`, which doesn't open anything.
     pub epoch: u64,
+    /// How long each phase of the open that produced this info took. Absent on
+    /// the infos that open nothing, so the UI can tell a real open's numbers
+    /// from a config read's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<OpenTiming>,
 }
 
 /// One entry in the "recently opened vaults" list surfaced on the welcome
@@ -52,6 +78,12 @@ pub struct RecentVault {
 
 /// How many recent vaults we keep in config / show on the welcome screen.
 const RECENT_LIMIT: usize = 10;
+
+/// Log a `load_yjs_state` past this payload size. The largest doc on the vault
+/// this was measured against holds 17.7 MB of CRDT and ~40 docs are over 1 MB;
+/// below that the line is noise, above it it is the number that explains a slow
+/// note open on someone else's install.
+const LARGE_DOC_LOG_BYTES: usize = 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Default)]
 struct AppConfig {
@@ -178,6 +210,7 @@ fn vault_info(path: &Path, epoch: u64) -> VaultInfo {
         path: path.to_string_lossy().to_string(),
         name,
         epoch,
+        timing: None,
     }
 }
 
@@ -217,13 +250,18 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
     // stream vault files (e.g. `<img src>` in notes) via convertFileSrc.
     let _ = app.asset_protocol_scope().allow_directory(&path, true);
 
+    let opened_at = std::time::Instant::now();
     let index = Arc::new(Mutex::new(Index::open(&path)?));
+    let index_open_ms = opened_at.elapsed().as_millis() as u64;
 
     // The watcher first, so nothing that changes during the rebuild below is
     // missed: its drain thread queues behind the same index lock and re-indexes
     // any file the rebuild may have seen too (idempotent).
+    let watcher_started = std::time::Instant::now();
     let watcher = watcher::start(path.clone(), index.clone(), app.clone())?;
+    let watcher_ms = watcher_started.elapsed().as_millis() as u64;
 
+    let publish_started = std::time::Instant::now();
     let epoch = {
         let mut inner = state.inner.lock().unwrap();
         // Every open invalidates the previous vault's epoch, so any command still
@@ -315,7 +353,10 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
         epoch
     };
 
-    let info = vault_info(&path, epoch);
+    let publish_ms = publish_started.elapsed().as_millis() as u64;
+
+    let config_started = std::time::Instant::now();
+    let mut info = vault_info(&path, epoch);
     // Preserve other config keys (e.g. server_url) when updating recents.
     let mut cfg = read_config(app);
     cfg.last_vault = Some(info.path.clone()); // kept for back-compat
@@ -332,6 +373,22 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
     );
     cfg.recent_vaults.truncate(RECENT_LIMIT);
     write_config(app, &cfg)?;
+    let config_ms = config_started.elapsed().as_millis() as u64;
+    let total_ms = opened_at.elapsed().as_millis() as u64;
+
+    info.timing = Some(OpenTiming {
+        index_open_ms,
+        watcher_ms,
+        publish_ms,
+        config_ms,
+        total_ms,
+    });
+    // One line per open. Everything but the background rebuild used to be
+    // unmeasured on a real machine, so "launching is slow" had no numbers.
+    log::info!(
+        "[open_vault] {} — index_open {index_open_ms}ms watcher {watcher_ms}ms publish {publish_ms}ms config {config_ms}ms total {total_ms}ms",
+        path.display()
+    );
     app.emit("vault-opened", info.clone())?;
     Ok(info)
 }
@@ -1184,8 +1241,21 @@ pub async fn load_yjs_state(
     expected_epoch: Option<u64>,
 ) -> AppResult<YjsState> {
     let (_, index) = require_vault_at(&state, expected_epoch)?;
-    let guard = index.lock().unwrap();
-    guard.load_yjs_state(&doc_id)
+    let started = std::time::Instant::now();
+    let loaded = {
+        let guard = index.lock().unwrap();
+        guard.load_yjs_state(&doc_id)?
+    };
+    let bytes = loaded.snapshot.as_ref().map_or(0, |s| s.len())
+        + loaded.updates.iter().map(|u| u.len()).sum::<usize>();
+    if bytes >= LARGE_DOC_LOG_BYTES {
+        log::info!(
+            "[yjs] load {doc_id}: {bytes} B in {} updates, read in {} ms",
+            loaded.updates.len(),
+            started.elapsed().as_millis()
+        );
+    }
+    Ok(loaded)
 }
 
 #[tauri::command]
