@@ -44,7 +44,10 @@ import { AuthDialog } from "./AuthDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
-import { Avatar, SyncBadge } from "./Identity";
+import { SyncBadge } from "./Identity";
+import { LazyAvatar } from "./Face";
+// Member lists live in the vault-settings dialog, which is its own lazy chunk.
+import { Avatar } from "./Avatar";
 import { SettingsModal } from "./SettingsModal";
 import { Switch } from "./Switch";
 import { ThemeToggle } from "./ThemeToggle";
@@ -252,7 +255,7 @@ export function AccountMenu() {
         }`}
       >
         <span className="identity-avatar-wrap">
-          <Avatar label={userLabel} image={session.user.image} />
+          <LazyAvatar label={userLabel} image={session.user.image} />
           <span className={`presence-light ${presence}`} aria-label={presenceLabel} />
         </span>
         <span className="identity-meta">

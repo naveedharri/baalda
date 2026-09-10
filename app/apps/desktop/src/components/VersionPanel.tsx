@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { AsyncButton } from "./AsyncButton";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { characterSvg } from "./Identity";
+import { Face } from "./Face";
 import {
   agoFromIso,
   formatVersionSize,
@@ -323,10 +323,6 @@ function VersionRow({
   onRevert: () => Promise<void>;
 }) {
   const author = versionAuthorLabel(version.authorName);
-  const svg = useMemo(
-    () => characterSvg(version.authorName || version.authorId || "?"),
-    [version.authorName, version.authorId],
-  );
   const size = formatVersionSize(version.size);
   return (
     <li
@@ -334,10 +330,10 @@ function VersionRow({
       className={`version-row${active ? " active" : ""}${isCurrent ? " is-current" : ""}`}
       onMouseEnter={onHover}
     >
-      <span
+      <Face
+        seed={version.authorName || version.authorId || "?"}
         className="version-avatar"
-        aria-hidden="true"
-        dangerouslySetInnerHTML={{ __html: svg }}
+        ariaHidden
       />
       <span className="version-row-main">
         <span className="version-row-title">

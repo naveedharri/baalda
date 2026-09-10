@@ -21,7 +21,8 @@ import * as ipc from "../lib/ipc";
 import { HtmlView } from "./HtmlView";
 import { FilePreview } from "./FilePreview";
 import { previewKind } from "../lib/preview";
-import { relativeAgo, characterSvg } from "./Identity";
+import { relativeAgo } from "./Identity";
+import { characterSvg } from "./Avatar";
 import { agoFromIso, lastEditedTooltip } from "./versionFormat";
 
 interface Peer {

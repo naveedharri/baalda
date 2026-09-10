@@ -6,7 +6,7 @@ import {
   sharePrincipalId,
 } from "../lib/api";
 import { useStore } from "../store";
-import { Avatar } from "./Identity";
+import { Avatar } from "./Avatar";
 
 export interface ShareTarget {
   resourceType: "folder" | "file";

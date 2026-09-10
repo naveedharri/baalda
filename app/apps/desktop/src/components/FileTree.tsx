@@ -57,7 +57,7 @@ import {
   ringShowsColor,
   statusTone,
 } from "../lib/presence/color";
-import { characterSvg } from "./Identity";
+import { Face } from "./Face";
 import { ShareDialog, type ShareTarget } from "./ShareDialog";
 import { placeMenu, type Placement } from "../lib/menuPlacement";
 
@@ -2046,14 +2046,11 @@ function TreeSyncMark({
 /** One presence face: the teammate's illustrated character ringed in their
  *  colour — the same treatment as the editor's PresenceAvatar, sized for a row. */
 function SidebarAvatar({ peer }: { peer: VaultPeer }) {
-  const svg = useMemo(
-    () => characterSvg(peer.name || peer.userId || "?"),
-    [peer.name, peer.userId],
-  );
   const tone = statusTone(peer.status);
   const live = ringShowsColor(tone);
   return (
-    <span
+    <Face
+      seed={peer.name || peer.userId || "?"}
       className={`tree-presence-avatar tone-${tone}${live ? "" : " offline"}`}
       style={
         {
@@ -2061,7 +2058,6 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
         } as CSSProperties
       }
       title={peer.name}
-      dangerouslySetInnerHTML={{ __html: svg }}
     />
   );
 }

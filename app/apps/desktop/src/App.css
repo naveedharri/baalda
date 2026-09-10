@@ -2836,7 +2836,19 @@ body:has(.sidebar-resizer.dragging) {
   flex-shrink: 0;
   display: inline-flex;
 }
-.identity-avatar-wrap .avatar {
+.identity-avatar-wrap /* Monogram stand-in while the avatar chunk loads. */
+.face-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+  font-weight: 700;
+  font-size: 0.6em;
+  line-height: 1;
+}
+
+.avatar {
   width: 32px;
   height: 32px;
   font-size: var(--fs-sm);
