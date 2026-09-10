@@ -12,6 +12,40 @@
 // Rust round-trip tests in `commands.rs`, so both halves are pinned to one wire
 // format rather than to each other's bugs.
 
+/**
+ * Build the `[u32 metaLen][meta JSON][bytes…]` frame the binary-inbound
+ * commands take (see `commands.rs` `raw_frame`).
+ *
+ * The command arguments ride in the frame rather than as `invoke` args or
+ * headers, for two reasons. Tauri sends a raw body only when the WHOLE payload
+ * is bytes — a `Uint8Array` field inside an args object is JSON-ified via
+ * `Array.from`, which is exactly the cost being removed — and with a raw body
+ * every ordinary deserialize-arg fails by design. Headers are not the answer
+ * either: the postMessage fallback transport re-encodes the payload as JSON and
+ * treats headers differently, so a header-based design would work right up
+ * until the custom-protocol IPC is blocked. A framed prefix behaves the same on
+ * both transports.
+ *
+ * `parts` are concatenated in order; the receiving command's meta says where
+ * they split (`snapshotLen`, per-entry lengths).
+ */
+export function frame(
+  meta: unknown,
+  ...parts: readonly Uint8Array[]
+): Uint8Array {
+  const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+  const bodyLen = parts.reduce((n, p) => n + p.byteLength, 0);
+  const out = new Uint8Array(4 + metaBytes.byteLength + bodyLen);
+  new DataView(out.buffer).setUint32(0, metaBytes.byteLength, true);
+  out.set(metaBytes, 4);
+  let off = 4 + metaBytes.byteLength;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.byteLength;
+  }
+  return out;
+}
+
 /** A doc's persisted CRDT state, decoded from the frame Rust returns. */
 export interface YjsState {
   /** Latest merged snapshot as raw Yjs update bytes, or null if none. */

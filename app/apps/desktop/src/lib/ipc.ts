@@ -6,7 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { decodeStateVectors, decodeYjsState, type YjsState } from "./ipcCodec";
+import { decodeStateVectors, decodeYjsState, frame, type YjsState } from "./ipcCodec";
 
 // The binary commands (CRDT state, attachment bytes) speak raw bytes, framed by
 // `ipcCodec.ts` — see that module for why and for the frame layouts.
@@ -399,19 +399,20 @@ export const listNoteTitles = (expectedEpoch?: VaultEpoch) =>
   invoke<NoteTitle[]>("list_note_titles", { expectedEpoch: expectedEpoch ?? null });
 
 // ---- CRDT persistence (Phase 1, spec 02 §4) ------------------------------
-// Reads come back as raw bytes and are decoded by `ipcCodec.ts`; writes still
-// marshal their bytes as number arrays (see the outbound half in `ipcCodec`).
+// Bytes cross the bridge as bytes in BOTH directions: reads come back framed
+// and are decoded by `ipcCodec.ts`, writes send `ipcCodec.frame(meta, …bytes)`
+// as the whole `invoke` payload. Every wrapper signature is unchanged, so no
+// caller (or test mock) had to move.
 
 export const appendYjsUpdate = (
   docId: string,
   update: Uint8Array,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("append_yjs_update", {
-    docId,
-    update: Array.from(update),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "append_yjs_update",
+    frame({ docId, expectedEpoch: expectedEpoch ?? null }, update),
+  );
 
 export const loadYjsState = (
   docId: string,
@@ -428,12 +429,19 @@ export const saveYjsSnapshot = (
   stateVector: Uint8Array,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("save_yjs_snapshot", {
-    docId,
-    snapshot: Array.from(snapshot),
-    stateVector: Array.from(stateVector),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "save_yjs_snapshot",
+    frame(
+      {
+        docId,
+        expectedEpoch: expectedEpoch ?? null,
+        // Where Rust splits the payload back into its two halves.
+        snapshotLen: snapshot.byteLength,
+      },
+      snapshot,
+      stateVector,
+    ),
+  );
 
 /**
  * Persist a batch of per-doc Yjs state vectors — the DURABLE form of the vault
@@ -448,10 +456,17 @@ export const saveYjsStateVectors = (
   entries: Array<[docId: string, stateVector: Uint8Array]>,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("save_yjs_state_vectors", {
-    entries: entries.map(([docId, sv]) => [docId, Array.from(sv)]),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "save_yjs_state_vectors",
+    frame(
+      {
+        expectedEpoch: expectedEpoch ?? null,
+        // Lengths only; the vectors themselves follow in this order.
+        entries: entries.map(([docId, sv]) => [docId, sv.byteLength]),
+      },
+      ...entries.map(([, sv]) => sv),
+    ),
+  );
 
 /** Every state vector this vault holds, to rebuild the manifest on launch. */
 /** Discard one doc's local CRDT — the local half of an oversized-note repair.
@@ -501,11 +516,10 @@ export const writeBinaryFile = (
   bytes: Uint8Array,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("write_binary_file", {
-    relPath,
-    bytes: Array.from(bytes),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "write_binary_file",
+    frame({ relPath, expectedEpoch: expectedEpoch ?? null }, bytes),
+  );
 
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });

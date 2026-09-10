@@ -1283,6 +1283,78 @@ pub async fn list_note_titles(
 // `encode_yjs_state_round_trips` / `encode_state_vectors_round_trips` here and
 // by `src/lib/__tests__/ipcCodec.test.ts` against the same byte fixtures.
 
+/// Split the `[u32 meta_len][meta JSON][payload]` frame the binary-inbound
+/// commands take (see `ipcCodec.ts` `frame`).
+///
+/// The command args ride INSIDE the frame because a raw `invoke` payload is the
+/// whole body: Tauri sends `application/octet-stream` only when the entire
+/// payload is bytes, and with a raw body every ordinary deserialize-arg fails
+/// by design. Not `options.headers` either — the postMessage fallback transport
+/// re-encodes the payload as JSON and treats headers differently, so a
+/// header-based design would work until the day the custom protocol is blocked.
+///
+/// A `Raw` body borrows, so the normal path copies nothing. The `Json` arm is
+/// not dead code: that same fallback transport JSON-encodes the payload into a
+/// number array, and accepting both is what keeps it from turning into "saving
+/// silently stopped working".
+fn raw_frame<'a, M: serde::de::DeserializeOwned>(
+    body: &'a tauri::ipc::InvokeBody,
+) -> AppResult<(M, std::borrow::Cow<'a, [u8]>)> {
+    use std::borrow::Cow;
+    use tauri::ipc::InvokeBody;
+    let bytes: Cow<'a, [u8]> = match body {
+        InvokeBody::Raw(b) => Cow::Borrowed(b.as_slice()),
+        InvokeBody::Json(v) => Cow::Owned(
+            serde_json::from_value::<Vec<u8>>(v.clone())
+                .map_err(|e| AppError::new(format!("binary ipc: bad json payload: {e}")))?,
+        ),
+    };
+    if bytes.len() < 4 {
+        return Err(AppError::new("binary ipc: truncated frame"));
+    }
+    let meta_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let head = 4usize
+        .checked_add(meta_len)
+        .filter(|h| *h <= bytes.len())
+        .ok_or_else(|| AppError::new("binary ipc: meta length past end of frame"))?;
+    let meta: M = serde_json::from_slice(&bytes[4..head])?;
+    Ok(match bytes {
+        Cow::Borrowed(b) => (meta, Cow::Borrowed(&b[head..])),
+        Cow::Owned(b) => (meta, Cow::Owned(b[head..].to_vec())),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppendUpdateMeta {
+    doc_id: String,
+    expected_epoch: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSnapshotMeta {
+    doc_id: String,
+    expected_epoch: Option<u64>,
+    /// Where the snapshot ends and the state vector begins in the payload.
+    snapshot_len: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveVectorsMeta {
+    expected_epoch: Option<u64>,
+    /// `(doc_id, state_vector byte length)`, in payload order.
+    entries: Vec<(String, usize)>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteBinaryMeta {
+    rel_path: String,
+    expected_epoch: Option<u64>,
+}
+
 /// Frame a doc's CRDT state as raw bytes — see `ipcCodec.ts` `decodeYjsState`:
 ///
 /// ```text
@@ -1344,19 +1416,24 @@ fn encode_state_vectors(rows: &[YjsStateVector]) -> Vec<u8> {
     out
 }
 
-#[tauri::command]
-pub async fn append_yjs_update(
+/// Append one Yjs update to a doc's log. Takes a raw frame — see `raw_frame`.
+///
+/// `#[tauri::command(async)]` on a SYNC fn (Tauri's own `sync_threadpool`
+/// mode): the body runs to completion before the future is built, so the
+/// `Request` borrow never crosses an await, and it still runs off the main
+/// thread.
+#[tauri::command(async)]
+pub fn append_yjs_update(
     state: State<'_, AppState>,
-    doc_id: String,
-    update: Vec<u8>,
-    expected_epoch: Option<u64>,
+    request: tauri::ipc::Request<'_>,
 ) -> AppResult<()> {
+    let (meta, update) = raw_frame::<AppendUpdateMeta>(request.body())?;
     // The CRDT log lives in the vault's own `.context/index.sqlite`, so an
     // epoch-less append that crossed a switch would file vault A's doc history
     // under vault B.
-    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let (_, index) = require_vault_at(&state, meta.expected_epoch)?;
     let guard = index.lock().unwrap();
-    guard.append_yjs_update(&doc_id, &update)
+    guard.append_yjs_update(&meta.doc_id, &update)
 }
 
 #[tauri::command]
@@ -1383,17 +1460,23 @@ pub async fn load_yjs_state(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-#[tauri::command]
-pub async fn save_yjs_snapshot(
+/// Write a doc's merged snapshot + state vector. Raw frame: the payload is the
+/// snapshot followed by the state vector, split at `snapshotLen`.
+#[tauri::command(async)]
+pub fn save_yjs_snapshot(
     state: State<'_, AppState>,
-    doc_id: String,
-    snapshot: Vec<u8>,
-    state_vector: Vec<u8>,
-    expected_epoch: Option<u64>,
+    request: tauri::ipc::Request<'_>,
 ) -> AppResult<()> {
-    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let (meta, body) = raw_frame::<SaveSnapshotMeta>(request.body())?;
+    if meta.snapshot_len > body.len() {
+        return Err(AppError::new(
+            "binary ipc: snapshot length past end of frame",
+        ));
+    }
+    let (snapshot, state_vector) = body.split_at(meta.snapshot_len);
+    let (_, index) = require_vault_at(&state, meta.expected_epoch)?;
     let guard = index.lock().unwrap();
-    guard.save_yjs_snapshot(&doc_id, &snapshot, &state_vector)
+    guard.save_yjs_snapshot(&meta.doc_id, snapshot, state_vector)
 }
 
 /// Persist a batch of per-doc Yjs state vectors (the durable sync manifest).
@@ -1402,13 +1485,26 @@ pub async fn save_yjs_snapshot(
 /// IPC round trip + one SQLite transaction for the batch is what keeps that off
 /// the hot path. Epoch-pinned like every other CRDT write — the manifest lives in
 /// the vault's own `.context/index.sqlite`.
-#[tauri::command]
-pub async fn save_yjs_state_vectors(
+#[tauri::command(async)]
+pub fn save_yjs_state_vectors(
     state: State<'_, AppState>,
-    entries: Vec<(String, Vec<u8>)>,
-    expected_epoch: Option<u64>,
+    request: tauri::ipc::Request<'_>,
 ) -> AppResult<()> {
-    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let (meta, body) = raw_frame::<SaveVectorsMeta>(request.body())?;
+    // The vectors are concatenated in `entries` order; the meta carries only
+    // their lengths, so a short body is a malformed frame, never a silent
+    // truncation of somebody's manifest.
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(meta.entries.len());
+    let mut off = 0usize;
+    for (doc_id, len) in meta.entries {
+        let end = off
+            .checked_add(len)
+            .filter(|e| *e <= body.len())
+            .ok_or_else(|| AppError::new("binary ipc: state vector past end of frame"))?;
+        entries.push((doc_id, body[off..end].to_vec()));
+        off = end;
+    }
+    let (_, index) = require_vault_at(&state, meta.expected_epoch)?;
     let guard = index.lock().unwrap();
     guard.save_yjs_state_vectors(&entries)
 }
@@ -1483,15 +1579,14 @@ pub async fn read_binary_file(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-#[tauri::command]
-pub async fn write_binary_file(
+#[tauri::command(async)]
+pub fn write_binary_file(
     state: State<'_, AppState>,
-    rel_path: String,
-    bytes: Vec<u8>,
-    expected_epoch: Option<u64>,
+    request: tauri::ipc::Request<'_>,
 ) -> AppResult<()> {
-    let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    attachments::write_binary_file(&vault, &rel_path, &bytes)
+    let (meta, bytes) = raw_frame::<WriteBinaryMeta>(request.body())?;
+    let (vault, _) = require_vault_at(&state, meta.expected_epoch)?;
+    attachments::write_binary_file(&vault, &meta.rel_path, &bytes)
 }
 
 #[tauri::command]
@@ -1571,6 +1666,92 @@ mod tests {
             peek_vault_config(file.to_string_lossy().to_string()).unwrap(),
             None
         );
+    }
+
+    /// The `ipcCodec.ts` `frame` encoder, in Rust, for the inbound tests.
+    fn frame(meta: serde_json::Value, payload: &[u8]) -> Vec<u8> {
+        let meta = serde_json::to_vec(&meta).unwrap();
+        let mut out = Vec::with_capacity(4 + meta.len() + payload.len());
+        out.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+        out.extend_from_slice(&meta);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    struct TestMeta {
+        doc_id: String,
+        expected_epoch: Option<u64>,
+    }
+
+    /// The normal (custom-protocol) transport: one raw body, meta prefix and
+    /// payload split without copying the payload.
+    #[test]
+    fn raw_frame_splits_meta_and_body() {
+        let buf = frame(
+            serde_json::json!({ "docId": "d1", "expectedEpoch": 7 }),
+            &[1, 2, 3],
+        );
+        let body = tauri::ipc::InvokeBody::Raw(buf);
+        let (meta, payload) = raw_frame::<TestMeta>(&body).unwrap();
+        assert_eq!(
+            meta,
+            TestMeta {
+                doc_id: "d1".to_string(),
+                expected_epoch: Some(7)
+            }
+        );
+        assert_eq!(&*payload, &[1, 2, 3]);
+
+        // An empty payload is legal (a zero-byte attachment, an empty vector).
+        let body = tauri::ipc::InvokeBody::Raw(frame(
+            serde_json::json!({ "docId": "d1", "expectedEpoch": null }),
+            &[],
+        ));
+        let (meta, payload) = raw_frame::<TestMeta>(&body).unwrap();
+        assert_eq!(meta.expected_epoch, None);
+        assert!(payload.is_empty());
+    }
+
+    /// The postMessage fallback transport, which JSON-encodes the payload as a
+    /// number array. If this arm ever goes, saving stops working on any install
+    /// where the custom-protocol IPC is blocked — silently.
+    #[test]
+    fn raw_frame_accepts_a_json_payload() {
+        let buf = frame(
+            serde_json::json!({ "docId": "d2", "expectedEpoch": null }),
+            &[9, 8],
+        );
+        let body = tauri::ipc::InvokeBody::Json(serde_json::to_value(&buf).unwrap());
+        let (meta, payload) = raw_frame::<TestMeta>(&body).unwrap();
+        assert_eq!(meta.doc_id, "d2");
+        assert_eq!(&*payload, &[9, 8]);
+    }
+
+    /// A frame too short to hold its own length prefix must be an error, not a
+    /// panic on a slice index.
+    #[test]
+    fn raw_frame_rejects_a_truncated_frame() {
+        for bytes in [vec![], vec![0u8], vec![0u8, 0, 0]] {
+            let body = tauri::ipc::InvokeBody::Raw(bytes);
+            assert!(raw_frame::<TestMeta>(&body).is_err());
+        }
+    }
+
+    /// A meta length that runs past the buffer (corruption, or a mismatched
+    /// encoder) must be rejected rather than slicing out of bounds.
+    #[test]
+    fn raw_frame_rejects_a_meta_length_past_the_end() {
+        let mut buf = frame(
+            serde_json::json!({ "docId": "d3", "expectedEpoch": null }),
+            &[1],
+        );
+        buf[0] = 0xff;
+        buf[1] = 0xff;
+        let body = tauri::ipc::InvokeBody::Raw(buf);
+        let err = raw_frame::<TestMeta>(&body).unwrap_err();
+        assert!(err.0.contains("binary ipc"), "{}", err.0);
     }
 
     /// The `ipcCodec.ts` decoder, in Rust, so a round trip pins the frame
