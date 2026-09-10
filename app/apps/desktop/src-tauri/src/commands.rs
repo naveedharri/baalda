@@ -85,8 +85,8 @@ const RECENT_LIMIT: usize = 10;
 /// note open on someone else's install.
 const LARGE_DOC_LOG_BYTES: usize = 1024 * 1024;
 
-#[derive(Serialize, Deserialize, Default)]
-struct AppConfig {
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct AppConfig {
     /// Legacy single last-opened vault. Superseded by `recent_vaults`; kept so
     /// old configs migrate cleanly and nothing else that reads it breaks.
     last_vault: Option<String>,
@@ -154,16 +154,26 @@ fn require_vault_at(
     Ok((vault, index))
 }
 
+/// Path of the app's own `config.json`, resolved (and its directory created)
+/// once per process.
+///
+/// `app_config_dir()` + `create_dir_all` is a syscall pair, and it used to be
+/// charged on every single `read_config` — thirteen-plus times per launch, for a
+/// directory that exists after the first one.
 fn config_path(app: &AppHandle) -> AppResult<PathBuf> {
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(p) = PATH.get() {
+        return Ok(p.clone());
+    }
     let dir = app
         .path()
         .app_config_dir()
         .map_err(|e| AppError::new(format!("no config dir: {e}")))?;
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("config.json"))
+    Ok(PATH.get_or_init(|| dir.join("config.json")).clone())
 }
 
-fn read_config(app: &AppHandle) -> AppConfig {
+fn load_config_from_disk(app: &AppHandle) -> AppConfig {
     config_path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -171,9 +181,21 @@ fn read_config(app: &AppHandle) -> AppConfig {
         .unwrap_or_default()
 }
 
-fn write_config(app: &AppHandle, cfg: &AppConfig) -> AppResult<()> {
+/// The app config, from `AppState`'s cache after the first read (see
+/// `AppState::config` for why the cache is sound).
+fn read_config(app: &AppHandle, state: &State<AppState>) -> AppConfig {
+    if let Some(cfg) = state.config.lock().unwrap().as_ref() {
+        return cfg.clone();
+    }
+    let cfg = load_config_from_disk(app);
+    *state.config.lock().unwrap() = Some(cfg.clone());
+    cfg
+}
+
+fn write_config(app: &AppHandle, state: &State<AppState>, cfg: &AppConfig) -> AppResult<()> {
     let p = config_path(app)?;
     std::fs::write(p, serde_json::to_string_pretty(cfg)?)?;
+    *state.config.lock().unwrap() = Some(cfg.clone());
     Ok(())
 }
 
@@ -228,7 +250,7 @@ pub struct IndexReady {
 /// The epoch of the currently-open vault (0 when none has been opened). The TS
 /// layer reads this when it starts a VaultScope for a vault it didn't just open.
 #[tauri::command]
-pub fn get_vault_epoch(state: State<'_, AppState>) -> AppResult<u64> {
+pub async fn get_vault_epoch(state: State<'_, AppState>) -> AppResult<u64> {
     Ok(state.inner.lock().unwrap().vault_epoch)
 }
 
@@ -358,7 +380,7 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
     let config_started = std::time::Instant::now();
     let mut info = vault_info(&path, epoch);
     // Preserve other config keys (e.g. server_url) when updating recents.
-    let mut cfg = read_config(app);
+    let mut cfg = read_config(app, state);
     cfg.last_vault = Some(info.path.clone()); // kept for back-compat
     // Move this vault to the front of the recents list (dedup by path), stamp
     // the open time, and cap the list length.
@@ -372,7 +394,7 @@ fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> 
         },
     );
     cfg.recent_vaults.truncate(RECENT_LIMIT);
-    write_config(app, &cfg)?;
+    write_config(app, state, &cfg)?;
     let config_ms = config_started.elapsed().as_millis() as u64;
     let total_ms = opened_at.elapsed().as_millis() as u64;
 
@@ -422,8 +444,11 @@ pub async fn open_vault(
 /// open the vault, so the returned `epoch` is the currently-open one (0 at
 /// launch) — callers must pin the epoch returned by the subsequent `open_vault`.
 #[tauri::command]
-pub fn get_last_vault(app: AppHandle, state: State<'_, AppState>) -> AppResult<Option<VaultInfo>> {
-    let cfg = read_config(&app);
+pub async fn get_last_vault(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Option<VaultInfo>> {
+    let cfg = read_config(&app, &state);
     let epoch = state.inner.lock().unwrap().vault_epoch;
     Ok(cfg.last_vault.and_then(|p| {
         let path = PathBuf::from(p);
@@ -434,8 +459,11 @@ pub fn get_last_vault(app: AppHandle, state: State<'_, AppState>) -> AppResult<O
 /// Recently opened vaults, newest first, pruned to those that still exist on
 /// disk. Migrates a legacy `last_vault` into the list on first read.
 #[tauri::command]
-pub fn get_recent_vaults(app: AppHandle) -> AppResult<Vec<RecentVault>> {
-    let mut cfg = read_config(&app);
+pub async fn get_recent_vaults(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<RecentVault>> {
+    let mut cfg = read_config(&app, &state);
 
     // One-time migration: fold a legacy single last_vault into the list.
     if cfg.recent_vaults.is_empty() {
@@ -455,7 +483,7 @@ pub fn get_recent_vaults(app: AppHandle) -> AppResult<Vec<RecentVault>> {
     let before = cfg.recent_vaults.len();
     cfg.recent_vaults.retain(|r| Path::new(&r.path).is_dir());
     if cfg.recent_vaults.len() != before {
-        let _ = write_config(&app, &cfg);
+        let _ = write_config(&app, &state, &cfg);
     }
 
     Ok(cfg.recent_vaults)
@@ -463,13 +491,17 @@ pub fn get_recent_vaults(app: AppHandle) -> AppResult<Vec<RecentVault>> {
 
 /// Remove one vault from the recents list (welcome-screen "×").
 #[tauri::command]
-pub fn remove_recent_vault(app: AppHandle, path: String) -> AppResult<()> {
-    let mut cfg = read_config(&app);
+pub async fn remove_recent_vault(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<()> {
+    let mut cfg = read_config(&app, &state);
     cfg.recent_vaults.retain(|r| r.path != path);
     if cfg.last_vault.as_deref() == Some(path.as_str()) {
         cfg.last_vault = None;
     }
-    write_config(&app, &cfg)
+    write_config(&app, &state, &cfg)
 }
 
 /// Move a local vault's folder — and all its notes — to the OS trash, then
@@ -478,7 +510,11 @@ pub fn remove_recent_vault(app: AppHandle, path: String) -> AppResult<()> {
 /// (recoverable) instead of hard-deleting, and the UI gates it behind a
 /// two-click confirm.
 #[tauri::command]
-pub fn delete_vault(app: AppHandle, path: String) -> AppResult<()> {
+pub async fn delete_vault(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<()> {
     let dir = PathBuf::from(&path);
     if !dir.is_dir() {
         return Err(AppError::new("selected path is not a folder"));
@@ -490,12 +526,12 @@ pub fn delete_vault(app: AppHandle, path: String) -> AppResult<()> {
     }
     trash::delete(&dir).map_err(|e| AppError::new(format!("could not move to trash: {e}")))?;
     // Also drop it from recents / last_vault so it doesn't linger in the switcher.
-    let mut cfg = read_config(&app);
+    let mut cfg = read_config(&app, &state);
     cfg.recent_vaults.retain(|r| r.path != path);
     if cfg.last_vault.as_deref() == Some(path.as_str()) {
         cfg.last_vault = None;
     }
-    write_config(&app, &cfg)
+    write_config(&app, &state, &cfg)
 }
 
 /// Create a brand-new empty vault folder `<parent>/<name>` and open it. A name
@@ -545,15 +581,18 @@ fn free_vault_dir(parent: &Path, name: &str) -> Option<PathBuf> {
 /// or contains markdown notes). The vault picker calls this after "New vault"
 /// picks a parent, so it can offer to *open* an existing vault instead of
 /// nesting a new empty one inside it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn is_vault(path: String) -> AppResult<bool> {
     Ok(crate::vault::is_vault(std::path::Path::new(&path)))
 }
 
 /// The configured sync server base URL, if the user has set one.
 #[tauri::command]
-pub fn get_server_url(app: AppHandle) -> AppResult<Option<String>> {
-    Ok(read_config(&app).server_url)
+pub async fn get_server_url(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Option<String>> {
+    Ok(read_config(&app, &state).server_url)
 }
 
 // ---- vaults root + `current` pointer --------------------------------------
@@ -582,8 +621,11 @@ fn default_vaults_root(app: &AppHandle) -> AppResult<PathBuf> {
 /// The effective vaults root, auto-initialized to the default and persisted
 /// on first read so the rest of the app can rely on it always existing.
 #[tauri::command]
-pub fn get_vaults_root(app: AppHandle) -> AppResult<String> {
-    let mut cfg = read_config(&app);
+pub async fn get_vaults_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    let mut cfg = read_config(&app, &state);
     let root = match cfg.vaults_root.clone() {
         Some(r) => PathBuf::from(r),
         None => {
@@ -592,7 +634,7 @@ pub fn get_vaults_root(app: AppHandle) -> AppResult<String> {
             d
         }
     };
-    let _ = write_config(&app, &cfg);
+    let _ = write_config(&app, &state, &cfg);
     std::fs::create_dir_all(&root)?;
     Ok(root.to_string_lossy().to_string())
 }
@@ -600,17 +642,24 @@ pub fn get_vaults_root(app: AppHandle) -> AppResult<String> {
 /// Change the managed vaults root (existing vault folders keep their location;
 /// only newly created ones land under the new root).
 #[tauri::command]
-pub fn set_vaults_root(app: AppHandle, path: String) -> AppResult<()> {
+pub async fn set_vaults_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<()> {
     let p = PathBuf::from(&path);
     std::fs::create_dir_all(&p)?;
-    let mut cfg = read_config(&app);
+    let mut cfg = read_config(&app, &state);
     cfg.vaults_root = Some(p.to_string_lossy().to_string());
-    write_config(&app, &cfg)
+    write_config(&app, &state, &cfg)
 }
 
 /// Native folder picker for the managed vaults root; persists and returns it.
 #[tauri::command]
-pub async fn pick_vaults_root(app: AppHandle) -> AppResult<Option<String>> {
+pub async fn pick_vaults_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Option<String>> {
     let Some(folder) = app.dialog().file().blocking_pick_folder() else {
         return Ok(None);
     };
@@ -618,9 +667,9 @@ pub async fn pick_vaults_root(app: AppHandle) -> AppResult<Option<String>> {
         .into_path()
         .map_err(|e| AppError::new(format!("invalid folder: {e}")))?;
     std::fs::create_dir_all(&path)?;
-    let mut cfg = read_config(&app);
+    let mut cfg = read_config(&app, &state);
     cfg.vaults_root = Some(path.to_string_lossy().to_string());
-    write_config(&app, &cfg)?;
+    write_config(&app, &state, &cfg)?;
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
@@ -756,7 +805,7 @@ pub async fn open_vault_in_root(
     } else if !folder.is_dir() {
         return Err(AppError::new(format!("vault folder not found: {path}")));
     }
-    if let Some(root) = read_config(&app).vaults_root {
+    if let Some(root) = read_config(&app, &state).vaults_root {
         repoint_current(Path::new(&root), &folder);
     }
     open_vault_inner(&app, &state, folder)
@@ -768,16 +817,16 @@ pub async fn open_vault_in_root(
 /// relaunch respects that choice instead of reopening the folder they just
 /// left. The next vault open re-arms it (`remember_recent`).
 #[tauri::command]
-pub fn clear_last_vault(app: AppHandle) -> AppResult<()> {
-    let mut cfg = read_config(&app);
+pub async fn clear_last_vault(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let mut cfg = read_config(&app, &state);
     cfg.last_vault = None;
-    write_config(&app, &cfg)
+    write_config(&app, &state, &cfg)
 }
 
 /// Does this absolute path exist as a directory? Lets the vault-switch flow tell
 /// "bound folder moved/deleted" (rediscover it) from "folder present but failed
 /// to open" (surface the error) without attempting the open.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn folder_exists(path: String) -> AppResult<bool> {
     Ok(Path::new(&path).is_dir())
 }
@@ -802,8 +851,11 @@ pub fn peek_vault_config(path: String) -> AppResult<Option<String>> {
 /// rediscovery candidate list — auto-created folders may have aged out of the
 /// recents list. Skips dotfiles and symlinks (which also excludes `current`).
 #[tauri::command]
-pub fn list_vaults_root_dirs(app: AppHandle) -> AppResult<Vec<String>> {
-    let Some(root) = read_config(&app).vaults_root else {
+pub async fn list_vaults_root_dirs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<String>> {
+    let Some(root) = read_config(&app, &state).vaults_root else {
         return Ok(Vec::new());
     };
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -893,11 +945,15 @@ pub async fn set_vault_config(
 
 /// Persist the sync server base URL (app config, next to last_vault).
 #[tauri::command]
-pub fn set_server_url(app: AppHandle, url: Option<String>) -> AppResult<()> {
-    let mut cfg = read_config(&app);
+pub async fn set_server_url(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: Option<String>,
+) -> AppResult<()> {
+    let mut cfg = read_config(&app, &state);
     // Normalize empty string to None so the TS default kicks back in.
     cfg.server_url = url.filter(|s| !s.trim().is_empty());
-    write_config(&app, &cfg)
+    write_config(&app, &state, &cfg)
 }
 
 // ---- tree + file commands -------------------------------------------------
