@@ -2,7 +2,7 @@ import { BRAND_NAME } from "../brand.js";
 import type { MailMessage } from "./mailer.js";
 
 /**
- * The three transactional emails the server sends. Deliberately plain: inline
+ * The transactional emails the server sends. Deliberately plain: inline
  * styles only, one column, a light background and a single black button —
  * what renders identically in Gmail, Outlook and Apple Mail, and what lands in
  * the inbox rather than the promotions tab. The plain-text twin is not an
@@ -22,7 +22,29 @@ export function esc(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function layout(opts: { title: string; intro: string; cta: string; url: string; outro: string }): string {
+/**
+ * One-column shell. The button and the "paste this link" fallback render only
+ * when there is a link to press — notification emails (a member left) have
+ * nothing to click and say so by leaving `cta`/`url` off.
+ */
+function layout(opts: {
+  title: string;
+  intro: string;
+  cta?: string;
+  url?: string;
+  outro: string;
+}): string {
+  const button =
+    opts.cta && opts.url
+      ? `<p style="margin:0 0 22px;">
+        <a href="${esc(opts.url)}" style="display:inline-block;background:#1c1c1a;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px;">${esc(opts.cta)}</a>
+      </p>
+      `
+      : "";
+  const fallback = opts.url
+    ? `
+      <p style="font-size:12px;line-height:1.5;margin:18px 0 0;color:#8a8a84;word-break:break-all;">If the button doesn't work, paste this link into your browser:<br /><a href="${esc(opts.url)}" style="color:#6b6b66;">${esc(opts.url)}</a></p>`
+    : "";
   return `<!doctype html>
 <html lang="en">
 <body style="margin:0;padding:0;background:#f4f4f1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1c1c1a;">
@@ -31,11 +53,7 @@ function layout(opts: { title: string; intro: string; cta: string; url: string; 
     <div style="background:#ffffff;border:1px solid #e6e5df;border-radius:14px;padding:30px 28px;">
       <h1 style="font-size:20px;font-weight:600;margin:0 0 12px;">${opts.title}</h1>
       <p style="font-size:15px;line-height:1.55;margin:0 0 22px;color:#3a3a37;">${opts.intro}</p>
-      <p style="margin:0 0 22px;">
-        <a href="${esc(opts.url)}" style="display:inline-block;background:#1c1c1a;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px;">${esc(opts.cta)}</a>
-      </p>
-      <p style="font-size:13px;line-height:1.55;margin:0;color:#6b6b66;">${opts.outro}</p>
-      <p style="font-size:12px;line-height:1.5;margin:18px 0 0;color:#8a8a84;word-break:break-all;">If the button doesn't work, paste this link into your browser:<br /><a href="${esc(opts.url)}" style="color:#6b6b66;">${esc(opts.url)}</a></p>
+      ${button}<p style="font-size:13px;line-height:1.55;margin:0;color:#6b6b66;">${opts.outro}</p>${fallback}
     </div>
   </div>
 </body>
@@ -109,6 +127,57 @@ export function invitationEmail(input: {
     cta: "Accept invitation",
     url: input.url,
     outro: `This invitation expires ${esc(expires)}. Don't have ${esc(BRAND_NAME)} yet? <a href="https://baalda.com" style="color:#6b6b66;">Get it</a>, then open the link again.`,
+  });
+  return { to: input.to, subject, text, html };
+}
+
+/**
+ * To a vault's owner when a member leaves on their own (#121). Purely
+ * informational — there is nothing for the owner to do — so no button. Names
+ * the shares that were dropped, because that is the one side effect the owner
+ * might otherwise go looking for.
+ */
+export function memberLeftEmail(input: {
+  to: string;
+  organizationName: string;
+  memberName: string | null;
+  memberEmail: string;
+}): MailMessage {
+  const who = input.memberName?.trim() || input.memberEmail;
+  const subject = `${who} left ${input.organizationName}`;
+  const text = [
+    `${who} (${input.memberEmail}) left the vault "${input.organizationName}" on ${BRAND_NAME}.`,
+    ``,
+    `They no longer have access to any of its notes. Any folders or files that were shared with them directly have been un-shared.`,
+    ``,
+    `If this wasn't expected, you can invite them again from the vault's Members page.`,
+  ].join("\n");
+  const html = layout({
+    title: `${esc(who)} left ${esc(input.organizationName)}`,
+    intro: `<b>${esc(who)}</b> (${esc(input.memberEmail)}) left the vault <b>${esc(input.organizationName)}</b> on ${esc(BRAND_NAME)}. They no longer have access to any of its notes, and any folders or files that were shared with them directly have been un-shared.`,
+    outro: `If this wasn't expected, you can invite them again from the vault's Members page.`,
+  });
+  return { to: input.to, subject, text, html };
+}
+
+/**
+ * To the person who left, as a receipt (#121). Says where the vault went on
+ * their devices — removed, not kept — and how to come back.
+ */
+export function youLeftVaultEmail(input: { to: string; organizationName: string }): MailMessage {
+  const subject = `You left ${input.organizationName}`;
+  const text = [
+    `You left the vault "${input.organizationName}" on ${BRAND_NAME}.`,
+    ``,
+    `It has been removed from your devices and you no longer have access to its notes.`,
+    `To rejoin, ask the vault's owner for a new invitation or join code.`,
+    ``,
+    `If you didn't do this, change your password right away — someone else may have access to your account.`,
+  ].join("\n");
+  const html = layout({
+    title: `You left ${esc(input.organizationName)}`,
+    intro: `You left the vault <b>${esc(input.organizationName)}</b> on ${esc(BRAND_NAME)}. It has been removed from your devices and you no longer have access to its notes. To rejoin, ask the vault's owner for a new invitation or join code.`,
+    outro: `If you didn't do this, change your password right away — someone else may have access to your account.`,
   });
   return { to: input.to, subject, text, html };
 }

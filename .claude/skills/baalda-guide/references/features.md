@@ -94,6 +94,13 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   pending invitation to paste into chat. Someone invited by email who uses the join code instead
   ends up in exactly the same place, with the invited role.
 - **Roles**: owner, admin, member.
+- **Leaving a vault** (members and admins): Vault Settings → Vaults → **Leave** on the vault, then
+  confirm. Access ends on all your devices at once, the vault disappears from your switcher and
+  recents, and its folder on that device moves to the Trash (it is not kept as a local copy). The
+  owner gets an email that you left and you get a receipt, on servers that send email. To come
+  back you need a new invitation or join code. The **owner cannot leave** — their way out is to
+  delete the vault. "Remove from device" is the gentler option: it only detaches the folder on
+  that one device and keeps your membership.
 - **Live presence**: coloured cursors and selections in the note, "who is viewing" avatars,
   and small presence dots in the sidebar showing who is in which note or folder. Ping a
   teammate to get their attention.

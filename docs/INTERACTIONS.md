@@ -101,6 +101,7 @@ n/a = synchronous or sub-100ms by construction.
 | Join by code | join → switch → reconcile | 1–5s | ✅ existing busy state |
 | New vault (menu) | create org → folder → seed | 1–3s | ✅ existing busy state |
 | Remove from device | local teardown | 0.2–1s | ✅ spinner |
+| Leave vault | server leave (membership + shares + sockets) → local teardown → folder to Trash | 0.5–3s | ✅ spinner, behind a confirm that names the folder |
 | Delete vault (permanent) | provider cancel-at-period-end (Pro only) → server delete + local teardown | 0.5–4s | ✅ spinner, behind a confirm that names the subscription end |
 | Delete local vault files | move folder to Trash | 0.2–2s | ✅ spinner, behind a confirm |
 | Invite member | server write + roster refresh | 0.3–1s | ✅ existing busy state |

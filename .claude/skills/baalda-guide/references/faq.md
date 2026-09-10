@@ -21,6 +21,15 @@ not per person, with unlimited members. Only the vault owner or an admin pays; e
 needs a free account. baalda.com/pricing is the place to ask questions or talk to the team, but
 nobody has to wait for a call to get started.
 
+## Can I leave a vault someone else owns?
+Yes. Open Vault Settings → Vaults, click **Leave** next to the vault and confirm. You lose access
+straight away on every device you are signed in on, the vault leaves your switcher, and the folder
+on that device goes to the Trash rather than staying behind as a copy. The owner is emailed that
+you left (and you get a receipt) when the server sends email. Nobody else's access changes. If you
+want back in, ask the owner for a new invitation or join code. The owner of a vault cannot leave
+it; they delete it instead. If you only want the vault off one computer but want to stay a member,
+use **Remove from device**.
+
 ## What happens to my subscription if I delete a vault?
 Deleting the vault stops the billing, but not mid-month: it is set to finish at the end of the
 period you have already paid for, so there is no further charge and no refund needed. If Baalda
