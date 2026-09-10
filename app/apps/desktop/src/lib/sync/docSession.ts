@@ -214,6 +214,19 @@ export class SyncManager implements InboundHost {
   private currentDocId: string | null = null;
   private currentLocalAwareness: Awareness | null = null;
   private enabled = false;
+  /**
+   * The registry has been primed from `.context/config.json`: this device
+   * already knows every mapped note's doc_id, so opening one can connect a
+   * provider (pull-before-seed) while the structural reconcile is still running.
+   *
+   * Deliberately NOT `enabled`. That flag also gates the watcher pipeline
+   * (`handleLocalFilesChanged`), the debounced registry pull
+   * (`handleRegistryChanged`) and attachments — none of which may run alongside
+   * a reconcile: `pull()` is serialized through `pullChain` but `reconcile()` is
+   * not, so two `syncStructure` passes would mutate the path maps and the shared
+   * progress reporter at once (the "Syncing 585/164" class of bug).
+   */
+  private primed = false;
   private presence: { id: string; name: string } | null = null;
   /** The local user's chosen activity status, broadcast via awareness. */
   private status: ActivityStatus = "online";
@@ -1213,7 +1226,16 @@ export class SyncManager implements InboundHost {
     const vaultId = this.registry.vaultId;
     const store = this.docStore;
     const progress = this.progress;
-    if (!vaultId || !store || !progress) return;
+    if (!vaultId || !store || !progress) {
+      // The queue survives this guard (it is only cleared below), but nothing
+      // re-armed the timer — so a drain that fired before the vault engine
+      // existed parked its notes for good. Retry, exactly like the
+      // uploader-busy branch in `armLocalChangeDrain`.
+      if (this.localChanges.size > 0 && scope.isCurrent()) {
+        this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
+      }
+      return;
+    }
     const notes = [...this.localChanges].map(([docId, relPath]) => ({ docId, relPath }));
     this.localChanges.clear();
     if (notes.length === 0) return;
@@ -1578,6 +1600,17 @@ export class SyncManager implements InboundHost {
     return this.enabled;
   }
 
+  /** May opening a note attach a network provider? True from the local prime
+   *  onward — see {@link primed} for why this is narrower than `enabled`. */
+  private syncable(): boolean {
+    return this.enabled || this.primed;
+  }
+
+  /** Public twin of {@link syncable}, for the store's open gate. */
+  isSyncable(): boolean {
+    return this.syncable();
+  }
+
   /** The vault scope this session is running under (null when disabled). */
   currentScope(): VaultScope | null {
     return this.scope;
@@ -1585,7 +1618,7 @@ export class SyncManager implements InboundHost {
 
   /** True if opening `relPath` will connect a network provider. */
   willSync(relPath: string): boolean {
-    return this.enabled && this.registry.getMapping(relPath) != null;
+    return this.syncable() && this.registry.getMapping(relPath) != null;
   }
 
   /**
@@ -1602,6 +1635,15 @@ export class SyncManager implements InboundHost {
   async enable(
     session: SessionInfo,
     vault: VaultTarget,
+    hooks?: {
+      /**
+       * The LOCAL prime landed: this folder's doc-id map is adopted, so a
+       * mapped note can now be opened safely. Fires before the reconcile (the
+       * networked half) has started, and at most once per call — it is what
+       * lets the launch consider the vault usable without waiting minutes.
+       */
+      onPrimed?: () => void;
+    },
   ): Promise<{ ok: boolean; reason?: string; seeded?: boolean; scope?: VaultScope }> {
     if (!session.activeOrganizationId) {
       this.disable();
@@ -1646,6 +1688,25 @@ export class SyncManager implements InboundHost {
       doc: (docId, state) => progress.doc(docId, state),
       flush: () => progress.flush(),
     });
+    // ---- PHASE A: local only. One config read; no socket, no HTTP. ----
+    //
+    // From here `willSync()` is true for every note this folder already maps, so
+    // a note clicked during the reconcile connects a provider and PULLS before
+    // it seeds (spec 03 §5) instead of taking the local-only branch and forking
+    // the doc. Best-effort: a folder with no (or a foreign) stamp doesn't prime,
+    // and a broken config must not fail the enable.
+    try {
+      if (await this.registry.primeLocal(vault.orgId)) {
+        if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
+        this.primed = true;
+        // Sidebar badges + `store.docIdByPath`, immediately.
+        this.publishRegistryMap();
+        hooks?.onPrimed?.();
+      }
+    } catch (e) {
+      console.warn("[sync] local prime failed; falling back to reconcile-first", e);
+    }
+    // ---- PHASE B: the networked reconcile. Unchanged. ----
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
       // deliberately does not take one from here, because the tree this layer
@@ -1660,6 +1721,9 @@ export class SyncManager implements InboundHost {
       // folder is open — exactly the state that merged two vaults.
       if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
       this.enabled = true;
+      // One flag owns the state from here; `syncable()` stays true throughout
+      // the handover, so nothing the user opened in the window loses its sync.
+      this.primed = false;
       // The reconcile IS this session's first structure pull: every file the
       // server knows about has been accounted for, so from here a vanished file
       // is news (see `markLive` for the other half of the condition).
@@ -2019,6 +2083,7 @@ export class SyncManager implements InboundHost {
    */
   private teardown(): void {
     this.enabled = false;
+    this.primed = false;
     this.presence = null;
     this.viewingDocId = null;
     this.vaultStatus = "idle";
@@ -2275,6 +2340,12 @@ export class SyncManager implements InboundHost {
       },
     });
     this.docStore = store;
+    // A note opened during the PRIME window already owns a provider for its doc.
+    // `openDoc` suppressed it on the store that existed then — which was null —
+    // and a fresh store suppresses nothing, so without this the background feed
+    // would cold-apply to that same Y.Doc: two writers on one doc, the one thing
+    // this layer is built to avoid.
+    if (this.currentDocId) store.setSuppressedDoc(this.currentDocId);
     this.vaultEngine = new VaultSyncEngine({
       api,
       vaultId,
@@ -2401,7 +2472,7 @@ export class SyncManager implements InboundHost {
   async openDoc(bridge: NoteBridge, relPath: string): Promise<OpenedDoc> {
     this.closeCurrent();
 
-    const mapping = this.enabled ? this.registry.getMapping(relPath) : null;
+    const mapping = this.syncable() ? this.registry.getMapping(relPath) : null;
     if (!mapping) {
       // Local-only: the bridge already seeded from disk on open.
       this.docStore?.setSuppressedDoc(null);
@@ -2475,7 +2546,7 @@ export class SyncManager implements InboundHost {
     scope: VaultScope | null,
   ): Promise<void> {
     const current = (): boolean =>
-      (!scope || scope.isCurrent()) && this.current === sync && !!this.enabled;
+      (!scope || scope.isCurrent()) && this.current === sync && this.syncable();
     // Up to 5s of waiting — easily long enough to span a vault switch. Seeding
     // then would read the NEW vault's file at this path into the OLD vault's doc.
     await sync.whenSynced(5000);

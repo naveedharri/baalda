@@ -38,6 +38,9 @@ const fakeRegistry = vi.hoisted(() => {
   const reg = {
     vaultId: "collection-1" as string | null,
     pushed: new Set<string>(),
+    // Phase A of `enable`: nothing to prime from in these fixtures (the mapping
+    // is supplied directly), so the ordering under test stays the reconcile's.
+    primeLocal: vi.fn(async (_orgId: string) => false),
     reconcile: vi.fn(async () => ({ seeded: false })),
     pull: vi.fn(async () => true),
     reset: vi.fn(),

@@ -336,6 +336,13 @@ export class VaultRegistry {
   private checkpoint: Checkpointer<VaultSyncConfig> | null = null;
 
   /**
+   * The config `primeLocal` parsed, held for the `reconcile` that follows it.
+   * One read of a file that is ~1.85 MB on a 6k-note vault, per boot, shared by
+   * both — instead of one apiece.
+   */
+  private primedConfig: VaultSyncConfig | null = null;
+
+  /**
    * Notified whenever the {relPath → docId} map changes.
    *
    * This map is the ONLY place a sidebar path and a note's docId meet, and every
@@ -515,6 +522,7 @@ export class VaultRegistry {
     // Synchronously first: a pending flush must never outlive the vault.
     this.checkpoint?.dispose();
     this.checkpoint = null;
+    this.primedConfig = null;
     this.serverVaultId = null;
     this.organizationId = null;
     this.byPath.clear();
@@ -1165,22 +1173,80 @@ export class VaultRegistry {
    * Returns `{ seeded }` — true only when this call wrote first-run starter
    * content into a brand-new, empty vault (so the caller can open it).
    */
+  /**
+   * Adopt this folder's OWN doc-id map from `.context/config.json`, with no
+   * server round trip — so a note this device already maps can open with a
+   * provider (pull-before-seed, spec 03 §5) while `reconcile` is still running.
+   *
+   * Provisional by construction: the collection id comes from disk, and
+   * `reconcile` re-validates it against `listVaults` a moment later. A mismatch
+   * drops these mappings in `syncStructure`'s different-collection prune,
+   * exactly as it drops a stale map today.
+   *
+   * REQUIRES the config to carry the `organizationId` stamp, and for it to
+   * match: a pre-stamp config proves nothing about whose folder this is, and
+   * priming a foreign one is the cross-vault merge every guard in this file
+   * exists to stop. Such a folder simply doesn't prime — the reconcile then
+   * adopts it the slow, verified way, which is today's behaviour.
+   *
+   * Returns whether anything was adopted.
+   */
+  async primeLocal(orgId: string): Promise<boolean> {
+    this.bound = this.scopes.current();
+    const cfg = await this.loadConfig();
+    if (this.stale()) return false;
+    if (!cfg.organizationId || cfg.organizationId !== orgId) return false;
+    if (!cfg.serverVaultId) return false;
+    // Handed to `reconcile` so the file is read once per boot, not twice.
+    this.primedConfig = cfg;
+    this.organizationId = orgId;
+    this.serverVaultId = cfg.serverVaultId;
+    // The layers above read the collection id off the scope.
+    if (this.bound) this.bound.serverVaultId = cfg.serverVaultId;
+    // So a `markPushed` for a note opened during the window is persisted rather
+    // than dropped (`reconcile` adopts this same checkpointer).
+    this.newCheckpointer();
+    for (const [rp, docId] of Object.entries(cfg.docs ?? {})) {
+      if (typeof docId === "string" && docId) this.setMapping(rp, docId, cfg.serverVaultId);
+    }
+    for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
+      if (typeof id === "string" && id) this.folderByPath.set(rp, id);
+    }
+    this.pushed = new Set(cfg.pushed ?? []);
+    // Same collection guard as `reconcile`'s: the baseline describes the
+    // collection the config names, which is the one we just adopted.
+    this.baselineDocs = new Map<string, string>();
+    for (const [docId, rp] of Object.entries(cfg.baseline ?? {})) {
+      if (typeof rp === "string" && rp) this.baselineDocs.set(docId, rp);
+    }
+    this.baselineVaultId = cfg.serverVaultId;
+    return true;
+  }
+
   async reconcile(input: ReconcileInput): Promise<{ seeded: boolean }> {
     // Bind this registry to the vault the reconcile is FOR — this is the one
     // operation allowed to (re)claim it. Every await below is a chance for the
     // user to switch vaults; each `stale()` checkpoint drops the rest of the work
     // instead of applying it to whatever vault is now open.
-    this.bound = this.scopes.current();
+    // `primeLocal` may have claimed the same scope moments ago; keep that claim
+    // while it is still current rather than re-reading it.
+    if (!this.bound || !this.bound.isCurrent()) this.bound = this.scopes.current();
     this.organizationId = input.organizationId;
     this.failed = [];
     this.limitReached = null;
-    this.newCheckpointer();
+    // NOT unconditional: `newCheckpointer` disposes the previous one, and after
+    // a prime that one may hold a `markPushed` for a note the user opened during
+    // the window — dropping it loses a real fact about the server.
+    this.checkpoint ?? this.newCheckpointer();
     this.sink.phase("registering", 0);
     // Epoch-pinned like every other read here: a vault switch mid-walk makes Rust
     // reject it, which `stale()` then turns into a clean drop.
     const tree = await this.readFullTree();
     if (this.stale()) return { seeded: false };
-    const cfg = await this.loadConfig();
+    // The prime already parsed it (one read per boot); it is consumed here so a
+    // later pull re-reads from disk as before.
+    const cfg = this.primedConfig ?? (await this.loadConfig());
+    this.primedConfig = null;
     if (this.stale()) return { seeded: false };
     this.tuneCheckpointBatch(Object.keys(cfg.docs ?? {}).length);
 
@@ -1233,7 +1299,16 @@ export class VaultRegistry {
     // killed backfill resume instead of re-walking the whole vault. Guarded on
     // the collection matching, like everything else read back from config: a
     // pushed-set recorded against another collection says nothing about this one.
-    this.pushed = new Set(cfg.serverVaultId === vaultId ? (cfg.pushed ?? []) : []);
+    //
+    // The in-memory set is folded in, not replaced: a note opened during the
+    // PRIME window can be confirmed (`confirmOpenDoc` → `markPushed`) before
+    // this line runs, and that is a real fact about the server. Overwriting it
+    // from the file would send the doc back through the content run for nothing.
+    // Both halves still die together when the collection doesn't match.
+    this.pushed =
+      cfg.serverVaultId === vaultId
+        ? new Set([...(cfg.pushed ?? []), ...this.pushed])
+        : new Set();
     // Adopt the baseline ONLY if the config we just read describes the collection
     // we actually resolved. Anything else (a first run, a config from another
     // vault, a rewritten `.context`) leaves it empty, which disables inbound for

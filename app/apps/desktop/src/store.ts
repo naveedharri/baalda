@@ -57,6 +57,7 @@ import type { TreeSort } from "./lib/tree/sort";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { planTurnOnSync } from "./lib/vault/turnOnSync";
+import { planOpen } from "./lib/sync/openGate";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
@@ -233,6 +234,16 @@ interface AppStore {
    * so a click can sit for a moment with nothing on screen acknowledging it.
    */
   openingNotePath: string | null;
+  /**
+   * Is the OPEN FOLDER stamped for a synced vault, per its own
+   * `.context/config.json`? Filled in by a cheap `peekVaultStamp` fired during
+   * the boot (never awaited), and null until that lands or after a vault swap.
+   *
+   * Read by the open gate (`lib/sync/openGate`): the boot paints before sync has
+   * primed, so a note clicked in that window needs to know whether waiting for
+   * a doc-id map is worth it — see `planOpen`.
+   */
+  openFolderIsSynced: boolean | null;
   organizations: Organization[];
   members: Member[];
   pendingInvitations: Invitation[];
@@ -576,9 +587,20 @@ interface AppStore {
   patchDocSyncState: (patch: Record<string, DocSyncState | null>) => void;
   /** Replace the path→docId index (the registry mirror; `{}` = nothing synced). */
   setDocIdByPath: (map: Record<string, string>) => void;
-  /** `seedIfEmpty` flows to the registry reconcile — true only when enabling
-   *  sync for a vault the user just created (see `setActiveOrganization`). */
-  enableSyncForVault: (opts?: { seedIfEmpty?: boolean }) => Promise<void>;
+  /**
+   * `seedIfEmpty` flows to the registry reconcile — true only when enabling
+   * sync for a vault the user just created (see `setActiveOrganization`).
+   *
+   * `background: true` returns as soon as sync has PRIMED (this device's doc-id
+   * map is adopted, so mapped notes open safely) and runs the reconcile and its
+   * tail detached. The launch and the vault switch pass it; "Turn on sync" must
+   * not — it reads `syncEnabled` the moment this resolves, and a brand-new vault
+   * has no config to prime from.
+   */
+  enableSyncForVault: (opts?: {
+    seedIfEmpty?: boolean;
+    background?: boolean;
+  }) => Promise<void>;
 }
 
 // Slug derivation for local folder naming reuses the org slug rules.
@@ -869,12 +891,19 @@ async function landInLastVault(get: () => AppStore): Promise<void> {
   // Only the two actions that end with a vault on screen raise the flag, and
   // only while they run: `stay-local`/`nothing` change nothing, so claiming to
   // be "opening your vault" there would hang a spinner forever.
-  if (action.kind === "stay-local" || action.kind === "nothing") return;
+  if (action.kind === "stay-local" || action.kind === "nothing") {
+    // Nothing is going to turn sync on for this folder — release the open gate,
+    // or the first click after launch would wait for a prime that never comes.
+    resolveSyncGate();
+    return;
+  }
   useStore.setState({ landingVault: true });
   try {
     switch (action.kind) {
       case "enable-sync":
-        await get().enableSyncForVault();
+        // Returns at the PRIME, not at the reconcile: this is the launch path,
+        // and the reconcile is minutes of work on a large vault.
+        await get().enableSyncForVault({ background: true });
         return;
       case "switch":
         await get().setActiveOrganization(action.orgId);
@@ -1000,6 +1029,42 @@ let orgSwitchGen = 0;
  */
 let authInitGen = 0;
 
+/** How long a click will wait for sync to prime before opening anyway. The
+ *  prime is local-only (one config read), so this is a belt, not a budget: a bug
+ *  must never wedge the user's first click. */
+const SYNC_GATE_MS = 3000;
+
+/**
+ * Resolves when sync has primed for the open vault — or when we learn it never
+ * will (signed out, a genuinely local folder, an enable that was refused).
+ * Re-armed on every vault open, because the answer belongs to one folder.
+ *
+ * This exists because the boot no longer waits: the sidebar is clickable before
+ * the doc-id map is loaded, and opening a MAPPED note without it seeds the doc
+ * from disk before pulling (see `lib/sync/openGate`).
+ */
+let syncReadyGate = newSyncGate();
+
+function newSyncGate(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = () => {};
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** A different folder is opening: nothing is known about ITS sync yet. */
+function armSyncGate(): void {
+  syncReadyGate = newSyncGate();
+}
+
+/** Sync primed — or we now know it isn't coming. Either way, stop waiting. */
+function resolveSyncGate(): void {
+  syncReadyGate.resolve();
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 /**
  * Tear down networked sync for the vault we're leaving. Call this BEFORE any
  * `ipc.openVault*` that swaps the Rust vault slot: Rust holds ONE global vault,
@@ -1106,6 +1171,8 @@ function vaultScopedSyncReset() {
     // Tabs are paths, and paths only mean something inside the vault that
     // minted them — every vault leave/switch spreads this reset.
     openTabs: [] as string[],
+    // A folder's own stamp says nothing about the next folder.
+    openFolderIsSynced: null as boolean | null,
   } satisfies Partial<AppStore>;
 }
 
@@ -1163,10 +1230,17 @@ export const useStore = create<AppStore>((set, get) => ({
     // Also fires from Rust's `vault-opened` event, which is the only signal some
     // opens produce — so this is where a local vault gets its scope.
     if (v) enterVaultScope(v, get().session?.activeOrganizationId ?? null);
+    // A DIFFERENT folder: whatever we knew about sync belonged to the last one.
+    // Only on an actual change — this fires repeatedly for the same vault, and
+    // re-arming the gate then would make a click wait for a prime that has
+    // already happened.
+    const switched = v?.path !== get().vault?.path;
+    if (switched) armSyncGate();
     set({
       vault: v,
       itemColors: readItemColors(v?.path),
       itemOrder: readItemOrder(v?.path),
+      ...(switched ? { openFolderIsSynced: null } : {}),
     });
   },
 
@@ -1416,6 +1490,30 @@ export const useStore = create<AppStore>((set, get) => ({
     // row and the editor both watch this and acknowledge the click at once.
     set({ openingNotePath: path });
     try {
+      // The boot paints before sync primes, so this click can land while the
+      // registry holds no doc-id map. Opening a MAPPED note then means opening
+      // it with no provider and seeding its CRDT from the file — the
+      // pull-before-seed reversal that forks a doc (see `openGate`). The click
+      // is already acknowledged above, so this wait is invisible; the timeout is
+      // a belt (the prime is one local config read, not a round trip).
+      if (
+        planOpen({
+          syncReady: syncManager.isSyncable(),
+          folderIsSynced: get().openFolderIsSynced,
+          authStatus: get().authStatus,
+        }).action === "wait"
+      ) {
+        await Promise.race([syncReadyGate.promise, sleep(SYNC_GATE_MS)]);
+        if (!sameVault(get, epoch)) return;
+        if (!syncManager.isSyncable() && get().authStatus !== "signed-out") {
+          // The belt fired. Never expected: the prime is one local file read,
+          // and every refusal path releases the gate explicitly. Say so, because
+          // the open below is the one that can take the local-only branch.
+          console.warn(
+            `[sync] opened "${path}" before sync primed (waited ${SYNC_GATE_MS}ms)`,
+          );
+        }
+      }
       const meta = await ipc.getNoteMeta(path);
       if (!sameVault(get, epoch)) return; // vault switched mid-open — drop it
       const title = meta?.title ?? path.split("/").pop() ?? path;
@@ -1880,12 +1978,16 @@ export const useStore = create<AppStore>((set, get) => ({
       } else {
         if (superseded()) return;
         set({ session: null, authStatus: "signed-out" });
+        // Signed out: no note will ever get a provider, so nothing is waiting
+        // for (see the open gate in `openNoteByPath`).
+        resolveSyncGate();
         if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
         else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
       }
     } catch (e) {
       if (superseded()) return;
       set({ authStatus: "signed-out", authError: errMsg(e) });
+      resolveSyncGate();
       if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
       else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
     }
@@ -2430,7 +2532,7 @@ export const useStore = create<AppStore>((set, get) => ({
         void get().refreshVault();
         void get().refreshOrgBilling();
         void get()
-          .enableSyncForVault()
+          .enableSyncForVault({ background: true })
           .catch((e) => console.warn("[sync] enable after switch failed", e));
         return;
       }
@@ -2867,6 +2969,7 @@ export const useStore = create<AppStore>((set, get) => ({
     // Detach from the open local folder and drop to the welcome/empty state.
     leaveVaultSync();
     get().closeNote();
+    armSyncGate();
     set({
       vault: null,
       ...vaultScopedSyncReset(),
@@ -2887,9 +2990,15 @@ export const useStore = create<AppStore>((set, get) => ({
     const v = await ipc.openVaultInRoot(path, { create: opts?.create ?? false });
     enterVaultScope(v, orgId);
     get().closeNote();
+    // A new folder is opening: re-arm the open gate for it (the enable below
+    // resolves it at the prime). This is a vault the SESSION names, so its
+    // folder does sync — say so, rather than making the first click wait for a
+    // peek this path already knows the answer to.
+    armSyncGate();
     set({
       vault: v,
       ...vaultScopedSyncReset(),
+      openFolderIsSynced: true,
       itemColors: readItemColors(v.path),
       itemOrder: readItemOrder(v.path),
       pendingVaultFolder: null,
@@ -3253,13 +3362,18 @@ export const useStore = create<AppStore>((set, get) => ({
 
   enableSyncForVault: async (opts = {}) => {
     const { session, vault } = get();
+    // Every refusal below is an ANSWER — sync is not coming for this folder — so
+    // each one releases the open gate rather than leaving the first click to
+    // time out against it.
     if (!session || !vault) {
       set({ syncEnabled: false });
+      resolveSyncGate();
       return;
     }
     const orgId = session.activeOrganizationId;
     if (!orgId) {
       set({ syncEnabled: false });
+      resolveSyncGate();
       return;
     }
     // The vault this call is FOR. `reconcile` can take many seconds on a large
@@ -3281,52 +3395,94 @@ export const useStore = create<AppStore>((set, get) => ({
     if (stale()) return;
     if (stamped && stamped !== orgId) {
       set({ syncEnabled: false });
+      resolveSyncGate();
       console.warn(
         `[sync] not enabled: folder is stamped for vault ${stamped}, not active vault ${orgId}`,
       );
       return;
     }
 
-    // No tree is passed: `store.tree` is the sidebar's LAZY tree (top level only,
-    // unexpanded folders hold an empty `children` placeholder), and reconcile
-    // needs every note in the vault. It reads the full tree itself.
-    const result = await syncManager.enable(session, {
-      orgId,
-      name: vault.name,
-      path: vault.path,
-      epoch,
-      seedIfEmpty: opts.seedIfEmpty,
+    // The prime half of `enable`, as a promise `background` callers can return
+    // on. Resolved by `onPrimed` below, and by the `finally` regardless — a
+    // refused or thrown enable must never leave a caller waiting.
+    let resolvePrimed = () => {};
+    const primed = new Promise<void>((r) => {
+      resolvePrimed = r;
     });
-    // `syncManager.enable` already dropped its own work if the scope went stale;
-    // this guard keeps the STORE from claiming sync is on for the wrong vault.
-    if (stale()) return;
-    set({ syncEnabled: result.ok });
-    if (result.ok) {
-      perf.mark("sync-enabled");
-      // Broadcast the user's current activity status on this session's presence.
-      syncManager.setPresenceStatus(get().activityStatus);
-      // This folder is now the one this vault opens with.
-      rememberOrgVault(orgId, vault.path);
-      rememberLastVault(orgId);
-      // Reconcile may have materialized server-only notes onto disk; refresh so
-      // the sidebar reflects the full vault, not just what was already local.
-      await get().refreshTree();
+
+    const tail = (async () => {
+      // No tree is passed: `store.tree` is the sidebar's LAZY tree (top level
+      // only, unexpanded folders hold an empty `children` placeholder), and
+      // reconcile needs every note in the vault. It reads the full tree itself.
+      const result = await syncManager.enable(
+        session,
+        {
+          orgId,
+          name: vault.name,
+          path: vault.path,
+          epoch,
+          seedIfEmpty: opts.seedIfEmpty,
+        },
+        {
+          onPrimed: () => {
+            if (stale()) return;
+            // The vault DOES sync and this device knows its doc ids. Say so
+            // now: the badge stops reading "Local", and a click on a mapped
+            // note gets a provider instead of seeding from disk.
+            set({ syncEnabled: true });
+            syncManager.setPresenceStatus(get().activityStatus);
+            rememberOrgVault(orgId, vault.path);
+            rememberLastVault(orgId);
+            perf.mark("sync-primed");
+            resolveSyncGate();
+            resolvePrimed();
+          },
+        },
+      );
+      // `syncManager.enable` already dropped its own work if the scope went stale;
+      // this guard keeps the STORE from claiming sync is on for the wrong vault.
       if (stale()) return;
-      await get().refreshTitles();
-      if (stale()) return;
-      await get().refreshLocks();
-      if (stale()) return;
-      await get().refreshVaultSettings();
-      if (stale()) return;
-      // A brand-new vault was just seeded with welcome content — greet the
-      // user with the welcome note if nothing else is open.
-      if (result.seeded && !get().openNote) {
-        await get().openNoteByPath(WELCOME_NOTE_PATH);
+      set({ syncEnabled: result.ok });
+      // Either outcome is an answer: nothing is left for a waiting open to
+      // gain by waiting longer.
+      resolveSyncGate();
+      if (result.ok) {
+        perf.mark("sync-enabled");
+        // Broadcast the user's current activity status on this session's presence.
+        syncManager.setPresenceStatus(get().activityStatus);
+        // This folder is now the one this vault opens with.
+        rememberOrgVault(orgId, vault.path);
+        rememberLastVault(orgId);
+        // Reconcile may have materialized server-only notes onto disk; refresh so
+        // the sidebar reflects the full vault, not just what was already local.
+        await get().refreshTree();
+        if (stale()) return;
+        await get().refreshTitles();
+        if (stale()) return;
+        await get().refreshLocks();
+        if (stale()) return;
+        await get().refreshVaultSettings();
+        if (stale()) return;
+        // A brand-new vault was just seeded with welcome content — greet the
+        // user with the welcome note if nothing else is open.
+        if (result.seeded && !get().openNote) {
+          await get().openNoteByPath(WELCOME_NOTE_PATH);
+        }
+      } else {
+        set({ locks: [] });
+        if (result.reason) console.warn("[sync] not enabled:", result.reason);
       }
-    } else {
-      set({ locks: [] });
-      if (result.reason) console.warn("[sync] not enabled:", result.reason);
+    })().finally(resolvePrimed);
+
+    if (opts.background) {
+      // The launch and the vault switch: the vault is usable at the prime, and
+      // the reconcile (plus its tree/titles/locks/settings tail) has no
+      // business in front of the user.
+      void tail.catch((e) => console.warn("[sync] background enable failed", e));
+      await primed;
+      return;
     }
+    await tail;
   },
 }));
 

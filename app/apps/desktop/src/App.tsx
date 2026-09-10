@@ -716,6 +716,19 @@ export default function App() {
           // former carries the vault epoch this session must pin its writes to
           // (`get_last_vault` reports the epoch from before it opened anything).
           useStore.getState().setVault(opened ?? last);
+          // Does this folder belong to a synced vault? One ~60-byte IPC, fired
+          // WITHOUT awaiting so it can't delay the paint. It is what tells a
+          // click that beats the sync prime whether waiting for a doc-id map is
+          // worth it — see `lib/sync/openGate`.
+          void ipc
+            .peekVaultStamp((opened ?? last).path)
+            .then((stamp) => {
+              if (useStore.getState().vault?.path !== (opened ?? last).path) return;
+              useStore.setState({ openFolderIsSynced: stamp?.organizationId != null });
+            })
+            .catch(() => {
+              /* unreadable: stays null, so the gate keeps waiting for the prime */
+            });
           await useStore.getState().refreshTree();
           perf.mark("tree-ready");
           // Not awaited: the index rebuild runs in the background now (#84), and
