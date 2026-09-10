@@ -7,6 +7,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Performance
+- **Startup and note loading, Rust side.** CRDT state, state-vector manifests
+  and attachment bytes now cross the desktop IPC boundary as raw bytes in both
+  directions (framed; `src/lib/ipcCodec.ts` ↔ `commands.rs`) instead of JSON
+  number arrays — the largest measured doc was 17.7 MB of CRDT shipped as
+  ≈62 MB of JSON text per open. Thirteen config/vault commands moved off the
+  main (painting) thread and the parsed app config is cached in `AppState`, so
+  `app_config_dir` + `create_dir_all` is one syscall pair per process rather
+  than per call. The open-time index rebuild now skips folder rows whose parent
+  and name are unchanged (1,458 pointless writes per open on the measured
+  vault), and folder churn alone no longer triggers a whole-vault link
+  re-resolution pass. `open_vault` reports per-phase timings (on `VaultInfo`
+  and as one log line) and `rebuild` logs one line unconditionally. Release
+  builds now use thin LTO, one codegen unit and a stripped binary.
+
 ### Changed
 - **Launch no longer waits for the network.** The whole UI used to be gated on
   the session restore, which ends in the sync reconcile — a full disk walk, ~14

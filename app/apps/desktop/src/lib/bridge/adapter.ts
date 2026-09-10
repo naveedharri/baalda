@@ -77,14 +77,10 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
     onWriteFailed: reportSaveFailure,
     onWriteRecovered: reportSaveRecovered,
     persistence: {
-      loadState: async (docId) => {
-        const s = await ipc.loadYjsState(docId, epoch);
-        return {
-          snapshot: s.snapshot ? new Uint8Array(s.snapshot) : null,
-          updates: s.updates.map((u) => new Uint8Array(u)),
-          updateCount: s.updateCount,
-        };
-      },
+      // No conversion: `loadYjsState` decodes Rust's byte frame straight into
+      // `YjsPersistedState` (`ipcCodec.ts`), where it used to hand back number
+      // arrays this had to copy element by element.
+      loadState: (docId) => ipc.loadYjsState(docId, epoch),
       appendUpdate: (docId, update) => ipc.appendYjsUpdate(docId, update, epoch),
       saveSnapshot: (docId, snapshot, stateVector) =>
         ipc.saveYjsSnapshot(docId, snapshot, stateVector, epoch),
