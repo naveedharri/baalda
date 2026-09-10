@@ -5706,14 +5706,51 @@ button.secondary:disabled {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-.billing-transfer-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
+/* ---- Transfer dialog ----
+   The destinations ride the upgrade dialog's selectable card, laid out as a
+   row (name left, seats right) inside the confirm dialog's centred body. The
+   list is left-aligned and full width so it reads as a form, not prose. */
+.transfer-targets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 100%;
+  margin: var(--sp-2) 0;
+  text-align: left;
 }
-/* Vault names are names: the role menu's `capitalize` would rewrite them. */
-.context-menu.billing-transfer-menu li {
-  text-transform: none;
+.upgrade-plan-card.transfer-target {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  /* Room for the corner check on the right, on every row not just selected. */
+  padding-right: calc(var(--sp-4) + 28px);
+}
+.upgrade-plan-card.transfer-target.selected::after {
+  top: 50%;
+  transform: translateY(-50%);
+}
+.transfer-target-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.transfer-target-meta {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.transfer-target.selected .transfer-target-meta {
+  color: var(--accent);
+}
+.confirm-body .transfer-targets-note {
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
 }
 /* One line of prose introducing a section's list. */
 .billing-section-note {
