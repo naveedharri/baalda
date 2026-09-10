@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import "./App.css";
 import { AccountMenu, AuthDialog } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
-import { Editor } from "./components/Editor";
+import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
 import { GraphView } from "./components/GraphView";
@@ -652,6 +652,13 @@ function PromptedAuthDialog() {
   );
 }
 
+/* Lazy chunks. Each of these is either a rare deliberate action (the graph),
+   a modal (settings, auth), or big enough that the first paint should not wait
+   on it (the editor carries CodeMirror + lezer). `lib/prefetch.ts` warms the
+   editor right after the first paint, so the first note click is still
+   instant. */
+const Editor = lazy(() => import("./components/Editor").then((m) => ({ default: m.Editor })));
+
 export default function App() {
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
@@ -1089,7 +1096,19 @@ export default function App() {
           <RemovedBanner />
           <DeletedByTeammateBanner />
           <div className="editor-wrap">
-            <Editor />
+            {openNote ? (
+              <Suspense
+                fallback={
+                  <div className="editor-column">
+                    <EditorSkeleton />
+                  </div>
+                }
+              >
+                <Editor />
+              </Suspense>
+            ) : (
+              <EditorEmpty />
+            )}
           </div>
           <BacklinksPanel />
           {/* Slides in over the editor from the right; anchored to .main. */}
