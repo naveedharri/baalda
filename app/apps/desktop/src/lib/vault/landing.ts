@@ -35,7 +35,7 @@ export interface LandingInput {
   rememberedOrgId: string | null;
   /**
    * The vault the open folder's own `.context/config.json` is stamped for
-   * (`configOrgId`), or null. The on-disk dual of `orgVaults`: it survives the
+   * (`ipc.peekVaultStamp`), or null. The on-disk dual of `orgVaults`: it survives the
    * lost/evicted localStorage binding, so a synced folder still lands in its
    * own vault after sign-in instead of silently staying "local".
    */

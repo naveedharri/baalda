@@ -35,7 +35,6 @@ import {
   type VaultRow,
 } from "../lib/vaultRows";
 import { buildInviteLink } from "../lib/inviteLink";
-import { configOrgId } from "../lib/vault/rediscover";
 import { statusTone } from "../lib/presence/color";
 import { AccessPanel } from "./AccessPanel";
 import { AccountSettings } from "./AccountSettings";
@@ -98,10 +97,12 @@ export function AccountMenu() {
       return;
     }
     let alive = true;
+    // ~60 bytes, parsed in Rust: this used to ship the folder's whole
+    // `.context/config.json`, whose doc-id map is megabytes on a big vault.
     void ipc
-      .peekVaultConfig(vaultPath)
-      .then((raw) => {
-        if (alive) setOpenFolderSynced(configOrgId(raw) !== null);
+      .peekVaultStamp(vaultPath)
+      .then((stamp) => {
+        if (alive) setOpenFolderSynced(stamp?.organizationId != null);
       })
       .catch(() => {
         if (alive) setOpenFolderSynced(false);

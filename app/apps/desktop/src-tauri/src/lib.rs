@@ -132,7 +132,7 @@ pub fn run() {
             commands::export_path,
             commands::open_vault_in_root,
             commands::folder_exists,
-            commands::peek_vault_config,
+            commands::peek_vault_stamp,
             commands::list_vaults_root_dirs,
             commands::get_vault_config,
             commands::set_vault_config,

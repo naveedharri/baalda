@@ -57,7 +57,7 @@ import type { TreeSort } from "./lib/tree/sort";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { planTurnOnSync } from "./lib/vault/turnOnSync";
-import { configOrgId, rediscoverVaultFolder } from "./lib/vault/rediscover";
+import { rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { viewingDocId } from "./lib/presence/viewingDocId";
 import { dismissToast, toast } from "./lib/toast";
@@ -685,7 +685,7 @@ async function findExistingVaultFolder(orgId: string): Promise<string | null> {
   const candidates = await Promise.all(
     paths.map(async (path) => ({
       path,
-      config: await ipc.peekVaultConfig(path).catch(() => null),
+      stamp: await ipc.peekVaultStamp(path).catch(() => null),
     })),
   );
   // The vault's collection ids, so folders whose config predates the
@@ -715,8 +715,8 @@ async function findExistingVaultFolder(orgId: string): Promise<string | null> {
  * binding, and what unmasks a folder that belongs to a different account.
  */
 async function peekStampedOrgId(path: string): Promise<string | null> {
-  const raw = await ipc.peekVaultConfig(path).catch(() => null);
-  return configOrgId(raw);
+  const stamp = await ipc.peekVaultStamp(path).catch(() => null);
+  return stamp?.organizationId ?? null;
 }
 
 /** Drop a vault's remembered local folder (used when removing/deleting it). */

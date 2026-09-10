@@ -12,7 +12,6 @@ import {
 import { AuthDialog } from "./AccountMenu";
 import { Wordmark } from "./Logo";
 import { Spinner } from "./Spinner";
-import { configOrgId } from "../lib/vault/rediscover";
 
 /**
  * A row in the welcome-screen list: either a local folder (a recent vault on
@@ -179,8 +178,8 @@ export function VaultPicker() {
     (async () => {
       const peeked = await Promise.all(
         recents.map(async (r) => {
-          const raw = await ipc.peekVaultConfig(r.path).catch(() => null);
-          return [r.path, configOrgId(raw)] as const;
+          const stamp = await ipc.peekVaultStamp(r.path).catch(() => null);
+          return [r.path, stamp?.organizationId ?? null] as const;
         }),
       );
       if (!alive) return;

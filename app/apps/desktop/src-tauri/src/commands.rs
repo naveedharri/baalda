@@ -725,20 +725,50 @@ pub fn folder_exists(path: String) -> AppResult<bool> {
     Ok(Path::new(&path).is_dir())
 }
 
-/// Read a folder's `.context/config.json` WITHOUT opening it as the active vault
-/// (contrast `get_vault_config`, which is epoch-pinned to the open one). This is
-/// the discovery probe behind `store.setActiveOrganization`'s rediscovery pass:
-/// it identifies a folder as an existing local copy of a vault so the switch can
-/// reopen it instead of auto-creating a duplicate under the vaults root.
-/// Best-effort by design — a missing folder, a non-vault folder, or an
-/// unreadable config all return None so one bad candidate can't abort a scan.
-#[tauri::command]
-pub fn peek_vault_config(path: String) -> AppResult<Option<String>> {
+/// Which vault a folder on disk belongs to, per its own `.context/config.json`.
+/// Both fields are optional: a never-synced folder has neither, and a folder
+/// written before the `organizationId` stamp existed has only the collection id.
+/// `Deserialize` too, so `peek_vault_stamp` can read it straight out of the file
+/// and let serde discard everything else (see that command for why that matters).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultStamp {
+    #[serde(default)]
+    pub organization_id: Option<String>,
+    #[serde(default)]
+    pub server_vault_id: Option<String>,
+}
+
+/// The two IDENTITY fields of a folder's `.context/config.json`, read without
+/// opening the folder as the active vault (contrast `get_vault_config`, which is
+/// epoch-pinned to the open one). This is the discovery probe behind
+/// `store.setActiveOrganization`'s rediscovery pass and the launch path's three
+/// "which vault does this folder belong to?" checks: it identifies a folder as an
+/// existing local copy of a vault so a switch reopens it instead of
+/// auto-creating a duplicate under the vaults root.
+///
+/// Parsed HERE, and streamed rather than slurped, because the rest of that file
+/// is the vault's doc-id map: ~1.85 MB on a 6k-note vault, which the launch path
+/// used to ship over IPC and JSON-parse in the webview three times over purely to
+/// learn one string. `serde` skips the unknown members without allocating them,
+/// so this stays a ~60-byte answer no matter how big the map gets.
+///
+/// Best-effort by design — a missing folder, a non-vault folder, an unreadable or
+/// malformed config all answer None, so one bad candidate can't abort a scan.
+/// `#[tauri::command(async)]` on a sync fn: it does blocking file I/O, so it runs
+/// on Tauri's thread pool instead of the main thread (and unit tests can still
+/// call it directly).
+#[tauri::command(async)]
+pub fn peek_vault_stamp(path: String) -> AppResult<Option<VaultStamp>> {
     let p = Path::new(&path);
     if !p.is_dir() {
         return Ok(None);
     }
-    Ok(std::fs::read_to_string(p.join(".context").join("config.json")).ok())
+    let Ok(file) = std::fs::File::open(p.join(".context").join("config.json")) else {
+        return Ok(None);
+    };
+    let reader = std::io::BufReader::new(file);
+    Ok(serde_json::from_reader::<_, VaultStamp>(reader).ok())
 }
 
 /// Immediate subdirectories of the managed vaults root (absolute paths), for the
@@ -1332,44 +1362,71 @@ mod tests {
         assert_eq!(root_label("/"), "/");
     }
 
-    /// The rediscovery probe must identify a vault folder without opening it,
-    /// and must answer None (never an error) for everything that isn't one —
-    /// a scan over recents can't have one bad candidate abort the whole pass.
+    /// The rediscovery/launch probe must identify a vault folder without opening
+    /// it, must return only the identity fields (never the doc map beside them),
+    /// and must answer None — never an error — for everything that isn't a vault
+    /// folder: a scan over recents can't have one bad candidate abort the pass.
     #[test]
-    fn peek_vault_config_reads_without_opening() {
+    fn peek_vault_stamp_reads_identity_without_opening() {
         let dir = tempfile::tempdir().unwrap();
+
+        // A stamped config, with a doc map beside the identity fields (the real
+        // shape — on a big vault that map is megabytes). Only the two fields
+        // come back.
         let vault = dir.path().join("my-vault");
         std::fs::create_dir_all(vault.join(".context")).unwrap();
         std::fs::write(
             vault.join(".context").join("config.json"),
-            r#"{"organizationId":"org-1"}"#,
+            r#"{"organizationId":"org-1","serverVaultId":"col-1","docs":{"a.md":"d1"},"pushed":["d1"]}"#,
         )
         .unwrap();
+        let got = peek_vault_stamp(vault.to_string_lossy().to_string())
+            .unwrap()
+            .expect("stamped config");
+        assert_eq!(got.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(got.server_vault_id.as_deref(), Some("col-1"));
 
-        // A vault folder: raw config comes back.
-        let got = peek_vault_config(vault.to_string_lossy().to_string()).unwrap();
-        assert_eq!(got.as_deref(), Some(r#"{"organizationId":"org-1"}"#));
+        // A legacy (pre-stamp) config: the collection id alone, which is what
+        // heals such a folder in place. Some(stamp) with a None org, NOT None —
+        // the caller distinguishes "not a vault" from "vault, org unknown".
+        let legacy = dir.path().join("legacy");
+        std::fs::create_dir_all(legacy.join(".context")).unwrap();
+        std::fs::write(
+            legacy.join(".context").join("config.json"),
+            r#"{"serverVaultId":"col-9"}"#,
+        )
+        .unwrap();
+        let got = peek_vault_stamp(legacy.to_string_lossy().to_string())
+            .unwrap()
+            .expect("legacy config");
+        assert_eq!(got.organization_id, None);
+        assert_eq!(got.server_vault_id.as_deref(), Some("col-9"));
+
+        // Malformed JSON: None, not an error.
+        let broken = dir.path().join("broken");
+        std::fs::create_dir_all(broken.join(".context")).unwrap();
+        std::fs::write(broken.join(".context").join("config.json"), "{not json").unwrap();
+        assert!(peek_vault_stamp(broken.to_string_lossy().to_string())
+            .unwrap()
+            .is_none());
 
         // A plain folder (no .context): None.
         let plain = dir.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
-        assert_eq!(
-            peek_vault_config(plain.to_string_lossy().to_string()).unwrap(),
-            None
-        );
+        assert!(peek_vault_stamp(plain.to_string_lossy().to_string())
+            .unwrap()
+            .is_none());
 
         // A path that doesn't exist / isn't a directory: None, not an error.
         let missing = dir.path().join("gone");
-        assert_eq!(
-            peek_vault_config(missing.to_string_lossy().to_string()).unwrap(),
-            None
-        );
+        assert!(peek_vault_stamp(missing.to_string_lossy().to_string())
+            .unwrap()
+            .is_none());
         let file = dir.path().join("note.md");
         std::fs::write(&file, "x").unwrap();
-        assert_eq!(
-            peek_vault_config(file.to_string_lossy().to_string()).unwrap(),
-            None
-        );
+        assert!(peek_vault_stamp(file.to_string_lossy().to_string())
+            .unwrap()
+            .is_none());
     }
 
     /// Two vaults may share a name (identity is the doc_ids, not the name), so

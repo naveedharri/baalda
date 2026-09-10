@@ -237,10 +237,21 @@ export const openVaultInRoot = (path: string, opts?: { create?: boolean }) =>
 /** Does this absolute path exist as a directory? */
 export const folderExists = (path: string) =>
   invoke<boolean>("folder_exists", { path });
-/** Raw `.context/config.json` of an arbitrary folder WITHOUT opening it (null if
- *  the folder isn't a vault). Rediscovery probe — see `setActiveOrganization`. */
-export const peekVaultConfig = (path: string) =>
-  invoke<string | null>("peek_vault_config", { path });
+/** Which vault a folder on disk belongs to, per its own `.context/config.json`.
+ *  Both fields can be null: a folder written before the `organizationId` stamp
+ *  existed carries only the collection id. */
+export interface VaultStamp {
+  organizationId: string | null;
+  serverVaultId: string | null;
+}
+/** The identity fields of an arbitrary folder's `.context/config.json`, WITHOUT
+ *  opening it — null when the folder isn't a vault (or its config is
+ *  unreadable/malformed). Rediscovery + launch probe; parsed in Rust precisely
+ *  so the doc-id map next to those fields (megabytes on a big vault) never
+ *  crosses the IPC boundary. See `getVaultConfig` for the full-file read, which
+ *  only the registry does, once per boot. */
+export const peekVaultStamp = (path: string) =>
+  invoke<VaultStamp | null>("peek_vault_stamp", { path });
 /** Immediate subdirectories of the managed vaults root (absolute paths). */
 export const listVaultsRootDirs = () =>
   invoke<string[]>("list_vaults_root_dirs");
