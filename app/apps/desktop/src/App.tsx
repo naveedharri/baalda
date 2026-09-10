@@ -8,7 +8,6 @@ import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
-import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
@@ -658,6 +657,9 @@ function PromptedAuthDialog() {
    editor right after the first paint, so the first note click is still
    instant. */
 const Editor = lazy(() => import("./components/Editor").then((m) => ({ default: m.Editor })));
+const GraphView = lazy(() =>
+  import("./components/GraphView").then((m) => ({ default: m.GraphView })),
+);
 
 export default function App() {
   const vault = useStore((s) => s.vault);
@@ -1121,7 +1123,11 @@ export default function App() {
             resetKeys={[graphOpen]}
             onError={() => setGraphOpen(false)}
           >
-            <GraphView onClose={() => setGraphOpen(false)} />
+            {/* `.graph-view` is the full-window overlay itself, so the screen
+                dims the instant the graph is asked for, then fills in. */}
+            <Suspense fallback={<div className="graph-view" aria-busy="true" />}>
+              <GraphView onClose={() => setGraphOpen(false)} />
+            </Suspense>
           </ErrorBoundary>
         )}
         <VaultFolderPrompt />
