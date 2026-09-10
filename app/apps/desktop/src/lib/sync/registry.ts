@@ -34,6 +34,7 @@ import {
 } from "../api";
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
+import * as perf from "../perf";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { planInbound } from "./inbound";
@@ -335,6 +336,13 @@ export class VaultRegistry {
   private checkpoint: Checkpointer<VaultSyncConfig> | null = null;
 
   /**
+   * The config `primeLocal` parsed, held for the `reconcile` that follows it.
+   * One read of a file that is ~1.85 MB on a 6k-note vault, per boot, shared by
+   * both — instead of one apiece.
+   */
+  private primedConfig: VaultSyncConfig | null = null;
+
+  /**
    * Notified whenever the {relPath → docId} map changes.
    *
    * This map is the ONLY place a sidebar path and a note's docId meet, and every
@@ -514,6 +522,7 @@ export class VaultRegistry {
     // Synchronously first: a pending flush must never outlive the vault.
     this.checkpoint?.dispose();
     this.checkpoint = null;
+    this.primedConfig = null;
     this.serverVaultId = null;
     this.organizationId = null;
     this.byPath.clear();
@@ -762,7 +771,10 @@ export class VaultRegistry {
     args: {
       folders: TreeNode[];
       notes: TreeNode[];
-      titles: Array<{ path: string; id: string }>;
+      /** The index's {path → docId} rows, READ ON DEMAND: they are needed only
+       *  for on-disk notes this registry doesn't already map, and the read parks
+       *  on the index write lock (see the thunk in `syncStructure`). */
+      titles: () => Promise<Array<{ path: string; id: string }>>;
       serverFolders: Array<{ id: string; path: string }>;
       serverNotes: RegisteredNote[];
       tombstones: string[] | null;
@@ -812,8 +824,14 @@ export class VaultRegistry {
     // Only notes that are BOTH in the tree and in the index have a docId we can
     // match on. (The index covers `.md`; a `.txt`/`.canvas` note therefore never
     // gets inbound-renamed or trashed, only materialized — the safe direction.)
-    for (const t of args.titles) {
-      if (localNotePaths.has(t.path) && !claimed.has(t.path)) local.set(t.id, t.path);
+    //
+    // Asked for only when some on-disk note is NOT claimed above: on a
+    // steady-state relaunch the registry's own map covers every one of them, so
+    // this loop has nothing to add and the index read is pure launch latency.
+    if ([...localNotePaths].some((p) => !claimed.has(p))) {
+      for (const t of await args.titles()) {
+        if (localNotePaths.has(t.path) && !claimed.has(t.path)) local.set(t.id, t.path);
+      }
     }
     const server = new Map<string, string>();
     for (const n of args.serverNotes) {
@@ -1155,22 +1173,80 @@ export class VaultRegistry {
    * Returns `{ seeded }` — true only when this call wrote first-run starter
    * content into a brand-new, empty vault (so the caller can open it).
    */
+  /**
+   * Adopt this folder's OWN doc-id map from `.context/config.json`, with no
+   * server round trip — so a note this device already maps can open with a
+   * provider (pull-before-seed, spec 03 §5) while `reconcile` is still running.
+   *
+   * Provisional by construction: the collection id comes from disk, and
+   * `reconcile` re-validates it against `listVaults` a moment later. A mismatch
+   * drops these mappings in `syncStructure`'s different-collection prune,
+   * exactly as it drops a stale map today.
+   *
+   * REQUIRES the config to carry the `organizationId` stamp, and for it to
+   * match: a pre-stamp config proves nothing about whose folder this is, and
+   * priming a foreign one is the cross-vault merge every guard in this file
+   * exists to stop. Such a folder simply doesn't prime — the reconcile then
+   * adopts it the slow, verified way, which is today's behaviour.
+   *
+   * Returns whether anything was adopted.
+   */
+  async primeLocal(orgId: string): Promise<boolean> {
+    this.bound = this.scopes.current();
+    const cfg = await this.loadConfig();
+    if (this.stale()) return false;
+    if (!cfg.organizationId || cfg.organizationId !== orgId) return false;
+    if (!cfg.serverVaultId) return false;
+    // Handed to `reconcile` so the file is read once per boot, not twice.
+    this.primedConfig = cfg;
+    this.organizationId = orgId;
+    this.serverVaultId = cfg.serverVaultId;
+    // The layers above read the collection id off the scope.
+    if (this.bound) this.bound.serverVaultId = cfg.serverVaultId;
+    // So a `markPushed` for a note opened during the window is persisted rather
+    // than dropped (`reconcile` adopts this same checkpointer).
+    this.newCheckpointer();
+    for (const [rp, docId] of Object.entries(cfg.docs ?? {})) {
+      if (typeof docId === "string" && docId) this.setMapping(rp, docId, cfg.serverVaultId);
+    }
+    for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
+      if (typeof id === "string" && id) this.folderByPath.set(rp, id);
+    }
+    this.pushed = new Set(cfg.pushed ?? []);
+    // Same collection guard as `reconcile`'s: the baseline describes the
+    // collection the config names, which is the one we just adopted.
+    this.baselineDocs = new Map<string, string>();
+    for (const [docId, rp] of Object.entries(cfg.baseline ?? {})) {
+      if (typeof rp === "string" && rp) this.baselineDocs.set(docId, rp);
+    }
+    this.baselineVaultId = cfg.serverVaultId;
+    return true;
+  }
+
   async reconcile(input: ReconcileInput): Promise<{ seeded: boolean }> {
     // Bind this registry to the vault the reconcile is FOR — this is the one
     // operation allowed to (re)claim it. Every await below is a chance for the
     // user to switch vaults; each `stale()` checkpoint drops the rest of the work
     // instead of applying it to whatever vault is now open.
-    this.bound = this.scopes.current();
+    // `primeLocal` may have claimed the same scope moments ago; keep that claim
+    // while it is still current rather than re-reading it.
+    if (!this.bound || !this.bound.isCurrent()) this.bound = this.scopes.current();
     this.organizationId = input.organizationId;
     this.failed = [];
     this.limitReached = null;
-    this.newCheckpointer();
+    // NOT unconditional: `newCheckpointer` disposes the previous one, and after
+    // a prime that one may hold a `markPushed` for a note the user opened during
+    // the window — dropping it loses a real fact about the server.
+    this.checkpoint ?? this.newCheckpointer();
     this.sink.phase("registering", 0);
     // Epoch-pinned like every other read here: a vault switch mid-walk makes Rust
     // reject it, which `stale()` then turns into a clean drop.
     const tree = await this.readFullTree();
     if (this.stale()) return { seeded: false };
-    const cfg = await this.loadConfig();
+    // The prime already parsed it (one read per boot); it is consumed here so a
+    // later pull re-reads from disk as before.
+    const cfg = this.primedConfig ?? (await this.loadConfig());
+    this.primedConfig = null;
     if (this.stale()) return { seeded: false };
     this.tuneCheckpointBatch(Object.keys(cfg.docs ?? {}).length);
 
@@ -1223,7 +1299,16 @@ export class VaultRegistry {
     // killed backfill resume instead of re-walking the whole vault. Guarded on
     // the collection matching, like everything else read back from config: a
     // pushed-set recorded against another collection says nothing about this one.
-    this.pushed = new Set(cfg.serverVaultId === vaultId ? (cfg.pushed ?? []) : []);
+    //
+    // The in-memory set is folded in, not replaced: a note opened during the
+    // PRIME window can be confirmed (`confirmOpenDoc` → `markPushed`) before
+    // this line runs, and that is a real fact about the server. Overwriting it
+    // from the file would send the doc back through the content run for nothing.
+    // Both halves still die together when the collection doesn't match.
+    this.pushed =
+      cfg.serverVaultId === vaultId
+        ? new Set([...(cfg.pushed ?? []), ...this.pushed])
+        : new Set();
     // Adopt the baseline ONLY if the config we just read describes the collection
     // we actually resolved. Anything else (a first run, a config from another
     // vault, a rewritten `.context`) leaves it empty, which disables inbound for
@@ -1278,21 +1363,28 @@ export class VaultRegistry {
     //     caller's explicit creation intent: turning on sync for a folder the
     //     user opened, or joining an empty team vault, must never invent
     //     content in it.
-    const serverNotes = await this.api.listNotes(vaultId);
-    if (this.stale()) return { seeded: false };
+    //
+    //     Ask the FREE questions first. Only a just-created vault can seed, and
+    //     only into an empty folder — both local facts. The server's note list
+    //     is not free: it is the same `GET /api/notes` that `syncStructure`
+    //     fetches below (`listNoteRegistry`), so on a 6k-note vault every
+    //     ordinary relaunch downloaded all 6k rows TWICE to answer one boolean.
     let workingTree = tree;
     let seeded = false;
     const localFlat = flattenTree(tree);
     if (
       input.seedIfEmpty === true &&
-      serverNotes.length === 0 &&
       localFlat.notes.length === 0 &&
       localFlat.folders.length === 0
     ) {
-      await seedWelcomeContent(this.epoch());
+      const serverNotes = await this.api.listNotes(vaultId);
       if (this.stale()) return { seeded: false };
-      workingTree = await this.readFullTree();
-      seeded = true;
+      if (serverNotes.length === 0) {
+        await seedWelcomeContent(this.epoch());
+        if (this.stale()) return { seeded: false };
+        workingTree = await this.readFullTree();
+        seeded = true;
+      }
     }
 
     await this.syncStructure(vaultId, workingTree, { inbound: true });
@@ -1382,11 +1474,19 @@ export class VaultRegistry {
     // guess.
     this.tuneCheckpointBatch(this.byPath.size);
 
-    // The local index's docId per note path, read BEFORE any decision so inbound
-    // can match by docId rather than by path (a rename changes the path, which is
-    // exactly why path-matching produced duplicates).
-    let titles = await ipc.listNoteTitles(this.epoch());
-    if (this.stale()) return false;
+    // The local index's docId per note path, for inbound to match by docId
+    // rather than by path (a rename changes the path, which is exactly why
+    // path-matching produced duplicates).
+    //
+    // A memoized THUNK, not a value: this read parks on the SQLite index write
+    // lock held by the background rebuild (#84), which made it the single worst
+    // blocking call on the launch path — and a steady-state relaunch needs it for
+    // nothing at all. Both consumers (the inbound fallback identity map and the
+    // create-missing-notes pass) ask for it only when they have an unmapped path
+    // to resolve. Memoized so the two of them share one read when they do.
+    let titlesCache: ipc.NoteTitle[] | null = null;
+    const titles = async (): Promise<ipc.NoteTitle[]> =>
+      (titlesCache ??= await ipc.listNoteTitles(this.epoch()));
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
@@ -1412,8 +1512,8 @@ export class VaultRegistry {
         const reread = await this.readFullTree();
         if (this.stale()) return false;
         ({ folders, notes } = flattenTree(reread));
-        titles = await ipc.listNoteTitles(this.epoch());
-        if (this.stale()) return false;
+        // The paths moved under us, so any memoized read describes the old tree.
+        titlesCache = null;
         // Re-read the server's notes too: `move_note` bumps rows we may have just
         // raced, and a stale list here would undo the move we just applied.
         const fresh = await this.api.listNoteRegistry(vaultId);
@@ -1534,14 +1634,20 @@ export class VaultRegistry {
 
     this.sink.phase("registering", missingFolders.length + missingNotes.length);
 
-    const titleByPath = new Map(titles.map((t) => [t.path, t.title] as const));
+    // Titles + local doc_ids for the notes we are about to CREATE server-side —
+    // so the index read happens only when there is something to create (on a
+    // fully-registered vault, never). `this.sink.phase` above needs none of it.
+    //
     // The local index already keyed each note by a stable doc_id. Supply it as
     // the server id so a note has ONE identity across the .md file, the local
     // CRDT store, and the server (the invariant: key by doc_id, never by path).
     // Omitting it lets the server mint a *different* random id, which forks the
     // note — the editor's bridge persists CRDT under the local id while sync
     // reads/writes the server id, so content silently fails to appear.
-    const idByPath = new Map(titles.map((t) => [t.path, t.id] as const));
+    const titleRows = missingNotes.length > 0 ? await titles() : [];
+    if (this.stale()) return false;
+    const titleByPath = new Map(titleRows.map((t) => [t.path, t.title] as const));
+    const idByPath = new Map(titleRows.map((t) => [t.path, t.id] as const));
 
     // ---- folders, level by level ----
     const byDepth = new Map<number, TreeNode[]>();
@@ -1759,6 +1865,7 @@ export class VaultRegistry {
     // can't happen after a relaunch.
     checkpoint.touch();
     await checkpoint.flush();
+    perf.mark("reconcile-done");
     return mutated;
   }
 

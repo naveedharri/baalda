@@ -20,47 +20,17 @@
 // Collection ids are UUIDs owned by exactly one org, so a cross-vault false
 // positive would require a forged config, not an accident.
 //
-// Pure: no store, no IPC — the caller peeks the configs (see
-// `ipc.peekVaultConfig`) and supplies them raw.
+// Pure: no store, no IPC — the caller peeks each folder's stamp (see
+// `ipc.peekVaultStamp`, which parses the two fields in RUST so the doc-id map
+// beside them — megabytes on a big vault — never crosses the IPC boundary) and
+// supplies them typed.
 
-/** A candidate folder and its raw `.context/config.json` (null: not a vault). */
+import type { VaultStamp } from "../ipc";
+
+/** A candidate folder and its vault stamp (null: not a vault, or unreadable). */
 export interface PeekedFolder {
   path: string;
-  config: string | null;
-}
-
-/** The two identity fields of `VaultSyncConfig` (registry.ts owns the schema). */
-interface ConfigIdentity {
-  organizationId: string | null;
-  serverVaultId: string | null;
-}
-
-/**
- * The vault (org) a folder's raw `.context/config.json` says it belongs to, or
- * null when the folder was never synced (or the config predates the stamp).
- * This is the on-disk truth the localStorage caches mirror — callers use it to
- * classify a folder when the caches have been lost or evicted.
- */
-export function configOrgId(raw: string | null): string | null {
-  return identityOf(raw)?.organizationId ?? null;
-}
-
-function identityOf(raw: string | null): ConfigIdentity | null {
-  if (!raw) return null;
-  try {
-    const cfg = JSON.parse(raw) as {
-      organizationId?: unknown;
-      serverVaultId?: unknown;
-    };
-    return {
-      organizationId:
-        typeof cfg.organizationId === "string" ? cfg.organizationId : null,
-      serverVaultId:
-        typeof cfg.serverVaultId === "string" ? cfg.serverVaultId : null,
-    };
-  } catch {
-    return null;
-  }
+  stamp: VaultStamp | null;
 }
 
 export interface RediscoverInput {
@@ -90,21 +60,20 @@ export function rediscoverVaultFolder(input: RediscoverInput): string | null {
   );
   const usable = input.candidates
     .filter((c) => !claimed.has(c.path))
-    .map((c) => ({ path: c.path, id: identityOf(c.config) }))
-    .filter((c): c is { path: string; id: ConfigIdentity } => c.id !== null);
+    .filter((c): c is { path: string; stamp: VaultStamp } => c.stamp !== null);
 
   // Pass 1: the explicit stamp. Exact and current — always wins over a legacy
   // collection match (a stamped folder is one this version has reconciled).
   for (const c of usable) {
-    if (c.id.organizationId === input.orgId) return c.path;
+    if (c.stamp.organizationId === input.orgId) return c.path;
   }
 
   // Pass 2: legacy configs, matched through the vault's collections. A folder
   // stamped for a DIFFERENT org is excluded even if its collection id matches:
   // the stamp is newer information than the collection row.
   for (const c of usable) {
-    if (c.id.organizationId !== null) continue;
-    if (c.id.serverVaultId && input.collectionIds.has(c.id.serverVaultId)) {
+    if (c.stamp.organizationId !== null) continue;
+    if (c.stamp.serverVaultId && input.collectionIds.has(c.stamp.serverVaultId)) {
       return c.path;
     }
   }

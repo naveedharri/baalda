@@ -15,7 +15,10 @@ import App from "./App";
 import { initPlatform } from "./lib/platform";
 import { initTheme } from "./lib/theme";
 import { mirrorConsoleToTerminal } from "./lib/devConsole";
+import * as perf from "./lib/perf";
 
+// The launch timeline starts here: the first line of our own JS to run.
+perf.mark("script");
 // Paint the persisted (or system) theme before the first render.
 initTheme();
 // Same deal for the platform flag: it sets the macOS traffic-light inset, and
@@ -29,3 +32,6 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <App />
   </React.StrictMode>,
 );
+// Render is synchronous up to the first commit's paint, so this is the cost of
+// parsing + evaluating the bundle plus React's first render.
+perf.mark("react-mount");

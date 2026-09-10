@@ -61,7 +61,7 @@ export interface TurnOnSyncInput {
   orgVaults: Readonly<Record<string, string>>;
   /**
    * The vault the folder's own `.context/config.json` is stamped for (see
-   * `configOrgId`), or null. This is the on-disk dual of `orgVaults`: the
+   * `ipc.peekVaultStamp`), or null. This is the on-disk dual of `orgVaults`: the
    * binding is per-device localStorage and easy to lose, while the stamp
    * travels with the folder — so it both heals a lost binding (stamped for a
    * vault we're in → switch) and unmasks a foreign folder (stamped for one

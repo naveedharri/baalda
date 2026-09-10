@@ -1,7 +1,13 @@
 import { describe, it, expect } from "vitest";
+import type { VaultStamp } from "../../ipc";
 import { rediscoverVaultFolder, type PeekedFolder } from "../rediscover";
 
-const cfg = (fields: Record<string, unknown>) => JSON.stringify(fields);
+/** A folder's stamp as `ipc.peekVaultStamp` reports it: both fields present,
+ *  each null when the config didn't carry it. */
+const cfg = (fields: Partial<VaultStamp>): VaultStamp => ({
+  organizationId: fields.organizationId ?? null,
+  serverVaultId: fields.serverVaultId ?? null,
+});
 
 const base = {
   orgId: "org-a",
@@ -12,8 +18,8 @@ const base = {
 describe("rediscoverVaultFolder", () => {
   it("finds the folder stamped with the vault's org id", () => {
     const candidates: PeekedFolder[] = [
-      { path: "/downloads/notes", config: cfg({ organizationId: "org-a" }) },
-      { path: "/root/other", config: cfg({ organizationId: "org-b" }) },
+      { path: "/downloads/notes", stamp: cfg({ organizationId: "org-a" }) },
+      { path: "/root/other", stamp: cfg({ organizationId: "org-b" }) },
     ];
     expect(rediscoverVaultFolder({ ...base, candidates })).toBe(
       "/downloads/notes",
@@ -22,8 +28,8 @@ describe("rediscoverVaultFolder", () => {
 
   it("returns null when nothing matches — the caller may mint a folder", () => {
     const candidates: PeekedFolder[] = [
-      { path: "/root/other", config: cfg({ organizationId: "org-b" }) },
-      { path: "/plain/folder", config: null },
+      { path: "/root/other", stamp: cfg({ organizationId: "org-b" }) },
+      { path: "/plain/folder", stamp: null },
     ];
     expect(rediscoverVaultFolder({ ...base, candidates })).toBeNull();
   });
@@ -32,7 +38,7 @@ describe("rediscoverVaultFolder", () => {
     // A folder synced by a version before `organizationId` existed carries only
     // `serverVaultId` — the silent in-place upgrade path.
     const candidates: PeekedFolder[] = [
-      { path: "/downloads/notes", config: cfg({ serverVaultId: "col-1" }) },
+      { path: "/downloads/notes", stamp: cfg({ serverVaultId: "col-1" }) },
     ];
     expect(
       rediscoverVaultFolder({
@@ -45,10 +51,10 @@ describe("rediscoverVaultFolder", () => {
 
   it("prefers the explicit stamp over a legacy collection match", () => {
     const candidates: PeekedFolder[] = [
-      { path: "/legacy/copy", config: cfg({ serverVaultId: "col-1" }) },
+      { path: "/legacy/copy", stamp: cfg({ serverVaultId: "col-1" }) },
       {
         path: "/current/home",
-        config: cfg({ organizationId: "org-a", serverVaultId: "col-1" }),
+        stamp: cfg({ organizationId: "org-a", serverVaultId: "col-1" }),
       },
     ];
     expect(
@@ -66,7 +72,7 @@ describe("rediscoverVaultFolder", () => {
     const candidates: PeekedFolder[] = [
       {
         path: "/root/other",
-        config: cfg({ organizationId: "org-b", serverVaultId: "col-1" }),
+        stamp: cfg({ organizationId: "org-b", serverVaultId: "col-1" }),
       },
     ];
     expect(
@@ -83,7 +89,7 @@ describe("rediscoverVaultFolder", () => {
     // one-folder-one-vault eviction re-assigned it). Matching it would just
     // restart the eviction ping-pong.
     const candidates: PeekedFolder[] = [
-      { path: "/shared/folder", config: cfg({ organizationId: "org-a" }) },
+      { path: "/shared/folder", stamp: cfg({ organizationId: "org-a" }) },
     ];
     expect(
       rediscoverVaultFolder({
@@ -98,7 +104,7 @@ describe("rediscoverVaultFolder", () => {
     // The bound-path branch normally handles it, but rediscovery must not
     // exclude the vault's OWN binding (e.g. reached after folderExists raced).
     const candidates: PeekedFolder[] = [
-      { path: "/downloads/notes", config: cfg({ organizationId: "org-a" }) },
+      { path: "/downloads/notes", stamp: cfg({ organizationId: "org-a" }) },
     ];
     expect(
       rediscoverVaultFolder({
@@ -109,10 +115,12 @@ describe("rediscoverVaultFolder", () => {
     ).toBe("/downloads/notes");
   });
 
-  it("ignores unparseable configs instead of aborting the scan", () => {
+  it("ignores folders with no readable stamp instead of aborting the scan", () => {
+    // Rust answers null for a plain folder, an unreadable config AND a
+    // malformed one — indistinguishable here, and all equally skippable.
     const candidates: PeekedFolder[] = [
-      { path: "/corrupt", config: "{not json" },
-      { path: "/downloads/notes", config: cfg({ organizationId: "org-a" }) },
+      { path: "/corrupt", stamp: null },
+      { path: "/downloads/notes", stamp: cfg({ organizationId: "org-a" }) },
     ];
     expect(rediscoverVaultFolder({ ...base, candidates })).toBe(
       "/downloads/notes",
@@ -124,8 +132,8 @@ describe("rediscoverVaultFolder", () => {
     // orders candidates most-recently-opened first, so the one the user
     // actually used wins.
     const candidates: PeekedFolder[] = [
-      { path: "/documents/notes", config: cfg({ organizationId: "org-a" }) },
-      { path: "/root/notes-slug", config: cfg({ organizationId: "org-a" }) },
+      { path: "/documents/notes", stamp: cfg({ organizationId: "org-a" }) },
+      { path: "/root/notes-slug", stamp: cfg({ organizationId: "org-a" }) },
     ];
     expect(rediscoverVaultFolder({ ...base, candidates })).toBe(
       "/documents/notes",

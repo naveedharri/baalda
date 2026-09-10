@@ -6,6 +6,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { decodeStateVectors, decodeYjsState, frame, type YjsState } from "./ipcCodec";
+
+// The binary commands (CRDT state, attachment bytes) speak raw bytes, framed by
+// `ipcCodec.ts` — see that module for why and for the frame layouts.
+export type { YjsState } from "./ipcCodec";
 
 /** Open an external URL (markdown links) in the user's default browser. */
 export const openExternal = (url: string) => openUrl(url);
@@ -83,6 +88,26 @@ export interface VaultInfo {
    * `getLastVault` reports the epoch that was current before it opened anything.
    */
   epoch: number;
+  /**
+   * Per-phase timings of the open that produced this info (Rust `OpenTiming`),
+   * absent on the infos that open nothing (`getLastVault`). Rust logs one line
+   * per open too, but only debug builds carry the log plugin — this is how a
+   * shipped install can report where an open went.
+   */
+  timing?: OpenTiming;
+}
+
+/** How long each phase of one `open_vault` took, in whole ms. */
+export interface OpenTiming {
+  /** Opening + migrating `.context/index.sqlite`. */
+  indexOpenMs: number;
+  /** Starting the recursive filesystem watcher. */
+  watcherMs: number;
+  /** Handing the index to the background rebuild and publishing it. */
+  publishMs: number;
+  /** Reading + rewriting the app config's recents list. */
+  configMs: number;
+  totalMs: number;
 }
 
 /**
@@ -148,13 +173,6 @@ export interface NoteTitle {
 export interface ResolvedLink {
   id: string;
   path: string;
-}
-
-/** A doc's persisted CRDT state (spec 02 §4). Binary blobs cross IPC as number arrays. */
-export interface YjsState {
-  snapshot: number[] | null;
-  updates: number[][];
-  updateCount: number;
 }
 
 export interface FileChanged {
@@ -237,10 +255,21 @@ export const openVaultInRoot = (path: string, opts?: { create?: boolean }) =>
 /** Does this absolute path exist as a directory? */
 export const folderExists = (path: string) =>
   invoke<boolean>("folder_exists", { path });
-/** Raw `.context/config.json` of an arbitrary folder WITHOUT opening it (null if
- *  the folder isn't a vault). Rediscovery probe — see `setActiveOrganization`. */
-export const peekVaultConfig = (path: string) =>
-  invoke<string | null>("peek_vault_config", { path });
+/** Which vault a folder on disk belongs to, per its own `.context/config.json`.
+ *  Both fields can be null: a folder written before the `organizationId` stamp
+ *  existed carries only the collection id. */
+export interface VaultStamp {
+  organizationId: string | null;
+  serverVaultId: string | null;
+}
+/** The identity fields of an arbitrary folder's `.context/config.json`, WITHOUT
+ *  opening it — null when the folder isn't a vault (or its config is
+ *  unreadable/malformed). Rediscovery + launch probe; parsed in Rust precisely
+ *  so the doc-id map next to those fields (megabytes on a big vault) never
+ *  crosses the IPC boundary. See `getVaultConfig` for the full-file read, which
+ *  only the registry does, once per boot. */
+export const peekVaultStamp = (path: string) =>
+  invoke<VaultStamp | null>("peek_vault_stamp", { path });
 /** Immediate subdirectories of the managed vaults root (absolute paths). */
 export const listVaultsRootDirs = () =>
   invoke<string[]>("list_vaults_root_dirs");
@@ -381,21 +410,29 @@ export const listNoteTitles = (expectedEpoch?: VaultEpoch) =>
   invoke<NoteTitle[]>("list_note_titles", { expectedEpoch: expectedEpoch ?? null });
 
 // ---- CRDT persistence (Phase 1, spec 02 §4) ------------------------------
-// Binary Yjs updates are marshalled as plain number arrays over the IPC bridge.
+// Bytes cross the bridge as bytes in BOTH directions: reads come back framed
+// and are decoded by `ipcCodec.ts`, writes send `ipcCodec.frame(meta, …bytes)`
+// as the whole `invoke` payload. Every wrapper signature is unchanged, so no
+// caller (or test mock) had to move.
 
 export const appendYjsUpdate = (
   docId: string,
   update: Uint8Array,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("append_yjs_update", {
-    docId,
-    update: Array.from(update),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "append_yjs_update",
+    frame({ docId, expectedEpoch: expectedEpoch ?? null }, update),
+  );
 
-export const loadYjsState = (docId: string, expectedEpoch?: VaultEpoch) =>
-  invoke<YjsState>("load_yjs_state", { docId, expectedEpoch: expectedEpoch ?? null });
+export const loadYjsState = (
+  docId: string,
+  expectedEpoch?: VaultEpoch,
+): Promise<YjsState> =>
+  invoke<ArrayBuffer>("load_yjs_state", {
+    docId,
+    expectedEpoch: expectedEpoch ?? null,
+  }).then(decodeYjsState);
 
 export const saveYjsSnapshot = (
   docId: string,
@@ -403,12 +440,19 @@ export const saveYjsSnapshot = (
   stateVector: Uint8Array,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("save_yjs_snapshot", {
-    docId,
-    snapshot: Array.from(snapshot),
-    stateVector: Array.from(stateVector),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "save_yjs_snapshot",
+    frame(
+      {
+        docId,
+        expectedEpoch: expectedEpoch ?? null,
+        // Where Rust splits the payload back into its two halves.
+        snapshotLen: snapshot.byteLength,
+      },
+      snapshot,
+      stateVector,
+    ),
+  );
 
 /**
  * Persist a batch of per-doc Yjs state vectors — the DURABLE form of the vault
@@ -423,10 +467,17 @@ export const saveYjsStateVectors = (
   entries: Array<[docId: string, stateVector: Uint8Array]>,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("save_yjs_state_vectors", {
-    entries: entries.map(([docId, sv]) => [docId, Array.from(sv)]),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "save_yjs_state_vectors",
+    frame(
+      {
+        expectedEpoch: expectedEpoch ?? null,
+        // Lengths only; the vectors themselves follow in this order.
+        entries: entries.map(([docId, sv]) => [docId, sv.byteLength]),
+      },
+      ...entries.map(([, sv]) => sv),
+    ),
+  );
 
 /** Every state vector this vault holds, to rebuild the manifest on launch. */
 /** Discard one doc's local CRDT — the local half of an oversized-note repair.
@@ -456,39 +507,37 @@ export const pruneYjsDocs = (live: string[], expectedEpoch?: VaultEpoch) =>
   });
 
 export const listYjsStateVectors = (expectedEpoch?: VaultEpoch) =>
-  invoke<{ docId: string; stateVector: number[] }[]>("list_yjs_state_vectors", {
+  invoke<ArrayBuffer>("list_yjs_state_vectors", {
     expectedEpoch: expectedEpoch ?? null,
-  }).then((rows) =>
-    rows.map((r) => ({ docId: r.docId, stateVector: Uint8Array.from(r.stateVector) })),
-  );
+  }).then(decodeStateVectors);
 
 // ---- Attachment binary I/O (Phase 3 blob store, spec 02 §2) ---------------
-// Raw bytes are marshalled as plain number arrays over the IPC bridge, like the
-// Yjs updates above. All paths are validated inside the vault by Rust.
+// Reads answer with raw bytes, like the CRDT reads above — the whole response
+// body IS the file, so there is no frame. All paths are validated inside the
+// vault by Rust.
 
 export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
-  invoke<number[]>("read_binary_file", {
+  invoke<ArrayBuffer>("read_binary_file", {
     relPath,
     expectedEpoch: expectedEpoch ?? null,
-  }).then((a) => Uint8Array.from(a));
+  }).then((b) => new Uint8Array(b));
 
 export const writeBinaryFile = (
   relPath: string,
   bytes: Uint8Array,
   expectedEpoch?: VaultEpoch,
 ) =>
-  invoke<void>("write_binary_file", {
-    relPath,
-    bytes: Array.from(bytes),
-    expectedEpoch: expectedEpoch ?? null,
-  });
+  invoke<void>(
+    "write_binary_file",
+    frame({ relPath, expectedEpoch: expectedEpoch ?? null }, bytes),
+  );
 
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
 export const readExternalFile = (path: string) =>
-  invoke<number[]>("read_external_file", { path }).then((a) => Uint8Array.from(a));
+  invoke<ArrayBuffer>("read_external_file", { path }).then((b) => new Uint8Array(b));
 
 // ---- OS keychain (Phase 2 auth, spec 04 §7) -------------------------------
 // Session tokens live in the OS keychain, never in localStorage/plaintext.
