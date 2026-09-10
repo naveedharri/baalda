@@ -8,6 +8,52 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Changed
+- **Launch no longer waits for the network.** The whole UI used to be gated on
+  the session restore, which ends in the sync reconcile — a full disk walk, ~14
+  serial HTTP round trips and three reads of a `.context/config.json` that is
+  1.85 MB on a 6k-note vault — so the window sat on "Loading…" for seconds. The
+  boot flag now covers only the vault open: the sidebar paints as soon as the
+  tree is in the store, and `initAuth` runs detached behind a generation guard
+  (`authInitGen`), so a sign-in/sign-out performed meanwhile always wins over
+  the restore that lands after it. Inside the restore, the roster and the
+  billing flag run in parallel, `refreshVault`'s three independent GETs run in
+  parallel, and seat usage no longer gates the landing. `AccountMenu` gained an
+  `authPending` state, so the identity bar names the open vault instead of
+  claiming "Local · not synced" while the answer is still in flight.
+- **Sync enables in two phases, so a first click is safe.** `SyncManager.enable`
+  now primes the registry from the folder's own `.context/config.json` before
+  any round trip (`VaultRegistry.primeLocal`), which makes every already-mapped
+  note openable *with* a provider — pull-before-seed — while the structural
+  reconcile is still running. The prime is a second, narrower flag than
+  `enabled` on purpose: the watcher pipeline, the debounced registry pull and
+  attachments stay off until the reconcile finishes, because a pull racing a
+  reconcile is its own class of bug. A folder whose config carries no
+  `organizationId` stamp, or a foreign one, refuses to prime. The landing and
+  the vault switch pass `{ background: true }` and return at the prime; "Turn on
+  sync" still waits for the whole enable. New pure `lib/sync/openGate.ts` holds
+  the rule for a click that beats the prime (wait for a folder we know syncs;
+  open at once for one we know is local, or when signed out), with a 3 s belt so
+  nothing can wedge the first click.
+- **`peek_vault_config` → `peek_vault_stamp`.** The launch path asked three
+  times "which vault does this folder belong to?", and every answer shipped the
+  folder's entire config — doc-id map included — over IPC to be JSON-parsed in
+  the webview. The new command streams the file in Rust and returns just
+  `{ organizationId, serverVaultId }`; `rediscoverVaultFolder` now takes those
+  typed stamps instead of raw JSON. The registry still reads the full file —
+  once per boot, shared between the prime and the reconcile.
+- **The reconcile stopped doing work nobody used.** `GET /api/notes` was
+  downloaded on every pass to answer one boolean only a just-created vault can
+  act on (and `syncStructure` fetches the same endpoint again regardless), so it
+  is now requested only when a seed is actually possible. `list_note_titles` —
+  which parks on the SQLite write lock held by the background rebuild — became a
+  memoized thunk that fires only when some on-disk note is unmapped or missing
+  from the server: zero calls on a steady-state relaunch.
+- **CRDT compaction counts bytes, not just rows.** The trigger was ">64 updates,
+  checked at load", and on a 5,933-note vault it had never fired (busiest doc:
+  58 updates) while 28 individual updates were over 1 MB each. `compactBytes`
+  (1 MB) now fires alongside `compactThreshold`, and both are checked live as
+  well as at load, so a paste or an AI rewrite no longer leaves megabytes of log
+  to replay on every open of that note.
 - **Billing → Transfer is a dialog, not a one-item menu.** Clicking Transfer on
   a Pro vault now opens a dialog that names the vault the subscription is
   leaving, lists every eligible destination as a selectable card with its seat
@@ -17,6 +63,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `confirmDisabled` prop so the confirm waits for a pick.
 
 ### Added
+- **Boot instrumentation.** `lib/perf.ts` marks `script`, `react-mount`,
+  `tree-ready`, `tree-painted`, `auth-resolved`, `sync-primed`, `sync-enabled`,
+  `reconcile-done` and `index-ready` — one `performance.mark` plus one
+  `[boot] <name> +Nms` line each, which `mirrorConsoleToTerminal` puts in the
+  `tauri dev` terminal. `tree-painted` is the number the user feels;
+  `reconcile-done` is the one that must not regress.
 - **Leave a vault you don't own** (#121). Members and admins get a **Leave**
   action in Vault Settings → Vaults. The server ends the membership the same way
   an admin's removal does — membership row, shares granted to you, your live
@@ -33,6 +85,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **A queued local-change push could park forever.** `runLocalChangePush`
+  returned without re-arming its drain timer when the vault engine was not up
+  yet, leaving the queued notes waiting on a timer nothing would set again. It
+  now retries, exactly like the uploader-busy branch beside it.
 - **Sidebar presence no longer waits out the backfill.** A client announced
   which note it was viewing only after the server's `ready` — i.e. after the
   entire vault download — and the roster round that reveals everyone *else* is

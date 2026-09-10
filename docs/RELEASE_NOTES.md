@@ -1,2 +1,3 @@
+- Baalda now opens straight into your vault: the sidebar appears right away and signing in, syncing and indexing carry on in the background. Notes you click in those first moments still open safely
 - You can now leave a vault you don't own: Vault Settings → Vaults → Leave. The vault is removed from your devices, the owner is notified by email, and you get a receipt
 - Moving a Pro subscription to another vault now opens a clear dialog that shows each eligible vault with its members and explains what changes, instead of a bare dropdown
