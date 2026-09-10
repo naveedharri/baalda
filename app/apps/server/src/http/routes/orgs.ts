@@ -11,6 +11,8 @@ import {
 } from "../../billing/store.js";
 import { announceMemberJoined } from "../../sync/member-events.js";
 import { billingEnabled } from "../../config.js";
+import { dispatchMail, emailEnabled } from "../../email/mailer.js";
+import { memberLeftEmail, youLeftVaultEmail } from "../../email/templates.js";
 import type { BillingProvider } from "../../billing/provider.js";
 
 /**
@@ -22,6 +24,12 @@ import type { BillingProvider } from "../../billing/provider.js";
  *    a 'member' of that vault (idempotent if already a member). A pending email
  *    invitation for the same address is consumed on the way in — same role,
  *    same end state as accepting it.
+ *  - POST   /api/orgs/:orgId/leave → a **member or admin** removes themselves
+ *    from a vault they don't own (#121). Same teardown as being removed by an
+ *    admin — membership row, direct shares, live sockets — plus the leaver's
+ *    sessions stop pointing at the vault, and the owner and the leaver are each
+ *    emailed when the server can send mail. The owner gets 409
+ *    `owner_cannot_leave`: their exit is DELETE below (or, one day, a transfer).
  *  - DELETE /api/orgs/:orgId → the vault **owner** permanently deletes the
  *    vault everywhere: members, invitations, note collections, folders, notes, files,
  *    shares, join codes, and MCP tokens cascade from the `organization` row;
@@ -95,6 +103,75 @@ async function resolveActiveOrg(
     [userId],
   );
   return rows.length === 1 ? rows[0].organizationId : null;
+}
+
+/**
+ * Take one user out of a vault. Shared by "admin removes a member" and "a member
+ * leaves" so the two can never drift — every hole this closes was found once
+ * already (#16):
+ *   1. delete the `member` row — their org-wide "Open" grant stops applying
+ *      (the resolver gates it on membership) and the next sync-token mint 403s;
+ *   2. purge their per-user shares — those are NOT membership-gated, so a folder
+ *      or file shared directly to them would survive step 1;
+ *   3. clear the vault from any of their sessions that had it active, so a
+ *      device of theirs that reloads doesn't come back asking for a vault it
+ *      can't see;
+ *   4. force-close live sockets so access dies now, not at token expiry.
+ *
+ * Shares the user *created for others* (`created_by`) are untouched — only
+ * grants TO this user (`principal_id`) go.
+ */
+async function revokeMembership(deps: OrgDeps, orgId: string, userId: string): Promise<void> {
+  // Snapshot the org's docs so we can kill any live sockets the departing
+  // member holds. closeConnections on a doc with no live socket is a cheap
+  // no-op, so covering every doc in the org is fine (this is rare).
+  const vaults = await pool.query<{ id: string }>(
+    "SELECT id FROM vaults WHERE organization_id = $1",
+    [orgId],
+  );
+  const vaultIds = vaults.rows.map((r) => r.id);
+  const docs = vaultIds.length
+    ? await pool.query<{ id: string; vault_id: string }>(
+        `SELECT id, vault_id FROM notes WHERE vault_id = ANY($1)
+         UNION ALL
+         SELECT id, vault_id FROM files WHERE vault_id = ANY($1)`,
+        [vaultIds],
+      )
+    : { rows: [] as Array<{ id: string; vault_id: string }> };
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM member WHERE "organizationId" = $1 AND "userId" = $2`, [
+      orgId,
+      userId,
+    ]);
+    await client.query(
+      `DELETE FROM shares
+        WHERE org_id = $1 AND principal_type = 'user' AND principal_id = $2`,
+      [orgId, userId],
+    );
+    await client.query(
+      `UPDATE session SET "activeOrganizationId" = NULL
+        WHERE "userId" = $1 AND "activeOrganizationId" = $2`,
+      [userId, orgId],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Membership is gone, so a reconnect now fails at token mint (403). Kick the
+  // live sockets AFTER the delete so the auto-reconnect can't re-mint a token.
+  for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
+  // …and tell the vault channel, which `disconnectDoc` cannot reach. Also after
+  // the commit, deliberately: the channel answers by re-running
+  // `listReadableDocsInVault`, which has to see the post-delete state to
+  // conclude the departed member may now read nothing.
+  for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
 }
 
 export function createOrgRoutes(deps: OrgDeps): Hono {
@@ -384,8 +461,9 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
   //      or file shared directly to them would survive step 1 (see issue #16);
   //   3. force-close live sockets so access dies now, not at token expiry.
   // Owner can remove anyone but themselves; an admin can remove only plain members
-  // (not another admin or the owner). Self-removal ("leave") is intentionally not
-  // supported here yet.
+  // (not another admin or the owner). Self-removal is POST /orgs/:orgId/leave
+  // below — a different authz shape (any non-owner, only themselves) that
+  // shares the teardown, not the checks.
   orgRoutes.delete("/orgs/:orgId/members/:userId", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -411,56 +489,77 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "Only the owner can remove an admin" }, 403);
     }
 
-    // Snapshot the org's docs so we can kill any live sockets the removed member
-    // holds. closeConnections on a doc with no live socket is a cheap no-op, so
-    // covering every doc in the org is fine (member removal is rare).
-    const vaults = await pool.query<{ id: string }>(
-      "SELECT id FROM vaults WHERE organization_id = $1",
-      [orgId],
-    );
-    const vaultIds = vaults.rows.map((r) => r.id);
-    const docs = vaultIds.length
-      ? await pool.query<{ id: string; vault_id: string }>(
-          `SELECT id, vault_id FROM notes WHERE vault_id = ANY($1)
-           UNION ALL
-           SELECT id, vault_id FROM files WHERE vault_id = ANY($1)`,
-          [vaultIds],
-        )
-      : { rows: [] as Array<{ id: string; vault_id: string }> };
+    await revokeMembership(deps, orgId, targetUserId);
+    return c.json({ removed: true });
+  });
 
-    // Drop membership + direct grants together. `shares.org_id` scopes the
-    // purge to this org; shares the member *created for others* (created_by)
-    // are untouched — only grants TO this user (principal_id) are removed.
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(
-        `DELETE FROM member WHERE "organizationId" = $1 AND "userId" = $2`,
-        [orgId, targetUserId],
+  // Leave a vault you don't own (#121). Any admin or member, any time, no
+  // approval — membership is theirs to end. The owner is refused with a 409
+  // that points at the exit they DO have (delete the vault): with no ownership
+  // transfer yet, an owner walking out would strand a vault nobody can manage
+  // or stop paying for.
+  orgRoutes.post("/orgs/:orgId/leave", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+
+    const role = await orgRole(orgId, session.userId);
+    if (!role) return c.json({ error: "Unknown vault" }, 404);
+    if (role === "owner") {
+      return c.json(
+        {
+          error: "owner_cannot_leave",
+          message:
+            "You own this vault, so you can't leave it. Delete the vault instead, or hand it to someone else first.",
+        },
+        409,
       );
-      await client.query(
-        `DELETE FROM shares
-          WHERE org_id = $1 AND principal_type = 'user' AND principal_id = $2`,
-        [orgId, targetUserId],
-      );
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
     }
 
-    // Membership is gone, so a reconnect now fails at token mint (403). Kick the
-    // live sockets AFTER the delete so the auto-reconnect can't re-mint a token.
-    for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
-    // …and tell the vault channel, which `disconnectDoc` cannot reach. Also after
-    // the commit, deliberately: the channel answers by re-running
-    // `listReadableDocsInVault`, which has to see the post-delete state to
-    // conclude the removed member may now read nothing.
-    for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
+    // Names for the emails, read BEFORE the membership goes so the owner
+    // lookup still resolves through the org. `user.name` is NOT NULL but may
+    // be blank; the template falls back to the address.
+    const { rows: people } = await pool.query<{
+      role: string;
+      email: string;
+      name: string;
+      org_name: string;
+    }>(
+      `SELECT m.role, u.email, u.name, o.name AS org_name
+         FROM member m
+         JOIN "user" u ON u.id = m."userId"
+         JOIN organization o ON o.id = m."organizationId"
+        WHERE m."organizationId" = $1
+          AND (m.role = 'owner' OR m."userId" = $2)`,
+      [orgId, session.userId],
+    );
+    const owner = people.find((p) => p.role === "owner") ?? null;
+    const me = people.find((p) => p.email === session.email) ?? people.find((p) => p.role !== "owner") ?? null;
+    const orgName = people[0]?.org_name ?? "your vault";
 
-    return c.json({ removed: true });
+    await revokeMembership(deps, orgId, session.userId);
+
+    // Fire-and-forget, after the commit: a mail failure must never undo or
+    // block a leave, and nothing here is a link the reader has to follow.
+    if (emailEnabled()) {
+      if (owner) {
+        dispatchMail(
+          "member-left notice",
+          memberLeftEmail({
+            to: owner.email,
+            organizationName: orgName,
+            memberName: me?.name ?? null,
+            memberEmail: session.email,
+          }),
+        );
+      }
+      dispatchMail(
+        "you-left receipt",
+        youLeftVaultEmail({ to: session.email, organizationName: orgName }),
+      );
+    }
+
+    return c.json({ left: true });
   });
 
   // Change a member's role (owner/admin). Same authz shape as removal: owner

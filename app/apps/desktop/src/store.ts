@@ -476,6 +476,11 @@ interface AppStore {
   /** Detach a vault from THIS device (forget its folder, stop syncing it).
    *  Server data and membership are untouched — it can be re-opened later. */
   removeVaultLocally: (organizationId: string) => Promise<void>;
+  /** Leave a vault you don't own: end the membership on the server, then take
+   *  the vault off THIS device for good — switcher, recents, and its folder
+   *  (moved to the OS Trash, never deleted outright). Owners get the server's
+   *  409 and are pointed at Delete instead. */
+  leaveVault: (organizationId: string) => Promise<void>;
   /** Permanently delete a vault everywhere (owner only), then detach it.
    *  Hands back the server's report so the caller can say what became of the
    *  vault's subscription — deleting a Pro vault stops it at the END of the
@@ -2662,6 +2667,30 @@ export const useStore = create<AppStore>((set, get) => ({
       }
     }
     await get().refreshVault();
+  },
+
+  leaveVault: async (organizationId) => {
+    // Where this vault lives here, captured BEFORE the detach forgets it.
+    const path = readOrgVaults()[organizationId] ?? null;
+    // Server first: an owner's 409 (or being offline) must leave this device
+    // exactly as it was. Once this returns, the membership is gone everywhere.
+    await authManager.api.leaveVault(organizationId);
+    // Then the same detach a device-level removal does — switch off it if it
+    // is open, forget its folder binding, re-list the account's vaults.
+    await get().removeVaultLocally(organizationId);
+    // The server unpinned the vault from our session; pick that up so nothing
+    // here keeps asking about a vault we can no longer see.
+    const refreshed = await authManager.currentSession().catch(() => null);
+    if (refreshed) set({ session: refreshed });
+    // Finally the folder itself. A departed member should not keep a copy of
+    // the team's notes lying around, so unlike "Remove from device" this one
+    // goes — to the Trash, where a mistaken click is still recoverable. Never
+    // the folder that is open now (the detach above may have switched into it).
+    if (path && get().vault?.path !== path) {
+      await ipc.deleteVault(path).catch((e: unknown) => {
+        console.warn("[vault] left the vault but couldn't trash its folder", path, e);
+      });
+    }
   },
 
   deleteRemoteVault: async (organizationId) => {

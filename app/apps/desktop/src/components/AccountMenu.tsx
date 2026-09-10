@@ -1358,6 +1358,11 @@ function VaultsTab() {
   >(null);
   // local-vault path whose file deletion is awaiting a second confirming click.
   const [confirmDeleteLocal, setConfirmDeleteLocal] = useState<string | null>(null);
+  // A vault the user is about to leave (#121). Always the full dialog: it has
+  // to say that the folder on this device goes too, which a row can't.
+  const [confirmLeave, setConfirmLeave] = useState<{ orgId: string; name: string } | null>(
+    null,
+  );
   const [actionError, setActionError] = useState<string | null>(null);
   // Free-plan vault-cap hit while creating — shows an upgrade nudge instead.
   const [limitNudge, setLimitNudge] = useState<{ kind: LimitKind; limit: number | null } | null>(
@@ -1389,6 +1394,10 @@ function VaultsTab() {
     members.find((m) => m.userId === session?.user.id)?.role === "owner";
   const canDelete = (orgId: string) =>
     orgId === activeOrgId ? isActiveOwner : true;
+  // Same uncertainty, mirrored: on the active row Leave is for non-owners
+  // only; elsewhere both are offered and the server's 409 settles it.
+  const canLeave = (orgId: string) =>
+    orgId === activeOrgId ? !isActiveOwner : true;
 
   const folderName = (orgId: string): string | null => {
     const p = bound[orgId];
@@ -1495,6 +1504,27 @@ function VaultsTab() {
       setActionError(message);
       // Destructive path: a failure here must never look like a success (#85).
       toast(`Couldn't delete the vault — ${message}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Leave a vault someone else owns (confirmed above). Server first, then the
+  // vault leaves this device entirely; the dialog stays open on failure so the
+  // server's reason (an owner's 409, offline) has somewhere to show.
+  const leaveVault = async (orgId: string, name: string) => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await useStore.getState().leaveVault(orgId);
+      setBound(readOrgVaults());
+      setConfirmLeave(null);
+      toast(`You left ${name}.`, "neutral");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setActionError(message);
+      toast(`Couldn't leave the vault — ${message}`, "error");
     } finally {
       setBusy(false);
     }
@@ -1655,6 +1685,19 @@ function VaultsTab() {
                   >
                     Remove from device
                   </AsyncButton>
+                  {canLeave(o.id) && (
+                    <button
+                      className="link-btn danger"
+                      disabled={busy}
+                      title="Leave this vault — you lose access and it is removed from this device"
+                      onClick={() => {
+                        setActionError(null);
+                        setConfirmLeave({ orgId: o.id, name: o.name });
+                      }}
+                    >
+                      Leave
+                    </button>
+                  )}
                   {canDelete(o.id) && (
                     <AsyncButton
                       className="link-btn danger"
@@ -1888,6 +1931,33 @@ function VaultsTab() {
       )}
 
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
+
+      {confirmLeave && (
+        <ConfirmDialog
+          title={`Leave ${confirmLeave.name}?`}
+          confirmLabel="Leave vault"
+          onCancel={() => setConfirmLeave(null)}
+          onConfirm={() => leaveVault(confirmLeave.orgId, confirmLeave.name)}
+        >
+          <p>
+            You lose access to this vault on all your devices right away, and the
+            owner is told that you left.
+          </p>
+          <p>
+            {bound[confirmLeave.orgId] ? (
+              <>
+                Its folder on this device, <strong>{folderName(confirmLeave.orgId)}</strong>,
+                moves to the Trash.
+              </>
+            ) : (
+              "Nothing from it is stored on this device."
+            )}{" "}
+            The vault itself and everyone else's access are unchanged.
+          </p>
+          <p>To come back later, you'll need a new invitation or join code.</p>
+          {actionError && <div className="auth-error">{actionError}</div>}
+        </ConfirmDialog>
+      )}
 
       {subDelete && (
         <ConfirmDialog

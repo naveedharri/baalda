@@ -17,6 +17,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `confirmDisabled` prop so the confirm waits for a pick.
 
 ### Added
+- **Leave a vault you don't own** (#121). Members and admins get a **Leave**
+  action in Vault Settings → Vaults. The server ends the membership the same way
+  an admin's removal does — membership row, shares granted to you, your live
+  sync sockets, and the vault is unpinned from your sessions — and, when email
+  is configured, tells the owner you left and sends you a receipt. On the
+  device you leave from the vault goes for good: out of the switcher and
+  recents, and its folder moves to the OS Trash instead of lingering as a local
+  copy. The owner is refused (`409 owner_cannot_leave`) and pointed at Delete.
+  New route `POST /api/orgs/:orgId/leave`; two new email templates.
 - **Tabs for open files.** Every note you open now stays open as a tab in a
   strip under the header — click to switch, × or middle-click to close, and
   closing the active tab lands on its neighbour. Tabs follow renames and moves

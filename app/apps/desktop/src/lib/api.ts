@@ -1035,6 +1035,20 @@ export class ApiClient {
   }
 
   /**
+   * Leave a vault you don't own (#121). The server drops the membership, purges
+   * shares granted directly to you, unpins the vault from your sessions and
+   * force-closes your live sync sockets — the same teardown as being removed by
+   * an admin. Throws ApiError 409 `owner_cannot_leave` for the owner (their exit
+   * is deleteRemoteVault) and 404 when you aren't a member.
+   */
+  async leaveVault(organizationId: string): Promise<void> {
+    await this.request<{ left: boolean }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(organizationId)}/leave`,
+    );
+  }
+
+  /**
    * Change a member's role (owner/admin). Same authz shape as removeMember:
    * an admin may only change plain members; nobody touches the owner or
    * themselves. The server force-closes the member's live sync sockets so the
