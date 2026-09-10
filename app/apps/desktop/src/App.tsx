@@ -39,6 +39,8 @@ import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
+import { prefetchAfterPaint } from "./lib/prefetch";
+import { revealWindowOnce } from "./lib/windowReveal";
 
 /* Lazy chunks. Each of these is either a rare deliberate action (the graph),
    a modal (settings, auth), or big enough that the first paint should not wait
@@ -687,6 +689,17 @@ export default function App() {
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
+
+  // Reveal the window on React's FIRST commit — deliberately not on the tree
+  // or on `!booting`. That first commit is the themed shell, so the user gets a
+  // correctly coloured window immediately instead of an empty frame while the
+  // bundle parses; holding it back until the sidebar has data would hide the
+  // app for the whole boot sequence. Effects run before the `booting` early
+  // return below, so this fires on the shell.
+  useEffect(() => {
+    revealWindowOnce();
+    prefetchAfterPaint();
+  }, []);
 
   // The history panel is about ONE note; switching notes under it would leave a
   // list of versions that no longer belong to what's in the editor.
