@@ -1272,8 +1272,77 @@ pub async fn list_note_titles(
 
 // ---- CRDT persistence commands (Phase 1, spec 02 §4) ----------------------
 //
-// Binary Yjs updates cross the IPC boundary as JSON number arrays (Vec<u8>).
 // The TS bridge owns all Yjs semantics; these commands are a thin durable store.
+//
+// Reads answer with RAW BYTES (`tauri::ipc::Response`), framed by the encoders
+// below and decoded by `src/lib/ipcCodec.ts`. They used to answer with
+// serde-serialized `Vec<u8>`, i.e. JSON number arrays: the largest doc on the
+// vault this was measured against holds 17.7 MB of CRDT, which is ≈62 MB of
+// JSON text for the webview to parse before a character of the note is on
+// screen, and ~40 docs there are over 1 MB. The frame formats are pinned by
+// `encode_yjs_state_round_trips` / `encode_state_vectors_round_trips` here and
+// by `src/lib/__tests__/ipcCodec.test.ts` against the same byte fixtures.
+
+/// Frame a doc's CRDT state as raw bytes — see `ipcCodec.ts` `decodeYjsState`:
+///
+/// ```text
+/// [u8  has_snapshot]  1 when a snapshot row exists
+/// [u32 snapshot_len]  0 when has_snapshot == 0
+/// [snapshot bytes]
+/// [u32 update_count]
+/// update_count × ([u32 len][bytes])
+/// ```
+///
+/// Little-endian throughout. An explicit flag byte rather than a length
+/// sentinel, because a zero-length snapshot and a missing snapshot are
+/// genuinely different states here: `save_yjs_state_vectors` creates rows with a
+/// NULL snapshot, and `Index::load_yjs_state` goes out of its way to keep the
+/// two apart.
+fn encode_yjs_state(state: &YjsState) -> Vec<u8> {
+    let snapshot_len = state.snapshot.as_ref().map_or(0, |s| s.len());
+    let mut out = Vec::with_capacity(
+        1 + 4 + snapshot_len + 4 + state.updates.iter().map(|u| 4 + u.len()).sum::<usize>(),
+    );
+    out.push(u8::from(state.snapshot.is_some()));
+    out.extend_from_slice(&(snapshot_len as u32).to_le_bytes());
+    if let Some(s) = &state.snapshot {
+        out.extend_from_slice(s);
+    }
+    out.extend_from_slice(&(state.updates.len() as u32).to_le_bytes());
+    for u in &state.updates {
+        out.extend_from_slice(&(u.len() as u32).to_le_bytes());
+        out.extend_from_slice(u);
+    }
+    out
+}
+
+/// Frame the state-vector manifest — see `ipcCodec.ts` `decodeStateVectors`:
+///
+/// ```text
+/// [u32 count]
+/// count × ([u32 id_len][id utf8][u32 sv_len][sv bytes])
+/// ```
+///
+/// `u32` for the id length too, not `u16`: doc ids are UUIDs today, but the
+/// framing must not carry that assumption, and four bytes per row is nothing
+/// against the 6,283 rows one launch reads.
+fn encode_state_vectors(rows: &[YjsStateVector]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        4 + rows
+            .iter()
+            .map(|r| 8 + r.doc_id.len() + r.state_vector.len())
+            .sum::<usize>(),
+    );
+    out.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+    for r in rows {
+        let id = r.doc_id.as_bytes();
+        out.extend_from_slice(&(id.len() as u32).to_le_bytes());
+        out.extend_from_slice(id);
+        out.extend_from_slice(&(r.state_vector.len() as u32).to_le_bytes());
+        out.extend_from_slice(&r.state_vector);
+    }
+    out
+}
 
 #[tauri::command]
 pub async fn append_yjs_update(
@@ -1295,23 +1364,23 @@ pub async fn load_yjs_state(
     state: State<'_, AppState>,
     doc_id: String,
     expected_epoch: Option<u64>,
-) -> AppResult<YjsState> {
+) -> AppResult<tauri::ipc::Response> {
     let (_, index) = require_vault_at(&state, expected_epoch)?;
     let started = std::time::Instant::now();
     let loaded = {
         let guard = index.lock().unwrap();
         guard.load_yjs_state(&doc_id)?
     };
-    let bytes = loaded.snapshot.as_ref().map_or(0, |s| s.len())
-        + loaded.updates.iter().map(|u| u.len()).sum::<usize>();
-    if bytes >= LARGE_DOC_LOG_BYTES {
+    let updates = loaded.updates.len();
+    let bytes = encode_yjs_state(&loaded);
+    if bytes.len() >= LARGE_DOC_LOG_BYTES {
         log::info!(
-            "[yjs] load {doc_id}: {bytes} B in {} updates, read in {} ms",
-            loaded.updates.len(),
+            "[yjs] load {doc_id}: {} B in {updates} updates, framed in {} ms",
+            bytes.len(),
             started.elapsed().as_millis()
         );
     }
-    Ok(loaded)
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -1388,26 +1457,30 @@ pub async fn prune_yjs_docs(
 pub async fn list_yjs_state_vectors(
     state: State<'_, AppState>,
     expected_epoch: Option<u64>,
-) -> AppResult<Vec<YjsStateVector>> {
+) -> AppResult<tauri::ipc::Response> {
     let (_, index) = require_vault_at(&state, expected_epoch)?;
-    let guard = index.lock().unwrap();
-    guard.list_yjs_state_vectors()
+    let rows = {
+        let guard = index.lock().unwrap();
+        guard.list_yjs_state_vectors()?
+    };
+    Ok(tauri::ipc::Response::new(encode_state_vectors(&rows)))
 }
 
 // ---- Attachment I/O (Phase 3 blob store, spec 02 §2) ----------------------
 //
-// Raw bytes cross the IPC boundary as JSON number arrays (Vec<u8>), like the
-// Yjs updates above. Every path is validated to stay inside the vault. These
-// never touch the note/CRDT pipeline.
+// Reads answer with raw bytes (`tauri::ipc::Response`) like the CRDT reads
+// above — no framing needed, the whole body is the file. Every path is
+// validated to stay inside the vault. These never touch the note/CRDT pipeline.
 
 #[tauri::command]
 pub async fn read_binary_file(
     state: State<'_, AppState>,
     rel_path: String,
     expected_epoch: Option<u64>,
-) -> AppResult<Vec<u8>> {
+) -> AppResult<tauri::ipc::Response> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    attachments::read_binary_file(&vault, &rel_path)
+    let bytes = attachments::read_binary_file(&vault, &rel_path)?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -1434,8 +1507,10 @@ pub async fn list_attachments(
 /// Unlike `read_binary_file` this is NOT vault-scoped — the bytes are on their
 /// way into an attachment; the path came from a user drag-drop, not the tree.
 #[tauri::command]
-pub async fn read_external_file(path: String) -> AppResult<Vec<u8>> {
-    std::fs::read(&path).map_err(|e| AppError::new(format!("read external file failed: {e}")))
+pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response> {
+    let bytes = std::fs::read(&path)
+        .map_err(|e| AppError::new(format!("read external file failed: {e}")))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[cfg(test)]
@@ -1496,6 +1571,116 @@ mod tests {
             peek_vault_config(file.to_string_lossy().to_string()).unwrap(),
             None
         );
+    }
+
+    /// The `ipcCodec.ts` decoder, in Rust, so a round trip pins the frame
+    /// format from this side too. `src/lib/__tests__/ipcCodec.test.ts` asserts
+    /// the same byte fixtures from the TS side.
+    fn decode_yjs_state(buf: &[u8]) -> (Option<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut off = 0usize;
+        let has_snapshot = buf[off] == 1;
+        off += 1;
+        let take_u32 = |buf: &[u8], off: &mut usize| -> usize {
+            let n = u32::from_le_bytes([buf[*off], buf[*off + 1], buf[*off + 2], buf[*off + 3]]);
+            *off += 4;
+            n as usize
+        };
+        let snapshot_len = take_u32(buf, &mut off);
+        let snapshot = if has_snapshot {
+            Some(buf[off..off + snapshot_len].to_vec())
+        } else {
+            None
+        };
+        off += snapshot_len;
+        let count = take_u32(buf, &mut off);
+        let mut updates = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = take_u32(buf, &mut off);
+            updates.push(buf[off..off + len].to_vec());
+            off += len;
+        }
+        assert_eq!(off, buf.len(), "frame must be consumed exactly");
+        (snapshot, updates)
+    }
+
+    fn yjs_state(snapshot: Option<Vec<u8>>, updates: Vec<Vec<u8>>) -> YjsState {
+        let update_count = updates.len() as i64;
+        YjsState {
+            snapshot,
+            updates,
+            update_count,
+        }
+    }
+
+    /// The four shapes a doc's persisted state actually takes, byte-for-byte.
+    /// A missing snapshot and an empty snapshot are different states (a state
+    /// vector recorded for a never-snapshotted doc leaves a NULL snapshot), so
+    /// the flag byte has to survive the round trip on its own.
+    #[test]
+    fn encode_yjs_state_round_trips() {
+        let cases = vec![
+            yjs_state(None, vec![]),
+            yjs_state(None, vec![vec![1, 2], vec![3], vec![4, 5, 6]]),
+            yjs_state(Some(vec![9, 9, 9]), vec![]),
+            // Includes a zero-length update: a length prefix of 0 must not read
+            // as "end of frame".
+            yjs_state(Some(vec![7]), vec![vec![], vec![255, 0, 128]]),
+        ];
+        for state in &cases {
+            let (snapshot, updates) = decode_yjs_state(&encode_yjs_state(state));
+            assert_eq!(snapshot, state.snapshot);
+            assert_eq!(updates, state.updates);
+        }
+
+        // The empty state is the shortest legal frame: flag + len + count.
+        assert_eq!(encode_yjs_state(&yjs_state(None, vec![])), vec![0; 9]);
+        // An EMPTY snapshot still sets the flag byte, so it cannot be confused
+        // with a doc that has none.
+        assert_eq!(
+            encode_yjs_state(&yjs_state(Some(vec![]), vec![]))[0],
+            1,
+            "an empty snapshot is not a missing snapshot"
+        );
+    }
+
+    /// Doc ids are UUIDs today; the framing must not depend on that, hence the
+    /// multi-byte id (its byte length and its char count differ).
+    #[test]
+    fn encode_state_vectors_round_trips() {
+        let rows = vec![
+            YjsStateVector {
+                doc_id: "doc-1".to_string(),
+                state_vector: vec![1, 2, 3],
+            },
+            YjsStateVector {
+                doc_id: "notité-🔒".to_string(),
+                state_vector: vec![],
+            },
+        ];
+        let buf = encode_state_vectors(&rows);
+
+        let mut off = 0usize;
+        let take_u32 = |buf: &[u8], off: &mut usize| -> usize {
+            let n = u32::from_le_bytes([buf[*off], buf[*off + 1], buf[*off + 2], buf[*off + 3]]);
+            *off += 4;
+            n as usize
+        };
+        let count = take_u32(&buf, &mut off);
+        assert_eq!(count, 2);
+        for expected in &rows {
+            let id_len = take_u32(&buf, &mut off);
+            let id = std::str::from_utf8(&buf[off..off + id_len]).unwrap();
+            off += id_len;
+            let sv_len = take_u32(&buf, &mut off);
+            let sv = buf[off..off + sv_len].to_vec();
+            off += sv_len;
+            assert_eq!(id, expected.doc_id);
+            assert_eq!(sv, expected.state_vector);
+        }
+        assert_eq!(off, buf.len(), "frame must be consumed exactly");
+
+        // An empty manifest is a bare count of zero, not an empty body.
+        assert_eq!(encode_state_vectors(&[]), vec![0, 0, 0, 0]);
     }
 
     /// Two vaults may share a name (identity is the doc_ids, not the name), so

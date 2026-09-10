@@ -118,7 +118,7 @@ vi.mock("../../ipc", () => ({
   }),
   loadYjsState: vi.fn(async (docId: string) =>
     fakeDisk.crdt.has(docId)
-      ? { snapshot: [1], updates: [], updateCount: 0 }
+      ? { snapshot: new Uint8Array([1]), updates: [], updateCount: 0 }
       : { snapshot: null, updates: [], updateCount: 0 },
   ),
   clearYjsDoc: vi.fn(async () => {}),

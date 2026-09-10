@@ -6,6 +6,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { decodeStateVectors, decodeYjsState, type YjsState } from "./ipcCodec";
+
+// The binary commands (CRDT state, attachment bytes) speak raw bytes, framed by
+// `ipcCodec.ts` — see that module for why and for the frame layouts.
+export type { YjsState } from "./ipcCodec";
 
 /** Open an external URL (markdown links) in the user's default browser. */
 export const openExternal = (url: string) => openUrl(url);
@@ -168,13 +173,6 @@ export interface NoteTitle {
 export interface ResolvedLink {
   id: string;
   path: string;
-}
-
-/** A doc's persisted CRDT state (spec 02 §4). Binary blobs cross IPC as number arrays. */
-export interface YjsState {
-  snapshot: number[] | null;
-  updates: number[][];
-  updateCount: number;
 }
 
 export interface FileChanged {
@@ -401,7 +399,8 @@ export const listNoteTitles = (expectedEpoch?: VaultEpoch) =>
   invoke<NoteTitle[]>("list_note_titles", { expectedEpoch: expectedEpoch ?? null });
 
 // ---- CRDT persistence (Phase 1, spec 02 §4) ------------------------------
-// Binary Yjs updates are marshalled as plain number arrays over the IPC bridge.
+// Reads come back as raw bytes and are decoded by `ipcCodec.ts`; writes still
+// marshal their bytes as number arrays (see the outbound half in `ipcCodec`).
 
 export const appendYjsUpdate = (
   docId: string,
@@ -414,8 +413,14 @@ export const appendYjsUpdate = (
     expectedEpoch: expectedEpoch ?? null,
   });
 
-export const loadYjsState = (docId: string, expectedEpoch?: VaultEpoch) =>
-  invoke<YjsState>("load_yjs_state", { docId, expectedEpoch: expectedEpoch ?? null });
+export const loadYjsState = (
+  docId: string,
+  expectedEpoch?: VaultEpoch,
+): Promise<YjsState> =>
+  invoke<ArrayBuffer>("load_yjs_state", {
+    docId,
+    expectedEpoch: expectedEpoch ?? null,
+  }).then(decodeYjsState);
 
 export const saveYjsSnapshot = (
   docId: string,
@@ -476,21 +481,20 @@ export const pruneYjsDocs = (live: string[], expectedEpoch?: VaultEpoch) =>
   });
 
 export const listYjsStateVectors = (expectedEpoch?: VaultEpoch) =>
-  invoke<{ docId: string; stateVector: number[] }[]>("list_yjs_state_vectors", {
+  invoke<ArrayBuffer>("list_yjs_state_vectors", {
     expectedEpoch: expectedEpoch ?? null,
-  }).then((rows) =>
-    rows.map((r) => ({ docId: r.docId, stateVector: Uint8Array.from(r.stateVector) })),
-  );
+  }).then(decodeStateVectors);
 
 // ---- Attachment binary I/O (Phase 3 blob store, spec 02 §2) ---------------
-// Raw bytes are marshalled as plain number arrays over the IPC bridge, like the
-// Yjs updates above. All paths are validated inside the vault by Rust.
+// Reads answer with raw bytes, like the CRDT reads above — the whole response
+// body IS the file, so there is no frame. All paths are validated inside the
+// vault by Rust.
 
 export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
-  invoke<number[]>("read_binary_file", {
+  invoke<ArrayBuffer>("read_binary_file", {
     relPath,
     expectedEpoch: expectedEpoch ?? null,
-  }).then((a) => Uint8Array.from(a));
+  }).then((b) => new Uint8Array(b));
 
 export const writeBinaryFile = (
   relPath: string,
@@ -508,7 +512,7 @@ export const listAttachments = (expectedEpoch?: VaultEpoch) =>
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
 export const readExternalFile = (path: string) =>
-  invoke<number[]>("read_external_file", { path }).then((a) => Uint8Array.from(a));
+  invoke<ArrayBuffer>("read_external_file", { path }).then((b) => new Uint8Array(b));
 
 // ---- OS keychain (Phase 2 auth, spec 04 §7) -------------------------------
 // Session tokens live in the OS keychain, never in localStorage/plaintext.
