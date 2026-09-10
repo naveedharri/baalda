@@ -349,12 +349,17 @@ button.primary.hero:hover:not(:disabled) {
   cursor: default;
   user-select: none;
 }
-/* Baalda wordmark image — ink on light theme, silver on dark. */
-.wordmark { display: inline-flex; justify-content: center; }
-.wordmark-img { width: min(42vw, 670px); height: auto; display: block; }
-.wordmark-silver { display: none; }
-[data-theme="dark"] .wordmark-ink { display: none; }
-[data-theme="dark"] .wordmark-silver { display: block; }
+/* Baalda wordmark — ink on light theme, silver on dark. One background image
+   per theme, so the splash fetches only the PNG it actually shows. */
+.wordmark {
+  display: inline-block;
+  width: min(42vw, 670px);
+  aspect-ratio: 1144 / 200;
+  background: url("./assets/baalda-wordmark-ink.png") center / contain no-repeat;
+}
+[data-theme="dark"] .wordmark {
+  background-image: url("./assets/baalda-wordmark-silver.png");
+}
 .vault-actions {
   display: flex;
   flex-direction: column;
@@ -2836,7 +2841,19 @@ body:has(.sidebar-resizer.dragging) {
   flex-shrink: 0;
   display: inline-flex;
 }
-.identity-avatar-wrap .avatar {
+.identity-avatar-wrap /* Monogram stand-in while the avatar chunk loads. */
+.face-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+  font-weight: 700;
+  font-size: 0.6em;
+  line-height: 1;
+}
+
+.avatar {
   width: 32px;
   height: 32px;
   font-size: var(--fs-sm);

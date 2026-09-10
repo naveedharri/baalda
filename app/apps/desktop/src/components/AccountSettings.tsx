@@ -5,7 +5,7 @@ import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import { ACTIVITY_STATUSES, type ActivityStatus, writeServerChoice } from "../lib/prefs";
 import { checkForUpdate, currentVersion, installUpdate, useUpdateState } from "../lib/updater";
 import { useStore } from "../store";
-import { Avatar } from "./Identity";
+import { Avatar } from "./Avatar";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SettingsModal } from "./SettingsModal";
 import { Switch } from "./Switch";

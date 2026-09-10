@@ -2,3 +2,4 @@
 - You can now leave a vault you don't own: Vault Settings → Vaults → Leave. The vault is removed from your devices, the owner is notified by email, and you get a receipt
 - Moving a Pro subscription to another vault now opens a clear dialog that shows each eligible vault with its members and explains what changes, instead of a bare dropdown
 - Large notes open faster and launching does less work up front: note history now moves between the app and its storage as raw data instead of text, and reopening a vault no longer rewrites index rows that did not change
+- Faster launch: the window now opens with the app already drawn instead of a blank frame, and Baalda loads about half as much code up front (and installs smaller)

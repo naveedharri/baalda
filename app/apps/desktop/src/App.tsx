@@ -1,14 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import "./App.css";
-import { AccountMenu, AuthDialog } from "./components/AccountMenu";
+import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
-import { Editor } from "./components/Editor";
+import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
-import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
@@ -17,7 +16,6 @@ import { SidebarResizer } from "./components/SidebarResizer";
 import { TabBar } from "./components/TabBar";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
-import { VaultPicker } from "./components/VaultPicker";
 import { VersionPanel } from "./components/VersionPanel";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
@@ -42,6 +40,24 @@ import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
+import { prefetchAfterPaint } from "./lib/prefetch";
+import { revealWindowOnce } from "./lib/windowReveal";
+
+/* Lazy chunks. Each of these is either a rare deliberate action (the graph),
+   a modal (settings, auth), or big enough that the first paint should not wait
+   on it (the editor carries CodeMirror + lezer). `lib/prefetch.ts` warms the
+   editor right after the first paint, so the first note click is still
+   instant. */
+const Editor = lazy(() => import("./components/Editor").then((m) => ({ default: m.Editor })));
+const GraphView = lazy(() =>
+  import("./components/GraphView").then((m) => ({ default: m.GraphView })),
+);
+const VaultPicker = lazy(() =>
+  import("./components/VaultPicker").then((m) => ({ default: m.VaultPicker })),
+);
+const AuthDialog = lazy(() =>
+  import("./components/AuthDialog").then((m) => ({ default: m.AuthDialog })),
+);
 
 /** How often a running app re-checks for a new release (it also checks at
  *  launch). The check is one cheap GET of the release's static `latest.json`
@@ -633,23 +649,25 @@ function PromptedAuthDialog() {
     return null;
   }
   return (
-    <AuthDialog
-      // An invitee usually has no account yet — the link is often the first
-      // time they hear of us — so the invite card opens on sign-up.
-      initialMode={authPrompt === "invite" ? "sign-up" : "sign-in"}
-      onSignedIn={() => useStore.getState().setAuthPrompt(null)}
-      onClose={() => {
-        clearPendingNoteLink();
-        requestOpenVault(null);
-        useStore.getState().clearServerLink();
-        // Dismissing the card declines for now: drop the queued invitation too,
-        // or the next unrelated sign-in would surprise-join a vault.
-        // Unconditional, because an invitation can be parked behind the
-        // "server-link" prompt as well — the invite that offered the server.
-        useStore.getState().clearInvitePrompt();
-        useStore.getState().setAuthPrompt(null);
-      }}
-    />
+    <Suspense fallback={null}>
+      <AuthDialog
+        // An invitee usually has no account yet — the link is often the first
+        // time they hear of us — so the invite card opens on sign-up.
+        initialMode={authPrompt === "invite" ? "sign-up" : "sign-in"}
+        onSignedIn={() => useStore.getState().setAuthPrompt(null)}
+        onClose={() => {
+          clearPendingNoteLink();
+          requestOpenVault(null);
+          useStore.getState().clearServerLink();
+          // Dismissing the card declines for now: drop the queued invitation too,
+          // or the next unrelated sign-in would surprise-join a vault.
+          // Unconditional, because an invitation can be parked behind the
+          // "server-link" prompt as well — the invite that offered the server.
+          useStore.getState().clearInvitePrompt();
+          useStore.getState().setAuthPrompt(null);
+        }}
+      />
+    </Suspense>
   );
 }
 
@@ -675,6 +693,17 @@ export default function App() {
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
+
+  // Reveal the window on React's FIRST commit — deliberately not on the tree
+  // or on `!booting`. That first commit is the themed shell, so the user gets a
+  // correctly coloured window immediately instead of an empty frame while the
+  // bundle parses; holding it back until the sidebar has data would hide the
+  // app for the whole boot sequence. Effects run before the `booting` early
+  // return below, so this fires on the shell.
+  useEffect(() => {
+    revealWindowOnce();
+    prefetchAfterPaint();
+  }, []);
 
   // The history panel is about ONE note; switching notes under it would leave a
   // list of versions that no longer belong to what's in the editor.
@@ -988,7 +1017,11 @@ export default function App() {
     return (
       <div className="app-shell">
         <UpdateGate />
-        <VaultPicker />
+        {/* Reusing `.booting` means the loading→welcome hand-off reads as one
+            continuous boot rather than a flash of a second loader. */}
+        <Suspense fallback={<div className="booting">Loading…</div>}>
+          <VaultPicker />
+        </Suspense>
         <VaultFolderPrompt />
         <PromptedAuthDialog />
       </div>
@@ -1118,7 +1151,19 @@ export default function App() {
           <RemovedBanner />
           <DeletedByTeammateBanner />
           <div className="editor-wrap">
-            <Editor />
+            {openNote ? (
+              <Suspense
+                fallback={
+                  <div className="editor-column">
+                    <EditorSkeleton />
+                  </div>
+                }
+              >
+                <Editor />
+              </Suspense>
+            ) : (
+              <EditorEmpty />
+            )}
           </div>
           <BacklinksPanel />
           {/* Slides in over the editor from the right; anchored to .main. */}
@@ -1131,7 +1176,11 @@ export default function App() {
             resetKeys={[graphOpen]}
             onError={() => setGraphOpen(false)}
           >
-            <GraphView onClose={() => setGraphOpen(false)} />
+            {/* `.graph-view` is the full-window overlay itself, so the screen
+                dims the instant the graph is asked for, then fills in. */}
+            <Suspense fallback={<div className="graph-view" aria-busy="true" />}>
+              <GraphView onClose={() => setGraphOpen(false)} />
+            </Suspense>
           </ErrorBoundary>
         )}
         <VaultFolderPrompt />

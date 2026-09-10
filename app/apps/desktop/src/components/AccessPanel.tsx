@@ -21,7 +21,7 @@ import { lockScopesByPath, resourceIdsByPath } from "../lib/locks";
 import { syncManager } from "../lib/sync/docSession";
 import { useStore } from "../store";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { Avatar } from "./Identity";
+import { Avatar } from "./Avatar";
 import { MenuSelect, type MenuSelectOption } from "./MenuSelect";
 import { Spinner } from "./Spinner";
 

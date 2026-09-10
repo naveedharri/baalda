@@ -10,6 +10,22 @@ export default defineConfig(async () => ({
 
   build: {
     /**
+     * `minimumSystemVersion: "10.15"` (src-tauri/tauri.conf.json) means the
+     * oldest WKWebView we support is Safari 13. Vite's default target is
+     * baseline-widely-available (~Safari 16.4), which emits syntax that throws
+     * on Catalina — a correctness bug, not a size one. Keep 10.15 and target
+     * the webview that ships with it.
+     */
+    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
+    /**
+     * One stylesheet, as before the code split. The Suspense fallbacks render
+     * rules that belong to a lazy chunk's CSS (the editor skeleton, the graph
+     * overlay, the avatar monogram), and splitting them would show the
+     * fallbacks unstyled and repaint the pane when the chunk lands. The whole
+     * sheet is ~135 KB and already shipped blocking, so this costs nothing new.
+     */
+    cssCodeSplit: false,
+    /**
      * Never inline the AudioWorklet module.
      *
      * It's ~2 KB, so Vite's default `assetsInlineLimit` turns it into a `data:`

@@ -76,6 +76,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   and explains what happens to both vaults before the confirm. When some owned
   vaults are missing it says why (already on Pro). `ConfirmDialog` gained a
   `confirmDisabled` prop so the confirm waits for a pick.
+- **Faster launch, smaller app.** The window now stays hidden until the UI has
+  actually painted, so no blank frame precedes the app (a Rust timer reveals it
+  anyway after 1.5s if the webview never gets that far). The editor
+  (CodeMirror), the illustrated avatars, the graph, the settings dialog, the
+  welcome screen, and the sign-in and share dialogs each load on demand, which
+  cuts the startup bundle from 2.05 MB to ~890 KB; the editor and avatar chunks
+  are prefetched right after the first paint, so the first click still feels
+  instant. Also targets the oldest supported WKWebView (Safari 13, matching
+  `minimumSystemVersion` 10.15) instead of Vite's newer default, drops 3.2 MB
+  of unreferenced brand art and Vite template SVGs from every installer, loads
+  only the wordmark the current theme shows, and removes an unused font
+  dependency.
 
 ### Added
 - **Boot instrumentation.** `lib/perf.ts` marks `script`, `react-mount`,
