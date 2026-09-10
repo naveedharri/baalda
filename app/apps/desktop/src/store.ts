@@ -42,6 +42,7 @@ import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import type { VoiceSpeaker } from "./lib/sync/docSession";
 import { MicPermissionError } from "./lib/voice/capture";
+import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
 import {
   type ActivityStatus,
@@ -1829,6 +1830,7 @@ export const useStore = create<AppStore>((set, get) => ({
     syncManager.setColorListener((colors) => get().applyVaultColors(colors));
     try {
       const session = await authManager.init();
+      perf.mark("auth-resolved");
       set({ serverUrl: authManager.getServerUrl() });
       if (session) {
         set({ session, authStatus: "signed-in", authError: null });
@@ -3225,6 +3227,7 @@ export const useStore = create<AppStore>((set, get) => ({
     if (stale()) return;
     set({ syncEnabled: result.ok });
     if (result.ok) {
+      perf.mark("sync-enabled");
       // Broadcast the user's current activity status on this session's presence.
       syncManager.setPresenceStatus(get().activityStatus);
       // This folder is now the one this vault opens with.

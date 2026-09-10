@@ -22,6 +22,7 @@ import { VersionPanel } from "./components/VersionPanel";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
+import * as perf from "./lib/perf";
 import { implicatedFolders } from "./lib/tree/lazyTree";
 import { syncManager } from "./lib/sync/docSession";
 import {
@@ -713,6 +714,7 @@ export default function App() {
           // (`get_last_vault` reports the epoch from before it opened anything).
           useStore.getState().setVault(opened ?? last);
           await useStore.getState().refreshTree();
+          perf.mark("tree-ready");
           // Not awaited: the index rebuild runs in the background now (#84), and
           // this call parks on its lock until it commits. The tree above needs
           // no index, so the vault is on screen while the rebuild runs; titles
@@ -728,6 +730,8 @@ export default function App() {
         console.error("auth init failed", e);
       } finally {
         setBooting(false);
+        // The frame AFTER the state flush is the one the user sees.
+        requestAnimationFrame(() => perf.mark("tree-painted"));
       }
       // Check for updates at launch AND on a background poll, but never install
       // uninvited: a found release raises the required-update wall (UpdateGate),
@@ -835,6 +839,7 @@ export default function App() {
       unlistenIndex = await ipc.onIndexReady((e) => {
         const vault = useStore.getState().vault;
         if (!vault || vault.epoch !== e.epoch) return;
+        perf.mark("index-ready");
         if (!e.ok) toast("Couldn't finish indexing this vault — search and backlinks may be incomplete.", "error");
         void useStore.getState().refreshTitles();
         void useStore.getState().refreshBacklinks();

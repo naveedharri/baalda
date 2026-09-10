@@ -34,6 +34,7 @@ import {
 } from "../api";
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
+import * as perf from "../perf";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { planInbound } from "./inbound";
@@ -1759,6 +1760,7 @@ export class VaultRegistry {
     // can't happen after a relaunch.
     checkpoint.touch();
     await checkpoint.flush();
+    perf.mark("reconcile-done");
     return mutated;
   }
 
