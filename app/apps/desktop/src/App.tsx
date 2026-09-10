@@ -1,14 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import "./App.css";
-import { AccountMenu, AuthDialog } from "./components/AccountMenu";
+import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
-import { Editor } from "./components/Editor";
+import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FileTree } from "./components/FileTree";
-import { GraphView } from "./components/GraphView";
 import { SyncBadge } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
@@ -17,11 +16,11 @@ import { SidebarResizer } from "./components/SidebarResizer";
 import { TabBar } from "./components/TabBar";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
-import { VaultPicker } from "./components/VaultPicker";
 import { VersionPanel } from "./components/VersionPanel";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
+import * as perf from "./lib/perf";
 import { implicatedFolders } from "./lib/tree/lazyTree";
 import { syncManager } from "./lib/sync/docSession";
 import {
@@ -41,6 +40,24 @@ import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
+import { prefetchAfterPaint } from "./lib/prefetch";
+import { revealWindowOnce } from "./lib/windowReveal";
+
+/* Lazy chunks. Each of these is either a rare deliberate action (the graph),
+   a modal (settings, auth), or big enough that the first paint should not wait
+   on it (the editor carries CodeMirror + lezer). `lib/prefetch.ts` warms the
+   editor right after the first paint, so the first note click is still
+   instant. */
+const Editor = lazy(() => import("./components/Editor").then((m) => ({ default: m.Editor })));
+const GraphView = lazy(() =>
+  import("./components/GraphView").then((m) => ({ default: m.GraphView })),
+);
+const VaultPicker = lazy(() =>
+  import("./components/VaultPicker").then((m) => ({ default: m.VaultPicker })),
+);
+const AuthDialog = lazy(() =>
+  import("./components/AuthDialog").then((m) => ({ default: m.AuthDialog })),
+);
 
 /** How often a running app re-checks for a new release (it also checks at
  *  launch). The check is one cheap GET of the release's static `latest.json`
@@ -632,23 +649,25 @@ function PromptedAuthDialog() {
     return null;
   }
   return (
-    <AuthDialog
-      // An invitee usually has no account yet — the link is often the first
-      // time they hear of us — so the invite card opens on sign-up.
-      initialMode={authPrompt === "invite" ? "sign-up" : "sign-in"}
-      onSignedIn={() => useStore.getState().setAuthPrompt(null)}
-      onClose={() => {
-        clearPendingNoteLink();
-        requestOpenVault(null);
-        useStore.getState().clearServerLink();
-        // Dismissing the card declines for now: drop the queued invitation too,
-        // or the next unrelated sign-in would surprise-join a vault.
-        // Unconditional, because an invitation can be parked behind the
-        // "server-link" prompt as well — the invite that offered the server.
-        useStore.getState().clearInvitePrompt();
-        useStore.getState().setAuthPrompt(null);
-      }}
-    />
+    <Suspense fallback={null}>
+      <AuthDialog
+        // An invitee usually has no account yet — the link is often the first
+        // time they hear of us — so the invite card opens on sign-up.
+        initialMode={authPrompt === "invite" ? "sign-up" : "sign-in"}
+        onSignedIn={() => useStore.getState().setAuthPrompt(null)}
+        onClose={() => {
+          clearPendingNoteLink();
+          requestOpenVault(null);
+          useStore.getState().clearServerLink();
+          // Dismissing the card declines for now: drop the queued invitation too,
+          // or the next unrelated sign-in would surprise-join a vault.
+          // Unconditional, because an invitation can be parked behind the
+          // "server-link" prompt as well — the invite that offered the server.
+          useStore.getState().clearInvitePrompt();
+          useStore.getState().setAuthPrompt(null);
+        }}
+      />
+    </Suspense>
   );
 }
 
@@ -665,12 +684,26 @@ export default function App() {
   const versionPanelOpen = useStore((s) => s.versionPanelDocId != null);
   // An open image/PDF preview isn't a synced note — hide the save/sync chrome.
   const isPreview = openNote != null && previewKind(openNote.path) != null;
-  const [booting, setBooting] = useState(true);
+  // Covers the LAST VAULT'S OPEN and nothing else. It used to cover the whole
+  // session restore + sync reconcile too, which is why launch showed "Loading…"
+  // for seconds on a big vault: the sidebar was ready long before auth was.
+  const [openingLastVault, setOpeningLastVault] = useState(true);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
+
+  // Reveal the window on React's FIRST commit — deliberately not on the tree
+  // or on `!booting`. That first commit is the themed shell, so the user gets a
+  // correctly coloured window immediately instead of an empty frame while the
+  // bundle parses; holding it back until the sidebar has data would hide the
+  // app for the whole boot sequence. Effects run before the `booting` early
+  // return below, so this fires on the shell.
+  useEffect(() => {
+    revealWindowOnce();
+    prefetchAfterPaint();
+  }, []);
 
   // The history panel is about ONE note; switching notes under it would leave a
   // list of versions that no longer belong to what's in the editor.
@@ -712,7 +745,21 @@ export default function App() {
           // former carries the vault epoch this session must pin its writes to
           // (`get_last_vault` reports the epoch from before it opened anything).
           useStore.getState().setVault(opened ?? last);
+          // Does this folder belong to a synced vault? One ~60-byte IPC, fired
+          // WITHOUT awaiting so it can't delay the paint. It is what tells a
+          // click that beats the sync prime whether waiting for a doc-id map is
+          // worth it — see `lib/sync/openGate`.
+          void ipc
+            .peekVaultStamp((opened ?? last).path)
+            .then((stamp) => {
+              if (useStore.getState().vault?.path !== (opened ?? last).path) return;
+              useStore.setState({ openFolderIsSynced: stamp?.organizationId != null });
+            })
+            .catch(() => {
+              /* unreadable: stays null, so the gate keeps waiting for the prime */
+            });
           await useStore.getState().refreshTree();
+          perf.mark("tree-ready");
           // Not awaited: the index rebuild runs in the background now (#84), and
           // this call parks on its lock until it commits. The tree above needs
           // no index, so the vault is on screen while the rebuild runs; titles
@@ -721,14 +768,20 @@ export default function App() {
         }
       } catch (e) {
         console.error("auto-reopen failed", e);
-      }
-      try {
-        await useStore.getState().initAuth();
-      } catch (e) {
-        console.error("auth init failed", e);
       } finally {
-        setBooting(false);
+        // The tree is in the store; NOTHING below this line may gate the paint.
+        setOpeningLastVault(false);
+        // The frame AFTER the state flush is the one the user sees.
+        requestAnimationFrame(() => perf.mark("tree-painted"));
       }
+      // Detached, deliberately: the session restore is 3+ HTTP round trips and
+      // it ends in the sync reconcile, which on a large vault is minutes of
+      // work. Every `set()` inside it is generation-guarded (`authInitGen`), so
+      // a sign-in/sign-out the user performs meanwhile still wins.
+      void useStore
+        .getState()
+        .initAuth()
+        .catch((e) => console.error("auth init failed", e));
       // Check for updates at launch AND on a background poll, but never install
       // uninvited: a found release raises the required-update wall (UpdateGate),
       // and the download/relaunch waits for the user's "Install & Restart" click.
@@ -835,6 +888,7 @@ export default function App() {
       unlistenIndex = await ipc.onIndexReady((e) => {
         const vault = useStore.getState().vault;
         if (!vault || vault.epoch !== e.epoch) return;
+        perf.mark("index-ready");
         if (!e.ok) toast("Couldn't finish indexing this vault — search and backlinks may be incomplete.", "error");
         void useStore.getState().refreshTitles();
         void useStore.getState().refreshBacklinks();
@@ -948,7 +1002,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  if (booting) {
+  // Only while we still don't know WHICH folder to show. `setVault` lands
+  // before `refreshTree` resolves, so the app shell appears the instant the
+  // vault is known; keeping the `!vault` conjunct is what stops VaultPicker
+  // flashing for the 10–50ms of `getLastVault` + `openVault` on a relaunch.
+  if (openingLastVault && !vault) {
     return <div className="booting">Loading…</div>;
   }
 
@@ -959,7 +1017,11 @@ export default function App() {
     return (
       <div className="app-shell">
         <UpdateGate />
-        <VaultPicker />
+        {/* Reusing `.booting` means the loading→welcome hand-off reads as one
+            continuous boot rather than a flash of a second loader. */}
+        <Suspense fallback={<div className="booting">Loading…</div>}>
+          <VaultPicker />
+        </Suspense>
         <VaultFolderPrompt />
         <PromptedAuthDialog />
       </div>
@@ -1089,7 +1151,19 @@ export default function App() {
           <RemovedBanner />
           <DeletedByTeammateBanner />
           <div className="editor-wrap">
-            <Editor />
+            {openNote ? (
+              <Suspense
+                fallback={
+                  <div className="editor-column">
+                    <EditorSkeleton />
+                  </div>
+                }
+              >
+                <Editor />
+              </Suspense>
+            ) : (
+              <EditorEmpty />
+            )}
           </div>
           <BacklinksPanel />
           {/* Slides in over the editor from the right; anchored to .main. */}
@@ -1102,7 +1176,11 @@ export default function App() {
             resetKeys={[graphOpen]}
             onError={() => setGraphOpen(false)}
           >
-            <GraphView onClose={() => setGraphOpen(false)} />
+            {/* `.graph-view` is the full-window overlay itself, so the screen
+                dims the instant the graph is asked for, then fills in. */}
+            <Suspense fallback={<div className="graph-view" aria-busy="true" />}>
+              <GraphView onClose={() => setGraphOpen(false)} />
+            </Suspense>
           </ErrorBoundary>
         )}
         <VaultFolderPrompt />

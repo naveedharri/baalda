@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.1.55"
+version = "0.1.56"
 description = "Baalda — local-first markdown app"
 authors = ["Baalda"]
 license = "Apache-2.0"
@@ -53,3 +53,23 @@ tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# There is no workspace Cargo.toml above this crate, so this is the only place a
+# release profile can go. Cargo's defaults build the shipped binary with no LTO
+# and 16 codegen units; `tauri build` (both release workflows) picks this up
+# automatically, no CI change.
+#
+# Deliberately NO `panic = "abort"`. This crate does `.lock().unwrap()`
+# throughout and the process holds CRDT updates the bridge has not egested yet,
+# so turning a poisoned-mutex panic into a process kill costs the user data;
+# `rusqlite` also relies on `catch_unwind` in the callback paths (inert today,
+# a landmine for whoever registers a custom collation or busy handler), and
+# `cargo test --release` would stop supporting `#[should_panic]`. The win from
+# abort is binary size, not startup latency.
+[profile.release]
+opt-level = 3
+# "thin" rather than "fat": most of the win at a fraction of the link time, and
+# a release links four targets. Measure before going fat.
+lto = "thin"
+codegen-units = 1
+strip = true

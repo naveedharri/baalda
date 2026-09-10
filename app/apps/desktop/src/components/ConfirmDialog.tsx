@@ -16,6 +16,7 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel = "Cancel",
   tone = "danger",
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -24,6 +25,8 @@ export function ConfirmDialog({
   confirmLabel: string;
   cancelLabel?: string;
   tone?: "danger" | "accent";
+  /** Hold the confirm button until the body has what it needs (e.g. a pick). */
+  confirmDisabled?: boolean;
   onConfirm: () => Promise<unknown> | unknown;
   onCancel: () => void;
 }) {
@@ -65,6 +68,7 @@ export function ConfirmDialog({
           <AsyncButton
             className={`primary${tone === "danger" ? " danger" : ""}`}
             spinnerTone="on-accent"
+            disabled={confirmDisabled}
             onClick={onConfirm}
           >
             {confirmLabel}

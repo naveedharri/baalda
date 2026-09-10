@@ -16,6 +16,16 @@ pub struct AppState {
     /// receiver here; `google_oauth_await` takes it out and blocks on it. Its
     /// own mutex so it never contends with the vault/index lock.
     pub oauth_rx: Mutex<Option<Receiver<OauthResult>>>,
+    /// The parsed app `config.json`, cached after its first read.
+    ///
+    /// Its OWN mutex, deliberately: a config read must never queue behind the
+    /// vault/index lock, which the background rebuild holds for the whole of a
+    /// vault open. `None` means "not loaded yet"; `write_config` replaces the
+    /// cached value rather than invalidating it, so the next read never touches
+    /// the disk. Correct only while this process is the sole writer of the file,
+    /// which it is (single-instance plugin) — a future "reload settings from
+    /// disk" would have to clear this.
+    pub config: Mutex<Option<crate::commands::AppConfig>>,
 }
 
 #[derive(Default)]

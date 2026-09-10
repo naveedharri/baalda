@@ -94,6 +94,13 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   pending invitation to paste into chat. Someone invited by email who uses the join code instead
   ends up in exactly the same place, with the invited role.
 - **Roles**: owner, admin, member.
+- **Leaving a vault** (members and admins): Vault Settings → Vaults → **Leave** on the vault, then
+  confirm. Access ends on all your devices at once, the vault disappears from your switcher and
+  recents, and its folder on that device moves to the Trash (it is not kept as a local copy). The
+  owner gets an email that you left and you get a receipt, on servers that send email. To come
+  back you need a new invitation or join code. The **owner cannot leave** — their way out is to
+  delete the vault. "Remove from device" is the gentler option: it only detaches the folder on
+  that one device and keeps your membership.
 - **Live presence**: coloured cursors and selections in the note, "who is viewing" avatars,
   and small presence dots in the sidebar showing who is in which note or folder. Ping a
   teammate to get their attention.
@@ -194,10 +201,12 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
     kept in a "From deleted vaults" list so you can still move it, cancel it outright, or open
     the billing portal for it.
   - **Move a subscription to another vault** (owners only): Vault Settings → Billing → Transfer,
-    from a live vault or from one in "From deleted vaults". The target has to be a vault you own
-    that is not already on Pro. Same price, same billing period; if the subscription had been set
-    to end because its vault was deleted, transferring makes it renew again. The vault it came
-    from drops to Free.
+    from a live vault or from one in "From deleted vaults". Transfer opens a dialog that lists
+    every vault it can move to — each with its member count and Free plan — and explains what
+    happens to the vault it leaves; pick one and confirm. Only vaults you own that are not already
+    on Pro are offered (Transfer is greyed out with a reason when there are none). Same price, same
+    billing period; if the subscription had been set to end because its vault was deleted,
+    transferring makes it renew again. The vault it came from drops to Free.
   - The public pricing page (baalda.com/pricing) may still describe the Team plan as early access
     or "talk to us". The app is ahead of the page: tell people they can upgrade in-app now, and
     to use the pricing page as the contact route if they want to talk first.

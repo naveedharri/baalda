@@ -38,6 +38,9 @@ const fakeRegistry = vi.hoisted(() => {
   const reg = {
     vaultId: "collection-1" as string | null,
     pushed: new Set<string>(),
+    // Phase A of `enable`: nothing to prime from in these fixtures (the mapping
+    // is supplied directly), so the ordering under test stays the reconcile's.
+    primeLocal: vi.fn(async (_orgId: string) => false),
     reconcile: vi.fn(async () => ({ seeded: false })),
     pull: vi.fn(async () => true),
     reset: vi.fn(),
@@ -118,7 +121,7 @@ vi.mock("../../ipc", () => ({
   }),
   loadYjsState: vi.fn(async (docId: string) =>
     fakeDisk.crdt.has(docId)
-      ? { snapshot: [1], updates: [], updateCount: 0 }
+      ? { snapshot: new Uint8Array([1]), updates: [], updateCount: 0 }
       : { snapshot: null, updates: [], updateCount: 0 },
   ),
   clearYjsDoc: vi.fn(async () => {}),

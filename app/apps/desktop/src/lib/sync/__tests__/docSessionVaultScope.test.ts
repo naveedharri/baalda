@@ -19,6 +19,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
     vaultId: null as string | null,
+    // Phase A of `enable`: the local prime. False here — this suite is about the
+    // reconcile-and-teardown path, and a prime that adopts nothing is exactly
+    // the pre-prime behaviour these assertions were written against.
+    primeLocal: vi.fn(async (_orgId: string) => false),
     reconcile: vi.fn(async () => ({ seeded: false })),
     // Resolves true ("something changed") so the tests can assert the tree
     // refresh fires — a false pull deliberately skips it to avoid flicker.

@@ -17,6 +17,7 @@ pub mod vault;
 mod watcher;
 
 use state::AppState;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -73,6 +74,28 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let _ = app.deep_link().register_all();
+            }
+            // The window starts hidden (`visible: false` in tauri.conf.json) so
+            // nobody watches an empty frame while the bundle parses; the
+            // frontend calls show() on its first paint. This is the dead-man's
+            // switch: if the webview never gets that far — a JS crash, a broken
+            // bundle — the window still appears, with whatever the webview
+            // managed to render, instead of the app running invisibly. Tauri v2
+            // window methods are callable off the main thread and show() on a
+            // visible window is a no-op, so this needs no coordination.
+            #[cfg(desktop)]
+            if let Some(win) = app.get_webview_window("main") {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    if win.is_visible().unwrap_or(false) {
+                        return;
+                    }
+                    log::warn!(
+                        "[window] frontend never revealed the window in 1500ms; showing it anyway"
+                    );
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                });
             }
             Ok(())
         })
@@ -132,7 +155,7 @@ pub fn run() {
             commands::export_path,
             commands::open_vault_in_root,
             commands::folder_exists,
-            commands::peek_vault_config,
+            commands::peek_vault_stamp,
             commands::list_vaults_root_dirs,
             commands::get_vault_config,
             commands::set_vault_config,

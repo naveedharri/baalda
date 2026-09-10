@@ -7,7 +7,8 @@ import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { remoteCursors } from "../lib/editor/remoteCursors";
 import type { Awareness } from "y-protocols/awareness";
 import { createEditorState } from "../lib/editor";
-import { setActiveView } from "../lib/editor/activeView";
+import { setActiveNote } from "../lib/editor/activeView";
+import { bindActiveNote } from "../lib/editor/activeNoteBinding";
 import { firstHeading, planTitleRename } from "../lib/editor/titleFollow";
 import { saveAttachment } from "../lib/attachments";
 import { bridgeManager, type NoteBridge } from "../lib/bridge";
@@ -21,7 +22,9 @@ import * as ipc from "../lib/ipc";
 import { HtmlView } from "./HtmlView";
 import { FilePreview } from "./FilePreview";
 import { previewKind } from "../lib/preview";
-import { relativeAgo, characterSvg } from "./Identity";
+import { relativeAgo } from "./Identity";
+import { EditorEmpty, EditorSkeleton } from "./EditorPlaceholders";
+import { characterSvg } from "./Avatar";
 import { agoFromIso, lastEditedTooltip } from "./versionFormat";
 
 interface Peer {
@@ -563,7 +566,7 @@ export function Editor() {
       view = new EditorView({ state, parent: hostRef.current });
       viewRef.current = view;
       setViewMounted(true);
-      setActiveView(view); // let out-of-tree drops embed into this note
+      setActiveNote(bindActiveNote(view)); // let out-of-tree drops embed into this note
       if (!ro) view.focus();
 
       // Live "who's here" avatar row + incoming pings addressed to this user.
@@ -594,7 +597,7 @@ export function Editor() {
       titleCommitRef.current?.();
       titleCommitRef.current = null;
       if (onAwarenessChange && awareness) awareness.off("change", onAwarenessChange);
-      setActiveView(null);
+      setActiveNote(null);
       setViewMounted(false);
       if (view) view.destroy();
       viewRef.current = null;
@@ -672,12 +675,10 @@ export function Editor() {
     return () => view.destroy();
   }, [previewVersionId, previewContent, notePath]);
 
+  // App only mounts this component with a note open; the guard is here so the
+  // branches below can treat `notePath` as a string.
   if (notePath == null) {
-    return (
-      <div className="editor-empty">
-        <p>Select a note, or press ⌘N to create one.</p>
-      </div>
-    );
+    return <EditorEmpty />;
   }
 
   // HTML pages render live in a sandboxed frame instead of the CRDT editor.
@@ -807,24 +808,3 @@ export function Editor() {
   );
 }
 
-/**
- * Placeholder for a note that is still opening.
- *
- * Deliberately lines of text rather than a spinner. A spinner says "wait"; a
- * skeleton says "text is arriving, and roughly this much of it" — and because it
- * occupies the same column as the real content, the note doesn't visibly jump
- * when it swaps in. The bars only appear after a beat (`skeleton-in` has a
- * delay) so a note that opens from the local index in 40ms — the common case —
- * never flashes one.
- */
-function EditorSkeleton() {
-  return (
-    <div className="editor-skeleton" role="status" aria-label="Opening note">
-      <span className="skel-line skel-title" />
-      <span className="skel-line" style={{ width: "92%" }} />
-      <span className="skel-line" style={{ width: "78%" }} />
-      <span className="skel-line" style={{ width: "85%" }} />
-      <span className="skel-line" style={{ width: "45%" }} />
-    </div>
-  );
-}
