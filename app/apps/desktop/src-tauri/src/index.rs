@@ -46,6 +46,11 @@ pub struct Index {
     /// and that difference is only observable by counting.
     #[cfg(test)]
     resolve_calls: std::cell::Cell<usize>,
+    /// Test-only: how many `folders` rows `upsert_folder` has written. A clean
+    /// reopen must write none, and that difference is only observable by
+    /// counting — the resulting table is identical either way.
+    #[cfg(test)]
+    folder_writes: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -140,6 +145,8 @@ impl Index {
             conn,
             #[cfg(test)]
             resolve_calls: std::cell::Cell::new(0),
+            #[cfg(test)]
+            folder_writes: std::cell::Cell::new(0),
         }
     }
 
@@ -147,6 +154,12 @@ impl Index {
     #[cfg(test)]
     fn resolve_call_count(&self) -> usize {
         self.resolve_calls.get()
+    }
+
+    /// Test-only accessor for the folder-write counter (see `folder_writes`).
+    #[cfg(test)]
+    fn folder_write_count(&self) -> usize {
+        self.folder_writes.get()
     }
 
     fn migrate(&self) -> AppResult<()> {
@@ -262,9 +275,40 @@ impl Index {
             }
         }
 
+        // Snapshot indexed folders: path -> (parent_id, name). An unchanged
+        // folder then costs a hash lookup instead of a write. `rebuild` used to
+        // re-upsert every folder of an untouched vault on every open — 1,458 of
+        // them on the vault this was measured against — dirtying that many pages
+        // inside the transaction that holds the index mutex, which is the lock
+        // every index reader (titles, search, backlinks, the sync manifest)
+        // waits on at launch.
+        let mut indexed_folders: HashMap<String, (Option<String>, String)> = HashMap::new();
+        {
+            let mut stmt = tx.prepare("SELECT path, parent_id, name FROM folders")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (path, parent, name) = row?;
+                indexed_folders.insert(path, (parent, name));
+            }
+        }
+
         let mut seen_notes: HashSet<String> = HashSet::new();
         let mut seen_folders: HashSet<String> = HashSet::new();
-        let mut changed = false;
+        // Two flags, not one. Links resolve against note basenames and titles
+        // only (see `resolve_links`), so a `folders` row appearing or going
+        // cannot change any link's answer — but a single removed folder used to
+        // set the one `changed` flag and charge a whole-vault `resolve_links`
+        // pass (91,702 rows on the measured vault) to a reopen that changed no
+        // note at all. If link resolution ever grows a folder-aware rule, this
+        // split is what would have to go with it.
+        let mut notes_changed = false;
+        let mut folders_changed = false;
         let mut folders_written = 0usize;
         let mut stale = 0usize;
 
@@ -280,9 +324,25 @@ impl Index {
             let abs = entry.path();
             if entry.file_type().is_dir() {
                 if entry.depth() > 0 {
-                    seen_folders.insert(rel_from_abs(vault, abs)?);
-                    self.upsert_folder(&tx, vault, abs)?;
-                    folders_written += 1;
+                    let rel = rel_from_abs(vault, abs)?;
+                    // Same derivation `upsert_folder` uses, computed once here
+                    // rather than once for `seen_folders` and again inside it.
+                    let name = abs
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let parent = rel.rsplit_once('/').map(|(p, _)| p.to_string());
+                    let fresh = indexed_folders
+                        .get(&rel)
+                        .is_some_and(|(p, n)| *p == parent && *n == name);
+                    // Unconditional: this set drives the stale-folder delete
+                    // below, so a skipped write must still count as seen.
+                    seen_folders.insert(rel);
+                    if !fresh {
+                        self.upsert_folder(&tx, vault, abs)?;
+                        folders_written += 1;
+                    }
                 }
                 continue;
             }
@@ -304,13 +364,13 @@ impl Index {
                 Some((id, _, _)) => {
                     self.index_one(&tx, vault, abs, Some(id.clone()))?;
                     touched += 1;
-                    changed = true;
+                    notes_changed = true;
                 }
                 // New file.
                 None => {
                     self.index_one(&tx, vault, abs, None)?;
                     touched += 1;
-                    changed = true;
+                    notes_changed = true;
                 }
             }
         }
@@ -319,7 +379,7 @@ impl Index {
         for (path, (id, _, rowid)) in &indexed {
             if !seen_notes.contains(path) {
                 Self::delete_note_rows(&tx, id, *rowid)?;
-                changed = true;
+                notes_changed = true;
                 stale += 1;
             }
         }
@@ -334,14 +394,14 @@ impl Index {
         };
         for path in stale_folders {
             tx.execute("DELETE FROM folders WHERE path = ?1", params![path])?;
-            changed = true;
+            folders_changed = true;
             stale += 1;
         }
 
-        // Link targets only need re-resolving when the note set changed. Full
+        // Link targets only need re-resolving when the NOTE set changed. Full
         // scope: `rebuild` has just rewritten every note, so there is no smaller
-        // set to narrow to.
-        if changed {
+        // set to narrow to. `folders_changed` deliberately does not qualify.
+        if notes_changed {
             self.resolve_links(&tx, LinkScope::All)?;
         }
         tx.commit()?;
@@ -349,7 +409,8 @@ impl Index {
         // `BATCH_LOG_MIN` — a clean reopen (0 touched notes) is exactly the case
         // worth seeing, because it is what every launch pays. One line per open.
         log::info!(
-            "[index] rebuild: {touched} notes, {folders_written} folder writes, {stale} stale, {} ms",
+            "[index] rebuild: {touched} notes, {folders_written} folder writes, {stale} stale{}, {} ms",
+            if folders_changed { " (folders)" } else { "" },
             started.elapsed().as_millis()
         );
         Ok(())
@@ -725,6 +786,8 @@ impl Index {
         if rel.is_empty() {
             return Ok(());
         }
+        #[cfg(test)]
+        self.folder_writes.set(self.folder_writes.get() + 1);
         let name = abs
             .file_name()
             .and_then(|s| s.to_str())
@@ -1488,6 +1551,14 @@ mod tests {
     use super::*;
     use crate::notefile::write_note;
 
+    /// Every `folders` row's path. There is no production listing command to
+    /// reuse — the sidebar walks disk — so the tests read the table directly.
+    fn folder_paths(idx: &Index) -> Vec<String> {
+        let mut stmt = idx.conn.prepare("SELECT path FROM folders").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
     fn seed_vault() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let v = tmp.path().to_path_buf();
@@ -1526,6 +1597,80 @@ mod tests {
         let backlinks = idx.get_backlinks(&beta.id).unwrap();
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].title, "Alpha");
+    }
+
+    /// A clean reopen must not rewrite a single `folders` row. Those writes
+    /// happen inside the transaction that holds the index mutex, so paying them
+    /// for an unchanged vault delays every reader at launch for nothing.
+    #[test]
+    fn rebuild_skips_unchanged_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Projects/a/One.md", "# One").unwrap();
+        write_note(&v, "Projects/b/Two.md", "# Two").unwrap();
+        let idx = Index::open(&v).unwrap();
+
+        idx.rebuild(&v).unwrap();
+        // Projects, Projects/a, Projects/b.
+        assert_eq!(idx.folder_write_count(), 3);
+
+        idx.rebuild(&v).unwrap();
+        assert_eq!(
+            idx.folder_write_count(),
+            3,
+            "an unchanged vault must write no folder rows on reopen"
+        );
+        // The rows are still all there — skipping the write is not dropping it.
+        assert_eq!(folder_paths(&idx).len(), 3);
+    }
+
+    /// The case that actually happens: a macOS case-only rename. The skip keys
+    /// on (parent_id, name), so the new casing must be written and the old row
+    /// must go — otherwise the sidebar and the sync registry disagree on a path.
+    #[test]
+    fn rebuild_upserts_a_case_renamed_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Projects/One.md", "# One").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert!(folder_paths(&idx).iter().any(|f| f == "Projects"));
+
+        // Rename via a temp name so the test works on a case-insensitive volume.
+        std::fs::rename(v.join("Projects"), v.join("tmp-rename")).unwrap();
+        std::fs::rename(v.join("tmp-rename"), v.join("projects")).unwrap();
+        let before = idx.folder_write_count();
+        idx.rebuild(&v).unwrap();
+
+        let folders = folder_paths(&idx);
+        assert!(folders.iter().any(|f| f == "projects"), "{folders:?}");
+        assert!(!folders.iter().any(|f| f == "Projects"), "{folders:?}");
+        assert!(
+            idx.folder_write_count() > before,
+            "a renamed folder must be re-upserted, not skipped"
+        );
+    }
+
+    /// Folder churn alone must not charge a whole-vault link pass: a link's
+    /// answer is a function of note basenames and titles, and no note changed.
+    #[test]
+    fn rebuild_does_not_resolve_links_for_folder_churn_alone() {
+        let (_tmp, v) = seed_vault();
+        std::fs::create_dir_all(v.join("Empty")).unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let after_first = idx.resolve_call_count();
+
+        // Remove the empty folder; every note is untouched.
+        std::fs::remove_dir(v.join("Empty")).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(
+            idx.resolve_call_count(),
+            after_first,
+            "a removed folder must not re-resolve every link in the vault"
+        );
+        // The folder row is gone all the same.
+        assert!(!folder_paths(&idx).iter().any(|f| f == "Empty"));
     }
 
     #[test]
