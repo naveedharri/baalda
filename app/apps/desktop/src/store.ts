@@ -990,6 +990,17 @@ let activeBroadcast: { stop: () => Promise<void> } | null = null;
 let orgSwitchGen = 0;
 
 /**
+ * Bumped by every flow that establishes or drops a session. `initAuth` now runs
+ * DETACHED from the launch (the tree paints without waiting for it), so the user
+ * can sign out, sign in as someone else or switch servers while the session
+ * restore is still in flight — and a restore landing on top of that is a session
+ * the user did not ask for. Each of those flows claims the generation before its
+ * own awaits, and everything `initAuth` (plus the three refreshers it calls)
+ * writes is gated on the generation it captured.
+ */
+let authInitGen = 0;
+
+/**
  * Tear down networked sync for the vault we're leaving. Call this BEFORE any
  * `ipc.openVault*` that swaps the Rust vault slot: Rust holds ONE global vault,
  * so a sync operation still in flight would resolve against the folder we just
@@ -1828,31 +1839,52 @@ export const useStore = create<AppStore>((set, get) => ({
     // Folder/note colors, from the same pull — a vault-wide fact, so the whole
     // team sees the arrangement one person set up.
     syncManager.setColorListener((colors) => get().applyVaultColors(colors));
+    // This whole restore is detached from the launch, so every `set()` past an
+    // await is gated: a sign-out (or a sign-in as someone else) that happens
+    // while we are still restoring OWNS the resulting state, and this call must
+    // drop its remaining work rather than re-land the old session on top.
+    let gen = ++authInitGen;
+    const superseded = () => authInitGen !== gen;
     try {
       const session = await authManager.init();
       perf.mark("auth-resolved");
+      if (superseded()) return;
       set({ serverUrl: authManager.getServerUrl() });
       if (session) {
         set({ session, authStatus: "signed-in", authError: null });
-        await get().refreshVault();
-        await get().refreshBillingConfig();
+        // Independent of each other: the vault roster + invitations, and the
+        // billing feature flag. Serial, these were two round trips in front of
+        // the landing for no reason.
+        await Promise.all([get().refreshVault(), get().refreshBillingConfig()]);
+        if (superseded()) return;
         // An invitation link may have LAUNCHED the app too, and the vault it
         // names is where the user must land — so the ordinary landing is
         // skipped while one is queued (landing elsewhere first would bind a
         // folder and reconcile a vault nobody asked for, then do it again).
         // A FAILED accept falls back to it rather than stranding the user.
         const joined = peekPendingInvite() != null && (await consumeQueuedInvite(get, set));
+        // `acceptInvitation` claims the generation itself (it re-reads the
+        // session and switches the active vault). That claim is OURS — this
+        // restore is what delegated to it — so adopt it instead of reading our
+        // own delegate as a supersession and abandoning the rest of the boot.
+        gen = authInitGen;
+        // Seat usage + plan feed the billing panel only — nothing about getting
+        // a vault on screen waits for them. (It reads `billingConfig`, so it has
+        // to follow the pair above.)
+        void get().refreshOrgBilling();
         if (!joined) await landInLastVault(get);
-        await get().refreshOrgBilling();
+        if (superseded()) return;
         // A share link may have LAUNCHED the app: its deep-link replay raced
         // this restore while authStatus was still "unknown" and got queued.
         await consumeQueuedNoteLink(get);
       } else {
+        if (superseded()) return;
         set({ session: null, authStatus: "signed-out" });
         if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
         else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
       }
     } catch (e) {
+      if (superseded()) return;
       set({ authStatus: "signed-out", authError: errMsg(e) });
       if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
       else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
@@ -1861,6 +1893,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
   signIn: async (email, password) => {
     set({ authError: null });
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land its state on top of ours.
+    ++authInitGen;
     try {
       await authManager.signIn({ email, password });
       const session = await authManager.currentSession();
@@ -1893,6 +1928,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
   signInWithGoogle: async () => {
     set({ authError: null });
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land its state on top of ours.
+    ++authInitGen;
     // Errors (incl. the loopback timeout on an abandoned flow) propagate to the
     // caller, which decides whether to surface them — a cancelled/superseded flow
     // must NOT flash a late error. See AuthDialog.googleSignIn.
@@ -1914,6 +1952,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
   signUp: async (name, email, password) => {
     set({ authError: null });
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land its state on top of ours.
+    ++authInitGen;
     try {
       await authManager.signUp({ name, email, password });
       const session = await authManager.currentSession();
@@ -1957,6 +1998,9 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   signOut: async () => {
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land its state on top of ours.
+    ++authInitGen;
     // Flush any debounced local write first so tearing down the view can't drop
     // an in-flight edit (the .md files stay on disk regardless of the account).
     try {
@@ -2021,6 +2065,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
   setServerUrl: async (url) => {
     set({ authError: null });
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land its state on top of ours.
+    ++authInitGen;
     const session = await authManager.setServerUrl(url);
     set({
       serverUrl: authManager.getServerUrl(),
@@ -2125,35 +2172,50 @@ export const useStore = create<AppStore>((set, get) => ({
 
   refreshVault: async () => {
     const { api } = authManager;
+    // The session generation this refresh describes: called from `initAuth`
+    // (detached, so a sign-out can land under it) as well as from live
+    // listeners, where it is simply the current one.
+    const gen = authInitGen;
     try {
       const organizations = await api.listOrganizations();
       const session = get().session;
       let activeOrgId = session?.activeOrganizationId ?? null;
       // Auto-activate the sole org so vault creation + sync work out of the box.
+      // Genuinely serial (activate, then re-read the session that names it), and
+      // it only runs on a device's FIRST sign-in — never on a relaunch.
       if (!activeOrgId && organizations.length === 1) {
         await api.setActiveOrganization(organizations[0].id);
         activeOrgId = organizations[0].id;
         const refreshed = await authManager.currentSession();
+        if (authInitGen !== gen) return;
         if (refreshed) set({ session: refreshed });
       }
-      let members: Member[] = [];
-      let pendingInvitations: Invitation[] = [];
-      if (activeOrgId) {
-        members = await api.listMembers(activeOrgId).catch(() => []);
-        pendingInvitations = await api
-          .listInvitations(activeOrgId)
+      // Three independent GETs. Run serially they were three round trips in the
+      // launch chain; none of them depends on another's answer.
+      const [members, pendingInvitations, userInvitations] = await Promise.all([
+        activeOrgId
+          ? api.listMembers(activeOrgId).catch(() => [] as Member[])
+          : Promise.resolve([] as Member[]),
+        activeOrgId
+          ? api
+              .listInvitations(activeOrgId)
+              .then((invs) => invs.filter((i) => i.status === "pending"))
+              .catch(() => [] as Invitation[])
+          : Promise.resolve([] as Invitation[]),
+        api
+          .listUserInvitations()
           .then((invs) => invs.filter((i) => i.status === "pending"))
-          .catch(() => []);
-      }
-      const userInvitations = await api
-        .listUserInvitations()
-        .then((invs) => invs.filter((i) => i.status === "pending"))
-        .catch(() => []);
+          .catch(() => [] as Invitation[]),
+      ]);
+      if (authInitGen !== gen) return;
       set({ organizations, members, pendingInvitations, userInvitations });
       // Cache the vault list locally so the signed-out welcome screen can
       // still offer them (kept across sign-out; refreshed here while signed in).
       writeKnownVaults(organizations.map((o) => ({ id: o.id, name: o.name })));
     } catch (e) {
+      // A failure that belongs to a session the user has since left is not this
+      // session's error to show.
+      if (authInitGen !== gen) return;
       set({ authError: errMsg(e) });
     }
   },
@@ -2590,6 +2652,9 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   acceptInvitation: async (invitationId) => {
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land its state on top of ours.
+    ++authInitGen;
     const inv = get().userInvitations.find((i) => i.id === invitationId);
     await authManager.api.acceptInvitation(invitationId);
     // Make the joined vault active through the switch path so it gets its
@@ -2628,6 +2693,9 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   joinVault: async (code) => {
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land its state on top of ours.
+    ++authInitGen;
     const joined = await authManager.api.joinVault(code.trim());
     // The code was good, so the welcome screen's join flow is over: disarm the
     // landing suppression before switching in (it's module state, and leaving it
@@ -3091,13 +3159,18 @@ export const useStore = create<AppStore>((set, get) => ({
   // ---- Billing ----
 
   refreshBillingConfig: async () => {
+    // Gated like every other detached-restore write: a config fetched for the
+    // account we just signed out of must not survive into the next one.
+    const gen = authInitGen;
     // getBillingConfig never throws — it returns { enabled: false } on any
     // failure (older/self-hosted server), so the billing UI simply stays hidden.
     const billingConfig = await authManager.api.getBillingConfig();
+    if (authInitGen !== gen) return;
     set({ billingConfig });
   },
 
   refreshOrgBilling: async () => {
+    const gen = authInitGen;
     const orgId = get().session?.activeOrganizationId;
     if (!orgId || !get().billingConfig?.enabled) {
       set({ orgBilling: null });
@@ -3105,9 +3178,11 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     try {
       const orgBilling = await authManager.api.getOrgBilling(orgId);
+      if (authInitGen !== gen) return;
       set({ orgBilling });
     } catch (e) {
       console.warn("[billing] refresh failed", e);
+      if (authInitGen !== gen) return;
       set({ orgBilling: null });
     }
   },
