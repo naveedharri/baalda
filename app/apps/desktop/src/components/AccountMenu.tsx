@@ -89,10 +89,18 @@ export function AccountMenu() {
   const [openFolderSynced, setOpenFolderSynced] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const signedOut = authStatus !== "signed-in" || !session;
+  // "unknown" is a state the user can now SEE: the sidebar paints before the
+  // session restore finishes, so for its first moments we do not yet know
+  // whether anyone is signed in. Claiming "Local · not synced" then is a lie
+  // about a synced vault, so pending renders the vault's name and nothing else.
+  const authPending = authStatus === "unknown";
+  const signedOut = !authPending && (authStatus !== "signed-in" || !session);
   const vaultPath = vault?.path ?? null;
   useEffect(() => {
-    if (!signedOut || !vaultPath) {
+    // Runs while PENDING too (the peek is ~60 bytes and answers the question
+    // auth is still deciding), and never for a signed-in session — there the
+    // vault list is the authority, not the folder's stamp.
+    if (authStatus === "signed-in" || !vaultPath) {
       setOpenFolderSynced(false);
       return;
     }
@@ -110,7 +118,7 @@ export function AccountMenu() {
     return () => {
       alive = false;
     };
-  }, [signedOut, vaultPath]);
+  }, [authStatus, vaultPath]);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
@@ -129,10 +137,13 @@ export function AccountMenu() {
     };
   }, [open]);
 
-  if (authStatus !== "signed-in" || !session) {
+  if (signedOut || authPending || !session) {
     // Signed out is still local-first: the identity bar names the local
     // vault you're in (if any) and opens the switcher, so you can hop
     // between local vaults and sign in — not a dead-end "Sign in" button.
+    //
+    // While auth is PENDING this same bar renders, minus every claim about sync
+    // state: the name only, until the restore says who is signed in.
     return (
       <div className="account-menu" ref={rootRef}>
         <button
@@ -142,10 +153,14 @@ export function AccountMenu() {
           aria-expanded={open}
           title={
             vault
-              ? openFolderSynced
-                ? `${vault.name} · Synced vault, signed out`
-                : `${vault.name} · Local`
-              : "Sign in to sync & collaborate"
+              ? authPending
+                ? vault.name
+                : openFolderSynced
+                  ? `${vault.name} · Synced vault, signed out`
+                  : `${vault.name} · Local`
+              : authPending
+                ? ""
+                : "Sign in to sync & collaborate"
           }
         >
           <span className="identity-avatar signed-out" aria-hidden="true">
@@ -162,16 +177,23 @@ export function AccountMenu() {
             </svg>
           </span>
           <span className="identity-meta">
-            <span className="identity-line1">{vault?.name ?? "Sign in"}</span>
+            <span className="identity-line1">
+              {vault?.name ?? (authPending ? "" : "Sign in")}
+            </span>
             <span className="identity-line2">
-              {vault
-                ? openFolderSynced
-                  ? // A synced vault whose session is gone, not a local one —
-                    // edits still merge on the next sign-in, and sign-in (not
-                    // "turn on sync") is how it comes back online.
-                    "Synced · signed out"
-                  : "Local · not synced"
-                : "Sync & collaborate"}
+              {authPending
+                ? // The restore is still deciding. Anything here would be a
+                  // guess, and the wrong guess ("Local · not synced" on a synced
+                  // vault) is the one that alarms people.
+                  ""
+                : vault
+                  ? openFolderSynced
+                    ? // A synced vault whose session is gone, not a local one —
+                      // edits still merge on the next sign-in, and sign-in (not
+                      // "turn on sync") is how it comes back online.
+                      "Synced · signed out"
+                    : "Local · not synced"
+                  : "Sync & collaborate"}
             </span>
           </span>
           <span className="identity-chevron" aria-hidden="true">
@@ -1106,6 +1128,9 @@ function GeneralTab({
   const syncProgress = useStore((s) => s.syncProgress);
   const serverUrl = useStore((s) => s.serverUrl);
   const authStatus = useStore((s) => s.authStatus);
+  // The sidebar paints before the session restore finishes, so this page can be
+  // open while we still don't know whether anyone is signed in.
+  const authPending = authStatus === "unknown";
 
   const [name, setName] = useState(vault?.name ?? "");
   const [busy, setBusy] = useState(false);
@@ -1192,15 +1217,24 @@ function GeneralTab({
                   if (e.key === "Enter") void turnOn();
                 }}
               />
-              <button className="primary" disabled={busy} onClick={() => void turnOn()}>
+              {/* Disabled while the session restore runs: its answer decides
+                  whether this button turns sync on or raises a sign-in card,
+                  and pressing it in between would do the wrong one. */}
+              <button
+                className="primary"
+                disabled={busy || authPending}
+                onClick={() => void turnOn()}
+              >
                 {busy
                   ? "…"
-                  : authStatus === "signed-in"
-                    ? "Turn on sync"
-                    : "Sign in to turn on"}
+                  : authPending
+                    ? "Checking your account…"
+                    : authStatus === "signed-in"
+                      ? "Turn on sync"
+                      : "Sign in to turn on"}
               </button>
             </div>
-            {authStatus !== "signed-in" && (
+            {!authPending && authStatus !== "signed-in" && (
               <div className="muted">You'll need to sign in first — this button will prompt you.</div>
             )}
             {error && <div className="auth-error">{error}</div>}

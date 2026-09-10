@@ -666,7 +666,10 @@ export default function App() {
   const versionPanelOpen = useStore((s) => s.versionPanelDocId != null);
   // An open image/PDF preview isn't a synced note — hide the save/sync chrome.
   const isPreview = openNote != null && previewKind(openNote.path) != null;
-  const [booting, setBooting] = useState(true);
+  // Covers the LAST VAULT'S OPEN and nothing else. It used to cover the whole
+  // session restore + sync reconcile too, which is why launch showed "Loading…"
+  // for seconds on a big vault: the sidebar was ready long before auth was.
+  const [openingLastVault, setOpeningLastVault] = useState(true);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
@@ -723,16 +726,20 @@ export default function App() {
         }
       } catch (e) {
         console.error("auto-reopen failed", e);
-      }
-      try {
-        await useStore.getState().initAuth();
-      } catch (e) {
-        console.error("auth init failed", e);
       } finally {
-        setBooting(false);
+        // The tree is in the store; NOTHING below this line may gate the paint.
+        setOpeningLastVault(false);
         // The frame AFTER the state flush is the one the user sees.
         requestAnimationFrame(() => perf.mark("tree-painted"));
       }
+      // Detached, deliberately: the session restore is 3+ HTTP round trips and
+      // it ends in the sync reconcile, which on a large vault is minutes of
+      // work. Every `set()` inside it is generation-guarded (`authInitGen`), so
+      // a sign-in/sign-out the user performs meanwhile still wins.
+      void useStore
+        .getState()
+        .initAuth()
+        .catch((e) => console.error("auth init failed", e));
       // Check for updates at launch AND on a background poll, but never install
       // uninvited: a found release raises the required-update wall (UpdateGate),
       // and the download/relaunch waits for the user's "Install & Restart" click.
@@ -953,7 +960,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  if (booting) {
+  // Only while we still don't know WHICH folder to show. `setVault` lands
+  // before `refreshTree` resolves, so the app shell appears the instant the
+  // vault is known; keeping the `!vault` conjunct is what stops VaultPicker
+  // flashing for the 10–50ms of `getLastVault` + `openVault` on a relaunch.
+  if (openingLastVault && !vault) {
     return <div className="booting">Loading…</div>;
   }
 
