@@ -1,1 +1,1 @@
-- Fixed the sync badge flickering forever and re-syncing the same notes on every reload; edits that were stuck on one device now upload automatically
+- Moving a Pro subscription to another vault now opens a clear dialog that shows each eligible vault with its members and explains what changes, instead of a bare dropdown

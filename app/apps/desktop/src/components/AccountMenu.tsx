@@ -42,7 +42,6 @@ import { AccountSettings } from "./AccountSettings";
 import { AsyncButton } from "./AsyncButton";
 import { AuthDialog } from "./AuthDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { MenuSelect } from "./MenuSelect";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
 import { Avatar, SyncBadge } from "./Identity";
@@ -2291,13 +2290,15 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
   const [upgradeOrg, setUpgradeOrg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A transfer waiting to be confirmed. It moves money between vaults, so it
-  // never fires straight off the picker.
+  // A transfer being set up: the source row's Transfer was clicked and the
+  // dialog is open. `targetOrgId` is the pick, null until one is made (or the
+  // only eligible vault, pre-picked). It moves money between vaults, so the
+  // dialog is where both the choice AND the confirmation happen — never a
+  // popover that fires on the first click.
   const [transfer, setTransfer] = useState<{
     sourceOrgId: string;
     sourceLabel: string;
-    targetOrgId: string;
-    targetName: string;
+    targetOrgId: string | null;
   } | null>(null);
   // An orphaned subscription waiting on a "cancel now" confirmation.
   const [cancelling, setCancelling] = useState<{ orgId: string; label: string } | null>(
@@ -2336,8 +2337,9 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
   // it, rather than closing over an error nobody sees. Neither re-throws — the
   // dialog's own AsyncButton has finished reporting by then.
   const runTransfer = async () => {
-    if (!transfer) return;
-    const { sourceOrgId, targetOrgId, targetName } = transfer;
+    if (!transfer || !transfer.targetOrgId) return;
+    const { sourceOrgId, targetOrgId } = transfer;
+    const targetName = vaults.find((v) => v.orgId === targetOrgId)?.name ?? "the vault";
     setError(null);
     try {
       await authManager.api.transferSubscription(sourceOrgId, targetOrgId);
@@ -2378,10 +2380,13 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
   const freeLimits = myBilling?.freeLimits ?? null;
 
   /**
-   * The Transfer control for one row: a picker over the eligible targets, or a
-   * disabled button that says why there are none. `value` is a LABEL, not a
-   * selection — nothing is currently chosen here, and MenuSelect renders the
-   * raw value whenever no option matches it.
+   * The Transfer control for one row. It opens the transfer dialog, where the
+   * eligible destinations are laid out with their seats and plan and the move
+   * is confirmed in the same place. With exactly one eligible vault it is
+   * pre-picked, so the common case is still one click plus a confirm.
+   *
+   * No eligible vault ⇒ a disabled control that says why, rather than a menu
+   * with nothing in it.
    */
   const transferControl = (sourceOrgId: string, sourceLabel: string) => {
     const targets = transferTargets(vaults, sourceOrgId);
@@ -2397,20 +2402,80 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
       );
     }
     return (
-      <MenuSelect
-        value={TRANSFER_TRIGGER_LABEL}
-        options={targets.map((t) => ({ value: t.orgId, label: t.name }))}
-        onSelect={(targetOrgId) => {
-          const target = targets.find((t) => t.orgId === targetOrgId);
-          if (!target) return;
-          setError(null);
-          setTransfer({ sourceOrgId, sourceLabel, targetOrgId, targetName: target.name });
-        }}
+      <button
+        type="button"
+        className="link-btn"
         disabled={busy}
-        ariaLabel={`Move ${sourceLabel}'s subscription to another vault`}
-        triggerClassName="link-btn billing-transfer-trigger"
-        menuClassName="billing-transfer-menu"
-      />
+        aria-label={`Move ${sourceLabel}'s subscription to another vault`}
+        onClick={() => {
+          setError(null);
+          setTransfer({
+            sourceOrgId,
+            sourceLabel,
+            targetOrgId: targets.length === 1 ? targets[0].orgId : null,
+          });
+        }}
+      >
+        Transfer
+      </button>
+    );
+  };
+
+  /**
+   * The transfer dialog body: the eligible destinations as selectable cards.
+   * Each card carries what the reader weighs when choosing — the vault's
+   * seats, and that it is on Free today — instead of a bare name.
+   */
+  const renderTransferDialog = () => {
+    if (!transfer) return null;
+    const targets = transferTargets(vaults, transfer.sourceOrgId);
+    const target = targets.find((t) => t.orgId === transfer.targetOrgId) ?? null;
+    // Owned vaults that are NOT offered, so the list's gaps are explained.
+    const skipped = vaults.filter(
+      (v) => v.orgId !== transfer.sourceOrgId && v.role === "owner" && !targets.includes(v),
+    ).length;
+    return (
+      <ConfirmDialog
+        tone="accent"
+        title={`Move Pro from ${transfer.sourceLabel}`}
+        confirmLabel={target ? `Move Pro to ${target.name}` : "Move subscription"}
+        confirmDisabled={!target}
+        onCancel={() => setTransfer(null)}
+        onConfirm={runTransfer}
+      >
+        <p>
+          Choose the vault that becomes Pro. It keeps the same billing period and
+          price. <strong>{transfer.sourceLabel}</strong> drops to Free — its members
+          and notes stay, but free-plan limits apply to it again.
+        </p>
+        <div className="transfer-targets" role="radiogroup" aria-label="Destination vault">
+          {targets.map((t) => {
+            const used = t.seats.members + t.seats.pendingInvitations;
+            const selected = t.orgId === transfer.targetOrgId;
+            return (
+              <button
+                key={t.orgId}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className={`upgrade-plan-card transfer-target${selected ? " selected" : ""}`}
+                onClick={() => setTransfer({ ...transfer, targetOrgId: t.orgId })}
+              >
+                <span className="transfer-target-name">{t.name}</span>
+                <span className="transfer-target-meta">
+                  {used} of {t.seats.limit ?? "∞"} member{used === 1 ? "" : "s"} · Free
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {skipped > 0 && (
+          <p className="transfer-targets-note">
+            Only vaults you own that aren't already on Pro are listed.
+          </p>
+        )}
+        {error && <div className="auth-error">{error}</div>}
+      </ConfirmDialog>
     );
   };
 
@@ -2660,25 +2725,7 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
         <UpgradeDialog orgId={upgradeOrg} onClose={() => setUpgradeOrg(null)} />
       )}
 
-      {transfer && (
-        <ConfirmDialog
-          tone="accent"
-          title={`Move Pro to ${transfer.targetName}?`}
-          confirmLabel="Move subscription"
-          onCancel={() => setTransfer(null)}
-          onConfirm={runTransfer}
-        >
-          <p>
-            <strong>{transfer.targetName}</strong> becomes Pro immediately, on the
-            same billing period and price.
-          </p>
-          <p>
-            <strong>{transfer.sourceLabel}</strong> drops to Free — its members and
-            notes stay, but free-plan limits apply to it again.
-          </p>
-          {error && <div className="auth-error">{error}</div>}
-        </ConfirmDialog>
-      )}
+      {renderTransferDialog()}
 
       {cancelling && (
         <ConfirmDialog
@@ -2709,13 +2756,6 @@ function formatDate(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
-
-/**
- * The MenuSelect trigger label for a transfer picker. Typed `string` rather
- * than the literal so it can never collide with an org-id option — it is a
- * label, not a value that could be selected.
- */
-const TRANSFER_TRIGGER_LABEL: string = "Transfer";
 
 /**
  * How a subscription row writes its date and price. Both formatters already

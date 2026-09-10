@@ -31,7 +31,8 @@ cancel it straight away, or open the billing portal.
 
 ## I deleted my Pro vault and made a new one. Can I move the subscription?
 Yes. Open Vault Settings → Billing, find it under "From deleted vaults", and choose **Transfer**.
-Pick the new vault (it has to be one you own that is not already on Pro) and it takes over the
+A dialog lists the vaults it can move to, with their member counts; pick the new vault (it has to
+be one you own that is not already on Pro), confirm, and it takes over the
 same price and the same billing period. Because the old vault was deleted, the subscription had
 been set to stop at the end of the period; transferring it starts it renewing again on the new
 vault. Only the owner can do this.
