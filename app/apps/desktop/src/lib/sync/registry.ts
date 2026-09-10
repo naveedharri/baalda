@@ -763,7 +763,10 @@ export class VaultRegistry {
     args: {
       folders: TreeNode[];
       notes: TreeNode[];
-      titles: Array<{ path: string; id: string }>;
+      /** The index's {path → docId} rows, READ ON DEMAND: they are needed only
+       *  for on-disk notes this registry doesn't already map, and the read parks
+       *  on the index write lock (see the thunk in `syncStructure`). */
+      titles: () => Promise<Array<{ path: string; id: string }>>;
       serverFolders: Array<{ id: string; path: string }>;
       serverNotes: RegisteredNote[];
       tombstones: string[] | null;
@@ -813,8 +816,14 @@ export class VaultRegistry {
     // Only notes that are BOTH in the tree and in the index have a docId we can
     // match on. (The index covers `.md`; a `.txt`/`.canvas` note therefore never
     // gets inbound-renamed or trashed, only materialized — the safe direction.)
-    for (const t of args.titles) {
-      if (localNotePaths.has(t.path) && !claimed.has(t.path)) local.set(t.id, t.path);
+    //
+    // Asked for only when some on-disk note is NOT claimed above: on a
+    // steady-state relaunch the registry's own map covers every one of them, so
+    // this loop has nothing to add and the index read is pure launch latency.
+    if ([...localNotePaths].some((p) => !claimed.has(p))) {
+      for (const t of await args.titles()) {
+        if (localNotePaths.has(t.path) && !claimed.has(t.path)) local.set(t.id, t.path);
+      }
     }
     const server = new Map<string, string>();
     for (const n of args.serverNotes) {
@@ -1279,21 +1288,28 @@ export class VaultRegistry {
     //     caller's explicit creation intent: turning on sync for a folder the
     //     user opened, or joining an empty team vault, must never invent
     //     content in it.
-    const serverNotes = await this.api.listNotes(vaultId);
-    if (this.stale()) return { seeded: false };
+    //
+    //     Ask the FREE questions first. Only a just-created vault can seed, and
+    //     only into an empty folder — both local facts. The server's note list
+    //     is not free: it is the same `GET /api/notes` that `syncStructure`
+    //     fetches below (`listNoteRegistry`), so on a 6k-note vault every
+    //     ordinary relaunch downloaded all 6k rows TWICE to answer one boolean.
     let workingTree = tree;
     let seeded = false;
     const localFlat = flattenTree(tree);
     if (
       input.seedIfEmpty === true &&
-      serverNotes.length === 0 &&
       localFlat.notes.length === 0 &&
       localFlat.folders.length === 0
     ) {
-      await seedWelcomeContent(this.epoch());
+      const serverNotes = await this.api.listNotes(vaultId);
       if (this.stale()) return { seeded: false };
-      workingTree = await this.readFullTree();
-      seeded = true;
+      if (serverNotes.length === 0) {
+        await seedWelcomeContent(this.epoch());
+        if (this.stale()) return { seeded: false };
+        workingTree = await this.readFullTree();
+        seeded = true;
+      }
     }
 
     await this.syncStructure(vaultId, workingTree, { inbound: true });
@@ -1383,11 +1399,19 @@ export class VaultRegistry {
     // guess.
     this.tuneCheckpointBatch(this.byPath.size);
 
-    // The local index's docId per note path, read BEFORE any decision so inbound
-    // can match by docId rather than by path (a rename changes the path, which is
-    // exactly why path-matching produced duplicates).
-    let titles = await ipc.listNoteTitles(this.epoch());
-    if (this.stale()) return false;
+    // The local index's docId per note path, for inbound to match by docId
+    // rather than by path (a rename changes the path, which is exactly why
+    // path-matching produced duplicates).
+    //
+    // A memoized THUNK, not a value: this read parks on the SQLite index write
+    // lock held by the background rebuild (#84), which made it the single worst
+    // blocking call on the launch path — and a steady-state relaunch needs it for
+    // nothing at all. Both consumers (the inbound fallback identity map and the
+    // create-missing-notes pass) ask for it only when they have an unmapped path
+    // to resolve. Memoized so the two of them share one read when they do.
+    let titlesCache: ipc.NoteTitle[] | null = null;
+    const titles = async (): Promise<ipc.NoteTitle[]> =>
+      (titlesCache ??= await ipc.listNoteTitles(this.epoch()));
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
@@ -1413,8 +1437,8 @@ export class VaultRegistry {
         const reread = await this.readFullTree();
         if (this.stale()) return false;
         ({ folders, notes } = flattenTree(reread));
-        titles = await ipc.listNoteTitles(this.epoch());
-        if (this.stale()) return false;
+        // The paths moved under us, so any memoized read describes the old tree.
+        titlesCache = null;
         // Re-read the server's notes too: `move_note` bumps rows we may have just
         // raced, and a stale list here would undo the move we just applied.
         const fresh = await this.api.listNoteRegistry(vaultId);
@@ -1535,14 +1559,20 @@ export class VaultRegistry {
 
     this.sink.phase("registering", missingFolders.length + missingNotes.length);
 
-    const titleByPath = new Map(titles.map((t) => [t.path, t.title] as const));
+    // Titles + local doc_ids for the notes we are about to CREATE server-side —
+    // so the index read happens only when there is something to create (on a
+    // fully-registered vault, never). `this.sink.phase` above needs none of it.
+    //
     // The local index already keyed each note by a stable doc_id. Supply it as
     // the server id so a note has ONE identity across the .md file, the local
     // CRDT store, and the server (the invariant: key by doc_id, never by path).
     // Omitting it lets the server mint a *different* random id, which forks the
     // note — the editor's bridge persists CRDT under the local id while sync
     // reads/writes the server id, so content silently fails to appear.
-    const idByPath = new Map(titles.map((t) => [t.path, t.id] as const));
+    const titleRows = missingNotes.length > 0 ? await titles() : [];
+    if (this.stale()) return false;
+    const titleByPath = new Map(titleRows.map((t) => [t.path, t.title] as const));
+    const idByPath = new Map(titleRows.map((t) => [t.path, t.id] as const));
 
     // ---- folders, level by level ----
     const byDepth = new Map<number, TreeNode[]>();
