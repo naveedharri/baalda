@@ -1,5 +1,7 @@
 import {
   createContext,
+  lazy,
+  Suspense,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -58,7 +60,13 @@ import {
   statusTone,
 } from "../lib/presence/color";
 import { Face } from "./Face";
-import { ShareDialog, type ShareTarget } from "./ShareDialog";
+import type { ShareTarget } from "./ShareDialog";
+
+/* Lazy: the sharing sheet is a context-menu action, and keeping it out of the
+   eager graph is also what lets it static-import the avatar chunk. */
+const ShareDialog = lazy(() =>
+  import("./ShareDialog").then((m) => ({ default: m.ShareDialog })),
+);
 import { placeMenu, type Placement } from "../lib/menuPlacement";
 
 /** Tooltip on every root-create affordance while the vault's root is frozen. */
@@ -1795,10 +1803,12 @@ export function FileTree() {
       )}
 
       {shareTarget && (
-        <ShareDialog
-          target={shareTarget}
-          onClose={() => setShareTarget(null)}
-        />
+        <Suspense fallback={null}>
+          <ShareDialog
+            target={shareTarget}
+            onClose={() => setShareTarget(null)}
+          />
+        </Suspense>
       )}
     </div>
   );
