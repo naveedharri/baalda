@@ -59,6 +59,33 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - Right-click any note or folder: rename, delete, move, share, lock, colour, reveal in
   Finder/Explorer, export.
 
+## The note's name, and its properties
+
+- **A note's name is its file name, and it sits at the top of the note.** Click it and type to
+  rename the file — the tab, the sidebar and every list follow, and links to the note keep
+  working (notes are tracked by an internal id, not their path). A new note opens with its name
+  selected, ready to type. Names with `/ \ : * ? " < > |`, a leading dot, or one already used by
+  a neighbouring note are refused with a message, not quietly changed.
+- **Properties** are the block of information at the very top of a Markdown file (what other
+  apps call "frontmatter" or "YAML"). Baalda shows it as a small table you fill in, one row per
+  property, with a type you can change from the icon at the left of the row:
+  - **Text** · **List** · **Number** · **Checkbox** · **Date** · **Date & time** · **Tags** ·
+    **Aliases**. Lists, tags and aliases show as chips: Enter adds one, × removes one.
+  - `tags` is always the tags type, because that is what feeds tag search.
+- `⌘;` (Ctrl-; on Windows/Linux) adds a property anywhere in a note, creating the block if the
+  note has none.
+- **It is still just text in your file.** Editing a property changes only that one value — your
+  comments, your quoting, and the order of your keys are left exactly as they were.
+- **If Baalda cannot read the properties, it shows them as plain text and never rewrites them.**
+  That happens with nested structures, multi-line values, anchors, or a repeated key. You will
+  see a short note saying so, and the text stays yours to fix by hand.
+- **Three display modes**, in Settings → Appearance → "Properties in document": *Visible* (the
+  panel), *Hidden* (nothing shown; the text is still in the file) and *Source* (plain YAML).
+  This is a per-device choice, not a per-vault one.
+- **The types you pick are remembered per vault, on that machine** (in the vault's hidden
+  `.context` folder). A teammate opening the same vault sees types worked out from the values
+  themselves until they choose their own — the same as Obsidian.
+
 ## Finding things
 
 - **Full-text search** runs locally and instantly, with highlighted snippets.

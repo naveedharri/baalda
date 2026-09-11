@@ -209,6 +209,20 @@ blind to the content element's, so a centring pad there made every full-line sel
 margins — block replace widgets (which are `.cm-content`'s direct children) get the inset back through
 the shared `cm-block-inset` class.
 
+Above the body sit two more block decorations, both React inside a CM6 widget (`lib/editor/noteHeader.ts`;
+`updateDOM` returns **true** so the host node — and the focused `<input>` — survives a remote keystroke,
+and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mode}`, never doc content):
+- **The inline title** is the note's *filename*. Committing it is a **rename** (`store.renameNoteFileExact`,
+  the no-dedup half of `renameNoteFile`), never a CRDT edit; an illegal or taken name is refused inline
+  (`lib/editor/titlePlan.ts`) instead of being silently suffixed.
+- **The Properties panel** replaces the frontmatter range. Every edit is a **minimal span replacement**
+  (`lib/frontmatter/parse.ts` gives doc-absolute spans, `edit.ts` plans the changes) dispatched as an
+  ordinary editor transaction, so it reaches the `.md`, the index and Yjs undo exactly like typing.
+  YAML outside the supported flat subset is **never rewritten** — it renders as source under a banner.
+  Per-vault types live in `.context/types.json`; the Visible/Hidden/Source mode is a device-local pref.
+  `frontmatterView(state)` is the single authority for which of the three renderings the region gets —
+  two block replaces over one range would throw.
+
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
 Hocuspocus instance is also served on the HTTP port at `/sync` (`sync/http-upgrade.ts`) so the whole

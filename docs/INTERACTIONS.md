@@ -140,13 +140,18 @@ n/a = synchronous or sub-100ms by construction.
 | Search | local FTS5 | fast | n/a |
 | Graph view | in-memory sim | fast | n/a |
 | Ping a peer | awareness field | instant | ✅ existing ping toast |
-| New tab (`+` / ⌘N) | create + open + reveal | fast | ✅ row pulses in the sidebar, highlight slides to the new tab |
+| New tab (`+` / ⌘N) | create + open + reveal | fast | ✅ row pulses in the sidebar, highlight slides to the new tab, cursor waits in the note's title |
 | Switch tab (click / Ctrl-Tab) | same as note open | 0.05–2s | ✅ tab dims while opening, then the highlight slides to it |
+| Rename via the inline title | file rename + registry + tabs | 0.1–1s | ✅ inline warning under the title for a refused or taken name; the tab and sidebar row follow |
+| Edit a property | one CM6 transaction over a span | instant | n/a (the value is the feedback) |
+| Property edited by someone else mid-typing | re-parse + span revalidate | instant | ✅ "Changed by someone else while you were typing." under the row |
 
 ### Known gaps (deliberate, not oversights)
 
 - **Rename** has no spinner. It is an inline edit that already commits visibly,
-  and a spinner over a text field you just typed into is noise.
+  and a spinner over a text field you just typed into is noise. Its one real
+  gap is closed: a name that is illegal or already taken now says so inline,
+  under the title, and keeps the focus instead of silently choosing another.
 - **`useAsyncAction` has no unit test.** It is a React hook and the repo has no
   `@testing-library/react`; adding one for a 140-line hook was not worth a new
   dependency. Its two constants are exported and documented, and the pure pieces

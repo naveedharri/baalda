@@ -100,6 +100,21 @@ with specific people, and choose view or edit for each. Roles are owner, admin, 
 Yes. "Copy link" on a note offers a public link: a read-only web page anyone with the link can
 open. Revoke it any time. There is also a private link that only works for teammates with access.
 
+## Does editing the title at the top of a note rename the file?
+Yes — that title *is* the file name. Type a new one and press Enter and the file is renamed on
+disk; the tab, the sidebar and every list follow. Links to the note keep working, because Baalda
+tracks notes by an internal id rather than by their path, so a rename never breaks a
+`[[wikilink]]` or a backlink. Headings inside the note are ordinary headings and do not rename
+anything. If the name is illegal (`/ \ : * ? " < > |`, or starting with a dot) or a neighbouring
+note already uses it, you are told inline and nothing is renamed.
+
+## Will Baalda rewrite my frontmatter?
+Only the exact value you change. Editing a property in the Properties panel replaces those few
+characters and nothing else — comments, quoting and key order all stay as you wrote them. And if
+your frontmatter uses something Baalda's panel does not support (nested structures, multi-line
+values, anchors, a repeated key), it does not try: it shows the raw text with a short note, and
+leaves the file alone.
+
 ## Can I edit the vault folder from outside the app?
 Yes, and it is a supported way to work. Create, edit, delete, rename and move `.md` files with any
 tool — Finder, a script, an AI agent — and Baalda picks the change up and syncs it, merging an

@@ -9,3 +9,5 @@
 - Opening a note now reveals it in the sidebar, expanding the folders above it
 - Note properties at the top of a file (tags, dates) now render as a compact block instead of a giant bold heading
 - Lists read as normal text again, with only the bullet dimmed
+- A note's name now sits at the top of the note itself — click it to rename the file, and the tab, the sidebar and every list follow. New notes open with their name selected, ready to type
+- Properties at the top of a note are now a panel you can fill in, with real types for text, lists, numbers, checkboxes, dates and tags. Switch it to plain YAML or hide it in Settings → Appearance. Properties Baalda cannot read are shown as text and never rewritten, and the types you choose are remembered per vault (on this machine)

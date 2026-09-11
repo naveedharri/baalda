@@ -114,6 +114,37 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **The note's name is an editable title above the body.** A CodeMirror block
+  widget at position 0 hosting a React `<input>` (`lib/editor/noteHeader.ts`,
+  `components/InlineTitle.tsx`), inset to the prose column through the same
+  `--editor-pad-x` the body uses. Committing it is a **rename**
+  (`store.renameNoteFileExact` → `ipc.renamePath` + `registry.renamePath` +
+  `followNoteRename`), never a CRDT edit — the file name is the note's name, so
+  a title living in the text would be a second identity. Validation refuses
+  rather than sanitizes (`lib/editor/titlePlan.ts`: empty, `/ \ : * ? " < > |`,
+  a leading dot, over 100 chars) and a collision keeps focus with an inline
+  warning instead of silently landing you on `Name 1` — which is why
+  `renameNoteFile` was split into a dedup half and an exact half. ⌘N and the
+  sidebar's + now put the cursor in the new note's title rather than the
+  sidebar's rename box.
+- **A structured Properties panel over YAML frontmatter.** A block replace over
+  the frontmatter range, in the same StateField, rendering one typed row per key
+  (`components/properties/`): text, list, number, checkbox, date, datetime, tags
+  and aliases, with chips for the list kinds and a `MenuSelect` type picker.
+  Every edit is a **minimal span replacement** dispatched as an ordinary editor
+  transaction (`lib/frontmatter/edit.ts`), so changing one value cannot reorder
+  keys, drop a comment or reformat another property — and it reaches the file,
+  the index and Yjs undo through exactly the same path as typing. The parser
+  (`lib/frontmatter/parse.ts`) is a dependency-free flat-YAML subset with
+  doc-absolute spans that **refuses** anything it cannot round-trip (nested maps,
+  block scalars, anchors, duplicate keys, tabs); a refusal renders a banner over
+  the untouched source, and nothing is ever written. `⌘;` adds a property from
+  anywhere in the note, creating the block if there is none. Per-vault types live
+  in `.context/types.json` (new `get_vault_types` / `set_vault_types` commands);
+  name and value suggestions come from `list_property_keys` /
+  `list_property_values`, computed in Rust over `notes.frontmatter` with
+  `serde_json`. Display mode (Visible / Hidden / Source) is a device-local
+  preference in Settings → Appearance, plumbed through a Compartment.
 - **Boot instrumentation.** `lib/perf.ts` marks `script`, `react-mount`,
   `tree-ready`, `tree-painted`, `auth-resolved`, `sync-primed`, `sync-enabled`,
   `reconcile-done` and `index-ready` — one `performance.mark` plus one

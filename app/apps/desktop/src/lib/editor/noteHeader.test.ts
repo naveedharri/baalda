@@ -78,6 +78,15 @@ describe("the inline title widget", () => {
     view.destroy();
   });
 
+  it("renders on an empty note too — the title is always there", () => {
+    // The naming affordance for a note created blank: ⌘N opens this, focused
+    // and selected, and typing replaces "Untitled".
+    const view = mount("");
+    expect(titleInput(view)?.value).toBe("My Note");
+    expect(view.contentDOM.querySelector(".cm-note-title")).not.toBeNull();
+    view.destroy();
+  });
+
   it("shows the properties affordance only when there is no frontmatter", () => {
     const plain = mount("Body text.");
     expect(plain.dom.querySelector(".inline-title-add")).not.toBeNull();
