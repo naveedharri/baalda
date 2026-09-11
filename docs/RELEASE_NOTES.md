@@ -12,3 +12,9 @@
 - A note's name now sits at the top of the note itself — click it to rename the file, and the tab, the sidebar and every list follow. New notes open with their name selected, ready to type
 - Properties at the top of a note are now a panel you can fill in, with real types for text, lists, numbers, checkboxes, dates and tags. Switch it to plain YAML or hide it in Settings → Appearance. Properties Baalda cannot read are shown as text and never rewritten, and the types you choose are remembered per vault (on this machine)
 - Tables are now editable in place: click a cell and type, Tab and Enter move between cells, Enter on the last row adds one, and right-clicking a cell inserts or deletes rows and columns or sets a column's alignment. The table stays a table the whole time — it never flips back to markdown pipes
+- The editor now reveals markdown one piece at a time: put the caret on a bold word and only that word's `**` appear, instead of every marker on the line. Click away and the whole note reads as a finished page
+- Bullets stay round dots while you type on the line, and every marker (#, >, quotes, backticks) is a quieter grey
+- `==Highlights==`, `%%private comments%%` and `#tags` now render properly — the same syntax Obsidian uses, so notes look right in both apps. Comments stay visible in the editor and tags become rounded pills
+- Callouts work: start a quote with `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` or `> [!quote]` and it gets a matching colour, tint and icon
+- Code blocks are syntax-highlighted for the common languages and carry a Copy button
+- `[[Links]]` now show what they mean: `[[Note|label]]` shows the label, `[[Note#Heading]]` shows `Note › Heading`, and the brackets come back when you edit them

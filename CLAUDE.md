@@ -209,6 +209,15 @@ blind to the content element's, so a centring pad there made every full-line sel
 margins — block replace widgets (which are `.cm-content`'s direct children) get the inset back through
 the shared `cm-block-inset` class.
 
+Live preview reveals markdown at **two scopes** (`lib/editor/reveal.ts`): LINE for the markers that
+shape a line (`#`, `>`, the task dash, block widgets) and TOKEN for inline ones (`**`, `==`, `%%`,
+`` ` ``, `[]()`), where `tokenOwner` finds the inline node a marker delimits and only a selection
+touching THAT node unfolds it. A blurred editor has no active line at all. Obsidian-flavoured syntax
+lives in `lib/editor/ofm/` — note the node names `OfmComment*`, because `@lezer/markdown` already owns
+`Comment`/`CommentBlock` and `configure()` silently skips a duplicate name. The editor's `#tag` rule
+(`ofm/hashtag.ts`) and Rust's `TAG_RE` (`parse.rs`) are ONE contract: change one, change both, or a
+tag becomes visible but unsearchable.
+
 Above the body sit two more block decorations, both React inside a CM6 widget (`lib/editor/noteHeader.ts`;
 `updateDOM` returns **true** so the host node — and the focused `<input>` — survives a remote keystroke,
 and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mode}`, never doc content):

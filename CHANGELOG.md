@@ -23,6 +23,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Changed
+- **Markdown markers moved to a new faint tier.** `--text-faint` (light
+  `#bfbfc8`, dark `#55555f`) is defined in all three `tokens.css` colour blocks
+  — `:root`, `[data-theme="dark"]` and the `prefers-color-scheme` pre-hydration
+  block, and missing the third would flash light markers on a dark cold start.
+  `t.meta`, `t.processingInstruction`, `t.contentSeparator`, `t.labelName` and
+  `t.comment` all consume it, as do `.cm-bullet` and `.cm-gutters`. Code tokens
+  inside fences map onto the existing palette (`--accent`, `--success`,
+  `--warning`, `--link`); `defaultHighlightStyle` is never imported, because it
+  ships hardcoded colours that ignore the theme. New tokens alongside:
+  `--highlight-bg` (the `==` wash), `--callout-tint`, `--editor-fold-gutter`,
+  `--indent-guide` / `--indent-guide-active`.
+- **Bullets stay dots on the active line.** The `ListMark` case now runs ahead of
+  the scope checks: a marker that changes shape under the caret is exactly the
+  flicker Stage 3 exists to remove, and Backspace still deletes the real `-`
+  (`deleteMarkupBackward`) because the decoration never touches the document.
+  Task items keep the old rule — the raw `- [ ]` has to come back for editing,
+  and `tasks.ts` drops its checkbox on the same line rule.
 - **Launch no longer waits for the network.** The whole UI used to be gated on
   the session restore, which ends in the sync reconcile — a full disk walk, ~14
   serial HTTP round trips and three reads of a `.context/config.json` that is
@@ -130,6 +147,55 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   moved out of `noteHeader.ts` into `lib/editor/reactWidget.ts` and is now
   shared. A table's range is atomic (`table/atomic.ts`), so no arrow key can
   park the caret inside a block that never shows its source.
+- **Live preview reveals one token at a time.** New `lib/editor/reveal.ts` holds
+  the two scopes the editor now distinguishes: LINE (headings, quote markers,
+  the task dash, block widgets) and TOKEN (`**`, `*`, `~~`, `==`, `%%`, `` ` ``,
+  `[]()`, `![]()`), where `tokenOwner` walks at most six parents to the inline
+  node a marker delimits and the marker unfolds only when a selection range
+  touches THAT node. Adjacency is inclusive at both ends, so the markers you are
+  typing never vanish from under the caret. A `focused` StateField (fed by
+  `EditorView.focusChangeEffect`) means a BLURRED editor has no active line at
+  all: click into the sidebar and the note reads as a finished page. The blanket
+  active-line early return in `livePreview.ts buildDecorations` is gone, and the
+  block-widget StateField is memoised on the ranges of the blocks whose
+  rendering still depends on the selection (HTML blocks and fences; a table is
+  always the editable widget) — before this, every arrow key re-parsed the whole
+  document through `ensureSyntaxTree`.
+- **Obsidian-flavoured syntax** (`lib/editor/ofm/`): `==highlight==` (a
+  MarkdownConfig mirroring GFM Strikethrough's delimiter and flanking rules,
+  refusing any run of three or more `=`), `%%comment%%` inline and `%%`-fenced
+  blocks, and `#tag`. Comments stay VISIBLE — faint and italic — with only their
+  `%%` folding away; a comment you cannot see is a comment you publish by
+  mistake. The comment nodes are `OfmComment` / `OfmCommentMark` /
+  `OfmCommentBlock`, never `Comment`/`CommentBlock`: @lezer/markdown owns those
+  names and `configure()` SILENTLY skips a duplicate, so the collision would
+  have been a feature that quietly did nothing (regression test: `<!-- -->`
+  still yields `CommentBlock`).
+- **Callouts.** `> [!note] Title`, and thirteen more types folded onto five
+  semantic tokens (accent / success / warning / danger / secondary), unknown
+  types falling back to `note`. A decoration layer over `Blockquote`, NOT a new
+  parser — a callout is a blockquote everywhere else, and a second parser would
+  be a second authority next to `blocks.ts`. Off the line the `[!type]` marker
+  becomes an icon built with `createElementNS`; on it, the raw text returns
+  (`livePreview.ts` yields the marker span, since lezer reads `[!warning]` as a
+  shortcut-reference Link whose brackets would otherwise fold TOKEN-scoped).
+- **Syntax-highlighted code fences with a Copy button.** `codeLanguages.ts` is a
+  curated list of ~14 `LanguageDescription`s whose grammars are DYNAMIC imports
+  — 0 KB on the startup path, fetched the first time a fence claims a language —
+  deliberately not `@codemirror/language-data` (~40 packages for a note app).
+  `codeFence.ts` adds one inline widget at the end of the opening fence line.
+- **`#tags` agree with the index.** The editor's tag rule
+  (`ofm/hashtag.ts`) and Rust's `TAG_RE` (`parse.rs`) now say the same thing,
+  character for character: the `#` is not preceded by `[\p{L}\p{N}_/]`, the
+  body is `[\p{L}\p{N}_/-]+` and holds at least one non-digit. `#2026goals` and
+  `(#tag)` are tags; `#2026`, `foo#bar` and a heading's `#` are not. Six Rust
+  tests pin the contract, because a tag you can see but cannot search for is
+  worse than no tag at all.
+- **Wiki-links show what they mean.** `[[Note|label]]` renders as `label`,
+  `[[Note#Heading]]` as `Note › Heading`, and the brackets return under the
+  caret. `wikilinks.ts` exports a `wikilinkRe()` FACTORY — the shared `/g`
+  regex carried `lastIndex` between its two consumers and silently skipped
+  every other match.
 - **The note's name is an editable title above the body.** A CodeMirror block
   widget at position 0 hosting a React `<input>` (`lib/editor/noteHeader.ts`,
   `components/InlineTitle.tsx`), inset to the prose column through the same
