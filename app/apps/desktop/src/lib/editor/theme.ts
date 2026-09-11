@@ -492,6 +492,62 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     margin: "0 -0.1em",
   },
 
+  // ---- Folding (see lib/editor/folding.ts) ----
+  //
+  // The chevron is pulled OUT of the prose column with a transform rather than
+  // given a gutter, so the text never shifts sideways when a note gains or
+  // loses a foldable heading. `.cm-line` is already `position: relative`, which
+  // makes each line its own positioning context.
+  ".cm-foldChevron": {
+    position: "absolute",
+    transform: "translateX(calc(-1 * var(--editor-fold-gutter)))",
+    width: "var(--editor-fold-gutter)",
+    height: "1.2em",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "var(--text-faint)",
+    opacity: "0",
+    cursor: "pointer",
+    userSelect: "none",
+    transition: "opacity var(--t-fast) var(--ease)",
+  },
+  ".cm-foldChevron svg": { width: "13px", height: "13px" },
+  // Only on hover — until something IS folded, when the chevron is the only
+  // sign of what is missing and must stay visible.
+  ".cm-line:hover .cm-foldChevron, .cm-foldChevron[data-folded='true']": {
+    opacity: "1",
+  },
+  ".cm-foldChevron:hover": { color: "var(--text-secondary)" },
+  ".cm-foldPlaceholder": {
+    background: "var(--accent-soft)",
+    color: "var(--text-secondary)",
+    border: "none",
+    borderRadius: "var(--radius-pill)",
+    padding: "0 0.55em",
+    margin: "0 0.25em",
+    fontSize: "0.85em",
+    cursor: "pointer",
+  },
+
+  // ---- Indentation guides (see lib/editor/indentGuides.ts) ----
+  //
+  // One gradient per line, `--indent-depth` steps wide, inset by the same
+  // `--editor-pad-x` the text uses. `--indent-guide-step` is measured at
+  // runtime by the probe in that module — the editor is set in a proportional
+  // font, so no static unit (`ch` least of all) matches a rendered space.
+  ".cm-indent-guides::before": {
+    content: '""',
+    position: "absolute",
+    top: "0",
+    bottom: "0",
+    left: "var(--editor-pad-x)",
+    width: "calc(var(--indent-depth, 0) * var(--indent-guide-step, 0px))",
+    backgroundImage:
+      "repeating-linear-gradient(to right, var(--indent-guide) 0 1px, transparent 1px var(--indent-guide-step, 1px))",
+    pointerEvents: "none",
+  },
+
   // The `›` a `[[Note#Heading]]` shows in place of its `#`.
   ".cm-wikilink-sep": {
     color: "var(--text-faint)",

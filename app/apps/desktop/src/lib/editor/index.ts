@@ -5,37 +5,45 @@
 import { autocompletion, closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { indentOnInput } from "@codemirror/language";
+import { foldKeymap, indentOnInput, indentUnit } from "@codemirror/language";
 import { searchKeymap } from "@codemirror/search";
-import { EditorState, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import {
   drawSelection,
   dropCursor,
   EditorView,
   keymap,
+  lineNumbers,
 } from "@codemirror/view";
 import { GFM } from "@lezer/markdown";
 import type { NoteTitle } from "../ipc";
 import { blockDecorations } from "./blocks";
 import { codeFenceFlair } from "./codeFence";
 import { codeLanguages } from "./codeLanguages";
+import { folding } from "./folding";
 import { formattingKeymap } from "./formatting";
 import { frontmatterDecorations } from "./frontmatter";
+import { indentGuides } from "./indentGuides";
 import { listKeymap } from "./lists";
 import { livePreview } from "./livePreview";
 import { noteHeader, type NoteHeaderOptions } from "./noteHeader";
-import { ofmDecorations, ofmMarkdown } from "./ofm";
+import { ofmDecorations, ofmMarkdown, tagCompletions, type TagSuggestion } from "./ofm";
 import { smartPaste, type SaveAttachment } from "./paste";
 import { tableAtomicRanges } from "./table/atomic";
 import { tripleClickLine } from "./selection";
 import { slashCompletions } from "./slash";
-import { checkboxes } from "./tasks";
+import { checkboxes, taskKeymap } from "./tasks";
 import { editorTheme, markdownHighlight } from "./theme";
 import { wikilinkCompletions, wikilinks } from "./wikilinks";
 
 export interface CreateEditorOptions {
   doc: string;
   getTitles: () => NoteTitle[];
+  /**
+   * Every `#tag` in the vault, most-used first, for the `#` completion. Omitted
+   * (the version-preview view, the tests) → typing `#` suggests nothing.
+   */
+  getTags?: () => TagSuggestion[];
   onNavigate: (target: string) => void;
   /** Phase-0 buffer callback; omitted for CRDT-managed notes (yCollab syncs). */
   onChange?: (doc: string) => void;
@@ -64,6 +72,17 @@ export interface CreateEditorOptions {
    * then keep the plain dimmed frontmatter block.
    */
   header?: NoteHeaderOptions;
+  /**
+   * Show the line-number gutter (Settings → Appearance; off by default, because
+   * a gutter takes real width from the prose column). Compartmented so the
+   * toggle reconfigures the live view instead of rebuilding it.
+   */
+  lineNumbers?: { on: boolean; compartment: Compartment };
+}
+
+/** The `lineNumbers()` gutter, or nothing. Exported for the Editor's toggle. */
+export function lineNumberExtension(on: boolean): Extension {
+  return on ? lineNumbers() : [];
 }
 
 export function baseExtensions(opts: CreateEditorOptions): Extension[] {
@@ -87,6 +106,9 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
     indentOnInput(),
+    // Two spaces: what `lists.ts`'s Tab, `indentOnInput` and every CodeMirror
+    // indent command all read, so there is one answer to "how wide is a level".
+    indentUnit.of("  "),
     EditorView.lineWrapping,
     closeBrackets(),
     // Markdown-aware editing keys, ahead of the base keymap so they win:
@@ -94,13 +116,15 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     //   Enter / Tab    smart list & quote continuation / indent
     formattingKeymap(),
     listKeymap(),
-    keymap.of(keys),
+    taskKeymap(),
+    keymap.of([...foldKeymap, ...keys]),
     // One autocompletion surface, shared by the slash-command block menu and
     // the [[wiki-link]] source (two `autocompletion()` configs would conflict).
     autocompletion({
       override: [
         slashCompletions,
         wikilinkCompletions({ getTitles: opts.getTitles, onNavigate: opts.onNavigate }),
+        ...(opts.getTags ? [tagCompletions({ getTags: opts.getTags })] : []),
       ],
     }),
     // GFM adds tables, task lists, strikethrough, and autolinks; `ofmMarkdown`
@@ -138,6 +162,14 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     // Callout tinting + tag pills. After livePreview, whose QuoteMark rule
     // hides the `>` a callout's marker line still carries.
     ...ofmDecorations,
+    // Fold placeholder + hover chevrons. The fold RANGES all come from
+    // lang-markdown (see ./folding.ts); this only draws the affordance.
+    ...folding,
+    // Faint rules down each indent level of a nested list.
+    ...indentGuides,
+    ...(opts.lineNumbers
+      ? [opts.lineNumbers.compartment.of(lineNumberExtension(opts.lineNumbers.on))]
+      : []),
     // Only mirror doc changes into the store buffer for the Phase-0 path.
     ...(collab || !opts.onChange
       ? []

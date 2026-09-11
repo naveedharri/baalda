@@ -90,10 +90,14 @@
   /* The editor's prose column. One pair of tokens so the CM6 theme
      (`lib/editor/theme.ts`) and the loading skeleton (`components/editor.css`)
      can never drift — the skeleton must land exactly where the real text does.
-     Wide on purpose: the content should fill most of the window, with
-     `--editor-gutter` as the minimum breathing room at each edge on narrow
-     windows (see the `max(...)` the consumers wrap these in). */
-  --editor-measure: 120ch;
+     88ch is the readable measure — past roughly ninety characters the eye
+     loses the start of the next line, which is where every typographic rule of
+     thumb (and Obsidian's own default) lands. `--editor-gutter` is the minimum
+     breathing room at each edge on narrow windows (see the `max(...)` the
+     consumers wrap these in). Settings → Appearance → "Readable line length"
+     turns this off by setting the measure to 100% on `.editor-column`
+     (`components/editor.css`), which every consumer then follows for free. */
+  --editor-measure: 88ch;
   --editor-gutter: 64px;
 
   /* The editor's horizontal inset. It lives on `.cm-line` (not `.cm-content`)

@@ -163,6 +163,56 @@ export const PROPERTIES_MODES: ReadonlyArray<{
   { id: "source", label: "Source", hint: "Shown as plain YAML" },
 ];
 
+// ---- Editor layout ----------------------------------------------------------
+
+const READABLE_LINE_LENGTH_KEY = "context.readableLineLength";
+const LINE_NUMBERS_KEY = "context.lineNumbers";
+
+/**
+ * Cap the prose column at a readable measure (`--editor-measure`) instead of
+ * letting it run the full width of the window. On by default: past roughly 90
+ * characters the eye loses the start of the next line, which is why every
+ * typographic rule of thumb — and Obsidian's own default — lands where this
+ * does. Turning it off is the escape hatch for wide tables and side-by-side
+ * work.
+ */
+export function readReadableLineLength(): boolean {
+  try {
+    return localStorage.getItem(READABLE_LINE_LENGTH_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function writeReadableLineLength(on: boolean): void {
+  try {
+    localStorage.setItem(READABLE_LINE_LENGTH_KEY, on ? "on" : "off");
+  } catch {
+    /* localStorage unavailable — the choice stays in-memory only */
+  }
+}
+
+/**
+ * Show the line-number gutter. OFF by default, unlike everything else here: the
+ * gutter takes real width from the prose column, and a second brain is a place
+ * you write prose, not a place you cite line 42.
+ */
+export function readLineNumbers(): boolean {
+  try {
+    return localStorage.getItem(LINE_NUMBERS_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+
+export function writeLineNumbers(on: boolean): void {
+  try {
+    localStorage.setItem(LINE_NUMBERS_KEY, on ? "on" : "off");
+  } catch {
+    /* localStorage unavailable — the choice stays in-memory only */
+  }
+}
+
 // ---- Sidebar width ----------------------------------------------------------
 
 const SIDEBAR_WIDTH_KEY = "context.sidebarWidth";

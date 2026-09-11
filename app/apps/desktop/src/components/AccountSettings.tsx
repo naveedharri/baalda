@@ -337,12 +337,38 @@ function StatusTab() {
 
 function AppearanceTab() {
   const propertiesMode = useStore((s) => s.propertiesMode);
+  const readableLineLength = useStore((s) => s.readableLineLength);
+  const lineNumbers = useStore((s) => s.lineNumbers);
   return (
     <>
       <div className="menu-row">
         <span className="menu-row-label">Theme</span>
         <ThemeToggle />
       </div>
+      <label className="menu-row toggle-row">
+        <span className="menu-row-label">
+          Readable line length
+          <span className="field-hint">
+            Keep the text in a narrow column instead of filling the window.
+          </span>
+        </span>
+        <Switch
+          checked={readableLineLength}
+          ariaLabel="Readable line length"
+          onChange={(next) => useStore.getState().setReadableLineLength(next)}
+        />
+      </label>
+      <label className="menu-row toggle-row">
+        <span className="menu-row-label">
+          Line numbers
+          <span className="field-hint">Show a line-number gutter in the editor.</span>
+        </span>
+        <Switch
+          checked={lineNumbers}
+          ariaLabel="Line numbers"
+          onChange={(next) => useStore.getState().setLineNumbers(next)}
+        />
+      </label>
       {/* Appearance, not Vault settings: this describes how the editor draws,
           not what a vault contains, so it must not flip as you switch vaults. */}
       <div className="menu-row">

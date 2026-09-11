@@ -512,6 +512,14 @@
 .editor-column {
   position: relative;
 }
+
+/* "Readable line length" off (Settings → Appearance): the prose column fills
+   the pane, leaving only `--editor-gutter` at each edge. Purely a token
+   override, so `--editor-pad-x` — and with it `.cm-line`, the block widgets,
+   the fold chevrons and the loading skeleton — all follow with no JS at all. */
+.editor-column[data-measure="full"] {
+  --editor-measure: 100%;
+}
 .skel-line {
   height: 12px;
   border-radius: var(--radius-pill);

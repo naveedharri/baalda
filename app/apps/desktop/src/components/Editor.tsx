@@ -6,7 +6,8 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { remoteCursors } from "../lib/editor/remoteCursors";
 import type { Awareness } from "y-protocols/awareness";
-import { createEditorState } from "../lib/editor";
+import { createEditorState, lineNumberExtension } from "../lib/editor";
+import { foldEffectsFor, parseNoteUiState, persistFolds } from "../lib/editor/folding";
 import { propertiesMode as propertiesModeFacet } from "../lib/editor/frontmatter";
 import { loadTypes } from "../lib/frontmatter/types";
 import { setActiveNote } from "../lib/editor/activeView";
@@ -357,6 +358,11 @@ export function Editor() {
   // reconfigures the live view instead of rebuilding it (like `editable`).
   const propsModeRef = useRef<Compartment | null>(null);
   const propertiesMode = useStore((s) => s.propertiesMode);
+  // The line-number gutter, also compartmented: flipping the Settings switch
+  // must not tear the live view down (and with it the CRDT binding).
+  const lineNumbersRef = useRef<Compartment | null>(null);
+  const lineNumbers = useStore((s) => s.lineNumbers);
+  const readableLineLength = useStore((s) => s.readableLineLength);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
@@ -463,9 +469,14 @@ export function Editor() {
       // Open the bridge; defer the disk-seed when this doc will sync so the
       // server's canonical state is pulled first (spec 03 §5 ordering).
       const willSync = syncManager.willSync(notePath);
-      const bridge = await bridgeManager.openNote(notePath, docId, {
-        seedFromFile: !willSync,
-      });
+      // The fold state is fetched ALONGSIDE the bridge, never after it: it has
+      // to be in hand by the time the view is constructed, so the folds can be
+      // applied in the same tick and no unfolded frame ever paints.
+      const uiEpoch = useStore.getState().vault?.epoch;
+      const [bridge, storedUiState] = await Promise.all([
+        bridgeManager.openNote(notePath, docId, { seedFromFile: !willSync }),
+        ipc.getNoteUiState(docId, uiEpoch).catch(() => null),
+      ]);
       if (cancelled || !hostRef.current) return;
 
       const opened = await syncManager.openDoc(bridge, notePath);
@@ -494,6 +505,8 @@ export function Editor() {
       editableRef.current = editable;
       const propsMode = new Compartment();
       propsModeRef.current = propsMode;
+      const lineNumberCompartment = new Compartment();
+      lineNumbersRef.current = lineNumberCompartment;
       // Vault-wide inputs for the Properties panel. Loaded in the background:
       // the panel renders from inferred types until they arrive.
       const epoch = useStore.getState().vault?.epoch;
@@ -540,6 +553,11 @@ export function Editor() {
           },
         },
         getTitles: () => useStore.getState().titles,
+        getTags: () => useStore.getState().tags,
+        lineNumbers: {
+          on: useStore.getState().lineNumbers,
+          compartment: lineNumberCompartment,
+        },
         onNavigate: (t) => void navigate(t),
         resolveAsset: makeResolveAsset(
           useStore.getState().vault?.path ?? null,
@@ -561,6 +579,14 @@ export function Editor() {
           // View-only grants / locks: the editor cannot be typed into (spec
           // 04 §4). Compartmented so a live lock change can reconfigure it.
           editable.of(editableExtensions(ro)),
+          // Remember which sections were folded. Debounced well clear of the
+          // bridge's 150/300 ms timings — this writes to `index.sqlite`, never
+          // to the `.md`.
+          persistFolds((json) => {
+            void ipc
+              .setNoteUiState(docId, json, useStore.getState().vault?.epoch)
+              .catch(() => {});
+          }),
         ],
       });
 
@@ -569,6 +595,11 @@ export function Editor() {
       // consumes the flag as it mounts inside the constructor below.
       const titleWantsFocus = useStore.getState().pendingTitleFocus === notePath;
       view = new EditorView({ state, parent: hostRef.current });
+      // Restore the folds SYNCHRONOUSLY, in the tick the view is created. A
+      // `useEffect` or a rAF would be one painted frame too late, and the note
+      // would visibly collapse in front of the reader every time it opened.
+      const foldEffects = foldEffectsFor(view.state, parseNoteUiState(storedUiState));
+      if (foldEffects.length) view.dispatch({ effects: foldEffects });
       viewRef.current = view;
       setViewMounted(true);
       setActiveNote(bindActiveNote(view)); // let out-of-tree drops embed into this note
@@ -605,6 +636,7 @@ export function Editor() {
       viewRef.current = null;
       editableRef.current = null;
       propsModeRef.current = null;
+      lineNumbersRef.current = null;
       bridgeRef.current = null;
       hadEditAccessRef.current = false;
       awarenessRef.current = null;
@@ -654,6 +686,14 @@ export function Editor() {
       effects: compartment.reconfigure(propertiesModeFacet.of(propertiesMode)),
     });
   }, [propertiesMode]);
+
+  // Push the line-number gutter setting into the live view.
+  useEffect(() => {
+    const view = viewRef.current;
+    const compartment = lineNumbersRef.current;
+    if (!view || !compartment) return;
+    view.dispatch({ effects: compartment.reconfigure(lineNumberExtension(lineNumbers)) });
+  }, [lineNumbers]);
 
   // Push the current read-only state into the live CodeMirror view.
   useEffect(() => {
@@ -724,7 +764,10 @@ export function Editor() {
       : null;
 
   return (
-    <div className="editor-column">
+    <div
+      className="editor-column"
+      data-measure={readableLineLength ? "readable" : "full"}
+    >
       {(readOnly || showToolbar) && (
         <div className="editor-topbar">
           {readOnly && (
