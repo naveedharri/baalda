@@ -24,6 +24,23 @@
 # deploy, targeting its one exposed port. Without it Coolify still lets you
 # assign a domain by hand (Service → server, Port → 3010) in each service's
 # "Domains" settings, but won't pick the right service for you.
+#
+# POSTGRES_PASSWORD and JWT_SECRET are Coolify magic vars too
+# (SERVICE_PASSWORD_<ID> / SERVICE_REALBASE64_64_<ID>) — Coolify generates and
+# persists them per-deployment, so there is nothing to type in for either.
+#
+# ⚠️ Do NOT use bash's `${VAR:?error message}` here for a required var, even
+# though ../compose/docker-compose.yml does (and should keep doing, for a
+# plain `docker compose` CLI, which implements it correctly: fail fast with
+# your message if VAR is unset). Coolify's compose parser gives `:?` a
+# DIFFERENT meaning — https://coolify.io/docs/knowledge-base/docker/compose —
+# `${VAR:?}` marks VAR required (blank in the UI), while `${VAR:?text}` treats
+# `text` as a *prefilled default value*, not an error message. Using our old
+# guard clauses here meant an unset var silently became the literal string
+# "set POSTGRES_PASSWORD in .env" instead of failing — DATABASE_URL, JWT_SECRET
+# and BETTER_AUTH_URL all came out as garbage and the deploy failed opaquely
+# downstream. BETTER_AUTH_URL below uses the correct bare `${BETTER_AUTH_URL:?}`
+# instead, which Coolify shows as a required, empty field in its UI.
 name: baalda
 
 x-server-image: &server-image
@@ -33,9 +50,9 @@ x-server-image: &server-image
 
 x-server-env: &server-env
   NODE_ENV: production
-  DATABASE_URL: postgres://baalda:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/baalda
-  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — openssl rand -base64 32}
-  BETTER_AUTH_URL: ${BETTER_AUTH_URL:?set BETTER_AUTH_URL in .env — the public https URL Coolify's proxy fronts}
+  DATABASE_URL: postgres://baalda:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/baalda
+  JWT_SECRET: ${SERVICE_REALBASE64_64_JWT}
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL:?}
   PORT: "3010"
 
 services:
@@ -44,7 +61,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: baalda
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
       POSTGRES_DB: baalda
     volumes:
       - baalda_pgdata:/var/lib/postgresql/data
