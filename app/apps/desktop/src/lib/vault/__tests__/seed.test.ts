@@ -46,8 +46,10 @@ describe("seedWelcomeContent", () => {
     expect(written).toEqual(STARTER_NOTES.map((n) => n.path));
     expect(written[0]).toBe(WELCOME_NOTE_PATH);
     expect(written.length).toBe(18);
-    // Welcome note leads with its own H1 (write_note is full-file, no auto title).
-    expect(writeNote.mock.calls[0][1]).toMatch(/^# Welcome to Baalda/);
+    // No starter note begins with a `# Title`: the file name IS the title (the
+    // editor's inline title shows it), so a heading would duplicate it.
+    expect(writeNote.mock.calls[0][1]).toMatch(/^Baalda is your/);
+    for (const [, body] of writeNote.mock.calls) expect(body).not.toMatch(/^# /);
   });
 
   it("every wikilink target resolves to another starter note (no dangling links)", () => {
