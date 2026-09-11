@@ -35,6 +35,7 @@ import {
 } from "./lib/updater";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
+import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
 import { listenForNoteLinks } from "./lib/deepLink";
@@ -683,6 +684,7 @@ export default function App() {
     return path && s.syncEnabled ? (s.docIdByPath[path] ?? null) : null;
   });
   const versionPanelOpen = useStore((s) => s.versionPanelDocId != null);
+  const editorMeasure = useStore((s) => s.editorMeasure);
   // An open image/PDF preview isn't a synced note — hide the save/sync chrome.
   const isPreview = openNote != null && previewKind(openNote.path) != null;
   // Covers the LAST VAULT'S OPEN and nothing else. It used to cover the whole
@@ -1174,7 +1176,13 @@ export default function App() {
             {openNote ? (
               <Suspense
                 fallback={
-                  <div className="editor-column">
+                  // The column the editor will use, not the default one:
+                  // without this the bars sat at 88ch and jumped sideways when
+                  // the real note landed. (The other half of that match is the
+                  // skeleton's own font-size — `--editor-measure` is a `ch`
+                  // length, so it resolves against whatever font the element
+                  // using it has; see `components/editor.css`.)
+                  <div className="editor-column" style={editorMeasureStyle(editorMeasure)}>
                     <EditorSkeleton />
                   </div>
                 }

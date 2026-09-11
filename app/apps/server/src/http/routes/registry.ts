@@ -143,7 +143,8 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // about solo vaults and wrong about what vaults are FOR: you invited
     // someone, and they landed on an empty sidebar with no way to ask for
     // access. Owners can still lock a vault down — Access panel → Private
-    // revokes exactly this row (`setVaultPosture` in AccessPanel.tsx).
+    // (`setVaultMode` in AccessPanel.tsx) sends `PUT /api/orgs/:orgId/team-access`,
+    // which drops this row AND every per-folder/per-file org grant with it.
     //
     // Only on the first collection. The grant is keyed on the ORG (one org can
     // own several collections and the grant covers all of them), so re-running

@@ -143,3 +143,68 @@ export async function docsForResource(
   );
   return rows.map((r) => ({ docId: r.doc_id, vaultId: r.vault_id }));
 }
+
+/**
+ * {@link docsForResource} for MANY folders and files at once, deduplicated.
+ *
+ * One share change touches one resource, so the singular form is the right
+ * shape there. A whole-vault posture change can clear hundreds of per-item
+ * rows, and calling the singular form per row issues one recursive walk each,
+ * in series, inside the request. This runs ONE recursive walk seeded with every
+ * folder id plus one lookup for every file id.
+ *
+ * `UNION` rather than `UNION ALL` in the recursive term on purpose: with
+ * several seeds, two of them can be ancestor and descendant of each other, and
+ * the overlapping subtree would otherwise be walked twice.
+ *
+ * Callers that also clear a vault-wide grant should resolve
+ * `docsForResource("vault", orgId)` instead and skip this entirely — that
+ * result is a strict superset of every folder and file walk in the org.
+ */
+export async function docsForResources(
+  resources: Array<{ resourceType: "folder" | "file"; resourceId: string }>,
+  db: Queryable = defaultPool,
+): Promise<Array<{ docId: string; vaultId: string }>> {
+  const folderIds = [
+    ...new Set(resources.filter((r) => r.resourceType === "folder").map((r) => r.resourceId)),
+  ];
+  const fileIds = [
+    ...new Set(resources.filter((r) => r.resourceType === "file").map((r) => r.resourceId)),
+  ];
+
+  const out = new Map<string, { docId: string; vaultId: string }>();
+  const collect = (rows: Array<{ doc_id: string; vault_id: string }>) => {
+    for (const r of rows) out.set(r.doc_id, { docId: r.doc_id, vaultId: r.vault_id });
+  };
+
+  const queries: Array<Promise<{ rows: Array<{ doc_id: string; vault_id: string }> }>> = [];
+  if (folderIds.length > 0) {
+    queries.push(
+      db.query<{ doc_id: string; vault_id: string }>(
+        `WITH RECURSIVE subtree AS (
+            SELECT id, vault_id FROM folders WHERE id = ANY($1::text[])
+            UNION
+            SELECT f.id, f.vault_id FROM folders f JOIN subtree s ON f.parent_id = s.id
+         )
+         SELECT n.id AS doc_id, n.vault_id FROM notes n
+           JOIN subtree s ON n.folder_id = s.id AND n.deleted_at IS NULL
+         UNION
+         SELECT fi.id AS doc_id, fi.vault_id FROM files fi
+           JOIN subtree s ON fi.folder_id = s.id`,
+        [folderIds],
+      ),
+    );
+  }
+  if (fileIds.length > 0) {
+    queries.push(
+      db.query<{ doc_id: string; vault_id: string }>(
+        `SELECT id AS doc_id, vault_id FROM notes WHERE id = ANY($1::text[])
+         UNION
+         SELECT id AS doc_id, vault_id FROM files WHERE id = ANY($1::text[])`,
+        [fileIds],
+      ),
+    );
+  }
+  for (const res of await Promise.all(queries)) collect(res.rows);
+  return [...out.values()];
+}

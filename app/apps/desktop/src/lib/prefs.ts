@@ -165,28 +165,73 @@ export const PROPERTIES_MODES: ReadonlyArray<{
 
 // ---- Editor layout ----------------------------------------------------------
 
-const READABLE_LINE_LENGTH_KEY = "context.readableLineLength";
+const EDITOR_MEASURE_KEY = "context.editorMeasure";
+/** The key this replaced: a two-state "Readable line length" switch. Read once,
+ *  to migrate a device that still has it, and never written again. */
+const LEGACY_READABLE_LINE_LENGTH_KEY = "context.readableLineLength";
 const LINE_NUMBERS_KEY = "context.lineNumbers";
 
 /**
- * Cap the prose column at a readable measure (`--editor-measure`) instead of
- * letting it run the full width of the window. On by default: past roughly 90
- * characters the eye loses the start of the next line, which is why every
- * typographic rule of thumb — and Obsidian's own default — lands where this
- * does. Turning it off is the escape hatch for wide tables and side-by-side
- * work.
+ * How wide the editor's prose column runs: a measure in `ch` — the unit
+ * `--editor-measure` is already expressed in — or `"full"`, the whole pane
+ * minus its gutters.
  */
-export function readReadableLineLength(): boolean {
+export type EditorMeasure = number | "full";
+
+/** 88ch is the readable measure: past roughly ninety characters the eye loses
+ *  the start of the next line, which is where every typographic rule of thumb
+ *  (and Obsidian's own default) lands. */
+export const EDITOR_MEASURE_DEFAULT = 88;
+/** Below ~60ch prose starts to hyphenate badly; above ~120ch the measure has
+ *  already stopped being readable and "full" is the honest choice. */
+export const EDITOR_MEASURE_MIN = 60;
+export const EDITOR_MEASURE_MAX = 120;
+/** The slider's granularity. Four characters is the smallest step whose effect
+ *  is actually visible as you drag. */
+export const EDITOR_MEASURE_STEP = 4;
+
+/** Snap to the step and clamp to the usable range. NaN — a corrupted stored
+ *  value, or a garbage slider reading — falls back to the default rather than
+ *  collapsing the column to nothing. ±Infinity clamps to the bounds like any
+ *  other out-of-range number; a clamp that answered "88" to "as wide as
+ *  possible" would be lying. */
+export function clampEditorMeasure(ch: number): number {
+  if (Number.isNaN(ch)) return EDITOR_MEASURE_DEFAULT;
+  const snapped = Math.round(ch / EDITOR_MEASURE_STEP) * EDITOR_MEASURE_STEP;
+  return Math.min(EDITOR_MEASURE_MAX, Math.max(EDITOR_MEASURE_MIN, snapped));
+}
+
+/**
+ * The chosen column width. Device-local like the theme — it describes how the
+ * editor draws, not what a vault contains.
+ *
+ * Migration: this replaced a two-state "Readable line length" switch. With no
+ * value of its own the old key still decides — "off" meant the column filled
+ * the window, which is exactly what `"full"` means now, and anything else meant
+ * the readable measure, which is the default. The legacy key is never written
+ * again, so the first drag of the slider settles it for good.
+ */
+export function readEditorMeasure(): EditorMeasure {
   try {
-    return localStorage.getItem(READABLE_LINE_LENGTH_KEY) !== "off";
+    const raw = localStorage.getItem(EDITOR_MEASURE_KEY);
+    if (raw === null) {
+      return localStorage.getItem(LEGACY_READABLE_LINE_LENGTH_KEY) === "off"
+        ? "full"
+        : EDITOR_MEASURE_DEFAULT;
+    }
+    if (raw === "full") return "full";
+    // `Number("")` is 0 — finite, so it would survive the clamp as the MINIMUM
+    // measure. An empty or blank value is a corrupted write, not a request for
+    // the narrowest column.
+    return raw.trim() === "" ? EDITOR_MEASURE_DEFAULT : clampEditorMeasure(Number(raw));
   } catch {
-    return true;
+    return EDITOR_MEASURE_DEFAULT;
   }
 }
 
-export function writeReadableLineLength(on: boolean): void {
+export function writeEditorMeasure(measure: EditorMeasure): void {
   try {
-    localStorage.setItem(READABLE_LINE_LENGTH_KEY, on ? "on" : "off");
+    localStorage.setItem(EDITOR_MEASURE_KEY, measure === "full" ? "full" : String(measure));
   } catch {
     /* localStorage unavailable — the choice stays in-memory only */
   }

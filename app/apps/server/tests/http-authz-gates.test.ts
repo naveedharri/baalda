@@ -29,16 +29,17 @@ function req(user: TestUser, method: string, path: string, body?: unknown) {
 describe("HTTP authz gates (per-doc ACL, not bare membership)", () => {
   let owner: TestUser;
   let member: TestUser;
+  let orgId: string;
   let vault: string;
 
   beforeEach(async () => {
     await resetDb();
     owner = await signUp("owner@authz.test");
-    const org = (await createOrg(owner, "Authz Co", "authz-co")).id;
+    orgId = (await createOrg(owner, "Authz Co", "authz-co")).id;
     // A plain member with NO shares — the vault is private by default.
     member = await signUp("member@authz.test");
-    await seedMember(org, member.userId, "member");
-    vault = await seedVault(org);
+    await seedMember(orgId, member.userId, "member");
+    vault = await seedVault(orgId);
   });
   afterAll(async () => {
     await pool.end();
@@ -78,5 +79,15 @@ describe("HTTP authz gates (per-doc ACL, not bare membership)", () => {
     const folder = await seedFolder(vault, null, "Docs", "Docs");
     expect((await req(member, "DELETE", `/api/folders/${folder}`)).status).toBe(403);
     expect((await req(owner, "DELETE", `/api/folders/${folder}`)).status).toBe(200);
+  });
+
+  it("member can neither read nor enforce the vault-wide team-access posture", async () => {
+    // Both verbs are gated on owner/admin — the mode decides what the WHOLE
+    // team can reach, so reading it is as privileged as setting it.
+    expect((await req(member, "GET", `/api/orgs/${orgId}/team-access`)).status).toBe(403);
+    expect(
+      (await req(member, "PUT", `/api/orgs/${orgId}/team-access`, { mode: "open" })).status,
+    ).toBe(403);
+    expect((await req(owner, "GET", `/api/orgs/${orgId}/team-access`)).status).toBe(200);
   });
 });

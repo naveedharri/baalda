@@ -14,6 +14,7 @@ import { setActiveNote } from "../lib/editor/activeView";
 import { bindActiveNote } from "../lib/editor/activeNoteBinding";
 import { saveAttachment } from "../lib/attachments";
 import { bridgeManager, type NoteBridge } from "../lib/bridge";
+import { editorMeasureStyle } from "../lib/editorMeasure";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
 import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
@@ -366,7 +367,7 @@ export function Editor() {
   // must not tear the live view down (and with it the CRDT binding).
   const lineNumbersRef = useRef<Compartment | null>(null);
   const lineNumbers = useStore((s) => s.lineNumbers);
-  const readableLineLength = useStore((s) => s.readableLineLength);
+  const editorMeasure = useStore((s) => s.editorMeasure);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
@@ -772,10 +773,7 @@ export function Editor() {
       : null;
 
   return (
-    <div
-      className="editor-column"
-      data-measure={readableLineLength ? "readable" : "full"}
-    >
+    <div className="editor-column" style={editorMeasureStyle(editorMeasure)}>
       {(readOnly || showToolbar) && (
         <div className="editor-topbar">
           {readOnly && (

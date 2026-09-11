@@ -46,17 +46,18 @@ import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
 import {
   type ActivityStatus,
+  type EditorMeasure,
   readActivityStatus,
   readMentionSound,
+  readEditorMeasure,
   readLineNumbers,
   readPropertiesMode,
-  readReadableLineLength,
   readTreeSort,
   writeActivityStatus,
   writeMentionSound,
+  writeEditorMeasure,
   writeLineNumbers,
   writePropertiesMode,
-  writeReadableLineLength,
   writeTreeSort,
 } from "./lib/prefs";
 import type { PropertiesMode } from "./lib/editor/frontmatter";
@@ -378,9 +379,9 @@ interface AppStore {
   /** How the editor draws YAML frontmatter: a Properties panel, nothing, or
    *  plain source. Device-local (Settings → Appearance), not per-vault. */
   propertiesMode: PropertiesMode;
-  /** Cap the editor's prose column at a readable measure rather than letting it
-   *  fill the window. Device-local (Settings → Appearance). */
-  readableLineLength: boolean;
+  /** How wide the editor's prose column runs: a measure in `ch`, or "full" for
+   *  the whole pane. Device-local (Settings → Appearance). */
+  editorMeasure: EditorMeasure;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
@@ -515,7 +516,7 @@ interface AppStore {
   setActivityStatus: (status: ActivityStatus) => void;
   setMentionSound: (enabled: boolean) => void;
   setPropertiesMode: (mode: PropertiesMode) => void;
-  setReadableLineLength: (on: boolean) => void;
+  setEditorMeasure: (measure: EditorMeasure) => void;
   setLineNumbers: (on: boolean) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
@@ -1382,7 +1383,7 @@ export const useStore = create<AppStore>((set, get) => ({
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
   propertiesMode: readPropertiesMode(),
-  readableLineLength: readReadableLineLength(),
+  editorMeasure: readEditorMeasure(),
   lineNumbers: readLineNumbers(),
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
@@ -2452,9 +2453,9 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ propertiesMode: mode });
   },
 
-  setReadableLineLength: (on) => {
-    writeReadableLineLength(on);
-    set({ readableLineLength: on });
+  setEditorMeasure: (measure) => {
+    writeEditorMeasure(measure);
+    set({ editorMeasure: measure });
   },
 
   setLineNumbers: (on) => {

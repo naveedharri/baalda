@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
+import type pg from "pg";
 import { pool } from "../../db/pool.js";
 import {
   docsForResource,
+  docsForResources,
   orgRole,
   resolveResource,
 } from "../../permissions/lookup.js";
@@ -18,6 +20,159 @@ import { getSession } from "../session.js";
  * owner/admin or the resource creator. On revoke we disconnect live sockets for
  * every affected doc (instant kill).
  */
+
+type Queryable = Pick<pg.Pool, "query">;
+
+/** The three postures the vault-level control offers. */
+type TeamAccessMode = "open" | "readonly" | "private";
+
+/** The `shares.permission` a mode writes on the vault row; null = no row. */
+const MODE_PERMISSION: Record<TeamAccessMode, "edit" | "view" | null> = {
+  open: "edit",
+  readonly: "view",
+  private: null,
+};
+
+/**
+ * How much access a grant confers, so a change can be judged as widening or
+ * NARROWING. `locked` and `denied` rank 0 alongside "no row": neither grants
+ * anything, they only cap or block what another row granted.
+ *
+ * Only a narrowing needs a socket kick — the client reconnects and re-mints a
+ * token, so a widening arrives on its own. This is the rule `POST /shares`
+ * already follows when it kicks on view/locked/denied and never on edit.
+ */
+function grantRank(permission: string | null | undefined): number {
+  return permission === "edit" ? 2 : permission === "view" ? 1 : 0;
+}
+
+function modeOf(permission: string | null | undefined): TeamAccessMode {
+  if (permission === "edit") return "open";
+  if (permission === "view") return "readonly";
+  return "private";
+}
+
+export interface TeamAccessOverride {
+  id: string;
+  vaultId: string;
+  resourceType: "folder" | "file";
+  resourceId: string;
+  permission: "edit" | "view" | "locked" | "denied";
+}
+
+/**
+ * Every per-item row the vault-level control owns: the org-principal grants,
+ * locks and denies on a folder or file living in one of the org's note
+ * collections.
+ *
+ * Per-USER rows are deliberately absent. The per-item control clears an item's
+ * own org rows and leaves named-person grants, per-member locks and per-member
+ * denies standing; the vault-level control is the same control at vault scope,
+ * so it must behave the same way.
+ *
+ * The membership subqueries mirror `GET /vaults/:vaultId/locks` — widened to
+ * every collection of the org and to all four permissions. A row whose resource
+ * no longer exists (or whose note is soft-deleted) produces no lateral row and
+ * so drops out of the inner join, which is what keeps a deleted note's leftover
+ * share off the list.
+ */
+async function teamOverrides(
+  db: Queryable,
+  orgId: string,
+  vaultIds: string[],
+): Promise<TeamAccessOverride[]> {
+  if (vaultIds.length === 0) return [];
+  const { rows } = await db.query<{
+    id: string;
+    vault_id: string;
+    resource_type: "folder" | "file";
+    resource_id: string;
+    permission: "edit" | "view" | "locked" | "denied";
+  }>(
+    `SELECT s.id, loc.vault_id, s.resource_type, s.resource_id, s.permission
+       FROM shares s
+       JOIN LATERAL (
+         SELECT f.vault_id FROM folders f
+          WHERE s.resource_type = 'folder' AND f.id = s.resource_id
+         UNION ALL
+         SELECT n.vault_id FROM notes n
+          WHERE s.resource_type = 'file' AND n.id = s.resource_id
+            AND n.deleted_at IS NULL
+         UNION ALL
+         SELECT fi.vault_id FROM files fi
+          WHERE s.resource_type = 'file' AND fi.id = s.resource_id
+         LIMIT 1
+       ) loc ON TRUE
+      WHERE s.principal_type = 'org'
+        AND s.principal_id = $2
+        AND s.resource_type IN ('folder', 'file')
+        AND loc.vault_id = ANY($1::text[])
+      ORDER BY s.resource_type, s.resource_id`,
+    [vaultIds, orgId],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    vaultId: r.vault_id,
+    resourceType: r.resource_type,
+    resourceId: r.resource_id,
+    permission: r.permission,
+  }));
+}
+
+/**
+ * Org rows stranded on SOFT-DELETED notes — the ones `teamOverrides` refuses to
+ * report because the user cannot see the note they sit on.
+ *
+ * PUT clears them anyway, silently and uncounted: left behind, a restored note
+ * would come back carrying the very override the whole-vault setting was
+ * applied to remove. They are absent from the reported `cleared` count because
+ * the user never saw them, and absent from the socket kick because a deleted
+ * doc has no live editors for the row to have been protecting.
+ *
+ * Soft-deleted NOTES only. `shares.resource_id` has no foreign key, so a row on
+ * a hard-deleted folder or file outlives its resource; those are inert garbage
+ * that no resolver can reach, they predate this endpoint, and cleaning them up
+ * is not this control's job.
+ */
+async function deadNoteOverrideIds(
+  db: Queryable,
+  orgId: string,
+  vaultIds: string[],
+): Promise<string[]> {
+  if (vaultIds.length === 0) return [];
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT s.id
+       FROM shares s
+       JOIN notes n ON n.id = s.resource_id
+      WHERE s.principal_type = 'org'
+        AND s.principal_id = $2
+        AND s.resource_type = 'file'
+        AND n.deleted_at IS NOT NULL
+        AND n.vault_id = ANY($1::text[])`,
+    [vaultIds, orgId],
+  );
+  return rows.map((r) => r.id);
+}
+
+/**
+ * The org's own posture row on the vault resource. At most one: the unique key
+ * is (resource_type, resource_id, principal_type, principal_id), so it is the
+ * `principal_id = orgId` filter — not the key alone — that makes this single.
+ * A row bearing some OTHER principal id is ignored here for the same reason
+ * `sharePermission` ignores it: it grants that principal nothing on this org.
+ */
+async function vaultPostureRow(
+  db: Queryable,
+  orgId: string,
+): Promise<{ id: string; permission: string } | null> {
+  const { rows } = await db.query<{ id: string; permission: string }>(
+    `SELECT id, permission FROM shares
+      WHERE resource_type = 'vault' AND resource_id = $1
+        AND principal_type = 'org' AND principal_id = $1`,
+    [orgId],
+  );
+  return rows[0] ?? null;
+}
 
 export interface ShareDeps {
   /** Force-close live sync sockets for a doc (instant revocation). */
@@ -251,6 +406,159 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       [vaultId],
     );
     return c.json({ locks: rows });
+  });
+
+  // ── Whole-vault team access ────────────────────────────────────────────────
+  //
+  // The Access panel's vault-level control ("This vault, by default") used to
+  // write the vault row and nothing else, so every per-folder/per-file override
+  // survived it. People read the control as "make the WHOLE vault Shared /
+  // Read-only / Private" and were right to: it is the per-item control at vault
+  // scope. So it now enforces the mode across the vault, clearing the item-level
+  // org rows exactly as the per-item control clears an item's own.
+  //
+  // It lives on the server because the client cannot do it: one round trip per
+  // item, no atomicity, and no way to even enumerate the org `edit`/`view`
+  // overrides (`/locks` reports only the `locked`/`denied` overlay).
+  //
+  // Owner/admin only, both verbs — `canManage` on the vault resource, which is
+  // role-based on purpose (an owner must be able to lift a restriction they
+  // applied to themselves; see the note at the top of this file).
+
+  // Report the posture plus every per-item override that currently survives it.
+  app.get("/orgs/:orgId/team-access", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+
+    const gate = await canManage(session.userId, "vault", orgId);
+    if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
+
+    // Only view/edit declare a posture — `vaultBaseline` reads the same pair.
+    const row = await vaultPostureRow(pool, orgId);
+    const posture = row?.permission === "edit" || row?.permission === "view" ? row : null;
+    return c.json({
+      mode: modeOf(posture?.permission),
+      grantId: posture?.id ?? null,
+      overrides: await teamOverrides(pool, orgId, gate.vaultIds ?? []),
+    });
+  });
+
+  // Enforce a posture on the entire vault.
+  app.put("/orgs/:orgId/team-access", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+
+    const body = await c.req.json().catch(() => ({}));
+    const mode = body?.mode as TeamAccessMode;
+    if (mode !== "open" && mode !== "readonly" && mode !== "private") {
+      return c.json({ error: "mode must be one of open|readonly|private" }, 400);
+    }
+
+    const gate = await canManage(session.userId, "vault", orgId);
+    if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
+
+    const vaultIds = gate.vaultIds ?? [];
+    const permission = MODE_PERMISSION[mode];
+
+    // What has to be force-disconnected. NOT "everything that was deleted": a
+    // client reconnects and re-mints its own token, so a change that gives
+    // people MORE access arrives by itself and a kick would only cost a
+    // reconnect. Only a narrowing has to reach open editors immediately, which
+    // is the same rule `POST /shares` applies per resource.
+    //
+    //   item row   kicked iff grantRank(row) > grantRank(target)
+    //   posture    kicked iff grantRank(old) > grantRank(new)
+    //
+    // So Read-only→Shared kicks nobody, Shared→Read-only kicks every doc, and a
+    // cleared `locked`/`denied` row (rank 0) never kicks anyone at all.
+    let itemKick: Array<{ resourceType: "folder" | "file"; resourceId: string }> = [];
+    let vaultKick = false;
+    // Reported separately, because the desktop says "N folder and note settings
+    // cleared": `cleared` counts ITEM rows only — the ones GET would have
+    // listed — and the posture is a yes/no of its own.
+    let cleared = 0;
+    let postureChanged = false;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const overrides = await teamOverrides(client, orgId, vaultIds);
+      const dead = await deadNoteOverrideIds(client, orgId, vaultIds);
+      const posture = await vaultPostureRow(client, orgId);
+      // Compared as MODES, not as raw permissions: a vault-level `locked` row
+      // is inert (the resolver's lock check ignores vault rows) and reads as
+      // Private, so it must not register as a change away from Private.
+      postureChanged = modeOf(posture?.permission) !== mode;
+      cleared = overrides.length;
+
+      // The posture row is deleted ONLY on the way to Private. For edit/view
+      // the upsert below rewrites it in place, which keeps `grantId` stable for
+      // the client and leaves no instant inside the transaction where the vault
+      // has no grant at all.
+      const dropPosture = permission === null && posture !== null;
+
+      const ids = [
+        ...overrides.map((o) => o.id),
+        ...dead,
+        ...(dropPosture ? [posture.id] : []),
+      ];
+      itemKick = overrides
+        .filter((o) => grantRank(o.permission) > grantRank(permission))
+        .map((o) => ({ resourceType: o.resourceType, resourceId: o.resourceId }));
+      vaultKick = grantRank(posture?.permission) > grantRank(permission);
+      if (ids.length > 0) {
+        await client.query("DELETE FROM shares WHERE id = ANY($1::text[])", [ids]);
+      }
+
+      if (permission !== null) {
+        await client.query(
+          `INSERT INTO shares
+             (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
+           VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6)
+           ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+           DO UPDATE SET permission = EXCLUDED.permission`,
+          [randomUUID(), orgId, orgId, orgId, permission, session.userId],
+        );
+      }
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // After the commit. A narrowed vault posture already reaches every doc in
+    // every collection of the org, so the per-item walks underneath it are
+    // pure duplication — resolve the one query and skip them. Otherwise the
+    // items go in a single batch rather than one recursive walk apiece.
+    // (The subtree walks still work: only `shares` rows were deleted.)
+    const affected = vaultKick
+      ? await docsForResource("vault", orgId)
+      : await docsForResources(itemKick);
+
+    // Best-effort, one doc at a time. The write is already committed, so a
+    // transport that throws on one socket must not cost the caller a 500 and
+    // must not strand the docs behind it on their old permission.
+    let disconnected = 0;
+    for (const d of affected) {
+      try {
+        deps.disconnectDoc(d.vaultId, d.docId);
+        disconnected += 1;
+      } catch {
+        // The doc keeps its socket until the token expires; nothing else to do.
+      }
+    }
+    // Only on a real change: an idempotent PUT would otherwise make every
+    // vault-channel subscriber in every collection recompute its readable set
+    // for nothing.
+    if (cleared > 0 || postureChanged) for (const v of vaultIds) deps.onAclChanged?.(v);
+
+    return c.json({ mode, cleared, postureChanged, disconnectedDocs: disconnected });
   });
 
   // List shares for a resource.

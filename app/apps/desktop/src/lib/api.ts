@@ -215,6 +215,44 @@ export interface Share {
 
 export type Permission = "view" | "edit";
 
+/** The vault-wide access mode (see {@link ContextApi.getTeamAccess}). */
+export type TeamAccessMode = "open" | "readonly" | "private";
+
+/** One org-principal share row sitting on a folder or note *inside* the vault. */
+export interface TeamAccessOverride {
+  id: string;
+  vaultId: string;
+  resourceType: "folder" | "file";
+  resourceId: string;
+  permission: "edit" | "view" | "locked" | "denied";
+}
+
+/**
+ * The vault's team access as one answer: the mode, the grant row backing it,
+ * and every per-item org row a whole-vault change would replace.
+ *
+ * One request rather than "list the vault's shares, then work the rest out"
+ * because the Access panel has to say how many settings it is about to clear
+ * *before* the user confirms, and a count assembled from several round trips
+ * is a count that can be wrong.
+ */
+export interface TeamAccess {
+  mode: TeamAccessMode;
+  grantId: string | null;
+  overrides: TeamAccessOverride[];
+}
+
+/** What a whole-vault mode change actually did. */
+export interface TeamAccessResult {
+  mode: TeamAccessMode;
+  /** Per-item org rows deleted. */
+  cleared: number;
+  /** Live sync sockets force-closed because the new mode revoked their access. */
+  disconnectedDocs: number;
+  /** False when the mode was already this and only the per-item rows went. */
+  postureChanged: boolean;
+}
+
 /** One member's effective access to a resource, as resolved server-side. */
 export interface ResolvedMemberAccess {
   userId: string;
@@ -1543,6 +1581,46 @@ export class ApiClient {
 
   async revokeShare(shareId: string): Promise<void> {
     await this.request<unknown>("DELETE", `/api/shares/${encodeURIComponent(shareId)}`);
+  }
+
+  /**
+   * The vault's team access in one shot: the vault-wide mode plus every
+   * per-item org row underneath it. Owner/admin only.
+   */
+  async getTeamAccess(orgId: string): Promise<TeamAccess> {
+    const { data } = await this.request<TeamAccess>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/team-access`,
+    );
+    return {
+      mode: data.mode ?? "private",
+      grantId: data.grantId ?? null,
+      overrides: data.overrides ?? [],
+    };
+  }
+
+  /**
+   * Set the mode for the WHOLE vault — every folder and note.
+   *
+   * The server does this transactionally: it deletes every per-item org row
+   * first, then writes the new vault row. That is the point of the endpoint.
+   * Doing it client-side as revoke-then-create left the per-item rows standing,
+   * so "set the entire vault to Shared" quietly skipped everything a folder had
+   * overridden. Per-user rows are untouched: people shared with by name keep
+   * their access.
+   */
+  async setTeamAccess(orgId: string, mode: TeamAccessMode): Promise<TeamAccessResult> {
+    const { data } = await this.request<TeamAccessResult>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/team-access`,
+      { body: { mode } },
+    );
+    return {
+      mode: data.mode ?? mode,
+      cleared: data.cleared ?? 0,
+      disconnectedDocs: data.disconnectedDocs ?? 0,
+      postureChanged: data.postureChanged ?? true,
+    };
   }
 
   /** Resolve every member's effective access to a resource (the "who can access"

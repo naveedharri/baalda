@@ -1,7 +1,8 @@
 // Minimalistic settings panel for the Graph View. Pure controlled component:
 // it holds no physics or canvas state — it only renders inputs bound to the
 // shared GraphSettings shape and emits partial patches upward. All visual
-// styling lives in graph.css; this file just emits the agreed class names.
+// styling lives in graph.css (plus the app-wide `.range-input` / `.range-value`
+// in App.css); this file just emits the agreed class names.
 
 import type { GraphSettings, ColorMode } from "../lib/graph/graphSettings";
 import { SETTING_RANGES } from "../lib/graph/graphSettings";
@@ -56,6 +57,7 @@ export function GraphControls(props: GraphControlsProps): React.JSX.Element {
         <label htmlFor={`graph-${key}`}>{SLIDER_LABELS[key]}</label>
         <input
           id={`graph-${key}`}
+          className="range-input"
           type="range"
           min={range.min}
           max={range.max}
@@ -63,7 +65,7 @@ export function GraphControls(props: GraphControlsProps): React.JSX.Element {
           value={value}
           onChange={(e) => onChange({ [key]: Number(e.target.value) })}
         />
-        <span className="graph-control-val">{formatValue(key, value)}</span>
+        <span className="range-value">{formatValue(key, value)}</span>
       </div>
     );
   };

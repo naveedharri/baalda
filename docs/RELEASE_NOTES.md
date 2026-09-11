@@ -23,5 +23,9 @@
 - More editing shortcuts: **⌘⇧H** highlights, **⌘⌥1**–**⌘⌥6** set a heading level (press the same one again to clear it), **⌘L** ticks a task or turns any line into one, and **⇧⏎** adds a line break inside a paragraph
 - Selecting a word and pressing **⌘K** is smarter: paste a link, select it, press ⌘K and the cursor lands where the words go
 - Faint guides now run down each level of a nested list
-- The editor keeps text in a readable column instead of stretching it across the whole window. Prefer the full width? Settings → Appearance → Readable line length. Line numbers live there too, off by default
+- The editor keeps text in a readable column instead of stretching it across the whole window. Prefer it narrower, wider or full width? Settings → Appearance → Content width. Line numbers live there too, off by default
 - Opening a note no longer makes the whole window flash: the note area shows its loading bars right away, the sidebar row you clicked stays highlighted instead of blinking, and when Baalda reveals a note in the sidebar (from a tab, a link or search) the list now glides to it rather than jumping
+- Vault Settings → Access now has an Entire vault control that means it: pick Shared, Read-only or Private and it is applied to every folder and note, clearing the individual settings underneath. Baalda tells you how many it is about to clear before you confirm, and people you have shared something with by name keep their access
+- The Access page no longer opens on the wrong answer: it waits for your vault's real setting instead of flashing Private first, a folder you set to Shared inside a private vault now reads Shared, and clicking a folder or note slides the page down to its permission buttons
+- Settings rows have room to breathe, with a faint line between them so it is clear where one setting ends and the next begins
+- Content width is now a slider instead of an on/off switch: drag from a narrow column to a wide one, or all the way to full width, and a small preview shows how the text will sit in your window. The editor follows as you drag

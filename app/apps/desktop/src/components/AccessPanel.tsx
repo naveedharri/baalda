@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { authManager } from "../lib/auth/authManager";
 import {
   type ResolvedMemberAccess,
@@ -6,7 +6,7 @@ import {
   sharePrincipalId,
   sharePrincipalType,
 } from "../lib/api";
-import type { AccessTreeResponse } from "../lib/api";
+import type { AccessTreeResponse, TeamAccess } from "../lib/api";
 import type { TreeNode } from "../lib/ipc";
 import {
   ancestorPaths,
@@ -17,6 +17,17 @@ import {
   type AccessEntry,
   type AccessRow,
 } from "../lib/accessTree";
+import {
+  MODE_LABEL,
+  buildOrgRowsByPath,
+  clearedCountPhrase,
+  effectiveTeamMode,
+  overrideCountPhrase,
+  type TeamMode,
+} from "../lib/accessMode";
+import { readTeamAccessCache, writeTeamAccessCache } from "../lib/teamAccessCache";
+import { toast } from "../lib/toast";
+import { scrollPaneIntoContainer } from "../lib/scrollPlan";
 import { lockScopesByPath, resourceIdsByPath } from "../lib/locks";
 import { syncManager } from "../lib/sync/docSession";
 import { useStore } from "../store";
@@ -26,11 +37,14 @@ import { MenuSelect, type MenuSelectOption } from "./MenuSelect";
 import { Spinner } from "./Spinner";
 
 /**
- * Access — the unified locker. A vault-default posture (Shared · Read-only ·
- * Private) plus a per-folder/note override and a resolved "who can access" list.
+ * Access — the unified locker. A whole-vault mode (Shared · Read-only ·
+ * Private) plus a per-folder/note setting and a resolved "who can access" list.
  * Built on the shares model:
- *  - Vault posture            = an org grant on the vault (edit=Shared, the
- *    default for a new vault; view=Read-only) or none (Private).
+ *  - Vault mode               = an org grant on the vault (edit=Shared, the
+ *    setting a new vault starts with; view=Read-only) or none (Private).
+ *    Choosing one ENFORCES it: the server clears every per-item org row first
+ *    (see `api.setTeamAccess`), so "the entire vault is Shared" is true of every
+ *    folder and note, not just of the ones nobody had overridden.
  *  - "Shared" on an item      = an org edit grant on the folder/file.
  *  - "Read-only" on an item   = an org view grant (Private vault) or an
  *    org `locked` share (Open vault, where a lock caps the edit baseline).
@@ -39,7 +53,7 @@ import { Spinner } from "./Spinner";
  * Folder settings inherit to everything inside (server ACL + lock overlay).
  */
 
-type Mode = "open" | "readonly" | "private";
+type Mode = TeamMode;
 // Per-member states are the two the vault model actually supports on top of
 // the Open baseline: "edit" (writable) and "view" (read-only). Because grants
 // only ever RAISE permission and a member already has edit under Open, "view"
@@ -112,7 +126,10 @@ const ICON = {
  */
 function memberOptions(everyoneReadonly: boolean): MenuSelectOption<MemberChoice>[] {
   return [
-    { value: "default", label: "Default", hint: "Whatever this item's mode gives them" },
+    // Labelled "Inherited", not "Default": this page no longer has a default
+    // anywhere — the vault control enforces a mode rather than seeding one —
+    // and "Inherited" is already the word `sourceLabel` uses for the same idea.
+    { value: "default", label: "Inherited", hint: "Whatever this item's mode gives them" },
     // An Everyone/parent lock already holds everyone at read-only, so offering
     // "can view"/"can edit" would promise something the lock overrides.
     // Private still works — a per-member block outranks a lock.
@@ -125,12 +142,6 @@ function memberOptions(everyoneReadonly: boolean): MenuSelectOption<MemberChoice
     { value: "none", label: "Private", hint: "Hidden from this person" },
   ];
 }
-
-const MODE_LABEL: Record<Mode, string> = {
-  open: "Open",
-  readonly: "Read-only",
-  private: "Private",
-};
 
 /** Which paths carry a lock, folded down through folder inheritance. */
 function buildLockMap(
@@ -209,51 +220,123 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const [serverTree, setServerTree] = useState<AccessTreeResponse | null>(null);
   const [shares, setShares] = useState<Share[]>([]);
   const [access, setAccess] = useState<ResolvedMemberAccess[] | null>(null);
-  const [wsShares, setWsShares] = useState<Share[]>([]);
+  /**
+   * The vault's team access as the server reports it. `null` means **not known
+   * yet** — never "Private".
+   *
+   * That distinction is the whole fix for the load flash: this used to be a
+   * `Share[]` starting empty, "no vault grant" reads as Private, and so every
+   * open of a Shared vault showed Private — on the cards AND on every row badge
+   * — until the request came back. On a slow link that is a second of the panel
+   * confidently stating the opposite of the truth.
+   */
+  const [teamAccess, setTeamAccess] = useState<TeamAccess | null>(null);
+  /**
+   * The mode this vault had last time, from localStorage. Paints the cards
+   * immediately; it can never authorise a WRITE (see `vaultModeKnown`), because
+   * the confirm has to count the per-item settings it is about to replace and a
+   * remembered mode brings no count with it.
+   */
+  const [cachedMode, setCachedMode] = useState<Mode | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The detail pane — scrolled into view when a row is selected. */
+  const detailRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * The per-item mode control. Selecting a row is a move towards *these three
+   * buttons*, and the pane's breadcrumb, title and banners can push them a
+   * screen below its top, so the scroll is planned to guarantee them.
+   */
+  const modesRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * Which load is current. Switching vault with Access open leaves the old
+   * vault's requests in flight, and a slow answer for A landing after B's would
+   * repaint B's heading with A's mode, A's override count and A's structure —
+   * with the control enabled, so the next confirm quotes A and PUTs to B. Same
+   * fence `store.refreshLocks` uses.
+   */
+  const loadGen = useRef(0);
 
   const orgId = session?.activeOrganizationId ?? null;
 
-  // Vault posture: an org grant on the vault is "Open" (edit) or
-  // "Read-only" (view); no grant is "Private" (members see only what they
-  // create or what's explicitly shared with them / the team).
+  // Vault mode: an org grant on the vault is "Shared" (edit) or "Read-only"
+  // (view); no grant is "Private" (members see only what they create or what's
+  // explicitly shared with them / the team).
   const reloadVault = async () => {
+    const mine = ++loadGen.current;
     if (!canManage || !orgId) {
-      setWsShares([]);
+      setTeamAccess(null);
       setServerTree(null);
       return;
-    }
-    try {
-      setWsShares(await authManager.api.listVaultShares(orgId));
-    } catch {
-      setWsShares([]);
     }
     // The structure listing is what keeps a Private item administrable, so it is
     // re-read after every write: setting something Private removes its file, and
     // the row you would undo that from has to survive it.
+    //
+    // Both requests go at once: settling the mode and the rows in two steps made
+    // the badges change twice on every open.
     const vaultId = syncManager.registry.vaultId;
-    if (!vaultId) {
-      setServerTree(null);
+    const [ta, st] = await Promise.all([
+      authManager.api.getTeamAccess(orgId).catch(async (): Promise<TeamAccess | null> => {
+        // A server without /team-access still answers the vault's share rows, so
+        // the panel can show the truth even though it can't enforce a new mode
+        // (the PUT surfaces its own error). No overrides — the confirm falls
+        // back to its plain wording rather than inventing a count.
+        const rows = await authManager.api.listVaultShares(orgId).catch(() => null);
+        if (!rows) return null;
+        const grant = rows.find(
+          (s) =>
+            sharePrincipalType(s) === "org" &&
+            (s.permission === "edit" || s.permission === "view"),
+        );
+        return {
+          mode: grant ? (grant.permission === "edit" ? "open" : "readonly") : "private",
+          grantId: grant?.id ?? null,
+          overrides: [],
+        };
+      }),
+      vaultId
+        ? authManager.api
+            .listAccessTree(vaultId)
+            // Older server, or a caller who can't manage — fall back to the local tree.
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    // Anything after the await belongs to a load that may have been superseded.
+    if (mine !== loadGen.current) return;
+    setServerTree(st);
+    if (!ta) {
+      // Both the endpoint AND the legacy fallback failed — offline, a 500, an
+      // expired session. Without this the three cards sit disabled and
+      // aria-busy forever, looking like a load that is never coming.
+      setError(
+        "Couldn't load this vault's access settings. Check your connection and reopen Access.",
+      );
       return;
     }
-    try {
-      setServerTree(await authManager.api.listAccessTree(vaultId));
-    } catch {
-      // Older server, or a caller who can't manage — fall back to the local tree.
-      setServerTree(null);
-    }
+    setTeamAccess(ta);
+    setCachedMode(ta.mode);
+    writeTeamAccessCache(authManager.getServerUrl(), orgId, ta.mode);
   };
   useEffect(() => {
+    // Abandon any load still in flight for the vault we just left, even if this
+    // one starts nothing of its own.
+    loadGen.current++;
+    setTeamAccess(null);
+    setError(null);
+    // A confirm raised for the old vault captured its orgId (and its override
+    // count): applying it after a switch would PUT to the new one.
+    setConfirm(null);
+    setCachedMode(orgId ? readTeamAccessCache(authManager.getServerUrl(), orgId) : null);
     void reloadVault();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canManage, orgId]);
 
-  const wsGrant = wsShares.find(
-    (s) => sharePrincipalType(s) === "org" && (s.permission === "edit" || s.permission === "view"),
-  );
-  const wsPosture: Mode = wsGrant ? (wsGrant.permission === "edit" ? "open" : "readonly") : "private";
+  /** The vault's mode, or null while it is genuinely unknown. */
+  const vaultMode: Mode | null = teamAccess?.mode ?? cachedMode;
+  /** Has the server answered? Only then may a mode be written. */
+  const vaultModeKnown = teamAccess !== null;
 
   /**
    * The rows currently on screen: the vault's structure, indented, with a
@@ -313,6 +396,20 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     }
   };
 
+  /**
+   * Select a row and bring its controls into view.
+   *
+   * The master list and the detail pane are stacked, not side by side, so in a
+   * vault of any size clicking a row put the thing you came to change below the
+   * fold and nothing appeared to happen. The scroll runs after paint (the pane
+   * has to exist to be measured), moves only the container that actually
+   * scrolls, and is skipped entirely when the pane is already fully visible.
+   */
+  const selectRow = (r: Resource) => {
+    setSelected(r);
+    requestAnimationFrame(() => scrollPaneIntoContainer(detailRef.current, modesRef.current));
+  };
+
   /** Reveal a path in the list by opening every folder above it. */
   const revealPath = (path: string) => {
     const above = ancestorPaths(path);
@@ -321,30 +418,44 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   };
 
   const lockMap = useMemo(() => buildLockMap(tree, locks), [tree, locks]);
+  /** Every ORG row in the vault, by path — see `lib/accessMode`. */
+  const orgRowsByPath = useMemo(
+    () =>
+      buildOrgRowsByPath(
+        entries,
+        resourceIdsByPath(tree),
+        teamAccess?.overrides ?? null,
+        locks,
+        denies,
+      ),
+    [entries, tree, teamAccess, locks, denies],
+  );
+
+  /** This item's team mode — the ONE authority, for badges and the tri-state. */
+  const teamModeFor = (path: string): Mode | null =>
+    vaultMode
+      ? effectiveTeamMode({
+          vaultMode,
+          path,
+          ancestors: ancestorPaths(path),
+          orgRowsByPath,
+        }).mode
+      : null;
+
   /**
    * Vault-relative paths carrying an ORG deny — an item set to Private.
    *
-   * Read from the vault-wide overlay rather than the selected resource's own
+   * Read from the vault-wide row map rather than the selected resource's own
    * shares, because Private inherits: a note inside a Private folder is private
    * too, and the panel has to be able to say which folder is deciding that.
    */
   const privatePaths = useMemo(() => {
-    // Mapped through the same entries the rows are drawn from — the SERVER
-    // structure when available — never through the local disk tree alone: a
-    // Private item has left the disk, so a disk-keyed map could not name its
-    // path and the row it still occupies on screen badged as "Shared".
-    const idToPath = new Map(entries.map((e) => [e.id, e.path] as const));
-    for (const [id, path] of resourceIdsByPath(tree)) {
-      if (!idToPath.has(id)) idToPath.set(id, path);
-    }
     const out = new Set<string>();
-    for (const d of denies) {
-      if (sharePrincipalType(d) !== "org") continue;
-      const path = idToPath.get(shareResId(d));
-      if (path) out.add(path);
+    for (const [path, rows] of orgRowsByPath) {
+      if (rows.has("denied")) out.add(path);
     }
     return out;
-  }, [entries, tree, denies]);
+  }, [orgRowsByPath]);
   /** The nearest ANCESTOR of `path` that is Private, or null. */
   const privateSourcePath = (path: string): string | null => {
     const parts = path.split("/");
@@ -408,29 +519,28 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   // Direct org rows on THIS resource: a lock, a read-only (view) grant, or a
   // shared (edit) grant. Plus a lock inherited from a parent folder.
   const ownOrgLock = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "locked");
-  const ownOrgView = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "view");
-  const ownOrgEdit = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "edit");
   const ownOrgDeny = shares.find((s) => sharePrincipalType(s) === "org" && s.permission === "denied");
   const inheritedOrgLock = !!effLock?.org && !ownOrgLock;
   // Private inherited from a parent folder: the nearest ancestor with an org
   // deny governs this item, exactly as an ancestor lock does.
   const privateSource = selected && !ownOrgDeny ? privateSourcePath(selected.path) : null;
-  // Resolve the resource's team mode. Private is checked FIRST because it is
-  // the only mode that can override an inherited grant — which is the whole
-  // reason it exists: with a Shared vault, clearing an item's own rows left the
-  // vault-wide grant reaching it, so Private silently snapped back to Shared.
-  const generalMode: Mode =
-    ownOrgDeny || privateSource
-      ? "private"
-      : ownOrgLock || inheritedOrgLock || ownOrgView
-        ? "readonly"
-        : ownOrgEdit
-          ? "open"
-          : wsPosture;
+  // The resource's team mode — from the SAME function the row badges use, so
+  // the list and the detail pane can never say different things about one item.
+  // (They did: the badges ignored per-item edit/view grants entirely.) Private
+  // is resolved first inside it because it is the only mode that can override an
+  // inherited grant — which is the whole reason it exists: with a Shared vault,
+  // clearing an item's own rows left the vault-wide grant reaching it, so
+  // Private silently snapped back to Shared.
+  // Nullable on purpose: `null` means the vault's mode hasn't arrived, and the
+  // copy below has to stay silent rather than assert Private in full sentences
+  // and then rewrite itself when the GET lands.
+  const generalMode: Mode | null = selected ? teamModeFor(selected.path) : null;
   // When an Everyone/org lock (direct or inherited) already makes the resource
   // read-only for all, a per-member "read-only" lock is redundant and makes
   // Unlock misleading — so the per-person controls are suppressed in favour of
   // the single vault/parent lock.
+  // Only ever true on a KNOWN mode: `generalMode` is null until the vault's mode
+  // arrives, so this can no longer be decided from a guess.
   const everyoneReadonly = generalMode === "readonly";
 
   const lockSourcePath = (): string | null => {
@@ -485,7 +595,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   // edit at view); a plain org view grant when the vault is Private (there
   // is no baseline edit to cap, and a grant is what GIVES the team read).
   const setGeneral = (mode: Mode) => {
-    if (!selected || mode === generalMode || inheritedOrgLock || privateSource) return;
+    // `teamAccess` and NOT `vaultMode` (which can come from localStorage):
+    // Read-only is a lock in a Shared vault and a view grant in a Private one.
+    // Applied from a cache that another admin has since invalidated, this writes
+    // a lock into a now-Private vault — a row the server treats as nothing,
+    // since a lock caps a permission and never grants one, while the panel
+    // badges the folder Read-only. Panel and enforcer disagreeing is the exact
+    // failure this whole screen was rebuilt to end.
+    if (!selected || !teamAccess || mode === generalMode || inheritedOrgLock || privateSource)
+      return;
     if (mode === "private") {
       const what = selected.kind === "folder" ? "folder" : "note";
       setConfirm({
@@ -537,7 +655,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
           permission: "edit",
         });
       } else if (mode === "readonly") {
-        if (wsPosture === "private") {
+        if (teamAccess?.mode === "private") {
           await authManager.api.createShare({
             resourceType: selected.kind,
             resourceId: selected.id,
@@ -551,49 +669,84 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     });
   };
 
-  // Whole-vault posture (Open / Read-only / Private) = the org grant on the
-  // vault resource. Private removes it, falling back to per-item sharing.
+  // Whole-vault mode (Shared / Read-only / Private) = the org grant on the vault
+  // resource. Private removes it, leaving per-item sharing.
   //
-  // The Read-only grant is a CEILING for everyone now, not just a floor for
+  // It ENFORCES, it does not merely default. The server clears every per-item
+  // org row in the same transaction before writing the new grant, because a
+  // "default" that stops at the first folder someone overrode is not an answer
+  // to "who can reach this vault" — it is a question about thirty other screens.
+  // Per-USER rows survive: people shared with by name keep their access.
+  //
+  // The Read-only grant is a CEILING for everyone, not just a floor for
   // members: the resolver stops taking the owner/admin and note-creator
   // shortcuts when it's set (`vaultBaseline`), so "Everyone can read
-  // everything, not edit" finally includes the person who chose it. It stays a
-  // single grant row rather than a grant plus a lock because both would want
-  // the same (resource, principal) key.
-  const setVaultPosture = (mode: Mode) => {
-    if (!orgId || mode === wsPosture) return;
-    if (mode === "private") {
+  // everything, not edit" includes the person who chose it. It stays a single
+  // grant row rather than a grant plus a lock because both would want the same
+  // (resource, principal) key.
+  const setVaultMode = (mode: Mode) => {
+    // `teamAccess` and not `vaultMode`: a mode remembered from localStorage can
+    // paint the cards but must never authorise a write, because the confirm
+    // below counts the settings it is about to destroy and a cached mode
+    // carries no count.
+    if (!orgId || !teamAccess) return;
+    // Re-choosing the mode that is already active is NOT a no-op when per-item
+    // settings exist: this control enforces, and "apply this to everything" is
+    // exactly what clicking the active card means. With nothing to clear it is
+    // genuinely nothing to do.
+    if (mode === teamAccess.mode && teamAccess.overrides.length === 0) return;
+    const folders = teamAccess.overrides.filter((o) => o.resourceType === "folder").length;
+    const notes = teamAccess.overrides.length - folders;
+    const replaced = overrideCountPhrase(folders, notes);
+    const privateBody = (
+      <>
+        <p>
+          Members will only see notes they created or that you share with them by
+          name. Everything else is removed from their devices,{" "}
+          <strong>including the local copies on disk</strong>.
+        </p>
+        <p>Owners and admins keep the whole vault. You can switch back to Shared at any time.</p>
+      </>
+    );
+    if (mode === "private" || replaced) {
       setConfirm({
-        title: "Make this vault private?",
-        label: "Make vault private",
-        apply: () => applyVaultPosture(mode),
+        title:
+          mode === "private"
+            ? "Make this vault private?"
+            : `Set the entire vault to ${MODE_LABEL[mode]}?`,
+        label: mode === "private" ? "Make vault private" : "Apply to whole vault",
+        apply: () => applyVaultMode(mode),
         body: (
           <>
-            <p>
-              Members will only see notes they created or that you share with them by
-              name. Everything else is removed from their devices,{" "}
-              <strong>including the local copies on disk</strong>.
-            </p>
-            <p>Owners and admins keep the whole vault. You can switch back to Shared at any time.</p>
+            {replaced && (
+              <p>
+                Every folder and note in this vault becomes{" "}
+                <strong>{MODE_LABEL[mode]}</strong>. This replaces the {replaced} you have
+                set — those individual choices are cleared and cannot be brought back except
+                by setting them again. People you have shared something with{" "}
+                <strong>by name</strong> keep their access.
+              </p>
+            )}
+            {mode === "private" && privateBody}
           </>
         ),
       });
       return;
     }
-    applyVaultPosture(mode);
+    applyVaultMode(mode);
   };
 
-  const applyVaultPosture = (mode: Mode) => {
+  const applyVaultMode = (mode: Mode) => {
     if (!orgId) return;
     void run(async () => {
-      if (wsGrant) await authManager.api.revokeShare(wsGrant.id);
-      if (mode !== "private") {
-        await authManager.api.createShare({
-          resourceType: "vault",
-          resourceId: orgId,
-          principalType: "org",
-          permission: mode === "open" ? "edit" : "view",
-        });
+      const result = await authManager.api.setTeamAccess(orgId, mode);
+      // The SERVER's count, not the one the confirm quoted: a teammate can add
+      // an override in the seconds between the two, and the number that matters
+      // is the number of settings that actually went.
+      if (result.cleared > 0) {
+        toast(
+          `Entire vault set to ${MODE_LABEL[result.mode]} · ${clearedCountPhrase(result.cleared)} cleared`,
+        );
       }
     });
   };
@@ -642,7 +795,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
               removed from their devices, <strong>including the local copy on disk</strong>
               {" "}— even if they created it.
             </p>
-            <p>Setting them back to Default restores their access.</p>
+            <p>Setting them back to Inherited restores their access.</p>
           </>
         ),
       });
@@ -698,42 +851,49 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   return (
     <div className="access-panel">
       <p className="access-intro">
-        Choose what the team can reach. Set the whole vault below, then override any folder or
-        note — <strong>Shared</strong> (read &amp; write), <strong>Read-only</strong>, or{" "}
-        <strong>Private</strong> (nobody until you name them — you included). Folder settings flow
-        down to everything inside.
+        Choose what the team can reach. Set the <strong>entire vault</strong> at once, or pick a
+        folder or note below to set just that one. Folder settings flow down to everything inside.
+        Each is <strong>Shared</strong> (read &amp; write), <strong>Read-only</strong>, or{" "}
+        <strong>Private</strong> (nobody until you name them — you included).
       </p>
 
       {canManage && orgId && (
         <div className="access-ws">
           <div className="access-seclabel">
-            This vault, by default
+            Entire vault
             {busy && (
               <span className="access-applying">
                 <Spinner size="xs" /> Applying…
               </span>
             )}
           </div>
-          <div className={`access-seg${busy ? " busy" : ""}`} aria-busy={busy} aria-disabled={busy}>
+          <div
+            className={`access-seg${busy ? " busy" : ""}`}
+            // Busy while the mode is still unknown, too: no card is marked
+            // active until the server has said which one is, so the control
+            // reads as "loading" rather than as a confident wrong answer.
+            aria-busy={busy || !vaultModeKnown}
+            aria-disabled={busy || !vaultModeKnown}
+          >
             {(["open", "readonly", "private"] as Mode[]).map((m) => (
               <button
                 key={m}
                 type="button"
-                className={`access-segbtn${wsPosture === m ? " active" : ""}`}
+                className={`access-segbtn${vaultMode === m ? " active" : ""}`}
                 data-mode={m}
-                disabled={busy}
-                onClick={() => setVaultPosture(m)}
+                disabled={busy || !vaultModeKnown}
+                onClick={() => setVaultMode(m)}
               >
                 <span className="access-st-top">
                   {m === "open" ? ICON.open : m === "readonly" ? ICON.lock : ICON.shield}
-                  {m === "open" ? "Shared" : MODE_LABEL[m]}
+                  {MODE_LABEL[m]}
                 </span>
                 <span className="access-st-sub">
                   {m === "open"
-                    ? "Everyone reads & writes everything."
+                    ? "Every folder and note: the team reads & writes."
                     : m === "readonly"
-                      ? "Everyone can read everything, not edit."
-                      : "Members see only what they create or you share."}
+                      ? "Every folder and note: the team reads, nobody edits."
+                      : "Nothing is shared. Members keep only what they create."}
                 </span>
               </button>
             ))}
@@ -766,15 +926,18 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
             <ul className="access-list">
               {resources.map((r) => {
                 const lk = lockMap.get(r.path);
-                const readOnly = !!lk;
                 const everyone = !!lk?.org;
                 const affected = everyone
                   ? members.map((m) => m.userId)
                   : [...(lk?.users ?? [])];
                 const isOpen = expanded.has(r.path);
-                // Private wins the badge: it's the strongest statement a row
-                // can make, and an item can be Private *and* sit under a lock.
-                const isPrivate = privatePaths.has(r.path) || !!privateSourcePath(r.path);
+                // The team mode, from the same function the detail pane's
+                // tri-state uses. `null` = the vault's mode hasn't arrived, so
+                // the badge stays a neutral placeholder instead of guessing.
+                const mode = teamModeFor(r.path);
+                // A lock that names only particular people isn't a mode — it's
+                // a per-user overlay on one, and it keeps its own word.
+                const restricted = !!lk && !everyone && lk.users.size > 0;
                 return (
                   // The twisty is a SIBLING of the row button, not a child.
                   // Opening a folder and selecting it are different intents, and
@@ -801,12 +964,16 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                     <button
                       type="button"
                       className={`access-row${r.key === selectedKey ? " sel" : ""}`}
-                      onClick={() => setSelected(r)}
+                      // Keyboard activation (Enter/Space) fires a button's
+                      // onClick too, so selecting by keyboard scrolls the pane
+                      // into view exactly as a click does. The twisty is a
+                      // separate button and doesn't select, so it never scrolls.
+                      onClick={() => selectRow(r)}
                     >
                       <span className="access-glyph">{r.kind === "folder" ? ICON.folder : ICON.note}</span>
                       <span className="access-rname">{r.name}</span>
                       <span className="access-rright">
-                        {!isPrivate && readOnly && affected.length > 0 && (
+                        {mode !== "private" && !!lk && affected.length > 0 && (
                           <span className="access-avstack" aria-hidden="true">
                             {affected.slice(0, 3).map((uid) => (
                               <span className="access-av-wrap locked" key={uid}>
@@ -815,32 +982,32 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                             ))}
                           </span>
                         )}
-                        <span
-                          className={`access-badge ${
-                            isPrivate ? "priv" : readOnly ? "ro" : wsPosture === "private" ? "priv" : "open"
-                          }`}
-                        >
-                          {isPrivate
-                            ? ICON.shield
-                            : readOnly
-                              ? ICON.lock
-                              : wsPosture === "private"
-                                ? ICON.shield
-                                : wsPosture === "readonly"
-                                  ? ICON.lock
-                                  : ICON.open}
-                          {isPrivate
-                            ? "Private"
-                            : readOnly
-                              ? everyone
-                                ? "Read-only"
-                                : "Restricted"
-                              : wsPosture === "private"
-                                ? "Private"
-                                : wsPosture === "readonly"
-                                  ? "Read-only"
-                                  : "Shared"}
-                        </span>
+                        {mode === null ? (
+                          <span className="access-badge loading" aria-label="Loading access">
+                            <Spinner size="xs" />
+                          </span>
+                        ) : (
+                          <span
+                            className={`access-badge ${
+                              mode === "private"
+                                ? "priv"
+                                : restricted || mode === "readonly"
+                                  ? "ro"
+                                  : "open"
+                            }`}
+                          >
+                            {mode === "private"
+                              ? ICON.shield
+                              : restricted || mode === "readonly"
+                                ? ICON.lock
+                                : ICON.open}
+                            {mode === "private"
+                              ? "Private"
+                              : restricted
+                                ? "Restricted"
+                                : MODE_LABEL[mode]}
+                          </span>
+                        )}
                       </span>
                     </button>
                   </li>
@@ -851,7 +1018,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         </div>
 
         {/* detail */}
-        <div className="access-detail">
+        <div className="access-detail" ref={detailRef}>
           {!selected ? (
             <div className="access-empty">
               <span className="access-empty-glyph">{ICON.lock}</span>
@@ -880,7 +1047,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                         className="access-jump"
                         onClick={() => {
                           revealPath(inheritSourceRes.path);
-                          setSelected(inheritSourceRes);
+                          selectRow(inheritSourceRes);
                         }}
                       >
                         Open {inheritSourceRes.name} ›
@@ -900,7 +1067,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                       className="access-jump"
                       onClick={() => {
                         revealPath(privateSourceRes.path);
-                        setSelected(privateSourceRes);
+                        selectRow(privateSourceRes);
                       }}
                     >
                       Open {privateSourceRes.name} ›
@@ -931,22 +1098,30 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                 )}
               </div>
               <div
+                ref={modesRef}
                 className={`access-seg${busy ? " busy" : ""}`}
-                aria-busy={busy}
-                aria-disabled={!canManage || inheritedOrgLock}
+                aria-busy={busy || !vaultModeKnown}
+                aria-disabled={!canManage || inheritedOrgLock || !vaultModeKnown}
               >
                 {(["open", "readonly", "private"] as Mode[]).map((m) => (
                   <button
                     key={m}
                     type="button"
+                    // No card is active until the vault's mode is known: an
+                    // item with no rows of its own resolves to the vault's, so
+                    // guessing here is guessing on screen.
                     className={`access-segbtn${generalMode === m ? " active" : ""}`}
                     data-mode={m}
-                    disabled={!canManage || inheritedOrgLock || !!privateSource || busy}
+                    // Read-only writes a lock or a view grant depending on the
+                    // vault's mode, so it cannot be applied before that is known.
+                    disabled={
+                      !canManage || inheritedOrgLock || !!privateSource || busy || !vaultModeKnown
+                    }
                     onClick={() => setGeneral(m)}
                   >
                     <span className="access-st-top">
                       {m === "open" ? ICON.open : m === "readonly" ? ICON.lock : ICON.shield}
-                      {m === "open" ? "Shared" : MODE_LABEL[m]}
+                      {MODE_LABEL[m]}
                     </span>
                     <span className="access-st-sub">
                       {m === "open"
@@ -961,8 +1136,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
               {generalMode === "private" && !privateSource && (
                 <div className="access-hint">
                   Nobody reaches this {selected.kind === "folder" ? "folder" : "note"}
-                  {wsPosture !== "private" && (
-                    <> — the vault being <strong>{MODE_LABEL[wsPosture]}</strong> doesn't override it</>
+                  {vaultMode && vaultMode !== "private" && (
+                    <> — the vault being <strong>{MODE_LABEL[vaultMode]}</strong> doesn't override it</>
                   )}
                   . Not the team, not vault admins, and not you: add someone below by name to give
                   them access, yourself included.{" "}
@@ -1020,7 +1195,10 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                             value={choice}
                             options={memberOptions(everyoneReadonly)}
                             onSelect={(next) => setMember(m.userId, next, m.name || m.email || "this person")}
-                            disabled={busy}
+                            // The option list depends on `everyoneReadonly`,
+                            // which depends on the vault's mode — so no
+                            // per-person write until that mode is known either.
+                            disabled={busy || !vaultModeKnown}
                             ariaLabel={`Access for ${m.name || m.email || m.userId}`}
                             triggerClassName="access-choice-trigger"
                             menuClassName="access-choice-menu"
@@ -1078,5 +1256,5 @@ function sourceLabel(m: ResolvedMemberAccess, choice: MemberChoice, isYou = fals
   if (choice === "edit") return "Shared · can edit";
   if (choice === "view") return "Read-only · locked";
   // default (no direct override): reflect whatever the baseline resolved to.
-  return m.permission === "view" ? "Inherited · read-only" : "Open · can edit";
+  return m.permission === "view" ? "Inherited · read-only" : "Inherited · can edit";
 }

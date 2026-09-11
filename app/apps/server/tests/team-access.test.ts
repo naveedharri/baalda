@@ -1,0 +1,617 @@
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createApp } from "../src/http/app.js";
+import { pool } from "../src/db/pool.js";
+import { effectivePermission } from "../src/permissions/resolver.js";
+import { resetDb } from "./helpers/db.js";
+import { recordingAppDeps } from "./helpers/app.js";
+import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
+import {
+  seedDeny,
+  seedFolder,
+  seedItemPrivate,
+  seedLock,
+  seedMember,
+  seedNote,
+  seedShare,
+  seedVault,
+  seedVaultGrant,
+} from "./helpers/seed.js";
+
+/**
+ * The whole-vault team-access control (`/api/orgs/:orgId/team-access`).
+ *
+ * The vault-level setting is the per-item Shared/Read-only/Private control at
+ * vault scope, so applying it must ENFORCE the mode: every org-principal
+ * override on a folder or file is cleared, exactly as the per-item control
+ * clears an item's own org rows. Per-USER rows (named grants, per-member locks,
+ * per-member denies) survive untouched, for the same reason they survive a
+ * per-item change.
+ */
+
+const rec = recordingAppDeps();
+const app = createApp(rec.deps);
+
+// One per FILE: an afterAll inside the first describe would close the pool
+// before the second one ran.
+afterAll(async () => {
+  await pool.end();
+});
+
+function get(user: TestUser, path: string) {
+  return app.fetch(new Request(`http://local${path}`, { headers: authHeaders(user) }));
+}
+
+function put(user: TestUser, path: string, body: unknown) {
+  return app.fetch(
+    new Request(`http://local${path}`, {
+      method: "PUT",
+      headers: authHeaders(user),
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+/** An ORG-scoped grant on a folder/file — "Shared with team" (edit) or
+ *  "Read-only for the team" (view). The seed helpers cover `locked`/`denied`
+ *  only, and the vault control has to clear all four. */
+async function seedOrgGrant(
+  orgId: string,
+  resourceType: "folder" | "file",
+  resourceId: string,
+  permission: "edit" | "view",
+): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO shares
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+     VALUES ($1, $2, $3, $4, 'org', $2, $5)`,
+    [id, orgId, resourceType, resourceId, permission],
+  );
+  return id;
+}
+
+async function countUserShares(orgId: string): Promise<number> {
+  const { rows } = await pool.query<{ n: string }>(
+    "SELECT count(*)::text AS n FROM shares WHERE org_id = $1 AND principal_type = 'user'",
+    [orgId],
+  );
+  return Number(rows[0].n);
+}
+
+async function orgRowsOn(resourceId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ id: string }>(
+    "SELECT id FROM shares WHERE resource_id = $1 AND principal_type = 'org'",
+    [resourceId],
+  );
+  return rows.map((r) => r.id);
+}
+
+interface TeamAccessBody {
+  mode: "open" | "readonly" | "private";
+  grantId: string | null;
+  overrides: Array<{
+    id: string;
+    vaultId: string;
+    resourceType: "folder" | "file";
+    resourceId: string;
+    permission: "edit" | "view" | "locked" | "denied";
+  }>;
+}
+
+describe("team-access — GET and PUT", () => {
+  let owner: TestUser;
+  let admin: TestUser;
+  let member: TestUser;
+  let outsider: TestUser;
+  let orgId: string;
+  let vaultA: string;
+  let vaultB: string;
+  // vault A
+  let rootNote: string;
+  let sharedFolder: string;
+  let sharedNote: string;
+  let privateFolder: string;
+  let privateNote: string;
+  let deletedNote: string;
+  // vault B
+  let lockedFolder: string;
+  let lockedNote: string;
+  let viewNote: string;
+
+  beforeEach(async () => {
+    await resetDb();
+    rec.reset();
+    owner = await signUp("owner@team-access.test");
+    orgId = (await createOrg(owner, "Team Access Co", "team-access-co")).id;
+    admin = await signUp("admin@team-access.test");
+    await seedMember(orgId, admin.userId, "admin");
+    member = await signUp("member@team-access.test");
+    await seedMember(orgId, member.userId, "member");
+    outsider = await signUp("outsider@team-access.test");
+
+    // TWO note collections in the same org — the control spans all of them.
+    vaultA = await seedVault(orgId, "A");
+    vaultB = await seedVault(orgId, "B");
+
+    rootNote = await seedNote(vaultA, null, "Root.md", owner.userId);
+    sharedFolder = await seedFolder(vaultA, null, "Shared", "Shared");
+    sharedNote = await seedNote(vaultA, sharedFolder, "Shared/S.md", owner.userId);
+    privateFolder = await seedFolder(vaultA, null, "Private", "Private");
+    privateNote = await seedNote(vaultA, privateFolder, "Private/P.md", owner.userId);
+    deletedNote = await seedNote(vaultA, null, "Gone.md", owner.userId);
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [deletedNote]);
+
+    lockedFolder = await seedFolder(vaultB, null, "Locked", "Locked");
+    lockedNote = await seedNote(vaultB, lockedFolder, "Locked/L.md", owner.userId);
+    viewNote = await seedNote(vaultB, null, "View.md", owner.userId);
+
+    // The four org overrides the control owns — one per permission, spread
+    // across both collections.
+    await seedOrgGrant(orgId, "folder", sharedFolder, "edit");
+    await seedOrgGrant(orgId, "file", viewNote, "view");
+    await seedLock(orgId, "folder", lockedFolder, { type: "org" });
+    await seedItemPrivate(orgId, "folder", privateFolder);
+    // A leftover row on a soft-deleted note — never reported, never counted.
+    await seedItemPrivate(orgId, "file", deletedNote);
+
+    // Per-user rows: all three must survive every PUT. Kept off vault A's
+    // notes so they can't colour the effective-permission assertions.
+    await seedShare(orgId, "file", viewNote, member.userId, "edit");
+    await seedDeny(orgId, "file", lockedNote, member.userId);
+    await seedLock(orgId, "folder", lockedFolder, { type: "user", id: member.userId });
+  });
+  async function readTeamAccess(user = owner): Promise<TeamAccessBody> {
+    const res = await get(user, `/api/orgs/${orgId}/team-access`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as TeamAccessBody;
+  }
+
+  // ── GET ────────────────────────────────────────────────────────────────────
+
+  it("GET reports private when there is no vault row, and lists every org override", async () => {
+    const body = await readTeamAccess();
+    expect(body.mode).toBe("private");
+    expect(body.grantId).toBeNull();
+
+    expect(body.overrides).toHaveLength(4);
+    const byResource = new Map(body.overrides.map((o) => [o.resourceId, o]));
+    expect(byResource.get(sharedFolder)).toMatchObject({
+      vaultId: vaultA,
+      resourceType: "folder",
+      permission: "edit",
+    });
+    expect(byResource.get(privateFolder)).toMatchObject({
+      vaultId: vaultA,
+      resourceType: "folder",
+      permission: "denied",
+    });
+    expect(byResource.get(lockedFolder)).toMatchObject({
+      vaultId: vaultB,
+      resourceType: "folder",
+      permission: "locked",
+    });
+    expect(byResource.get(viewNote)).toMatchObject({
+      vaultId: vaultB,
+      resourceType: "file",
+      permission: "view",
+    });
+  });
+
+  it("GET excludes per-user rows and rows on soft-deleted notes", async () => {
+    const body = await readTeamAccess();
+    expect(body.overrides.map((o) => o.resourceId)).not.toContain(deletedNote);
+    // Three per-user rows exist; none of them is reported.
+    expect(await countUserShares(orgId)).toBe(3);
+    for (const o of body.overrides) {
+      const { rows } = await pool.query<{ principal_type: string }>(
+        "SELECT principal_type FROM shares WHERE id = $1",
+        [o.id],
+      );
+      expect(rows[0].principal_type).toBe("org");
+    }
+  });
+
+  it("GET reports open for an edit vault row and readonly for a view one", async () => {
+    const grant = await seedVaultGrant(orgId, "edit");
+    let body = await readTeamAccess();
+    expect(body.mode).toBe("open");
+    expect(body.grantId).toBe(grant);
+
+    await pool.query("UPDATE shares SET permission = 'view' WHERE id = $1", [grant]);
+    body = await readTeamAccess();
+    expect(body.mode).toBe("readonly");
+    expect(body.grantId).toBe(grant);
+  });
+
+  // ── PUT ────────────────────────────────────────────────────────────────────
+
+  it("PUT open clears every override and opens a previously Private folder", async () => {
+    // The member cannot reach the Private folder's note today.
+    expect(await effectivePermission(member.userId, privateNote)).toBe("none");
+    expect(await effectivePermission(member.userId, rootNote)).toBe("none");
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      mode: string;
+      cleared: number;
+      postureChanged: boolean;
+    };
+    expect(body.mode).toBe("open");
+    // `cleared` counts ITEM settings only — the four overrides. The posture
+    // going from Private to Shared is reported on its own.
+    expect(body.cleared).toBe(4);
+    expect(body.postureChanged).toBe(true);
+    // Every cleared row was a restriction, or a grant no wider than the new
+    // vault-wide `edit`. Nobody lost access, so nobody is disconnected.
+    expect(body.disconnectedDocs).toBe(0);
+    expect(rec.disconnected).toEqual([]);
+    // Both collections of the org hear about it.
+    expect(new Set(rec.aclBroadcasts)).toEqual(new Set([vaultA, vaultB]));
+
+    const after = await readTeamAccess();
+    expect(after.mode).toBe("open");
+    expect(after.grantId).not.toBeNull();
+    expect(after.overrides).toEqual([]);
+
+    expect(await effectivePermission(member.userId, privateNote)).toBe("edit");
+    expect(await effectivePermission(member.userId, rootNote)).toBe("edit");
+    // Per-user rows are none of this control's business.
+    expect(await countUserShares(orgId)).toBe(3);
+  });
+
+  it("PUT private removes the team's reach into a previously Shared folder", async () => {
+    await seedVaultGrant(orgId, "edit");
+    expect(await effectivePermission(member.userId, sharedNote)).toBe("edit");
+    expect(await effectivePermission(member.userId, rootNote)).toBe("edit");
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      mode: string;
+      cleared: number;
+      postureChanged: boolean;
+    };
+    expect(body.mode).toBe("private");
+    // Four item settings; the vault row is `postureChanged`, not a fifth item.
+    expect(body.cleared).toBe(4);
+    expect(body.postureChanged).toBe(true);
+
+    const after = await readTeamAccess();
+    expect(after.mode).toBe("private");
+    expect(after.grantId).toBeNull();
+    expect(after.overrides).toEqual([]);
+
+    expect(await effectivePermission(member.userId, sharedNote)).toBe("none");
+    expect(await effectivePermission(member.userId, rootNote)).toBe("none");
+    expect(await countUserShares(orgId)).toBe(3);
+  });
+
+  it("PUT readonly caps everyone — including the owner — at view", async () => {
+    await seedVaultGrant(orgId, "edit");
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      mode: "readonly",
+      cleared: 4,
+      postureChanged: true,
+    });
+
+    const after = await readTeamAccess();
+    expect(after.mode).toBe("readonly");
+    expect(after.grantId).not.toBeNull();
+    expect(after.overrides).toEqual([]);
+
+    expect(await effectivePermission(member.userId, rootNote)).toBe("view");
+    // A folder that used to be org-edit is now just as read-only as the rest.
+    expect(await effectivePermission(member.userId, sharedNote)).toBe("view");
+    expect(await effectivePermission(owner.userId, rootNote)).toBe("view");
+  });
+
+  it("PUT clears an org row stranded on a soft-deleted note, without counting it", async () => {
+    // Invisible to the user — GET never listed it, because the note is deleted.
+    expect(await orgRowsOn(deletedNote)).toHaveLength(1);
+    const listed = (await readTeamAccess()).overrides.map((o) => o.resourceId);
+    expect(listed).not.toContain(deletedNote);
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(res.status).toBe(200);
+    // Still four: the count reports what GET showed, not what was swept up.
+    expect((await res.json()) as unknown).toMatchObject({ cleared: 4 });
+
+    // Gone all the same — a restored note must not come back carrying an
+    // override the whole-vault setting was applied to remove.
+    expect(await orgRowsOn(deletedNote)).toEqual([]);
+  });
+
+  it("PUT is idempotent — re-applying the current mode clears nothing and keeps the grant id", async () => {
+    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" })).status).toBe(200);
+    const first = await readTeamAccess();
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      mode: "open",
+      cleared: 0,
+      postureChanged: false,
+      disconnectedDocs: 0,
+    });
+
+    const second = await readTeamAccess();
+    expect(second.mode).toBe("open");
+    expect(second.grantId).toBe(first.grantId);
+  });
+
+  it("PUT readonly kicks only the docs an org edit grant reached", async () => {
+    // Private vault, so the posture does not narrow — it widens to Read-only.
+    // Of the four overrides only the `edit` folder outranks the new baseline.
+    rec.reset();
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 4,
+      postureChanged: true,
+      disconnectedDocs: 1,
+    });
+    expect(rec.disconnected).toEqual([{ vaultId: vaultA, docId: sharedNote }]);
+  });
+
+  it("PUT private kicks every doc a cleared grant reached, and nothing else", async () => {
+    // The vault is already Private, so only the item grants narrow: the `edit`
+    // folder and the `view` note. The `locked` and `denied` rows granted
+    // nothing, so removing them takes nothing away.
+    rec.reset();
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 4,
+      postureChanged: false,
+      disconnectedDocs: 2,
+    });
+    expect(rec.disconnected).toContainEqual({ vaultId: vaultA, docId: sharedNote });
+    expect(rec.disconnected).toContainEqual({ vaultId: vaultB, docId: viewNote });
+    expect(rec.disconnected).toHaveLength(2);
+  });
+
+  it("an admin, not just the owner, can read and enforce the posture", async () => {
+    expect((await get(admin, `/api/orgs/${orgId}/team-access`)).status).toBe(200);
+    const res = await put(admin, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(res.status).toBe(200);
+    expect((await readTeamAccess()).mode).toBe("open");
+  });
+
+  it("a PUT on one org leaves another org's rows and posture alone", async () => {
+    // A second org owned by the same person — the query scoping, not the
+    // caller's identity, is what has to keep these apart.
+    const otherOrg = (await createOrg(owner, "Other Co", "other-co")).id;
+    const otherVault = await seedVault(otherOrg, "Other");
+    const otherFolder = await seedFolder(otherVault, null, "Keep", "Keep");
+    await seedNote(otherVault, otherFolder, "Keep/K.md", owner.userId);
+    const otherGrant = await seedOrgGrant(otherOrg, "folder", otherFolder, "edit");
+    const otherPosture = await seedVaultGrant(otherOrg, "view");
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(res.status).toBe(200);
+    // Only this org's four item settings were counted or touched.
+    expect((await res.json()) as unknown).toMatchObject({ cleared: 4 });
+
+    expect(await orgRowsOn(otherFolder)).toEqual([otherGrant]);
+    const otherBody = (await (
+      await get(owner, `/api/orgs/${otherOrg}/team-access`)
+    ).json()) as TeamAccessBody;
+    expect(otherBody.mode).toBe("readonly");
+    expect(otherBody.grantId).toBe(otherPosture);
+    expect(otherBody.overrides).toHaveLength(1);
+  });
+
+  // ── Auth and validation ────────────────────────────────────────────────────
+
+  it("a plain member is refused both verbs", async () => {
+    expect((await get(member, `/api/orgs/${orgId}/team-access`)).status).toBe(403);
+    expect((await put(member, `/api/orgs/${orgId}/team-access`, { mode: "open" })).status).toBe(403);
+  });
+
+  it("a non-member is refused both verbs", async () => {
+    // `canManage` resolves the org (it exists) and then fails the role check.
+    expect((await get(outsider, `/api/orgs/${orgId}/team-access`)).status).toBe(403);
+    expect(
+      (await put(outsider, `/api/orgs/${orgId}/team-access`, { mode: "open" })).status,
+    ).toBe(403);
+  });
+
+  it("an unknown org is 404 and an unknown mode is 400", async () => {
+    expect((await get(owner, `/api/orgs/${randomUUID()}/team-access`)).status).toBe(404);
+    expect(
+      (await put(owner, `/api/orgs/${randomUUID()}/team-access`, { mode: "open" })).status,
+    ).toBe(404);
+    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "shared" })).status).toBe(400);
+    expect((await put(owner, `/api/orgs/${orgId}/team-access`, {})).status).toBe(400);
+  });
+
+  it("an unauthenticated caller is 401", async () => {
+    const res = await app.fetch(new Request(`http://local/api/orgs/${orgId}/team-access`));
+    expect(res.status).toBe(401);
+  });
+
+  // ── Transactionality ───────────────────────────────────────────────────────
+
+  it("a failed INSERT rolls the deletes back", async () => {
+    const before = await readTeamAccess();
+    expect(before.overrides).toHaveLength(4);
+
+    const realConnect = pool.connect.bind(pool);
+    const spy = vi.spyOn(pool, "connect");
+    // Two things this mock has to get right:
+    //  - `pool.query` calls `connect` in its CALLBACK form, so that form must
+    //    pass straight through or every other query in the process hangs.
+    //  - the route hands its connection back to the pool, so patch a PROXY and
+    //    never the client itself — a pooled client carrying a patched `query`
+    //    would poison every test that later drew it.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (spy as any).mockImplementation((cb?: unknown) => {
+      if (typeof cb === "function") return (realConnect as never as (c: unknown) => unknown)(cb);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return realConnect().then((client: any) =>
+        new Proxy(client, {
+          get(target, prop) {
+            if (prop === "query") {
+              return (sql: unknown, params?: unknown) =>
+                typeof sql === "string" && sql.includes("INSERT INTO shares")
+                  ? Promise.reject(new Error("forced INSERT failure"))
+                  : target.query(sql, params);
+            }
+            const value = Reflect.get(target, prop, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        }),
+      );
+    });
+
+    try {
+      const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+      expect(res.status).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const after = await readTeamAccess();
+    expect(after.mode).toBe("private");
+    expect(after.overrides).toHaveLength(4);
+    expect(await countUserShares(orgId)).toBe(3);
+    // The silent sweep of the soft-deleted note's row rolled back too.
+    expect(await orgRowsOn(deletedNote)).toHaveLength(1);
+  });
+});
+
+/**
+ * Socket kicks. The rule is the one `DELETE /shares/:id` already follows: a row
+ * that goes away kicks every doc it reached, a new grant kicks nobody. A vault
+ * row rewritten to the SAME permission never went away, so it kicks nobody
+ * either.
+ */
+describe("team-access — live socket kicks", () => {
+  let owner: TestUser;
+  let orgId: string;
+  let vault: string;
+  let folder: string;
+  let folderNote: string;
+  let rootNote: string;
+
+  beforeEach(async () => {
+    await resetDb();
+    rec.reset();
+    owner = await signUp("owner@team-kick.test");
+    orgId = (await createOrg(owner, "Kick Co", "kick-co")).id;
+    vault = await seedVault(orgId);
+    folder = await seedFolder(vault, null, "Team", "Team");
+    folderNote = await seedNote(vault, folder, "Team/T.md", owner.userId);
+    rootNote = await seedNote(vault, null, "Root.md", owner.userId);
+  });
+  it("clearing one folder override kicks that folder's docs only", async () => {
+    await seedOrgGrant(orgId, "folder", folder, "edit");
+    rec.reset();
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 1,
+      postureChanged: false,
+      disconnectedDocs: 1,
+    });
+    expect(rec.disconnected).toEqual([{ vaultId: vault, docId: folderNote }]);
+    expect(rec.aclBroadcasts).toContain(vault);
+  });
+
+  it("readonly → open kicks nothing and keeps the same grant id", async () => {
+    await seedVaultGrant(orgId, "view");
+    const before = (await (
+      await get(owner, `/api/orgs/${orgId}/team-access`)
+    ).json()) as { grantId: string | null };
+    rec.reset();
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(res.status).toBe(200);
+    // Everyone gains edit. A kick here would cost the whole vault a reconnect
+    // for a change that takes nothing away.
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 0,
+      postureChanged: true,
+      disconnectedDocs: 0,
+    });
+    expect(rec.disconnected).toEqual([]);
+
+    const after = (await (
+      await get(owner, `/api/orgs/${orgId}/team-access`)
+    ).json()) as { mode: string; grantId: string | null };
+    expect(after.mode).toBe("open");
+    // Rewritten in place by the upsert, not deleted and re-created.
+    expect(after.grantId).toBe(before.grantId);
+  });
+
+  it("a no-op re-apply broadcasts no ACL change", async () => {
+    await seedVaultGrant(orgId, "edit");
+    rec.reset();
+    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" })).status).toBe(200);
+    expect(rec.aclBroadcasts).toEqual([]);
+  });
+
+  it("re-applying open on an already-open vault with no overrides kicks nothing", async () => {
+    await seedVaultGrant(orgId, "edit");
+    rec.reset();
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 0,
+      postureChanged: false,
+      disconnectedDocs: 0,
+    });
+    expect(rec.disconnected).toEqual([]);
+  });
+
+  it("open on a Private vault with no overrides kicks nothing", async () => {
+    rec.reset();
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(res.status).toBe(200);
+    // The posture moved, but nothing was taken away, so nobody is kicked.
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 0,
+      postureChanged: true,
+      disconnectedDocs: 0,
+    });
+    expect(rec.disconnected).toEqual([]);
+  });
+
+  it("readonly on an open vault kicks every doc", async () => {
+    await seedVaultGrant(orgId, "edit");
+    rec.reset();
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 0,
+      postureChanged: true,
+      disconnectedDocs: 2,
+    });
+    expect(rec.disconnected).toContainEqual({ vaultId: vault, docId: folderNote });
+    expect(rec.disconnected).toContainEqual({ vaultId: vault, docId: rootNote });
+  });
+
+  it("a doc reached by both the vault row and a folder override is kicked once", async () => {
+    await seedVaultGrant(orgId, "edit");
+    await seedOrgGrant(orgId, "folder", folder, "edit");
+    rec.reset();
+
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 1,
+      postureChanged: true,
+      disconnectedDocs: 2,
+    });
+    expect(rec.disconnected).toHaveLength(2);
+  });
+});

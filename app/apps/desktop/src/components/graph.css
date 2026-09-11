@@ -280,45 +280,8 @@
   text-overflow: ellipsis;
 }
 
-.graph-control-val {
-  min-width: 32px;
-  text-align: right;
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
-/* Native range input, restyled minimal. */
-.graph-control-row input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--border-strong);
-  cursor: pointer;
-}
-.graph-control-row input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid var(--bg-surface);
-  transition: transform var(--t-fast) var(--ease);
-}
-.graph-control-row input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.15);
-}
-.graph-control-row input[type="range"]::-moz-range-thumb {
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid var(--bg-surface);
-}
+/* The slider and its readout are `.range-input` / `.range-value` in App.css —
+   shared with Settings → Appearance rather than restyled twice. */
 
 .graph-control-row input[type="checkbox"] {
   accent-color: var(--accent);

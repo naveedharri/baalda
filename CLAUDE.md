@@ -232,6 +232,12 @@ and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mo
   `frontmatterView(state)` is the single authority for which of the three renderings the region gets —
   two block replaces over one range would throw.
 
+`AccessPanel` treats the vault mode as **unknown until fetched** (`teamAccess: TeamAccess | null`;
+`lib/teamAccessCache.ts` seeds the paint from localStorage but can never authorise a write, which
+waits for the real GET) — falling back to Private flashed the opposite of the truth on every open of
+a shared vault. `lib/accessMode.ts` `effectiveTeamMode` is the single authority for both the row
+badges and the detail pane's tri-state, mirroring `permissions/resolver.ts` at the org level.
+
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
 Hocuspocus instance is also served on the HTTP port at `/sync` (`sync/http-upgrade.ts`) so the whole
@@ -271,7 +277,17 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   which left an invited teammate on an empty sidebar with no way to ask for access.) Vaults that
   predate the reversal are untouched: no grant means private, and the owner flips it in Access. Keep
   this in lockstep with `permissions/vault-docs.ts` (the readable-set dual that gates live sync +
-  registry listings).
+  registry listings). The Access panel's vault-level control is **"Entire vault"** and **enforces** a
+  mode rather than defaulting it: `PUT /api/orgs/:orgId/team-access` (`http/routes/shares.ts`,
+  owner/admin) clears every org-principal row on every folder/file in the org's collections and
+  upserts the vault row, all in one transaction — per-**user** rows survive, so people shared with by
+  name keep their access. `GET` on the same path returns the mode plus the surviving overrides, which
+  is what lets the panel confirm with exact counts before writing. Grants rank `edit=2 > view=1 >
+  everything else 0` (`locked`/`denied` grant nothing, they only cap), and **only a narrowing kicks
+  sockets**: a cleared item row kicks its docs iff its rank exceeds the target's, the posture kicks
+  every doc iff it dropped — so Read-only→Shared and Private→Shared kick nobody, Shared→Read-only and
+  →Private kick everything. `grantId` is stable (the vault row is upserted in place, deleted only for
+  Private) and a no-op re-apply clears nothing, kicks nobody and broadcasts nothing.
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
   `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note`.

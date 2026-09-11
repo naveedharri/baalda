@@ -23,11 +23,53 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Changed
+- **The Access panel's vault-level control enforces a mode instead of merely
+  defaulting to it.** "This vault, by default" wrote one `shares` row on the
+  vault resource and left every per-folder and per-note override standing, so
+  "set the whole vault to Shared" quietly skipped everything anyone had ever
+  overridden — which people read, correctly, as the control not working. It is
+  now labelled **Entire vault** and calls `PUT /api/orgs/:orgId/team-access`,
+  which in one transaction deletes every org-principal row on every folder and
+  file in the vault's collections and then writes the new vault row (none, for
+  Private). Per-**user** rows are untouched: people shared with by name keep
+  their access. The confirm names what it is about to replace with exact counts
+  (`accessMode.ts` `overrideCountPhrase` — "This replaces 3 folder settings and
+  1 note setting"), and the toast afterwards quotes the server's own `cleared`
+  count, because a teammate can add an override between the confirm and the
+  write. Wording moved with it: `MODE_LABEL` makes `open` **"Shared"**
+  everywhere (one hint in the detail pane still said "Open", which read as a
+  fourth state nobody could find), and the per-member tri-state's "Default" is
+  now **"Inherited"**. `docs/specs/04-team-collaboration.md` lost its stale
+  "Private by default" paragraph, which still described the posture reversed on
+  2026-08-07, and gained the two-control model.
+- **"Readable line length" is now a Content width slider.** The two-state switch
+  could only answer 88ch or the whole window; the slider runs 60–120ch in steps
+  of 4 with one stop past the end that means full width (`lib/editorMeasure.ts`
+  `sliderToMeasure`), and applies live as an inline `--editor-measure` on
+  `.editor-column` rather than the old `data-measure="full"` attribute — so
+  `--editor-pad-x` and its consumers still follow with no JavaScript at all.
+  `context.readableLineLength` is read once to migrate a device that still has
+  it ("off" ⇒ Full) and never written again; the new key is
+  `context.editorMeasure`. The Suspense-fallback `EditorSkeleton` column takes
+  the same style, so its bars no longer sit at the default 88ch and jump
+  sideways when the real note lands. The graph panel's private restyling of the
+  native range input was lifted into app-wide `.range-input` / `.range-value`
+  rather than copied.
+- **Settings rows have height and dividers.** `.menu-row` is the account
+  popover's row rendered on a surface eight times the size, and at the popover's
+  4px padding a column of them reads as one paragraph, with no line between the
+  control you meant to reach and the one below it. A row that is a DIRECT child
+  of `.settings-content` now gets `min-height: 40px`, `var(--sp-3)` vertical
+  padding and a hairline between siblings. Side padding goes to zero rather than
+  up, so rows stay aligned with the section headings above them;
+  `.settings-footer-row` still wins on specificity, and rows nested inside a
+  card (the billing plan, the Updates tab) are deliberately untouched because
+  their container already spaces them.
 - **The editor's default measure is 88ch, down from 120ch — a visible
   narrowing.** Past roughly ninety characters the eye loses the start of the
   next line; this is where every typographic rule of thumb, and Obsidian's own
-  default, lands. Settings → Appearance → "Readable line length" restores the
-  full width.
+  default, lands. Settings → Appearance → "Content width" moves it, and dragging
+  that slider past its last stop, to Full, restores the full width.
 - **`indentUnit.of("  ")`** is now set explicitly, so `lists.ts`'s Tab/Shift-Tab,
   `indentOnInput` and every CodeMirror indent command share one answer to "how
   wide is a level". `lists.ts` lost its dead `listEnter` command and the unused
@@ -141,6 +183,54 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **`GET` / `PUT /api/orgs/:orgId/team-access`** (`http/routes/shares.ts`,
+  owner/admin only, gated by `canManage` on the vault resource). GET reports the
+  vault's mode, the grant row backing it, and every per-item org row that
+  currently survives it — one request, because the Access panel has to state how
+  many settings it will clear *before* the confirm, and a count assembled from
+  several round trips is a count that can be wrong. PUT applies a mode to the
+  whole vault in a transaction, then force-closes the sync sockets of exactly
+  what NARROWED — a client reconnects and re-mints its own token, so a change
+  that gives people more access arrives by itself. Grants rank `edit=2 >
+  view=1 > everything else 0` (`locked`/`denied` grant nothing, they only cap,
+  so clearing one kicks nobody): a cleared item row kicks its docs iff its rank
+  exceeds the target's, and the vault posture kicks every doc iff it dropped, so
+  Read-only→Shared kicks nobody and Shared→Private kicks everything. A narrowed
+  posture already reaches every doc in the org's collections, which makes the
+  per-item walks underneath it pure duplication — they are skipped; otherwise
+  the items resolve in one batched `permissions/lookup.ts` `docsForResources`
+  instead of a recursive walk apiece. The disconnects are best effort, one doc
+  at a time: the write is already committed, so a transport that throws on one
+  socket must not cost the caller a 500 or strand the docs behind it.
+  `onAclChanged` fires per collection only on a real change, or an idempotent
+  PUT would make every vault-channel subscriber recompute its readable set for
+  nothing. It answers `{ mode, cleared, postureChanged, disconnectedDocs }`,
+  where `cleared` counts ITEM rows only — the ones GET would have listed — and
+  `postureChanged` is the separate yes/no of whether the vault row itself moved,
+  because the desktop reports the two as different sentences. Org rows stranded
+  on soft-deleted notes are swept in the same transaction, silently and outside
+  that count: the user never saw them, a deleted doc has no live editors for the
+  row to have been protecting, and left behind a restored note would come back
+  carrying the very override the whole-vault change was made to remove. New
+  `tests/team-access.test.ts` covers the clearing, the per-user survivors and
+  the role gate.
+- **Clicking a folder or note row scrolls its controls into view.** New pure
+  `lib/scrollPlan.ts` finds the one ancestor that actually scrolls by computed
+  style (`Element.scrollIntoView` moves EVERY scrollable ancestor, which inside a
+  modal drags the page behind it too) and plans a target that guarantees the
+  per-item mode buttons rather than just the pane's title — the pane opens with a
+  breadcrumb, a title and up to two banners above them, so on a short window
+  "scroll the pane to the top" still left the three buttons the click was about
+  below the fold. An already-visible pane and a sub-pixel move both plan `null`,
+  and `prefers-reduced-motion` drops the smooth behaviour.
+- **A live miniature under the Content width slider**
+  (`components/ContentWidthPreview.tsx` + `lib/editorMeasure.ts`
+  `computePreviewColumn`). It measures the real editor pane and the real width of
+  a `0` in the editor's body font — `ch` resolves at the element using the token,
+  which is `.cm-line`, not the settings panel — runs the same arithmetic the
+  browser runs for `--editor-pad-x`, and scales the answer down. A window too
+  narrow to grant the measure being dragged towards therefore shows the column
+  stop growing, which is the one thing a fixed illustration could never say.
 - **Tables are edited in place, not as markdown source.** A GFM table is now
   always the rendered table (`lib/editor/table/`): the `"Table"` branch in
   `livePreview.ts` no longer yields to the active line, and clicking a cell
@@ -220,12 +310,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   guides track a webfont landing and any zoom.
 - **Two layout settings** (Settings → Appearance, device-local like the theme):
   **Readable line length** (on by default) and **Line numbers** (off by
-  default — a gutter takes real width from the prose column). The width toggle
-  is pure CSS: `.editor-column[data-measure="full"] { --editor-measure: 100% }`,
-  which `--editor-pad-x` and therefore `.cm-line`, `cm-block-inset`, the fold
-  chevrons and the loading skeleton all follow with no JS. `lineNumbers()` sits
-  in a Compartment so the switch reconfigures the live view instead of rebuilding
-  it (and with it the CRDT binding).
+  default — a gutter takes real width from the prose column). The width control
+  has since become the Content width slider (see the Changed entry above): it
+  now sets `--editor-measure` inline on `.editor-column` rather than flipping a
+  single attribute, but it is still only that one token, which `--editor-pad-x`
+  and therefore `.cm-line`, `cm-block-inset`, the fold chevrons and the loading
+  skeleton all follow with no JS. `lineNumbers()` sits in a Compartment so the
+  switch reconfigures the live view instead of rebuilding it (and with it the
+  CRDT binding).
 
 - **Live preview reveals one token at a time.** New `lib/editor/reveal.ts` holds
   the two scopes the editor now distinguishes: LINE (headings, quote markers,
@@ -329,6 +421,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **The Access page no longer paints Private and then jumps to Shared.** The
+  vault mode was initialised to the Private end of the tri-state and corrected
+  only when the shares GET landed, so every open of a Shared vault showed the
+  opposite of the truth — on the cards AND on every row badge — for as long as
+  the network took. The mode is now `null` until fetched: badges render a blank
+  loading pill (`.access-badge.loading`), no card is marked active, and a write
+  is refused (`vaultModeKnown`) because the confirm has to count overrides it has
+  not fetched yet. New `lib/teamAccessCache.ts` remembers the last known mode per
+  (server URL, vault) in `localStorage` for an instant correct first paint, keyed
+  like `store.knownVaultsKey` because a vault id means nothing across two
+  servers; it is never allowed to authorise a write.
+- **A row badge and the item's own controls now give the same answer.** The
+  badges read only the lock/deny overlay and then fell straight back to the vault
+  mode, so a folder explicitly set to Shared inside a Private vault badged
+  "Private" while the detail pane two inches away read the item's own share rows
+  and said Shared. Both now call `lib/accessMode.ts` `effectiveTeamMode`, which
+  mirrors `permissions/resolver.ts` at the ORG level: a `denied` on the item or
+  any ancestor wins, then a `locked`, then the vault being open or an `edit`
+  above, then the vault being read-only or a `view`, else private. It also
+  reports where the answer came from, so the pane can name the folder that is
+  deciding rather than sending someone to clear a row that is not.
+- **The Properties-in-document dropdown had no styling.** Its `triggerClassName`
+  was `role-trigger`, which matches no CSS anywhere — the member-role menus use
+  `role-field-trigger` — so the one select on the Appearance tab rendered as a
+  bare button beside properly framed controls.
 - **Opening a note no longer flashes the whole app.** Three things fired on
   every click. The editor pane went bare for ~180 ms: the loading skeleton is
   held back so a 40 ms open never flashes one, but a note-to-note switch
