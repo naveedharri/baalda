@@ -108,9 +108,12 @@ pub fn create_note(vault: &Path, parent_rel: &str, name: &str) -> AppResult<Stri
     if let Some(parent) = abs.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Seed with an H1 of the title so the note isn't empty.
-    let stem = name.trim_end_matches(".md");
-    std::fs::write(&abs, format!("# {stem}\n\n"))?;
+    // Create it EMPTY. A note's title is its FILENAME (the UI shows the file
+    // stem in the tab, the sidebar and the window), so a seeded `# {stem}` was a
+    // visible duplicate of the title the app already shows — and the heading the
+    // old title-follow rule renamed the file from. Obsidian-exact: a new note is
+    // a blank sheet.
+    std::fs::write(&abs, "")?;
     Ok(rel)
 }
 
@@ -458,7 +461,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let rel = create_note(tmp.path(), "", "My Note").unwrap();
         assert_eq!(rel, "My Note.md");
+        assert_eq!(read_note(tmp.path(), "My Note.md").unwrap(), "");
         assert!(create_note(tmp.path(), "", "My Note").is_err());
+    }
+
+    #[test]
+    fn create_note_writes_an_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rel = create_note(tmp.path(), "sub", "Blank").unwrap();
+        let abs = tmp.path().join(&rel);
+        assert_eq!(std::fs::metadata(&abs).unwrap().len(), 0);
     }
 
     #[test]

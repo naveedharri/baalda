@@ -228,6 +228,17 @@ mod tests {
         assert_eq!(p2.title, "the-stem");
     }
 
+    /// New notes are created empty (`notefile.rs create_note`) and the UI shows a
+    /// note's filename stem as its title. `derive_title` is deliberately NOT
+    /// collapsed to the stem: it stays the *index* title (frontmatter `title:` →
+    /// first H1 → stem) because `index.rs` resolves `[[wikilinks]]` by basename
+    /// and then by title, and `notes_fts` indexes the title column. This pins the
+    /// empty-note half of that contract.
+    #[test]
+    fn empty_note_titles_from_its_stem() {
+        assert_eq!(parse_note("", "My Note").title, "My Note");
+    }
+
     #[test]
     fn extracts_wikilinks_with_alias_and_heading() {
         let p = parse_note("see [[Target Note]] and [[Other|alias]] and [[Third#sec]]", "s");
