@@ -12,8 +12,22 @@
 import { cursorCharLeft, cursorCharRight } from "@codemirror/commands";
 import { EditorState, type Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createEditorState } from "../index";
+
+beforeAll(() => {
+  // jsdom has no layout engine, and CodeMirror's measure pass — which runs in a
+  // rAF after a dispatch, i.e. potentially after the test that caused it — calls
+  // Range#getClientRects. Without these the failure surfaces as an unhandled
+  // exception attributed to whichever test happened to still be open.
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
+  Range.prototype.getClientRects = () =>
+    ({
+      length: 0,
+      item: () => null,
+      [Symbol.iterator]: function* () {},
+    }) as unknown as DOMRectList;
+});
 
 interface Mounted {
   view: EditorView;
