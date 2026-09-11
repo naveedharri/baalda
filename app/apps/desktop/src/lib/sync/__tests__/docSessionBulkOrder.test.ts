@@ -125,6 +125,7 @@ vi.mock("../../ipc", () => ({
       : { snapshot: null, updates: [], updateCount: 0 },
   ),
   clearYjsDoc: vi.fn(async () => {}),
+  listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(async () => []),
   pruneYjsDocs: vi.fn(async () => ({ docsRemoved: 0, updatesRemoved: 0, bytesReclaimed: 0 })),
   listAttachments: vi.fn(async () => []),

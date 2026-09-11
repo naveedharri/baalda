@@ -34,6 +34,9 @@ import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
 import { previewKind } from "../lib/preview";
+import { ancestorPaths } from "../lib/accessTree";
+import { nodeAt } from "../lib/tree/lazyTree";
+import { displayName } from "../lib/notePath";
 import {
   buildTreeSyncIndex,
   FolderWaveTracker,
@@ -1235,6 +1238,71 @@ export function FileTree() {
   }, [data, nodeByPath]);
 
   /**
+   * "Show me this path" — the one reveal mechanism (store `requestReveal`).
+   * Expand every folder above it, scroll it into view, optionally open its
+   * inline rename box, and pulse the row once. Lives here because the arborist
+   * handle does, and lazily-listed children must be loaded in ancestor order
+   * before arborist has the row at all.
+   *
+   * Never `tree.select(path)`: arborist selection is unused (the `<Tree>` takes
+   * no `selection` prop) and the row highlight comes from
+   * `RowShared.selectedPath`.
+   */
+  const revealRequest = useStore((s) => s.revealRequest);
+  useEffect(() => {
+    if (!revealRequest) return;
+    const { path, edit } = revealRequest;
+    let cancelled = false;
+    void (async () => {
+      for (const dir of ancestorPaths(path)) {
+        if (cancelled) return;
+        try {
+          await useStore.getState().loadChildren(dir);
+        } catch {
+          // An unreadable folder just leaves the reveal short.
+        }
+      }
+      if (cancelled) return;
+      // rAF retry: a refresh only SCHEDULES the re-render, so the row may not be
+      // in arborist's data yet. 30 frames (~500ms) is the budget the old
+      // `beginRename` used; the folder listings are already awaited above, so it
+      // only has to cover React's render.
+      //
+      // The gate is the STORE tree, not `tree.get(path)`: arborist's `get` only
+      // knows VISIBLE rows, so a note inside a collapsed folder is "missing" until
+      // that folder opens — gating on it meant a reveal into a closed folder gave
+      // up every time. `openParents`/`scrollTo` search the whole tree, and
+      // `scrollTo` waits for the row to become visible before scrolling to it.
+      const land = (tries = 0) => {
+        if (cancelled) return;
+        const tree = treeRef.current;
+        const known = treeHasPath(useStore.getState().tree, path);
+        if (tree && known) {
+          const t = tree; // narrowed copy for the closure below
+          t.openParents(path);
+          void t.scrollTo(path, "auto")?.then(() => {
+            if (cancelled) return;
+            // Only a visible row can be edited, so this waits for the scroll.
+            if (edit) void t.edit(path);
+          });
+          useStore.getState().setRevealedPath(path);
+          window.setTimeout(() => {
+            if (useStore.getState().revealedPath === path) {
+              useStore.getState().setRevealedPath(null);
+            }
+          }, 700);
+          return;
+        }
+        if (tries < 30) requestAnimationFrame(() => land(tries + 1));
+      };
+      land();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [revealRequest]);
+
+  /**
    * Refuse a create/import at the vault root when the root is frozen.
    *
    * Client-side first, purely so the user gets a sentence instead of a failed
@@ -1248,38 +1316,6 @@ export function FileTree() {
       "error",
     );
     return true;
-  }
-
-  async function createUniqueNote(dir: string) {
-    if (rootBlocked(dir)) return;
-    let name = "Untitled";
-    for (let i = 0; i < 50; i++) {
-      const candidate = i === 0 ? name : `${name} ${i}`;
-      try {
-        const path = await ipc.createNote(dir, candidate);
-        await refreshAll();
-        await useStore.getState().openNoteByPath(path);
-        return;
-      } catch {
-        // name taken → try next
-      }
-    }
-  }
-
-  // Put a freshly created node straight into rename mode — same instant-rename
-  // affordance a new note gets by opening in the editor. refreshAll() only
-  // schedules the tree re-render, so poll a few frames until react-arborist has
-  // the new row in its store, then reveal + select + edit it.
-  function beginRename(path: string, tries = 0) {
-    const tree = treeRef.current;
-    if (tree?.get(path)) {
-      tree.openParents(path);
-      tree.select(path);
-      void tree.scrollTo(path);
-      void tree.edit(path);
-      return;
-    }
-    if (tries < 30) requestAnimationFrame(() => beginRename(path, tries + 1));
   }
 
   async function createUniqueFolder(dir: string) {
@@ -1297,7 +1333,10 @@ export function FileTree() {
           console.warn("[sync] registerFolder failed", path, e);
         }
         await refreshAll();
-        beginRename(path);
+        // Straight into rename mode, through the same reveal path a new note
+        // takes (the effect above waits out both the folder listings and
+        // arborist's render).
+        useStore.getState().requestReveal(path, { edit: true });
         return;
       } catch {
         // taken → next
@@ -1406,7 +1445,7 @@ export function FileTree() {
             title={rootFrozen ? ROOT_FROZEN_HINT : "New note"}
             aria-label="New note"
             aria-disabled={rootFrozen}
-            onClick={() => createUniqueNote("")}
+            onClick={() => void useStore.getState().createNoteIn("")}
           >
             {ICON_NEW_NOTE}
           </button>
@@ -1670,7 +1709,7 @@ export function FileTree() {
           <li
             className={menuCreateBlocked ? "disabled" : undefined}
             title={menuCreateBlocked ? ROOT_FROZEN_HINT : undefined}
-            onClick={() => createUniqueNote(menuDir)}
+            onClick={() => void useStore.getState().createNoteIn(menuDir)}
           >
             New note
           </li>
@@ -1959,9 +1998,13 @@ const ICON_HTML = (
   </TreeSvg>
 );
 
-/** Note titles hide the .md/.html extension — it's a notes list, not a file manager. */
-function displayName(name: string, isDir: boolean): string {
-  return isDir ? name : name.replace(/\.(md|html?)$/i, "");
+/** Is `path` (file or folder) in the store's tree yet? `nodeAt` only walks
+ *  folders, so look the parent up and then check its listing for the entry. */
+function treeHasPath(root: TreeNode | null, path: string): boolean {
+  if (!root) return false;
+  const slash = path.lastIndexOf("/");
+  const dir = slash === -1 ? root : nodeAt(root, path.slice(0, slash));
+  return dir?.children?.some((c) => c.path === path) ?? false;
 }
 
 function isHtmlPath(path: string): boolean {
@@ -2135,6 +2178,9 @@ function Node({
   // note opening elsewhere in the tree doesn't re-render every other row — this
   // component is instantiated once per visible row.
   const isOpening = useStore((s) => s.openingNotePath === node.data.path);
+  // Same boolean-subscription reason: a one-shot pulse on the row the app just
+  // revealed must not re-render the other 6,000.
+  const isRevealed = useStore((s) => s.revealedPath === node.data.path);
   const colorValue = itemColorValue(color);
   const peers = peersForNode(node, presenceByDoc);
   // Compose arborist's per-level indent with the row's base inset so every
@@ -2156,7 +2202,7 @@ function Node({
         // Pre-selects the row the instant it's clicked, so the selection doesn't
         // wait on `getNoteMeta` + `registerNote` to come back from the server.
         isOpening ? " opening" : ""
-      }`}
+      }${isRevealed ? " revealed" : ""}`}
       aria-busy={isOpening || undefined}
       onContextMenu={(e) => {
         e.preventDefault();

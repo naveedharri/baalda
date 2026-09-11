@@ -71,6 +71,7 @@ vi.mock("../../ipc", () => ({
   getNoteMeta: vi.fn(async () => null),
   loadYjsState: vi.fn(async () => ({ snapshot: null, updates: [], updateCount: 0 })),
   clearYjsDoc: vi.fn(async () => {}),
+  listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(async () => []),
   pruneYjsDocs: vi.fn(async () => ({ docsRemoved: 0, updatesRemoved: 0, bytesReclaimed: 0 })),
   listAttachments: vi.fn(async () => []),
@@ -78,6 +79,20 @@ vi.mock("../../ipc", () => ({
   writeBinaryFile: vi.fn(async () => {}),
   writeTrashCopy: vi.fn(async () => "trash"),
   rebindNoteId: vi.fn(async () => true),
+}));
+
+/**
+ * The server. Only `enable`'s fire-and-forget attachment reconcile reaches it —
+ * but a real `fetch` from Node rejects and logs, and this file's tests finish
+ * first, so that log landed in an already-closed worker ("Closing rpc while
+ * onUserConsoleLog was pending") on roughly one run in three.
+ */
+vi.mock("../../auth/authManager", () => ({
+  api: {
+    listVaultBlobs: vi.fn(async () => []),
+    downloadBlob: vi.fn(async () => new Uint8Array()),
+    resetNoteHistory: vi.fn(async () => {}),
+  },
 }));
 
 const engineHooks = vi.hoisted(() => ({ started: 0, opts: null as VaultSyncEngineOptions | null }));

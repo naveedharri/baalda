@@ -17,6 +17,7 @@ vi.mock("../ipc", () => ({
     children: [],
     childrenLoaded: true,
   })),
+  listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(async () => []),
   writeNote: vi.fn(async () => {}),
   writeNoteIfMissing: vi.fn(async () => true),

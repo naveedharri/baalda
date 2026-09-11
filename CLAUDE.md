@@ -109,7 +109,11 @@ Errors: single `AppError(String)` (`error.rs`).
 - `vault.rs` — path safety (`resolve_in_vault` rejects `..`/absolute/escape); ignores `.context/`, `.git`, dotfiles.
 - `tree.rs` — recursive walk to nested `TreeNode`; surfaces `.md`/`.html` only.
 - `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`.
-- `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter.
+- `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter. `derive_title`
+  (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title — `index.rs`
+  resolves links by basename *then* title and `notes_fts` has a title column — while the **UI
+  displays the filename stem** (`src/lib/notePath.ts noteLabel`); that asymmetry is deliberate
+  (`aliases` would unify it later). New notes are created **empty** (`notefile.rs create_note`).
 - `index.rs` — SQLite at `<vault>/.context/index.sqlite` (WAL): `notes` (id=`doc_id`, path UNIQUE),
   FTS5 `notes_fts`, `tags`/`note_tags`, `links`, `folders`, `yjs_updates`, `yjs_snapshot`. Notes keyed by
   `doc_id`; `rebuild` preserves ids and never wipes the CRDT tables; `rename_note` rewrites paths by id so
@@ -199,7 +203,34 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 sync status, locks, prefs). Editor is CodeMirror 6 + `y-codemirror.next` (`yCollab`) — the buffer *is* the
 markdown. In `collab` mode CM6 history/onChange are dropped so Yjs owns undo. Graph view is a hand-rolled
 canvas force sim (no deps). Live-preview and inline-HTML rendering sanitize aggressively (drop
-script/style/iframe, strip `on*`/`javascript:`).
+script/style/iframe, strip `on*`/`javascript:`). The editor's horizontal inset lives on **`.cm-line`**
+via `--editor-pad-x`, never on `.cm-content`: `drawSelection()` reads the first line's padding and is
+blind to the content element's, so a centring pad there made every full-line selection rect overrun the
+margins — block replace widgets (which are `.cm-content`'s direct children) get the inset back through
+the shared `cm-block-inset` class.
+
+Live preview reveals markdown at **two scopes** (`lib/editor/reveal.ts`): LINE for the markers that
+shape a line (`#`, `>`, the task dash, block widgets) and TOKEN for inline ones (`**`, `==`, `%%`,
+`` ` ``, `[]()`), where `tokenOwner` finds the inline node a marker delimits and only a selection
+touching THAT node unfolds it. A blurred editor has no active line at all. Obsidian-flavoured syntax
+lives in `lib/editor/ofm/` — note the node names `OfmComment*`, because `@lezer/markdown` already owns
+`Comment`/`CommentBlock` and `configure()` silently skips a duplicate name. The editor's `#tag` rule
+(`ofm/hashtag.ts`) and Rust's `TAG_RE` (`parse.rs`) are ONE contract: change one, change both, or a
+tag becomes visible but unsearchable.
+
+Above the body sit two more block decorations, both React inside a CM6 widget (`lib/editor/noteHeader.ts`;
+`updateDOM` returns **true** so the host node — and the focused `<input>` — survives a remote keystroke,
+and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mode}`, never doc content):
+- **The inline title** is the note's *filename*. Committing it is a **rename** (`store.renameNoteFileExact`,
+  the no-dedup half of `renameNoteFile`), never a CRDT edit; an illegal or taken name is refused inline
+  (`lib/editor/titlePlan.ts`) instead of being silently suffixed.
+- **The Properties panel** replaces the frontmatter range. Every edit is a **minimal span replacement**
+  (`lib/frontmatter/parse.ts` gives doc-absolute spans, `edit.ts` plans the changes) dispatched as an
+  ordinary editor transaction, so it reaches the `.md`, the index and Yjs undo exactly like typing.
+  YAML outside the supported flat subset is **never rewritten** — it renders as source under a banner.
+  Per-vault types live in `.context/types.json`; the Visible/Hidden/Source mode is a device-local pref.
+  `frontmatterView(state)` is the single authority for which of the three renderings the region gets —
+  two block replaces over one range would throw.
 
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same

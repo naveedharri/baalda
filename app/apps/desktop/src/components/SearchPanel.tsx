@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { SearchResult } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
+import { noteLabel } from "../lib/notePath";
 import { useStore } from "../store";
 
 /**
@@ -121,7 +122,11 @@ export function SearchPanel({ onClose }: { onClose?: () => void }) {
                 onMouseEnter={() => setActive(i)}
                 onClick={() => open(r.path)}
               >
-                <div className="search-title">{r.title || r.path}</div>
+                {/* The file name, like the tab and the sidebar. `r.title` stays
+                    match fuel (Rust indexes it in `notes_fts`) but is never the
+                    label: for a note with an H1 it names the same note
+                    differently from its own tab. */}
+                <div className="search-title">{noteLabel(r.path)}</div>
                 <div
                   className="search-snippet"
                   // The snippet is HTML-escaped in Rust (see index.rs::html_escape)

@@ -1412,6 +1412,29 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--bg-active);
   color: var(--text-primary);
 }
+/* A one-shot "here it is" pulse on a row the app just revealed (store
+   `revealedPath`). Subtle by design: the row's own `.selected` highlight is the
+   lasting signal, this only catches the eye once. Declared BEFORE `.selected` so
+   the held end state (`both`, transparent) never outranks the selection fill. */
+@keyframes tree-reveal {
+  0% {
+    background: var(--accent-soft);
+  }
+  35% {
+    background: var(--accent-soft-hover);
+  }
+  100% {
+    background: transparent;
+  }
+}
+.tree-row.revealed {
+  animation: tree-reveal 600ms var(--ease) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-row.revealed {
+    animation: none;
+  }
+}
 .tree-row.selected {
   background: var(--accent-soft);
   color: var(--text-primary);
@@ -2398,33 +2421,34 @@ body:has(.sidebar-resizer.dragging) {
     animation: none;
   }
 }
+/* The tab strip is the header's title row (see App.tsx): tabs on the left, the
+   sync badge and the icon buttons on the right. The row is chrome (a subtle
+   well) and its bottom rule is the seam with the note sheet; the active tab is
+   a piece of that sheet lifted into the row, so the rule bends up and around
+   it (Obsidian's tab shape). */
 .main-header {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: var(--sp-3);
-  padding: var(--sp-4) var(--sp-6);
+  min-height: 44px;
+  padding: 0 var(--sp-6) 0 var(--sp-3);
   border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
 }
-.note-title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: var(--fs-lg);
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* The controls keep their own box: never shrink, never wrap, sit centred — the
+   strip is the flexible child, and it scrolls instead of squeezing the badge. */
+.main-header > :not(.tab-strip) {
+  flex: none;
+  align-self: center;
   white-space: nowrap;
-  margin-right: auto;
 }
 /* ---- Open-file tabs (TabBar) ---- */
 .tab-strip {
   display: flex;
-  align-items: stretch;
+  align-items: flex-end;
   gap: var(--sp-1);
-  flex: none;
-  padding: 0 var(--sp-3);
-  border-bottom: 1px solid var(--border);
   overflow-x: auto;
+  overflow-y: hidden;
   /* The strip scrolls (wheel/trackpad/drag-into-view), but a scrollbar under
      a row of tabs reads as clutter, so it's hidden in both engines. */
   scrollbar-width: none;
@@ -2432,34 +2456,119 @@ body:has(.sidebar-resizer.dragging) {
 .tab-strip::-webkit-scrollbar {
   display: none;
 }
+/* Inside the header: take the row and shrink rather than push the controls off.
+   `margin-bottom: -1px` lets the strip reach 1px INTO the header's bottom rule,
+   so the active card (which sits at the strip's bottom edge) paints over the
+   rule and joins the sheet below. The left pad keeps the first tab's fillet off
+   the scroll container's clip edge. The mask fades the last tabs out before
+   they reach the badge, so overflow reads as "more to the right". */
+.main-header > .tab-strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--sp-2) 0 0 var(--radius-sm);
+  margin-bottom: -1px;
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+}
 .tab {
+  position: relative; /* the travelling card anchors here */
   display: flex;
   align-items: center;
   flex: none;
   max-width: 220px;
-  margin: var(--sp-1) 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   color: var(--text-secondary);
 }
-.tab:hover {
+.tab:not(.active):hover {
   background: var(--bg-hover);
 }
-/* Same selected idiom as the sidebar's .tree-row.selected. */
-.tab.active {
-  background: var(--accent-soft);
-  color: var(--text-primary);
+/* The active tab's card SLIDES between tabs (one shared-layout motion element,
+   see TabBar.tsx) — the tabs themselves never move. The card is the note sheet
+   itself (`--bg-surface`) outlined by the same rule as the header's seam, open
+   at the bottom so it merges with the sheet. */
+.tab-active-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
-.tab.active:hover {
-  background: var(--accent-soft-hover);
+/* Fillets: an r×r square just outside each bottom corner of the card, painted
+   with a radial gradient centred on the square's corner that touches the card's
+   top edge — transparent (the header shows through) inside the arc, a 1px ring
+   of `--border` AS the arc, and the sheet colour outside it. The sheet part
+   covers the header's rule for the fillet's width, and the ring meets the rule
+   at the far end, so the seam visibly bends up into the card's side. Children
+   of the card, so they travel with it. */
+.tab-active-bg::before,
+.tab-active-bg::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: var(--radius-sm);
+  height: var(--radius-sm);
+  pointer-events: none;
+}
+.tab-active-bg::before {
+  left: calc(var(--radius-sm) * -1 - 1px);
+  background: radial-gradient(
+    circle at 0 0,
+    transparent calc(var(--radius-sm) - 1px),
+    var(--border) calc(var(--radius-sm) - 1px),
+    var(--border) var(--radius-sm),
+    var(--bg-surface) calc(var(--radius-sm) + 0.5px)
+  );
+}
+.tab-active-bg::after {
+  right: calc(var(--radius-sm) * -1 - 1px);
+  background: radial-gradient(
+    circle at 100% 0,
+    transparent calc(var(--radius-sm) - 1px),
+    var(--border) calc(var(--radius-sm) - 1px),
+    var(--border) var(--radius-sm),
+    var(--bg-surface) calc(var(--radius-sm) + 0.5px)
+  );
+}
+.tab > .tab-label,
+.tab > .tab-close {
+  position: relative;
+  z-index: 1;
+}
+.tab.active {
+  color: var(--text-primary);
 }
 /* Click acknowledged, open in flight (same signal as the sidebar row). */
 .tab.opening {
   opacity: 0.6;
 }
+/* `+` new note, after the last tab. */
+.tab-new {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  margin: 0 var(--sp-1) 3px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.tab-new:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.tab-new svg {
+  width: 13px;
+  height: 13px;
+}
 .tab-label {
   background: none;
   border: 0;
-  padding: var(--sp-1) 2px var(--sp-1) var(--sp-2);
+  padding: 7px 2px 7px var(--sp-3);
   font: inherit;
   font-size: var(--fs-sm);
   color: inherit;
@@ -2469,7 +2578,7 @@ body:has(.sidebar-resizer.dragging) {
   cursor: pointer;
 }
 .tab.active .tab-label {
-  font-weight: 500;
+  font-weight: 600;
 }
 .tab-close {
   display: grid;

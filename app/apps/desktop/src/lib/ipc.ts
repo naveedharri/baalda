@@ -581,6 +581,61 @@ export const getVaultConfig = (expectedEpoch?: VaultEpoch) =>
 export const setVaultConfig = (content: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("set_vault_config", { content, expectedEpoch: expectedEpoch ?? null });
 
+// ---- Per-vault property types (.context/types.json) ------------------------
+// The Properties panel's type registry, vault-global by property name. Raw JSON
+// string for the same reason as config.json: the TS layer owns the schema (see
+// lib/frontmatter/types.ts). It travels with the vault folder, and is never in
+// the note, the CRDT or the server.
+
+export const getVaultTypes = (expectedEpoch?: VaultEpoch) =>
+  invoke<string | null>("get_vault_types", { expectedEpoch: expectedEpoch ?? null });
+export const setVaultTypes = (content: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("set_vault_types", { content, expectedEpoch: expectedEpoch ?? null });
+
+/** One frontmatter key and how many notes use it, most-used first. */
+export interface PropertyKeyCount {
+  key: string;
+  count: number;
+}
+
+/** Keys/values seen across the vault's frontmatter, for the panel's
+ *  suggestions. Derived from the index, so they follow the last re-index. */
+export const listPropertyKeys = (expectedEpoch?: VaultEpoch) =>
+  invoke<PropertyKeyCount[]>("list_property_keys", {
+    expectedEpoch: expectedEpoch ?? null,
+  });
+export const listPropertyValues = (key: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string[]>("list_property_values", { key, expectedEpoch: expectedEpoch ?? null });
+
+/** One `#tag` and how many notes carry it, most-used first. */
+export interface TagCount {
+  name: string;
+  count: number;
+}
+
+/** Every tag in the vault, for the editor's `#` completion. Derived from the
+ *  index, so it follows the last re-index exactly like search does. */
+export const listTags = (expectedEpoch?: VaultEpoch) =>
+  invoke<TagCount[]>("list_tags", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Per-note editor UI state — which sections were folded — as opaque JSON this
+ * layer owns (`lib/editor/folding.ts` defines the shape). Stored in the vault's
+ * `index.sqlite`, keyed by doc_id: it is a property of how you read a note on
+ * THIS device, never of the note, so it must not reach the `.md` or the CRDT.
+ */
+export const getNoteUiState = (docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string | null>("get_note_ui_state", {
+    docId,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+export const setNoteUiState = (docId: string, uiState: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("set_note_ui_state", {
+    docId,
+    uiState,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
 /** Epoch of the currently-open vault (0 if none). Used to start a VaultScope for
  *  a vault this call site didn't open itself (e.g. enabling sync on the folder
  *  that is already open). */

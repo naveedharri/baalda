@@ -48,11 +48,18 @@ import {
   type ActivityStatus,
   readActivityStatus,
   readMentionSound,
+  readLineNumbers,
+  readPropertiesMode,
+  readReadableLineLength,
   readTreeSort,
   writeActivityStatus,
   writeMentionSound,
+  writeLineNumbers,
+  writePropertiesMode,
+  writeReadableLineLength,
   writeTreeSort,
 } from "./lib/prefs";
+import type { PropertiesMode } from "./lib/editor/frontmatter";
 import type { TreeSort } from "./lib/tree/sort";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
@@ -92,6 +99,13 @@ export interface OpenNote {
   path: string;
   /** doc_id from the index — the stable Yjs document id for this note. */
   id: string | null;
+  /**
+   * The INDEXED title (frontmatter `title:` → first H1 → stem, from Rust
+   * `parse.rs derive_title`), snapshotted at open. Never a display label: the
+   * UI shows the file name through `lib/notePath.ts noteLabel`, which is what
+   * stopped the header, the tab and the sidebar from disagreeing. This field
+   * exists only to hand `registry.registerNote` the server-side registry title.
+   */
   title: string;
 }
 
@@ -130,9 +144,11 @@ interface AppStore {
   vault: ipc.VaultInfo | null;
   tree: ipc.TreeNode | null;
   openNote: OpenNote | null;
-  /** Paths of the files held open as tabs, in the order they were opened. The
-   *  ACTIVE tab is `openNote.path` — this list is only which tabs exist, so the
-   *  two never disagree about what's on screen. Session-only, vault-scoped. */
+  /** Paths of the files held open as tabs, in the order they were opened —
+   *  a tab never moves once it exists, so the strip stays a stable map of where
+   *  things are and only the highlight travels. The ACTIVE tab is
+   *  `openNote.path`; this list is only which tabs exist, so the two never
+   *  disagree about what's on screen. Session-only, vault-scoped. */
   openTabs: string[];
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
@@ -164,8 +180,19 @@ interface AppStore {
    * taken. Resolves to the path actually used, or null if none was free.
    */
   renameNoteFile: (oldPath: string, newPath: string) => Promise<string | null>;
+  /**
+   * The same rename WITHOUT the dedup loop: the caller's name is used or the
+   * call throws. That is the right shape for a name a person just typed — the
+   * inline title reports "a note called X already exists" and keeps focus,
+   * where silently landing them on `X 1` would be a lie. `renameNoteFile` is
+   * this plus the dedup, so there is one rename implementation, not two.
+   */
+  renameNoteFileExact: (oldPath: string, newPath: string) => Promise<boolean>;
   backlinks: ipc.Backlink[];
   titles: ipc.NoteTitle[];
+  /** Every `#tag` in the vault, most-used first — the editor's `#` completion
+   *  source. Refreshed alongside `titles`, from the same index. */
+  tags: ipc.TagCount[];
 
   // ---- Auth / vault / sync ----
   authStatus: AuthStatus;
@@ -348,6 +375,14 @@ interface AppStore {
   activityStatus: ActivityStatus;
   /** Whether the mention chime plays when someone pings you. */
   mentionSound: boolean;
+  /** How the editor draws YAML frontmatter: a Properties panel, nothing, or
+   *  plain source. Device-local (Settings → Appearance), not per-vault. */
+  propertiesMode: PropertiesMode;
+  /** Cap the editor's prose column at a readable measure rather than letting it
+   *  fill the window. Device-local (Settings → Appearance). */
+  readableLineLength: boolean;
+  /** Show the editor's line-number gutter. Off by default. */
+  lineNumbers: boolean;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
    *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
   treeSort: TreeSort;
@@ -374,6 +409,7 @@ interface AppStore {
   /** Lazily load one folder's immediate children into the sidebar tree. */
   loadChildren: (path: string) => Promise<void>;
   refreshTitles: () => Promise<void>;
+  refreshTags: () => Promise<void>;
   /**
    * Bring `titles` current for just the notes a watcher batch named: re-read
    * those rows (one `getNoteMeta` each) and drop the removed ones, instead of
@@ -386,6 +422,48 @@ interface AppStore {
   openWelcomeIfPresent: () => Promise<void>;
 
   openNoteByPath: (path: string) => Promise<void>;
+  /**
+   * Create a note at `dir` with an explicit name, open it, and reveal it in the
+   * sidebar. The one path every caller shares — the ⌘N handler used to invent
+   * `Untitled ${Date.now()}` while the sidebar's New-note button used
+   * `Untitled`, `Untitled 1`, … Returns the created path, or null when the root
+   * freeze latch refused it. Throws what `ipc.createNote` throws (a taken name
+   * included) so `createNoteIn` can walk to the next candidate.
+   */
+  createNoteAt: (dir: string, name: string) => Promise<string | null>;
+  /**
+   * `createNoteAt` with the sidebar's `Untitled` / `Untitled N` search, plus
+   * the cursor waiting in the new note's inline title. New notes are created
+   * EMPTY (Rust `create_note`), and their name IS their title, so that is
+   * where naming happens.
+   */
+  createNoteIn: (dir: string) => Promise<string | null>;
+  /**
+   * "Show me this path in the sidebar." Bumped by `openNoteByPath` and by
+   * `createNoteIn`; consumed by an effect in `FileTree`, which is the only place
+   * that holds the arborist handle (lazy children must be listed in ancestor
+   * order before the row exists). `token` makes a repeat request for the SAME
+   * path re-fire — a reveal is an event, not a state.
+   */
+  revealRequest: { path: string; edit: boolean; token: number } | null;
+  requestReveal: (path: string, opts?: { edit?: boolean }) => void;
+  /**
+   * "The next time this note's editor mounts, put the cursor in its inline
+   * title." Set by `createNoteIn`, consumed once by `InlineTitle` on mount.
+   *
+   * A new note is created EMPTY and its name IS its title, so the naming
+   * affordance is the title at the top of the note — not the sidebar's rename
+   * box, which is where it lived until the title existed. A flag rather than a
+   * direct call because the widget mounts several awaits after the create
+   * (bridge open → sync open → `new EditorView`).
+   */
+  pendingTitleFocus: string | null;
+  setPendingTitleFocus: (path: string | null) => void;
+  /** The path the sidebar just revealed, for a one-shot highlight pulse.
+   *  Cleared by a timer in the FileTree; read per-row as a BOOLEAN so a pulse on
+   *  one row does not re-render the other 6,000. */
+  revealedPath: string | null;
+  setRevealedPath: (path: string | null) => void;
   /**
    * Follow a `baalda://note/<orgId>/<docId>` link: switch to that vault if
    * needed, then open the note. Never grants anything — the recipient's own
@@ -436,6 +514,9 @@ interface AppStore {
   updateProfile: (input: { name?: string; image?: string | null }) => Promise<void>;
   setActivityStatus: (status: ActivityStatus) => void;
   setMentionSound: (enabled: boolean) => void;
+  setPropertiesMode: (mode: PropertiesMode) => void;
+  setReadableLineLength: (on: boolean) => void;
+  setLineNumbers: (on: boolean) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
   /** Stop broadcasting and release the mic (button released). */
@@ -1064,6 +1145,39 @@ function resolveSyncGate(): void {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/**
+ * Answer "does THIS folder sync?" for the open gate in `openNoteByPath`. A
+ * never-stamped folder has no mapped notes to fork, so its gate opens at once;
+ * a stamped one keeps waiting for the prime that `enableSyncForVault` resolves.
+ * Without this answer the gate stayed armed with `openFolderIsSynced: null`
+ * after every vault switch or creation, and each note open in a local-only
+ * folder sat out the full SYNC_GATE_MS belt ("opened … before sync primed").
+ *
+ * Fire-and-forget; every path that swaps the open folder calls it (`setVault`
+ * on a switch, `adoptOpenedVault` for the picker/create flows).
+ */
+function probeFolderSync(
+  get: () => AppStore,
+  set: (partial: Partial<AppStore>) => void,
+  path: string,
+): void {
+  void ipc
+    .peekVaultStamp(path)
+    .then((stamp) => {
+      if (get().vault?.path !== path) return; // moved on again
+      // A surer path may already have answered (`openVaultInRoot` knows its
+      // folder syncs; the launch probe in App.tsx peeks too). Never override an
+      // answer, and never release a gate someone else is holding.
+      if (get().openFolderIsSynced !== null) return;
+      const synced = stamp?.organizationId != null;
+      set({ openFolderIsSynced: synced });
+      if (!synced) resolveSyncGate();
+    })
+    .catch(() => {
+      /* unreadable: stays null, so the gate keeps waiting for the prime */
+    });
+}
+
 
 /**
  * Tear down networked sync for the vault we're leaving. Call this BEFORE any
@@ -1104,6 +1218,47 @@ function enterVaultScope(info: ipc.VaultInfo, orgId: string | null): void {
  */
 function sameVault(get: () => AppStore, epoch: number | null | undefined): boolean {
   return (get().vault?.epoch ?? null) === (epoch ?? null);
+}
+
+/**
+ * Refuse a create at the vault root while the freeze latch is on, and say why.
+ * Client-side purely so the user gets a sentence instead of a failed write — the
+ * server enforces the same latch and is the authority. (A note written past it
+ * would be permanently unsyncable: the server refuses to register it.)
+ */
+function rootCreateBlocked(get: () => AppStore, dir: string): boolean {
+  if (dir !== "" || !get().rootFrozen) return false;
+  toast(
+    "This vault's root is frozen — create this inside a folder instead.",
+    "error",
+  );
+  return true;
+}
+
+/**
+ * Everything a freshly created note needs after its file exists: the tree and
+ * title list catch up, the note opens, and its row is revealed — with the
+ * cursor waiting in the note's inline title when the name was auto-picked,
+ * since a new note is EMPTY and its name is the first thing to type.
+ *
+ * Kept out of `createNoteAt` so `createNoteIn`'s name search can retry the
+ * *create* alone: if a failure in here counted as "name taken", the retry would
+ * leave a second `Untitled` behind.
+ */
+async function finishNoteCreate(
+  get: () => AppStore,
+  path: string,
+  opts?: { edit?: boolean },
+): Promise<string> {
+  await get().refreshTree();
+  await get().refreshTitles();
+  await get().openNoteByPath(path);
+  // The new note's name is typed into its INLINE TITLE, not the sidebar's
+  // rename box: a note created empty shows its filename at the top of itself,
+  // and that is where the cursor belongs. `openNoteByPath` already revealed the
+  // row; it just does not go into edit mode any more.
+  if (opts?.edit) get().setPendingTitleFocus(path);
+  return path;
 }
 
 /**
@@ -1183,8 +1338,11 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemoved: false,
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
+  revealRequest: null,
+  revealedPath: null,
   backlinks: [],
   titles: [],
+  tags: [],
 
   authStatus: "unknown",
   session: null,
@@ -1223,6 +1381,10 @@ export const useStore = create<AppStore>((set, get) => ({
   myBilling: null,
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
+  propertiesMode: readPropertiesMode(),
+  readableLineLength: readReadableLineLength(),
+  lineNumbers: readLineNumbers(),
+  pendingTitleFocus: null,
   treeSort: readTreeSort(),
   memberJoined: null,
 
@@ -1242,6 +1404,8 @@ export const useStore = create<AppStore>((set, get) => ({
       itemOrder: readItemOrder(v?.path),
       ...(switched ? { openFolderIsSynced: null } : {}),
     });
+    // Answer "does THIS folder sync?" for the open gate (see `probeFolderSync`).
+    if (switched && v) probeFolderSync(get, set, v.path);
   },
 
   setItemColor: (path, colorId) => {
@@ -1423,6 +1587,24 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     if (!sameVault(get, epoch)) return;
     set({ titles });
+    // Tags ride along with titles: both are index-derived completion sources
+    // refreshed at the same moments (vault open, note create, structural
+    // batches), and neither is worth its own trigger. Fire-and-forget so a
+    // tag-query hiccup can never fail a title refresh.
+    void get().refreshTags();
+  },
+
+  refreshTags: async () => {
+    const epoch = get().vault?.epoch;
+    let tags: ipc.TagCount[];
+    try {
+      tags = await ipc.listTags(epoch);
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return; // the vault moved on (see refreshTree)
+      throw e;
+    }
+    if (!sameVault(get, epoch)) return;
+    set({ tags });
   },
 
   patchTitles: async (changes) => {
@@ -1555,10 +1737,16 @@ export const useStore = create<AppStore>((set, get) => ({
         openNote: { path, id: meta?.id ?? null, title },
         noteRemoved: false,
         noteRemovedSynced: false,
-        // Every open gets (or keeps) a tab; switching tabs re-runs this path,
-        // so membership is checked rather than blindly appended.
+        // Every open gets (or keeps) a tab, in place: switching tabs re-runs
+        // this path, so membership is checked rather than blindly appended, and
+        // an existing tab is never moved — the highlight travels, the tabs don't.
         openTabs: s.openTabs.includes(path) ? s.openTabs : [...s.openTabs, path],
       }));
+      // Whichever note becomes active gets shown in the sidebar. Unconditional
+      // on purpose: it is idempotent (`openParents` on open parents and
+      // `scrollTo(…, "auto")` on a visible row both do nothing), and the
+      // alternative is threading a flag through all of this action's callers.
+      get().requestReveal(path);
       // Tell teammates which note we're now viewing (drives their sidebar dots).
       // The announced id must be the SERVER doc_id — see `viewingDocId`, which
       // exists to hold that reasoning and a regression test for it.
@@ -1572,6 +1760,40 @@ export const useStore = create<AppStore>((set, get) => ({
       if (get().openingNotePath === path) set({ openingNotePath: null });
     }
   },
+
+  createNoteAt: async (dir, name) => {
+    if (rootCreateBlocked(get, dir)) return null;
+    return finishNoteCreate(get, await ipc.createNote(dir, name));
+  },
+
+  createNoteIn: async (dir) => {
+    if (rootCreateBlocked(get, dir)) return null;
+    for (let i = 0; i < 50; i++) {
+      const candidate = i === 0 ? "Untitled" : `Untitled ${i}`;
+      let path: string;
+      try {
+        path = await ipc.createNote(dir, candidate);
+      } catch {
+        continue; // name taken → try the next one
+      }
+      return finishNoteCreate(get, path, { edit: true });
+    }
+    return null;
+  },
+
+  setPendingTitleFocus: (path) => set({ pendingTitleFocus: path }),
+
+  requestReveal: (path, opts) => {
+    set((s) => ({
+      revealRequest: {
+        path,
+        edit: opts?.edit ?? false,
+        token: (s.revealRequest?.token ?? 0) + 1,
+      },
+    }));
+  },
+
+  setRevealedPath: (path) => set({ revealedPath: path }),
 
   openNoteLink: async (url) => {
     const target = parseNoteLink(url);
@@ -1768,19 +1990,28 @@ export const useStore = create<AppStore>((set, get) => ({
       target = `${base} ${i}${ext}`;
     }
     if (await ipc.noteExists(target, epoch)) return null;
+    const ok = await get().renameNoteFileExact(oldPath, target);
+    return ok ? target : null;
+  },
+
+  renameNoteFileExact: async (oldPath, newPath) => {
+    if (oldPath === newPath) return true;
+    const epoch = get().vault?.epoch;
     // Epoch-pinned: this spans awaits, so a vault switch mid-rename must be
     // refused by Rust rather than applied to the other vault.
-    await ipc.renamePath(oldPath, target, epoch);
+    await ipc.renamePath(oldPath, newPath, epoch);
+    // The registry rename is what keeps `doc_id` stable across the move.
+    // Skipping it forks the note into a second server-side note at the new path.
     try {
-      await syncManager.registry.renamePath(oldPath, target);
+      await syncManager.registry.renamePath(oldPath, newPath);
     } catch (e) {
       console.warn("[sync] renamePath failed", oldPath, e);
     }
-    get().setItemOrder(renameInOrder(get().itemOrder, oldPath, target));
-    get().followNoteRename(oldPath, target);
+    get().setItemOrder(renameInOrder(get().itemOrder, oldPath, newPath));
+    get().followNoteRename(oldPath, newPath);
     await get().refreshTree();
     await get().refreshTitles();
-    return target;
+    return true;
   },
 
   followNoteRename: (from, to) => {
@@ -2214,6 +2445,21 @@ export const useStore = create<AppStore>((set, get) => ({
   setMentionSound: (enabled) => {
     writeMentionSound(enabled);
     set({ mentionSound: enabled });
+  },
+
+  setPropertiesMode: (mode) => {
+    writePropertiesMode(mode);
+    set({ propertiesMode: mode });
+  },
+
+  setReadableLineLength: (on) => {
+    writeReadableLineLength(on);
+    set({ readableLineLength: on });
+  },
+
+  setLineNumbers: (on) => {
+    writeLineNumbers(on);
+    set({ lineNumbers: on });
   },
 
   startBroadcast: async () => {
@@ -2891,13 +3137,21 @@ export const useStore = create<AppStore>((set, get) => ({
       opts.resync ? (get().session?.activeOrganizationId ?? null) : null,
     );
     get().closeNote();
+    // A different folder is on screen: whatever the open gate knew belonged to
+    // the last one. Re-arm it, forget the old answer, and ask again — this path
+    // bypasses `setVault`'s switch detection (Rust already swapped the vault),
+    // so without this a new local vault kept the previous vault's answer and
+    // every note open waited out the sync gate.
+    armSyncGate();
     set({
       vault: info,
       ...vaultScopedSyncReset(),
+      openFolderIsSynced: null,
       itemColors: readItemColors(info.path),
       itemOrder: readItemOrder(info.path),
       pendingVaultFolder: null,
     });
+    probeFolderSync(get, set, info.path);
     await get().refreshTree();
     await get().refreshTitles();
     if (!sameVault(get, info.epoch)) return;
