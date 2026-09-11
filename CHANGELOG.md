@@ -114,6 +114,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Tables are edited in place, not as markdown source.** A GFM table is now
+  always the rendered table (`lib/editor/table/`): the `"Table"` branch in
+  `livePreview.ts` no longer yields to the active line, and clicking a cell
+  mounts a React `<input>` holding that cell's RAW markdown inside the widget —
+  the block never flips to `| a | b |`. Cell, row, column and alignment edits
+  are pure span planners (`table/edit.ts`) over doc-absolute spans
+  (`table/parse.ts`, which honours `\|` as a literal pipe and leaves ragged
+  rows ragged), dispatched as ONE ordinary transaction per commit
+  (`input.table`, no selection change), so a cell edit reaches the `.md`, the
+  index and Yjs undo exactly like typing and touches only that cell's bytes.
+  Cell content renders through the app's own GFM parser with no `innerHTML`
+  anywhere; `[[wikilinks]]` are masked out before that parse so CommonMark
+  cannot claim them as reference links. The React-in-a-CM6-widget lifecycle
+  moved out of `noteHeader.ts` into `lib/editor/reactWidget.ts` and is now
+  shared. A table's range is atomic (`table/atomic.ts`), so no arrow key can
+  park the caret inside a block that never shows its source.
 - **The note's name is an editable title above the body.** A CodeMirror block
   widget at position 0 hosting a React `<input>` (`lib/editor/noteHeader.ts`,
   `components/InlineTitle.tsx`), inset to the prose column through the same

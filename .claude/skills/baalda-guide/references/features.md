@@ -47,6 +47,15 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 
 - Markdown editor with live preview (headings, lists, links, images, tables, code blocks render
   in place while you type). Inline HTML is rendered but sanitized.
+- **Tables are edited like a table, not like text.** A table in a note shows as a real table
+  and stays that way: click any cell to type in it, Tab and Shift-Tab step between cells, Enter
+  drops to the next row and adds a new row when you are on the last one, and the arrow keys walk
+  out of the table at the top and the bottom. Hovering shows a `+` for a new column or row, and
+  right-clicking a cell offers insert row above/below, insert column left/right, delete row,
+  delete column, and align the column left, centre or right. Bold, italic, code, links and
+  `[[wikilinks]]` inside a cell render as themselves; clicking into the cell shows the markdown
+  behind them. The file on disk stays ordinary Markdown — an edit rewrites only the cell you
+  changed, so the spacing and alignment of every other cell are left exactly as you typed them.
 - `[[Wikilinks]]` between notes, with a backlinks panel. Links survive renames and moves.
 - `#tags` inline or in frontmatter.
 - Tabs for open notes, with a right-click menu (close, close others, close to the right, close
