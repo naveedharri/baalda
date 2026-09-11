@@ -51,6 +51,13 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // why `.cm-blockquote`'s extra indent skews multi-line rects by its 16px).
   ".cm-line": {
     paddingInline: "var(--editor-pad-x)",
+    // The positioning context for line-level flair that must sit at the prose
+    // column's edge rather than the window's: the code fence's copy button, and
+    // (Stage 1) the blockquote bar and horizontal rule, which already relied on
+    // their own line classes being relative. `position: relative` with
+    // `z-index: auto` creates no stacking context, so the blockquote bar's
+    // `z-index: -1` still paints behind the text.
+    position: "relative",
   },
   "&.cm-focused": { outline: "none" },
 
@@ -414,6 +421,31 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     height: "1px",
     backgroundColor: "var(--border)",
   },
+
+  // ---- Code fences (see lib/editor/codeFence.ts) --------------------------
+  //
+  // Pinned to the right edge of the prose column, on the opening fence line.
+  // Invisible until you go near the block, so a note full of code does not read
+  // as a page full of buttons.
+  ".cm-fence-copy": {
+    position: "absolute",
+    right: "var(--editor-pad-x)",
+    top: "0",
+    border: "0",
+    borderRadius: "var(--radius-sm)",
+    background: "var(--bg-surface)",
+    padding: "0 var(--sp-2)",
+    cursor: "pointer",
+    fontFamily: "var(--font-body)",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-tertiary)",
+    opacity: "0",
+    transition: "opacity var(--t-fast) var(--ease)",
+  },
+  ".cm-codeblock:hover .cm-fence-copy, .cm-fence-copy:focus-visible": {
+    opacity: "1",
+  },
+  ".cm-fence-copy:hover": { color: "var(--text-primary)" },
 
   // ---- Callouts (see lib/editor/ofm/callout.ts) ---------------------------
   //

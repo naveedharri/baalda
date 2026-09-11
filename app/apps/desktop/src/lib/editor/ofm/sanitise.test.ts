@@ -42,7 +42,9 @@ describe("OFM decorations never build elements from note text", () => {
 
   it("keeps an <img onerror> in a fence info string as literal text", () => {
     const view = mount('```<img src=x onerror=alert(1)>\ncode\n```');
-    expect(view.contentDOM.querySelector("img")).toBeNull();
+    // CodeMirror's own `cm-widgetBuffer` is an <img>; what must not exist is
+    // one built from the note's text.
+    expect(view.contentDOM.querySelector("img[src]")).toBeNull();
     expect(text(view)).toContain("onerror=alert(1)");
     view.destroy();
   });

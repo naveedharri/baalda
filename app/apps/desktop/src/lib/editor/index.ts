@@ -17,6 +17,8 @@ import {
 import { GFM } from "@lezer/markdown";
 import type { NoteTitle } from "../ipc";
 import { blockDecorations } from "./blocks";
+import { codeFenceFlair } from "./codeFence";
+import { codeLanguages } from "./codeLanguages";
 import { formattingKeymap } from "./formatting";
 import { frontmatterDecorations } from "./frontmatter";
 import { listKeymap } from "./lists";
@@ -104,7 +106,14 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     // GFM adds tables, task lists, strikethrough, and autolinks; `ofmMarkdown`
     // adds Obsidian's `==highlight==`, `%%comment%%` and `#tag` on top, so a
     // vault reads the same here and in Obsidian.
-    markdown({ base: markdownLanguage, extensions: [GFM, ...ofmMarkdown] }),
+    // `codeLanguages` are LanguageDescriptions with dynamic imports: nothing
+    // here reaches the startup bundle, and a grammar is fetched only when a
+    // fence in an open note claims that language.
+    markdown({
+      base: markdownLanguage,
+      extensions: [GFM, ...ofmMarkdown],
+      codeLanguages,
+    }),
     markdownHighlight,
     // Frontmatter first: blocks.ts and livePreview.ts both read its range so
     // nothing else decorates inside it (see lib/editor/frontmatter.ts).
@@ -120,6 +129,8 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     tableAtomicRanges,
     // Clickable `- [ ]` task checkboxes.
     checkboxes,
+    // A copy button on every code fence.
+    codeFenceFlair,
     // Paste a URL over a selection → link; paste/drop an image → attachment.
     smartPaste(opts.saveAttachment),
     editorTheme,
