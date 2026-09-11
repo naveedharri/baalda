@@ -8,26 +8,37 @@ because Coolify runs `docker compose` with the **repo root** as the project
 directory, which breaks `deploy/compose/docker-compose.yml`'s `context: ../..`
 (see [issue #97](https://github.com/naveedharri/baalda/issues/97)).
 
+> **Tested end-to-end** on a live Coolify instance: build → `postgres` →
+> `migrate` → `server` all healthy, a custom domain with a real Let's
+> Encrypt certificate, and the desktop app signing in and syncing notes
+> through it. The gotchas below are all things that broke during that test
+> and are now fixed in this file — read them if you're customizing it.
+
 ## Coolify setup
 
-1. **New Resource → Docker Compose**, point it at this repository.
+1. **New Resource → Docker Compose** (a public repo works with **Public Git
+   Repository**, no credentials needed), point it at this repository.
 2. **Base Directory:** `/` (repo root).
 3. **Docker Compose Location:** `/deploy/coolify/docker-compose.yml`.
 4. Deploy — no env vars to fill in first. `POSTGRES_PASSWORD` and
-   `JWT_SECRET` come from Coolify's magic env vars; `BETTER_AUTH_URL` starts
-   unset and the app falls back to a placeholder (`http://localhost:3010`)
-   rather than refusing to start, so the stack comes up on its own. Coolify
-   runs `postgres → migrate → server` in order (via `depends_on` +
-   `condition: service_completed_successfully`), so the server never answers
-   requests against an unmigrated schema.
-5. Once it's up: open the `server` service → **Domains**, copy the generated
-   `https://<something>.sslip.io` (or set your own domain there first). Then
-   **Environment Variables → Production**, set `BETTER_AUTH_URL` to that URL
-   (`https://…`, no trailing slash, no port — TLS is on 443), and redeploy.
-   This isn't a global Coolify setting — it's this one service's own env var,
-   same as `PORT` — so nothing else on the instance is affected. Until you do
-   this, auth/invitation emails and the desktop app's connect link point at
-   the placeholder instead of your real domain.
+   `JWT_SECRET` come from Coolify's magic env vars; `BETTER_AUTH_URL`
+   resolves to a placeholder (`http://localhost:3010`) via the compose
+   file's own `${BETTER_AUTH_URL:-http://localhost:3010}` default, so the
+   stack comes up on its own. Coolify runs `postgres → migrate → server` in
+   order (via `depends_on` + `condition: service_completed_successfully`),
+   so the server never answers requests against an unmigrated schema.
+5. Once it's up: open the `server` service → **Domains**. A domain is
+   already there (Coolify auto-generated a free `*.sslip.io` one via
+   `SERVICE_FQDN_SERVER`) — use it, or **Add Domain** with your own (Service
+   `server`, Port `3010`, Protocol `https`; point the domain's DNS `A`
+   record at your Coolify server first, or the certificate can't be issued).
+6. **Environment Variables → Production** on the `server` service, set
+   `BETTER_AUTH_URL` to that domain (`https://…`, no trailing slash, no
+   port — TLS is on 443), and redeploy. This isn't a global Coolify
+   setting — it's this one service's own env var, same as `PORT` — so
+   nothing else on the instance is affected. Until you do this,
+   auth/invitation emails and the desktop app's connect link point at the
+   placeholder instead of your real domain.
 
 ## Domain
 
@@ -44,24 +55,50 @@ by hand: open the `server` service → **Domains** → **Add domain**, set
 **Protocol:** `http` (Coolify's Traefik terminates TLS in front — the
 container itself only ever speaks plain HTTP).
 
-## A gotcha we hit testing this: `${VAR:?message}`
+## Gotchas we hit testing this
 
-If you're customizing this file, don't borrow bash's `${VAR:?error message}`
-pattern from `../compose/docker-compose.yml` for a required var — Coolify's
-compose parser gives `:?` a different meaning than bash does. `${VAR:?}`
-(nothing after the `?`) marks the var required **and blocks deployment**
-until it's filled in; `${VAR:?some text}` instead treats `some text` as a
-**prefilled default value**, not an error message. Writing `${JWT_SECRET:?set
-JWT_SECRET in .env}` (our first attempt) meant an unset `JWT_SECRET` silently
-became the literal string `set JWT_SECRET in .env` instead of failing — every
-downstream value built from it came out as garbage and the deploy failed with
-an opaque error nowhere near the actual cause. That's why `BETTER_AUTH_URL`
-below is plain `${BETTER_AUTH_URL}` with no `:?` at all, rather than
-`${BETTER_AUTH_URL:?}` — the latter is the "correct" required-var form, but it
-would block the very first deploy that's needed to learn the domain in the
-first place. Use `${VAR:?}` only for a var with no safe fallback the app can
-run with; use a Coolify magic var (`SERVICE_PASSWORD_<ID>`, etc.) for one
-Coolify can generate itself.
+Three separate issues surfaced while getting this file working, in the order
+we hit them. All three are already fixed here — this is context for anyone
+customizing the file, or hitting a similar error.
+
+**1. `${VAR:?message}` means something different in Coolify than in bash.**
+Coolify's compose parser gives `:?` its own meaning: `${VAR:?}` (nothing after
+the `?`) marks the var required **and blocks deployment** until it's filled
+in; `${VAR:?some text}` instead treats `some text` as a **prefilled default
+value**, not an error message shown on a missing var. Writing
+`${JWT_SECRET:?set JWT_SECRET in .env}` (our first attempt, copied from
+`../compose/docker-compose.yml`, where it's correct — that's a plain
+`docker compose` CLI, which *does* implement bash's `:?` semantics) meant an
+unset `JWT_SECRET` silently became the literal string `set JWT_SECRET in
+.env` instead of failing. Every downstream value built from it came out as
+garbage and the deploy failed with an error nowhere near the real cause. Fix:
+use a Coolify magic var (`SERVICE_PASSWORD_64_<ID>`, etc.) for anything
+Coolify can generate itself, and plain `${VAR:-default}` (standard bash `:-`
+behavior — Coolify's docs confirm this one isn't special-cased) for anything
+else that needs a safe placeholder.
+
+**2. An unset `${VAR}` becomes an empty string in the container, not an
+absent key — the app's own fallback doesn't catch that.**
+`app/apps/server/src/config.ts`'s `required(name, fallback)` applies
+`fallback` via `??`, which only triggers on `undefined`/`null` — not on `""`.
+Coolify interpolates a genuinely-unset `${BETTER_AUTH_URL}` to an empty
+string in the container's environment rather than omitting the key, so the
+app saw `v = ""`, skipped the fallback, and threw `Missing required env var:
+BETTER_AUTH_URL` — crashing **both** `migrate` and `server` on startup,
+before either reached any Postgres-related code (this is what an opaque
+`migrate` `exit 1` with no other log actually was). Fix: supply the default
+in the compose interpolation itself — `${BETTER_AUTH_URL:-http://localhost:3010}`
+— so the container never sees an empty value in the first place; don't rely
+on an app-level fallback for a var Coolify might pass through empty.
+
+**3. A Coolify platform bug could corrupt a domain into `https://` with no
+host, and abort every deploy after that with `The string 'https://' is no
+valid url.`** This is
+[coollabsio/coolify#11664](https://github.com/coollabsio/coolify/issues/11664),
+fixed in **Coolify v4.3.19**. If you hit that exact error and your compose
+file has no `:?`/`:-` issues, update Coolify — the fix skips/heals a
+corrupted domain row at deploy time and prevents new corruption on save. Not
+something this file can work around.
 
 Then in the desktop app: **account menu → Server settings →** your
 `BETTER_AUTH_URL` → **Save**. Create an account and you're synced.

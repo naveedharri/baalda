@@ -240,35 +240,44 @@ repo root and the build fails with `lstat /app: no such file or directory`.
 (Postgres → migrate → server) with `build.context: .`, built for that project
 directory, and with no ports published — Coolify's own Traefik proxy
 terminates TLS and reaches the container on the internal network instead.
+Tested end-to-end on a live Coolify instance: build, all three services
+healthy, a custom domain with a real Let's Encrypt certificate, and the
+desktop app signing in and syncing through it.
 
-1. **New Resource → Docker Compose**, point it at this repository (or your fork).
+1. **New Resource → Docker Compose** (**Public Git Repository** works for a
+   public repo, no credentials needed), point it at this repository (or your fork).
 2. **Base Directory:** `/` (repo root) — this is what makes `context: .` in
    the compose file resolve correctly.
 3. **Docker Compose Location:** `/deploy/coolify/docker-compose.yml`.
 4. Deploy — no env vars to fill in first. `POSTGRES_PASSWORD` and
    `JWT_SECRET` come from Coolify's magic env vars
-   (`SERVICE_PASSWORD_POSTGRES`, `SERVICE_REALBASE64_64_JWT`);
-   `BETTER_AUTH_URL` starts unset and the app falls back to a placeholder
-   rather than refusing to start, so the stack comes up on its own. `migrate`
-   must complete successfully before `server` starts, so a deploy never
-   briefly answers requests against an old schema. `server` also declares
-   Coolify's `SERVICE_FQDN_SERVER` magic env var, so a domain (targeting its
-   exposed port `3010`) is generated and assigned to it automatically; if
-   that doesn't happen, assign one by hand (Service → `server`, Port →
-   `3010`, Protocol → `http`).
+   (`SERVICE_PASSWORD_64_POSTGRES`, `SERVICE_REALBASE64_64_JWT`);
+   `BETTER_AUTH_URL` resolves to a placeholder (`http://localhost:3010`) via
+   the compose file's own `:-` default, so the stack comes up on its own.
+   `migrate` must complete successfully before `server` starts, so a deploy
+   never briefly answers requests against an old schema. `server` also
+   declares Coolify's `SERVICE_FQDN_SERVER` magic env var, so a domain
+   (targeting its exposed port `3010`) is generated and assigned to it
+   automatically; if that doesn't happen, assign one by hand (Service →
+   `server`, Port → `3010`, Protocol → `https`, with the domain's DNS `A`
+   record already pointed at your Coolify server).
 5. Once it's up, set `BETTER_AUTH_URL` to the real domain from step 4
    (`https://…`, no trailing slash, no port) in the `server` service's own
    Environment Variables — not a global Coolify setting — and redeploy. Until
    then, auth/invitation links point at the placeholder instead. The sync
    WebSocket rides the same port at `/sync`, so nothing else needs routing.
 
-   Don't reuse bash's `${VAR:?error message}` pattern here if you customize
-   this file — Coolify's compose parser reads the text after `:?` as a
-   *prefilled default value*, not an error message, so an unset var silently
-   becomes that literal text instead of failing loudly. `${VAR:?}` (bare) also
-   *blocks deployment* until filled in, which is why `BETTER_AUTH_URL` above
-   deliberately has no `:?` at all — the domain isn't known before this first
-   deploy runs.
+   Three Coolify-specific gotchas this file already works around — see
+   [`deploy/coolify/README.md`](../deploy/coolify/README.md#gotchas-we-hit-testing-this)
+   for the full detail if you're customizing it: `${VAR:?text}` means
+   "prefilled default", not "error message", unlike bash; an unset `${VAR}`
+   reaches the container as an **empty string**, which this server's own env
+   fallback does not catch (the default has to live in the compose file's
+   `${VAR:-default}`, not in app code); and a since-fixed Coolify bug
+   ([#11664](https://github.com/coollabsio/coolify/issues/11664), fixed in
+   **v4.3.19**) could corrupt a saved domain into a bare `https://`, aborting
+   every deploy with `The string 'https://' is no valid url.` — if you hit
+   that exact error, update Coolify.
 
 Full walkthrough and the differences from `deploy/compose`:
 [`deploy/coolify/README.md`](../deploy/coolify/README.md).
