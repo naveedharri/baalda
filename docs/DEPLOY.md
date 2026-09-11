@@ -227,6 +227,36 @@ curl -sL https://railway.com/deploy/baalda-server | grep -o '<title>[^<]*</title
 > and publishing it would push a public marketplace template built from production
 > — env values, domain and all. Always compose the template fresh, as above.
 
+## Option C: Coolify
+
+Coolify (and similar PaaS Docker Compose tools) run `docker compose` with the
+**repo root** as the project directory, not the directory the compose file
+lives in. That breaks [`deploy/compose/docker-compose.yml`](../deploy/compose)'s
+`build.context: ../..`, which assumes you run `cd deploy/compose && docker
+compose up` — Coolify instead resolves that path two directories *above* the
+repo root and the build fails with `lstat /app: no such file or directory`.
+
+[`deploy/coolify/docker-compose.yml`](../deploy/coolify) is the same stack
+(Postgres → migrate → server) with `build.context: .`, built for that project
+directory, and with no ports published — Coolify's own Traefik proxy
+terminates TLS and reaches the container on the internal network instead.
+
+1. **New Resource → Docker Compose**, point it at this repository (or your fork).
+2. **Base Directory:** `/` (repo root) — this is what makes `context: .` in
+   the compose file resolve correctly.
+3. **Docker Compose Location:** `/deploy/coolify/docker-compose.yml`.
+4. Required env vars on the `server`/`migrate` services: `POSTGRES_PASSWORD`,
+   `JWT_SECRET` (`openssl rand -base64 32`), `BETTER_AUTH_URL` (the public
+   HTTPS URL Coolify's proxy fronts, no trailing slash, no port).
+5. On the `server` service, set the domain to that same host and expose
+   container port `3010`. The sync WebSocket rides the same port at `/sync`,
+   so nothing else needs routing.
+6. Deploy — `migrate` must complete successfully before `server` starts, so a
+   deploy never briefly answers requests against an old schema.
+
+Full walkthrough and the differences from `deploy/compose`:
+[`deploy/coolify/README.md`](../deploy/coolify/README.md).
+
 ## A staging instance
 
 Nothing in the server distinguishes staging from production — a staging instance

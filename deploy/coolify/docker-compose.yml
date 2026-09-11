@@ -1,0 +1,85 @@
+# Baalda server — Coolify / PaaS Compose bundle (server + Postgres).
+#
+# This is the same stack as ../compose/docker-compose.yml, adapted for
+# platforms (Coolify and similar) that run `docker compose` with the repo
+# root as the project directory, rather than the directory the compose file
+# lives in. That changes how a relative `build.context` resolves, which is
+# why this file is separate from ../compose/ instead of replacing it:
+#
+#   - ../compose/docker-compose.yml uses `context: ../..` and is meant to be
+#     run with `cd deploy/compose && docker compose up`, i.e. context
+#     resolves relative to the compose file.
+#   - This file uses `context: .` because Coolify's project directory *is*
+#     the repo root, so `.` already points at the right place. Point Coolify's
+#     "Base Directory" at the repo root (`/`) and its "Compose file location"
+#     at `/deploy/coolify/docker-compose.yml`.
+#
+# No host ports are published here — Coolify's own proxy (Traefik) terminates
+# TLS and reaches the container directly on its internal network, so `server`
+# only needs to `expose` the port, not publish it.
+name: baalda
+
+x-server-image: &server-image
+  build:
+    context: .
+    dockerfile: app/apps/server/Dockerfile
+
+x-server-env: &server-env
+  NODE_ENV: production
+  DATABASE_URL: postgres://baalda:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/baalda
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — openssl rand -base64 32}
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL:?set BETTER_AUTH_URL in .env — the public https URL Coolify's proxy fronts}
+  PORT: "3010"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: baalda
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: baalda
+    volumes:
+      - baalda_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baalda -d baalda"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Runs to completion, then the server starts. Same ordering guarantee as
+  # ../compose/docker-compose.yml: schema changes land before anything serves
+  # traffic.
+  migrate:
+    <<: *server-image
+    command: ["node", "dist/db/migrate.js"]
+    environment: *server-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    <<: *server-image
+    environment: *server-env
+    # No `ports:` — Coolify's proxy reaches the container on the internal
+    # network. `expose` documents the port without publishing it to the host.
+    expose:
+      - "3010"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  baalda_pgdata:
