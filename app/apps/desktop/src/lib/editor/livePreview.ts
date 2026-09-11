@@ -28,6 +28,7 @@ import {
 } from "@codemirror/view";
 import { openExternal } from "../ipc";
 import { previewKind } from "../preview";
+import { frontmatterField } from "./frontmatter";
 import { TASK_RE } from "./tasks";
 
 /** Turns an image `src` into a webview-loadable URL (see CreateEditorOptions). */
@@ -131,7 +132,7 @@ class HtmlEmbedWidget extends WidgetType {
   }
   toDOM() {
     const el = document.createElement("div");
-    el.className = "cm-md-html";
+    el.className = `cm-md-html ${BLOCK_INSET_CLASS}`;
     renderEmbeddedHtml(el, this.html, this.resolveAsset);
     return el;
   }
@@ -199,7 +200,7 @@ class TableWidget extends WidgetType {
   }
   toDOM() {
     const wrap = document.createElement("div");
-    wrap.className = "cm-md-table";
+    wrap.className = `cm-md-table ${BLOCK_INSET_CLASS}`;
     const rows = this.source
       .split("\n")
       .map((l) => l.trim())
@@ -254,6 +255,15 @@ const bullet = Decoration.replace({ widget: new BulletWidget() });
 const hidden = Decoration.replace({});
 
 /**
+ * Block replace widgets are direct children of `.cm-content`, siblings of
+ * `.cm-line` — so they miss the `.cm-line` horizontal inset that keeps the prose
+ * column centred (see `--editor-pad-x` in tokens.css). This class hands them the
+ * same one. INLINE replace widgets (images, PDF embeds) live inside a line and
+ * must NOT carry it.
+ */
+export const BLOCK_INSET_CLASS = "cm-block-inset";
+
+/**
  * Lines touched by any selection stay "raw" so the writer edits real markdown.
  * Shared by the inline plugin and the block-widget field so both agree on what
  * "being edited" means.
@@ -275,6 +285,18 @@ function activeLineChecker(state: EditorState): (from: number, to: number) => bo
 }
 
 /**
+ * "Is this node inside the YAML frontmatter?" — the region decorates itself
+ * (frontmatter.ts), so every other source skips it. Containment, not overlap:
+ * the syntax tree's root node starts at 0 as well, and skipping that would skip
+ * the whole document.
+ */
+function frontmatterChecker(state: EditorState): (from: number, to: number) => boolean {
+  const fm = state.field(frontmatterField, false) ?? null;
+  if (!fm) return () => false;
+  return (from, to) => from < fm.to && to <= fm.to;
+}
+
+/**
  * Block-level widgets (raw HTML blocks, ```html fences, GFM tables). These use
  * `Decoration.replace({block: true})` over multiple lines, which CodeMirror
  * only accepts from a StateField — a view plugin providing them throws
@@ -286,12 +308,15 @@ function buildBlockDecorations(state: EditorState, resolveAsset: ResolveAsset): 
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const isActive = activeLineChecker(state);
+  const inFrontmatter = frontmatterChecker(state);
 
   // Force-parse the whole doc if the background parse hasn't caught up yet —
   // notes are small, and a partially-parsed tree would silently drop widgets.
   const tree = ensureSyntaxTree(state, doc.length, 100) ?? syntaxTree(state);
   tree.iterate({
     enter: (node) => {
+      // Nothing decorates inside the frontmatter region (see frontmatter.ts).
+      if (inFrontmatter(node.from, node.to)) return false;
       if (node.name === "HTMLBlock") {
         if (!isActive(node.from, node.to)) {
           const html = doc.sliceString(node.from, node.to);
@@ -353,6 +378,7 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const isActive = activeLineChecker(state);
+  const inFrontmatter = frontmatterChecker(state);
 
   // `[[wiki-links]]` are owned by the wikilinks plugin; never touch their marks.
   const wikiRanges: Array<[number, number]> = [];
@@ -375,6 +401,10 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
       from,
       to,
       enter: (node) => {
+        // Frontmatter owns its own look: without this, lezer's reading of
+        // `key: v\n---` as a SetextHeading2 would hide the region's HeaderMark
+        // and render the YAML as a giant bold heading (see frontmatter.ts).
+        if (inFrontmatter(node.from, node.to)) return false;
         // Block HTML is rendered by the block-widget StateField; never style
         // its children here.
         if (node.name === "HTMLBlock") {

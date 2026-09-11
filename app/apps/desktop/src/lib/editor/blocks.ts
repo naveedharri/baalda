@@ -12,10 +12,20 @@ import {
   ViewPlugin,
   type ViewUpdate,
 } from "@codemirror/view";
+import { frontmatterField } from "./frontmatter";
 
 function buildBlockDecorations(view: EditorView): DecorationSet {
   const { state } = view;
   const doc = state.doc;
+  // Frontmatter owns its own look (see frontmatter.ts). Without this, lezer's
+  // reading of `---` as a HorizontalRule would draw a hairline through a fence
+  // line we are collapsing. `false` = don't throw when the field is absent, so
+  // this plugin still works in a partial extension set.
+  const fm = state.field(frontmatterField, false) ?? null;
+  // A node *contained* in the region, not merely overlapping it: the tree's root
+  // starts at 0 too, and skipping that would skip the whole document.
+  const inFrontmatter = (from: number, to: number) =>
+    fm !== null && from < fm.to && to <= fm.to;
   // line-start position -> set of classes to apply to that line
   const lineClasses = new Map<number, Set<string>>();
   const add = (linePos: number, cls: string) => {
@@ -32,6 +42,7 @@ function buildBlockDecorations(view: EditorView): DecorationSet {
       from,
       to,
       enter: (node) => {
+        if (inFrontmatter(node.from, node.to)) return false;
         const startLine = doc.lineAt(node.from).number;
         // node.to often points at the newline after the block; step back so we
         // don't paint the following (blank) line.

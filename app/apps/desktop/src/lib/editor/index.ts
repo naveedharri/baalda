@@ -18,6 +18,7 @@ import { GFM } from "@lezer/markdown";
 import type { NoteTitle } from "../ipc";
 import { blockDecorations } from "./blocks";
 import { formattingKeymap } from "./formatting";
+import { frontmatterDecorations } from "./frontmatter";
 import { listKeymap } from "./lists";
 import { livePreview } from "./livePreview";
 import { smartPaste, type SaveAttachment } from "./paste";
@@ -94,6 +95,9 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     // GFM adds tables, task lists, strikethrough, and autolinks to the parser.
     markdown({ base: markdownLanguage, extensions: [GFM] }),
     markdownHighlight,
+    // Frontmatter first: blocks.ts and livePreview.ts both read its range so
+    // nothing else decorates inside it (see lib/editor/frontmatter.ts).
+    frontmatterDecorations,
     blockDecorations,
     // Live-preview inline rendering: hide markers off the active line, render
     // bullets/links/images/tables, and preview embedded HTML blocks (never run).
