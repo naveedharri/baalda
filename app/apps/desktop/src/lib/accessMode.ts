@@ -112,6 +112,76 @@ export function effectiveTeamMode(input: EffectiveTeamModeInput): EffectiveTeamM
   return { mode: "private", source: "vault" };
 }
 
+export interface EffectiveVaultModeInput {
+  /** The posture row on the vault resource — what the server would report. */
+  vaultMode: TeamMode;
+  /**
+   * Vault-relative paths of the ROOT-level items: every top-level folder and
+   * every note sitting at the vault root.
+   *
+   * Root items are a sufficient sample. Nothing under a Private folder is
+   * reachable by the team however it is marked — `effectiveTeamMode` finds the
+   * nearest `denied` walking outwards, and the server's `isDenied` walks the
+   * same ancestry — so if every root says Private, the whole vault does.
+   *
+   * Pass these only when the SERVER's structure is in hand. The local tree
+   * cannot answer this: an item set Private leaves the disk, so the very rows
+   * that would prove the vault is private are the rows missing from it.
+   */
+  rootPaths: readonly string[];
+  /** Org-principal rows by vault-relative path — {@link buildOrgRowsByPath}. */
+  orgRowsByPath: ReadonlyMap<string, ReadonlySet<OrgRow>>;
+}
+
+export interface EffectiveVaultMode {
+  /** What the team can actually reach across the whole vault. */
+  mode: TeamMode;
+  /** True when the per-item settings decided it rather than the posture row. */
+  overridden: boolean;
+  /** The posture row's own mode, whether or not it is what `mode` says. */
+  postureMode: TeamMode;
+}
+
+/**
+ * What the "Entire vault" control should READ.
+ *
+ * The posture row is not the whole answer and reading it alone produced the
+ * complaint this exists for: someone set every folder and note to Private one
+ * at a time, and the control kept saying **Shared** — because Private on an
+ * item is a `denied` row on that item and never touches the vault row above it.
+ * Two controls, one question, and the one at the top was answering about a row
+ * instead of about the vault.
+ *
+ * The rule is UNANIMITY, not the maximum. If every root item agrees on a mode
+ * that is not the posture's, that mode is the truth about the vault and is what
+ * the control shows. If they disagree, the posture stands — because an item
+ * carrying no row of its own really is whatever the posture says, so with one
+ * folder Private and the rest untouched, "Shared" is the honest answer and
+ * "Private" would be the new lie.
+ *
+ * Nothing here WRITES: choosing a card still PUTs the posture and clears the
+ * per-item rows, which is what makes the two agree again.
+ */
+export function effectiveVaultMode(input: EffectiveVaultModeInput): EffectiveVaultMode {
+  const postureMode = input.vaultMode;
+  const base = { postureMode, mode: postureMode, overridden: false };
+  if (input.rootPaths.length === 0) return base;
+
+  let agreed: TeamMode | null = null;
+  for (const path of input.rootPaths) {
+    const { mode } = effectiveTeamMode({
+      vaultMode: postureMode,
+      path,
+      ancestors: [],
+      orgRowsByPath: input.orgRowsByPath,
+    });
+    if (agreed === null) agreed = mode;
+    else if (agreed !== mode) return base; // they disagree — the posture stands
+  }
+  if (agreed === null || agreed === postureMode) return base;
+  return { postureMode, mode: agreed, overridden: true };
+}
+
 /**
  * Every ORG-principal row in a vault, by vault-relative path — the map
  * {@link effectiveTeamMode} resolves against.

@@ -49,11 +49,14 @@ export async function seedFolder(
   parentId: string | null,
   name: string,
   path: string,
+  /** Matches `seedNote`. Authorship is what a Private vault leaves standing, so
+   *  a fixture that wants an owner to still manage a folder has to say so. */
+  createdBy: string | null = null,
 ): Promise<string> {
   const id = randomUUID();
   await pool.query(
-    "INSERT INTO folders (id, vault_id, parent_id, name, path) VALUES ($1, $2, $3, $4, $5)",
-    [id, vaultId, parentId, name, path],
+    "INSERT INTO folders (id, vault_id, parent_id, name, path, created_by) VALUES ($1, $2, $3, $4, $5, $6)",
+    [id, vaultId, parentId, name, path, createdBy],
   );
   return id;
 }
@@ -107,6 +110,47 @@ export async function seedVaultGrant(
 }
 
 /** A lock row (read-only cap) on a folder/file, for a user or the whole org. */
+/**
+ * A vault-scoped grant for ONE user — the per-person equivalent of
+ * {@link seedVaultGrant}. This is what makes someone a vault-wide reader now
+ * that the owner/admin role is not one on its own: it survives the Private
+ * posture, exactly as the resolver's read-only branch honours it.
+ */
+/**
+ * Seal a vault: the org-principal `denied` row on the vault resource that
+ * `PUT /orgs/:orgId/team-access { mode: "private" }` writes.
+ *
+ * Distinct from having no row at all, which means "never shared" and still
+ * leaves people the notes they wrote. See [[resolver]] `vaultBaseline`.
+ */
+export async function sealVault(organizationId: string): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO shares
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+     VALUES ($1, $2, 'vault', $2, 'org', $2, 'denied')
+     ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+     DO UPDATE SET permission = 'denied'`,
+    [id, organizationId],
+  );
+  return id;
+}
+
+export async function seedUserVaultGrant(
+  organizationId: string,
+  userId: string,
+  permission: "view" | "edit",
+): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO shares
+       (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+     VALUES ($1, $2, 'vault', $2, 'user', $3, $4)`,
+    [id, organizationId, userId, permission],
+  );
+  return id;
+}
+
 export async function seedLock(
   organizationId: string,
   resourceType: "folder" | "file",

@@ -23,6 +23,73 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Changed
+- **Pressing Private seals the vault, for the person who pressed it too.** The
+  control used to express Private by DELETING the vault's grant row, and absence
+  already meant something else: a vault that was never shared, which is the
+  private-by-default space `created_by` exists for, where people keep the notes
+  they wrote. One state, two meanings, wanting opposite answers about
+  authorship — so Private spared the author, and in a vault you set up yourself
+  you wrote nearly every note in it, which made it a setting you could press and
+  see nothing happen. `PUT /orgs/:orgId/team-access { mode: "private" }` now
+  upserts an org-principal **`denied`** row on the vault resource (all three
+  modes upsert one row in place, so `grantId` is stable and there is no instant
+  mid-transaction where the vault reads as never-shared), and
+  `resolver.vaultBaseline` reports it as a fourth posture, `sealed`. Sealed
+  skips the role shortcut AND authorship: nobody reads anything until something
+  is shared by name or a folder is shared with the team, which still lifts —
+  sealed is a floor, not a wall, and that is the one thing an item set Private
+  does differently, since there the point is to withdraw one item from a team
+  that can otherwise reach it. Creation closes with reading
+  (`vaultRootWritable`, `canEditFolder`): a note you make in a sealed vault is a
+  note you instantly cannot open, so the root refuses one unless a per-user
+  vault-scoped `edit` grant lifts you. Sealing narrows even from no row at all,
+  so it kicks every live socket and broadcasts the ACL change, which ranking by
+  grant alone would have missed (`denied` and absence both rank 0). A vault that
+  merely never had a grant is untouched and keeps working exactly as it does
+  today — pressing the button is what upgrades it.
+- **Private means the same thing at every scope, owners and admins included.**
+  An item set to Private already dropped them (the org `denied` row resolves
+  above the role branch), but the vault-wide Private posture did not: with no
+  org grant on the vault, `effectivePermission` still short-circuited
+  owner/admin to `edit`, and `vault-docs.ts vaultAccess` answered
+  `vaultWide: true` for the role before reading a single grant — the widest
+  bypass in the system, feeding the readable set, the folder tree, blob reads,
+  the graph, MCP search, the registry pull and the vault channel's
+  `ready.revoked`. So one word meant two different things depending on which
+  control you reached for, and the person who set it was the one person who
+  could not observe it working. The role shortcut is now withdrawn under a
+  Private posture in `effectivePermission`, in `resolveAccessForUser` (the "who
+  can access" list, which must agree branch for branch), in `vaultAccess` (the
+  early return is gone; the role reaches vault-wide read through the org grant
+  like everyone else) and in `canEditFolder`. **Authorship survives** — everyone
+  keeps the notes and folders they created, which is what the Private card has
+  always promised members — and it deliberately does not survive an *item* set
+  to Private: an item is one thing you withdraw from the team, while the posture
+  is the state every vault sits in from birth, and a Private vault that dropped
+  authorship too would be unreadable to the person who just made it. Managing
+  access is untouched and role-based (`shares.ts canManage`), so an owner can
+  always put it back. Two gates that used to ride on the role closed with it:
+  minting a public link now requires read access as well as the management gate
+  (publishing a note you cannot open would put it on the open web), and a
+  whole-vault checkpoint revert requires vault-wide read (403
+  `no_vault_wide_access`) because a partial revert restores the structure whole
+  and the contents in part. Fixtures that seeded a vault directly were quietly
+  testing a Private vault driven by an owner; they now seed the org grant
+  `POST /api/vaults` creates, and `seedFolder` takes a creator like `seedNote`.
+- **The "Entire vault" control reads what the team can actually reach.** Setting
+  every folder and note to Private one at a time left the control saying
+  **Shared**, because a per-item Private is a `denied` row on that item and
+  never touches the vault row above it — two controls answering one question,
+  and the one at the top was answering about a row. `lib/accessMode.ts`
+  `effectiveVaultMode` now rolls the root items up: when they unanimously agree
+  on a mode the posture disagrees with, that mode is what the control marks
+  active and a line underneath names the posture. Unanimity, not the maximum —
+  an item with no row of its own really is whatever the posture says, so one
+  Private folder among many leaves "Shared" the honest answer. Root items are a
+  sufficient sample because nothing under a Private folder is reachable however
+  it is marked. Three pieces of copy that promised owners and admins keep access
+  were wrong and are fixed, including the item-Private confirm, which had been
+  describing the opposite of what the server did since the org deny was added.
 - **The Access panel's vault-level control enforces a mode instead of merely
   defaulting to it.** "This vault, by default" wrote one `shares` row on the
   vault resource and left every per-folder and per-note override standing, so

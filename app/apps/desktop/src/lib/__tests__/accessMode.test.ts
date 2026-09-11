@@ -5,6 +5,7 @@ import {
   buildOrgRowsByPath,
   clearedCountPhrase,
   effectiveTeamMode,
+  effectiveVaultMode,
   overrideCountPhrase,
   type OrgRow,
   type TeamMode,
@@ -195,6 +196,74 @@ describe("effectiveTeamMode — an unrelated sibling never bleeds across", () =>
     // "Team" is not an ancestor of "TeamNotes/x.md" — string prefixes are not
     // path ancestry.
     expect(resolve("private", "TeamNotes/x.md", { Team: ["edit"] }).mode).toBe("private");
+  });
+});
+
+/** The vault-wide roll-up the "Entire vault" control reads. */
+function vault(
+  vaultMode: TeamMode,
+  rootPaths: string[],
+  spec: Record<string, OrgRow[]> = {},
+) {
+  return effectiveVaultMode({ vaultMode, rootPaths, orgRowsByPath: rows(spec) });
+}
+
+describe("effectiveVaultMode — the bug this function exists to fix", () => {
+  it("reads Private once every root item has been set Private one at a time", () => {
+    expect(
+      vault("open", ["Projects", "Archive", "Inbox.md"], {
+        Projects: ["denied"],
+        Archive: ["denied"],
+        "Inbox.md": ["denied"],
+      }),
+    ).toEqual({ mode: "private", postureMode: "open", overridden: true });
+  });
+
+  it("keeps the posture when only SOME roots are Private", () => {
+    expect(
+      vault("open", ["Projects", "Archive"], { Projects: ["denied"] }),
+    ).toEqual({ mode: "open", postureMode: "open", overridden: false });
+  });
+
+  it("does not claim an override when the items merely agree with the posture", () => {
+    expect(vault("open", ["Projects"], { Projects: ["edit"] })).toEqual({
+      mode: "open",
+      postureMode: "open",
+      overridden: false,
+    });
+  });
+
+  it("reads Read-only when every root is locked under a Shared vault", () => {
+    expect(
+      vault("open", ["Projects", "Archive"], {
+        Projects: ["locked"],
+        Archive: ["locked"],
+      }),
+    ).toEqual({ mode: "readonly", postureMode: "open", overridden: true });
+  });
+
+  it("reads Shared when every root is explicitly shared inside a Private vault", () => {
+    expect(
+      vault("private", ["Projects", "Archive"], {
+        Projects: ["edit"],
+        Archive: ["edit"],
+      }),
+    ).toEqual({ mode: "open", postureMode: "private", overridden: true });
+  });
+
+  it("falls back to the posture with nothing to roll up", () => {
+    for (const mode of ["open", "readonly", "private"] as TeamMode[]) {
+      expect(vault(mode, [])).toEqual({ mode, postureMode: mode, overridden: false });
+    }
+  });
+
+  it("ignores rows on nested paths — roots decide the whole vault", () => {
+    expect(
+      vault("open", ["Projects"], {
+        Projects: ["denied"],
+        "Projects/Live": ["edit"],
+      }),
+    ).toEqual({ mode: "private", postureMode: "open", overridden: true });
   });
 });
 

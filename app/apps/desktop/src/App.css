@@ -4050,6 +4050,18 @@ body:has(.sidebar-resizer.dragging) {
   padding-bottom: var(--sp-4);
   border-bottom: 1px solid var(--border-subtle, var(--border));
 }
+/* Shown only when the per-item settings, not the vault row, decide what the
+   team gets — the control marks the real answer active and this says why. */
+.access-ws-note {
+  margin: var(--sp-2) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.access-ws-note strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
 
 /* affected-people avatar stack */
 .access-avstack {

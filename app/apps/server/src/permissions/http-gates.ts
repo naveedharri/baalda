@@ -49,6 +49,12 @@ export async function canEditDoc(
  * user/team edit share on the folder or any ancestor. A lock on the folder or
  * any ancestor makes it read-only for everyone (owners/admins included),
  * matching `folderWritePermission` in the MCP service.
+ *
+ * A SEALED vault (the Access panel's Private) withdraws the owner/admin
+ * shortcut AND the creator rule, exactly as the resolver does ([[resolver]]
+ * `vaultBaseline`) — you cannot restructure what you cannot read, and there
+ * authorship no longer lets you read it. A vault that was merely never shared
+ * withdraws the role shortcut only, and its folders' creators keep them.
  */
 export async function canEditFolder(
   userId: string,
@@ -76,17 +82,22 @@ export async function canEditFolder(
   if (await isDenied(db, "user", userId, null, chain)) return false;
   if (await isLocked(db, userId, null, chain)) return false;
   const itemPrivate = await isDenied(db, "org", row.organization_id, null, chain);
-  const readOnlyVault = (await vaultBaseline(db, row.organization_id)) === "view";
+  const baseline = await vaultBaseline(db, row.organization_id);
+  const readOnlyVault = baseline === "view";
+  const sealedVault = baseline === "sealed";
+  const ungrantedVault = baseline === null;
 
-  // Private and a Read-only vault both skip the shortcuts and let the share
-  // lookup at the bottom decide — that is how a folder marked Shared can still
-  // lift someone out of a Read-only vault.
-  if (itemPrivate || readOnlyVault) {
+  // An item set Private, a Read-only vault and a sealed vault all skip the
+  // shortcuts AND the creator rule, and let the share lookup decide — that is
+  // how a folder marked Shared still lifts someone out of any of the three.
+  if (itemPrivate || readOnlyVault || sealedVault) {
     const ctx = await buildAccessContext("folder", folderId, db);
     if (!ctx) return false;
     return (await resolveAccessForUser(ctx, userId, role, db)).permission === "edit";
   }
-  if (role === "owner" || role === "admin") return true;
+  // A never-shared vault skips only the role shortcut; the creator rule below
+  // is the private-by-default space, so it has to stay ordered this way round.
+  if (!ungrantedVault && (role === "owner" || role === "admin")) return true;
   if (row.created_by && row.created_by === userId) return true;
 
   // Else: an explicit user/team edit share on the folder or an ancestor.
@@ -222,13 +233,21 @@ export async function canCreateIn(
 /**
  * Is the vault ROOT writable for `userId` at all?
  *
- * True unless the vault-wide Read-only posture is on, in which case only an
- * explicit per-user vault-scoped `edit` grant survives — the one thing the
- * resolver's read-only branch still honours where there is no folder for a
- * share to hang on. Says nothing about membership or role; callers add that.
+ * True unless the vault posture is Read-only **or sealed**, in which case only
+ * an explicit per-user vault-scoped `edit` grant survives — the one thing the
+ * resolver's posture branch still honours where there is no folder for a share
+ * to hang on. Says nothing about membership or role; callers add that. A vault
+ * that was never shared stays writable: that is the private-by-default space,
+ * where what you create is yours.
+ *
+ * Sealed belongs here for the same reason Read-only does, and the failure it
+ * prevents is sharper: in a sealed vault nobody can read a note they did not
+ * have shared with them, authorship included, so a root create would have
+ * handed someone a note that vanished from their own disk the moment it synced.
+ * Creating in a vault you cannot read is not a lesser write, it is a worse one.
  *
  * Shared with the MCP layer (`folderWritePermission`), whose root branch is
- * admin-only and so was the one place a Read-only vault still let writes
+ * admin-only and so was the one place a restricted vault still let writes
  * through: an owner could not touch a single existing note but could keep
  * creating new ones at the root.
  */
@@ -237,7 +256,8 @@ export async function vaultRootWritable(
   organizationId: string,
   db: Queryable = defaultPool,
 ): Promise<boolean> {
-  if ((await vaultBaseline(db, organizationId)) !== "view") return true;
+  const posture = await vaultBaseline(db, organizationId);
+  if (posture !== "view" && posture !== "sealed") return true;
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM shares
       WHERE resource_type = 'vault' AND resource_id = $1

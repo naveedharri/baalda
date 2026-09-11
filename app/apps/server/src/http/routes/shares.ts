@@ -26,11 +26,21 @@ type Queryable = Pick<pg.Pool, "query">;
 /** The three postures the vault-level control offers. */
 type TeamAccessMode = "open" | "readonly" | "private";
 
-/** The `shares.permission` a mode writes on the vault row; null = no row. */
-const MODE_PERMISSION: Record<TeamAccessMode, "edit" | "view" | null> = {
+/**
+ * The `shares.permission` a mode writes on the vault row.
+ *
+ * Private writes `denied` — a real row — rather than deleting the grant and
+ * leaving none. Absence already meant something else: a vault that was never
+ * shared, where people keep the notes they wrote (`created_by`,
+ * private-by-default). Those two want opposite answers about authorship, so
+ * they cannot be the same state. `denied` is the one the resolver reads as
+ * `sealed`: nobody reaches anything, the owner who pressed it included, until
+ * something is shared by name.
+ */
+const MODE_PERMISSION: Record<TeamAccessMode, "edit" | "view" | "denied"> = {
   open: "edit",
   readonly: "view",
-  private: null,
+  private: "denied",
 };
 
 /**
@@ -46,6 +56,12 @@ function grantRank(permission: string | null | undefined): number {
   return permission === "edit" ? 2 : permission === "view" ? 1 : 0;
 }
 
+/**
+ * Both `denied` (sealed) and no row at all report **Private**: the panel offers
+ * three choices and a never-shared vault is not a fourth one to explain. They
+ * differ only in what the resolver does with authorship, and pressing the
+ * button is what turns the second into the first.
+ */
 function modeOf(permission: string | null | undefined): TeamAccessMode {
   if (permission === "edit") return "open";
   if (permission === "view") return "readonly";
@@ -278,8 +294,15 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     //     all; clearing an item's own grants could never achieve it, because a
     //     vault-wide Open grant still reached the item and the UI snapped back
     //     to Shared.
-    if (permission === "denied" && resourceType === "vault") {
-      return c.json({ error: "denied applies to a folder or a file" }, 400);
+    //   - resource 'vault' + principal 'org' — the whole vault sealed. Written
+    //     by `PUT /orgs/:orgId/team-access`, and accepted here so the two
+    //     surfaces cannot disagree about what Private is.
+    //
+    // A per-USER deny on the vault resource stays refused: nothing reads it
+    // (`isDenied` resolves folders and files), so it would be a row that looks
+    // like a block and blocks nothing.
+    if (permission === "denied" && resourceType === "vault" && principalType !== "org") {
+      return c.json({ error: "a vault-wide block applies to the team" }, 400);
     }
 
     const gate = await canManage(session.userId, resourceType, resourceId);
@@ -518,9 +541,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const gate = await canManage(session.userId, "vault", orgId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
 
-    // Only view/edit declare a posture — `vaultBaseline` reads the same pair.
+    // view/edit/denied all declare a posture — `vaultBaseline` reads the same
+    // three. Anything else on that key (a stray `locked`) is inert and reads as
+    // no posture at all.
     const row = await vaultPostureRow(pool, orgId);
-    const posture = row?.permission === "edit" || row?.permission === "view" ? row : null;
+    const posture =
+      row?.permission === "edit" || row?.permission === "view" || row?.permission === "denied"
+        ? row
+        : null;
     return c.json({
       mode: modeOf(posture?.permission),
       grantId: posture?.id ?? null,
@@ -572,41 +600,41 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       const overrides = await teamOverrides(client, orgId, vaultIds);
       const dead = await deadNoteOverrideIds(client, orgId, vaultIds);
       const posture = await vaultPostureRow(client, orgId);
-      // Compared as MODES, not as raw permissions: a vault-level `locked` row
-      // is inert (the resolver's lock check ignores vault rows) and reads as
-      // Private, so it must not register as a change away from Private.
-      postureChanged = modeOf(posture?.permission) !== mode;
+      // Compared as RAW permissions, not as modes. Sealing a vault that was
+      // merely never shared is a change even though both read as Private — it
+      // is the change that stops authorship keeping a note — and reporting it
+      // as a no-op would skip the `onAclChanged` fan-out and leave every open
+      // client on its old readable set.
+      postureChanged = (posture?.permission ?? null) !== permission;
       cleared = overrides.length;
 
-      // The posture row is deleted ONLY on the way to Private. For edit/view
-      // the upsert below rewrites it in place, which keeps `grantId` stable for
-      // the client and leaves no instant inside the transaction where the vault
-      // has no grant at all.
-      const dropPosture = permission === null && posture !== null;
-
-      const ids = [
-        ...overrides.map((o) => o.id),
-        ...dead,
-        ...(dropPosture ? [posture.id] : []),
-      ];
+      // Nothing deletes the posture row any more: all three modes upsert it in
+      // place (Private writes `denied`), which keeps `grantId` stable for the
+      // client and leaves no instant inside the transaction where the vault has
+      // no row at all — an instant that used to read as "never shared", the one
+      // state whose meaning is different.
+      const ids = [...overrides.map((o) => o.id), ...dead];
       itemKick = overrides
         .filter((o) => grantRank(o.permission) > grantRank(permission))
         .map((o) => ({ resourceType: o.resourceType, resourceId: o.resourceId }));
-      vaultKick = grantRank(posture?.permission) > grantRank(permission);
+      // Sealing narrows even from no row at all: `denied` and absence both rank
+      // 0, but absence lets people read what they wrote and `denied` does not,
+      // so an author with the note open has to be disconnected.
+      vaultKick =
+        grantRank(posture?.permission) > grantRank(permission) ||
+        (permission === "denied" && posture?.permission !== "denied");
       if (ids.length > 0) {
         await client.query("DELETE FROM shares WHERE id = ANY($1::text[])", [ids]);
       }
 
-      if (permission !== null) {
-        await client.query(
-          `INSERT INTO shares
-             (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
-           VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6)
-           ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
-           DO UPDATE SET permission = EXCLUDED.permission`,
-          [randomUUID(), orgId, orgId, orgId, permission, session.userId],
-        );
-      }
+      await client.query(
+        `INSERT INTO shares
+           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
+         VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6)
+         ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+         DO UPDATE SET permission = EXCLUDED.permission`,
+        [randomUUID(), orgId, orgId, orgId, permission, session.userId],
+      );
 
       await client.query("COMMIT");
     } catch (err) {

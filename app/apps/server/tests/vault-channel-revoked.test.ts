@@ -140,10 +140,11 @@ describe("vault channel — ready.revoked", () => {
     );
 
     const ready = await readyFor(member.userId, vault, [rootNote, folderNote, ownNote]);
-    expect(new Set(ready.revoked as string[])).toEqual(new Set([rootNote, folderNote]));
-    // The member's own note is authored by them, so it never leaves their
-    // readable set and must never be named.
-    expect(ready.revoked as string[]).not.toContain(ownNote);
+    // Every doc they hold, their OWN note included: pressing Private seals the
+    // vault, and a sealed vault drops authorship along with the role.
+    expect(new Set(ready.revoked as string[])).toEqual(
+      new Set([rootNote, folderNote, ownNote]),
+    );
     expect(ready.revokedTruncated).toBeUndefined();
   });
 
@@ -159,13 +160,19 @@ describe("vault channel — ready.revoked", () => {
     expect(ready.revoked).toEqual([rootNote]);
   });
 
-  it("names nothing for an owner, who reads everything", async () => {
+  it("names the owner's losses too — Private is not a setting they sit above", async () => {
     expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
       200,
     );
 
+    // All three, the two the owner wrote included. The list is NAMED rather
+    // than left to the client's "absent from both listings" guess, because
+    // being named is what safely lifts the removal cap — and a seal that takes
+    // the whole vault is exactly the case where the cap would otherwise bite.
     const ready = await readyFor(owner.userId, vault, [rootNote, folderNote, ownNote]);
-    expect(ready.revoked).toBeUndefined();
+    expect(new Set(ready.revoked as string[])).toEqual(
+      new Set([rootNote, folderNote, ownNote]),
+    );
   });
 
   it("caps the list and flags it, rather than framing an unbounded one", async () => {
@@ -196,6 +203,8 @@ describe("vault channel — ready.revoked", () => {
     await seedShare(orgId, "folder", folder, member.userId, "view");
 
     const ready = await readyFor(member.userId, vault, [rootNote, folderNote, ownNote]);
-    expect(ready.revoked).toEqual([rootNote]);
+    // `folderNote` is covered by the surviving share; `rootNote` and their own
+    // note are not, and a sealed vault does not spare the author.
+    expect(new Set(ready.revoked as string[])).toEqual(new Set([rootNote, ownNote]));
   });
 });

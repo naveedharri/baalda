@@ -284,7 +284,11 @@ describe("team-access — GET and PUT", () => {
 
     const after = await readTeamAccess();
     expect(after.mode).toBe("private");
-    expect(after.grantId).toBeNull();
+    // Private writes a `denied` row rather than deleting the grant: absence
+    // means "never shared", which is a weaker thing that leaves authors their
+    // own notes. The id is stable across all three modes because the upsert
+    // rewrites one row in place.
+    expect(after.grantId).not.toBeNull();
     expect(after.overrides).toEqual([]);
 
     expect(await effectivePermission(member.userId, sharedNote)).toBe("none");
@@ -362,21 +366,36 @@ describe("team-access — GET and PUT", () => {
     expect(rec.disconnected).toEqual([{ vaultId: vaultA, docId: sharedNote }]);
   });
 
-  it("PUT private kicks every doc a cleared grant reached, and nothing else", async () => {
-    // The vault is already Private, so only the item grants narrow: the `edit`
-    // folder and the `view` note. The `locked` and `denied` rows granted
-    // nothing, so removing them takes nothing away.
+  it("PUT private seals a never-shared vault, which narrows it and kicks everything", async () => {
+    // The vault has no posture row, which reads as Private but is the WEAKER
+    // state: people still keep the notes they wrote. Pressing Private writes
+    // the `denied` row, which takes that away too — so this is a posture change
+    // and a narrowing, and every doc goes, not just the two the cleared item
+    // grants reached.
     rec.reset();
     const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
     expect(res.status).toBe(200);
     expect((await res.json()) as unknown).toMatchObject({
       cleared: 4,
-      postureChanged: false,
-      disconnectedDocs: 2,
+      postureChanged: true,
     });
     expect(rec.disconnected).toContainEqual({ vaultId: vaultA, docId: sharedNote });
     expect(rec.disconnected).toContainEqual({ vaultId: vaultB, docId: viewNote });
-    expect(rec.disconnected).toHaveLength(2);
+  });
+
+  it("re-applying private on an already sealed vault changes nothing", async () => {
+    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
+      200,
+    );
+    rec.reset();
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({
+      cleared: 0,
+      postureChanged: false,
+      disconnectedDocs: 0,
+    });
+    expect(rec.disconnected).toEqual([]);
   });
 
   it("an admin, not just the owner, can read and enforce the posture", async () => {
@@ -513,18 +532,20 @@ describe("team-access — live socket kicks", () => {
     folderNote = await seedNote(vault, folder, "Team/T.md", owner.userId);
     rootNote = await seedNote(vault, null, "Root.md", owner.userId);
   });
-  it("clearing one folder override kicks that folder's docs only", async () => {
+  it("sealing kicks the whole vault, the cleared folder override included", async () => {
     await seedOrgGrant(orgId, "folder", folder, "edit");
     rec.reset();
 
     const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
     expect(res.status).toBe(200);
+    // The posture itself narrows here (never-shared → sealed), so the per-item
+    // walk underneath is pure duplication and one vault-wide query answers it.
     expect((await res.json()) as unknown).toMatchObject({
       cleared: 1,
-      postureChanged: false,
-      disconnectedDocs: 1,
+      postureChanged: true,
     });
-    expect(rec.disconnected).toEqual([{ vaultId: vault, docId: folderNote }]);
+    expect(rec.disconnected).toContainEqual({ vaultId: vault, docId: folderNote });
+    expect(rec.disconnected).toContainEqual({ vaultId: vault, docId: rootNote });
     expect(rec.aclBroadcasts).toContain(vault);
   });
 
@@ -670,12 +691,14 @@ describe("team-access — a member's readable set after Private", () => {
     const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
     expect(res.status).toBe(200);
 
-    // 1. The resolver's set-based dual (the vault channel's authority).
-    expect(await listReadableDocsInVault(member.userId, vault)).toEqual(new Set([ownNote]));
+    // 1. The resolver's set-based dual (the vault channel's authority). NOTHING
+    //    survives, `ownNote` included: pressing Private seals the vault, and a
+    //    sealed vault drops authorship for everyone.
+    expect(await listReadableDocsInVault(member.userId, vault)).toEqual(new Set());
     // Per-doc agreement with the canonical resolver.
     expect(await effectivePermission(member.userId, rootNote)).toBe("none");
     expect(await effectivePermission(member.userId, folderNote)).toBe("none");
-    expect(await effectivePermission(member.userId, ownNote)).toBe("edit");
+    expect(await effectivePermission(member.userId, ownNote)).toBe("none");
 
     // 2. The folder set: nothing the owner made is visible any more.
     expect(await listVisibleFolders(member.userId, vault)).toEqual([]);
@@ -689,7 +712,7 @@ describe("team-access — a member's readable set after Private", () => {
       notes: Array<{ id: string }>;
       tombstones: string[];
     };
-    expect(noteBody.notes.map((n) => n.id)).toEqual([ownNote]);
+    expect(noteBody.notes).toEqual([]);
     // Answered, not withheld: `null` tombstones means "I don't know" to the
     // client and stops it removing anything at all.
     expect(Array.isArray(noteBody.tombstones)).toBe(true);
@@ -704,12 +727,48 @@ describe("team-access — a member's readable set after Private", () => {
     expect(Array.isArray(folderBody.tombstones)).toBe(true);
   });
 
-  it("the owner keeps everything", async () => {
+  it("empties the owner's too — the setting applies to the seat that made it", async () => {
+    // The complaint this answers: Private meant one thing on a folder (the org
+    // deny drops owners, admins and the author) and another on the vault
+    // (everyone kept what they wrote, and in a vault you set up yourself that
+    // is nearly everything — so pressing it changed nothing you could see).
+    // Sealed means sealed, for the person who pressed it most of all.
     await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+
+    expect(await listReadableDocsInVault(owner.userId, vault)).toEqual(new Set());
+    expect(await effectivePermission(owner.userId, rootNote)).toBe("none");
+    expect(await effectivePermission(owner.userId, folderNote)).toBe("none");
+    expect(await effectivePermission(owner.userId, ownNote)).toBe("none");
+    // No readable note left to hang it on, so no folder either.
+    expect(await listVisibleFolders(owner.userId, vault)).toEqual([]);
+  });
+
+  it("a folder shared with the team still lifts out of a sealed vault", async () => {
+    // Sealed is a FLOOR, not a wall: it is the one thing an item set Private
+    // does differently, because there the point is to withdraw a single item
+    // from a team that can otherwise reach it.
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    await seedOrgGrant(orgId, "folder", folder, "edit");
+
+    for (const who of [owner, member]) {
+      expect(await listReadableDocsInVault(who.userId, vault)).toEqual(new Set([folderNote]));
+      expect(await effectivePermission(who.userId, folderNote)).toBe("edit");
+      expect(await effectivePermission(who.userId, rootNote)).toBe("none");
+    }
+  });
+
+  it("the owner can still put it back, having lost the content", async () => {
+    // The safety net is not an exemption — it is that managing access is
+    // role-gated (`canManage`) and never asks for effective permission. An
+    // owner who locked themselves out of the content can always undo it.
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(await effectivePermission(owner.userId, ownNote)).toBe("none");
+
+    const back = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(back.status).toBe(200);
     expect(await listReadableDocsInVault(owner.userId, vault)).toEqual(
       new Set([rootNote, folderNote, ownNote]),
     );
-    expect((await listVisibleFolders(owner.userId, vault)).map((f) => f.path)).toEqual(["Docs"]);
   });
 
   it("per-item Private on one folder revokes only that folder — the path that already worked", async () => {

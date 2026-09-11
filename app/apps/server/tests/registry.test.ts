@@ -3,7 +3,13 @@ import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedFolder, seedMember, seedNote, seedVault } from "./helpers/seed.js";
+import {
+  seedFolder,
+  seedMember,
+  seedNote,
+  seedVault,
+  seedVaultGrant,
+} from "./helpers/seed.js";
 import { recordingAppDeps } from "./helpers/app.js";
 import { pool as pgPool } from "../src/db/pool.js";
 
@@ -38,6 +44,10 @@ describe("registry structure sync", () => {
     owner = await signUp("owner@registry.test");
     const org = (await createOrg(owner, "Reg Co", "reg-co")).id;
     vault = await seedVault(org);
+    // The org-wide grant `POST /api/vaults` gives a new vault. Seeded directly a
+    // vault has none, so it is Private — and Private stopped exempting owners,
+    // which would silently make these tests about the posture instead.
+    await seedVaultGrant(org, "edit");
   });
   afterAll(async () => {
     await pool.end();
@@ -222,6 +232,13 @@ describe("registry structure sync", () => {
     const org = (await pgPool.query(`SELECT organization_id FROM vaults WHERE id = $1`, [vault]))
       .rows[0].organization_id as string;
     await seedMember(org, member.userId, "member");
+    // This one test is about the PRIVATE posture, so it drops the grant the
+    // beforeEach seeds. Private is the state that hides one member's notes from
+    // another — with the vault Shared there is nothing to hide.
+    await pgPool.query(
+      "DELETE FROM shares WHERE resource_type = 'vault' AND resource_id = $1",
+      [org],
+    );
 
     // Owner's private folder + note (owner created them).
     const ownerFolder = await seedFolder(vault, null, "Owner", "Owner");
@@ -253,12 +270,15 @@ describe("registry structure sync", () => {
     expect(fids).toContain(teamFolder);
     expect(fids).not.toContain(ownerFolder); // owner's private folder hidden
 
-    // The owner still sees everything.
+    // The owner is under the same rule. Private used to mean "private from the
+    // members" and nothing at all to the person who owns the vault; it now means
+    // the same thing from every seat. So the owner sees the two notes they wrote
+    // and NOT the member's — which is the half of this test that changed.
     const ownerNotes = (await (await req(owner, "GET", `/api/notes?vaultId=${vault}`)).json()) as {
       notes: Array<{ id: string }>;
     };
-    expect(ownerNotes.notes.map((n) => n.id)).toEqual(
-      expect.arrayContaining([ownerNote, memberNote, teamNote]),
-    );
+    const ownerIds = ownerNotes.notes.map((n) => n.id);
+    expect(ownerIds).toEqual(expect.arrayContaining([ownerNote, teamNote]));
+    expect(ownerIds).not.toContain(memberNote);
   });
 });

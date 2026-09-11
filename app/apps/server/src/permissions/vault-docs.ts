@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
+import { vaultBaseline } from "./resolver.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -12,11 +13,14 @@ type Queryable = Pick<pg.Pool, "query">;
  * Mirrors the resolver exactly (here "vault" is the note collection; the
  * owner/admin/member role belongs to its owning organization, the user-facing
  * vault):
- *   - vault owner/admin  -> every (non-deleted) note + file in the vault;
  *   - a vault-scoped view/edit grant (org-wide "Open"/"Read-only" for
- *     members, or per-user) -> likewise every doc in the vault;
- *   - otherwise             -> docs reachable via a **user** share (view/edit)
- *     on the doc itself or any ancestor folder (folder grants inherit down).
+ *     members, or per-user) -> every (non-deleted) note + file in the vault.
+ *     Owner and admin reach this through the org-wide grant like anyone else,
+ *     so a Private vault (no grant) leaves them scoped too;
+ *   - otherwise             -> docs reachable via a share (view/edit) on the doc
+ *     itself or any ancestor folder (folder grants inherit down), plus the docs
+ *     the caller created — except in a SEALED vault (the Access panel's
+ *     Private), which drops authorship for everyone and leaves only the shares.
  *
  * `locked` is a cap overlay that only takes edit->view; it never grants read, so
  * it's absent here. `denied` (per-member "No access") IS here: it removes read,
@@ -24,8 +28,20 @@ type Queryable = Pick<pg.Pool, "query">;
  *
  * Read = view OR edit, so the channel streams content to view-only grantees too.
  */
-/** Resolve a user's vault-level posture: their org, role, and whether they have
- *  vault-wide read (owner/admin, or a vault-scoped Open/Read-only grant). */
+/**
+ * Resolve a user's vault-level posture: their org, role, and whether they have
+ * vault-wide read (a vault-scoped Open/Read-only grant, org-wide or per-user).
+ *
+ * Owner and admin used to answer `vaultWide: true` outright, before any grant
+ * was read. That made a Private vault mean "private from the team" to a member
+ * and nothing at all to the person who set it, and it was the single widest
+ * bypass in the system: this one boolean feeds the readable set, the folder
+ * tree, blob reads, the graph, MCP search, the registry pull and the live
+ * channel's `ready.revoked`. The role now buys exactly what it buys everywhere
+ * else — the org-wide grant, which Shared and Read-only write and Private does
+ * not — so all eight surfaces follow the posture without a line of their own.
+ * See [[resolver]] `vaultBaseline`.
+ */
 export async function vaultAccess(
   db: Queryable,
   userId: string,
@@ -42,7 +58,6 @@ export async function vaultAccess(
   const row = org.rows[0];
   if (!row) return null;
   const base = { organizationId: row.organization_id, role: row.role };
-  if (row.role === "owner" || row.role === "admin") return { ...base, vaultWide: true };
   const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
   const grant = await db.query(
     `SELECT 1 FROM shares
@@ -277,6 +292,15 @@ async function listDocsInVault(
   const userDenied = await deniedDocsInVault(db, "user", userId, vaultId);
   const orgDenied = await deniedDocsInVault(db, "org", organizationId, vaultId);
 
+  // A SEALED vault (the Access panel's Private) stops authorship keeping a doc,
+  // exactly as an item set Private does — the resolver's posture branch skips
+  // both the role and the creator rule, so `creatorCounts` has to go with it or
+  // the set and the resolver disagree about every note its author wrote. Org and
+  // per-user grants still lift, which is what makes "sealed vault, one folder
+  // shared with the team" work. A vault that was merely never shared is NOT
+  // this: there, people keep what they wrote.
+  const sealed = (await vaultBaseline(db, organizationId)) === "sealed";
+
   let reachable: Set<string>;
   if (vaultWide) {
     const { rows } = await db.query<{ id: string }>(
@@ -289,7 +313,7 @@ async function listDocsInVault(
     );
     reachable = new Set(rows.map((r) => r.id));
   } else {
-    reachable = await scopedDocs(true);
+    reachable = await scopedDocs(true, !sealed);
   }
 
   if (orgDenied.size > 0) {
@@ -363,8 +387,10 @@ export interface VaultFolderRow {
 }
 
 /**
- * Folders a user may SEE in the tree (private-by-default). Owner/admin or an
- * Open/Read-only vault get every folder; otherwise a member sees folders
+ * Folders a user may SEE in the tree (private-by-default). An Open/Read-only
+ * vault shows every folder to everyone who holds its grant, owners and admins
+ * included — and a Private vault shows them no more than anyone else;
+ * otherwise a member sees folders
  * they created, folders shared to them or the team (+ their subtrees, since
  * grants inherit down), and the ANCESTORS of anything visible so the path to a
  * shared note/folder is never missing a link.
@@ -392,9 +418,14 @@ export async function listVisibleFolders(
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   const isMember = access.role !== null;
+  // Authorship seeds the tree everywhere EXCEPT in a SEALED vault, which drops
+  // it for everyone (see `listDocsInVault`). Leaving it in would show a folder
+  // whose every note has gone — the tree and the notes in it disagreeing about
+  // the same setting.
+  const authorSeeds = (await vaultBaseline(db, access.organizationId)) !== "sealed";
   const { rows: visibleIds } = await db.query<{ id: string }>(
     `WITH RECURSIVE seed AS (
-        SELECT id FROM folders WHERE vault_id = $2 AND created_by = $1
+        SELECT id FROM folders WHERE vault_id = $2 AND $6 AND created_by = $1
         UNION
         SELECT resource_id AS id FROM shares
          WHERE resource_type = 'folder' AND permission IN ('view', 'edit')
@@ -421,7 +452,7 @@ export async function listVisibleFolders(
         SELECT f.id, f.parent_id FROM folders f JOIN up u ON f.id = u.parent_id
      )
      SELECT DISTINCT id FROM up`,
-    [userId, vaultId, access.organizationId, isMember, [...readable]],
+    [userId, vaultId, access.organizationId, isMember, [...readable], authorSeeds],
   );
   const visible = new Set(visibleIds.map((r) => r.id));
   return all.rows.filter((f) => visible.has(f.id) && !hidden(f.id));

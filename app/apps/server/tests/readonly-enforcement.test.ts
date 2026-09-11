@@ -27,6 +27,8 @@ import {
   seedShare,
   seedVault,
   seedVaultGrant,
+  seedUserVaultGrant,
+  sealVault,
 } from "./helpers/seed.js";
 
 /**
@@ -1021,3 +1023,50 @@ class FakeWs extends EventEmitter {
     return this.sent.filter((s) => s.text).map((s) => s.text as Record<string, unknown>);
   }
 }
+
+
+/**
+ * The sealed vault's write contract — the same shape as the read-only one, for
+ * the same reason: "nobody can read this" has to close the create door too, or
+ * the first thing you make in a sealed vault is a note you cannot open.
+ */
+describe("a sealed vault refuses creation, a never-shared one does not", () => {
+  let owner: TestUser;
+  let org: string;
+  let vault: string;
+
+  beforeEach(async () => {
+    await resetDb();
+    owner = await signUp("owner@sealed-writes.test");
+    org = (await createOrg(owner, "Sealed Co", "sealed-co")).id;
+    vault = await seedVault(org);
+  });
+
+  const createRootNote = async (user: TestUser) =>
+    app.fetch(
+      new Request("http://local/api/notes", {
+        method: "POST",
+        headers: { ...authHeaders(user), "content-type": "application/json" },
+        body: JSON.stringify({ vaultId: vault, relPath: `n-${randomUUID()}.md` }),
+      }),
+    );
+
+  it("lets the owner create at the root of a never-shared vault", async () => {
+    // No posture row: the private-by-default space, where what you make is
+    // yours. Closing this would make the state unusable rather than private.
+    expect((await createRootNote(owner)).status).toBeLessThan(300);
+  });
+
+  it("refuses once the vault is sealed, and lets a named person back in", async () => {
+    await sealVault(org);
+    const refused = await createRootNote(owner);
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as { code?: string }).code).toBe("no_write_access");
+
+    // The way back that does not involve unsealing: a vault-scoped grant for
+    // one person, which is the one thing the posture branch still honours where
+    // there is no folder for a share to hang on.
+    await seedUserVaultGrant(org, owner.userId, "edit");
+    expect((await createRootNote(owner)).status).toBeLessThan(300);
+  });
+});

@@ -22,6 +22,7 @@ import {
   buildOrgRowsByPath,
   clearedCountPhrase,
   effectiveTeamMode,
+  effectiveVaultMode,
   overrideCountPhrase,
   type TeamMode,
 } from "../lib/accessMode";
@@ -435,6 +436,26 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     [entries, tree, teamAccess, locks, denies],
   );
 
+  /**
+   * The vault-wide answer the control shows: the posture row, corrected by the
+   * per-item settings underneath it when those are unanimous — see
+   * `lib/accessMode.effectiveVaultMode`.
+   *
+   * Root paths come from the SERVER's structure only. The local tree is missing
+   * exactly the items a Private setting removed from disk, so deriving from it
+   * could report a vault Private on the strength of the rows that survived.
+   */
+  const rootPaths = useMemo(
+    () => (serverTree ? entries.map((e) => e.path).filter((p) => !p.includes("/")) : []),
+    [serverTree, entries],
+  );
+  const vaultEffective = useMemo(
+    () => (vaultMode ? effectiveVaultMode({ vaultMode, rootPaths, orgRowsByPath }) : null),
+    [vaultMode, rootPaths, orgRowsByPath],
+  );
+  /** What the segmented control marks active. */
+  const shownVaultMode: Mode | null = vaultEffective?.mode ?? vaultMode;
+
   /** This item's team mode — the ONE authority, for badges and the tri-state. */
   const teamModeFor = (path: string): Mode | null =>
     vaultMode
@@ -632,8 +653,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
               removed from their devices, <strong>including the local copy on disk</strong>.
             </p>
             <p>
-              You, the vault's owners and admins, and anyone you have shared it with by
-              name keep it. Setting it back to Shared restores access.
+              Only people shared with <strong>by name</strong> keep it. That includes
+              you: owners and admins lose it too, and so does whoever wrote it, until
+              you name them. Setting it back to Shared restores access.
             </p>
           </>
         ),
@@ -651,10 +673,11 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         // An explicit org DENY, not merely the absence of a grant. Clearing the
         // rows was the old behaviour and it could not work: in a Shared vault
         // the vault-wide grant still reached the item, so the segment snapped
-        // straight back to Shared. The deny removes the team's reach and
-        // nothing else — the creator, anyone shared with by name, and
-        // owners/admins keep it, which is what "only you and people you share
-        // it with" says on the button.
+        // straight back to Shared. The deny removes every org-scoped route to
+        // the item and leaves only the per-user ones: anyone shared with by
+        // name. Not the creator, and not owners or admins — the resolver puts
+        // `isDenied` above both shortcuts, because a restriction its author is
+        // exempt from cannot be checked by its author.
         await authManager.api.createShare({
           resourceType: selected.kind,
           resourceId: selected.id,
@@ -715,11 +738,16 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     const privateBody = (
       <>
         <p>
-          Members will only see notes they created or that you share with them by
-          name. Everything else is removed from their devices,{" "}
+          Nobody will be able to open anything in this vault — not the team, not the
+          other owners and admins, and <strong>not you</strong>, including the notes you
+          wrote yourself. Every note is removed from every device,{" "}
           <strong>including the local copies on disk</strong>.
         </p>
-        <p>Owners and admins keep the whole vault. You can switch back to Shared at any time.</p>
+        <p>
+          Nothing is lost: the server keeps it all, switching back to Shared brings it
+          back, and you can share a folder or a note by name to open up part of the
+          vault while the rest stays sealed.
+        </p>
       </>
     );
     if (mode === "private" || replaced) {
@@ -868,7 +896,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         Choose what the team can reach. Set the <strong>entire vault</strong> at once, or pick a
         folder or note below to set just that one. Folder settings flow down to everything inside.
         Each is <strong>Shared</strong> (read &amp; write), <strong>Read-only</strong>, or{" "}
-        <strong>Private</strong> (nobody until you name them — you included).
+        <strong>Private</strong> (nobody until you name them — you included, and that
+        applies to the notes you wrote).
       </p>
 
       {canManage && orgId && (
@@ -893,7 +922,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
               <button
                 key={m}
                 type="button"
-                className={`access-segbtn${vaultMode === m ? " active" : ""}`}
+                className={`access-segbtn${shownVaultMode === m ? " active" : ""}`}
                 data-mode={m}
                 disabled={busy || !vaultModeKnown}
                 onClick={() => setVaultMode(m)}
@@ -907,11 +936,20 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                     ? "Every folder and note: the team reads & writes."
                     : m === "readonly"
                       ? "Every folder and note: the team reads, nobody edits."
-                      : "Nothing is shared. Members keep only what they create."}
+                      : "Nobody reaches anything — you included — until you share it."}
                 </span>
               </button>
             ))}
           </div>
+          {vaultEffective?.overridden && (
+            <p className="access-ws-note">
+              The vault-wide setting is{" "}
+              <strong>{MODE_LABEL[vaultEffective.postureMode]}</strong>, but every folder and
+              note is set to <strong>{MODE_LABEL[vaultEffective.mode]}</strong> — so that is
+              what the team gets. Choose a setting here to clear those and apply one answer to
+              the whole vault.
+            </p>
+          )}
         </div>
       )}
 

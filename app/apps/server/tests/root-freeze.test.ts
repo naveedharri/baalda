@@ -376,7 +376,10 @@ describe("root freeze — MCP parity", () => {
     owner = await signUp("owner@rf-mcp.test");
     org = (await createOrg(owner, "Freeze MCP", "freeze-mcp")).id;
     vault = await seedVault(org);
-    docsFolder = await seedFolder(vault, null, "Docs", "Docs");
+    // Created by the owner: a seeded vault carries no org grant, so it is
+    // Private, and in a Private vault it is authorship — not the role — that
+    // lets the owner write inside this folder.
+    docsFolder = await seedFolder(vault, null, "Docs", "Docs", owner.userId);
     token = (await createMcpToken({ userId: owner.userId, organizationId: org }, "test")).token;
   });
 

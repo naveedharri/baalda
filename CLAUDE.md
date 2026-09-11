@@ -296,7 +296,21 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
 - `permissions/resolver.ts` — `effectivePermission(userId, docId)`: owner/admin → edit; a note's
   **creator** → edit on their own note; else max of file/folder shares (walk `parent_id` up) — either
   per-user or an org-wide "share with team" grant — plus any vault-wide grant; a `locked` share caps at
-  view even for admins. `edit > view > none`; no grant → no sync access (403 at token mint). **New
+  view even for admins. **The vault posture is a baseline for everyone** (`vaultBaseline`): Read-only
+  caps every shortcut at view; a vault that was never shared withdraws the owner/admin shortcut but
+  keeps authorship (the private-by-default space); and **`sealed`** — an org `denied` row on the
+  vault resource, which is what the Access panel's Private now writes — withdraws authorship too, so
+  nobody reads anything until a grant lifts it. An org grant on a folder/note still lifts out of a
+  sealed vault (a floor, not a wall); an *item* set to Private drops those too, because there the
+  point is withdrawing one item from a team that can otherwise reach it. Creation follows reading:
+  `vaultRootWritable` refuses a root create in a sealed vault, since a note you cannot read is not
+  worth making. Keep
+  `vault-docs.ts vaultAccess` in lockstep: it reads the same grant rather than short-circuiting on the
+  role, which is what makes the readable set, the folder tree, blob reads, the graph, MCP search, the
+  registry pull and `ready.revoked` follow the posture for free. Management stays role-based
+  (`shares.ts canManage`), so an owner can always undo what they set; two gates that used to ride on
+  the role now ask for content access too — minting a public link, and a whole-vault checkpoint
+  revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). **New
   vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
   grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
   owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,

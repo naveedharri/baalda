@@ -76,7 +76,10 @@ describe("HTTP authz gates (per-doc ACL, not bare membership)", () => {
   });
 
   it("F11: member cannot delete a folder they don't own; owner can", async () => {
-    const folder = await seedFolder(vault, null, "Docs", "Docs");
+    // Created by the owner, like F2's note. In this private-by-default vault
+    // authorship is what the owner's access rests on — the role stopped being a
+    // blanket bypass, so a folder nobody created is a folder nobody may delete.
+    const folder = await seedFolder(vault, null, "Docs", "Docs", owner.userId);
     expect((await req(member, "DELETE", `/api/folders/${folder}`)).status).toBe(403);
     expect((await req(owner, "DELETE", `/api/folders/${folder}`)).status).toBe(200);
   });
