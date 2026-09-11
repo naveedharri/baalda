@@ -1130,6 +1130,39 @@ function resolveSyncGate(): void {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/**
+ * Answer "does THIS folder sync?" for the open gate in `openNoteByPath`. A
+ * never-stamped folder has no mapped notes to fork, so its gate opens at once;
+ * a stamped one keeps waiting for the prime that `enableSyncForVault` resolves.
+ * Without this answer the gate stayed armed with `openFolderIsSynced: null`
+ * after every vault switch or creation, and each note open in a local-only
+ * folder sat out the full SYNC_GATE_MS belt ("opened … before sync primed").
+ *
+ * Fire-and-forget; every path that swaps the open folder calls it (`setVault`
+ * on a switch, `adoptOpenedVault` for the picker/create flows).
+ */
+function probeFolderSync(
+  get: () => AppStore,
+  set: (partial: Partial<AppStore>) => void,
+  path: string,
+): void {
+  void ipc
+    .peekVaultStamp(path)
+    .then((stamp) => {
+      if (get().vault?.path !== path) return; // moved on again
+      // A surer path may already have answered (`openVaultInRoot` knows its
+      // folder syncs; the launch probe in App.tsx peeks too). Never override an
+      // answer, and never release a gate someone else is holding.
+      if (get().openFolderIsSynced !== null) return;
+      const synced = stamp?.organizationId != null;
+      set({ openFolderIsSynced: synced });
+      if (!synced) resolveSyncGate();
+    })
+    .catch(() => {
+      /* unreadable: stays null, so the gate keeps waiting for the prime */
+    });
+}
+
 
 /**
  * Tear down networked sync for the vault we're leaving. Call this BEFORE any
@@ -1353,30 +1386,8 @@ export const useStore = create<AppStore>((set, get) => ({
       itemOrder: readItemOrder(v?.path),
       ...(switched ? { openFolderIsSynced: null } : {}),
     });
-    // Answer "does THIS folder sync?" for the open gate. A never-stamped folder
-    // has no mapped notes to fork, so its gate opens at once; a stamped one keeps
-    // waiting for the prime that `enableSyncForVault` resolves. Without this
-    // answer the gate stayed armed with `openFolderIsSynced: null` after every
-    // vault switch, and each note open in a local-only folder sat out the full
-    // SYNC_GATE_MS belt before opening ("opened … before sync primed").
-    if (switched && v) {
-      const path = v.path;
-      void ipc
-        .peekVaultStamp(path)
-        .then((stamp) => {
-          if (get().vault?.path !== path) return; // moved on again
-          // A surer path may already have answered (`openVaultInRoot` knows its
-          // folder syncs; the launch probe in App.tsx peeks too). Never override
-          // an answer, and never release a gate someone else is holding.
-          if (get().openFolderIsSynced !== null) return;
-          const synced = stamp?.organizationId != null;
-          set({ openFolderIsSynced: synced });
-          if (!synced) resolveSyncGate();
-        })
-        .catch(() => {
-          /* unreadable: stays null, so the gate keeps waiting for the prime */
-        });
-    }
+    // Answer "does THIS folder sync?" for the open gate (see `probeFolderSync`).
+    if (switched && v) probeFolderSync(get, set, v.path);
   },
 
   setItemColor: (path, colorId) => {
@@ -3080,13 +3091,21 @@ export const useStore = create<AppStore>((set, get) => ({
       opts.resync ? (get().session?.activeOrganizationId ?? null) : null,
     );
     get().closeNote();
+    // A different folder is on screen: whatever the open gate knew belonged to
+    // the last one. Re-arm it, forget the old answer, and ask again — this path
+    // bypasses `setVault`'s switch detection (Rust already swapped the vault),
+    // so without this a new local vault kept the previous vault's answer and
+    // every note open waited out the sync gate.
+    armSyncGate();
     set({
       vault: info,
       ...vaultScopedSyncReset(),
+      openFolderIsSynced: null,
       itemColors: readItemColors(info.path),
       itemOrder: readItemOrder(info.path),
       pendingVaultFolder: null,
     });
+    probeFolderSync(get, set, info.path);
     await get().refreshTree();
     await get().refreshTitles();
     if (!sameVault(get, info.epoch)) return;

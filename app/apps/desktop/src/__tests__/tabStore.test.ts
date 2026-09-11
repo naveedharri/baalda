@@ -32,6 +32,7 @@ const sync = vi.hoisted(() => ({
     registerNote: vi.fn(async () => null),
   },
   isSyncable: vi.fn(() => false),
+  disable: vi.fn(), // `adoptOpenedVault` → `leaveVaultSync`
   setViewing: vi.fn(),
   handleRegistryChanged: vi.fn(),
   willSync: vi.fn(() => false),
@@ -224,6 +225,18 @@ describe("open gate after a vault switch", () => {
     await open("a.md");
     expect(Date.now() - t0).toBeLessThan(1000);
     expect(useStore.getState().openNote?.path).toBe("a.md");
+  });
+
+  it("answers for a vault adopted from the picker/create flow too (bypasses setVault)", async () => {
+    useStore.setState({ authStatus: "signed-in", vault: null, openFolderIsSynced: true });
+    ipcMock.peekVaultStamp.mockResolvedValueOnce(null);
+    await useStore.getState().adoptOpenedVault(vaultAt("/vaults/brand-new"));
+    await flush();
+    // The previous vault's answer (`true`) must not survive the adoption.
+    expect(useStore.getState().openFolderIsSynced).toBe(false);
+    const t0 = Date.now();
+    await open("a.md");
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 
   it("keeps waiting for the prime when the folder IS stamped", async () => {
