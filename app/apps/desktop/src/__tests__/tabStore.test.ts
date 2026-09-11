@@ -156,11 +156,14 @@ describe("createNoteIn / createNoteAt", () => {
     expect(await useStore.getState().createNoteIn("Work")).toBe("Work/Untitled.md");
   });
 
-  it("opens the new note and reveals its row in inline rename", async () => {
+  it("opens the new note, reveals its row, and arms its inline title", async () => {
     const path = await useStore.getState().createNoteIn("");
     expect(useStore.getState().openNote?.path).toBe(path);
-    // New notes are created EMPTY, so the rename box is the naming affordance.
-    expect(useStore.getState().revealRequest).toMatchObject({ path, edit: true });
+    // The row is revealed but NOT put into the sidebar's rename box: a new note
+    // is created EMPTY and its name is its title, so the cursor waits in the
+    // note's own inline title instead (consumed by `InlineTitle` on mount).
+    expect(useStore.getState().revealRequest).toMatchObject({ path, edit: false });
+    expect(useStore.getState().pendingTitleFocus).toBe(path);
   });
 
   it("refuses the vault root while the freeze latch is on, and creates nothing", async () => {

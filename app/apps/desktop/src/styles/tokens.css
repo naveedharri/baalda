@@ -102,6 +102,17 @@
     calc((100% - var(--editor-measure)) / 2)
   );
 
+  /* The inline note title — the note's filename, rendered as an editable
+     heading above the body. Sized to match `t.heading1` in the editor's
+     HighlightStyle so a title and an H1 look like the same typography. */
+  --inline-title-size: 1.75em;
+  --inline-title-weight: 700;
+  --inline-title-family: var(--font-display);
+  --inline-title-color: var(--text-primary);
+  --inline-title-placeholder: var(--text-tertiary);
+  /* Title → properties/body. */
+  --inline-title-gap: var(--sp-4);
+
   /* Height to keep clear at the very top of the window for system window
      controls. Zero everywhere the OS still draws its own title bar above the
      webview; only macOS runs `titleBarStyle: "Overlay"`, where the webview owns

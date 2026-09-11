@@ -5,6 +5,7 @@
 // the account across devices; see `ApiClient.updateUser`.
 
 import type { ServerChoice } from "./auth/serverChoice";
+import type { PropertiesMode } from "./editor/frontmatter";
 import type { TreeSort } from "./tree/sort";
 
 export type ActivityStatus = "online" | "away" | "busy" | "invisible";
@@ -124,6 +125,43 @@ export function writeTreeSort(sort: TreeSort): void {
     /* localStorage unavailable — the sort stays in-memory only */
   }
 }
+
+// ---- Properties in document -------------------------------------------------
+
+const PROPERTIES_MODE_KEY = "context.propertiesMode";
+
+/**
+ * How YAML frontmatter is drawn in the editor: as a Properties panel, as plain
+ * source, or not at all. Device-local like the theme — it describes how the
+ * editor draws, not what a vault contains, so it must not flip as you switch
+ * vaults. Defaults to the panel, which is the point of the feature.
+ */
+export function readPropertiesMode(): PropertiesMode {
+  try {
+    const v = localStorage.getItem(PROPERTIES_MODE_KEY);
+    return v === "visible" || v === "hidden" || v === "source" ? v : "visible";
+  } catch {
+    return "visible";
+  }
+}
+
+export function writePropertiesMode(mode: PropertiesMode): void {
+  try {
+    localStorage.setItem(PROPERTIES_MODE_KEY, mode);
+  } catch {
+    /* localStorage unavailable — the choice stays in-memory only */
+  }
+}
+
+export const PROPERTIES_MODES: ReadonlyArray<{
+  id: PropertiesMode;
+  label: string;
+  hint: string;
+}> = [
+  { id: "visible", label: "Visible", hint: "Shown as a panel above the note" },
+  { id: "hidden", label: "Hidden", hint: "Not shown; still in the file" },
+  { id: "source", label: "Source", hint: "Shown as plain YAML" },
+];
 
 // ---- Sidebar width ----------------------------------------------------------
 

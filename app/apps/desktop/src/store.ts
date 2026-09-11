@@ -48,11 +48,14 @@ import {
   type ActivityStatus,
   readActivityStatus,
   readMentionSound,
+  readPropertiesMode,
   readTreeSort,
   writeActivityStatus,
   writeMentionSound,
+  writePropertiesMode,
   writeTreeSort,
 } from "./lib/prefs";
+import type { PropertiesMode } from "./lib/editor/frontmatter";
 import type { TreeSort } from "./lib/tree/sort";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
@@ -173,6 +176,14 @@ interface AppStore {
    * taken. Resolves to the path actually used, or null if none was free.
    */
   renameNoteFile: (oldPath: string, newPath: string) => Promise<string | null>;
+  /**
+   * The same rename WITHOUT the dedup loop: the caller's name is used or the
+   * call throws. That is the right shape for a name a person just typed — the
+   * inline title reports "a note called X already exists" and keeps focus,
+   * where silently landing them on `X 1` would be a lie. `renameNoteFile` is
+   * this plus the dedup, so there is one rename implementation, not two.
+   */
+  renameNoteFileExact: (oldPath: string, newPath: string) => Promise<boolean>;
   backlinks: ipc.Backlink[];
   titles: ipc.NoteTitle[];
 
@@ -357,6 +368,9 @@ interface AppStore {
   activityStatus: ActivityStatus;
   /** Whether the mention chime plays when someone pings you. */
   mentionSound: boolean;
+  /** How the editor draws YAML frontmatter: a Properties panel, nothing, or
+   *  plain source. Device-local (Settings → Appearance), not per-vault. */
+  propertiesMode: PropertiesMode;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
    *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
   treeSort: TreeSort;
@@ -406,8 +420,9 @@ interface AppStore {
   createNoteAt: (dir: string, name: string) => Promise<string | null>;
   /**
    * `createNoteAt` with the sidebar's `Untitled` / `Untitled N` search, plus
-   * inline rename armed on the new row. New notes are created EMPTY (Rust
-   * `create_note`), so the sidebar's rename box is how they get named.
+   * the cursor waiting in the new note's inline title. New notes are created
+   * EMPTY (Rust `create_note`), and their name IS their title, so that is
+   * where naming happens.
    */
   createNoteIn: (dir: string) => Promise<string | null>;
   /**
@@ -419,6 +434,18 @@ interface AppStore {
    */
   revealRequest: { path: string; edit: boolean; token: number } | null;
   requestReveal: (path: string, opts?: { edit?: boolean }) => void;
+  /**
+   * "The next time this note's editor mounts, put the cursor in its inline
+   * title." Set by `createNoteIn`, consumed once by `InlineTitle` on mount.
+   *
+   * A new note is created EMPTY and its name IS its title, so the naming
+   * affordance is the title at the top of the note — not the sidebar's rename
+   * box, which is where it lived until the title existed. A flag rather than a
+   * direct call because the widget mounts several awaits after the create
+   * (bridge open → sync open → `new EditorView`).
+   */
+  pendingTitleFocus: string | null;
+  setPendingTitleFocus: (path: string | null) => void;
   /** The path the sidebar just revealed, for a one-shot highlight pulse.
    *  Cleared by a timer in the FileTree; read per-row as a BOOLEAN so a pulse on
    *  one row does not re-render the other 6,000. */
@@ -474,6 +501,7 @@ interface AppStore {
   updateProfile: (input: { name?: string; image?: string | null }) => Promise<void>;
   setActivityStatus: (status: ActivityStatus) => void;
   setMentionSound: (enabled: boolean) => void;
+  setPropertiesMode: (mode: PropertiesMode) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
   /** Stop broadcasting and release the mic (button released). */
@@ -1161,9 +1189,9 @@ function rootCreateBlocked(get: () => AppStore, dir: string): boolean {
 
 /**
  * Everything a freshly created note needs after its file exists: the tree and
- * title list catch up, the note opens, and its row is revealed (in the sidebar's
- * rename box when the name was auto-picked, since a new note is EMPTY and that
- * box is the only way to name it).
+ * title list catch up, the note opens, and its row is revealed — with the
+ * cursor waiting in the note's inline title when the name was auto-picked,
+ * since a new note is EMPTY and its name is the first thing to type.
  *
  * Kept out of `createNoteAt` so `createNoteIn`'s name search can retry the
  * *create* alone: if a failure in here counted as "name taken", the retry would
@@ -1177,9 +1205,11 @@ async function finishNoteCreate(
   await get().refreshTree();
   await get().refreshTitles();
   await get().openNoteByPath(path);
-  // `openNoteByPath` already requested a plain reveal; re-request with `edit` so
-  // the row lands in its rename box.
-  if (opts?.edit) get().requestReveal(path, { edit: true });
+  // The new note's name is typed into its INLINE TITLE, not the sidebar's
+  // rename box: a note created empty shows its filename at the top of itself,
+  // and that is where the cursor belongs. `openNoteByPath` already revealed the
+  // row; it just does not go into edit mode any more.
+  if (opts?.edit) get().setPendingTitleFocus(path);
   return path;
 }
 
@@ -1302,6 +1332,8 @@ export const useStore = create<AppStore>((set, get) => ({
   myBilling: null,
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
+  propertiesMode: readPropertiesMode(),
+  pendingTitleFocus: null,
   treeSort: readTreeSort(),
   memberJoined: null,
 
@@ -1702,6 +1734,8 @@ export const useStore = create<AppStore>((set, get) => ({
     return null;
   },
 
+  setPendingTitleFocus: (path) => set({ pendingTitleFocus: path }),
+
   requestReveal: (path, opts) => {
     set((s) => ({
       revealRequest: {
@@ -1909,19 +1943,28 @@ export const useStore = create<AppStore>((set, get) => ({
       target = `${base} ${i}${ext}`;
     }
     if (await ipc.noteExists(target, epoch)) return null;
+    const ok = await get().renameNoteFileExact(oldPath, target);
+    return ok ? target : null;
+  },
+
+  renameNoteFileExact: async (oldPath, newPath) => {
+    if (oldPath === newPath) return true;
+    const epoch = get().vault?.epoch;
     // Epoch-pinned: this spans awaits, so a vault switch mid-rename must be
     // refused by Rust rather than applied to the other vault.
-    await ipc.renamePath(oldPath, target, epoch);
+    await ipc.renamePath(oldPath, newPath, epoch);
+    // The registry rename is what keeps `doc_id` stable across the move.
+    // Skipping it forks the note into a second server-side note at the new path.
     try {
-      await syncManager.registry.renamePath(oldPath, target);
+      await syncManager.registry.renamePath(oldPath, newPath);
     } catch (e) {
       console.warn("[sync] renamePath failed", oldPath, e);
     }
-    get().setItemOrder(renameInOrder(get().itemOrder, oldPath, target));
-    get().followNoteRename(oldPath, target);
+    get().setItemOrder(renameInOrder(get().itemOrder, oldPath, newPath));
+    get().followNoteRename(oldPath, newPath);
     await get().refreshTree();
     await get().refreshTitles();
-    return target;
+    return true;
   },
 
   followNoteRename: (from, to) => {
@@ -2355,6 +2398,11 @@ export const useStore = create<AppStore>((set, get) => ({
   setMentionSound: (enabled) => {
     writeMentionSound(enabled);
     set({ mentionSound: enabled });
+  },
+
+  setPropertiesMode: (mode) => {
+    writePropertiesMode(mode);
+    set({ propertiesMode: mode });
   },
 
   startBroadcast: async () => {

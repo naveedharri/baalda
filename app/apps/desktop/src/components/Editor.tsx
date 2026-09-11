@@ -7,6 +7,8 @@ import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { remoteCursors } from "../lib/editor/remoteCursors";
 import type { Awareness } from "y-protocols/awareness";
 import { createEditorState } from "../lib/editor";
+import { propertiesMode as propertiesModeFacet } from "../lib/editor/frontmatter";
+import { loadTypes } from "../lib/frontmatter/types";
 import { setActiveNote } from "../lib/editor/activeView";
 import { bindActiveNote } from "../lib/editor/activeNoteBinding";
 import { saveAttachment } from "../lib/attachments";
@@ -351,6 +353,10 @@ export function Editor() {
   // the rollback above: a live mid-session lock must never undo edits the
   // server already accepted.
   const hadEditAccessRef = useRef(false);
+  // The Properties display mode, in a Compartment so the Settings row
+  // reconfigures the live view instead of rebuilding it (like `editable`).
+  const propsModeRef = useRef<Compartment | null>(null);
+  const propertiesMode = useStore((s) => s.propertiesMode);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
@@ -486,10 +492,53 @@ export function Editor() {
       setReadOnly(ro);
       const editable = new Compartment();
       editableRef.current = editable;
+      const propsMode = new Compartment();
+      propsModeRef.current = propsMode;
+      // Vault-wide inputs for the Properties panel. Loaded in the background:
+      // the panel renders from inferred types until they arrive.
+      const epoch = useStore.getState().vault?.epoch;
+      void loadTypes(epoch);
+      let propertyKeys: string[] = [];
+      const propertyValues = new Map<string, string[]>();
+      void ipc
+        .listPropertyKeys(epoch)
+        .then((rows) => {
+          propertyKeys = rows.map((r) => r.key);
+        })
+        .catch(() => {});
 
       const state = createEditorState({
         doc: bridge.text.toString(),
         collab: true,
+        header: {
+          path: notePath,
+          mode: useStore.getState().propertiesMode,
+          modeCompartment: propsMode,
+          // The inline title commits a RENAME, never a CRDT edit. `Exact`, not
+          // `renameNoteFile`: a name a person just typed must be refused on a
+          // collision, not silently turned into "Name 1".
+          renameTo: async (nextPath) => {
+            try {
+              await useStore.getState().renameNoteFileExact(notePath, nextPath);
+              return null;
+            } catch (e) {
+              console.error("rename from inline title failed", e);
+              return "That name couldn't be saved.";
+            }
+          },
+          noteExists: (p) => ipc.noteExists(p, useStore.getState().vault?.epoch),
+          getPropertyKeys: () => propertyKeys,
+          getPropertyValues: (key) => {
+            const cached = propertyValues.get(key);
+            if (cached) return cached;
+            propertyValues.set(key, []);
+            void ipc
+              .listPropertyValues(key, useStore.getState().vault?.epoch)
+              .then((values) => propertyValues.set(key, values))
+              .catch(() => {});
+            return [];
+          },
+        },
         getTitles: () => useStore.getState().titles,
         onNavigate: (t) => void navigate(t),
         resolveAsset: makeResolveAsset(
@@ -515,11 +564,15 @@ export function Editor() {
         ],
       });
 
+      // A note created by ⌘N / the sidebar's + wants the cursor in its TITLE,
+      // not the body — read before the view exists, because the title widget
+      // consumes the flag as it mounts inside the constructor below.
+      const titleWantsFocus = useStore.getState().pendingTitleFocus === notePath;
       view = new EditorView({ state, parent: hostRef.current });
       viewRef.current = view;
       setViewMounted(true);
       setActiveNote(bindActiveNote(view)); // let out-of-tree drops embed into this note
-      if (!ro) view.focus();
+      if (!ro && !titleWantsFocus) view.focus();
 
       // Live "who's here" avatar row + incoming pings addressed to this user.
       onAwarenessChange = () => {
@@ -551,6 +604,7 @@ export function Editor() {
       if (view) view.destroy();
       viewRef.current = null;
       editableRef.current = null;
+      propsModeRef.current = null;
       bridgeRef.current = null;
       hadEditAccessRef.current = false;
       awarenessRef.current = null;
@@ -590,6 +644,16 @@ export function Editor() {
       setReadOnly(false);
     }
   }, [syncStatus]);
+
+  // Push the Properties display mode into the live view when it changes.
+  useEffect(() => {
+    const view = viewRef.current;
+    const compartment = propsModeRef.current;
+    if (!view || !compartment) return;
+    view.dispatch({
+      effects: compartment.reconfigure(propertiesModeFacet.of(propertiesMode)),
+    });
+  }, [propertiesMode]);
 
   // Push the current read-only state into the live CodeMirror view.
   useEffect(() => {
