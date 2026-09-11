@@ -13,10 +13,18 @@
  * an H1); Stage 2's inline title commits a rename through it.
  */
 
-/** Characters no filesystem we ship on accepts in a name (plus control chars). */
+/**
+ * Characters no filesystem we ship on accepts in a name (plus control chars).
+ * Exported because the inline title REFUSES them where `sanitizeFileStem`
+ * strips them — same set, two policies (see `lib/editor/titlePlan.ts`).
+ * It is a `g` regex, so callers that only test must reset `lastIndex` (or build
+ * their own from `.source`).
+ */
 // eslint-disable-next-line no-control-regex
-const UNSAFE = /[\\/:*?"<>|\x00-\x1f]/g;
-const MAX_STEM = 100;
+export const UNSAFE_STEM = /[\\/:*?"<>|\x00-\x1f]/g;
+const UNSAFE = UNSAFE_STEM;
+/** Longest name we will write. Filesystems allow more; this is a sanity cap. */
+export const MAX_STEM = 100;
 
 /** The extensions a note-shaped file hides in the UI. */
 const NOTE_EXT = /\.(md|html?)$/i;

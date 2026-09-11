@@ -50,6 +50,8 @@ export function MenuSelect<T extends string>({
   ariaLabel,
   triggerClassName,
   menuClassName,
+  triggerContent,
+  caret = true,
 }: {
   value: T;
   options: ReadonlyArray<MenuSelectOption<T>>;
@@ -59,6 +61,14 @@ export function MenuSelect<T extends string>({
   /** Trigger styling — the caller decides whether it's a field or a pill. */
   triggerClassName: string;
   menuClassName?: string;
+  /**
+   * Replace the trigger's label with something else (the Properties panel puts
+   * the type's icon there). The menu itself is unchanged, so this stays one
+   * control rather than becoming two that drift.
+   */
+  triggerContent?: React.ReactNode;
+  /** Icon triggers have no room for the caret. */
+  caret?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<Placement | null>(null);
@@ -138,10 +148,14 @@ export function MenuSelect<T extends string>({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="role-trigger-label">{current?.label ?? value}</span>
-        <span className="role-caret" aria-hidden="true">
-          ▾
-        </span>
+        {triggerContent ?? (
+          <span className="role-trigger-label">{current?.label ?? value}</span>
+        )}
+        {caret && (
+          <span className="role-caret" aria-hidden="true">
+            ▾
+          </span>
+        )}
       </button>
       {open &&
         createPortal(

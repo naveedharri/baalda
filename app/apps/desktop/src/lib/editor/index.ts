@@ -21,6 +21,7 @@ import { formattingKeymap } from "./formatting";
 import { frontmatterDecorations } from "./frontmatter";
 import { listKeymap } from "./lists";
 import { livePreview } from "./livePreview";
+import { noteHeader, type NoteHeaderOptions } from "./noteHeader";
 import { smartPaste, type SaveAttachment } from "./paste";
 import { tripleClickLine } from "./selection";
 import { slashCompletions } from "./slash";
@@ -53,6 +54,12 @@ export interface CreateEditorOptions {
    * `history()` + its keymap and the buffer `onChange` listener (spec 03 §5).
    */
   collab?: boolean;
+  /**
+   * The inline title + Properties panel above the body. Omitted for editors
+   * with no note behind them — the version-preview view and the tests — which
+   * then keep the plain dimmed frontmatter block.
+   */
+  header?: NoteHeaderOptions;
 }
 
 export function baseExtensions(opts: CreateEditorOptions): Extension[] {
@@ -98,6 +105,9 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     // Frontmatter first: blocks.ts and livePreview.ts both read its range so
     // nothing else decorates inside it (see lib/editor/frontmatter.ts).
     frontmatterDecorations,
+    // The inline title and the Properties panel. After frontmatterDecorations,
+    // which yields the region to it (one authority: `frontmatterView`).
+    ...(opts.header ? [noteHeader(opts.header)] : []),
     blockDecorations,
     // Live-preview inline rendering: hide markers off the active line, render
     // bullets/links/images/tables, and preview embedded HTML blocks (never run).

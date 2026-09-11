@@ -321,6 +321,184 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     color: "var(--text-tertiary)",
   },
 
+  // ---- The note header: inline title + Properties panel -------------------
+  //
+  // Both are block widgets inside `.cm-content`, so they are siblings of
+  // `.cm-line` and get the prose column's left edge from `cm-block-inset`
+  // (see noteHeader.ts). The title's left edge being pixel-identical to the
+  // body's is the single most visible way to get this feature wrong.
+  ".cm-note-title": {
+    marginBottom: "var(--inline-title-gap)",
+  },
+  ".inline-title-wrap": {
+    display: "flex",
+    flexDirection: "column",
+    gap: "var(--sp-1)",
+  },
+  // A real <input>, not a contenteditable: typing into one emits no
+  // MutationRecord, so CodeMirror's DOMObserver never flushes the widget out
+  // from under the caret. Styled to be indistinguishable from an H1.
+  ".inline-title-input": {
+    width: "100%",
+    border: "0",
+    outline: "none",
+    padding: "0",
+    background: "transparent",
+    fontFamily: "var(--inline-title-family)",
+    fontSize: "var(--inline-title-size)",
+    fontWeight: "var(--inline-title-weight)",
+    lineHeight: "var(--lh-tight)",
+    color: "var(--inline-title-color)",
+  },
+  ".inline-title-input::placeholder": {
+    color: "var(--inline-title-placeholder)",
+  },
+  ".inline-title-warning": {
+    margin: "0",
+    fontSize: "var(--fs-sm)",
+    color: "var(--danger)",
+  },
+  ".inline-title-add": {
+    alignSelf: "flex-start",
+    border: "0",
+    background: "transparent",
+    padding: "0",
+    cursor: "pointer",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-tertiary)",
+    opacity: "0",
+    transition: "opacity 120ms ease",
+  },
+  // A note with no properties shows no chrome until you reach for it.
+  ".cm-note-title:hover .inline-title-add, .inline-title-add:focus-visible": {
+    opacity: "1",
+  },
+
+  ".cm-note-properties": {
+    marginBottom: "var(--sp-4)",
+    paddingBottom: "var(--sp-3)",
+    borderBottom: "1px solid var(--border)",
+  },
+  ".prop-row": {
+    display: "flex",
+    alignItems: "center",
+    gap: "var(--sp-2)",
+    minHeight: "28px",
+  },
+  ".prop-type-trigger": {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "24px",
+    height: "24px",
+    flex: "0 0 auto",
+    border: "0",
+    borderRadius: "var(--radius-sm)",
+    background: "transparent",
+    color: "var(--text-tertiary)",
+    cursor: "pointer",
+  },
+  ".prop-type-trigger:hover:not(:disabled)": {
+    backgroundColor: "var(--bg-subtle)",
+    color: "var(--text-secondary)",
+  },
+  ".prop-name": {
+    flex: "0 0 auto",
+    width: "9rem",
+    border: "0",
+    outline: "none",
+    background: "transparent",
+    padding: "var(--sp-1)",
+    borderRadius: "var(--radius-sm)",
+    fontFamily: "var(--font-body)",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-secondary)",
+  },
+  ".prop-value": {
+    flex: "1 1 auto",
+    minWidth: "0",
+  },
+  ".prop-input, .prop-chip-input": {
+    width: "100%",
+    border: "0",
+    outline: "none",
+    background: "transparent",
+    padding: "var(--sp-1)",
+    borderRadius: "var(--radius-sm)",
+    fontFamily: "var(--font-body)",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-primary)",
+  },
+  ".prop-name:hover:not(:read-only), .prop-input:hover:not(:read-only)": {
+    backgroundColor: "var(--bg-subtle)",
+  },
+  ".prop-name:focus, .prop-input:focus, .prop-chip-input:focus": {
+    backgroundColor: "var(--bg-subtle)",
+  },
+  ".prop-chips": {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: "var(--sp-1)",
+  },
+  ".prop-chip": {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "var(--sp-1)",
+    padding: "1px var(--sp-2)",
+    borderRadius: "var(--radius-sm)",
+    backgroundColor: "var(--accent-soft)",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-primary)",
+  },
+  ".prop-chip button": {
+    border: "0",
+    background: "transparent",
+    padding: "0",
+    cursor: "pointer",
+    color: "var(--text-tertiary)",
+    lineHeight: "1",
+  },
+  ".prop-chip-input": { width: "6rem", flex: "1 1 6rem" },
+  ".prop-remove": {
+    flex: "0 0 auto",
+    border: "0",
+    background: "transparent",
+    cursor: "pointer",
+    color: "var(--text-tertiary)",
+    opacity: "0",
+    padding: "0 var(--sp-1)",
+  },
+  ".prop-row:hover .prop-remove, .prop-remove:focus-visible": { opacity: "1" },
+  ".prop-note": {
+    margin: "0",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-tertiary)",
+  },
+  ".prop-add": {
+    border: "0",
+    background: "transparent",
+    padding: "var(--sp-1)",
+    cursor: "pointer",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-tertiary)",
+  },
+  ".prop-add:hover": { color: "var(--text-secondary)" },
+
+  // YAML we refuse to rewrite: a banner, and the source left editable beneath.
+  ".cm-fm-banner": {
+    marginBottom: "var(--sp-2)",
+    padding: "var(--sp-2) var(--sp-3)",
+    borderRadius: "var(--radius-sm)",
+    backgroundColor: "var(--bg-subtle)",
+    fontSize: "var(--fs-sm)",
+    color: "var(--text-secondary)",
+  },
+  ".cm-fm-invalid": {
+    backgroundColor: "var(--bg-subtle)",
+    backgroundClip: "content-box",
+  },
+
   // Autocomplete: a floating surface card with an accent-soft active row.
   ".cm-tooltip": {
     border: "none",

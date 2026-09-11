@@ -26,11 +26,13 @@
 import {
   type EditorState,
   type Extension,
+  Facet,
   type Range,
   StateField,
   type Text,
 } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
+import { parseFrontmatter } from "../frontmatter/parse";
 
 export interface FrontmatterRange {
   /** Start of the opening fence line (always 0). */
@@ -41,6 +43,67 @@ export interface FrontmatterRange {
   openLine: number;
   /** 1-based line number of the closing fence. */
   closeLine: number;
+  /** First char of the YAML body (after the opening fence's newline). Equals
+   *  `contentTo` for an empty `---\n---` block. */
+  contentFrom: number;
+  /** Last char of the YAML body (before the closing fence's newline). */
+  contentTo: number;
+}
+
+/**
+ * How the frontmatter is drawn — the "Properties in document" setting.
+ *
+ * Defaults to `source` so that an editor built without the note header (the
+ * version-preview view, the geometry tests) keeps Stage 1's dimmed block. The
+ * real value is supplied by `noteHeader`, through a Compartment so the setting
+ * reconfigures the live view instead of rebuilding it.
+ */
+export type PropertiesMode = "visible" | "hidden" | "source";
+
+export const propertiesMode = Facet.define<PropertiesMode, PropertiesMode>({
+  combine: (values) => values[0] ?? "source",
+});
+
+/**
+ * Which of the three renderings the region gets right now. ONE authority, so
+ * the panel's block replace and this module's dimmed block can never both be
+ * emitted over the same lines (two block replaces on one range throw).
+ *
+ * `source` wins whenever the caret is inside the region — the code-fence rule,
+ * reused: a peer's cursor landing in the frontmatter, or a search hit there,
+ * must show real YAML rather than a panel that is silently read-only. It also
+ * wins when the YAML is outside the subset we can edit, because a panel we
+ * cannot round-trip would be a panel that rewrites someone's file.
+ */
+export type FrontmatterView = "source" | "panel" | "collapsed" | "invalid";
+
+export function frontmatterView(state: EditorState): FrontmatterView {
+  const fm = state.field(frontmatterField, false) ?? null;
+  if (!fm) return "source";
+  const mode = state.facet(propertiesMode);
+  if (mode === "source") return "source";
+  if (selectionInside(state.selection.ranges, fm)) return "source";
+  if (!parseFrontmatter(state.doc, fm).ok) return "invalid";
+  return mode === "hidden" ? "collapsed" : "panel";
+}
+
+/**
+ * Is a cursor really INSIDE the region, rather than parked at its edge?
+ *
+ * Strict containment, unlike the fence-hiding rule below. A fresh view's
+ * selection sits at position 0 — the start of the opening fence — so an
+ * inclusive test would drop every note with frontmatter into source mode the
+ * moment it opened, which is the opposite of the feature. `fm.to` is excluded
+ * at the other end for the same reason: ↑ from the first body line lands there.
+ * What this DOES catch is the case the rule exists for — a search hit, a
+ * teammate's cursor, or a caret mapped in by a change — where a panel that is
+ * silently read-only would be a lie.
+ */
+function selectionInside(
+  ranges: readonly { from: number; to: number }[],
+  fm: FrontmatterRange,
+): boolean {
+  return ranges.some((r) => r.from > fm.from && r.to < fm.to);
 }
 
 /** A fence line is exactly `---`, ignoring the CR of a CRLF document. */
@@ -58,7 +121,16 @@ export function findFrontmatter(doc: Text): FrontmatterRange | null {
   for (let n = 2; n <= doc.lines; n++) {
     const line = doc.line(n);
     if (isFence(line.text)) {
-      return { from: 0, to: line.to, openLine: 1, closeLine: n };
+      return {
+        from: 0,
+        to: line.to,
+        openLine: 1,
+        closeLine: n,
+        contentFrom: doc.line(2).from,
+        // An empty block (`---\n---`) has no content lines at all, so the span
+        // collapses onto the closing fence's start.
+        contentTo: n === 2 ? line.from : doc.line(n - 1).to,
+      };
     }
   }
   return null;
@@ -75,7 +147,7 @@ export const frontmatterField = StateField.define<FrontmatterRange | null>({
 
 /** True when any selection range touches `[from, to]` — inclusive, so a caret
  *  parked at either edge counts as "being edited". */
-function selectionTouches(
+export function selectionTouches(
   ranges: readonly { from: number; to: number }[],
   from: number,
   to: number
@@ -86,6 +158,13 @@ function selectionTouches(
 function buildFrontmatterDecorations(state: EditorState): DecorationSet {
   const fm = state.field(frontmatterField);
   if (!fm) return Decoration.none;
+  // The Properties panel (and the collapsed mode) own the region instead —
+  // `noteHeader.ts` puts a block replace over exactly these lines, and a second
+  // block replace on the same range throws. `invalid` DOES keep this dimmed
+  // block (under noteHeader's banner), minus the fence hiding below: someone
+  // fixing their YAML by hand needs to see the whole block.
+  const presentation = frontmatterView(state);
+  if (presentation === "panel" || presentation === "collapsed") return Decoration.none;
   const decos: Range<Decoration>[] = [];
   const line = Decoration.line({ class: "cm-frontmatter" });
   const fence = Decoration.line({ class: "cm-frontmatter cm-frontmatter-fence" });
@@ -98,7 +177,11 @@ function buildFrontmatterDecorations(state: EditorState): DecorationSet {
   // matters: both fences hidden on an empty `---\n---` block would leave it
   // invisible and unreachable by caret, so those stay visible.
   const hasContent = fm.closeLine - fm.openLine >= 2;
-  if (hasContent && !selectionTouches(state.selection.ranges, fm.from, fm.to)) {
+  if (
+    hasContent &&
+    presentation !== "invalid" &&
+    !selectionTouches(state.selection.ranges, fm.from, fm.to)
+  ) {
     const collapse = Decoration.replace({ block: true });
     for (const n of [fm.openLine, fm.closeLine]) {
       const l = state.doc.line(n);
@@ -117,7 +200,10 @@ export const frontmatterDecorations: Extension = [
   StateField.define<DecorationSet>({
     create: (state) => buildFrontmatterDecorations(state),
     update: (value, tr) =>
-      tr.docChanged || tr.selection
+      tr.docChanged ||
+      tr.selection ||
+      // The display-mode Compartment reconfiguring is neither of those.
+      tr.startState.facet(propertiesMode) !== tr.state.facet(propertiesMode)
         ? buildFrontmatterDecorations(tr.state)
         : value,
     provide: (f) => EditorView.decorations.from(f),
