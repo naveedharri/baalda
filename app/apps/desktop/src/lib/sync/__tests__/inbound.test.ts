@@ -24,6 +24,12 @@ const empty = {
   folderTombstones: new Set<string>() as Set<string> | null,
   localFolderIds: new Map<string, string>(),
   serverFolderIds: new Map<string, string>(),
+  // Default OFF: every case below that removes anything has to say so
+  // explicitly, so the conservative path stays the one under test by default.
+  authoritative: false,
+  // The docs the server NAMED on `ready.revoked`, when it named any. Undefined
+  // by default, which is the live `reauth` path: authority with no list.
+  authoritativeRevoked: undefined as ReadonlySet<string> | undefined,
 };
 
 function plan(over: Partial<typeof empty>) {
@@ -318,7 +324,9 @@ describe("planInbound — deletes", () => {
       local: new Map([["d1", "bye.md"]]),
       tombstones: new Set(["d1"]),
     });
-    expect(p.trash).toEqual([{ docId: "d1", path: "bye.md", reason: "deleted" }]);
+    expect(p.trash).toEqual([
+      { docId: "d1", path: "bye.md", reason: "deleted", recoverable: true },
+    ]);
     // Suppressed as well, so even if the trash step is skipped the note is not
     // re-registered as an unsyncable ghost.
     expect([...p.suppress]).toEqual(["bye.md"]);
@@ -334,8 +342,12 @@ describe("planInbound — deletes", () => {
       local: new Map([["d1", "shared.md"]]),
       tombstones: new Set(),
     });
-    expect(p.trash).toEqual([{ docId: "d1", path: "shared.md", reason: "revoked" }]);
-    expect([...p.revoked]).toEqual(["d1"]);
+    // Not recoverable: a trash copy would hand the ex-reader back the readable
+    // `.md` the revocation exists to take away. The one exception is a note this
+    // user wrote themselves (`authoredByMe`).
+    expect(p.trash).toEqual([
+      { docId: "d1", path: "shared.md", reason: "revoked", recoverable: false },
+    ]);
     // Suppressed too, so the outbound half can't re-register it on the way out.
     expect([...p.suppress]).toEqual(["shared.md"]);
   });
@@ -350,7 +362,7 @@ describe("planInbound — deletes", () => {
       tombstones: null,
     });
     expect(p.trash).toEqual([]);
-    expect([...p.revoked]).toEqual(["d1"]);
+    // Suppressed, so we stop claiming it, but nothing leaves the disk.
     expect([...p.suppress]).toEqual(["shared.md"]);
   });
 
@@ -363,7 +375,7 @@ describe("planInbound — deletes", () => {
       tombstones: null,
     });
     expect(p.trash).toEqual([]);
-    expect([...p.revoked]).toEqual(["d1"]);
+    expect([...p.suppress]).toEqual(["bye.md"]);
   });
 
   it("ignores a tombstone for a doc we never agreed was ours", () => {
@@ -478,7 +490,9 @@ describe("planInbound — circuit breakers", () => {
     const p = plan({ baseline, local, server, tombstones: new Set(["d0"]) });
 
     // 99 revocations against a cap of 50 → the whole revoked group is refused…
-    expect(p.trash).toEqual([{ docId: "d0", path: "n0.md", reason: "deleted" }]);
+    expect(p.trash).toEqual([
+      { docId: "d0", path: "n0.md", reason: "deleted", recoverable: true },
+    ]);
     expect(p.rejected).toHaveLength(98);
     expect(p.rejected[0].reason).toContain("access removals");
 
@@ -508,6 +522,175 @@ describe("planInbound — circuit breakers", () => {
     const p = plan({ baseline, local, server });
     expect(p.renames).toEqual([]);
     expect(p.rejected).toHaveLength(100);
+  });
+
+  /**
+   * Vault Settings → Access → Entire vault → Private.
+   *
+   * It takes EVERY doc away at once, which is 100% of the mapped set — a shape
+   * the revocation cap can never admit, since its ceiling is 50%. So the setting
+   * that promises "removed from their devices, including the local copies on
+   * disk" removed nothing at all, while the same setting on ONE folder worked,
+   * purely because a folder is a small enough slice to fit under the cap.
+   */
+  describe("a whole-vault revocation", () => {
+    it("goes through on an authoritative pass", () => {
+      const { baseline, local } = manyDocs(100, true);
+      const p = plan({ baseline, local, authoritative: true });
+      expect(p.trash).toHaveLength(100);
+      expect(p.trash.every((t) => t.reason === "revoked")).toBe(true);
+      expect(p.rejected).toEqual([]);
+    });
+
+    it("is refused without that authority", () => {
+      // The session is not live yet (a launch still catching up), so a listing
+      // that names nothing is "not there yet", not "taken away".
+      const { baseline, local } = manyDocs(100, true);
+      const p = plan({ baseline, local });
+      expect(p.trash).toEqual([]);
+      expect(p.rejected).toHaveLength(100);
+      expect(p.rejected[0].reason).toContain("access removals");
+    });
+
+    it("never lifts the DELETION cap, however authoritative the pass", () => {
+      // The revocation cap disbelieves a shrunken listing; the deletion cap
+      // guards work. Only the first has an answer good enough to overrule.
+      const { baseline, local } = manyDocs(100, true);
+      const p = plan({
+        baseline,
+        local,
+        tombstones: new Set([...baseline.keys()]),
+        authoritative: true,
+      });
+      expect(p.trash).toEqual([]);
+      expect(p.rejected).toHaveLength(100);
+      expect(p.rejected[0].reason).toContain("deletions");
+    });
+
+    it("takes the folders with it", () => {
+      // The notes leaving is only half of it: a vault whose folders all stayed
+      // behind is still the vault, in the sidebar, empty.
+      const localFolderIds = new Map<string, string>();
+      const localFolders = new Set<string>();
+      for (let i = 0; i < 100; i++) {
+        localFolderIds.set(`F${i}`, `f${i}`);
+        localFolders.add(`F${i}`);
+      }
+      const p = plan({ localFolderIds, localFolders, authoritative: true });
+      expect(p.removeFolders).toHaveLength(100);
+      expect(p.rejected).toEqual([]);
+
+      const q = plan({ localFolderIds, localFolders });
+      expect(q.removeFolders).toEqual([]);
+      expect(q.rejected).toHaveLength(100);
+    });
+
+    it("removes only the docs the server NAMED, when it named any", () => {
+      // `ready.revoked` names the docs the vault channel says this client holds
+      // and may no longer read. Same resolver as the listing, read at a
+      // different moment over a different transport — so agreeing catches a
+      // transient short answer, not a bug inside the resolver. The answer that
+      // could really disagree is `effectivePermission`, which the EXECUTOR asks
+      // about `plan.needsAccessCheck` before deleting anything.
+      const { baseline, local } = manyDocs(100, true);
+      const named = new Set(Array.from({ length: 60 }, (_, i) => `d${i}`));
+      const p = plan({ baseline, local, authoritative: true, authoritativeRevoked: named });
+      // Everything goes: the 60 named ones are exempt from the cap, and the 40
+      // left over are under it (revokeCap(100) = 50), which is the shape a real
+      // revocation has — a small residue of docs this device holds no CRDT for.
+      expect(p.trash).toHaveLength(100);
+      expect(p.rejected).toEqual([]);
+    });
+
+    it("flags the lifted removals for the executor's second opinion", () => {
+      // Nothing the lift saves is final. The ids ride out on the plan so the
+      // executor can resolve them against `effectivePermission` — a different
+      // query — before a single file is deleted.
+      const { baseline, local } = manyDocs(100, true);
+      const p = plan({ baseline, local, authoritative: true });
+      expect(p.needsAccessCheck.sort()).toEqual(p.trash.map((t) => t.docId).sort());
+
+      // A revocation small enough to fit under the cap needs no lift, so it
+      // needs no round trip either.
+      const small = manyDocs(10, true);
+      const q = plan({ baseline: small.baseline, local: small.local, authoritative: true });
+      expect(q.trash).toHaveLength(10);
+      expect(q.needsAccessCheck).toEqual([]);
+    });
+
+    it("still demands a second opinion when the unnamed half is refused", () => {
+      // The hole R2 found. 45 named of 100 mapped, 55 unnamed: the unnamed group
+      // blows its own cap and is struck, and the 45 survivors then LOOK small
+      // enough to need no corroboration — even though the lift is the only
+      // reason they are still in the plan. Measuring the group as it stood
+      // BEFORE the refusal is what closes it.
+      const { baseline, local } = manyDocs(100, true);
+      const named = new Set(Array.from({ length: 45 }, (_, i) => `d${i}`));
+      const p = plan({ baseline, local, authoritative: true, authoritativeRevoked: named });
+      expect(p.trash).toHaveLength(45);
+      expect(p.rejected).toHaveLength(55);
+      expect(p.needsAccessCheck.sort()).toEqual([...named].sort());
+    });
+
+    it("keeps the cap over docs the server did NOT name", () => {
+      // The listing says all 100 are gone; the channel corroborated only 10. The
+      // other 90 are one server's word alone, and 90 > revokeCap(100) = 50.
+      const { baseline, local } = manyDocs(100, true);
+      const named = new Set(Array.from({ length: 10 }, (_, i) => `d${i}`));
+      const p = plan({ baseline, local, authoritative: true, authoritativeRevoked: named });
+      expect(p.trash.map((t) => t.docId).sort()).toEqual([...named].sort());
+      expect(p.rejected).toHaveLength(90);
+      expect(p.rejected[0].reason).toContain("access removals");
+      // The named ones are taken out BEFORE the rest are measured, so they can
+      // never push the residue over its own limit.
+      expect(p.rejected.every((r) => !named.has(r.docId ?? ""))).toBe(true);
+    });
+
+    it("lifts the cap wholesale when the authority named nothing", () => {
+      // The live `acl-changed` -> `reauth` path carries no list. Unchanged
+      // behaviour: authority alone is enough.
+      const { baseline, local } = manyDocs(100, true);
+      const p = plan({ baseline, local, authoritative: true, authoritativeRevoked: undefined });
+      expect(p.trash).toHaveLength(100);
+      expect(p.rejected).toEqual([]);
+    });
+
+    it("ignores a named set on a pass with no authority at all", () => {
+      // A list without the live+announced gate behind it is not a licence.
+      const { baseline, local } = manyDocs(100, true);
+      const named = new Set(Array.from({ length: 100 }, (_, i) => `d${i}`));
+      const p = plan({ baseline, local, authoritativeRevoked: named });
+      expect(p.trash).toEqual([]);
+      expect(p.rejected).toHaveLength(100);
+    });
+
+    it("named revocations never buy a deletion past its cap", () => {
+      // Same ids, but the server TOMBSTONED them: a different category with a
+      // different cap, and this list exempts nothing there.
+      const { baseline, local } = manyDocs(100, true);
+      const named = new Set(Array.from({ length: 100 }, (_, i) => `d${i}`));
+      const p = plan({
+        baseline,
+        local,
+        tombstones: new Set([...baseline.keys()]),
+        authoritative: true,
+        authoritativeRevoked: named,
+      });
+      expect(p.trash).toEqual([]);
+      expect(p.rejected).toHaveLength(100);
+      expect(p.rejected[0].reason).toContain("deletions");
+    });
+
+    it("still refuses when the server did not answer about deletions", () => {
+      // `authoritative` says the session is live and the listings are complete.
+      // It says nothing about a server that cannot report tombstones at all, and
+      // absence from a listing is uninformative until one of them does.
+      const { baseline, local } = manyDocs(100, true);
+      const p = plan({ baseline, local, tombstones: null, authoritative: true });
+      expect(p.trash).toEqual([]);
+      expect(p.suppress.size).toBe(100);
+      expect(p.rejected).toEqual([]);
+    });
   });
 });
 

@@ -3,6 +3,10 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { effectivePermission } from "../src/permissions/resolver.js";
+import {
+  listReadableDocsInVault,
+  listVisibleFolders,
+} from "../src/permissions/vault-docs.js";
 import { resetDb } from "./helpers/db.js";
 import { recordingAppDeps } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
@@ -613,5 +617,305 @@ describe("team-access — live socket kicks", () => {
       disconnectedDocs: 2,
     });
     expect(rec.disconnected).toHaveLength(2);
+  });
+});
+
+/**
+ * What a plain MEMBER can still read after the vault is set to Private.
+ *
+ * The desktop removes a note from disk when it leaves the member's readable
+ * set, so "Entire vault → Private" only reaches their disk if the three server
+ * surfaces the reconciler consults all agree the set is empty: the resolver's
+ * readable-doc set (the vault channel), the visible-folder set, and the
+ * ACL-filtered registry listings the pull reads. They are three different
+ * queries over the same algebra, so each is asserted separately.
+ */
+describe("team-access — a member's readable set after Private", () => {
+  let owner: TestUser;
+  let member: TestUser;
+  let orgId: string;
+  let vault: string;
+  let rootNote: string;
+  let folder: string;
+  let folderNote: string;
+  let ownNote: string;
+
+  beforeEach(async () => {
+    await resetDb();
+    rec.reset();
+    owner = await signUp("owner@private-removal.test");
+    orgId = (await createOrg(owner, "Private Removal Co", "private-removal-co")).id;
+    member = await signUp("member@private-removal.test");
+    await seedMember(orgId, member.userId, "member");
+
+    vault = await seedVault(orgId, "V");
+    rootNote = await seedNote(vault, null, "Root.md", owner.userId);
+    folder = await seedFolder(vault, null, "Docs", "Docs");
+    folderNote = await seedNote(vault, folder, "Docs/D.md", owner.userId);
+    // The member's OWN note: authorship keeps it, by design.
+    ownNote = await seedNote(vault, null, "Mine.md", member.userId);
+
+    // Start from a shared vault, the state a team is normally in.
+    await seedVaultGrant(orgId, "edit");
+  });
+
+  it("shared → the member reads every doc and sees every folder", async () => {
+    expect(await listReadableDocsInVault(member.userId, vault)).toEqual(
+      new Set([rootNote, folderNote, ownNote]),
+    );
+    expect((await listVisibleFolders(member.userId, vault)).map((f) => f.path)).toEqual(["Docs"]);
+  });
+
+  it("private empties the member's readable set, folders and registry listings", async () => {
+    const res = await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(res.status).toBe(200);
+
+    // 1. The resolver's set-based dual (the vault channel's authority).
+    expect(await listReadableDocsInVault(member.userId, vault)).toEqual(new Set([ownNote]));
+    // Per-doc agreement with the canonical resolver.
+    expect(await effectivePermission(member.userId, rootNote)).toBe("none");
+    expect(await effectivePermission(member.userId, folderNote)).toBe("none");
+    expect(await effectivePermission(member.userId, ownNote)).toBe("edit");
+
+    // 2. The folder set: nothing the owner made is visible any more.
+    expect(await listVisibleFolders(member.userId, vault)).toEqual([]);
+
+    // 3. What the desktop's registry pull actually reads. Both listings must
+    //    still answer 200 with a complete, empty-but-for-mine body — a 403 here
+    //    would abort the pull and leave the files on disk forever.
+    const notes = await get(member, `/api/notes?vaultId=${vault}`);
+    expect(notes.status).toBe(200);
+    const noteBody = (await notes.json()) as {
+      notes: Array<{ id: string }>;
+      tombstones: string[];
+    };
+    expect(noteBody.notes.map((n) => n.id)).toEqual([ownNote]);
+    // Answered, not withheld: `null` tombstones means "I don't know" to the
+    // client and stops it removing anything at all.
+    expect(Array.isArray(noteBody.tombstones)).toBe(true);
+
+    const folders = await get(member, `/api/folders?vaultId=${vault}`);
+    expect(folders.status).toBe(200);
+    const folderBody = (await folders.json()) as {
+      folders: Array<{ id: string }>;
+      tombstones: string[];
+    };
+    expect(folderBody.folders).toEqual([]);
+    expect(Array.isArray(folderBody.tombstones)).toBe(true);
+  });
+
+  it("the owner keeps everything", async () => {
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(await listReadableDocsInVault(owner.userId, vault)).toEqual(
+      new Set([rootNote, folderNote, ownNote]),
+    );
+    expect((await listVisibleFolders(owner.userId, vault)).map((f) => f.path)).toEqual(["Docs"]);
+  });
+
+  it("per-item Private on one folder revokes only that folder — the path that already worked", async () => {
+    const res = await app.fetch(
+      new Request("http://local/api/shares", {
+        method: "POST",
+        headers: authHeaders(owner),
+        body: JSON.stringify({
+          resourceType: "folder",
+          resourceId: folder,
+          principalType: "org",
+          principalId: orgId,
+          permission: "denied",
+        }),
+      }),
+    );
+    expect(res.status).toBeLessThan(300);
+    expect(await listReadableDocsInVault(member.userId, vault)).toEqual(
+      new Set([rootNote, ownNote]),
+    );
+    expect(await listVisibleFolders(member.userId, vault)).toEqual([]);
+  });
+});
+
+/**
+ * The lock overlay a read-only vault publishes.
+ *
+ * Read-only for the whole vault is stored as ONE `view` grant on the vault
+ * resource, not as locks on the items — but to the person reading the sidebar
+ * it is a lock on every folder and note, so `GET /vaults/:id/locks` reports it
+ * as a synthetic `resource_type: 'vault'` row with `permission: 'locked'`.
+ */
+describe("team-access — the vault posture in the lock overlay", () => {
+  interface LockRow {
+    id: string;
+    resource_type: "folder" | "file" | "vault";
+    resource_id: string;
+    principal_type: "user" | "org";
+    principal_id: string;
+    permission: "locked" | "denied" | "edit";
+  }
+
+  let owner: TestUser;
+  let member: TestUser;
+  let other: TestUser;
+  let orgId: string;
+  let vault: string;
+  let folder: string;
+  let note: string;
+  let loose: string;
+
+  async function locks(user: TestUser): Promise<LockRow[]> {
+    const res = await get(user, `/api/vaults/${vault}/locks`);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { locks: LockRow[] }).locks;
+  }
+
+  const vaultRows = (rows: LockRow[]) => rows.filter((r) => r.resource_type === "vault");
+  const liftRows = (rows: LockRow[]) => rows.filter((r) => r.permission === "edit");
+
+  beforeEach(async () => {
+    await resetDb();
+    rec.reset();
+    owner = await signUp("owner@vault-lock.test");
+    orgId = (await createOrg(owner, "Vault Lock Co", "vault-lock-co")).id;
+    member = await signUp("member@vault-lock.test");
+    await seedMember(orgId, member.userId, "member");
+    other = await signUp("other@vault-lock.test");
+    await seedMember(orgId, other.userId, "member");
+    vault = await seedVault(orgId, "V");
+    folder = await seedFolder(vault, null, "Docs", "Docs");
+    note = await seedNote(vault, folder, "Docs/N.md", owner.userId);
+    loose = await seedNote(vault, null, "Loose.md", owner.userId);
+  });
+
+  it("Read-only publishes exactly one vault row, as a lock, to an ordinary member", async () => {
+    expect(vaultRows(await locks(member))).toHaveLength(0);
+
+    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" })).status).toBe(200);
+
+    const rows = await locks(member);
+    const posture = vaultRows(rows);
+    expect(posture).toHaveLength(1);
+    expect(posture[0]).toMatchObject({
+      resource_type: "vault",
+      resource_id: orgId,
+      principal_type: "org",
+      principal_id: orgId,
+      // Synthesised: the stored row says `view`, which is a grant the client's
+      // lock map would drop on the floor.
+      permission: "locked",
+    });
+    // The stored row is untouched — only the wire shape changes.
+    const { rows: stored } = await pool.query<{ permission: string }>(
+      "SELECT permission FROM shares WHERE resource_type = 'vault' AND resource_id = $1",
+      [orgId],
+    );
+    expect(stored.map((r) => r.permission)).toEqual(["view"]);
+  });
+
+  it("Shared and Private publish no vault row at all", async () => {
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    expect(vaultRows(await locks(member))).toHaveLength(1);
+
+    // An open vault grants; it does not cap.
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(vaultRows(await locks(member))).toHaveLength(0);
+
+    // Private deletes the row entirely.
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" });
+    expect(vaultRows(await locks(member))).toHaveLength(0);
+  });
+
+  it("a per-item lock still appears alongside the vault row", async () => {
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    await seedLock(orgId, "folder", folder, { type: "org" });
+
+    const rows = await locks(member);
+    expect(vaultRows(rows)).toHaveLength(1);
+    expect(rows.filter((r) => r.resource_type === "folder" && r.resource_id === folder)).toHaveLength(1);
+  });
+
+  it("the owner sees the posture row too — it caps them as well", async () => {
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    expect(vaultRows(await locks(owner))).toHaveLength(1);
+  });
+
+  it("the posture row carries a NON-routable id, never the live grant row's", async () => {
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    const posture = vaultRows(await locks(member))[0];
+    expect(posture.id).toBe(`vault:${orgId}`);
+
+    // The point of the synthetic id: `DELETE /shares/:id` on the real grant row
+    // is "Entire vault → Private", and an unlock path that ever passed this id
+    // through would do exactly that. Pin it so a future refactor cannot quietly
+    // hand the grant row's id back out.
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM shares WHERE resource_type = 'vault' AND resource_id = $1",
+      [orgId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(posture.id).not.toBe(rows[0].id);
+  });
+
+  // ── The lifts ──────────────────────────────────────────────────────────────
+  //
+  // Read-only is a baseline the resolver lets an `edit` row lift, so the client
+  // needs those rows to know which subtrees are NOT actually locked.
+
+  it("reports the org edit rows that lift the posture, and only under Read-only", async () => {
+    await seedOrgGrant(orgId, "folder", folder, "edit");
+
+    // Shared: no posture, so nothing to lift and nothing to report.
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "open" });
+    expect(liftRows(await locks(member))).toHaveLength(0);
+
+    // Read-only clears the item overrides, so re-apply one after the PUT — which
+    // is exactly the two-click path an admin takes in the Access panel.
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    await seedOrgGrant(orgId, "folder", folder, "edit");
+
+    const lifts = liftRows(await locks(member));
+    expect(lifts).toHaveLength(1);
+    expect(lifts[0]).toMatchObject({
+      resource_type: "folder",
+      resource_id: folder,
+      principal_type: "org",
+      permission: "edit",
+    });
+  });
+
+  it("reports the CALLER's own per-user edit row and never anyone else's", async () => {
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    await seedShare(orgId, "file", note, member.userId, "edit");
+    await seedShare(orgId, "file", loose, other.userId, "edit");
+
+    const mine = liftRows(await locks(member));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({
+      resource_id: note,
+      principal_type: "user",
+      principal_id: member.userId,
+    });
+    // The other member's grant is absent: a badge endpoint must not let anyone
+    // enumerate who else was lifted out of the vault's Read-only posture.
+    expect(mine.map((r) => r.resource_id)).not.toContain(loose);
+
+    const theirs = liftRows(await locks(other));
+    expect(theirs.map((r) => r.resource_id)).toEqual([loose]);
+  });
+
+  it("does not report a view grant or the vault grant itself as a lift", async () => {
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+    await seedOrgGrant(orgId, "file", note, "view");
+
+    // The stored vault row IS `edit`-shaped machinery, but it is the posture,
+    // not an item exception, and its resource_type keeps it out.
+    expect(liftRows(await locks(member))).toHaveLength(0);
+  });
+
+  it("a member of ANOTHER org is refused outright", async () => {
+    const stranger = await signUp("stranger@vault-lock.test");
+    await createOrg(stranger, "Other Co", "other-co-vault-lock");
+    await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "readonly" });
+
+    const res = await get(stranger, `/api/vaults/${vault}/locks`);
+    expect(res.status).toBe(403);
   });
 });

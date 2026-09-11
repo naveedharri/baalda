@@ -192,6 +192,32 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   named on `ready.behind` and queued for a push exactly like `ready.empty` ones. Before this, 40 notes with
   unflushed local edits re-downloaded a 2-byte empty diff on every connect ("Syncing 40/40" on each
   reload) and the edits never left the device.
+- **`ready.revoked` is the third doc list** (`docSession.handleServerRevoked`): on every connect the
+  server names the docs the client's own hello manifest claims that are NOT in its readable set
+  (`vault-channel.ts revokedFromManifest`, `REVOKED_CAP` 2000, pure set arithmetic, no query) — bounded
+  by what the client holds, never by the vault. It fires ahead of `setStatus("synced")`, because that
+  flip arms the pull the authority is meant to cover; that ordering is what cleans up a member whose app
+  was closed when the owner went Private, on their next launch. A revoked file leaves the disk only when
+  all seven hold: both listings 200; the server ANSWERED the tombstone question; `isLive()`; an ACL
+  signal ≤60 s old (`ready.revoked` or `reauth`); the group fits `revokeCap = max(20, ceil(mapped*0.5))`
+  OR the server NAMED this doc; the access-check agrees where the cap lift is what saved it; and the doc
+  is `pushed` or the file is empty. The named list is NOT a second opinion — `/api/notes` and
+  `revokedFromManifest` both call `listReadableDocsInVault`, so it only catches a racy short answer; the
+  real cross-check is `POST /api/vaults/:id/access-check` (`InboundPlan.needsAccessCheck`, measured on
+  the revoked group BEFORE any refusal → `registry.confirmRevocations`, chunked in slices of
+  `ACCESS_CHECK_MAX` — mirrored in `lib/api.ts`, pinned by `accessCheckBound.test.ts`), and a
+  disagreement, an unanswered id, a throw on ANY slice or the 30 s `ACCESS_CHECK_TIMEOUT_MS` abort
+  LEAVES the whole group (a refused id also leaves the named set via
+  `InboundHost.revocationRefused`). The named set unions across the session
+  (`handleServerReauth` never clears it; `onServerDrop` feeds the live path) and a truncated list keeps
+  its 2000 as the allow-list. `folderLift` needs an authoritative pass that named nothing, and folder
+  removal is empty-only. Removal is OUTRIGHT via Rust `delete_file` (`rel_path_is_ignored` FIRST, so
+  `.context` AND `.context/config.json` are refused, then a directory refusal; `deletePath` stays the
+  sidebar's recursive one) — unless this user AUTHORED the note, which goes to
+  `.context/trash` (`authored`, learned in `syncStructure`, persisted in `.context/config.json` as
+  `{ userId, docIds }` and honoured only for that user; item-Private still beats authorship). A revoked
+  removal also `docStore.drop`s + `ipc.clearYjsDoc`s, so `ready` stops re-naming it. The deletion cap is
+  never lifted.
 - **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
   the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
   said `Projects/community` while the server said `Projects/Community` (with empty server folders under
@@ -288,6 +314,22 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   every doc iff it dropped — so Read-only→Shared and Private→Shared kick nobody, Shared→Read-only and
   →Private kick everything. `grantId` is stable (the vault row is upserted in place, deleted only for
   Private) and a no-op re-apply clears nothing, kicks nobody and broadcasts nothing.
+  `GET /vaults/:id/locks` reports the Read-only posture as a synthetic `vault` lock row (id
+  `vault:<orgId>`, `permission: 'locked'`) plus the **lifts** — the surviving org `edit` rows and the
+  caller's own per-user `edit` rows — so the sidebar can padlock everything except what a grant frees.
+  Creates are gated by `permissions/http-gates.ts` `canCreateIn` (= `canEditFolder` in a folder;
+  `vaultRootWritable` at the root, which a per-user vault-scoped `edit` lifts) and attachment uploads by
+  `canWriteAttachment` (vault posture only — a blob has no folder to resolve a lock against); refusals
+  carry `code: "no_write_access"` and are checked BEFORE the `root_frozen` latch. `onAuthenticate`
+  re-resolves `effectivePermission` at connect, so a pre-revocation edit token cannot be replayed for the
+  rest of its TTL.
+  `POST /vaults/:vaultId/access-check` (member-gated, `ACCESS_CHECK_MAX` 2000, `runPool` at
+  `config.backfillConcurrency`) answers per-doc `effectivePermission` so the desktop can cross-check a
+  revocation against the resolver rather than against the listing that announced it; an id with no row
+  in this vault is left UNANSWERED, never `none`. `listDocsInVault`'s deleted branch resolves a
+  hard-deleted folder's ancestry from `folder_tombstones` (`d.deleted_at >= n.created_at`, so a dead
+  tombstone cannot claim a note created later) — without it a folder delete reaches a share-only
+  member as a REVOCATION (no tombstone) instead of a deletion.
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
   `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note`.

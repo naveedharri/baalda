@@ -164,14 +164,24 @@ async function deadNoteOverrideIds(
 async function vaultPostureRow(
   db: Queryable,
   orgId: string,
-): Promise<{ id: string; permission: string } | null> {
-  const { rows } = await db.query<{ id: string; permission: string }>(
-    `SELECT id, permission FROM shares
+): Promise<{ id: string; permission: string; createdBy: string | null; createdAt: Date | null } | null> {
+  const { rows } = await db.query<{
+    id: string;
+    permission: string;
+    created_by: string | null;
+    created_at: Date | null;
+  }>(
+    `SELECT id, permission, created_by, created_at FROM shares
       WHERE resource_type = 'vault' AND resource_id = $1
         AND principal_type = 'org' AND principal_id = $1`,
     [orgId],
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  // `created_by`/`created_at` are carried for `GET /locks`, which reports this
+  // row in the same shape as the item rows beside it.
+  return row
+    ? { id: row.id, permission: row.permission, createdBy: row.created_by, createdAt: row.created_at }
+    : null;
 }
 
 export interface ShareDeps {
@@ -377,6 +387,40 @@ export function createShareRoutes(deps: ShareDeps): Hono {
   // Still mounted at `/locks`: the shape is a superset and the client splits by
   // permission, so an older client that only understands `locked` is unaffected
   // by the extra rows only if it filters — which it does.
+  //
+  // Plus ONE synthetic row: a vault whose posture is Read-only is a lock on
+  // everything, so it is reported as `resource_type: 'vault'` with
+  // `permission: 'locked'` even though the stored row says `view`. Two reasons
+  // for the rewrite rather than shipping the raw `view` row:
+  //
+  //  - It IS a lock to every reader. `vaultBaseline` caps the owner/admin and
+  //    author shortcuts at view, so the sidebar has to put the same padlock on
+  //    every folder and note that a per-item lock puts on one. Locking an item
+  //    and making it read-only are the same thing to the person looking at it.
+  //  - A vault-scoped `locked` row cannot exist in the table — it would collide
+  //    with the vault GRANT on (resource_type, resource_id, principal_type,
+  //    principal_id), which is exactly why `isLocked` is folder/file only. So
+  //    `locked` is free on the wire and unambiguous: a `vault` row here always
+  //    means the Read-only posture and never a stored lock.
+  //
+  // The `edit` posture is NOT reported: an open vault grants, it does not cap.
+  // Neither is Private (no row at all) — that is a grant question, and the
+  // per-item `denied` rows above already carry it.
+  //
+  // And when the posture IS Read-only, the LIFTS come with it. Read-only is a
+  // baseline, not a ceiling: `sharePermission` takes the max over the vault
+  // grant and every org/user row on the item and its ancestors, so a folder set
+  // to Shared — or a personal `edit` grant on one note — puts the caller back
+  // to edit inside it. A client that badged the posture alone would padlock a
+  // folder the reader can write to and open its notes read-only on the first
+  // frame. So the `edit` rows that can lift this caller ride along, at their
+  // real permission, and the client subtracts their subtrees from the seed.
+  //
+  // Two rules on WHOSE rows: org-principal rows are the vault's own posture
+  // exceptions and every member already sees their effect, so they are public
+  // within the vault. Per-user rows are reported ONLY when they name the
+  // CALLER — who else was lifted is nobody else's business, and a member must
+  // not be able to enumerate their teammates' grants from a badge endpoint.
   app.get("/vaults/:vaultId/locks", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -405,6 +449,46 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           )`,
       [vaultId],
     );
+
+    const posture = await vaultPostureRow(pool, org);
+    if (posture?.permission === "view") {
+      rows.push({
+        // NOT `posture.id`. That is the live vault GRANT row, and
+        // `DELETE /shares/:id` would happily accept it from an owner — which is
+        // "Entire vault → Private", silently, from something that looked like an
+        // unlock. Nothing on the client reads this id (every unlock path
+        // resolves a share by RESOURCE id, which the org id never matches), so
+        // a deliberately non-routable value costs nothing and closes the hole.
+        id: `vault:${org}`,
+        resource_type: "vault",
+        resource_id: org,
+        principal_type: "org",
+        principal_id: org,
+        permission: "locked",
+        created_by: posture.createdBy,
+        created_at: posture.createdAt,
+      });
+
+      const { rows: lifts } = await pool.query(
+        `SELECT s.id, s.resource_type, s.resource_id, s.principal_type, s.principal_id,
+                s.permission, s.created_by, s.created_at
+           FROM shares s
+          WHERE s.permission = 'edit'
+            AND (
+              (s.principal_type = 'org' AND s.principal_id = $2)
+              OR (s.principal_type = 'user' AND s.principal_id = $3)
+            )
+            AND (
+              (s.resource_type = 'folder' AND s.resource_id IN
+                 (SELECT id FROM folders WHERE vault_id = $1))
+              OR (s.resource_type = 'file' AND s.resource_id IN
+                 (SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
+                  UNION SELECT id FROM files WHERE vault_id = $1))
+            )`,
+        [vaultId, org, session.userId],
+      );
+      rows.push(...lifts);
+    }
     return c.json({ locks: rows });
   });
 

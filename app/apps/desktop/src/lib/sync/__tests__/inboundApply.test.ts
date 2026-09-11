@@ -13,12 +13,13 @@ vi.mock("../../ipc", () => ({
   renamePath: vi.fn(),
   trashNote: vi.fn(),
   deletePath: vi.fn(),
+  deleteFile: vi.fn(),
   deleteFolderIfEmpty: vi.fn(),
   isVaultMismatch: vi.fn(() => false),
 }));
 vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
 
-import type { ApiClient } from "../../api";
+import { ACCESS_CHECK_MAX, type ApiClient } from "../../api";
 import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
 import { VaultRegistry, type InboundHost } from "../registry";
@@ -125,6 +126,14 @@ function install(disk: FakeDisk) {
     disk.bodies.delete(p);
     disk.deleted.push(p);
   }) as never);
+  // The revocation removal's own call: single file, never a directory (Rust
+  // refuses one). Same book-keeping so the assertions below read the same.
+  vi.mocked(ipc.deleteFile).mockImplementation((async (p: string) => {
+    if (!disk.notes.has(p)) throw new Error("path does not exist");
+    disk.notes.delete(p);
+    disk.bodies.delete(p);
+    disk.deleted.push(p);
+  }) as never);
   vi.mocked(ipc.trashNote).mockImplementation((async (p: string, stamp: string) => {
     if (!disk.notes.has(p)) throw new Error("path does not exist");
     disk.notes.delete(p);
@@ -136,13 +145,26 @@ function install(disk: FakeDisk) {
 }
 
 interface ServerState {
-  notes: Array<{ id: string; rel_path: string }>;
+  notes: Array<{ id: string; rel_path: string; created_by?: string }>;
   tombstones?: string[] | null;
   folders?: Array<{ id: string; path: string }>;
   folderTombstones?: string[] | null;
+  /**
+   * What `POST /vaults/:id/access-check` answers — the resolver's independent
+   * second opinion, which every removal past the revocation cap has to clear.
+   *
+   * `"confirm"` (the default): the resolver agrees the caller has lost access to
+   * every id asked about. `"grant"`: it says they can still read them, so the
+   * two server answers disagree and nothing may be removed. `"fail"`: the
+   * request throws, which is "no answer" and also removes nothing.
+   */
+  accessCheck?: "confirm" | "grant" | "fail";
+  /** Answer this many access-check calls, then throw — the partial-answer case. */
+  accessCheckFailAfter?: number;
 }
 
 function fakeApi(state: ServerState) {
+  let accessCheckCalls = 0;
   return {
     listVaults: vi.fn(async () => [{ id: VAULT, name: "v", organization_id: ORG }]),
     createVault: vi.fn(),
@@ -163,10 +185,27 @@ function fakeApi(state: ServerState) {
     })),
     deleteNote: vi.fn(async () => {}),
     deleteFolder: vi.fn(async () => {}),
+    accessCheck: vi.fn(async (_vaultId: string, docIds: string[]) => {
+      const mode = state.accessCheck ?? "confirm";
+      if (mode === "fail") throw new Error("network down");
+      // The real route answers 400 above `ACCESS_CHECK_MAX`, and the client reads
+      // a 400 as "no answer" — so a fake that silently accepted any size would
+      // hide exactly the bug this models.
+      if (docIds.length > ACCESS_CHECK_MAX) throw new Error("at most 2000 docIds per request");
+      accessCheckCalls++;
+      if (state.accessCheckFailAfter !== undefined && accessCheckCalls > state.accessCheckFailAfter) {
+        throw new Error("network down");
+      }
+      return mode === "grant" ? [] : docIds;
+    }),
   } as unknown as ApiClient;
 }
 
-function recordingHost() {
+/** The signed-in user, for the author exemption on a revoked removal. */
+const ME = "user-me";
+
+function recordingHost(authority = false, named: ReadonlySet<string> | null = null) {
+  const refused: string[] = [];
   const released: string[] = [];
   const renamed: Array<{ from: string; to: string }> = [];
   const removed: Array<{ path: string; trashedTo: string | null; reason: string }> = [];
@@ -184,8 +223,17 @@ function recordingHost() {
       hydrated.push({ docId, path });
       return false;
     },
+    // Off by default: an inbound pass only treats a shrunken listing as fact
+    // when the session is live AND the server just announced an access change.
+    revocationAuthority: () => authority,
+    // Which docs the server NAMED. Null is the old wholesale-lift path; a set
+    // narrows the lift to those ids, which is what production always carries
+    // once the vault channel has sent a `ready.revoked` or a `drop`.
+    authoritativeRevoked: () => named,
+    revocationRefused: (ids) => refused.push(...ids),
+    localUserId: () => ME,
   };
-  return { host, released, renamed, removed, hydrated };
+  return { host, released, renamed, removed, hydrated, refused };
 }
 
 /**
@@ -194,7 +242,15 @@ function recordingHost() {
  * server. Inbound compares against a prior agreement, so a single pass can never
  * exercise it.
  */
-async function twoPasses(opts: { disk: FakeDisk; first: ServerState; then: ServerState }) {
+async function twoPasses(opts: {
+  disk: FakeDisk;
+  first: ServerState;
+  then: ServerState;
+  /** Does the SECOND pass carry revocation authority (session live AND an
+   *  `acl-changed` frame just arrived)? Only then may it act on a wholesale
+   *  loss of access. */
+  authority?: boolean;
+}) {
   install(opts.disk);
   const reg1 = new VaultRegistry(fakeApi(opts.first));
   reg1.setInboundHost(recordingHost().host);
@@ -209,7 +265,7 @@ async function twoPasses(opts: { disk: FakeDisk; first: ServerState; then: Serve
 
   const api = fakeApi(opts.then);
   const reg = new VaultRegistry(api);
-  const host = recordingHost();
+  const host = recordingHost(opts.authority === true);
   reg.setInboundHost(host.host);
   await reg.reconcile({ organizationId: ORG, vaultName: "v" });
   return { reg, api, ...host };
@@ -321,6 +377,7 @@ describe("inbound delete", () => {
     expect(disk.notes.has("bye.md")).toBe(false);
     // Recoverable, never a hard delete: this reconciler once destroyed 428 notes.
     expect(ipc.deletePath).not.toHaveBeenCalled();
+    expect(ipc.deleteFile).not.toHaveBeenCalled();
     expect(disk.trashed[0].to).toContain(".context/trash/");
     expect(r.released).toEqual(["d1"]);
     expect(r.removed[0]?.path).toBe("bye.md");
@@ -812,5 +869,351 @@ describe("inbound folder deletion", () => {
     });
     expect(disk.folders.has("Team")).toBe(true);
     expect(ipc.deleteFolderIfEmpty).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Vault Settings → Access → Entire vault → Private, seen from the plain
+ * member's device.
+ *
+ * The per-ITEM Private already worked: one folder's notes are a small enough
+ * slice of the vault to fit under the revocation cap. The whole vault never can
+ * — it is 100% of the mapped set against a 50% ceiling — so the setting that
+ * promises "removed from their devices, including the local copies on disk"
+ * removed nothing, on any vault with more than 20 notes.
+ */
+describe("whole-vault Private reaches the member's disk", () => {
+  const N = 40;
+
+  function memberVault(): { disk: FakeDisk; state: ServerState } {
+    const disk = new FakeDisk();
+    disk.folders.add("Docs");
+    const notes: Array<{ id: string; rel_path: string }> = [];
+    for (let i = 0; i < N; i++) {
+      const path = `Docs/n${i}.md`;
+      disk.notes.set(path, `d${i}`);
+      // Real content, and confirmed upstream below: the trash executor refuses
+      // any doc whose bytes this device never sent, so an empty-file vault
+      // would pass for the wrong reason.
+      disk.bodies.set(path, `note ${i}`);
+      notes.push({ id: `d${i}`, rel_path: path });
+    }
+    return { disk, state: { notes, folders: [{ id: "f1", path: "Docs" }] } };
+  }
+
+  /** Reconcile once (the shared state), carry the config, then reconcile against
+   *  a server that now shows the member nothing. */
+  async function afterPrivate(
+    authority: boolean,
+    opts: {
+      /** The resolver's second opinion (see `ServerState.accessCheck`). */
+      accessCheck?: "confirm" | "grant" | "fail";
+      /** Docs to mark confirmed-upstream. Default: all of them. */
+      pushed?: number;
+      /** Run a SECOND pull after the first, the way a launch does: the reconcile
+       *  is not authoritative, the channel's pull that follows is. */
+      thenAuthoritative?: boolean;
+    } = {},
+  ) {
+    const { disk, state } = memberVault();
+    install(disk);
+    const reg1 = new VaultRegistry(fakeApi(state));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+
+    // The owner set the vault to Private: the member's ACL-filtered listings are
+    // empty, and both tombstone questions are ANSWERED (nothing was deleted).
+    const api = fakeApi({
+      notes: [],
+      tombstones: [],
+      folders: [],
+      folderTombstones: [],
+      accessCheck: opts.accessCheck,
+    });
+    let live = authority;
+    const reg = new VaultRegistry(api);
+    const host = recordingHost(false);
+    // The authority is read at plan time, so a two-pass run can change it
+    // between passes exactly the way a launch does.
+    (host.host as { revocationAuthority?: () => boolean }).revocationAuthority = () => live;
+    reg.setInboundHost(host.host);
+    const pushed = opts.pushed ?? N;
+    for (let i = 0; i < pushed; i++) reg.markPushed(`d${i}`);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    if (opts.thenAuthoritative !== undefined) {
+      live = opts.thenAuthoritative;
+      await reg.pull();
+    }
+    return { disk, reg, api, ...host };
+  }
+
+  it("removes every note and the folder on the pull the ACL frame asked for", async () => {
+    const r = await afterPrivate(true);
+
+    expect(r.disk.notes.size).toBe(0);
+    expect(r.disk.deleted).toHaveLength(N);
+    // Removed outright, never trashed: a copy under `.context/trash` would leave
+    // the ex-reader exactly the readable `.md` the revocation takes away.
+    expect(r.disk.trashed).toEqual([]);
+    expect(r.removed.every((x) => x.reason === "revoked" && x.trashedTo === null)).toBe(true);
+    // The emptied folder goes too, rather than sitting in the sidebar as a shell.
+    expect(r.disk.folders.size).toBe(0);
+    // And nothing is re-registered on the way out.
+    expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+    expect(vi.mocked(r.api.createFolder)).not.toHaveBeenCalled();
+    expect(r.reg.hasFailures()).toBe(false);
+  });
+
+  it("still removes on the authoritative pull that FOLLOWS a refused reconcile", async () => {
+    // The real cold-launch sequence, which one pass cannot model: the launch
+    // reconcile runs before the vault channel is `synced`, so it is refused; the
+    // pull the channel then asks for is the authoritative one. This only works
+    // because the baseline accumulates rather than being rebuilt per pass — a
+    // refused pass must not forget which docs it had agreed were server-owned.
+    const r = await afterPrivate(false, { thenAuthoritative: true });
+
+    expect(r.disk.notes.size).toBe(0);
+    expect(r.disk.deleted).toHaveLength(N);
+    expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+  });
+
+  it("refuses every removal the resolver will not confirm", async () => {
+    // The listing says the member may read nothing and the channel named every
+    // doc — but both are the same server function. `effectivePermission` is the
+    // one that could disagree, and when it does, the files stay.
+    const r = await afterPrivate(true, { accessCheck: "grant" });
+
+    expect(r.disk.notes.size).toBe(N);
+    expect(r.disk.deleted).toEqual([]);
+    expect(vi.mocked(r.api.accessCheck)).toHaveBeenCalledTimes(1);
+    expect(
+      r.reg.failures().some((f) => f.reason.includes("the resolver still grants access")),
+    ).toBe(true);
+    // Not suppressed either: a doc the server says we can still read is an
+    // ordinary note again, not one frozen out of every later pass.
+    expect(r.reg.hasFailures()).toBe(true);
+  });
+
+  it("removes nothing when the second opinion cannot be reached", async () => {
+    // No answer is not a yes. A permission change is never so urgent that it
+    // justifies deleting files on a round trip that did not happen.
+    const r = await afterPrivate(true, { accessCheck: "fail" });
+
+    expect(r.disk.notes.size).toBe(N);
+    expect(r.disk.deleted).toEqual([]);
+    expect(
+      r.reg.failures().some((f) => f.reason.includes("could not confirm the access change")),
+    ).toBe(true);
+  });
+
+  it("keeps a revoked file whose content this device never confirmed upstream", async () => {
+    // The last guard before an authoritative pass destroys work that exists
+    // nowhere else. Half the vault is unpushed, and those files have text in
+    // them, so they stay and are reported as orphans.
+    const half = N / 2;
+    const r = await afterPrivate(true, { pushed: half });
+
+    expect(r.disk.notes.size).toBe(N - half);
+    expect(r.disk.deleted).toHaveLength(half);
+    const orphans = r.reg.failures().filter((f) => f.kind === "orphan");
+    expect(orphans).toHaveLength(N - half);
+    expect(orphans[0].reason).toContain("never confirmed its content upstream");
+  });
+
+  it("gives the author of a revoked note a recoverable copy", async () => {
+    // Authorship does not survive an item set to Private (spec 04: a restriction
+    // its author is exempt from is not a restriction), so a member's own notes
+    // genuinely can be revoked. What must not happen is that a permission change
+    // destroys the only local copy of something this person wrote.
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    disk.bodies.set("mine.md", "my own words");
+    disk.notes.set("theirs.md", "d2");
+    disk.bodies.set("theirs.md", "someone else's");
+    install(disk);
+
+    const reg1 = new VaultRegistry(
+      fakeApi({
+        notes: [
+          { id: "d1", rel_path: "mine.md", created_by: ME },
+          { id: "d2", rel_path: "theirs.md", created_by: "user-them" },
+        ],
+      }),
+    );
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const carried = writes[writes.length - 1]?.[0] as string;
+    // Authorship is PERSISTED, because a revoked doc is absent from the listing
+    // and there is nowhere left to read its author from when it matters.
+    expect(JSON.parse(carried).authored).toEqual({ userId: ME, docIds: ["d1"] });
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(carried as never);
+
+    const reg = new VaultRegistry(fakeApi({ notes: [], tombstones: [] }));
+    const host = recordingHost(true);
+    reg.setInboundHost(host.host);
+    reg.markPushed("d1");
+    reg.markPushed("d2");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.notes.size).toBe(0);
+    // The note they wrote is recoverable; the one they were merely shown is not.
+    expect(disk.trashed.map((t) => t.from)).toEqual(["mine.md"]);
+    expect(disk.deleted).toEqual(["theirs.md"]);
+  });
+
+  it("corroborates the named survivors even when the unnamed half is refused", async () => {
+    // The executor half of R2, and the first test anywhere to drive it with a
+    // non-null named set — the shape production always has once the vault
+    // channel has named anything. 10 of 40 named: the other 30 blow
+    // revokeCap(40) = 20 and are struck, and the 10 survivors must STILL be
+    // corroborated rather than sliding under the cap the refusal just vacated.
+    const { disk, state } = memberVault();
+    install(disk);
+    const reg1 = new VaultRegistry(fakeApi(state));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+
+    const named = new Set(Array.from({ length: 10 }, (_, i) => `d${i}`));
+    const api = fakeApi({ notes: [], tombstones: [], folders: [], folderTombstones: [] });
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost(true, named).host);
+    for (let i = 0; i < N; i++) reg.markPushed(`d${i}`);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(vi.mocked(api.accessCheck)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.accessCheck).mock.calls[0][1].sort()).toEqual([...named].sort());
+    expect(disk.deleted.length).toBe(10);
+    expect(disk.notes.size).toBe(N - 10);
+  });
+
+  it("chunks the access check rather than earning a 400", async () => {
+    // A vault larger than `ACCESS_CHECK_MAX` sent one oversized request, got a
+    // 400, and the catch read that as "no answer" — so the revocation never
+    // landed, on any vault of more than 2000 mapped notes, and repeated the
+    // whole failure on every connect.
+    const disk = new FakeDisk();
+    const big = ACCESS_CHECK_MAX + 1000;
+    const notes: Array<{ id: string; rel_path: string }> = [];
+    for (let i = 0; i < big; i++) {
+      const path = `n${i}.md`;
+      disk.notes.set(path, `d${i}`);
+      disk.bodies.set(path, "x");
+      notes.push({ id: `d${i}`, rel_path: path });
+    }
+    install(disk);
+    const reg1 = new VaultRegistry(fakeApi({ notes }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+
+    const api = fakeApi({ notes: [], tombstones: [], folders: [], folderTombstones: [] });
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost(true).host);
+    for (let i = 0; i < big; i++) reg.markPushed(`d${i}`);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    const calls = vi.mocked(api.accessCheck).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c[1].length <= ACCESS_CHECK_MAX)).toBe(true);
+    expect(calls[0][1].length + calls[1][1].length).toBe(big);
+    // And the removal actually completes, which is the point.
+    expect(disk.notes.size).toBe(0);
+  }, 30_000);
+
+  it("fails the WHOLE group when any slice goes unanswered", async () => {
+    // Acting on the half that came back would delete files on a partial second
+    // opinion. `failAfter` lets the first slice answer and the second throw.
+    const disk = new FakeDisk();
+    const big = ACCESS_CHECK_MAX + 10;
+    const notes: Array<{ id: string; rel_path: string }> = [];
+    for (let i = 0; i < big; i++) {
+      const path = `n${i}.md`;
+      disk.notes.set(path, `d${i}`);
+      disk.bodies.set(path, "x");
+      notes.push({ id: `d${i}`, rel_path: path });
+    }
+    install(disk);
+    const reg1 = new VaultRegistry(fakeApi({ notes }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+
+    const api = fakeApi({
+      notes: [],
+      tombstones: [],
+      folders: [],
+      folderTombstones: [],
+      accessCheckFailAfter: 1,
+    });
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost(true).host);
+    for (let i = 0; i < big; i++) reg.markPushed(`d${i}`);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.deleted).toEqual([]);
+    expect(disk.notes.size).toBe(big);
+  }, 30_000);
+
+  it("does not honour one account's authorship list for another account", async () => {
+    // `.context/config.json` travels with the vault and a device can be signed
+    // into a different account tomorrow. Inheriting A's list would mark A's
+    // notes recoverable for B — and the recoverable route writes a full readable
+    // `.md` into `.context/trash`, which is the exact leak the outright removal
+    // exists to prevent.
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    disk.bodies.set("mine.md", "A wrote this");
+    install(disk);
+
+    const hostA = recordingHost();
+    const regA = new VaultRegistry(
+      fakeApi({ notes: [{ id: "d1", rel_path: "mine.md", created_by: ME }] }),
+    );
+    regA.setInboundHost(hostA.host);
+    await regA.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const carried = writes[writes.length - 1]?.[0] as string;
+    expect(JSON.parse(carried).authored).toEqual({ userId: ME, docIds: ["d1"] });
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(carried as never);
+
+    // B signs in on the same device. The server no longer lists the note at all.
+    const regB = new VaultRegistry(fakeApi({ notes: [], tombstones: [] }));
+    const hostB = recordingHost(true);
+    (hostB.host as { localUserId?: () => string }).localUserId = () => "user-someone-else";
+    regB.setInboundHost(hostB.host);
+    regB.markPushed("d1");
+    await regB.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.notes.size).toBe(0);
+    // Removed outright. A trash copy here would have handed B a readable copy of
+    // A's note.
+    expect(disk.deleted).toEqual(["mine.md"]);
+    expect(disk.trashed).toEqual([]);
+  });
+
+  it("removes nothing on a pull that carries no such authority", async () => {
+    // Either the session is not live yet (a launch still catching up, where an
+    // empty listing means "not there yet"), or no `acl-changed` frame announced
+    // this — a routine pull whose listing merely came back empty, which is what
+    // a server-side regression in the readable-set filter looks like.
+    const r = await afterPrivate(false);
+
+    expect(r.disk.notes.size).toBe(N);
+    expect(r.disk.deleted).toEqual([]);
+    expect(r.disk.folders.has("Docs")).toBe(true);
+    // The files stay, but they are NOT pushed back up: re-registering notes the
+    // server just stopped listing would re-create the member's copies under new
+    // ids — a revocation leaking content back in the wrong direction.
+    expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
+    // Refused loudly, not silently: the vault cannot read as fully synced.
+    expect(r.reg.hasFailures()).toBe(true);
+    expect(r.reg.failures().some((f) => f.reason.includes("access removals"))).toBe(true);
   });
 });

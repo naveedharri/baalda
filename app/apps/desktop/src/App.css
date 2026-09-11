@@ -1584,7 +1584,11 @@ body:has(.sidebar-resizer.dragging) {
   width: 12px;
   height: 12px;
 }
+/* A lock that actually restricts YOU reads as a warning tone. `.member` stays
+   tertiary: it is someone else's restriction, shown for awareness only.
+   `.vault` is the whole-vault Read-only posture — it restricts you too. */
 .tree-lock.all,
+.tree-lock.vault,
 .tree-lock.you {
   color: var(--warning);
 }

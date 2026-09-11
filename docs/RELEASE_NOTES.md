@@ -29,3 +29,9 @@
 - The Access page no longer opens on the wrong answer: it waits for your vault's real setting instead of flashing Private first, a folder you set to Shared inside a private vault now reads Shared, and clicking a folder or note slides the page down to its permission buttons
 - Settings rows have room to breathe, with a faint line between them so it is clear where one setting ends and the next begins
 - Content width is now a slider instead of an on/off switch: drag from a narrow column to a wide one, or all the way to full width, and a small preview shows how the text will sit in your window. The editor follows as you drag, and if the old setting never seemed to do anything for you, this one does
+- Making a whole vault Private now removes its notes from your teammates' devices, even if their app was closed at the time, the same as making a single folder private always did. Nothing is deleted on the server, so restoring someone's access brings it all straight back
+- When a vault is read-only, every folder and note in the sidebar now shows the lock, the same as locking a single item — except folders or notes you were given edit access to
+- If your vault's root is frozen and you move a note or folder to the top level from outside Baalda, Baalda now tells you why it could not sync it instead of quietly moving it back
+- When something is read-only for you, the server now refuses every kind of change to it, not just typing: new notes and folders inside it, attachments, and edits arriving from a connection that was opened before your access changed
+- Notes you wrote yourself are now kept in the vault's trash folder when your access to them is removed, instead of being removed outright. Notes other people shared with you are still removed
+- Baalda now double-checks with the server before it removes anything from your disk after an access change. If the two answers disagree, or the check cannot be made, the file stays where it is

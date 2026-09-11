@@ -123,6 +123,7 @@ pub fn run() {
             commands::ensure_folder,
             commands::rename_path,
             commands::delete_path,
+            commands::delete_file,
             commands::delete_folder_if_empty,
             commands::trash_note,
             commands::search_notes,

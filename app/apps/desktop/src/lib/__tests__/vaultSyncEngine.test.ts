@@ -757,6 +757,53 @@ describe("VaultSyncEngine — server-empty reporting", () => {
     expect(events[1]).toEqual({ ids: [], truncated: false });
   });
 
+  it("fires onServerRevoked ahead of the status flip, and only when named", async () => {
+    // `ready.revoked` is the authority a wholesale removal needs. The status flip
+    // to `synced` is what arms the reconnect's registry pull, so the authority
+    // has to be recorded first or it arrives one pull too late — which, on a cold
+    // launch after a revocation, is the entire gap this frame closes.
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const order: string[] = [];
+    const events: Array<{ ids: string[]; truncated: boolean }> = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onServerRevoked: (ids, truncated) => {
+        events.push({ ids, truncated });
+        order.push("revoked");
+      },
+      onStatus: (s) => order.push(s),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+
+    ws!.onmessage?.({
+      data: JSON.stringify({ t: "ready", revoked: ["a", "b"], revokedTruncated: true }),
+    });
+    expect(events).toEqual([{ ids: ["a", "b"], truncated: true }]);
+    expect(order.indexOf("revoked")).toBeLessThan(order.indexOf("synced"));
+
+    // Never fired empty: an ordinary `ready` says nothing about access, and a
+    // no-op call here would stamp the authority clock on every reconnect.
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+    expect(events).toHaveLength(1);
+  });
+
+  it("an older server that never sends `revoked` is simply silent", async () => {
+    // Forward compatibility runs both ways: the field is optional on the wire.
+    expect(parseServerControl(JSON.stringify({ t: "ready" }))).toEqual({ t: "ready" });
+    expect(
+      parseServerControl(JSON.stringify({ t: "ready", revoked: ["a", 7, ""] })),
+    ).toEqual({ t: "ready", revoked: ["a"] });
+    expect(
+      parseServerControl(JSON.stringify({ t: "ready", revoked: ["a"], revokedTruncated: 1 })),
+    ).toEqual({ t: "ready", revoked: ["a"] });
+  });
+
   it("refresh() sends a fresh hello over the existing backoff", async () => {
     const sink = new MemSink();
     const created: FakeWs[] = [];

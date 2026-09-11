@@ -22,8 +22,10 @@
 //     (`failures()`), so a vault with failures can never report fully synced.
 
 import {
+  ACCESS_CHECK_MAX,
   ApiClient,
   ApiError,
+  noteCreatedBy,
   noteDocId,
   noteLastEdited,
   noteRelPath,
@@ -37,7 +39,7 @@ import type { TreeNode } from "../ipc";
 import * as perf from "../perf";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
-import { planInbound } from "./inbound";
+import { planInbound, type InboundPlan } from "./inbound";
 import { REGISTRY_CONCURRENCY, runPool, withRetry } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { toast } from "../toast";
@@ -92,6 +94,28 @@ interface VaultSyncConfig {
    * local note and re-register it — the ghost, back every other pull.
    */
   baseline?: Record<string, string>;
+  /**
+   * docIds a NAMED user is recorded as having authored, learned from the
+   * listing's `created_by` and accumulated like {@link baseline}.
+   *
+   * Persisted for one reason: a revoked doc is absent from the listing by
+   * definition, so at the moment the reconciler decides how to remove it there
+   * is nowhere left to read its author from. Without this, the author exemption
+   * would work only for a revocation that happened while the app was open, and
+   * not at all for the cold-launch case — the very one this whole path exists
+   * for.
+   *
+   * The `userId` is not decoration. This file travels with the vault (it is
+   * read on any device that opens the folder) and a device can be signed into a
+   * different account tomorrow. Honouring a list that belonged to someone else
+   * would mark THEIR notes recoverable for THIS user — and on this path the
+   * recoverable route writes a full readable `.md` into `.context/trash`, which
+   * is exactly the leak the outright removal exists to prevent. A list whose
+   * `userId` does not match the session is dropped, not inherited. (An older
+   * config's bare `string[]` is unattributable and is dropped for the same
+   * reason; the next pass relearns it.)
+   */
+  authored?: { userId: string; docIds: string[] };
 }
 
 /**
@@ -167,6 +191,53 @@ export interface InboundHost {
    * trigger instead of guarding against it.
    */
   materializeContent(docId: string, path: string): Promise<boolean>;
+  /**
+   * May this pass act on a wholesale loss of access — is the session live AND
+   * did the server announce an access change moments ago
+   * (`SyncManager.revocationAuthority`)?
+   *
+   * Inbound asks because a shrunken readable set only means "access was taken
+   * away" when both hold: before the session is live, absence can still mean
+   * "this device hasn't caught up"; with no `acl-changed` frame behind it, a
+   * listing that came back small is more likely a server fault than a decision
+   * anyone made. See `InboundInput.authoritative`.
+   *
+   * Optional: a registry with no host (unit tests) never has the authority,
+   * which keeps the conservative behaviour as the default.
+   */
+  revocationAuthority?(): boolean;
+  /**
+   * WHICH docs the server has named as no longer readable in this vault session
+   * — the union of every `ready.revoked` list and every live `drop` frame — or
+   * `null` when it has never named any.
+   *
+   * Only consulted on an authoritative pass, where it narrows the cap lift to
+   * the docs actually named. `null` is the old-server path (nothing is ever
+   * named, so the live `reauth` keeps the wholesale lift it always had).
+   *
+   * NOT an independent opinion: the names and the listing absences are the same
+   * server function read twice. The independent one is
+   * {@link revocationRefused} / the access-check round trip below. See
+   * `InboundInput.authoritativeRevoked`.
+   *
+   * Optional, like the question above: a registry with no host never has a list
+   * and never has the authority either.
+   */
+  authoritativeRevoked?(): ReadonlySet<string> | null;
+  /**
+   * The server's own resolver says these docs are still readable, so their
+   * removal was refused. Drop them from the named-revocation set: leaving them
+   * there would let a later pass try again on the strength of a claim that has
+   * already been contradicted.
+   */
+  revocationRefused?(docIds: string[]): void;
+  /**
+   * The signed-in user's id, or null when there is no session.
+   *
+   * Used for one thing: a revoked note this user AUTHORED keeps a recoverable
+   * `.context/trash` copy instead of being removed outright.
+   */
+  localUserId?(): string | null;
 }
 
 export interface ReconcileInput {
@@ -284,6 +355,11 @@ export class VaultRegistry {
   private pushed = new Set<string>();
   /** Last agreed docId → relPath (see `VaultSyncConfig.baseline`). */
   private baselineDocs = new Map<string, string>();
+  /** docIds this user authored (see `VaultSyncConfig.authored`). Accumulates. */
+  private authoredDocs = new Set<string>();
+  /** Whose authorship {@link authoredDocs} describes. Null until a session with
+   *  a user id has learned or adopted one. */
+  private authoredBy: string | null = null;
   /**
    * The collection `baselineDocs` describes. A baseline recorded against ANOTHER
    * collection must never decide that a file moved or died, so a mismatch
@@ -533,6 +609,8 @@ export class VaultRegistry {
     // A surviving baseline is exactly the cross-vault confusion this method
     // exists to prevent — it would tell vault B that vault A's notes moved.
     this.baselineDocs.clear();
+    this.authoredDocs.clear();
+    this.authoredBy = null;
     this.baselineVaultId = null;
     this.failed = [];
     this.limitReached = null;
@@ -747,6 +825,11 @@ export class VaultRegistry {
       folders,
       pushed: [...this.pushed],
       baseline,
+      // Written only when we know whose it is; an unattributed list is worse
+      // than none (see `VaultSyncConfig.authored`).
+      ...(this.authoredBy
+        ? { authored: { userId: this.authoredBy, docIds: [...this.authoredDocs] } }
+        : {}),
     };
   }
 
@@ -766,6 +849,122 @@ export class VaultRegistry {
    *     recreate the file we just moved;
    *   - and `planInbound` caps how much one pass may change.
    */
+  /**
+   * Resolve `plan.needsAccessCheck` against the server's OTHER permission
+   * answer, and strike from the plan everything that answer does not confirm.
+   *
+   * Three outcomes, and the default of each is "keep the file":
+   *
+   *  - the resolver also says no access ⇒ the removal stands;
+   *  - the resolver still grants access ⇒ the two server answers disagree, the
+   *    file stays, and the path is un-suppressed so the next pass treats it as
+   *    an ordinary note again rather than freezing it out;
+   *  - the request fails ⇒ no answer, so nothing in the group is removed. A
+   *    permission change is never so urgent that it justifies deleting files on
+   *    a round trip that did not happen.
+   */
+  /**
+   * Remember which of these notes THIS user wrote.
+   *
+   * Accumulative, like the baseline, and persisted with it: the answer is needed
+   * at the moment a doc has vanished from the listing, so it cannot be read from
+   * the listing then. Used for one decision — whether a revoked file gets a
+   * recoverable `.context/trash` copy or is removed outright.
+   */
+  private learnAuthorship(serverNotes: RegisteredNote[]): void {
+    const me = this.host?.localUserId?.() ?? null;
+    if (me === null) return;
+    // A list learned under one account says nothing about another. Claim it (or
+    // start a fresh one) before adding to it, so the persisted record is always
+    // attributable to exactly one user.
+    if (this.authoredBy !== me) {
+      this.authoredBy = me;
+      this.authoredDocs.clear();
+    }
+    for (const n of serverNotes) {
+      if (noteCreatedBy(n) === me) this.authoredDocs.add(noteDocId(n));
+    }
+  }
+
+  /**
+   * Take the persisted authorship list only if it is THIS user's.
+   *
+   * Anything else — another account's list, or an older config's unattributed
+   * `string[]` — is dropped rather than inherited, and the next `learnAuthorship`
+   * rebuilds it from the listing. The cost of dropping is one pass without the
+   * author exemption; the cost of inheriting is a readable `.md` copy of someone
+   * else's note left in this user's `.context/trash`.
+   */
+  private adoptAuthored(cfg: VaultSyncConfig): void {
+    this.authoredDocs = new Set();
+    this.authoredBy = null;
+    const rec = cfg.authored;
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) return;
+    const me = this.host?.localUserId?.() ?? null;
+    if (me === null || typeof rec.userId !== "string" || rec.userId !== me) return;
+    this.authoredBy = me;
+    for (const d of rec.docIds ?? []) if (typeof d === "string" && d) this.authoredDocs.add(d);
+  }
+
+  private async confirmRevocations(vaultId: string, plan: InboundPlan): Promise<void> {
+    const asked = new Set(plan.needsAccessCheck);
+    let confirmed: Set<string>;
+    try {
+      // Chunked, because the route refuses more than `ACCESS_CHECK_MAX` ids with
+      // a 400 — and a 400 reads here as "no answer", so one oversized request
+      // turned every revocation on a vault of more than 2000 mapped notes into a
+      // permanent failure that repeated on every connect and never landed.
+      //
+      // A throw on ANY slice fails the WHOLE group, not just that slice: the
+      // answers are corroboration for one decision, and acting on the half we
+      // happened to get back would delete files on a partial second opinion.
+      confirmed = new Set<string>();
+      const ids = [...asked];
+      for (let i = 0; i < ids.length; i += ACCESS_CHECK_MAX) {
+        const slice = ids.slice(i, i + ACCESS_CHECK_MAX);
+        for (const docId of await this.api.accessCheck(vaultId, slice)) {
+          confirmed.add(docId);
+        }
+        if (this.stopRun()) throw new Error("vault changed during the access check");
+      }
+    } catch (e) {
+      for (const t of plan.trash) {
+        if (t.reason !== "revoked" || !asked.has(t.docId)) continue;
+        plan.suppress.delete(t.path);
+        plan.rejected.push({
+          kind: "trash",
+          path: t.path,
+          docId: t.docId,
+          reason: `refused: could not confirm the access change with the server (${reasonOf(e)}) — left on disk`,
+        });
+      }
+      plan.trash = plan.trash.filter((t) => !(t.reason === "revoked" && asked.has(t.docId)));
+      return;
+    }
+    const disputed: string[] = [];
+    for (const t of plan.trash) {
+      if (t.reason !== "revoked" || !asked.has(t.docId) || confirmed.has(t.docId)) continue;
+      disputed.push(t.docId);
+      // Un-suppress: the server says we may still read it, so it is an ordinary
+      // note again. Leaving it suppressed would keep it out of every later pass
+      // on the strength of a claim the server has just contradicted.
+      plan.suppress.delete(t.path);
+      plan.rejected.push({
+        kind: "trash",
+        path: t.path,
+        docId: t.docId,
+        reason:
+          "refused: the server listing omitted it but the resolver still grants access — left on disk",
+      });
+    }
+    if (disputed.length === 0) return;
+    const dropped = new Set(disputed);
+    plan.trash = plan.trash.filter((t) => !(t.reason === "revoked" && dropped.has(t.docId)));
+    // Tell the session, so the contradicted ids leave the named-revocation set
+    // instead of being retried on the next authoritative pass.
+    this.host?.revocationRefused?.(disputed);
+  }
+
   private async applyInbound(
     vaultId: string,
     args: {
@@ -851,7 +1050,35 @@ export class VaultRegistry {
       // The persisted path → server-folder-id join: an id match against a
       // tombstone is proof the local folder IS the deleted one.
       localFolderIds: new Map(this.folderByPath),
+      // Both listings came back 200 (a failure throws out of `syncStructure`
+      // before this runs), the session is live, and the server itself announced
+      // an access change moments ago — so a doc absent from these listings has
+      // genuinely left this user's readable set. That is what lets "Entire vault
+      // → Private" remove ALL of them; without it the revocation cap refuses any
+      // pass that takes away more than half the vault, which is every
+      // whole-vault revocation there is.
+      authoritative: this.host?.revocationAuthority?.() === true,
+      // …and, when the server named the docs rather than only announcing that
+      // access moved, the names. The cap then lifts for those docs only.
+      authoritativeRevoked: this.host?.authoritativeRevoked?.() ?? undefined,
+      // Notes THIS user wrote, so a revocation of one of them leaves a
+      // recoverable copy rather than deleting the author's own work outright.
+      // Accumulated and persisted, not read from this listing: a revoked doc is
+      // ABSENT from the listing, which is exactly when the answer is needed.
+      authoredByMe: this.authoredDocs,
     });
+
+    // Anything the cap lift saved has to survive a SECOND, differently-computed
+    // answer before a file is deleted. `GET /api/notes` and the vault channel's
+    // `ready.revoked` are one function read twice, so a regression inside it
+    // produces the short listing and the announcement together — which is
+    // exactly the authority needed to clear a member's disk. `access-check`
+    // resolves each doc through `effectivePermission` instead, and a
+    // disagreement means the file stays.
+    if (plan.needsAccessCheck.length > 0) {
+      await this.confirmRevocations(vaultId, plan);
+      if (this.stale()) return none;
+    }
 
     for (const r of plan.rejected) {
       this.recordFailure({
@@ -958,18 +1185,26 @@ export class VaultRegistry {
         // outright: nothing was deleted (the server still holds every byte, and
         // the note comes straight back if access is restored), while a copy in
         // `.context/trash` would leave the ex-reader with exactly the readable
-        // `.md` the revocation exists to take away. `deletePath` is the same
-        // epoch-pinned Rust call the sidebar's own Delete uses.
+        // `.md` the revocation exists to take away. `deleteFile` is the
+        // epoch-pinned Rust call that refuses a directory outright; the
+        // sidebar's own Delete is the only caller of the recursive `deletePath`.
         let dest: string | null = null;
-        if (gone.reason === "revoked") {
-          await ipc.deletePath(gone.path, this.epoch());
+        if (gone.reason === "revoked" && !gone.recoverable) {
+          // `deleteFile`, not `deletePath`: the recursive one is the sidebar's,
+          // where a person picked the folder. This is the one removal with no
+          // recoverable copy, so it is structurally unable to take a tree.
+          await ipc.deleteFile(gone.path, this.epoch());
         } else {
+          // `recoverable` on a revocation means THIS user wrote the note (see
+          // `InboundTrash.recoverable`): losing read access to your own writing
+          // must not destroy your only local copy of it.
           dest = await ipc.trashNote(gone.path, stamp, this.epoch());
         }
         changedDisk = true;
         // The file left, so the baseline entry goes with it — otherwise every
         // later pass would keep trying to remove a path that isn't there.
         this.baselineDocs.delete(gone.docId);
+        this.authoredDocs.delete(gone.docId);
         this.host?.noteRemoved(gone.docId, gone.path, dest, gone.reason);
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
@@ -1219,6 +1454,7 @@ export class VaultRegistry {
     for (const [docId, rp] of Object.entries(cfg.baseline ?? {})) {
       if (typeof rp === "string" && rp) this.baselineDocs.set(docId, rp);
     }
+    this.adoptAuthored(cfg);
     this.baselineVaultId = cfg.serverVaultId;
     return true;
   }
@@ -1315,10 +1551,13 @@ export class VaultRegistry {
     // this pass — outbound-only, i.e. exactly the old behaviour.
     this.baselineDocs = new Map<string, string>();
     this.baselineVaultId = null;
+    this.authoredDocs = new Set();
+    this.authoredBy = null;
     if (cfg.serverVaultId === vaultId && cfg.baseline) {
       for (const [docId, rp] of Object.entries(cfg.baseline)) {
         if (typeof rp === "string" && rp) this.baselineDocs.set(docId, rp);
       }
+      this.adoptAuthored(cfg);
       this.baselineVaultId = vaultId;
     }
     // Restore the path → server-docId join too, under the same collection guard.
@@ -1487,6 +1726,13 @@ export class VaultRegistry {
     let titlesCache: ipc.NoteTitle[] | null = null;
     const titles = async (): Promise<ipc.NoteTitle[]> =>
       (titlesCache ??= await ipc.listNoteTitles(this.epoch()));
+
+    // Learn who wrote what, BEFORE any of the steps below and outside the inbound
+    // guard: the very first pass of a fresh vault has no baseline and so runs no
+    // inbound, yet it is the one pass that sees every row. Authorship has to be
+    // captured while the row is still LISTED — once access to it is taken away
+    // the listing omits it, which is precisely the moment the answer is needed.
+    this.learnAuthorship(serverNotes);
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
@@ -1976,7 +2222,20 @@ export class VaultRegistry {
       try {
         await this.api.updateFolder(folderId, { name: baseName(newPath), path: newPath, parentId });
       } catch (e) {
+        // REPORTED, not just logged. The server can refuse this move on its
+        // merits — dragging a folder out to a frozen root is the common one —
+        // and a console line is invisible to the person who made the move. The
+        // local directory has already moved on disk by the time we get here, so
+        // swallowing the refusal left the two sides disagreeing with nothing
+        // said. `recordFailure` owns the one-toast-per-path explanation.
         console.error("[registry] updateFolder failed", oldPath, e);
+        this.recordFailure({
+          kind: "folder",
+          path: newPath,
+          docId: null,
+          reason: reasonOf(e),
+          code: errorCode(e),
+        });
         return;
       }
       // The maps may belong to a different vault by now — remapping them would
@@ -1995,7 +2254,20 @@ export class VaultRegistry {
       try {
         await this.api.updateNote(mapping.docId, { relPath: newPath, folderId: newFolderId });
       } catch (e) {
+        // Same reason as the folder branch above. This one is the path an
+        // EXTERNAL rename takes (`docSession.applyDiskRename`), which treats a
+        // silent return as success and carries on to rebind the note's id and
+        // push its content — so a refused move out to a frozen root used to end
+        // with the note quietly back in its old folder and not a word to the
+        // user about why.
         console.error("[registry] updateNote failed", oldPath, e);
+        this.recordFailure({
+          kind: "note",
+          path: newPath,
+          docId: mapping.docId,
+          reason: reasonOf(e),
+          code: errorCode(e),
+        });
         return;
       }
       if (this.stale() || this.serverVaultId !== vaultId) return;

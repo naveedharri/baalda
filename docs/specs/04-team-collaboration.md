@@ -196,6 +196,16 @@ the item/an ancestor, is Shared; else the vault being Read-only, or a `view` on 
 Read-only; else Private. A lock naming only particular people is not a mode at all — it shows as
 **Restricted**, a per-user overlay on whatever the item's mode is.
 
+Under a **Read-only** vault the sidebar padlocks *every* folder and note, not only the ones
+carrying a lock of their own — to the person reading it, an item they may not edit and an item
+someone locked are the same state. `GET /api/vaults/:id/locks` says so directly: one synthetic
+`vault` row, plus the **lifts**, the `edit` rows the posture does not cap (org-wide ones and the
+caller's own per-user ones, never anybody else's). The client subtracts each lifted subtree from
+the padlock, so a folder or note you were granted edit on carries none, and that scope is never
+inherited downwards — otherwise a note freed by a personal grant would take the padlock straight
+back from its folder. A row padlocked only by the posture offers no Unlock: it holds no row to
+clear, and the Entire vault control is the one place that state lives.
+
 Folder grants are **inherited by descendants**; a file-level `share` can only *raise* permission
 (Outline's "read-only collection + writable document" pattern).
 

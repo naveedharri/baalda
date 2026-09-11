@@ -173,6 +173,60 @@ async function listDocsInVault(
      SELECT fi.id FROM files fi
        WHERE fi.vault_id = $2
          AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files))`;
+  // Deleting a folder HARD-deletes its rows (`tree-ops.ts deleteFolder`) after
+  // soft-deleting the notes inside, and `notes.folder_id` is `ON DELETE SET
+  // NULL`. So for a tombstone the walk above finds nothing: the folder that
+  // carried the member's share no longer exists, the note's `folder_id` is null,
+  // and a member whose access ran through a folder share was told nothing at all.
+  //
+  // That is not a cosmetic gap. "Absent from BOTH lists" is how the desktop
+  // spells REVOKED, and a revocation is removed outright with no recoverable
+  // copy, under a cap an authoritative pass lifts. An owner deleting a shared
+  // folder while the member's app was closed therefore erased those files on the
+  // next launch, with the deletion cap and the trash copy — the two things built
+  // for exactly this — never consulted.
+  //
+  // `folder_tombstones` still holds the deleted subtree's ids AND paths, so the
+  // ancestry is recoverable from the path even though the rows are gone. Only
+  // the tombstone question asks for this: a LIVE note's `folder_id` is
+  // authoritative and must stay the only thing that decides it.
+  const deadFolderCte = opts.deleted
+    ? `,
+       dead_folder_paths AS (
+          SELECT ft.path, ft.deleted_at FROM folder_tombstones ft
+           WHERE ft.vault_id = $2
+             AND (
+               -- the shared folder itself was deleted …
+               ft.id IN (SELECT id FROM shared_folders)
+               -- … or it sits under a shared folder that is still alive.
+               OR EXISTS (
+                 SELECT 1 FROM folders f2
+                  WHERE f2.id IN (SELECT id FROM subtree)
+                    AND starts_with(lower(ft.path), lower(f2.path) || '/')
+               )
+             )
+       )`
+    : "";
+  const deadFolderPredicate = opts.deleted
+    ? `OR EXISTS (
+                 SELECT 1 FROM dead_folder_paths d
+                  WHERE starts_with(lower(n.rel_path), lower(d.path) || '/')
+                    -- A tombstone may only claim notes that already EXISTED
+                    -- when it was written. Without this it matches purely by
+                    -- path: create a new, unshared folder at the same path
+                    -- later, and its deleted notes resolve through the old
+                    -- folder's long-dead share. Bounded harm — tombstones carry
+                    -- ids only, and the client holds no file for a note it never
+                    -- had — but it is an id disclosure, and it contradicts the
+                    -- doc-id-not-path invariant this system is built on.
+                    --
+                    -- Compared against created_at, not deleted_at:
+                    -- deleteFolderCascade soft-deletes the notes BEFORE it
+                    -- writes the folder tombstone, so the tombstone is always
+                    -- marginally the later of the two even in the ordinary case.
+                    AND d.deleted_at >= n.created_at
+               )`
+    : "";
   // `creatorCounts` exists for the rescue call below: under item-Private,
   // authorship no longer keeps a doc, so the "reaches it personally" set is
   // per-user shares ONLY. The normal call keeps it — a member still reads the
@@ -199,13 +253,14 @@ async function listDocsInVault(
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
              )
-       )
+       )${deadFolderCte}
        SELECT n.id FROM notes n
          WHERE n.vault_id = $2 AND n.${livePredicate}
            AND (
              ($4 AND $6 AND n.created_by = $1)
              OR n.folder_id IN (SELECT id FROM subtree)
              OR n.id IN (SELECT id FROM shared_files)
+             ${deadFolderPredicate}
            )
        ${filesUnion}`,
       [userId, vaultId, organizationId, isMember, orgGrants, creatorCounts],
@@ -273,12 +328,18 @@ export async function listReadableDocsInVault(
  * an unanswered tombstone question still means "change nothing" — see
  * `lib/sync/inbound.ts`.
  *
- * Permission-filtered rather than "every deleted id in the vault": the filtered
- * version's failure mode is the safe one. If a teammate lost the share AND the
- * note was deleted, the id is withheld and the client falls into its
- * "absent from both" branch, which removes the file as a revocation instead of
- * as a delete — the same outcome by the gentler route (a larger safety budget,
- * and it never fires at all if this endpoint couldn't answer).
+ * Permission-filtered rather than "every deleted id in the vault". If a teammate
+ * lost the share AND the note was deleted, the id is withheld and the client
+ * falls into its "absent from both" branch — where the file is removed as a
+ * REVOCATION rather than as a delete.
+ *
+ * That fallback is the harsher route, not the gentler one, and it is worth being
+ * plain about: a revocation is removed outright with no `.context/trash` copy,
+ * and on an authoritative pass its cap is lifted. So every case where a doc the
+ * caller could once read is *deleted* must be answered here rather than left to
+ * fall through — which is why the `deleted` branch resolves a share through
+ * `folder_tombstones` when the folder that carried it has been hard-deleted.
+ * An endpoint that cannot answer at all still means "change nothing".
  */
 export async function listDeletedReadableDocsInVault(
   userId: string,

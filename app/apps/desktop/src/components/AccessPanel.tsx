@@ -28,7 +28,7 @@ import {
 import { readTeamAccessCache, writeTeamAccessCache } from "../lib/teamAccessCache";
 import { toast } from "../lib/toast";
 import { scrollPaneIntoContainer } from "../lib/scrollPlan";
-import { lockScopesByPath, resourceIdsByPath } from "../lib/locks";
+import { itemLockRows, lockScopesByPath, resourceIdsByPath } from "../lib/locks";
 import { syncManager } from "../lib/sync/docSession";
 import { useStore } from "../store";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -150,7 +150,11 @@ function buildLockMap(
 ): Map<string, { org: boolean; users: Set<string> }> {
   const idToPath = resourceIdsByPath(tree);
   const direct = new Map<string, { org: boolean; users: Set<string> }>();
-  for (const l of locks) {
+  // Item rows only. The whole-vault posture would miss the id lookup below and
+  // drop out anyway, but on a coincidence — the org id is in no registry map —
+  // and this map answers "which ITEM carries a lock", which the posture never
+  // does. The vault's mode reaches the panel through `effectiveTeamMode`.
+  for (const l of itemLockRows(locks)) {
     const path = idToPath.get(shareResId(l));
     if (!path) continue;
     const entry = direct.get(path) ?? { org: false, users: new Set<string>() };
@@ -465,8 +469,18 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     }
     return null;
   };
+  /**
+   * Locks that sit on an ITEM, by path. The whole-vault Read-only posture is
+   * deliberately excluded: the server reports it as a `vault` lock row so the
+   * sidebar can badge every folder and note, but here it would answer "this
+   * item carries its own lock" for everything and send people to clear a row
+   * that decides nothing. The vault posture reaches this panel through
+   * `teamModeFor`/`effectiveTeamMode` instead, which is its one authority.
+   */
   const directScopes = useMemo(
-    () => lockScopesByPath(tree, locks, session?.user.id),
+    // No `lifts` either: they only ever subtract from the vault seed, which is
+    // not here to subtract from.
+    () => lockScopesByPath(tree, itemLockRows(locks), session?.user.id),
     [tree, locks, session?.user.id],
   );
 

@@ -369,6 +369,17 @@ export const trashNote = (path: string, stamp: string, expectedEpoch?: VaultEpoc
   invoke<string>("trash_note", { path, stamp, expectedEpoch: expectedEpoch ?? null });
 export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_path", { path, expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Delete a single FILE, refusing a directory.
+ *
+ * Used by the inbound reconciler for a REVOKED note — the one removal in the app
+ * that leaves no recoverable copy anywhere. `deletePath` above is recursive for
+ * a directory, deliberately, because the sidebar's Delete means it; nothing
+ * driven by the server may reach that. See `notefile.rs delete_file`.
+ */
+export const deleteFile = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("delete_file", { path, expectedEpoch: expectedEpoch ?? null });
 /**
  * Remove a folder the server has deleted — only if it is empty by now. Resolves
  * true only when THIS call removed it (the watcher will echo that); false when

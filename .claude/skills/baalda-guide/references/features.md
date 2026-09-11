@@ -166,7 +166,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - The MCP screen in the app puts the AI rule in one line: "It gets the same access you do."
   Deleting a token cuts the AI off immediately.
 - **Locks**: lock a note or folder so it is read-only for everyone, admins included, until
-  unlocked.
+  unlocked. Setting the whole vault to read-only shows that same lock on every folder and note,
+  except the ones you were given edit access to.
 - **Losing access** removes the note from the ex-reader's other devices (moved to trash, never
   destroyed); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom

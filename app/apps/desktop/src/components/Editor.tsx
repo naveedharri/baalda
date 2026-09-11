@@ -330,6 +330,7 @@ export function Editor() {
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locks = useStore((s) => s.locks);
+  const lifts = useStore((s) => s.lifts);
   const session = useStore((s) => s.session);
   const tree = useStore((s) => s.tree);
   const syncStatus = useStore((s) => s.syncStatus);
@@ -432,8 +433,16 @@ export function Editor() {
   // copy — a lock is deliberate protection, not a missing grant.
   const lockScope =
     notePath && syncEnabled
-      ? effectiveLockForPath(lockScopesByPath(tree, locks, session?.user.id), notePath)
+      ? effectiveLockForPath(
+          lockScopesByPath(tree, locks, session?.user.id, lifts),
+          notePath,
+        )
       : null;
+  // The banner speaks about THIS note, so a whole-vault Read-only posture is
+  // not a lock for its purposes — "this note is locked" would send someone
+  // hunting for a setting on a note that has none. The vault-wide state is
+  // exactly what "View-only access" already says, so it keeps that copy.
+  const itemLock = lockScope === "vault" ? null : lockScope;
 
   useEffect(() => {
     if (!hostRef.current || notePath == null || /\.html?$/i.test(notePath)) return;
@@ -501,7 +510,7 @@ export function Editor() {
       const lockedLocally =
         syncEnabled &&
         effectiveLockForPath(
-          lockScopesByPath(st.tree, st.locks, st.session?.user.id),
+          lockScopesByPath(st.tree, st.locks, st.session?.user.id, st.lifts),
           notePath,
         ) != null;
       const ro = opened.readOnly || opened.status === "no-access" || lockedLocally;
@@ -778,7 +787,7 @@ export function Editor() {
         <div className="editor-topbar">
           {readOnly && (
             <div
-              className={`editor-lockbanner${lockScope ? " locked" : " viewonly"}`}
+              className={`editor-lockbanner${itemLock ? " locked" : " viewonly"}`}
               role="status"
             >
               <span className="editor-lockbanner-icon" aria-hidden="true">
@@ -795,9 +804,9 @@ export function Editor() {
                 </svg>
               </span>
               <span className="editor-lockbanner-text">
-                <strong>{lockScope ? "This note is locked" : "View-only access"}</strong>
+                <strong>{itemLock ? "This note is locked" : "View-only access"}</strong>
                 <span className="editor-lockbanner-sub">
-                  {lockScope
+                  {itemLock
                     ? "You can read it, but your changes won’t be saved or synced."
                     : "You can read this note, but you can’t edit it."}
                 </span>

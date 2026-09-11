@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { orgRole } from "./lookup.js";
+import { orgRole, vaultOrg } from "./lookup.js";
 import {
   ancestorFolderIds,
   buildAccessContext,
@@ -176,4 +176,102 @@ export async function filterReadableBlobs<T extends { rel_path: string | null }>
   );
   const referenced = new Set(rows.map((r) => r.rel_path));
   return blobs.filter((b) => !!b.rel_path && referenced.has(b.rel_path));
+}
+
+/**
+ * May `userId` CREATE a folder / note / file at `folderId` in `vaultId`?
+ *
+ * Creating is a write, and until now the HTTP registry's three create routes
+ * asked only "are you a member of this vault?" — so a read-only user could not
+ * change a single note but could add as many as they liked next to them. The
+ * three ways a vault turns read-only (a `locked` share, a `view` grant, the
+ * vault-wide Read-only posture) all have to close this door too, or "read-only"
+ * means "cannot edit what already exists".
+ *
+ * Inside a folder this is exactly {@link canEditFolder} — the same gate MCP's
+ * `create_note` / `create_folder` already use (`folderWritePermission`), so the
+ * two surfaces cannot drift.
+ *
+ * At the vault ROOT there is no folder row to resolve against, and the two
+ * surfaces legitimately differ: MCP keeps root writes admin-only, HTTP has
+ * never applied that rule and a plain member creating a note at the top of
+ * their own vault is the normal case. So the root check enforces only the
+ * read-only contract: under the Read-only posture nobody creates at the root —
+ * owners and admins included, because `vaultBaseline` caps every shortcut for
+ * everyone (see the resolver) and an owner who can still add notes has not
+ * really set the vault read-only. The way back is the Access panel, which is
+ * role-gated through `shares.ts canManage` and so is unaffected; a per-user
+ * vault-scoped `edit` grant also lifts one person out, exactly as it does for
+ * editing an existing root note.
+ */
+export async function canCreateIn(
+  userId: string,
+  vaultId: string,
+  folderId: string | null,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
+  if (folderId) return canEditFolder(userId, folderId, db);
+
+  const org = await vaultOrg(vaultId, db);
+  if (!org) return false;
+  const role = await orgRole(org, userId, db);
+  if (role === null) return false; // not a member of the vault
+  return vaultRootWritable(userId, org, db);
+}
+
+/**
+ * Is the vault ROOT writable for `userId` at all?
+ *
+ * True unless the vault-wide Read-only posture is on, in which case only an
+ * explicit per-user vault-scoped `edit` grant survives — the one thing the
+ * resolver's read-only branch still honours where there is no folder for a
+ * share to hang on. Says nothing about membership or role; callers add that.
+ *
+ * Shared with the MCP layer (`folderWritePermission`), whose root branch is
+ * admin-only and so was the one place a Read-only vault still let writes
+ * through: an owner could not touch a single existing note but could keep
+ * creating new ones at the root.
+ */
+export async function vaultRootWritable(
+  userId: string,
+  organizationId: string,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
+  if ((await vaultBaseline(db, organizationId)) !== "view") return true;
+  const { rows } = await db.query<{ ok: number }>(
+    `SELECT 1 AS ok FROM shares
+      WHERE resource_type = 'vault' AND resource_id = $1
+        AND principal_type = 'user' AND principal_id = $2
+        AND permission = 'edit'
+      LIMIT 1`,
+    [organizationId, userId],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * May `userId` UPLOAD an attachment blob into `vaultId`?
+ *
+ * Attachments carry no folder_id and no per-blob ACL row (see
+ * {@link canReadAttachment}: read access is derived from the notes that embed
+ * them), so there is no folder to resolve a lock or a `view` grant against —
+ * only the vault-wide posture applies here, and it is the one that matters:
+ * under Read-only NOBODY adds bytes to the vault, owners and admins included,
+ * exactly as `vaultBaseline` caps every other write. A per-user vault-scoped
+ * `edit` grant lifts one person out, as everywhere else.
+ *
+ * Known limit, deliberately not papered over: a member who is read-only only
+ * because of a folder lock or a folder `view` grant can still upload a blob.
+ * The blob is inert on its own — it becomes visible to anyone else only when a
+ * note they can read references it, and writing that reference is gated by the
+ * note's own permission.
+ */
+export async function canWriteAttachment(
+  userId: string,
+  vaultId: string,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
+  const access = await vaultAccess(db, userId, vaultId);
+  if (!access || access.role === null) return false; // unknown vault or not a member
+  return vaultRootWritable(userId, access.organizationId, db);
 }

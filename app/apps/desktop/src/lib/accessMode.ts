@@ -11,7 +11,7 @@
 // over the top. Per-user rows stay where they were (the "Restricted" badge and
 // the per-member menu): they are an overlay on this, not a replacement for it.
 
-import { type Share, sharePrincipalType, shareResourceId } from "./api";
+import { type Share, sharePrincipalType, shareResourceId, shareResourceType } from "./api";
 
 export type TeamMode = "open" | "readonly" | "private";
 
@@ -153,6 +153,11 @@ export function buildOrgRowsByPath(
   for (const o of overrides ?? []) add(o.resourceId, o.permission);
   for (const s of [...locks, ...denies]) {
     if (sharePrincipalType(s) !== "org") continue;
+    // The whole-vault Read-only posture is org-principal too, so the check
+    // above does not exclude it. It belongs to `vaultMode`, not to any path —
+    // `effectiveTeamMode` reads it from there — and letting it through would
+    // rest on nothing but the org id missing every entry in `idToPath`.
+    if (shareResourceType(s) === "vault") continue;
     add(shareResourceId(s), s.permission);
   }
   return out;
