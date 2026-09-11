@@ -1321,6 +1321,30 @@ export const useStore = create<AppStore>((set, get) => ({
       itemOrder: readItemOrder(v?.path),
       ...(switched ? { openFolderIsSynced: null } : {}),
     });
+    // Answer "does THIS folder sync?" for the open gate. A never-stamped folder
+    // has no mapped notes to fork, so its gate opens at once; a stamped one keeps
+    // waiting for the prime that `enableSyncForVault` resolves. Without this
+    // answer the gate stayed armed with `openFolderIsSynced: null` after every
+    // vault switch, and each note open in a local-only folder sat out the full
+    // SYNC_GATE_MS belt before opening ("opened … before sync primed").
+    if (switched && v) {
+      const path = v.path;
+      void ipc
+        .peekVaultStamp(path)
+        .then((stamp) => {
+          if (get().vault?.path !== path) return; // moved on again
+          // A surer path may already have answered (`openVaultInRoot` knows its
+          // folder syncs; the launch probe in App.tsx peeks too). Never override
+          // an answer, and never release a gate someone else is holding.
+          if (get().openFolderIsSynced !== null) return;
+          const synced = stamp?.organizationId != null;
+          set({ openFolderIsSynced: synced });
+          if (!synced) resolveSyncGate();
+        })
+        .catch(() => {
+          /* unreadable: stays null, so the gate keeps waiting for the prime */
+        });
+    }
   },
 
   setItemColor: (path, colorId) => {

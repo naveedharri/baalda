@@ -136,6 +136,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **Opening a note in a never-synced folder no longer waits 3 s.** After a vault
+  switch the open gate was re-armed and `openFolderIsSynced` reset to `null`,
+  and nothing answered for an unstamped folder — so, while signed in, every
+  note open sat out the full `SYNC_GATE_MS` belt ("opened … before sync
+  primed"). `setVault` now peeks the folder's vault stamp and releases the gate
+  for a folder that does not sync.
 - **Selection rectangles bled ~58px into the margins.** CodeMirror's
   `drawSelection()` derives every selection rect from the *first* `.cm-line`'s
   computed padding and is blind to padding on `.cm-content` — which is where the

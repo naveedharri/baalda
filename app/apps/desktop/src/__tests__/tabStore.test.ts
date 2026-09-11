@@ -3,8 +3,8 @@
 // docs/INTERACTIONS.md "Known gaps").
 //
 // Three things are pinned here:
-//   1. `openTabs` is most-recently-active FIRST, so the active card is always the
-//      leftmost one and `closeTab` lands on the note you came from;
+//   1. `openTabs` keeps its order — a tab never moves once open, only the
+//      highlight does — and `closeTab` lands on the neighbour;
 //   2. `createNoteIn` names a new note `Untitled`, `Untitled 1`, … and arms the
 //      sidebar's inline rename through a reveal request;
 //   3. a reveal is an EVENT: the same path requested twice must re-fire, which is
@@ -200,5 +200,34 @@ describe("requestReveal", () => {
       path: "Deep/Folder/note.md",
       edit: false,
     });
+  });
+});
+
+describe("open gate after a vault switch", () => {
+  const vaultAt = (path: string) =>
+    ({ path, epoch: 1, name: path.split("/").pop() }) as unknown as Parameters<
+      ReturnType<typeof useStore.getState>["setVault"]
+    >[0];
+
+  it("answers 'never synced' for an unstamped folder so an open does not sit out the gate", async () => {
+    useStore.setState({ authStatus: "signed-in", vault: null });
+    ipcMock.peekVaultStamp.mockResolvedValueOnce(null);
+    useStore.getState().setVault(vaultAt("/vaults/local"));
+    await flush();
+    expect(useStore.getState().openFolderIsSynced).toBe(false);
+
+    // Signed in + not syncable used to mean "wait SYNC_GATE_MS (3s)" per open.
+    const t0 = Date.now();
+    await open("a.md");
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(useStore.getState().openNote?.path).toBe("a.md");
+  });
+
+  it("keeps waiting for the prime when the folder IS stamped", async () => {
+    useStore.setState({ authStatus: "signed-in", vault: null });
+    ipcMock.peekVaultStamp.mockResolvedValueOnce({ organizationId: "org-1" } as never);
+    useStore.getState().setVault(vaultAt("/vaults/synced"));
+    await flush();
+    expect(useStore.getState().openFolderIsSynced).toBe(true);
   });
 });
