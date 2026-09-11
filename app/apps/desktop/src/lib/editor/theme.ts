@@ -415,6 +415,57 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     backgroundColor: "var(--border)",
   },
 
+  // ---- Callouts (see lib/editor/ofm/callout.ts) ---------------------------
+  //
+  // A callout IS a blockquote, so it inherits `.cm-blockquote`'s indent and its
+  // `::before` bar and only re-colours them. `--callout-color` is set per family
+  // by the attribute selectors below — one variable, so a new family is one
+  // line and can never drift away from the theme's semantic tokens.
+  ".cm-blockquote.cm-callout": {
+    "--callout-color": "var(--accent)",
+    color: "var(--text-primary)",
+    background:
+      "color-mix(in srgb, var(--callout-color) var(--callout-tint), transparent)",
+    backgroundClip: "content-box",
+  },
+  ".cm-callout::before": { backgroundColor: "var(--callout-color)" },
+  '.cm-callout[data-callout="tip"]': { "--callout-color": "var(--success)" },
+  '.cm-callout[data-callout="warning"]': { "--callout-color": "var(--warning)" },
+  '.cm-callout[data-callout="danger"]': { "--callout-color": "var(--danger)" },
+  '.cm-callout[data-callout="quote"]': { "--callout-color": "var(--text-secondary)" },
+  // The title line reads as a heading for the block.
+  ".cm-callout-title": { fontWeight: "650" },
+  ".cm-callout-icon": {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "var(--sp-2)",
+    marginRight: "var(--sp-2)",
+    color: "var(--callout-color)",
+    verticalAlign: "-0.2em",
+  },
+  ".cm-callout-label": {
+    fontWeight: "650",
+    color: "var(--callout-color)",
+  },
+
+  // ---- #tags (see lib/editor/ofm/hashtag.ts) ------------------------------
+  //
+  // Always a pill, never folded away: a tag is a thing you read and (soon)
+  // click, not a marker that gets out of the way.
+  ".cm-hashtag": {
+    backgroundColor: "var(--accent-soft)",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.05em 0.45em",
+    // Negative margin so the pill's padding does not push the prose apart.
+    margin: "0 -0.1em",
+  },
+
+  // The `›` a `[[Note#Heading]]` shows in place of its `#`.
+  ".cm-wikilink-sep": {
+    color: "var(--text-faint)",
+    padding: "0 0.15em",
+  },
+
   // ---- YAML frontmatter (see lib/editor/frontmatter.ts) ----
   //
   // Rendered as compact dimmed source. The descendant selector is load-bearing:

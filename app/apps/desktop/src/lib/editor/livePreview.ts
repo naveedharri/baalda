@@ -44,9 +44,11 @@ import type { SyntaxNodeRef } from "@lezer/common";
 import { openExternal } from "../ipc";
 import { previewKind } from "../preview";
 import { frontmatterField } from "./frontmatter";
+import { CALLOUT_RE } from "./ofm/callout";
 import {
+  activeLineChecker,
   focusMoved,
-  isFocused,
+  lineSpanChecker,
   revealState,
   selectionTouches,
   setFocused,
@@ -228,40 +230,6 @@ const hidden = Decoration.replace({});
 export const BLOCK_INSET_CLASS = "cm-block-inset";
 
 /**
- * Does `[from, to]` share a line with any selection range? The LINE scope with
- * the focus rule left off — the memoisation below has to ask this about a state
- * whose focus flag has just flipped.
- */
-function lineSpanChecker(state: EditorState): (from: number, to: number) => boolean {
-  const doc = state.doc;
-  const activeLines = new Set<number>();
-  for (const r of state.selection.ranges) {
-    const first = doc.lineAt(r.from).number;
-    const last = doc.lineAt(r.to).number;
-    for (let n = first; n <= last; n++) activeLines.add(n);
-  }
-  return (from: number, to: number) => {
-    const first = doc.lineAt(from).number;
-    const last = doc.lineAt(Math.max(from, to)).number;
-    for (let n = first; n <= last; n++) if (activeLines.has(n)) return true;
-    return false;
-  };
-}
-
-/**
- * Lines touched by any selection stay "raw" so the writer edits real markdown.
- * Shared by the inline plugin, the block-widget field and ./ofm/callout.ts, so
- * all three agree on what "being edited" means.
- *
- * A BLURRED editor has no active line at all: the caret it is still carrying is
- * not where anyone is looking.
- */
-export function activeLineChecker(state: EditorState): (from: number, to: number) => boolean {
-  if (!isFocused(state)) return () => false;
-  return lineSpanChecker(state);
-}
-
-/**
  * "Is this node inside the YAML frontmatter?" — the region decorates itself
  * (frontmatter.ts), so every other source skips it. Containment, not overlap:
  * the syntax tree's root node starts at 0 as well, and skipping that would skip
@@ -403,6 +371,23 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
     return owner ? touches(owner.from, owner.to) : touches(node.from, node.to);
   };
 
+  /**
+   * The `[!type]` head of a callout marker, if `pos` sits inside one.
+   *
+   * lezer reads `[!warning]` as a shortcut-reference Link, so its `[` and `]`
+   * would otherwise fold away TOKEN-scoped and leave `> !warning Careful` on
+   * screen the moment you tried to edit the marker. The marker is STRUCTURE:
+   * ofm/callout.ts replaces the whole span with an icon off the line, and on the
+   * line it must read exactly as it was typed.
+   */
+  const inCalloutMarker = (pos: number): boolean => {
+    const line = doc.lineAt(pos);
+    if (!CALLOUT_RE.test(line.text)) return false;
+    const open = line.text.indexOf("[!");
+    const close = line.text.indexOf("]", open);
+    return open >= 0 && close > open && pos >= line.from + open && pos <= line.from + close;
+  };
+
   // `[[wiki-links]]` are owned by the wikilinks plugin; never touch their marks.
   // (`wikilinkRe()` mints a fresh regex per call — the `g` flag carries
   // `lastIndex` state, so one shared instance silently skips matches.)
@@ -456,6 +441,8 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
 
         // Wiki-links are the wikilinks plugin's territory, marks and all.
         if (inWiki(node.from)) return;
+        // …and so is a callout's `[!type]`, which belongs to ofm/callout.ts.
+        if (inCalloutMarker(node.from)) return false;
 
         switch (node.name) {
           // ---- LINE scope: the markers that give a LINE its shape ----------

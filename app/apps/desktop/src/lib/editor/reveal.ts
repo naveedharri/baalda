@@ -85,6 +85,40 @@ export function selectionTouches(state: EditorState): (from: number, to: number)
 }
 
 /**
+ * Does `[from, to]` share a line with any selection range? The LINE scope with
+ * the focus rule left off — livePreview's block memoisation has to ask this
+ * about a state whose focus flag has just flipped.
+ */
+export function lineSpanChecker(state: EditorState): (from: number, to: number) => boolean {
+  const doc = state.doc;
+  const activeLines = new Set<number>();
+  for (const r of state.selection.ranges) {
+    const first = doc.lineAt(r.from).number;
+    const last = doc.lineAt(r.to).number;
+    for (let n = first; n <= last; n++) activeLines.add(n);
+  }
+  return (from: number, to: number) => {
+    const first = doc.lineAt(from).number;
+    const last = doc.lineAt(Math.max(from, to)).number;
+    for (let n = first; n <= last; n++) if (activeLines.has(n)) return true;
+    return false;
+  };
+}
+
+/**
+ * Lines touched by any selection stay "raw" so the writer edits real markdown.
+ * Shared by livePreview's inline plugin, its block-widget field, ./tasks.ts and
+ * ./ofm/callout.ts, so all of them agree on what "being edited" means.
+ *
+ * A BLURRED editor has no active line at all: the caret it is still carrying is
+ * not where anyone is looking.
+ */
+export function activeLineChecker(state: EditorState): (from: number, to: number) => boolean {
+  if (!isFocused(state)) return () => false;
+  return lineSpanChecker(state);
+}
+
+/**
  * The inline constructs a marker can belong to. `Link`/`Image` are here so the
  * `[`, `]`, `(`, `)` and the URL of one link reveal together while the link
  * next to it stays rendered.

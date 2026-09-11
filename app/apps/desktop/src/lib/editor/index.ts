@@ -22,6 +22,7 @@ import { frontmatterDecorations } from "./frontmatter";
 import { listKeymap } from "./lists";
 import { livePreview } from "./livePreview";
 import { noteHeader, type NoteHeaderOptions } from "./noteHeader";
+import { ofmDecorations, ofmMarkdown } from "./ofm";
 import { smartPaste, type SaveAttachment } from "./paste";
 import { tableAtomicRanges } from "./table/atomic";
 import { tripleClickLine } from "./selection";
@@ -100,8 +101,10 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
         wikilinkCompletions({ getTitles: opts.getTitles, onNavigate: opts.onNavigate }),
       ],
     }),
-    // GFM adds tables, task lists, strikethrough, and autolinks to the parser.
-    markdown({ base: markdownLanguage, extensions: [GFM] }),
+    // GFM adds tables, task lists, strikethrough, and autolinks; `ofmMarkdown`
+    // adds Obsidian's `==highlight==`, `%%comment%%` and `#tag` on top, so a
+    // vault reads the same here and in Obsidian.
+    markdown({ base: markdownLanguage, extensions: [GFM, ...ofmMarkdown] }),
     markdownHighlight,
     // Frontmatter first: blocks.ts and livePreview.ts both read its range so
     // nothing else decorates inside it (see lib/editor/frontmatter.ts).
@@ -121,6 +124,9 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     smartPaste(opts.saveAttachment),
     editorTheme,
     wikilinks({ getTitles: opts.getTitles, onNavigate: opts.onNavigate }),
+    // Callout tinting + tag pills. After livePreview, whose QuoteMark rule
+    // hides the `>` a callout's marker line still carries.
+    ...ofmDecorations,
     // Only mirror doc changes into the store buffer for the Phase-0 path.
     ...(collab || !opts.onChange
       ? []
