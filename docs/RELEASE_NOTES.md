@@ -18,3 +18,9 @@
 - Callouts work: start a quote with `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` or `> [!quote]` and it gets a matching colour, tint and icon
 - Code blocks are syntax-highlighted for the common languages and carry a Copy button
 - `[[Links]]` now show what they mean: `[[Note|label]]` shows the label, `[[Note#Heading]]` shows `Note › Heading`, and the brackets come back when you edit them
+- Fold a section away: hover the left edge of a heading, a list item, a callout or a code block and click the ›. Baalda remembers what you folded and brings it back when you reopen the note
+- Typing `#` now suggests the tags this vault already uses, most-used first — so `#idea` stays `#idea` instead of quietly becoming `#ideas`
+- More editing shortcuts: **⌘⇧H** highlights, **⌘⌥1**–**⌘⌥6** set a heading level (press the same one again to clear it), **⌘L** ticks a task or turns any line into one, and **⇧⏎** adds a line break inside a paragraph
+- Selecting a word and pressing **⌘K** is smarter: paste a link, select it, press ⌘K and the cursor lands where the words go
+- Faint guides now run down each level of a nested list
+- The editor keeps text in a readable column instead of stretching it across the whole window. Prefer the full width? Settings → Appearance → Readable line length. Line numbers live there too, off by default

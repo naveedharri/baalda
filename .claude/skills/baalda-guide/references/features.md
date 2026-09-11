@@ -57,7 +57,21 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   behind them. The file on disk stays ordinary Markdown — an edit rewrites only the cell you
   changed, so the spacing and alignment of every other cell are left exactly as you typed them.
 - `[[Wikilinks]]` between notes, with a backlinks panel. Links survive renames and moves.
-- `#tags` inline or in frontmatter.
+- `#tags` inline or in frontmatter. Typing `#` suggests the tags the vault already uses, the
+  ones you use most first, so a tag stays one tag instead of drifting into three spellings.
+- **Folding.** Hover the left edge of a heading, a list item, a callout or a code block and a
+  small `>` appears; click it to fold that section away, leaving a `…` you can click to bring it
+  back. Baalda remembers what you folded per note, on this device, and restores it the next time
+  you open the note — even if lines were added above it in the meantime. What you fold is a way
+  of reading; it never changes the file.
+- **Keyboard shortcuts** (beyond the usual ⌘N / ⌘W / ⌘F): ⌘B bold, ⌘I italic, ⌘E inline code,
+  ⌘⇧X strikethrough, ⌘⇧H highlight, ⌘K link (select a URL first and the cursor lands where the
+  words go), ⌘⌥1–⌘⌥6 heading level (press the same one again to clear it), ⌘L tick a task or turn
+  any line into one, ⇧⏎ a line break inside a paragraph, ⌘; add a property, Tab / ⇧Tab indent a
+  list item. Enter continues the list you are in and renumbers as you go.
+- **Readable line length** keeps the text in a comfortable column rather than stretching it
+  across the whole window. Turn it off in Settings → Appearance for full width; **Line numbers**
+  live in the same place, off by default. Faint guides mark each level of a nested list.
 - Tabs for open notes, with a right-click menu (close, close others, close to the right, close
   all).
 - Autosave. Undo/redo is shared correctly even during live collaboration.

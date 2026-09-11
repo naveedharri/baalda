@@ -23,6 +23,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Changed
+- **The editor's default measure is 88ch, down from 120ch — a visible
+  narrowing.** Past roughly ninety characters the eye loses the start of the
+  next line; this is where every typographic rule of thumb, and Obsidian's own
+  default, lands. Settings → Appearance → "Readable line length" restores the
+  full width.
+- **`indentUnit.of("  ")`** is now set explicitly, so `lists.ts`'s Tab/Shift-Tab,
+  `indentOnInput` and every CodeMirror indent command share one answer to "how
+  wide is a level". `lists.ts` lost its dead `listEnter` command and the unused
+  half of `parseItem` along with it: lang-markdown registers
+  `insertNewlineContinueMarkup` at `Prec.high`, so ours could never run.
 - **Markdown markers moved to a new faint tier.** `--text-faint` (light
   `#bfbfc8`, dark `#55555f`) is defined in all three `tokens.css` colour blocks
   — `:root`, `[data-theme="dark"]` and the `prefers-color-scheme` pre-hydration
@@ -147,6 +157,76 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   moved out of `noteHeader.ts` into `lib/editor/reactWidget.ts` and is now
   shared. A table's range is atomic (`table/atomic.ts`), so no arrow key can
   park the caret inside a block that never shows its source.
+- **Folding, with the folds remembered.** `lib/editor/folding.ts` adds
+  `codeFolding()` (an accent-soft `…` pill), `foldKeymap` and a hover chevron.
+  No new fold *services*: `@codemirror/lang-markdown` already folds headings
+  (`headerIndent`) and, through its blanket `foldNodeProp`, list items,
+  blockquotes/callouts and fenced code with exactly the ranges the plan
+  specified — a probe against the real parser confirmed it, so the hand-written
+  `listItemFold`/`calloutFold` were dropped rather than added as a second
+  authority. What IS ours is `foldOwner`, which decides where a chevron may
+  appear: the same blanket prop also makes a hard-wrapped paragraph and a GFM
+  table foldable, and a table's lines belong to an atomic block replace widget.
+  The chevron is an absolutely-positioned widget translated out of the column by
+  `--editor-fold-gutter` (**Plan A** — a `foldGutter()` would take real width
+  from `.cm-content`, so the prose would shift sideways the first time a note
+  grew a foldable heading). Persistence is **line anchors** — `{v:1, folds:
+  [{line, text(80)}]}` — resolved by exact text at the remembered line, then a
+  ±8-line scan, then dropped; never offsets. Saved debounced 500 ms (well clear
+  of the bridge's 150/300 ms timings, and into `index.sqlite`, never the `.md`),
+  and RESTORED by a synchronous dispatch in the same tick as `new EditorView`,
+  with the state fetched in parallel with the bridge open, so no unfolded frame
+  ever paints. `remoteCursors` skips a peer whose caret is inside a range we
+  folded. New Rust table `note_ui_state (doc_id PK, state, updated_at)`,
+  appended to `index.rs::migrate()`'s idempotent batch, untouched by `rebuild()`
+  like the `yjs_*` tables, swept by `prune_yjs_docs` against the same live set;
+  IPC `get_note_ui_state` / `set_note_ui_state`.
+- **Tag autocomplete.** Typing `#` suggests the vault's existing tags, ranked by
+  use count so a spelling that already exists wins over a new near-duplicate.
+  Rust `Index::list_tags` (a `tags` ⟕ `note_tags` count, most-used first, ties by
+  name) → `list_tags` command → `ipc.listTags` → store `tags`/`refreshTags`,
+  refreshed from inside `refreshTitles` (same index, same moments).
+  `ofm/hashtag.ts` gains `tagCompletions`, added to the SINGLE
+  `autocompletion({override})` in `lib/editor/index.ts` — a second
+  `autocompletion()` config would conflict with the slash and `[[` sources.
+- **More editing keys.** `Mod-Shift-h` → `==highlight==`; `Mod-Alt-1…6` set a
+  heading level and clear it when pressed again (`changeByRange` over every line
+  a selection touches); `Shift-Enter` inserts a markdown hard break `"  \n"`
+  (a distinct key name from Enter, so lang-markdown's `Prec.high` binding never
+  sees it — but `defaultKeymap` DOES fill Enter's `shift` slot, which is why
+  `formattingKeymap()` must stay ahead of it); `Mod-l` (`tasks.ts`
+  `toggleTaskAtCursor`) ticks a task, gives a bare bullet a box, or turns a plain
+  line into `- [ ] `, every touched line in ONE transaction. `toggleInline` now
+  trims whitespace off the selection (`**word **` is literal asterisks in
+  markdown, so the naive version silently produced nothing) and expands an empty
+  selection to `state.wordAt`. `Mod-k` over a URL produces `[](url)` with the
+  caret in the label. `commands.test.ts` drives all of it — plus the list
+  continuation, renumbering and `deleteMarkupBackward` we deliberately did NOT
+  write — through a real `EditorView`, so lang-markdown changing under us is a
+  test failure rather than a bug report.
+- **Indentation guides.** `lib/editor/indentGuides.ts`: a `Decoration.line`
+  carrying `--indent-depth` plus a `::before` filled with a repeating gradient,
+  inset by `--editor-pad-x` and full-height so a wrapped line's guides run down
+  every row. **No dependency** — `@replit/codemirror-indentation-markers` was
+  installed, spiked and removed: it steps its gradients in `ch`, and our editor
+  is set in a proportional font where a space is about half a `ch`, so every
+  guide landed inside the text; the step is baked into JS-generated
+  `background-position`, so no stylesheet could move it. Its pseudo-element is
+  also pinned at `left: 2px` (blind to `--editor-pad-x`) and drawn at
+  `z-index: -1` (behind any line with its own background — our code well, our
+  callout tint). Instead the step is MEASURED: a probe span of real spaces in
+  `.cm-scroller` (never in `.cm-content`, which the DOMObserver watches) is laid
+  out on every geometry change and published as `--indent-guide-step`, so the
+  guides track a webfont landing and any zoom.
+- **Two layout settings** (Settings → Appearance, device-local like the theme):
+  **Readable line length** (on by default) and **Line numbers** (off by
+  default — a gutter takes real width from the prose column). The width toggle
+  is pure CSS: `.editor-column[data-measure="full"] { --editor-measure: 100% }`,
+  which `--editor-pad-x` and therefore `.cm-line`, `cm-block-inset`, the fold
+  chevrons and the loading skeleton all follow with no JS. `lineNumbers()` sits
+  in a Compartment so the switch reconfigures the live view instead of rebuilding
+  it (and with it the CRDT binding).
+
 - **Live preview reveals one token at a time.** New `lib/editor/reveal.ts` holds
   the two scopes the editor now distinguishes: LINE (headings, quote markers,
   the task dash, block widgets) and TOKEN (`**`, `*`, `~~`, `==`, `%%`, `` ` ``,
