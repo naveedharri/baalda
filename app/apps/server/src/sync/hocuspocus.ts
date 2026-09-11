@@ -87,6 +87,34 @@ export type DocEditedHook = (
   userId: string | null,
 ) => void;
 
+/**
+ * Why this message must be refused, or null to let it through.
+ *
+ * TWO ceilings, and the second is the one experience added. Capping the MESSAGE
+ * alone bounds a single step, and a note that doubles doubles from small: a
+ * customer's `Map of Content.md` went 276 bytes → 8 MB in seventeen messages,
+ * not one of them near the cap, and ended at 16 MB of Yjs state holding
+ * 1,179,679 lines of 35 distinct ones. Capping the DOC makes the limit a wall
+ * the note cannot be pushed through rather than a step size: a doc under it
+ * always accepts one more message, a doc over it accepts none and is a repair
+ * job (`POST /api/notes/:id/reset-crdt`).
+ *
+ * The doc length is `Y.Text`'s own counter, so asking costs nothing.
+ */
+export function noteSizeRefusal(
+  updateBytes: number,
+  docChars: number,
+  capBytes: number = config.maxNoteMb * 1024 * 1024,
+): string | null {
+  if (updateBytes > capBytes) {
+    return `Rejecting oversized sync message: ${updateBytes} bytes (cap ${capBytes})`;
+  }
+  if (docChars > capBytes) {
+    return `Refusing writes to oversized doc: ${docChars} chars (cap ${capBytes}) — needs /reset-crdt`;
+  }
+  return null;
+}
+
 export function createSyncServer(
   port: number = config.hocuspocusPort,
   onDocChanged?: DocChangedHook,
@@ -117,12 +145,12 @@ export function createSyncServer(
      * a second for as long as the app was open.
      */
     async beforeHandleMessage(data) {
-      const cap = config.maxNoteMb * 1024 * 1024;
-      if (data.update.byteLength > cap) {
-        console.error(
-          `Rejecting oversized sync message for ${data.documentName}: ` +
-            `${data.update.byteLength} bytes (cap ${cap})`,
-        );
+      const refusal = noteSizeRefusal(
+        data.update.byteLength,
+        data.document.getText("content").length,
+      );
+      if (refusal) {
+        console.error(`${refusal} for ${data.documentName}`);
         throw new NoteTooLargeError();
       }
     },

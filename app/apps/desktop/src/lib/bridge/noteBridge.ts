@@ -63,6 +63,22 @@ export class NoteBridge {
   private ingestTimer: number | null = null;
   private egestTimer: number | null = null;
   private ingestDirty = false;
+  /** The ingest pass in flight, if any. Two passes that overlap each diff
+   *  against the SAME `this.text` and each apply their own result: against an
+   *  empty doc that is the whole file inserted twice — the doubling bug through
+   *  a second door (`__tests__/doubling-ingest.test.ts`). The debounced watcher
+   *  drain and the sync layer's `ingestNow` target the same doc routinely, so
+   *  passes are chained here rather than left to interleave. */
+  private ingestInFlight: Promise<boolean> | null = null;
+  /** Appends still in flight. Updates are persisted fire-and-forget and
+   *  `destroy()` is synchronous, so a bridge torn down right after it applied
+   *  ops used to drop them — while `flushEgest` had already put the same text in
+   *  the `.md`. That leaves the local CRDT BEHIND its own file, which is the
+   *  state a diff-and-push cycle turns into duplicated text: the next bridge
+   *  reads the file, does not recognise the content as its own, and re-inserts
+   *  it under a fresh clientID. `whenPersisted()` is the way to close a bridge
+   *  without opening that gap. */
+  private persistQueue: Promise<void> = Promise.resolve();
   private destroyed = false;
   /** Consecutive failed egest writes (0 once one lands). Drives the retry
    *  backoff and the `onWriteFailed`/`onWriteRecovered` UI cues. */
@@ -111,7 +127,16 @@ export class NoteBridge {
       this.observedUpdates++;
       this.logLength++;
       this.logBytes += update.byteLength;
-      void Promise.resolve(this.io.persistence.appendUpdate(this.docId, update))
+      // Started eagerly (not chained behind the queue): the store's ordering is
+      // its own business, and deferring the call by a microtask changes when a
+      // log row exists. The queue only TRACKS completion, for `whenPersisted`.
+      const appended = Promise.resolve(
+        this.io.persistence.appendUpdate(this.docId, update),
+      );
+      this.persistQueue = this.persistQueue
+        .catch(() => {})
+        .then(() => appended);
+      appended
         .then(() => {
           // Compact LIVE, not only on the next load: one paste or AI rewrite can
           // put megabytes into the log, and until now nothing shrank it until
@@ -121,6 +146,7 @@ export class NoteBridge {
           if (this.shouldCompact()) void this.compact();
         })
         .catch((e) => this.reportError(e, "appendUpdate"));
+      void this.persistQueue;
     };
 
     this.onTextChange = (_evt, tr) => {
@@ -310,7 +336,33 @@ export class NoteBridge {
     return this.drainIngest();
   }
 
+  /**
+   * Run one ingest pass, never overlapping another. A queued pass re-reads the
+   * dirty flag when its turn comes, so a file change that arrived mid-pass is
+   * still merged (against the doc as the earlier pass left it) and one that was
+   * already covered costs nothing.
+   */
   private async drainIngest(): Promise<boolean> {
+    const prior = this.ingestInFlight;
+    const run = (async () => {
+      if (prior) {
+        try {
+          await prior;
+        } catch {
+          // A failed pass must not strand the queue behind it.
+        }
+      }
+      return this.runIngest();
+    })();
+    this.ingestInFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (this.ingestInFlight === run) this.ingestInFlight = null;
+    }
+  }
+
+  private async runIngest(): Promise<boolean> {
     if (this.destroyed || !this.ingestDirty) return false;
     this.ingestDirty = false;
 
@@ -373,10 +425,28 @@ export class NoteBridge {
     }
     this.truncateReported = false;
 
+    // A diff against an EMPTY doc is not a merge, it is a seed: every byte of
+    // the file is inserted as this device's own history. Seeding is ordered —
+    // pull the server's canonical state FIRST, then `seedFromFileIfEmpty` only
+    // if the doc is still empty (spec 03 §5) — and this path is not in that
+    // order. `docSession.handleLocalFileChanged` ingests any resident bridge
+    // the watcher names, including one whose first pull has not landed, so
+    // without this the file's text and the server's text both end up in the
+    // doc: the note-doubling bug through the ingest door. A doc that has held
+    // content this session (`everHadContent`) is past its seed and a genuine
+    // clear-all still ingests; a local-only vault seeds on open and never gets
+    // here empty.
+    if (current.length === 0 && !this.everHadContent && !this.seedOnOpen) {
+      return false;
+    }
+
     const diffs = computeDiff(current, fileText);
     const ratio = changeRatio(diffs, current.length, fileText.length);
 
     if (ratio > this.cfg.largeDiffRatio) {
+      // What the doc had seen when `current` and `diffs` were taken — the check
+      // after the snapshot below compares against it.
+      const generation = this.observedUpdates;
       // A coarse whole-file rewrite (e.g. an AI edit) can merge badly against a
       // concurrent edit. Snapshot the pre-diff state first so it's recoverable
       // (spec 02 §6, spec 03 §5). The snapshot row IS the recovery point; the
@@ -390,6 +460,16 @@ export class NoteBridge {
         this.recoverySnapshotTaken = true;
       } catch (e) {
         this.reportError(e, "ingest:recoverySnapshot");
+      }
+      // That snapshot is the one await between reading `current` and applying
+      // the diff against it, and a remote update landing inside it leaves the
+      // diff describing a document that no longer exists — positions shifted,
+      // and on the empty-doc case every byte of the file inserted on top of the
+      // server's copy of the same note. Re-diff against what the doc says NOW;
+      // the seed refusal above is re-evaluated with it.
+      if (this.observedUpdates !== generation) {
+        this.ingestDirty = true;
+        return this.runIngest();
       }
     }
 
@@ -525,6 +605,22 @@ export class NoteBridge {
     this.clearT(this.egestTimer);
     this.egestTimer = null;
     await this.drainEgest();
+  }
+
+  /**
+   * Resolve once every update this doc has produced is in the local CRDT store.
+   *
+   * Call it before `destroy()` on any bridge that applied ops — a cold apply, an
+   * LRU retire — or the doc goes away holding updates the store never got. See
+   * {@link persistQueue}.
+   */
+  async whenPersisted(): Promise<void> {
+    try {
+      await this.persistQueue;
+    } catch {
+      // Already reported by the append's own catch; a failed persist must not
+      // stop a teardown.
+    }
   }
 
   /**

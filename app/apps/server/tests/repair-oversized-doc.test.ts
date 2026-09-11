@@ -3,7 +3,7 @@ import * as Y from "yjs";
 import { createApp } from "../src/http/app.js";
 import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
-import { CLOSE_NOTE_TOO_LARGE } from "../src/sync/hocuspocus.js";
+import { CLOSE_NOTE_TOO_LARGE, noteSizeRefusal } from "../src/sync/hocuspocus.js";
 import { appendUpdate, docStoredBytes, loadDocState, resetDocCrdt } from "../src/yjs/persistence.js";
 import { recordingAppDeps, type RecordingAppDeps } from "./helpers/app.js";
 import { signUp, type TestUser } from "./helpers/auth.js";
@@ -54,6 +54,30 @@ describe("oversized-doc repair", () => {
     // module — this literal is the only thing holding them in lockstep, and a
     // drift silently restores the infinite reconnect loop.
     expect(CLOSE_NOTE_TOO_LARGE).toBe(4413);
+  });
+
+  describe("the size gate", () => {
+    const CAP = 1000;
+
+    it("lets an ordinary message through", () => {
+      expect(noteSizeRefusal(500, 400, CAP)).toBeNull();
+    });
+
+    it("refuses a single message bigger than the cap", () => {
+      expect(noteSizeRefusal(CAP + 1, 0, CAP)).toMatch(/oversized sync message/);
+    });
+
+    it("refuses any write to a doc already over the cap", () => {
+      // The half that experience added. A note that doubles doubles from small:
+      // every message in the cascade that took a customer's `Map of Content.md`
+      // from 276 bytes to 16 MB was comfortably under the message cap, so the
+      // message cap alone never fired. The doc cap turns the limit into a wall.
+      expect(noteSizeRefusal(10, CAP + 1, CAP)).toMatch(/oversized doc/);
+    });
+
+    it("still accepts one more message from a doc at the cap, so it can be edited down", () => {
+      expect(noteSizeRefusal(10, CAP, CAP)).toBeNull();
+    });
   });
 
   it("resets a doc's history and re-seeds it from the supplied text", async () => {
