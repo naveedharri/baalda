@@ -3,3 +3,9 @@
 - Moving a Pro subscription to another vault now opens a clear dialog that shows each eligible vault with its members and explains what changes, instead of a bare dropdown
 - Large notes open faster and launching does less work up front: note history now moves between the app and its storage as raw data instead of text, and reopening a vault no longer rewrites index rows that did not change
 - Faster launch: the window now opens with the app already drawn instead of a blank frame, and Baalda loads about half as much code up front (and installs smaller)
+- The editor now selects text cleanly: highlighting a line or a paragraph no longer spills out into the margins
+- New notes start blank, and a note's title is simply its file name — the name in the tab, the sidebar and the search results all agree
+- Open notes moved into one row at the top: the note you are reading is the raised tab on the left, ⌘W closes it, Ctrl-Tab moves between them, and + starts a new note
+- Opening a note now reveals it in the sidebar, expanding the folders above it
+- Note properties at the top of a file (tags, dates) now render as a compact block instead of a giant bold heading
+- Lists read as normal text again, with only the bullet dimmed

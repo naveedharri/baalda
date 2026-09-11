@@ -88,6 +88,32 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   of unreferenced brand art and Vite template SVGs from every installer, loads
   only the wordmark the current theme shows, and removes an unused font
   dependency.
+- **New notes are created empty.** Rust `notefile.rs create_note` used to seed
+  `# {stem}`, a visible duplicate of the title the app already shows. With it
+  gone, the "title follows heading" rule (`lib/editor/titleFollow.ts`) went too:
+  its whole premise was that seeded H1, and on a *legacy* note all it could do
+  was silently rename the file while you typed over an old heading. Naming a new
+  note is now the sidebar's inline rename box, armed by the new shared
+  `store.createNoteIn` — one create path for the sidebar's New-note button, the
+  tab strip's `+` and ⌘N (which used to invent `Untitled ${Date.now()}`). The
+  Rust *index* title is unchanged (frontmatter `title:` → first H1 → stem): it
+  is what `[[wikilinks]]` resolve against and what `notes_fts` indexes, and it
+  stays the search/link title while the UI shows the file name.
+- **The note title is its file name, in one place.** The header's `.note-title`
+  span is gone and the tab strip is the header's top row, so the two can no
+  longer disagree about a note whose H1 and filename differ (they did). New
+  `lib/notePath.ts` (`stemOf` / `noteLabel` / `sanitizeFileStem`) is the one
+  label rule, shared by the tab strip, the sidebar rows, search results and
+  backlinks. The active tab is a raised `--bg-surface` card whose bottom corners
+  curve into the note sheet, and `openTabs` is now most-recently-active first, so
+  it is always the leftmost card and ⌘W lands on the note you came from. Added
+  ⌘W (close), Ctrl-Tab / Ctrl-Shift-Tab (walk a snapshot of the strip, so the
+  order changing underneath cannot ping-pong between two tabs) and a `+` button.
+- **Opening a note reveals it in the sidebar.** Store `requestReveal` + one
+  `FileTree` effect: the folders above it are listed in ancestor order, the row
+  scrolls into view and pulses once (nothing under `prefers-reduced-motion`).
+  This generalises the rAF-retry `beginRename` the new-folder flow used, which is
+  now one mechanism for both.
 
 ### Added
 - **Boot instrumentation.** `lib/perf.ts` marks `script`, `react-mount`,
@@ -112,6 +138,39 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **Selection rectangles bled ~58px into the margins.** CodeMirror's
+  `drawSelection()` derives every selection rect from the *first* `.cm-line`'s
+  computed padding and is blind to padding on `.cm-content` — which is where the
+  centring inset lived, so a full-line or multi-line highlight started well left
+  of the text and overran its right edge. The inset moved to `.cm-line` as the
+  shared `--editor-pad-x` token (`.cm-content` stays full width, so a click out
+  in the margin still places the caret); the blockquote bar, the fenced-code well
+  and the `---` hairline are re-cut to paint inside the prose column now that a
+  line box spans the sheet; and block replace widgets — tables, embedded HTML —
+  get the same inset back through a shared `cm-block-inset` class. The code-block
+  well is now a filled well without hairlines or rounded corners.
+- **List item text was accent-coloured.** `@lezer/markdown` maps
+  `"OrderedList/... BulletList/..."` to `tags.list`, and the `/...` hands the tag
+  to every descendant — so a `t.list` colour painted the whole item's *text*
+  rather than its marker. The rule is deleted rather than recoloured, so a list
+  inside a blockquote correctly inherits the muted tier; the `•` bullet joins the
+  faint marker tier. GFM task items were affected the same way and are fixed too.
+- **YAML frontmatter rendered as a giant bold heading.** With no frontmatter
+  parser, lezer reads `---` as a horizontal rule and `key: v\n---` as a Setext
+  H2. New `lib/editor/frontmatter.ts` finds the region the same way Rust's
+  `parse.rs split_frontmatter` does (parity-tested, CRLF included) and renders it
+  as a compact dimmed source block whose fences hide while the caret is
+  elsewhere; `blocks.ts` and both `livePreview.ts` builders now skip the range,
+  so nothing else decorates inside it. Decorations only — no document change.
+- **A note created empty and then filled while offline could never upload.**
+  `contentWorkList` filters the `emptyEverywhere` verdict *before* it consults
+  `serverEmpty`, and an egest from the note you have OPEN is suppressed in
+  `handleLocalFileChanged` before the line that clears that verdict. So a note
+  settled by `ready.empty`, then opened, typed into offline and closed, was
+  skipped by every later `ready.empty` probe until an app restart. `openDoc` now
+  clears the verdict when it takes over a doc. Previously reachable only for a
+  0-byte inbound placeholder filled while open; with new notes created empty it
+  would have been the common path.
 - **A queued local-change push could park forever.** `runLocalChangePush`
   returned without re-arming its drain timer when the vault engine was not up
   yet, leaving the queued notes waiting on a timer nothing would set again. It
