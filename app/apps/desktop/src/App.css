@@ -2431,6 +2431,11 @@ body:has(.sidebar-resizer.dragging) {
   min-height: 44px;
   padding: 0 var(--sp-6) 0 var(--sp-3);
   border-bottom: 1px solid var(--border);
+  /* Chrome, not paper: `.main` is `--bg-surface`, and the active tab is a
+     `--bg-surface` card — on a same-colour row it (and its fillets) would
+     vanish. The subtle well is what makes the card read as lifted out of the
+     header and joined to the sheet below. */
+  background: var(--bg-subtle);
 }
 /* ---- Open-file tabs (TabBar) ---- */
 .tab-strip {
