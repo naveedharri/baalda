@@ -19,13 +19,30 @@ directory, which breaks `deploy/compose/docker-compose.yml`'s `context: ../..`
    - `JWT_SECRET` — `openssl rand -base64 32`
    - `BETTER_AUTH_URL` — the public HTTPS URL Coolify's proxy fronts, e.g.
      `https://baalda.example.com` (no trailing slash, no port — TLS is on 443)
-5. On the `server` service, set the domain to the same host as
-   `BETTER_AUTH_URL` and expose container port `3010`. Coolify's Traefik
-   handles TLS and WebSocket upgrade for you — the sync WebSocket rides the
-   same port at `/sync`, so there's nothing extra to route.
-6. Deploy. Coolify runs `postgres → migrate → server` in order (via
+5. Deploy. Coolify runs `postgres → migrate → server` in order (via
    `depends_on` + `condition: service_completed_successfully`), so the server
    never answers requests against an unmigrated schema.
+
+## Domain
+
+The `server` service declares `SERVICE_FQDN_SERVER` — Coolify's [magic env var
+convention](https://coolify.io/docs/knowledge-base/environment-variables) —
+which tells Coolify to generate a domain (a free `*.sslip.io` one, unless you
+already set your own) and assign it to *this* service's exposed port (`3010`)
+automatically on first deploy. `postgres` and `migrate` have no exposed port,
+so they're never offered a domain.
+
+If a domain doesn't get assigned automatically (older Coolify versions, or you
+skipped step 5's redeploy), do it by hand: open the `server` service →
+**Domains** → **Add domain**, set **Service:** `server` (not `migrate` or
+`postgres`), **Port:** `3010`, **Protocol:** `http` (Coolify's Traefik
+terminates TLS in front — the container itself only ever speaks plain HTTP).
+
+Either way, once you have the domain, set **`BETTER_AUTH_URL`** to it with an
+`https://` scheme and no trailing slash (e.g.
+`https://server-abc123.your-coolify-host.sslip.io`) and redeploy — Better Auth
+builds invitation and verification links from that value, so a mismatch here
+breaks them.
 
 Then in the desktop app: **account menu → Server settings →** your
 `BETTER_AUTH_URL` → **Save**. Create an account and you're synced.

@@ -248,11 +248,14 @@ terminates TLS and reaches the container on the internal network instead.
 4. Required env vars on the `server`/`migrate` services: `POSTGRES_PASSWORD`,
    `JWT_SECRET` (`openssl rand -base64 32`), `BETTER_AUTH_URL` (the public
    HTTPS URL Coolify's proxy fronts, no trailing slash, no port).
-5. On the `server` service, set the domain to that same host and expose
-   container port `3010`. The sync WebSocket rides the same port at `/sync`,
-   so nothing else needs routing.
-6. Deploy — `migrate` must complete successfully before `server` starts, so a
-   deploy never briefly answers requests against an old schema.
+5. Deploy — `migrate` must complete successfully before `server` starts, so a
+   deploy never briefly answers requests against an old schema. `server`
+   declares Coolify's `SERVICE_FQDN_SERVER` magic env var, so a domain
+   (targeting its exposed port `3010`) is generated and assigned to it
+   automatically; if that doesn't happen, assign one by hand (Service →
+   `server`, Port → `3010`, Protocol → `http`) and redeploy. Either way, once
+   you have the domain, set `BETTER_AUTH_URL` to it and redeploy — the sync
+   WebSocket rides the same port at `/sync`, so nothing else needs routing.
 
 Full walkthrough and the differences from `deploy/compose`:
 [`deploy/coolify/README.md`](../deploy/coolify/README.md).

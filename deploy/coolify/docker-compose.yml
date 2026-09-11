@@ -17,6 +17,13 @@
 # No host ports are published here — Coolify's own proxy (Traefik) terminates
 # TLS and reaches the container directly on its internal network, so `server`
 # only needs to `expose` the port, not publish it.
+#
+# `server` declares SERVICE_FQDN_SERVER (Coolify's magic env var convention,
+# https://coolify.io/docs/knowledge-base/environment-variables) so Coolify
+# generates and assigns a domain to THIS service automatically on first
+# deploy, targeting its one exposed port. Without it Coolify still lets you
+# assign a domain by hand (Service → server, Port → 3010) in each service's
+# "Domains" settings, but won't pick the right service for you.
 name: baalda
 
 x-server-image: &server-image
@@ -61,7 +68,11 @@ services:
 
   server:
     <<: *server-image
-    environment: *server-env
+    environment:
+      <<: *server-env
+      # Bare (unset) magic var — Coolify generates a domain and assigns it to
+      # this service's exposed port. See the file-level comment above.
+      SERVICE_FQDN_SERVER:
     # No `ports:` — Coolify's proxy reaches the container on the internal
     # network. `expose` documents the port without publishing it to the host.
     expose:
