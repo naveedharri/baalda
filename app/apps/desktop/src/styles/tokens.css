@@ -142,7 +142,6 @@
 
   /* How the editor's selection layer blends over content (see theme.ts
      .cm-selectionLayer): darken on light, lighten on dark. */
-  --selection-blend: multiply;
 }
 
 /* Traffic lights are ~12px tall centred around y≈19, so 28px clears them —
@@ -186,7 +185,6 @@
   --border-strong: rgba(255, 255, 255, 0.18);
   --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
 
-  --selection-blend: screen;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -225,7 +223,6 @@
     --border-strong: rgba(255, 255, 255, 0.18);
     --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
 
-    --selection-blend: screen;
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
     --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);

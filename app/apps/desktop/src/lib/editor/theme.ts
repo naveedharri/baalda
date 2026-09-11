@@ -74,18 +74,17 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
     backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
   },
-  // drawSelection() paints in a layer BEHIND the content, so opaque line
-  // backgrounds (the .cm-codeblock well, rendered tables) swallow the wash —
-  // selecting inside a code block showed nothing. Lift the layer above the
-  // content and blend it so the wash tints every background and text stays
-  // readable (multiply darkens on light; dark theme flips to screen via
-  // --selection-blend in tokens.css). The margin overhang that used to be the
-  // other half of this rule's job is now fixed upstream, by insetting `.cm-line`
-  // rather than `.cm-content`.
+  // drawSelection() paints in a layer BEHIND the content, so opaque line and
+  // span backgrounds (the .cm-codeblock well, inline-code chips, rendered
+  // tables) swallow the wash and a selection looks like it skips them. Lift the
+  // layer ABOVE the content instead and paint it as a plain translucent wash:
+  // every pixel in the range — text, chips, markers, widgets — gets the same
+  // tint, and 28% accent over dark text still reads. (A `multiply` blend was
+  // tried first: it kept text crisper but barely tinted grey chips, so a
+  // selection across inline code looked incomplete.)
   ".cm-selectionLayer": {
     zIndex: "1",
     pointerEvents: "none",
-    mixBlendMode: "var(--selection-blend, multiply)",
   },
 
   // Search / highlight matches in soft warning.
