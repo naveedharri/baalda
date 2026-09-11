@@ -93,7 +93,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   gone, the "title follows heading" rule (`lib/editor/titleFollow.ts`) went too:
   its whole premise was that seeded H1, and on a *legacy* note all it could do
   was silently rename the file while you typed over an old heading. Naming a new
-  note is now the sidebar's inline rename box, armed by the new shared
+  note happens in the note's own inline title (below), armed by the new shared
   `store.createNoteIn` — one create path for the sidebar's New-note button, the
   tab strip's `+` and ⌘N (which used to invent `Untitled ${Date.now()}`). The
   Rust *index* title is unchanged (frontmatter `title:` → first H1 → stem): it

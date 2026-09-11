@@ -5,8 +5,8 @@
 // Three things are pinned here:
 //   1. `openTabs` keeps its order — a tab never moves once open, only the
 //      highlight does — and `closeTab` lands on the neighbour;
-//   2. `createNoteIn` names a new note `Untitled`, `Untitled 1`, … and arms the
-//      sidebar's inline rename through a reveal request;
+//   2. `createNoteIn` names a new note `Untitled`, `Untitled 1`, … reveals its
+//      row, and arms the note's own inline title (`pendingTitleFocus`);
 //   3. a reveal is an EVENT: the same path requested twice must re-fire, which is
 //      what `revealRequest.token` is for.
 //
