@@ -1584,7 +1584,11 @@ body:has(.sidebar-resizer.dragging) {
   width: 12px;
   height: 12px;
 }
+/* A lock that actually restricts YOU reads as a warning tone. `.member` stays
+   tertiary: it is someone else's restriction, shown for awareness only.
+   `.vault` is the whole-vault Read-only posture — it restricts you too. */
 .tree-lock.all,
+.tree-lock.vault,
 .tree-lock.you {
   color: var(--warning);
 }
@@ -2028,6 +2032,51 @@ body:has(.sidebar-resizer.dragging) {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
   background: var(--bg-surface);
+}
+
+/* ---- Range slider — the app's one ----
+   Lifted out of `components/graph.css`, where it was the graph panel's private
+   restyling of the native control, when Settings → Appearance needed the same
+   slider for Content width. Same look, one definition: a hairline track and a
+   small accent thumb ringed in the surface colour so it reads as lifted off
+   the line. `.range-value` is its readout — tabular mono, right-aligned, so a
+   number changing under a dragging thumb doesn't shift the row.
+
+   Only the WebKit thumb is styled: Tauri renders in WKWebView, WebKitGTK and
+   WebView2, so the `::-moz-range-thumb` half of the graph's original rule had
+   no target to reach and did not come along.
+
+   Ranges are exempted from `.settings-page input` further down, or the settings
+   card would repaint the track as a text field. */
+.range-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  cursor: pointer;
+}
+.range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-surface);
+  transition: transform var(--t-fast) var(--ease);
+}
+.range-input::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.range-value {
+  min-width: 32px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Color swatch row inside the ⋯ menu (Finder-tag style) */
@@ -3554,7 +3603,12 @@ body:has(.sidebar-resizer.dragging) {
   font-weight: 600;
   color: var(--text-primary);
 }
-.settings-page input,
+/* Text fields and selects — NOT ranges. A slider is `.range-input` (0,1,0) and
+   this rule is (0,1,1), so without the exemption the settings card repainted
+   every track as a 10px-radius padded box: the shared look survived in the
+   graph panel and nowhere else. Same shape as the checkbox exemption further
+   down. */
+.settings-page input:not([type="range"]),
 .settings-page select {
   background: var(--bg-subtle);
   border: 1px solid transparent;
@@ -3572,11 +3626,14 @@ body:has(.sidebar-resizer.dragging) {
 .settings-page input::placeholder {
   color: var(--text-tertiary);
 }
-.settings-page input:hover,
+.settings-page input:not([type="range"]):hover,
 .settings-page select:hover {
   border-color: var(--border-strong);
 }
-.settings-page input:focus,
+/* A focused range keeps the browser's own ring — the box-shadow + surface
+   background below are a text field's focus, and the background would repaint
+   the track out of existence. */
+.settings-page input:not([type="range"]):focus,
 .settings-page select:focus {
   outline: none;
   border-color: var(--accent);
@@ -3667,6 +3724,26 @@ body:has(.sidebar-resizer.dragging) {
   padding: var(--sp-2) 0;
 }
 .settings-content .member-list > li + li {
+  border-top: 1px solid var(--border);
+}
+/* A settings ROW is the account popover's `.menu-row` on a surface eight times
+   the size, and the same thing goes wrong as in the lists above: at the
+   popover's 4px padding a column of rows reads as one paragraph, with no line
+   between the control you meant to reach and the one below it. So a row that
+   is a direct child of a settings panel gets real height and the same hairline
+   the lists use. Side padding goes to zero, not up: the popover's 8px inset
+   would set every row in from the section headings it sits under, and the
+   hairline has to span the panel to read as a divider rather than a smudge.
+   `.settings-footer-row` (0,3,0) keeps its own padding over the (0,2,0) rule
+   below — the hairline rule under that is (0,3,0) itself and would win the tie
+   on `border-top`, which is harmless while both declare the same hairline. Rows
+   nested inside a card — the billing plan, the Updates tab — are deliberately
+   untouched: their container already spaces them. */
+.settings-content > .menu-row {
+  min-height: 40px;
+  padding: var(--sp-3) 0;
+}
+.settings-content > .menu-row + .menu-row {
   border-top: 1px solid var(--border);
 }
 
@@ -3957,12 +4034,33 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--bg-hover);
   color: var(--text-secondary);
 }
+/* The vault's mode hasn't arrived yet. A blank pill the width of a real one,
+   because the alternative — falling back to "Private" — states the opposite of
+   the truth in every shared vault for as long as the network takes. */
+.access-badge.loading {
+  background: var(--bg-hover);
+  color: var(--text-tertiary);
+  min-width: 66px;
+  justify-content: center;
+}
 
-/* vault-default posture block, above the per-item list */
+/* whole-vault mode block, above the per-item list */
 .access-ws {
   margin-bottom: var(--sp-4);
   padding-bottom: var(--sp-4);
   border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+/* Shown only when the per-item settings, not the vault row, decide what the
+   team gets — the control marks the real answer active and this says why. */
+.access-ws-note {
+  margin: var(--sp-2) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.access-ws-note strong {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 /* affected-people avatar stack */
@@ -4162,6 +4260,18 @@ body:has(.sidebar-resizer.dragging) {
 }
 .access-segbtn.active[data-mode="readonly"] .access-st-top {
   color: var(--warning);
+}
+/* Private had no accent, so the chosen card was told apart from its neighbours
+   only by a shadow — on a light ground that is not a selection, it is a guess.
+   It borrows the neutral the Private badge already uses rather than the danger
+   red: restricting a vault is a decision, not a mistake. */
+.access-segbtn.active[data-mode="private"] {
+  box-shadow:
+    inset 0 0 0 1.5px var(--text-secondary),
+    var(--shadow-sm);
+}
+.access-segbtn.active[data-mode="private"] .access-st-top {
+  color: var(--text-primary);
 }
 .access-segbtn:disabled {
   cursor: default;
@@ -5567,6 +5677,86 @@ button.secondary:disabled {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* ---- Appearance → Content width ----
+   The one settings row with a control too big for the right-hand side: a
+   slider, its readout, and a live miniature of the editor under both. It stays
+   a `.menu-row` (so it keeps the panel's spacing and hairlines) and wraps
+   instead: label and slider share the first line, the preview takes a full one
+   of its own. */
+.settings-content > .menu-row.measure-row {
+  flex-wrap: wrap;
+}
+.measure-row .menu-row-label {
+  flex: 1 1 200px;
+}
+.range-field {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 1 1 220px;
+  max-width: 320px;
+}
+.range-field .range-input {
+  flex: 1;
+  min-width: 0;
+}
+/* Fixed width, in the readout's own monospace: "Full width" and "120
+   characters" must not move the slider's right edge as you drag past the last
+   stop. */
+.measure-row .range-value {
+  flex: 0 0 14ch;
+}
+.measure-row .width-preview {
+  flex: 0 0 100%;
+}
+
+/* The miniature. The frame is the app's ground and the page inside it is the
+   editor's surface — the same two colours the real window puts side by side —
+   so the column's air reads as margin rather than as emptiness. Its width and
+   margins are set inline from `computePreviewColumn` (real pane, real `ch`,
+   scaled down); everything here is the picture frame around that arithmetic. */
+.width-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.width-preview-frame {
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-2);
+}
+.width-preview-page {
+  height: 104px;
+  padding: var(--sp-4) 0;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+}
+.width-preview-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  /* Follows the thumb rather than jumping to each stop. The app-wide
+     reduced-motion rule already flattens this to nothing. */
+  transition:
+    width var(--t-med) var(--ease),
+    margin var(--t-med) var(--ease);
+}
+/* Borrowed from the editor's loading skeleton, at miniature scale and holding
+   still: a shimmer here would say "loading" on a panel that is not loading. */
+.width-preview .skel-line {
+  height: 6px;
+  animation: none;
+}
+.width-preview .skel-title {
+  height: 9px;
+  margin-bottom: var(--sp-1);
+}
+.width-preview-caption {
+  text-align: center;
 }
 
 /* ---- Account settings (profile, status, notifications) ---- */

@@ -108,7 +108,13 @@ describe("listReadableDocsInVault agrees with effectivePermission (spec 05 §3.1
     }
 
     // And the concrete expected sets, so a resolver bug can't make both wrong.
-    expect(await listReadableDocsInVault(owner, vault)).toEqual(new Set(all));
+    // The owner reads NOTHING: this vault carries no org grant, so its posture
+    // is Private, and Private is not special-cased for the person who owns it
+    // (`resolver.vaultBaseline`). `seedNote` leaves `created_by` null here, so
+    // authorship saves nothing either and the owner lands exactly where carol
+    // does. The Shared vault — where the owner does read everything, through
+    // the org grant like everyone else — is the next test.
+    expect(await listReadableDocsInVault(owner, vault)).toEqual(new Set());
     expect(await listReadableDocsInVault(alice, vault)).toEqual(new Set([s1, d1]));
     expect(await listReadableDocsInVault(bob, vault)).toEqual(new Set([p1]));
     expect(await listReadableDocsInVault(carol, vault)).toEqual(new Set());
@@ -154,6 +160,10 @@ describe("listReadableDocsInVault agrees with effectivePermission (spec 05 §3.1
     await seedMember(org, owner, "owner");
     const outsider = await seedUser("out@x.com"); // not a member
     const vault = await seedVault(org);
+    // The org-wide grant every vault is created with (POST /api/vaults). Without
+    // it the vault is Private, which since it stopped exempting owners would make
+    // this a test about the posture rather than about tombstones.
+    await seedVaultShare(org, "org", org, "edit");
     const live = await seedNote(vault, null, "live.md");
     const gone = await seedNote(vault, null, "gone.md");
     await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [gone]);
@@ -178,6 +188,10 @@ describe("listDeletedReadableDocsInVault", () => {
     const owner = await seedUser("owner@tomb.com");
     await seedMember(org, owner, "owner");
     const vault = await seedVault(org);
+    // The org-wide grant every vault is created with (POST /api/vaults). Without
+    // it the vault is Private, which since it stopped exempting owners would make
+    // this a test about the posture rather than about tombstones.
+    await seedVaultShare(org, "org", org, "edit");
     const live = await seedNote(vault, null, "live.md");
     const gone = await seedNote(vault, null, "gone.md");
     await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [gone]);
@@ -244,6 +258,10 @@ describe("listDeletedReadableDocsInVault", () => {
     const owner = await seedUser("owner@tomb5.com");
     await seedMember(org, owner, "owner");
     const vault = await seedVault(org);
+    // The org-wide grant every vault is created with (POST /api/vaults). Without
+    // it the vault is Private, which since it stopped exempting owners would make
+    // this a test about the posture rather than about tombstones.
+    await seedVaultShare(org, "org", org, "edit");
     const fileId = randomUUID();
     await pool.query(
       "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, NULL, 'a.md')",

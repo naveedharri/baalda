@@ -9,7 +9,14 @@ import { mintVaultToken } from "../src/tokens/vault-token.js";
 import { appendUpdate } from "../src/yjs/persistence.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
-import { seedMember, seedNote, seedOrg, seedUser, seedVault } from "./helpers/seed.js";
+import {
+  seedMember,
+  seedNote,
+  seedOrg,
+  seedUser,
+  seedVault,
+  seedVaultGrant,
+} from "./helpers/seed.js";
 
 // End-to-end against a REAL Postgres + real deps (ACL resolver, loadDocDiff,
 // token verify) through a fake socket: proves the channel backfills a doc's
@@ -73,6 +80,7 @@ describe("VaultChannel end-to-end (spec 05 §3.1)", () => {
     const owner = await seedUser("owner@e2e.com");
     await seedMember(org, owner, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
     const docId = await seedNote(vault, null, "n.md");
 
     // Persist real Yjs state for the doc.
@@ -97,6 +105,7 @@ describe("VaultChannel end-to-end (spec 05 §3.1)", () => {
     const owner = await seedUser("owner2@e2e.com");
     await seedMember(org, owner, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
     const docId = await seedNote(vault, null, "n.md");
 
     const channel = new VaultChannel({ pubsub: new InMemoryPubSub() });

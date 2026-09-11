@@ -3,6 +3,7 @@ import { pool } from "../../db/pool.js";
 import { canEditDoc } from "../../permissions/http-gates.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
+import { vaultAccess } from "../../permissions/vault-docs.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited } from "../../versions/capture.js";
 import {
@@ -242,6 +243,24 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     // could take checkpoints and not use them.
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can revert a vault" }, 403);
+    }
+    // …and only someone the whole vault is actually readable to. This rewrites
+    // every note at once, so it cannot be done from a seat that can only see
+    // some of them: the role stopped implying vault-wide read when the Private
+    // posture stopped exempting owners, and a partial revert is worse than
+    // none — the structure would come back whole while the contents did not.
+    // A Private vault's owner reverts per note instead (the routes above,
+    // gated on `effectivePermission`), or opens the vault first.
+    const access = await vaultAccess(pool, session.userId, vaultId);
+    if (!access?.vaultWide) {
+      return c.json(
+        {
+          error:
+            "This vault is private, so a whole-vault revert would rewrite notes you cannot read. Revert individual notes, or set the vault to Shared first.",
+          code: "no_vault_wide_access",
+        },
+        403,
+      );
     }
     const checkpointId = c.req.param("id");
     const { rows } = await pool.query<{ id: string }>(

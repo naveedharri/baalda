@@ -14,6 +14,7 @@ import { setActiveNote } from "../lib/editor/activeView";
 import { bindActiveNote } from "../lib/editor/activeNoteBinding";
 import { saveAttachment } from "../lib/attachments";
 import { bridgeManager, type NoteBridge } from "../lib/bridge";
+import { editorMeasureStyle } from "../lib/editorMeasure";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
 import { playPingSound } from "../lib/presence/ping";
 import { syncManager } from "../lib/sync/docSession";
@@ -329,6 +330,7 @@ export function Editor() {
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locks = useStore((s) => s.locks);
+  const lifts = useStore((s) => s.lifts);
   const session = useStore((s) => s.session);
   const tree = useStore((s) => s.tree);
   const syncStatus = useStore((s) => s.syncStatus);
@@ -366,7 +368,7 @@ export function Editor() {
   // must not tear the live view down (and with it the CRDT binding).
   const lineNumbersRef = useRef<Compartment | null>(null);
   const lineNumbers = useStore((s) => s.lineNumbers);
-  const readableLineLength = useStore((s) => s.readableLineLength);
+  const editorMeasure = useStore((s) => s.editorMeasure);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
@@ -431,8 +433,16 @@ export function Editor() {
   // copy — a lock is deliberate protection, not a missing grant.
   const lockScope =
     notePath && syncEnabled
-      ? effectiveLockForPath(lockScopesByPath(tree, locks, session?.user.id), notePath)
+      ? effectiveLockForPath(
+          lockScopesByPath(tree, locks, session?.user.id, lifts),
+          notePath,
+        )
       : null;
+  // The banner speaks about THIS note, so a whole-vault Read-only posture is
+  // not a lock for its purposes — "this note is locked" would send someone
+  // hunting for a setting on a note that has none. The vault-wide state is
+  // exactly what "View-only access" already says, so it keeps that copy.
+  const itemLock = lockScope === "vault" ? null : lockScope;
 
   useEffect(() => {
     if (!hostRef.current || notePath == null || /\.html?$/i.test(notePath)) return;
@@ -500,7 +510,7 @@ export function Editor() {
       const lockedLocally =
         syncEnabled &&
         effectiveLockForPath(
-          lockScopesByPath(st.tree, st.locks, st.session?.user.id),
+          lockScopesByPath(st.tree, st.locks, st.session?.user.id, st.lifts),
           notePath,
         ) != null;
       const ro = opened.readOnly || opened.status === "no-access" || lockedLocally;
@@ -772,15 +782,12 @@ export function Editor() {
       : null;
 
   return (
-    <div
-      className="editor-column"
-      data-measure={readableLineLength ? "readable" : "full"}
-    >
+    <div className="editor-column" style={editorMeasureStyle(editorMeasure)}>
       {(readOnly || showToolbar) && (
         <div className="editor-topbar">
           {readOnly && (
             <div
-              className={`editor-lockbanner${lockScope ? " locked" : " viewonly"}`}
+              className={`editor-lockbanner${itemLock ? " locked" : " viewonly"}`}
               role="status"
             >
               <span className="editor-lockbanner-icon" aria-hidden="true">
@@ -797,9 +804,9 @@ export function Editor() {
                 </svg>
               </span>
               <span className="editor-lockbanner-text">
-                <strong>{lockScope ? "This note is locked" : "View-only access"}</strong>
+                <strong>{itemLock ? "This note is locked" : "View-only access"}</strong>
                 <span className="editor-lockbanner-sub">
-                  {lockScope
+                  {itemLock
                     ? "You can read it, but your changes won’t be saved or synced."
                     : "You can read this note, but you can’t edit it."}
                 </span>

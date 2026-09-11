@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
+import { config } from "../../config.js";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
+import { canCreateIn, canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
+import { effectivePermission } from "../../permissions/resolver.js";
 import {
   listDeletedReadableDocsInVault,
   listReadableDocsInVault,
@@ -22,6 +24,27 @@ import {
   resolveParentFolder,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
+
+/** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
+ *  bound the vault channel's `ready.revoked` uses for the list it corroborates,
+ *  and mirrored client-side as `lib/api.ts ACCESS_CHECK_MAX` so the desktop
+ *  chunks to it rather than earning a 400. */
+export const ACCESS_CHECK_MAX = 2000;
+
+/** Run `fn` over items with at most `limit` in flight, preserving nothing about
+ *  order (callers here collect into a set/array they sort or don't care about).
+ *  A rejection propagates, which is what turns a database failure into a 500
+ *  rather than a partial, quietly-wrong answer. */
+async function runPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  if (items.length === 0) return;
+  const width = Math.max(1, Math.min(limit, items.length));
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: width }, async () => {
+      while (cursor < items.length) await fn(items[cursor++]);
+    }),
+  );
+}
 
 export interface RegistryDeps {
   /** Force-close live sync sockets for a doc, so an editor open on a note that
@@ -69,6 +92,28 @@ const ROOT_FROZEN_ERROR = {
   error: "This vault's root is frozen — create this inside a folder instead.",
   code: "root_frozen",
 } as const;
+
+/**
+ * The 403 body every permission refusal on a CREATE shares.
+ *
+ * It carries a `code` for the same reason `ROOT_FROZEN_ERROR` does: the desktop
+ * explains a failed registration by its code and nothing else
+ * (`lib/sync/registry.ts recordFailure`), so a refusal without one counts
+ * silently toward "N items not synced" with no reason attached.
+ *
+ * **Precedence, deliberately: permission first, frozen root second.** Both
+ * checks can fire on the same request (a read-only user creating at a frozen
+ * root), and the permission gate runs first — telling someone to "move it into
+ * a folder" is useless advice when they may not write to that folder either,
+ * and it would leak that the root is frozen to someone with no write access at
+ * all. A caller who may write still gets `root_frozen`, which is the case the
+ * desktop's toast is for.
+ */
+const NO_WRITE_ACCESS_ERROR = (kind: "note" | "folder" | "file") =>
+  ({
+    error: `You do not have permission to create a ${kind} here.`,
+    code: "no_write_access",
+  }) as const;
 
 /** 400 body for a path that disagrees with its folder (or names a folder that
  *  does not exist). Terminal for the desktop's `withRetry`, which is right: the
@@ -143,7 +188,8 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // about solo vaults and wrong about what vaults are FOR: you invited
     // someone, and they landed on an empty sidebar with no way to ask for
     // access. Owners can still lock a vault down — Access panel → Private
-    // revokes exactly this row (`setVaultPosture` in AccessPanel.tsx).
+    // (`setVaultMode` in AccessPanel.tsx) sends `PUT /api/orgs/:orgId/team-access`,
+    // which drops this row AND every per-folder/per-file org grant with it.
     //
     // Only on the first collection. The grant is keyed on the ORG (one org can
     // own several collections and the grant covers all of them), so re-running
@@ -252,6 +298,80 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     });
   });
 
+  /**
+   * Second opinion on a set of docs, before the client deletes their files.
+   *
+   * `GET /api/notes` and the vault channel's `ready.revoked` both come from
+   * `listReadableDocsInVault` — one function, so "absent from the listing" and
+   * "named as revoked" are not two answers, they are the same answer read twice.
+   * A regression inside that resolver would therefore make a client both see an
+   * empty listing AND be told the docs were revoked, which is precisely the
+   * authority it needs to remove every one of them, outright and uncapped.
+   *
+   * This route is the independent one. It answers per doc through
+   * `permissions/resolver.ts effectivePermission` — different SQL, a different
+   * walk (`locateDoc` + parent chain) — and the two are held in agreement by
+   * `tests/vault-docs.test.ts` rather than by sharing code. So a bug in either
+   * alone shows up here as a DISAGREEMENT, and the client's rule is that a
+   * disagreement leaves the file on disk.
+   *
+   * Member-gated only: a member asking "may I still read the notes I already
+   * hold?" is asking about ids they already have. It names nothing back — the
+   * response is the subset that resolves to `none`, so it cannot be used to
+   * enumerate a vault.
+   *
+   * **An id is either ANSWERED or left out.** Only ids with a row in THIS vault
+   * reach the resolver; anything else — an id from another vault, an id that was
+   * never here — is simply absent from `none`, and the client's rule for an
+   * unanswered id is to keep the file. Reporting those as `none` would have been
+   * a false confirmation on the one route whose entire job is to be a second
+   * opinion: an id the caller can read perfectly well in a different vault would
+   * have come back corroborated-unreadable. A doc that is merely REVOKED still
+   * has a live row here, so a real revocation always reaches the resolver and is
+   * always answered.
+   */
+  registryRoutes.post("/vaults/:vaultId/access-check", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    if (!(await orgRole(org, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const docIds: unknown = (body as { docIds?: unknown }).docIds;
+    if (!Array.isArray(docIds)) return c.json({ error: "docIds array required" }, 400);
+    const ids = [...new Set(docIds.filter((d): d is string => typeof d === "string" && d !== ""))];
+    // Bounded like every other list this protocol carries: a caller asking about
+    // more docs than a vault channel will name in one frame is not a client.
+    if (ids.length > ACCESS_CHECK_MAX) {
+      return c.json({ error: `at most ${ACCESS_CHECK_MAX} docIds per request` }, 400);
+    }
+    // Scoped to THIS vault. An id with no row here is left UNANSWERED (see the
+    // doc comment) rather than reported as unreadable. No `deleted_at` filter:
+    // a soft-deleted note does have a row, and it should reach the resolver,
+    // which answers `none` for it through `locateDoc`.
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM notes WHERE vault_id = $1 AND id = ANY($2::text[])",
+      [vaultId, ids],
+    );
+    const present = new Set(rows.map((r) => r.id));
+    const inVault = ids.filter((id) => present.has(id));
+    // Bounded concurrency rather than a sequential await per doc.
+    // `effectivePermission` is roughly seven queries (locate, ancestry, two
+    // deny checks, role, vault baseline, share), so 2000 ids in series is
+    // thousands of sequential round trips holding one pool connection — tens of
+    // seconds on a managed database, and any proxy timeout in front of it turns
+    // this into the client's "no answer, remove nothing" branch on every pass.
+    // The same width the vault channel backfills at.
+    const none: string[] = [];
+    await runPool(inVault, config.backfillConcurrency, async (id) => {
+      if ((await effectivePermission(session.userId, id)) === "none") none.push(id);
+    });
+    return c.json({ none });
+  });
+
   // ── folders ──────────────────────────────────────────────────────────────
   registryRoutes.post("/folders", async (c) => {
     const session = await getSession(c);
@@ -301,6 +421,15 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     } catch (err) {
       if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
       throw err;
+    }
+
+    // Write permission on the RESOLVED parent, not bare membership: a lock, a
+    // `view` grant or the vault-wide Read-only posture has to stop new folders
+    // landing, or read-only would mean "cannot change what exists" only. Checked
+    // after the adopt path above, so re-registering an existing folder from any
+    // device keeps working.
+    if (!(await canCreateIn(session.userId, vaultId, resolvedParent))) {
+      return c.json(NO_WRITE_ACCESS_ERROR("folder"), 403);
     }
 
     // Frozen root: only NEW root folders are refused. The adopt path above
@@ -541,6 +670,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       throw err;
     }
 
+    // Write permission on the RESOLVED folder, not bare membership — the same
+    // gate MCP's `create_note` applies. Without it a user who is read-only on
+    // every note in a folder could still fill it with new ones.
+    if (!(await canCreateIn(session.userId, vaultId, resolvedFolder))) {
+      return c.json(NO_WRITE_ACCESS_ERROR("note"), 403);
+    }
+
     // Frozen root: refuse only notes that do not exist yet. Re-registering a
     // root note that predates the latch (a second device, a repeat reconcile)
     // has to keep working, or freezing the root would break sync for the very
@@ -608,13 +744,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       throw err;
     }
     if (inserted.rowCount === 0) {
-      const { rows: existing } = await pool.query<{ vault_id: string; rel_path: string }>(
-        "SELECT vault_id, rel_path FROM notes WHERE id = $1",
-        [id],
-      );
+      const { rows: existing } = await pool.query<{
+        vault_id: string;
+        rel_path: string;
+        folder_id: string | null;
+        title: string | null;
+      }>("SELECT vault_id, rel_path, folder_id, title FROM notes WHERE id = $1", [id]);
       const row = existing[0];
-      // Re-registering the same note in the same vault is the ordinary adopt
-      // path (a second device, or a repeat reconcile) — still a success.
       if (row && row.vault_id !== vaultId) {
         return c.json(
           {
@@ -623,6 +759,30 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
             docId: id,
           },
           409,
+        );
+      }
+      // Re-registering the same note in the same vault is the ordinary adopt
+      // path (a second device, or a repeat reconcile) — still a success. But
+      // `ON CONFLICT DO NOTHING` wrote nothing, so when the caller asked for a
+      // DIFFERENT path than the row holds, answering 201 with the requested
+      // path told the client "this note now lives at `relPath`" about a move
+      // that never happened. The client then mapped its file to a path the
+      // server disagrees with and re-sent it on every reconcile — and at a
+      // frozen root it reported a root note that does not exist. Echo the row's
+      // CANONICAL path/folder instead, exactly as the two adopt paths above do,
+      // and let the client converge quietly. Moving a note is `PATCH
+      // /api/notes/:id`, which is permission- and latch-checked properly.
+      if (row && row.rel_path !== storedRelPath) {
+        return c.json(
+          {
+            id,
+            docId: id,
+            vaultId,
+            folderId: row.folder_id,
+            title: row.title,
+            relPath: row.rel_path,
+          },
+          200,
         );
       }
     }
@@ -804,6 +964,15 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
       throw err;
     }
+    // Same create gate as notes and folders. A `files` row is a syncable doc
+    // like any other, so a read-only user must not be able to add one.
+    // Re-registering an existing file is an `ON CONFLICT DO NOTHING` below, but
+    // it still has to get past this; a file that already exists is one the
+    // caller could read, so the check is on the folder, not the row.
+    if (!(await canCreateIn(session.userId, vaultId, resolvedFolder))) {
+      return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    }
+
     // Frozen root: same rule as notes — refuse only files that do not exist
     // yet, so a device re-registering a root file that predates the latch
     // still syncs.

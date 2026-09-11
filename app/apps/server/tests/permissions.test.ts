@@ -12,6 +12,7 @@ import {
   seedUser,
   seedVault,
   seedVaultGrant,
+  sealVault,
 } from "./helpers/seed.js";
 
 describe("effective-permission resolver matrix (spec 04 §3)", () => {
@@ -22,22 +23,88 @@ describe("effective-permission resolver matrix (spec 04 §3)", () => {
     await pool.end();
   });
 
-  it("vault owner -> edit on everything", async () => {
+  it("vault owner -> edit on everything, in a SHARED vault", async () => {
     const org = await seedOrg("Acme", "acme-owner");
     const owner = await seedUser("owner@a.com");
     await seedMember(org, owner, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit"); // what POST /api/vaults creates
     const doc = await seedNote(vault, null, "root.md");
     expect(await effectivePermission(owner, doc)).toBe("edit");
   });
 
-  it("vault admin -> edit on everything", async () => {
+  it("vault admin -> edit on everything, in a SHARED vault", async () => {
     const org = await seedOrg("Acme", "acme-admin");
     const admin = await seedUser("admin@a.com");
     await seedMember(org, admin, "admin");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
     const doc = await seedNote(vault, null, "root.md");
     expect(await effectivePermission(admin, doc)).toBe("edit");
+  });
+
+  it("a PRIVATE vault gives an owner and an admin no more than a member", async () => {
+    // The rule this file is the matrix for: the posture is a baseline for
+    // everyone. Read-only already capped owners and admins; Private did not,
+    // so the one word meant two different things depending on whether you set
+    // it on a folder or on the vault — and the person who set it was the only
+    // one who could not see it working.
+    const org = await seedOrg("Acme", "acme-private-posture");
+    const owner = await seedUser("owner@p.com");
+    const admin = await seedUser("admin@p.com");
+    const member = await seedUser("member@p.com");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, admin, "admin");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org); // no grant == Private
+    const doc = await seedNote(vault, null, "root.md");
+
+    for (const u of [owner, admin, member]) {
+      expect(await effectivePermission(u, doc)).toBe("none");
+    }
+  });
+
+  it("a SEALED vault (the Private button) leaves nobody anything, author included", async () => {
+    // The difference between this and the test below is the whole design. No
+    // row at all means "never shared" — the private-by-default space, where
+    // what you wrote is yours. An org `denied` row on the vault means someone
+    // pressed Private, and that applies to the person who pressed it: in a
+    // vault you set up yourself you wrote nearly every note, so a Private that
+    // spares the author is one you can never see working.
+    const org = await seedOrg("Acme", "acme-sealed");
+    const owner = await seedUser("owner@s.com");
+    const member = await seedUser("member@s.com");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const mine = await seedNote(vault, null, "mine.md", owner);
+    const theirs = await seedNote(vault, null, "theirs.md", member);
+    await sealVault(org);
+
+    for (const doc of [mine, theirs]) {
+      expect(await effectivePermission(owner, doc)).toBe("none");
+      expect(await effectivePermission(member, doc)).toBe("none");
+    }
+
+    // A grant still lifts out of it — sealed is a floor, not a wall.
+    await seedShare(org, "file", theirs, owner, "edit");
+    expect(await effectivePermission(owner, theirs)).toBe("edit");
+  });
+
+  it("a never-shared vault still leaves everyone what they wrote", async () => {
+    const org = await seedOrg("Acme", "acme-private-author");
+    const owner = await seedUser("owner@pa.com");
+    const member = await seedUser("member@pa.com");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const mine = await seedNote(vault, null, "mine.md", owner);
+    const theirs = await seedNote(vault, null, "theirs.md", member);
+
+    expect(await effectivePermission(owner, mine)).toBe("edit");
+    expect(await effectivePermission(owner, theirs)).toBe("none");
+    expect(await effectivePermission(member, theirs)).toBe("edit");
+    expect(await effectivePermission(member, mine)).toBe("none");
   });
 
   it("plain member with no share -> none", async () => {

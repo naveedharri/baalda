@@ -221,6 +221,7 @@ export function FileTree() {
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locks = useStore((s) => s.locks);
+  const lifts = useStore((s) => s.lifts);
   const vaultPresence = useStore((s) => s.vaultPresence);
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
@@ -353,13 +354,37 @@ export function FileTree() {
   // Resolve lock rows (server resource ids) to tree paths for the badges.
   const lockByPath = useMemo(
     () =>
-      syncEnabled ? lockScopesByPath(tree, locks, session?.user.id) : new Map(),
-    [tree, locks, syncEnabled, session?.user.id],
+      syncEnabled
+        ? lockScopesByPath(tree, locks, session?.user.id, lifts)
+        : new Map<string, LockScope>(),
+    [tree, locks, lifts, syncEnabled, session?.user.id],
   );
+
+  /**
+   * True when a path's padlock comes ONLY from the whole-vault Read-only
+   * posture — there is no lock row on the item to unlock.
+   *
+   * The Lock/Unlock controls speak to an item's own row, so on these rows they
+   * have nothing to act on: Unlock would find no share, and Lock would write a
+   * redundant per-item row that changes nothing except the wording of the badge
+   * it already has. The vault posture is changed in Access, not here.
+   */
+  const vaultLockedOnly = (path: string) => lockByPath.get(path) === "vault";
 
   // Owners/admins can lock and unlock straight from the row menu.
   const myRole = members.find((m) => m.userId === session?.user.id)?.role;
   const canManage = myRole === "owner" || myRole === "admin";
+
+  /**
+   * Whether the selection bar's Lock/Unlock pair has anything to do.
+   *
+   * Hidden outright when every selected row is padlocked by the vault posture
+   * alone: Lock would write rows that change nothing and Unlock would find none
+   * to remove, so the pair would report success and leave every padlock exactly
+   * where it was. One selected row with a real item lock is enough to keep them.
+   */
+  const bulkLockUseful =
+    selected.size === 0 || [...selected].some((p) => !vaultLockedOnly(p));
 
   /** Resolve a path (+ kind) to a server share resource, if the vault is synced. */
   function shareTargetForPath(
@@ -511,6 +536,9 @@ export function FileTree() {
       if (!target) continue;
       // Skip anything already locked directly (avoids a duplicate share row).
       if (locks.some((l) => shareResourceId(l) === target.resourceId)) continue;
+      // And anything the read-only vault already covers: the row would change
+      // nothing an unlock could then undo.
+      if (vaultLockedOnly(p)) continue;
       try {
         await store.createLock(target.resourceType, target.resourceId, null);
       } catch (e) {
@@ -1419,6 +1447,8 @@ export function FileTree() {
   const menuLock = menuTarget
     ? (locks.find((l) => shareResourceId(l) === menuTarget.resourceId) ?? null)
     : null;
+  // The padlock on this row comes from the vault posture and nothing else.
+  const menuVaultLockedOnly = !!menu?.node && vaultLockedOnly(menu.node.data.path);
 
   async function lockFromMenu(target: ShareTarget) {
     try {
@@ -1659,7 +1689,7 @@ export function FileTree() {
           <span className="selbar-count">{selected.size} selected</span>
           {selected.size > 0 && (
             <div className="selbar-actions">
-              {canManage && syncEnabled && (
+              {canManage && syncEnabled && bulkLockUseful && (
                 <>
                   {/* One server round trip per selected item, so a lock over a
                       large selection is a real wait. `replaceLabel` swaps the
@@ -1858,6 +1888,19 @@ export function FileTree() {
             canManage &&
             (menuLock ? (
               <li onClick={() => void unlockFromMenu(menuLock.id)}>Unlock</li>
+            ) : menuVaultLockedOnly ? (
+              // The row shows a padlock but has no row of its own to unlock,
+              // and locking it would change nothing. Shown disabled rather than
+              // hidden, because the padlock is right there and an entry that
+              // simply vanished would read as a bug — this says who decides.
+              <li
+                className="disabled"
+                aria-disabled="true"
+                title="The vault is read-only — change it in Access"
+                onClick={(e) => e.stopPropagation()}
+              >
+                Locked by the vault
+              </li>
             ) : (
               <li
                 title="Read-only for everyone — changes won't sync"
@@ -2367,7 +2410,13 @@ function Node({
           <span className="tree-label">
             {displayName(node.data.name, isDir)}
           </span>
-          {isEmpty && !lock && <span className="tree-hint">empty</span>}
+          {/* The `lock` guard keeps two badges off one row — but a read-only
+              vault padlocks EVERY row, and suppressing the hint everywhere
+              would cost the whole vault a signal to spare a collision that is
+              no longer rare. An item's own lock still wins the space. */}
+          {isEmpty && (!lock || lock === "vault") && (
+            <span className="tree-hint">empty</span>
+          )}
           {lock && (
             <span
               className={`tree-lock ${lock}`}

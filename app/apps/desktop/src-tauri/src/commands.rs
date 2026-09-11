@@ -1315,6 +1315,25 @@ pub async fn delete_folder_if_empty(
     Ok(removed)
 }
 
+/// Delete a single FILE, refusing a directory (`notefile::delete_file`).
+///
+/// The inbound reconciler's removal for a REVOKED note, which is the one delete
+/// in the app that leaves no recoverable copy. Separate from `delete_path` so
+/// that path's deliberate recursion stays reachable only from the sidebar, where
+/// the user picked the folder themselves.
+#[tauri::command]
+pub async fn delete_file(
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let abs = vault::resolve_in_vault(&vault, &path)?;
+    notefile::delete_file(&vault, &path)?;
+    index.lock().unwrap().remove_note(&vault, &abs)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn delete_path(
     state: State<'_, AppState>,

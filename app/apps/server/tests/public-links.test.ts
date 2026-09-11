@@ -5,7 +5,7 @@ import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { testAppDeps, memoryDocWriter } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedMember, seedNote, seedVault } from "./helpers/seed.js";
+import { seedMember, seedNote, seedVault, seedVaultGrant } from "./helpers/seed.js";
 
 /**
  * Public note links: /api/notes/:docId/public-link (mint/inspect/revoke, gated
@@ -42,6 +42,9 @@ describe("public note links", () => {
     owner = await signUp(`owner-${randomUUID().slice(0, 8)}@pl.test`);
     orgId = (await createOrg(owner, "PL Co", `pl-co-${randomUUID().slice(0, 8)}`)).id;
     vault = await seedVault(orgId);
+    // Shared. Minting a public link now needs read access as well as the
+    // management gate — you cannot publish what you cannot open.
+    await seedVaultGrant(orgId, "edit");
     docId = await seedNote(vault, null, "shared.md");
     docWriter.store.set(docId, "# Hello\n\nSome **shared** text.");
   });
@@ -63,6 +66,23 @@ describe("public note links", () => {
     expect(b.token).toBe(a.token);
     expect(b.url).toBe(a.url);
     expect(b.existing).toBe(true);
+  });
+
+  it("refuses to mint for a note the minter cannot read", async () => {
+    // The management gate is role-based and the read gate is not, so in a
+    // Private vault an owner can hold one without the other. Publishing to the
+    // open web from that seat would put contents they are not allowed to open
+    // on a public URL.
+    await pool.query("DELETE FROM shares WHERE resource_type = 'vault' AND resource_id = $1", [
+      orgId,
+    ]);
+    const member = await signUp("member@publinks.test");
+    await seedMember(orgId, member.userId, "member");
+    const theirs = await seedNote(vault, null, "Theirs.md", member.userId);
+
+    const res = await mint(owner, theirs);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("No access to this note");
   });
 
   it("gate: creator-member can mint, other member 403, anon 401, unknown/deleted 404", async () => {

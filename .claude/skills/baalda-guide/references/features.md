@@ -69,9 +69,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   words go), ⌘⌥1–⌘⌥6 heading level (press the same one again to clear it), ⌘L tick a task or turn
   any line into one, ⇧⏎ a line break inside a paragraph, ⌘; add a property, Tab / ⇧Tab indent a
   list item. Enter continues the list you are in and renumbers as you go.
-- **Readable line length** keeps the text in a comfortable column rather than stretching it
-  across the whole window. Turn it off in Settings → Appearance for full width; **Line numbers**
-  live in the same place, off by default. Faint guides mark each level of a nested list.
+- **Content width** (Settings → Appearance) sets how wide the text runs before it wraps: drag the
+  slider between a narrow column and a comfortable one, or all the way to the end for the full
+  window. A live preview shows the shape as you drag, and the setting is per-device. **Line
+  numbers** live in the same place, off by default. Faint guides mark each level of a nested list.
 - Tabs for open notes, with a right-click menu (close, close others, close to the right, close
   all).
 - Autosave. Undo/redo is shared correctly even during live collaboration.
@@ -165,7 +166,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - The MCP screen in the app puts the AI rule in one line: "It gets the same access you do."
   Deleting a token cuts the AI off immediately.
 - **Locks**: lock a note or folder so it is read-only for everyone, admins included, until
-  unlocked.
+  unlocked. Setting the whole vault to read-only shows that same lock on every folder and note,
+  except the ones you were given edit access to.
 - **Losing access** removes the note from the ex-reader's other devices (moved to trash, never
   destroyed); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom
@@ -175,7 +177,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   access; they carry no access themselves.
 - **Push-to-talk voice**: hold a button to talk to everyone in the vault. Nothing is recorded.
 - **Access panel** (owners/admins): a tree of every folder and note in the vault with its sharing
-  state, independent of what is on your own disk.
+  state, independent of what is on your own disk. The **"Entire vault"** choice at the top applies
+  to every folder and note at once and replaces whatever you had set on individual folders and
+  notes, so the app asks you to confirm and tells you how many of those settings it is about to
+  clear; people you shared something with by name keep their access either way.
 
 ## History and recovery
 

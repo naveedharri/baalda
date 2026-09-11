@@ -84,6 +84,16 @@ export const REGISTRY_COALESCE_MS = 120;
 /** Most docs one `ready.behind` names — the same bound `ready.empty` uses. */
 export const BEHIND_CAP = 2000;
 
+/**
+ * Most docs one `ready.revoked` names.
+ *
+ * The list is already bounded by the CLIENT'S manifest — it can only name docs
+ * this client says it holds — so this cap is about frame size, not about the
+ * size of the vault. A member of a private-by-default vault with 10,000 docs
+ * they never had is named zero of them.
+ */
+export const REVOKED_CAP = 2000;
+
 export class VaultChannel {
   private readonly pubsub: PubSub;
   private readonly listReadableDocs: typeof listReadableDocsInVault;
@@ -478,6 +488,10 @@ class VaultConnection {
     // never received. Named so the client pushes them; the feed itself cannot.
     const behind = this.behind;
     const behindTruncated = this.behindTruncated;
+    // …and the mirror image: docs this client says it HOLDS that it may no
+    // longer read. Pure set arithmetic over two things already in hand (the
+    // hello manifest and `this.readable`), so it costs no query.
+    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest);
     this.send({
       t: "ready",
       // Omitted when nothing is empty, so the common frame is byte-identical to
@@ -486,7 +500,55 @@ class VaultConnection {
       ...(empty.length > 0 && emptyTruncated ? { emptyTruncated: true as const } : {}),
       ...(behind.length > 0 ? { behind } : {}),
       ...(behind.length > 0 && behindTruncated ? { behindTruncated: true as const } : {}),
+      ...(revoked.length > 0 ? { revoked } : {}),
+      ...(revoked.length > 0 && revokedTruncated ? { revokedTruncated: true as const } : {}),
     });
+  }
+
+  /**
+   * The docs this client's `hello` manifest claims which are NOT in its readable
+   * set: it is holding local copies of notes it may no longer read.
+   *
+   * This is the server STATING a revocation. Everything else on this path leaves
+   * the client to infer one from a registry listing that came back short, and a
+   * client cannot safely tell that apart from a server fault — so the desktop
+   * only removes files wholesale when an access change was ANNOUNCED. The live
+   * announcement (`acl-changed` -> `refreshAcl` -> `reauth`) reaches only a
+   * client that was connected when the rules changed; set a vault to Private
+   * while a member's app is closed and their next launch had no announcement
+   * behind it at all. This one rides every `ready`, so a cold launch is covered.
+   *
+   * Deliberately manifest-scoped rather than vault-scoped. Naming "every doc in
+   * the vault you cannot read" would be unbounded on a private-by-default vault
+   * and would also leak the existence of notes this user has never been shown.
+   * What the client already holds is both bounded and, by definition, already
+   * known to it.
+   *
+   * A doc the owner DELETED also leaves the readable set and so is named here.
+   * The frame's contract is "these are gone for you", not "an admin revoked
+   * these". Usually the client then resolves it as a tombstone on the pull that
+   * follows, where the deletion cap — which this frame never lifts — applies.
+   * That depends on the tombstone actually being answerable for this caller, so
+   * `listDeletedReadableDocsInVault` has to resolve a share whose FOLDER was
+   * hard-deleted (see `permissions/vault-docs.ts`, the `folder_tombstones`
+   * branch); before it did, a share-only member's deleted notes fell through to
+   * the revocation path and were removed with no recoverable copy.
+   */
+  private revokedFromManifest(manifest: Record<string, string>): {
+    revoked: string[];
+    revokedTruncated: boolean;
+  } {
+    const revoked: string[] = [];
+    let revokedTruncated = false;
+    for (const docId of Object.keys(manifest)) {
+      if (this.readable.has(docId)) continue;
+      if (revoked.length >= REVOKED_CAP) {
+        revokedTruncated = true;
+        break;
+      }
+      revoked.push(docId);
+    }
+    return { revoked, revokedTruncated };
   }
 
   /** Binary from the client. Only voice frames are defined; the leading type

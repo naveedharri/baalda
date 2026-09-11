@@ -6,7 +6,7 @@ import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { testAppDeps } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedNote, seedVault } from "./helpers/seed.js";
+import { seedNote, seedVault, seedVaultGrant } from "./helpers/seed.js";
 
 /**
  * Response compression on the JSON API. The registry listings are why it exists:
@@ -43,6 +43,10 @@ describe("HTTP response compression", () => {
     owner = await signUp("owner@compress.test");
     const org = (await createOrg(owner, "Compress Co", "compress-co")).id;
     vault = await seedVault(org);
+    // The org-wide grant `POST /api/vaults` gives a new vault. Seeded directly a
+    // vault has none, so it is Private — and Private no longer exempts owners,
+    // which would silently make this a test about the posture.
+    await seedVaultGrant(org, "edit");
     // Enough rows that the payload is worth compressing at all.
     for (let i = 0; i < 40; i++) {
       await seedNote(vault, null, `Note-${String(i).padStart(3, "0")}.md`, owner.userId);

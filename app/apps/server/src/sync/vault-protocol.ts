@@ -83,6 +83,22 @@ export type ServerControl =
    * re-delivered an empty diff for them (see `DocDiff.clientAhead`).
    * `behindTruncated` means the list hit the cap.
    *
+   * `revoked` names the docs THIS CLIENT'S OWN MANIFEST claims — i.e. copies it
+   * is holding — that are NOT in the caller's readable set any more. It is the
+   * server STATING a revocation instead of leaving the client to infer one from
+   * a listing that came back short. That distinction is the whole point: the
+   * desktop refuses to remove files wholesale unless an access change was
+   * announced, and the live announcement (`acl-changed` -> `reauth`) only
+   * reaches a client that was CONNECTED when the owner changed the rules. Set a
+   * vault to Private while a member's app is closed and their next launch had
+   * nothing behind it, so the revoked notes stayed readable on their disk until
+   * some unrelated ACL change happened. This frame fires on EVERY connect, so a
+   * cold launch is covered. `revokedTruncated` means the list hit the cap.
+   *
+   * Bounded by the client's own manifest, never by the vault: a private-by-
+   * default vault with thousands of docs the member never had names none of
+   * them, because the client holds none of them.
+   *
    * Every field is OMITTED when it has nothing to say, so the overwhelmingly
    * common frame stays byte-identical to `{"t":"ready"}`. Old clients ignore
    * unknown keys (`parseServerControl` switches on `t` and reads only what it
@@ -95,6 +111,8 @@ export type ServerControl =
       emptyTruncated?: true;
       behind?: string[];
       behindTruncated?: true;
+      revoked?: string[];
+      revokedTruncated?: true;
     }
   | { t: "drop"; docId: string } // access lost / doc removed -> client evicts
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token

@@ -130,6 +130,34 @@ const CHANNEL_WATCHDOG_MS = 30_000;
 const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
 
 /**
+ * How long the server's `acl-changed` frame keeps a pull authorised to remove
+ * files wholesale (see {@link SyncManager.revocationAuthority}).
+ *
+ * Not "the very next pull": the pull is debounced and coalesced, a burst of
+ * frames folds into one, and the pass that finally reads the new listing may be
+ * two or three triggers downstream of the one that announced the change. A
+ * window is what survives that without having to thread a reason through the
+ * coalescing. A minute is far longer than the 250ms debounce needs and far
+ * shorter than the gap between two unrelated permission changes.
+ */
+const ACL_AUTHORITY_WINDOW_MS = 60_000;
+
+/**
+ * Does an `acl-changed` frame stamped at `aclChangedAt` still authorise a
+ * wholesale removal at `now`? `0` means no frame has ever arrived for this
+ * vault.
+ *
+ * Exported only so the window itself can be pinned by a test; the decision
+ * belongs to {@link SyncManager.revocationAuthority}, which pairs it with
+ * liveness. A negative age (a clock that moved backwards) is not freshness.
+ */
+export function aclSignalIsFresh(aclChangedAt: number, now: number): boolean {
+  if (aclChangedAt === 0) return false;
+  const age = now - aclChangedAt;
+  return age >= 0 && age <= ACL_AUTHORITY_WINDOW_MS;
+}
+
+/**
  * Why a registry pull was asked for. Named rather than inferred from a stack
  * frame: the debounced pull is the one place in the sync layer where several
  * unrelated triggers converge, so "which one is firing over and over" is the
@@ -139,6 +167,7 @@ const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
  *  - `channel-synced`     the vault channel reached `synced` (every (re)connect)
  *  - `registry-frame`     the server's `registry` control frame — a real structural change
  *  - `reauth`             the server's `reauth` frame (ACL moved; the readable SET may have too)
+ *  - `acl-revoked`        the server NAMED docs we hold that we may no longer read (`ready.revoked`)
  *  - `watcher`            a local batch held an unmapped path or a `tree` event
  *  - `disk-delete-drain`  the delete drain deferred a batch's pull until it had decided
  *  - `register-failed`    a note opened unregistered, so nothing of it reaches the server yet
@@ -148,6 +177,7 @@ export type RegistryPullReason =
   | "channel-synced"
   | "registry-frame"
   | "reauth"
+  | "acl-revoked"
   | "watcher"
   | "disk-delete-drain"
   | "register-failed"
@@ -333,6 +363,34 @@ export class SyncManager implements InboundHost {
   private liveSince: number | null = null;
   private channelSynced = false;
   private pulledOnce = false;
+  /**
+   * When the server last told us THIS vault's access rules moved (`acl-changed`
+   * → the `reauth` frame). 0 = never, or a different vault.
+   *
+   * The only thing that makes a shrunken readable set worth acting on. See
+   * {@link revocationAuthority}.
+   */
+  private aclChangedAt = 0;
+  /**
+   * Every doc the server has NAMED as no longer readable in this vault session:
+   * the `ready.revoked` list from each connect, UNIONED with the live `drop`
+   * frames that accompany a `reauth`.
+   *
+   * Where {@link aclChangedAt} only says "access moved", this says WHICH docs
+   * moved — and the cap lifts for those docs only.
+   *
+   * It is a union and it never expires, on purpose. An announcement that names
+   * nothing (a lock toggle, a view↔edit flip, a share granted to a third person
+   * — all of which send `reauth` to every connected client) must never be able
+   * to WIDEN an authority that was correctly narrow. Clearing it on such an
+   * event is what would let an unrelated permission change plus one transient
+   * short listing take a whole vault off disk.
+   *
+   * It shrinks in exactly one way: when the access-check round trip contradicts
+   * an entry ({@link revocationRefused}), which is the server's own resolver
+   * saying the doc is readable after all.
+   */
+  private serverRevoked = new Set<string>();
   /** Docs holding local-only ops from an out-of-band merge (a resident bridge
    *  or a cold apply ingested an external edit). For these, "file == doc" does
    *  NOT mean "nothing to send", so the push must connect regardless. Cleared
@@ -733,6 +791,167 @@ export class SyncManager implements InboundHost {
   /** True once a disk delete would be propagated (tests / diagnostics). */
   isLive(): boolean {
     return this.liveSince != null;
+  }
+
+  /**
+   * May THIS pass remove files wholesale because they left the readable set?
+   *
+   * Inbound asks before it lifts its revocation caps (`InboundInput.authoritative`).
+   * Two conditions, and both are needed:
+   *
+   *  - the session is LIVE — vault channel `synced` plus a completed structure
+   *    pull — so "absent from the listing" cannot still mean "this device hasn't
+   *    caught up yet"; and
+   *  - the server itself announced an access change in the last
+   *    {@link ACL_AUTHORITY_WINDOW_MS} (`acl-changed` → `reauth`), so the empty
+   *    listing is the *answer to something that happened* rather than a listing
+   *    that merely came back small.
+   *
+   * The second condition is what keeps a server-side regression from being
+   * destructive. Without it, one bad deploy of the readable-set filter would
+   * make every routine pull — and there is one on every reconnect — delete every
+   * member's local copies. A change nobody announced is not a revocation; it
+   * stays under the ordinary 50% cap and is reported as a refusal instead.
+   */
+  revocationAuthority(): boolean {
+    return this.isLive() && aclSignalIsFresh(this.aclChangedAt, Date.now());
+  }
+
+  /**
+   * WHICH docs this pass may remove past the revocation cap: every doc the
+   * server has NAMED in this vault session, whether on a `ready.revoked` list or
+   * as a live `drop`. `null` only when it has never named any — an older server,
+   * where `reauth` keeps the wholesale lift it always had.
+   *
+   * A non-null set makes the pass STRICTER, and the strictness is real but
+   * modest: `ready.revoked` and the listing absences both come from the SAME
+   * server function (`listReadableDocsInVault`), so this is one resolver read
+   * twice, at different moments over different transports. It catches a
+   * transient or racy short answer on one of them. It does NOT catch a bug
+   * inside that function, which would produce both readings together.
+   *
+   * The answer that could genuinely disagree is `effectivePermission`, and the
+   * registry asks it — `POST /api/vaults/:id/access-check` — before it deletes
+   * anything the cap lift saved. See `InboundPlan.needsAccessCheck`.
+   *
+   * Docs the server did NOT name are not exempted from removal; they simply stay
+   * under the ordinary 50% cap, which the small residue of a real revocation
+   * fits under comfortably.
+   *
+   * A TRUNCATED `ready.revoked` still contributes its 2000 ids and still
+   * narrows: the residue rides the ordinary cap and the next connect names the
+   * next batch, so a very large revocation converges over a few connects instead
+   * of taking one uncorroborated swing at the whole disk. The largest vaults
+   * would otherwise have been the ones with no cross-check at all.
+   */
+  authoritativeRevoked(): ReadonlySet<string> | null {
+    return this.serverRevoked.size === 0 ? null : this.serverRevoked;
+  }
+
+  /**
+   * The server's resolver contradicted these removals, so forget we were ever
+   * told they were revoked. Without this the same ids would be re-offered on
+   * every later authoritative pass, each one paying for a round trip to be told
+   * the same thing.
+   */
+  revocationRefused(docIds: string[]): void {
+    for (const docId of docIds) this.serverRevoked.delete(docId);
+  }
+
+  /** The signed-in user, for the inbound reconciler's author exemption. */
+  localUserId(): string | null {
+    return this.presence?.id ?? null;
+  }
+
+  /**
+   * One `drop` frame: the server took this doc out of our readable set while we
+   * were connected.
+   *
+   * Recorded as a NAMED revocation, exactly like a `ready.revoked` entry. It is
+   * what makes the live path as narrow as the cold one: the `reauth` that
+   * follows announces "access moved" without saying about what, and on its own
+   * it would have to lift the cap for everything.
+   *
+   * No pull is requested here — the `reauth` right behind these frames asks for
+   * one, and a burst of drops must not each arm their own.
+   */
+  handleServerDrop(docId: string, scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    this.serverRevoked.add(docId);
+  }
+
+  /**
+   * The `reauth` frame: the server says access in this vault moved.
+   *
+   * That statement is what authorises the pull below to act on a loss of access
+   * — a listing that shrinks with no such frame behind it is treated as a glitch
+   * and stays under the ordinary cap (see {@link revocationAuthority}).
+   *
+   * What it deliberately does NOT do is clear {@link serverRevoked}. `reauth`
+   * goes to every connected client on every ACL change in the vault, including
+   * ones that change nothing for this user — a lock toggled on a note they
+   * cannot see, a share granted to someone else — and it names nothing. Clearing
+   * would let one of those turn a correctly narrow three-note authority into a
+   * whole-vault one for the next minute, which is the opposite of what an
+   * announcement about something else should do. The docs a live change actually
+   * took away arrive as `drop` frames just ahead of this one, and those name
+   * themselves ({@link handleServerDrop}).
+   */
+  handleServerReauth(scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    this.aclChangedAt = Date.now();
+    // Two things follow from "the ACL moved". The open note re-mints its token so
+    // a view<->edit flip lands live...
+    this.current?.refreshAccess();
+    // ...and the registry gets re-pulled, because the readable SET may have
+    // changed too. That pull is what removes a note this user just lost access to
+    // from their disk, and without it the removal would wait for the next
+    // structural change or an app restart - long enough to look like the
+    // revocation hadn't worked.
+    this.handleRegistryChanged("reauth");
+    // ...and the UI's lock overlay refreshes, so the NEXT open of a just-locked
+    // note starts read-only from its first frame.
+    this.onAclChangedListener?.();
+  }
+
+  /**
+   * The vault channel's `ready` named docs we hold that we may no longer read.
+   *
+   * Two effects, and the first is the point of the whole frame: it stamps the
+   * ACL-authority clock, so the registry pull that follows is allowed to act on
+   * a wholesale loss of access. Unlike the live `reauth` frame this one arrives
+   * on EVERY connect, which is what covers a revocation made while this app was
+   * closed — until now those files stayed on disk until some unrelated access
+   * change happened to announce itself.
+   *
+   * The second is the pull itself. The channel's own `synced` transition already
+   * asks for one, but that is armed AFTER this callback, and asking again costs
+   * nothing: `handleRegistryChanged` debounces and both requests fold into the
+   * same pass.
+   *
+   * Public like `handleRegistryChanged` and `handleAttachmentChanged` — all three
+   * are "an external signal for this vault arrived", and the vault engine wires
+   * this one in `startVaultEngine`. `scope` is the one that engine was started
+   * under, deliberately rather than `this.scope`: a frame from a socket left over
+   * from the previous vault must not stamp the new vault's authority.
+   *
+   * `truncated` changes nothing about how the list is used — the 2000 ids it did
+   * carry still narrow the pass, and the residue rides the ordinary cap until a
+   * later connect names it. Treating truncation as a reason to lift the cap
+   * wholesale would have left the biggest revocations as the only ones with no
+   * cross-check at all.
+   */
+  handleServerRevoked(docIds: string[], truncated: boolean, scope: VaultScope): void {
+    if (!scope.isCurrent() || docIds.length === 0) return;
+    this.aclChangedAt = Date.now();
+    // Unioned, never replaced: a later connect's list is bounded by whatever is
+    // still in the manifest, and a doc already removed from disk has left it.
+    // Replacing would quietly widen the authority back out for the rest.
+    for (const docId of docIds) this.serverRevoked.add(docId);
+    console.info(
+      `[sync] server revoked ${docIds.length} doc(s) we hold${truncated ? " (truncated)" : ""}`,
+    );
+    this.handleRegistryChanged("acl-revoked");
   }
 
   /**
@@ -1359,6 +1578,25 @@ export class SyncManager implements InboundHost {
     trashedTo: string | null,
     reason: "deleted" | "revoked",
   ): void {
+    if (reason === "revoked") {
+      // `releaseDoc` only RELEASED this doc, which deliberately keeps its state
+      // vector (a rename doesn't change content, so the manifest stays true).
+      // A revocation is the other case: the doc is gone for good, and an id left
+      // in the manifest is re-sent in every `hello`, so the server names it in
+      // every `ready.revoked` — re-stamping the ACL-authority clock on each
+      // reconnect and making "the server announced a change in the last minute"
+      // permanently true. `drop` takes it out of the manifest for this session…
+      this.docStore?.drop(docId);
+      // …and this takes the local CRDT rows (the persisted state vector among
+      // them) out of `.context/index.sqlite`, so the next launch doesn't
+      // re-advertise it either. It is also the right privacy answer: leaving the
+      // note's full text in the local CRDT log would keep readable what deleting
+      // the `.md` just took away. Fire-and-forget — a failure only means the
+      // vault-open GC sweep tidies it instead, and nothing here may block the
+      // removal loop.
+      const epoch = this.scope?.vaultEpoch ?? undefined;
+      void ipc.clearYjsDoc(docId, epoch).catch(() => {});
+    }
     this.onNoteRemoved?.(docId, path, trashedTo, reason);
   }
 
@@ -2115,6 +2353,9 @@ export class SyncManager implements InboundHost {
     this.liveSince = null;
     this.channelSynced = false;
     this.pulledOnce = false;
+    // Another vault's permission news says nothing about this one's listings.
+    this.aclChangedAt = 0;
+    this.serverRevoked.clear();
     this.divergedDocs.clear();
     // Scoped to the vault like everything else here: another vault's empty-doc
     // list would put ITS doc ids at the head of this vault's upload queue.
@@ -2374,20 +2615,7 @@ export class SyncManager implements InboundHost {
       // An ACL change in this vault may have flipped the open note's grant
       // (view↔edit, lock/unlock). Re-mint its token so the editor becomes
       // read-only/editable live — no reopen (spec 04 §4).
-      onAclChanged: () => {
-        // Two things follow from "the ACL moved". The open note re-mints its
-        // token so a view<->edit flip lands live...
-        this.current?.refreshAccess();
-        // ...and the registry gets re-pulled, because the readable SET may have
-        // changed too. That pull is what removes a note this user just lost
-        // access to from their disk, and without it the removal would wait for
-        // the next structural change or an app restart - long enough to look
-        // like the revocation hadn't worked.
-        this.handleRegistryChanged("reauth");
-        // ...and the UI's lock overlay refreshes, so the NEXT open of a
-        // just-locked note starts read-only from its first frame.
-        this.onAclChangedListener?.();
-      },
+      onAclChanged: () => this.handleServerReauth(scope),
       // A teammate changed the folder/note structure — re-pull + refresh tree.
       onRegistryChanged: () => this.handleRegistryChanged("registry-frame"),
       // A new teammate joined the vault — refresh roster + celebrate.
@@ -2407,6 +2635,13 @@ export class SyncManager implements InboundHost {
       // Which readable docs THIS device holds ops the server lacks for. Fired
       // right before `onServerEmpty`, so the run that starts sees them queued.
       onServerBehind: (docIds) => this.handleServerBehind(docIds, scope),
+      // Which docs we HOLD that we may no longer read. Server-stated, on every
+      // connect — the authority a cold launch after a revocation never had.
+      onServerRevoked: (docIds, truncated) =>
+        this.handleServerRevoked(docIds, truncated, scope),
+      // The live half of the same statement: `refreshAcl` names each lost doc
+      // with a `drop` just before the `reauth`, so both paths carry a list.
+      onServerDrop: (docId) => this.handleServerDrop(docId, scope),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).

@@ -3,7 +3,11 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { canReadAttachment, filterReadableBlobs } from "../../permissions/http-gates.js";
+import {
+  canReadAttachment,
+  canWriteAttachment,
+  filterReadableBlobs,
+} from "../../permissions/http-gates.js";
 import { getSession } from "../session.js";
 
 /**
@@ -192,6 +196,11 @@ blobRoutes.post(
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    // Uploading is a write. A Read-only vault has to refuse it too, or
+    // "read-only" would let anyone keep adding bytes to the vault's blob store.
+    if (!(await canWriteAttachment(session.userId, vaultId))) {
+      return c.json({ error: "This vault is read-only for you" }, 403);
     }
 
     // Admission control, after auth (so anonymous callers can never occupy the
