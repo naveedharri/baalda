@@ -613,6 +613,49 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **A note could double one block of its own text, geometrically, until it was
+  megabytes of one paragraph.** `vaultDocStore.coldApply` opens a TRANSIENT
+  bridge for a background note — a fresh `Y.Doc`, so a fresh clientID every
+  time — hydrates it from the local CRDT store, folds in the `.md` on disk,
+  applies the server's update and egests the result. Folding the file in first
+  is a three-way merge and has to stay one (an AI that edited the file while no
+  bridge was alive would otherwise be overwritten by the egest), but ingest
+  turns file bytes into ops attributed to THIS client. So when the file already
+  held the text of the update about to be applied — which is exactly what a
+  local store that has fallen behind its own file looks like — that text was
+  inserted TWICE, once as this client's fresh ops and once as the server's, and
+  Yjs keeps both. The egest wrote the doubled text back to the file, so the next
+  update through the same path doubled twice as much.
+  A customer's `Map of Content.md` ran that eighteen times in an hour: eighteen
+  updates, each from a different clientID, each re-inserting the whole current
+  delta, 276 bytes → 8 MB, ending at 2^16 copies of one added block — 16 MB of
+  Yjs state for a 686-byte note, 1,179,679 lines of 35 distinct ones. It is NOT
+  the 2026-09-04 seed-vs-pull race (that duplicates the whole note, from two
+  versions interleaved); this one duplicates only the delta and leaves the rest
+  intact, which is what the line-frequency profile shows.
+  `isExternalEdit` is the fix and it is exact rather than heuristic: ask what
+  the update ALONE would make the text, and if the file already says that, the
+  file is this loop's own echo, not an edit worth ingesting. Three more doors of
+  the same family closed alongside it — `NoteBridge.drainIngest` now serialises
+  its passes (two that overlap each diffed against the same text and each
+  applied their own copy), re-diffs after the recovery snapshot's `await` (the
+  one window between reading the doc and applying a diff computed from it), and
+  refuses a whole-file insert into a doc still waiting for its first pull (a
+  seed by another name, outside the pull-then-seed order). `destroy()` no longer
+  drops updates the store never got: persistence was fire-and-forget and the
+  teardown synchronous, which is how the local store ends up behind its own file
+  in the first place — `whenPersisted()` closes that gap, and both cold apply
+  and LRU retire await it. Pinned by `sync/__tests__/coldApplyDoubling.test.ts`
+  and `bridge/__tests__/doubling-ingest.test.ts`.
+- **The note size ceiling capped each message, not the note.** A note that
+  doubles doubles from small, so every single update in the cascade above was
+  comfortably under `MAX_NOTE_MB` and the cap never fired — which is how a 10 MB
+  limit produced a 16 MB note. `beforeHandleMessage` now also refuses any write
+  to a doc whose `Y.Text` is already over the cap (its own length counter, so
+  O(1)), making the limit a wall rather than a step size: a doc under it always
+  accepts one more message so it can be edited down, a doc over it accepts none
+  and is a repair job (`POST /api/notes/:id/reset-crdt`). Extracted as
+  `noteSizeRefusal` and pinned in `tests/repair-oversized-doc.test.ts`.
 - **Read-only was enforced on the surfaces people type into, not on the ones
   they create with.** Three write paths asked only whether the caller was a
   MEMBER of the vault, so someone who could not change a single note in a folder
