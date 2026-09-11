@@ -113,7 +113,9 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     closeBrackets(),
     // Markdown-aware editing keys, ahead of the base keymap so they win:
     //   Mod-b/i/e/k/…  inline formatting toggles
-    //   Enter / Tab    smart list & quote continuation / indent
+    //   Mod-Alt-1…6    heading level      Shift-Enter  hard break
+    //   Mod-l          task toggle        Tab/Shift-Tab list indent
+    // (Enter is lang-markdown's, at `Prec.high` — see lists.ts.)
     formattingKeymap(),
     listKeymap(),
     taskKeymap(),
