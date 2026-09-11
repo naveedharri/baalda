@@ -24,3 +24,4 @@
 - Selecting a word and pressing **⌘K** is smarter: paste a link, select it, press ⌘K and the cursor lands where the words go
 - Faint guides now run down each level of a nested list
 - The editor keeps text in a readable column instead of stretching it across the whole window. Prefer the full width? Settings → Appearance → Readable line length. Line numbers live there too, off by default
+- Opening a note no longer makes the whole window flash: the note area shows its loading bars right away, the sidebar row you clicked stays highlighted instead of blinking, and when Baalda reveals a note in the sidebar (from a tab, a link or search) the list now glides to it rather than jumping

@@ -344,6 +344,10 @@ export function Editor() {
   // False from the moment a note starts opening until its CodeMirror view is in
   // the DOM. Drives the loading skeleton over the (genuinely empty) pane.
   const [viewMounted, setViewMounted] = useState(false);
+  // True between destroying one note's view and mounting the next one's: the
+  // pane is empty because WE emptied it, so the skeleton must appear at once
+  // rather than after its first-open grace delay (see `EditorSkeleton`).
+  const switchingNoteRef = useRef(false);
   // Editability is held in a Compartment so a lock applied while the note is
   // open can flip the live view read-only without rebuilding it.
   const editableRef = useRef<Compartment | null>(null);
@@ -601,6 +605,7 @@ export function Editor() {
       const foldEffects = foldEffectsFor(view.state, parseNoteUiState(storedUiState));
       if (foldEffects.length) view.dispatch({ effects: foldEffects });
       viewRef.current = view;
+      switchingNoteRef.current = false;
       setViewMounted(true);
       setActiveNote(bindActiveNote(view)); // let out-of-tree drops embed into this note
       if (!ro && !titleWantsFocus) view.focus();
@@ -631,6 +636,9 @@ export function Editor() {
       cancelled = true;
       if (onAwarenessChange && awareness) awareness.off("change", onAwarenessChange);
       setActiveNote(null);
+      // Order matters: the ref is read by the render that `setViewMounted`
+      // schedules, so it must be written first.
+      if (view) switchingNoteRef.current = true;
       setViewMounted(false);
       if (view) view.destroy();
       viewRef.current = null;
@@ -859,7 +867,7 @@ export function Editor() {
           </div>
         )}
       </div>
-      {!viewMounted && <EditorSkeleton />}
+      {!viewMounted && <EditorSkeleton immediate={switchingNoteRef.current} />}
     </div>
   );
 }

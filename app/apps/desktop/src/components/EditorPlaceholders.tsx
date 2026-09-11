@@ -14,10 +14,20 @@
  * delay) so a note that opens from the local index in 40ms — the common case —
  * never flashes one. That delay is also what makes it safe as the lazy chunk's
  * fallback: the Editor chunk normally lands well inside it.
+ *
+ * `immediate` drops that delay. It is for a note-to-note switch, where the
+ * previous CodeMirror view has just been destroyed and the pane is empty NOW:
+ * holding the bars back there showed a bare surface for the whole beat, which
+ * read as the app blanking rather than as a note loading.
  */
-export function EditorSkeleton() {
+export function EditorSkeleton({ immediate = false }: { immediate?: boolean }) {
   return (
-    <div className="editor-skeleton" role="status" aria-label="Opening note">
+    <div
+      className="editor-skeleton"
+      data-immediate={immediate || undefined}
+      role="status"
+      aria-label="Opening note"
+    >
       <span className="skel-line skel-title" />
       <span className="skel-line" style={{ width: "92%" }} />
       <span className="skel-line" style={{ width: "78%" }} />

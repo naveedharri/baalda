@@ -508,6 +508,12 @@
      fault rather than as loading. */
   animation: skeleton-in 0.2s var(--ease) 0.18s both;
 }
+/* Switching between notes: the outgoing view is already gone, so the bars take
+   its place on the same frame — no delay, no fade — and the swap reads as
+   "text → loading → text" instead of "text → blank → text". */
+.editor-skeleton[data-immediate] {
+  animation: none;
+}
 /* `.editor-column` is the positioning context for the overlay above. */
 .editor-column {
   position: relative;

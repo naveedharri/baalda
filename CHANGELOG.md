@@ -329,6 +329,28 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **Opening a note no longer flashes the whole app.** Three things fired on
+  every click. The editor pane went bare for ~180 ms: the loading skeleton is
+  held back so a 40 ms open never flashes one, but a note-to-note switch
+  destroys the outgoing CodeMirror view first, so the delay showed an empty
+  surface instead — `EditorSkeleton` now takes `immediate` and `Editor` sets it
+  whenever a view was just torn down. The clicked sidebar row blinked: the
+  `tree-reveal` pulse ended on `transparent` and, as a held animation end state,
+  outranked `.selected` whatever the source order, so the row went bare and then
+  snapped back to accent when the class dropped; the keyframes now land on the
+  selection fill (a folder gets a variant that ends transparent), and a row that
+  was already on screen is not pulsed at all — the selection is the signal. And
+  the reveal re-listed every ancestor folder on every open, committing a fresh
+  `tree` per level and re-sorting and re-rendering the whole sidebar mid-click;
+  it now skips folders already carrying `childrenLoaded`, like `onToggle`. The
+  row context value is memoized too — a fresh object literal there re-rendered
+  every row on every `FileTree` render, and `FileTree` renders on every open.
+- **Revealing a note in the sidebar glides instead of jumping.** `.filetree-scroll`
+  sets `scroll-behavior: smooth` (react-window assigns `scrollTop`, which honours
+  it; wheel scrolling is unaffected), the scroll is deferred one frame so the
+  expanded rows start their `top` glide first, and it uses arborist's `"smart"`
+  align so a visible row is left alone. Reduced-motion restores the instant
+  scroll.
 - **Opening a note in a never-synced folder no longer waits 3 s.** After a vault
   switch the open gate was re-armed and `openFolderIsSynced` reset to `null`,
   and nothing answered for an unstamped folder — so, while signed in, every

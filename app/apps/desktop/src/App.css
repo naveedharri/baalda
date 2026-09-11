@@ -1087,6 +1087,11 @@ body:has(.sidebar-resizer.dragging) {
    of forcing a horizontal scrollbar. */
 .filetree-scroll {
   overflow-x: hidden !important;
+  /* A reveal (`tree.scrollTo`) lands on react-window assigning `scrollTop`,
+     which honours `scroll-behavior`, so the list glides to the revealed row
+     instead of jumping while the freshly expanded rows are still settling
+     into place. Wheel/trackpad scrolling is unaffected by this property. */
+  scroll-behavior: smooth;
 }
 .filetree-scroll > div {
   width: 100% !important;
@@ -1414,21 +1419,43 @@ body:has(.sidebar-resizer.dragging) {
 }
 /* A one-shot "here it is" pulse on a row the app just revealed (store
    `revealedPath`). Subtle by design: the row's own `.selected` highlight is the
-   lasting signal, this only catches the eye once. Declared BEFORE `.selected` so
-   the held end state (`both`, transparent) never outranks the selection fill. */
+   lasting signal, this only catches the eye once.
+
+   The keyframes END on the selection fill, not on transparent. An animation's
+   held end state (`both`) outranks `.selected`'s normal declaration whatever
+   the source order, so a pulse that faded to transparent left the row bare
+   until the class dropped and then snapped it back to accent — the "blink" on
+   every click. Landing on `--accent-soft` makes the class drop invisible. A
+   revealed row that is NOT the selection (a folder) gets the variant below. */
 @keyframes tree-reveal {
   0% {
     background: var(--accent-soft);
   }
-  35% {
+  30% {
+    background: var(--accent-soft-hover);
+  }
+  100% {
+    background: var(--accent-soft);
+  }
+}
+@keyframes tree-reveal-unselected {
+  0% {
+    background: var(--accent-soft);
+  }
+  30% {
     background: var(--accent-soft-hover);
   }
   100% {
     background: transparent;
   }
 }
+/* Length is mirrored by the clear timer in `FileTree`'s reveal effect
+   (`REVEAL_PULSE_MS`); keep them together. */
 .tree-row.revealed {
-  animation: tree-reveal 600ms var(--ease) both;
+  animation: tree-reveal 900ms var(--ease) both;
+}
+.tree-row.revealed:not(.selected) {
+  animation-name: tree-reveal-unselected;
 }
 @media (prefers-reduced-motion: reduce) {
   .tree-row.revealed {
@@ -1477,6 +1504,9 @@ body:has(.sidebar-resizer.dragging) {
 
 /* Honor reduced-motion: keep the reorder instant, drop the lift animation. */
 @media (prefers-reduced-motion: reduce) {
+  .filetree-scroll {
+    scroll-behavior: auto;
+  }
   .tree-rowwrap {
     transition: none;
   }
