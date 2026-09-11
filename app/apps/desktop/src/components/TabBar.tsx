@@ -90,62 +90,62 @@ export function TabBar() {
     <div className="tab-strip" role="tablist" aria-label="Open files">
       <LayoutGroup>
         {tabs.map((path) => {
-        const active = path === activePath;
-        // The openingNotePath acknowledgement, same as the sidebar row: a tab
-        // click in a synced vault takes a round trip before the editor swaps.
-        const opening = path === openingPath && !active;
-        const label = noteLabel(path);
-        return (
-          <motion.div
-            key={path}
-            layout={!reduceMotion}
-            transition={{ type: "spring", stiffness: 520, damping: 40 }}
-            className={`tab${active ? " active" : ""}${opening ? " opening" : ""}`}
-            role="tab"
-            aria-selected={active}
-            title={path}
-            // Middle-click closes, the platform-wide tab convention.
-            onAuxClick={(e) => {
-              if (e.button === 1) useStore.getState().closeTab(path);
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setMenu({ x: e.clientX, y: e.clientY, path });
-            }}
-          >
-            <button
-              ref={active ? activeRef : undefined}
-              className="tab-label"
-              tabIndex={active ? 0 : -1}
-              onClick={() => {
-                if (!active) void useStore.getState().openNoteByPath(path);
+          const active = path === activePath;
+          // The openingNotePath acknowledgement, same as the sidebar row: a tab
+          // click in a synced vault takes a round trip before the editor swaps.
+          const opening = path === openingPath && !active;
+          const label = noteLabel(path);
+          return (
+            <motion.div
+              key={path}
+              layout={!reduceMotion}
+              transition={{ type: "spring", stiffness: 520, damping: 40 }}
+              className={`tab${active ? " active" : ""}${opening ? " opening" : ""}`}
+              role="tab"
+              aria-selected={active}
+              title={path}
+              // Middle-click closes, the platform-wide tab convention.
+              onAuxClick={(e) => {
+                if (e.button === 1) useStore.getState().closeTab(path);
               }}
-            >
-              {label}
-            </button>
-            <button
-              className="tab-close"
-              title="Close tab"
-              aria-label={`Close ${label}`}
-              onClick={(e) => {
+              onContextMenu={(e) => {
+                e.preventDefault();
                 e.stopPropagation();
-                useStore.getState().closeTab(path);
+                setMenu({ x: e.clientX, y: e.clientY, path });
               }}
             >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                aria-hidden="true"
+              <button
+                ref={active ? activeRef : undefined}
+                className="tab-label"
+                tabIndex={active ? 0 : -1}
+                onClick={() => {
+                  if (!active) void useStore.getState().openNoteByPath(path);
+                }}
               >
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-          </motion.div>
-        );
+                {label}
+              </button>
+              <button
+                className="tab-close"
+                title="Close tab"
+                aria-label={`Close ${label}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  useStore.getState().closeTab(path);
+                }}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  aria-hidden="true"
+                >
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </motion.div>
+          );
         })}
       </LayoutGroup>
 
