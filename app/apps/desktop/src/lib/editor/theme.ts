@@ -207,8 +207,18 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // The block inside each cell (see TableWidget). Its max-width is what bounds
   // a column's natural size: long prose wraps at a readable measure, short
   // columns stay as wide as their content — nothing is squeezed below it.
+  // `display: block` is load-bearing twice over: `max-width` does nothing on an
+  // inline box, and an empty cell needs a box to give a height to.
   ".cm-md-table .cm-md-cell": {
+    display: "block",
     maxWidth: "42ch",
+    minHeight: "1.6em",
+  },
+  // A just-added row or column is all empty cells. Without a line box they
+  // collapse to a few pixels and the new row looks like a hairline until you
+  // click it, so an empty cell carries a zero-width space.
+  ".cm-md-table .cm-md-cell-content:empty::before": {
+    content: '"\\200B"',
   },
   // A visible (non-overlay) scrollbar, so a table that CAN scroll shows it.
   ".cm-md-table::-webkit-scrollbar": {
@@ -243,12 +253,30 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   },
 
   // ---- The editable table (./table/TableWidget) ----
-  // The widget's own container inside the scrolling `.cm-md-table` host, so the
-  // hover affordances have something positioned to hang off.
+  // The widget's own container inside the scrolling `.cm-md-table` host: the
+  // table and its column bar in one row, the row bar underneath.
+  //
+  // `user-select: none` is what makes a document selection ACROSS the table
+  // read as one thing. Without it the browser paints its own native
+  // `::selection` blue inside every cell, on top of CodeMirror's accent wash —
+  // two highlights in two colours over one block. The wash itself still covers
+  // the table: `.cm-selectionLayer` sits at `z-index: 1` and nothing here
+  // raises the table above it (position: relative with `z-index: auto` paints
+  // below it, and `contain: inline-size` on the host is not a stacking
+  // context). The cell input opts back in — you must be able to select text you
+  // are editing.
   ".cm-md-table-wrap": {
-    position: "relative",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
     width: "max-content",
     minWidth: "100%",
+    userSelect: "none",
+    WebkitUserSelect: "none",
+  },
+  ".cm-md-table-row": {
+    display: "flex",
+    alignItems: "stretch",
   },
   // The open cell: a quiet ring drawn INSIDE the cell, so the table's own grid
   // lines never move by a pixel when a cell is being edited.
@@ -271,6 +299,8 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     color: "var(--text-primary)",
     font: "inherit",
     textAlign: "inherit",
+    userSelect: "text",
+    WebkitUserSelect: "text",
   },
   ".cm-md-table .cm-md-cell-content code": {
     fontFamily: "var(--font-mono)",
@@ -283,55 +313,43 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     {
       cursor: "pointer",
     },
-  // Hover affordances: a slim `+` at a column's right edge, and one under the
-  // last row. Both stay invisible until the pointer is in the table, so a table
-  // being read looks like a table.
-  ".cm-md-table .cm-md-add-col": {
-    position: "absolute",
-    top: "0",
-    right: "0",
-    bottom: "0",
-    width: "14px",
-    padding: "0",
-    border: "none",
-    background: "transparent",
-    color: "var(--text-tertiary)",
-    fontSize: "var(--fs-sm)",
-    lineHeight: "1",
-    cursor: "pointer",
-    opacity: "0",
-    transition: "opacity var(--t-fast) var(--ease)",
-  },
-  ".cm-md-table .cm-md-add-col.is-shown, .cm-md-table .cm-md-add-col:focus-visible": {
-    opacity: "1",
-  },
-  ".cm-md-table .cm-md-add-col:hover": {
-    color: "var(--accent)",
-    backgroundColor: "var(--accent-soft)",
-  },
-  ".cm-md-table .cm-md-add-row": {
-    display: "block",
-    width: "100%",
-    height: "14px",
-    marginTop: "2px",
+  // The two add bars: one down the RIGHT edge of the table (a new column, the
+  // table's exact height), one UNDER it (a new row, the table's exact width —
+  // `100%` of the wrap minus the column bar, not the width of the editor). Both
+  // are in flow, so they take their own space; a margin here would be invisible
+  // to CM6, which measures a block widget with getBoundingClientRect.
+  ".cm-md-table .cm-md-add-col, .cm-md-table .cm-md-add-row": {
     padding: "0",
     border: "none",
     borderRadius: "var(--radius-sm)",
     background: "transparent",
     color: "var(--text-tertiary)",
-    fontSize: "var(--fs-sm)",
+    fontSize: "var(--fs-md)",
     lineHeight: "1",
     cursor: "pointer",
     opacity: "0",
-    transition: "opacity var(--t-fast) var(--ease)",
+    transition: "opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease)",
   },
-  ".cm-md-table-wrap:hover .cm-md-add-row, .cm-md-table .cm-md-add-row:focus-visible": {
+  ".cm-md-table .cm-md-add-col": {
+    width: "22px",
+    flex: "0 0 22px",
+  },
+  ".cm-md-table .cm-md-add-row": {
+    height: "22px",
+    width: "calc(100% - 22px)",
+  },
+  // Faint until the pointer is over the table (or the bar itself has focus),
+  // then plainly there.
+  ".cm-md-table-wrap:hover .cm-md-add-col, .cm-md-table-wrap:hover .cm-md-add-row, .cm-md-table .cm-md-add-col:focus-visible, .cm-md-table .cm-md-add-row:focus-visible":
+    {
+      opacity: "1",
+    },
+  ".cm-md-table .cm-md-add-col:hover, .cm-md-table .cm-md-add-row:hover": {
     opacity: "1",
-  },
-  ".cm-md-table .cm-md-add-row:hover": {
     color: "var(--accent)",
     backgroundColor: "var(--accent-soft)",
   },
+
   // "Changed by someone else while you were typing." — the same hint the
   // Properties panel shows, in the same voice.
   ".cm-md-table .cm-md-table-note": {

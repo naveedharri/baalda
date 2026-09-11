@@ -50,6 +50,40 @@ describe("editor theme geometry", () => {
     expect(editorThemeSpec[".cm-selectionLayer"].zIndex).toBe("1");
   });
 
+  it("hands the table's selection to CodeMirror's layer, not the browser's", () => {
+    // A native `::selection` inside the cells paints blue on top of the accent
+    // wash — two highlights in two colours over one block.
+    expect(editorThemeSpec[".cm-md-table-wrap"].userSelect).toBe("none");
+    // …and the table must not raise itself over the `z-index: 1` wash.
+    expect(editorThemeSpec[".cm-md-table-wrap"].zIndex).toBeUndefined();
+    expect(editorThemeSpec[".cm-md-table"].zIndex).toBeUndefined();
+    // The text you are editing is still selectable.
+    expect(editorThemeSpec[".cm-md-table .cm-md-cell-input"].userSelect).toBe("text");
+  });
+
+  it("gives an empty table cell a full line box", () => {
+    // A just-added row is all empty cells; with no box it renders as a hairline.
+    expect(editorThemeSpec[".cm-md-table .cm-md-cell"].display).toBe("block");
+    expect(editorThemeSpec[".cm-md-table .cm-md-cell"].minHeight).toBe("1.6em");
+    expect(editorThemeSpec[".cm-md-table .cm-md-cell-content:empty::before"].content).toBe(
+      '"\\200B"',
+    );
+  });
+
+  it("sizes the add bars to the table, and spaces them with padding", () => {
+    // The row bar spans the table, not the editor: the wrap is max-content wide
+    // and the column bar is the 22px that `calc` takes back off it.
+    expect(editorThemeSpec[".cm-md-table-wrap"].width).toBe("max-content");
+    expect(editorThemeSpec[".cm-md-table .cm-md-add-row"].width).toBe("calc(100% - 22px)");
+    expect(editorThemeSpec[".cm-md-table .cm-md-add-col"].width).toBe("22px");
+    // `align-items: stretch` is what makes the column bar the table's height.
+    expect(editorThemeSpec[".cm-md-table-row"].alignItems).toBe("stretch");
+    // Padding, never margin: CM6 measures a block widget's height with
+    // getBoundingClientRect, which does not see margins.
+    expect(editorThemeSpec[".cm-md-table"].paddingBlock).toBe("var(--sp-3)");
+    expect(editorThemeSpec[".cm-md-table"].margin).toBeUndefined();
+  });
+
   it("paints full-width line decorations inside the prose column", () => {
     // A border/background on a now-full-width line box would reach the window.
     expect(editorThemeSpec[".cm-blockquote::before"].left).toBe("var(--editor-pad-x)");

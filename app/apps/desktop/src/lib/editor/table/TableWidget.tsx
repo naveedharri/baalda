@@ -166,7 +166,6 @@ function EditableTable({
   const [draft, setDraft] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const [menu, setMenu] = useState<CellMenu | null>(null);
-  const [hoverCol, setHoverCol] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   /** The cell's source when the draft began, to spot a concurrent edit. */
   const rawAtStart = useRef("");
@@ -232,13 +231,20 @@ function EditableTable({
   const startEdit = useCallback(
     (r: number, c: number, caret: number | null) => {
       if (readOnly) return;
+      // Moving between cells commits explicitly rather than relying on blur:
+      // the wrapper cancels the mousedown's default (see `swallowPointer`), so
+      // focus does not leave the open input on its own and no blur would fire.
+      if (editing && (editing.row !== r || editing.col !== c)) {
+        handledCell.current = `${editing.row}:${editing.col}`;
+        commit(editing.row, editing.col, draft);
+      }
       const raw = cellRaw(r, c);
       handledCell.current = null;
       rawAtStart.current = raw;
       setDraft(raw);
       setEditing({ row: r, col: c, caret });
     },
-    [readOnly, cellRaw],
+    [readOnly, cellRaw, editing, draft, commit],
   );
 
   /** Commit the open cell, then open another one (or none). */
@@ -308,6 +314,36 @@ function EditableTable({
     structural((live) =>
       planInsertRow(live, where === "above" ? displayRow - 2 : displayRow - 1),
     );
+
+  /** The bar under the table: a new last row, with the caret already in it. */
+  const addRowAtEnd = () => {
+    const live = liveModel();
+    if (!live) return;
+    dispatchChanges(view, planInsertRow(live, live.rows.length - 1));
+    const after = liveModel();
+    handledCell.current = null;
+    rawAtStart.current = "";
+    setDraft("");
+    setEditing({ row: after ? displayRowCount(after) - 1 : rowCount, col: 0, caret: null });
+  };
+
+  /** The bar down the right edge: a new last column. */
+  const addColumnAtEnd = () => structural((live) => planInsertColumn(live, live.columns - 1));
+
+  /**
+   * Cancel the browser's own handling of a pointer press inside the widget.
+   *
+   * `ignoreEvent()` keeps CodeMirror's handlers away, but the widget still sits
+   * inside a `contenteditable` host, so without this the BROWSER starts a
+   * native selection at the nearest editable position — the table's atomic edge
+   * — and the click's few pixels of travel drag it back over the title and the
+   * paragraph above. Form controls are exempt: an input needs the default to
+   * place its own caret.
+   */
+  const swallowPointer = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("input, textarea, button")) return;
+    e.preventDefault();
+  };
 
   const onCellKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (!editing) return;
@@ -398,7 +434,6 @@ function EditableTable({
   const cellProps = (r: number, c: number) => ({
     className: editing?.row === r && editing.col === c ? "cm-md-cell-open" : undefined,
     style: model.aligns[c] ? { textAlign: model.aligns[c]! } : undefined,
-    onMouseEnter: () => setHoverCol(c),
     onContextMenu: (e: React.MouseEvent) => {
       if (readOnly) return;
       e.preventDefault();
@@ -412,51 +447,43 @@ function EditableTable({
   const cols = Array.from({ length: columns }, (_, i) => i);
 
   return (
-    <div className="cm-md-table-wrap" onMouseLeave={() => setHoverCol(null)}>
-      <table>
-        <thead>
-          <tr>
-            {cols.map((c) => (
-              <th key={c} {...cellProps(0, c)}>
-                {cellBody(0, c)}
-                {!readOnly && (
-                  <button
-                    type="button"
-                    className={`cm-md-add-col${hoverCol === c ? " is-shown" : ""}`}
-                    aria-label={`Insert column after column ${c + 1}`}
-                    // The affordance is the column's, not the cell's: opening an
-                    // editor underneath it would be the opposite of what it does.
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      structural((live) => planInsertColumn(live, c));
-                    }}
-                  >
-                    +
-                  </button>
-                )}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {bodyRows.map((r) => (
-            <tr key={r}>
+    <div className="cm-md-table-wrap" onMouseDown={swallowPointer}>
+      <div className="cm-md-table-row">
+        <table>
+          <thead>
+            <tr>
               {cols.map((c) => (
-                <td key={c} {...cellProps(r, c)}>
-                  {cellBody(r, c)}
-                </td>
+                <th key={c} {...cellProps(0, c)}>
+                  {cellBody(0, c)}
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {bodyRows.map((r) => (
+              <tr key={r}>
+                {cols.map((c) => (
+                  <td key={c} {...cellProps(r, c)}>
+                    {cellBody(r, c)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!readOnly && (
+          <button
+            type="button"
+            className="cm-md-add-col"
+            aria-label="Add column"
+            onClick={addColumnAtEnd}
+          >
+            +
+          </button>
+        )}
+      </div>
       {!readOnly && (
-        <button
-          type="button"
-          className="cm-md-add-row"
-          aria-label="Add row"
-          onClick={() => structural((live) => planInsertRow(live, live.rows.length - 1))}
-        >
+        <button type="button" className="cm-md-add-row" aria-label="Add row" onClick={addRowAtEnd}>
           +
         </button>
       )}

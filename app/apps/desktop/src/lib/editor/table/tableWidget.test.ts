@@ -234,6 +234,75 @@ describe("the editable table widget", () => {
     view.destroy();
   });
 
+  it("swallows the pointer press, leaving the document selection alone", async () => {
+    // Regression: the widget sits inside a contenteditable host, so a mousedown
+    // the browser still handled started a native selection at the table's
+    // atomic edge and the click's few pixels of travel dragged it back over the
+    // inline title and the paragraph above.
+    const { view, txs } = mount(DOC);
+    view.dispatch({ selection: { anchor: 3 } });
+    const before = view.state.selection;
+    txs.length = 0;
+    const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    cells(view)[2]!.dispatchEvent(event);
+    await settle();
+    expect(event.defaultPrevented).toBe(true);
+    expect(view.state.selection).toBe(before);
+    // …and no transaction of our own moved it either.
+    expect(txs.filter((t) => t.selection !== undefined)).toHaveLength(0);
+    view.destroy();
+  });
+
+  it("lets a press inside the open input through, so the caret can move", async () => {
+    const { view } = mount(DOC);
+    click(cells(view)[2]!);
+    await settle();
+    const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    openInput(view)!.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    view.destroy();
+  });
+
+  it("commits the open cell when another cell is clicked", async () => {
+    // Blur cannot be relied on here: the wrapper cancels the mousedown, so
+    // focus never leaves the input by itself.
+    const { view } = mount(DOC);
+    click(cells(view)[0]!);
+    await settle();
+    typeInto(openInput(view)!, "hdr");
+    await settle();
+    click(cells(view)[2]!);
+    await settle();
+    expect(view.state.doc.toString()).toBe(DOC.replace("| a | b |", "| hdr | b |"));
+    expect(openInput(view)!.value).toBe("1");
+    view.destroy();
+  });
+
+  it("adds a row from the bar and puts the caret in it", async () => {
+    const { view } = mount(DOC);
+    const bar = view.dom.querySelector<HTMLButtonElement>(".cm-md-add-row")!;
+    click(bar);
+    await settle();
+    expect(view.state.doc.toString()).toBe(
+      DOC.replace("| 1 | 2 |", "| 1 | 2 |\n|  |  |"),
+    );
+    expect(openInput(view)).not.toBeNull();
+    expect(openInput(view)!.value).toBe("");
+    view.destroy();
+  });
+
+  it("adds a column from the bar, delimiter row included", async () => {
+    const { view } = mount(DOC);
+    click(view.dom.querySelector(".cm-md-add-col")!);
+    await settle();
+    expect(view.state.doc.toString()).toBe(
+      DOC.replace(TABLE, ["| a | b |  |", "| --- | --- | --- |", "| 1 | 2 |  |"].join("\n")),
+    );
+    // The new cells are empty but present, so the column is not a hairline.
+    expect(cellTexts(view)).toHaveLength(6);
+    view.destroy();
+  });
+
   it("renders `<script>` in a cell as literal text", () => {
     const { view } = mount(
       ["| a |", "| --- |", "| <script>alert(1)</script> |"].join("\n"),
