@@ -421,6 +421,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **The editor's width control had never actually worked.** `--editor-pad-x` —
+  the inset every consumer follows — was composed on `:root` out of
+  `var(--editor-measure)`, and a `var()` inside a custom property is substituted
+  at computed-value time ON THE DECLARING ELEMENT: `:root`'s own 88ch was baked
+  into the token stream before it inherited, so no override further down the tree
+  could reach it. Neither the old
+  `.editor-column[data-measure="full"] { --editor-measure: 100% }` rule nor the
+  new inline measure changed a single line, which is why "Readable line length"
+  off left the column exactly where it was. The declaration moved to
+  `.editor-column` (`src/styles/tokens.css`) — the one element the override is
+  set on — while `--editor-measure` and `--editor-gutter` stay `:root` defaults.
+  `lib/__tests__/editorMeasure.test.ts` reads the stylesheet back and asserts
+  both the selector and that the inset is declared exactly once, because a
+  second declaration would reintroduce the ambiguity.
 - **The Access page no longer paints Private and then jumps to Shared.** The
   vault mode was initialised to the Private end of the tri-state and corrected
   only when the shares GET landed, so every open of a Shared vault showed the

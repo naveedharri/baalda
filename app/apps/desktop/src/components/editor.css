@@ -533,7 +533,9 @@
    a measure in `ch`, or 100% for full width, which leaves only
    `--editor-gutter` at each edge. Purely a token override, so `--editor-pad-x`
    — and with it `.cm-line`, the block widgets, the fold chevrons and the
-   loading skeleton — all follow with no JS at all. */
+   loading skeleton — all follow with no JS at all. That only holds because
+   `--editor-pad-x` is composed on `.editor-column` rather than on `:root`;
+   tokens.css explains why, and moving it back would silence this control. */
 .skel-line {
   height: 12px;
   border-radius: var(--radius-pill);
