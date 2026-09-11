@@ -140,8 +140,8 @@ n/a = synchronous or sub-100ms by construction.
 | Search | local FTS5 | fast | n/a |
 | Graph view | in-memory sim | fast | n/a |
 | Ping a peer | awareness field | instant | ✅ existing ping toast |
-| New tab (`+` / ⌘N) | create + open + reveal | fast | ✅ row pulses in the sidebar, tab slides to first |
-| Switch tab (click / Ctrl-Tab) | same as note open | 0.05–2s | ✅ tab dims while opening, then slides to first |
+| New tab (`+` / ⌘N) | create + open + reveal | fast | ✅ row pulses in the sidebar, highlight slides to the new tab |
+| Switch tab (click / Ctrl-Tab) | same as note open | 0.05–2s | ✅ tab dims while opening, then the highlight slides to it |
 
 ### Known gaps (deliberate, not oversights)
 
@@ -156,7 +156,7 @@ n/a = synchronous or sub-100ms by construction.
 - **The tab strip has no unit test.** Same reason as `useAsyncAction`: it is a
   React component and the repo has no `@testing-library/react`. Its whole
   contract lives in the store instead (`src/__tests__/tabStore.test.ts` covers
-  the MRU order, what `closeTab` lands on, the shared create path and the reveal
+  the stable tab order, what `closeTab` lands on, the shared create path and the reveal
   request), and the strip itself is on the manual pass.
 - **Editor selection geometry is verified manually.** jsdom does no layout, so
   `getComputedStyle(line).paddingLeft` cannot resolve the `max()`/`calc()`/`ch`

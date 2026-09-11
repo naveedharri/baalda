@@ -102,14 +102,14 @@ beforeEach(() => {
 });
 
 describe("openTabs ordering", () => {
-  it("puts the active tab first and keeps the rest in most-recent order", async () => {
+  it("appends new tabs and never moves an existing one when it is re-activated", async () => {
     await open("a.md");
     await open("b.md");
     await open("c.md");
-    expect(useStore.getState().openTabs).toEqual(["c.md", "b.md", "a.md"]);
+    expect(useStore.getState().openTabs).toEqual(["a.md", "b.md", "c.md"]);
 
     await open("a.md");
-    expect(useStore.getState().openTabs).toEqual(["a.md", "c.md", "b.md"]);
+    expect(useStore.getState().openTabs).toEqual(["a.md", "b.md", "c.md"]);
     expect(useStore.getState().openNote?.path).toBe("a.md");
   });
 
@@ -119,13 +119,16 @@ describe("openTabs ordering", () => {
     expect(useStore.getState().openTabs).toEqual(["a.md"]);
   });
 
-  it("closing the active tab lands on the previously active one", async () => {
+  it("closing the active tab lands on its neighbour", async () => {
     await open("a.md");
-    await open("b.md"); // active, so openTabs === ["b.md", "a.md"]
+    await open("b.md");
+    await open("c.md");
+    await open("b.md"); // active, in the middle: ["a", "b", "c"]
     useStore.getState().closeTab("b.md");
     await flush();
-    expect(useStore.getState().openTabs).toEqual(["a.md"]);
-    expect(useStore.getState().openNote?.path).toBe("a.md");
+    expect(useStore.getState().openTabs).toEqual(["a.md", "c.md"]);
+    // The tab to its right slid into its slot.
+    expect(useStore.getState().openNote?.path).toBe("c.md");
   });
 
   it("closing the last tab clears the editor", async () => {
@@ -135,14 +138,14 @@ describe("openTabs ordering", () => {
     expect(useStore.getState().openNote).toBeNull();
   });
 
-  it("closeTabsToRight on the active (leading) tab keeps only it", async () => {
+  it("closeTabsToRight keeps the anchor and everything before it", async () => {
     await open("a.md");
     await open("b.md");
-    await open("c.md"); // ["c","b","a"], active "c"
-    useStore.getState().closeTabsToRight("c.md");
+    await open("c.md"); // ["a","b","c"], active "c"
+    useStore.getState().closeTabsToRight("a.md");
     await flush();
-    expect(useStore.getState().openTabs).toEqual(["c.md"]);
-    expect(useStore.getState().openNote?.path).toBe("c.md");
+    expect(useStore.getState().openTabs).toEqual(["a.md"]);
+    expect(useStore.getState().openNote?.path).toBe("a.md");
   });
 });
 

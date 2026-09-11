@@ -35,6 +35,7 @@ import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
 import { previewKind } from "../lib/preview";
 import { ancestorPaths } from "../lib/accessTree";
+import { nodeAt } from "../lib/tree/lazyTree";
 import { displayName } from "../lib/notePath";
 import {
   buildTreeSyncIndex,
@@ -1263,16 +1264,27 @@ export function FileTree() {
       }
       if (cancelled) return;
       // rAF retry: a refresh only SCHEDULES the re-render, so the row may not be
-      // in arborist's store yet. 30 frames (~500ms) is the budget the old
+      // in arborist's data yet. 30 frames (~500ms) is the budget the old
       // `beginRename` used; the folder listings are already awaited above, so it
       // only has to cover React's render.
+      //
+      // The gate is the STORE tree, not `tree.get(path)`: arborist's `get` only
+      // knows VISIBLE rows, so a note inside a collapsed folder is "missing" until
+      // that folder opens — gating on it meant a reveal into a closed folder gave
+      // up every time. `openParents`/`scrollTo` search the whole tree, and
+      // `scrollTo` waits for the row to become visible before scrolling to it.
       const land = (tries = 0) => {
         if (cancelled) return;
         const tree = treeRef.current;
-        if (tree?.get(path)) {
-          tree.openParents(path);
-          void tree.scrollTo(path, "auto");
-          if (edit) void tree.edit(path);
+        const known = treeHasPath(useStore.getState().tree, path);
+        if (tree && known) {
+          const t = tree; // narrowed copy for the closure below
+          t.openParents(path);
+          void t.scrollTo(path, "auto")?.then(() => {
+            if (cancelled) return;
+            // Only a visible row can be edited, so this waits for the scroll.
+            if (edit) void t.edit(path);
+          });
           useStore.getState().setRevealedPath(path);
           window.setTimeout(() => {
             if (useStore.getState().revealedPath === path) {
@@ -1985,6 +1997,15 @@ const ICON_HTML = (
     <path d="m10 12-2 2.5 2 2.5M14 12l2 2.5-2 2.5" />
   </TreeSvg>
 );
+
+/** Is `path` (file or folder) in the store's tree yet? `nodeAt` only walks
+ *  folders, so look the parent up and then check its listing for the entry. */
+function treeHasPath(root: TreeNode | null, path: string): boolean {
+  if (!root) return false;
+  const slash = path.lastIndexOf("/");
+  const dir = slash === -1 ? root : nodeAt(root, path.slice(0, slash));
+  return dir?.children?.some((c) => c.path === path) ?? false;
+}
 
 function isHtmlPath(path: string): boolean {
   return /\.html?$/i.test(path);

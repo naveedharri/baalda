@@ -2421,26 +2421,26 @@ body:has(.sidebar-resizer.dragging) {
     animation: none;
   }
 }
-/* The tab strip is the header's title row (see App.tsx), so the header holds no
-   vertical padding of its own and stretches its children: the active tab is a
-   card that has to reach the bottom edge to join the note sheet below. */
+/* The tab strip is the header's title row (see App.tsx): tabs on the left,
+   the sync badge and the icon buttons on the right. */
 .main-header {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: var(--sp-3);
   min-height: 44px;
   padding: 0 var(--sp-6) 0 var(--sp-3);
   border-bottom: 1px solid var(--border);
-  /* Chrome, not paper: `.main` is `--bg-surface`, and the active tab is a
-     `--bg-surface` card — on a same-colour row it (and its fillets) would
-     vanish. The subtle well is what makes the card read as lifted out of the
-     header and joined to the sheet below. */
-  background: var(--bg-subtle);
+}
+/* The controls keep their own box: never shrink, never wrap — the strip is the
+   flexible child, and it scrolls instead of squeezing the badge onto two lines. */
+.main-header > :not(.tab-strip) {
+  flex: none;
+  white-space: nowrap;
 }
 /* ---- Open-file tabs (TabBar) ---- */
 .tab-strip {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: var(--sp-1);
   overflow-x: auto;
   /* The strip scrolls (wheel/trackpad/drag-into-view), but a scrollbar under
@@ -2450,79 +2450,45 @@ body:has(.sidebar-resizer.dragging) {
 .tab-strip::-webkit-scrollbar {
   display: none;
 }
-/* Inside the header: take the row, shrink rather than push the buttons off, and
-   sit ON the header's bottom border so the active card can paint over it. The
-   left pad keeps the first tab off the scroll container's clip edge, where the
-   active card's left corner notch would otherwise be cut. */
+/* Inside the header: take the row and shrink rather than push the controls off.
+   The mask fades the last tabs out before they reach the badge, so an overflowing
+   strip reads as "more to the right" instead of colliding with the controls. */
 .main-header > .tab-strip {
   flex: 1 1 auto;
   min-width: 0;
-  padding-left: var(--radius-sm);
-  margin-bottom: -1px;
-}
-/* Only the strip stretches to the row's height; the badge and the icon buttons
-   keep their own box and sit centred, as they did in the old padded header. */
-.main-header > :not(.tab-strip) {
-  align-self: center;
+  padding: var(--sp-2) 0;
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
 }
 .tab {
-  position: relative; /* the active card's corner pseudos anchor here */
+  position: relative; /* the travelling highlight anchors here */
   display: flex;
   align-items: center;
   flex: none;
   max-width: 220px;
-  margin: var(--sp-1) 0 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
 }
-.tab:hover {
+.tab:not(.active):hover {
   background: var(--bg-hover);
 }
-/* The active tab is a raised card: the note surface itself, lifted out of the
-   header, its bottom edge dissolving into the sheet below. `--bg-surface` is the
-   editor sheet, so the card and the note read as one piece of paper. (This
-   replaces the sidebar-row `--accent-soft` pill idiom the strip used to borrow.) */
-.tab.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  margin-bottom: 0;
-  z-index: 1; /* over the header's bottom border */
-}
-.tab.active:hover {
-  background: var(--bg-surface);
-}
-/* Inverted corners (fillets). Each pseudo is an r×r square just outside the
-   card's bottom corner, painted with a radial gradient centred on the square's
-   corner that touches the card's top edge: transparent inside radius r, the note
-   surface outside it. What remains is the region between the card's side, the
-   header's bottom edge and a concave arc — so the card's silhouette flares
-   outward into the sheet instead of stopping at a hard edge. The gradient takes
-   the token, never a literal colour, so dark theme follows. (A same-colour
-   box-shadow on a rounded square gives a convex bump, not a concave notch.) */
-.tab.active::before,
-.tab.active::after {
-  content: "";
+/* The active tab is marked by one soft grey highlight that SLIDES between tabs
+   (a shared-layout motion element, see TabBar.tsx) — the tabs themselves never
+   move. Everything in the tab sits above it. */
+.tab-active-bg {
   position: absolute;
-  bottom: 0;
-  width: var(--radius-sm);
-  height: var(--radius-sm);
-  pointer-events: none;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  z-index: 0;
 }
-.tab.active::before {
-  left: calc(var(--radius-sm) * -1);
-  background: radial-gradient(
-    circle at 0 0,
-    transparent calc(var(--radius-sm) - 0.5px),
-    var(--bg-surface) var(--radius-sm)
-  );
+.tab > .tab-label,
+.tab > .tab-close {
+  position: relative;
+  z-index: 1;
 }
-.tab.active::after {
-  right: calc(var(--radius-sm) * -1);
-  background: radial-gradient(
-    circle at 100% 0,
-    transparent calc(var(--radius-sm) - 0.5px),
-    var(--bg-surface) var(--radius-sm)
-  );
+.tab.active {
+  color: var(--text-primary);
 }
 /* Click acknowledged, open in flight (same signal as the sidebar row). */
 .tab.opening {
@@ -2534,7 +2500,7 @@ body:has(.sidebar-resizer.dragging) {
   place-items: center;
   flex: none;
   width: 26px;
-  align-self: center;
+  height: 26px;
   margin-left: var(--sp-1);
   border: 0;
   border-radius: var(--radius-sm);

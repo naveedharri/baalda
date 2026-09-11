@@ -137,11 +137,11 @@ interface AppStore {
   vault: ipc.VaultInfo | null;
   tree: ipc.TreeNode | null;
   openNote: OpenNote | null;
-  /** Paths of the files held open as tabs, most-recently-active FIRST —
-   *  `openTabs[0]` is always the active tab, so the card you are looking at is
-   *  the leftmost one and the note you came from is right behind it. The ACTIVE
-   *  tab is `openNote.path`; this list is only which tabs exist, so the two
-   *  never disagree about what's on screen. Session-only, vault-scoped. */
+  /** Paths of the files held open as tabs, in the order they were opened —
+   *  a tab never moves once it exists, so the strip stays a stable map of where
+   *  things are and only the highlight travels. The ACTIVE tab is
+   *  `openNote.path`; this list is only which tabs exist, so the two never
+   *  disagree about what's on screen. Session-only, vault-scoped. */
   openTabs: string[];
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
@@ -1634,14 +1634,10 @@ export const useStore = create<AppStore>((set, get) => ({
         openNote: { path, id: meta?.id ?? null, title },
         noteRemoved: false,
         noteRemovedSynced: false,
-        // The active tab leads. Obsidian-style most-recently-used order: the
-        // card you are looking at is always the leftmost one, and the tab you
-        // came from is right behind it (which is also what makes `closeTab`
-        // land on the previously active note). Membership was already checked
-        // here — switching tabs re-runs this path — and the reorder subsumes it.
-        // Done in THIS set, not next to `openingNotePath` above, so the strip
-        // does not reshuffle for an open that then bails on a vault switch.
-        openTabs: [path, ...s.openTabs.filter((p) => p !== path)],
+        // Every open gets (or keeps) a tab, in place: switching tabs re-runs
+        // this path, so membership is checked rather than blindly appended, and
+        // an existing tab is never moved — the highlight travels, the tabs don't.
+        openTabs: s.openTabs.includes(path) ? s.openTabs : [...s.openTabs, path],
       }));
       // Whichever note becomes active gets shown in the sidebar. Unconditional
       // on purpose: it is idempotent (`openParents` on open parents and

@@ -24,9 +24,10 @@ interface TabMenu {
  * indexed title.
  *
  * The ACTIVE tab is derived from `openNote.path`, never tracked separately, so
- * the strip can't disagree with the editor about what's on screen. `openTabs` is
- * most-recently-active first, so the active card is always leftmost and
- * switching tabs animates the strip re-ordering (`layout`, the Toasts pattern).
+ * the strip can't disagree with the editor about what's on screen. Tabs never
+ * move; what travels is the soft highlight behind the active one — a single
+ * `motion` element with a shared `layoutId`, so switching tabs slides it from
+ * the old tab to the new one instead of re-painting two boxes.
  */
 export function TabBar() {
   const openTabs = useStore((s) => s.openTabs);
@@ -96,10 +97,8 @@ export function TabBar() {
           const opening = path === openingPath && !active;
           const label = noteLabel(path);
           return (
-            <motion.div
+            <div
               key={path}
-              layout={!reduceMotion}
-              transition={{ type: "spring", stiffness: 520, damping: 40 }}
               className={`tab${active ? " active" : ""}${opening ? " opening" : ""}`}
               role="tab"
               aria-selected={active}
@@ -114,6 +113,18 @@ export function TabBar() {
                 setMenu({ x: e.clientX, y: e.clientY, path });
               }}
             >
+              {active && (
+                <motion.span
+                  className="tab-active-bg"
+                  layoutId="tab-active-bg"
+                  aria-hidden="true"
+                  transition={
+                    reduceMotion
+                      ? { duration: 0 }
+                      : { type: "spring", stiffness: 380, damping: 34, mass: 0.9 }
+                  }
+                />
+              )}
               <button
                 ref={active ? activeRef : undefined}
                 className="tab-label"
@@ -144,7 +155,7 @@ export function TabBar() {
                   <path d="M6 6l12 12M18 6L6 18" />
                 </svg>
               </button>
-            </motion.div>
+            </div>
           );
         })}
       </LayoutGroup>

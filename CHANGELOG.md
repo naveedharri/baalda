@@ -104,11 +104,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   longer disagree about a note whose H1 and filename differ (they did). New
   `lib/notePath.ts` (`stemOf` / `noteLabel` / `sanitizeFileStem`) is the one
   label rule, shared by the tab strip, the sidebar rows, search results and
-  backlinks. The active tab is a raised `--bg-surface` card whose bottom corners
-  curve into the note sheet, and `openTabs` is now most-recently-active first, so
-  it is always the leftmost card and ⌘W lands on the note you came from. Added
-  ⌘W (close), Ctrl-Tab / Ctrl-Shift-Tab (walk a snapshot of the strip, so the
-  order changing underneath cannot ping-pong between two tabs) and a `+` button.
+  backlinks. The active tab is marked by one soft highlight that slides between tabs (tabs never reorder). Added
+  ⌘W (close), Ctrl-Tab / Ctrl-Shift-Tab (walk the strip in its visible order)
+  and a `+` button.
 - **Opening a note reveals it in the sidebar.** Store `requestReveal` + one
   `FileTree` effect: the folders above it are listed in ancestor order, the row
   scrolls into view and pulses once (nothing under `prefers-reduced-motion`).

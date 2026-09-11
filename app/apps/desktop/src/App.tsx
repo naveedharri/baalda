@@ -907,8 +907,6 @@ export default function App() {
   useEffect(() => {
     // Timestamp of the last bare "r" press, for the "rr" reload chord below.
     let lastRAt = 0;
-    // The tab order as it was when a Ctrl-Tab chord began — see the handler.
-    let tabCycle: string[] | null = null;
 
     // True when focus is in the editor or any text field, so bare-key chords
     // (like "rr") never fire mid-typing — they only work when just viewing.
@@ -954,22 +952,16 @@ export default function App() {
         if (active) useStore.getState().closeTab(active);
         return;
       }
-      // Ctrl-Tab / Ctrl-Shift-Tab walk the strip. Ctrl, not ⌘, on every
+      // Ctrl-Tab / Ctrl-Shift-Tab walk the strip in its visible order (tabs
+      // never reorder, so a live read is the right one). Ctrl, not ⌘, on every
       // platform: ⌘-Tab is the macOS app switcher and never reaches the webview.
-      //
-      // Over a SNAPSHOT of the order taken on the first press of the chord: the
-      // strip is most-recently-active first, so switching moves the target to
-      // index 0 and a live read would ping-pong between two tabs forever. The
-      // snapshot is dropped when Control comes up (see `onKeyUp`).
       if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") {
         e.preventDefault();
         const { openTabs, openNote } = useStore.getState();
-        const strip = tabCycle ?? openTabs;
-        tabCycle = strip;
-        if (strip.length < 2) return;
-        const i = openNote ? strip.indexOf(openNote.path) : -1;
+        if (openTabs.length < 2) return;
+        const i = openNote ? openTabs.indexOf(openNote.path) : -1;
         const step = e.shiftKey ? -1 : 1;
-        const next = strip[(i + step + strip.length) % strip.length];
+        const next = openTabs[(i + step + openTabs.length) % openTabs.length];
         if (next) void useStore.getState().openNoteByPath(next);
         return;
       }
@@ -1016,17 +1008,8 @@ export default function App() {
         return;
       }
     };
-    // Releasing Control ends the Ctrl-Tab chord, so the next one re-snapshots
-    // the (by then re-ordered) strip.
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === "Control") tabCycle = null;
-    };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("keyup", onKeyUp);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("keyup", onKeyUp);
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // Only while we still don't know WHICH folder to show. `setVault` lands

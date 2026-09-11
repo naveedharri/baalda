@@ -5,7 +5,7 @@
 - Faster launch: the window now opens with the app already drawn instead of a blank frame, and Baalda loads about half as much code up front (and installs smaller)
 - The editor now selects text cleanly: highlighting a line or a paragraph no longer spills out into the margins
 - New notes start blank, and a note's title is simply its file name — the name in the tab, the sidebar and the search results all agree
-- Open notes moved into one row at the top: the note you are reading is the raised tab on the left, ⌘W closes it, Ctrl-Tab moves between them, and + starts a new note
+- Open notes moved into one row at the top: a soft highlight slides to the note you are reading, ⌘W closes it, Ctrl-Tab moves between them, and + starts a new note
 - Opening a note now reveals it in the sidebar, expanding the folders above it
 - Note properties at the top of a file (tags, dates) now render as a compact block instead of a giant bold heading
 - Lists read as normal text again, with only the bullet dimmed
