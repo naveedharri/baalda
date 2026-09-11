@@ -15,6 +15,10 @@
 // Raw HTML *blocks* embedded in a note render in place (never execute — see
 // HtmlEmbedWidget) unless the cursor is inside them, in which case the source
 // shows for editing.
+//
+// GFM tables are the exception to that rule: they are ALWAYS the rendered
+// table, because their widget is editable (./table/TableWidget). Clicking a
+// cell types into the cell, so there is no source to fall back to.
 
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { type EditorState, StateField } from "@codemirror/state";
@@ -29,6 +33,7 @@ import {
 import { openExternal } from "../ipc";
 import { previewKind } from "../preview";
 import { frontmatterField } from "./frontmatter";
+import { TableWidget } from "./table/TableWidget";
 import { TASK_RE } from "./tasks";
 
 /** Turns an image `src` into a webview-loadable URL (see CreateEditorOptions). */
@@ -190,67 +195,6 @@ class PdfEmbedWidget extends WidgetType {
   }
 }
 
-/** A GFM pipe-table rendered as a real <table> off the active line. */
-class TableWidget extends WidgetType {
-  constructor(readonly source: string) {
-    super();
-  }
-  eq(other: TableWidget) {
-    return other.source === this.source;
-  }
-  toDOM() {
-    const wrap = document.createElement("div");
-    wrap.className = `cm-md-table ${BLOCK_INSET_CLASS}`;
-    const rows = this.source
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    // A GFM table is: header | delimiter (---|:--:) | body rows.
-    const isDelim = (l: string) => /^\|?[\s:|-]+\|?$/.test(l) && l.includes("-");
-    const cells = (l: string) =>
-      l.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-    const table = document.createElement("table");
-    let wroteHead = false;
-    rows.forEach((line, i) => {
-      if (isDelim(line)) return;
-      const tr = document.createElement("tr");
-      const head = i === 0 && rows[1] && isDelim(rows[1]);
-      for (const c of cells(line)) {
-        const cell = document.createElement(head ? "th" : "td");
-        // Inner block, not textContent on the cell: `max-width` on a table
-        // cell is unreliable in auto table layout, but on a block child it
-        // reliably caps the column's natural width so long prose wraps at a
-        // readable measure while short columns keep their natural size.
-        const inner = document.createElement("div");
-        inner.className = "cm-md-cell";
-        inner.textContent = c;
-        cell.appendChild(inner);
-        tr.appendChild(cell);
-      }
-      if (head) {
-        const thead = document.createElement("thead");
-        thead.appendChild(tr);
-        table.appendChild(thead);
-        wroteHead = true;
-      } else {
-        tr.dataset.body = "1";
-        table.appendChild(tr);
-      }
-    });
-    // Group body rows into a <tbody> for clean styling.
-    if (wroteHead) {
-      const body = document.createElement("tbody");
-      table.querySelectorAll('tr[data-body="1"]').forEach((tr) => body.appendChild(tr));
-      if (body.childElementCount) table.appendChild(body);
-    }
-    wrap.appendChild(table);
-    return wrap;
-  }
-  ignoreEvent() {
-    return false;
-  }
-}
-
 const bullet = Decoration.replace({ widget: new BulletWidget() });
 const hidden = Decoration.replace({});
 
@@ -304,7 +248,11 @@ function frontmatterChecker(state: EditorState): (from: number, to: number) => b
  * live here, computed over the whole document, while the inline marker work
  * stays in the (viewport-scoped) plugin below.
  */
-function buildBlockDecorations(state: EditorState, resolveAsset: ResolveAsset): DecorationSet {
+function buildBlockDecorations(
+  state: EditorState,
+  resolveAsset: ResolveAsset,
+  onNavigate?: (target: string) => void,
+): DecorationSet {
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const isActive = activeLineChecker(state);
@@ -353,17 +301,18 @@ function buildBlockDecorations(state: EditorState, resolveAsset: ResolveAsset): 
         return false;
       }
 
-      // GFM table → render as a real table off the active line.
+      // GFM table → an EDITABLE rendered table (./table/TableWidget). Alone
+      // among the widgets here it is not conditioned on the active line:
+      // clicking a table must not flip it to `| a | b |` source, so the cells
+      // are the editing surface and the source is never shown in its place.
       if (node.name === "Table") {
-        if (!isActive(node.from, node.to)) {
-          const src = doc.sliceString(node.from, node.to);
-          decos.push(
-            Decoration.replace({
-              widget: new TableWidget(src),
-              block: true,
-            }).range(node.from, node.to)
-          );
-        }
+        const src = doc.sliceString(node.from, node.to);
+        decos.push(
+          Decoration.replace({
+            widget: new TableWidget(src, { onNavigate, readOnly: state.readOnly }),
+            block: true,
+          }).range(node.from, node.to)
+        );
         return false;
       }
       return undefined;
@@ -425,14 +374,9 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
           return;
         }
 
-        // A non-active table is replaced by the StateField; skip its children.
-        // While it's being edited, descend so its text keeps inline styling.
-        if (node.name === "Table") {
-          if (!isActive(node.from, node.to)) {
-            return false;
-          }
-          return;
-        }
+        // A table is ALWAYS replaced by the StateField's editable widget, so
+        // nothing underneath one is ever on screen — never style its children.
+        if (node.name === "Table") return false;
 
         // On the active line(s) we show raw markers; likewise inside wiki-links.
         if (isActive(node.from, node.to)) return;
@@ -524,13 +468,18 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
  *  - a view plugin for the inline marker work, rebuilt on edits, scroll, and
  *    cursor moves.
  */
-export function livePreview(opts: { resolveAsset?: ResolveAsset } = {}) {
+export function livePreview(
+  opts: { resolveAsset?: ResolveAsset; onNavigate?: (target: string) => void } = {}
+) {
   const resolveAsset = opts.resolveAsset ?? identityAsset;
+  const onNavigate = opts.onNavigate;
 
   const blockWidgets = StateField.define<DecorationSet>({
-    create: (state) => buildBlockDecorations(state, resolveAsset),
+    create: (state) => buildBlockDecorations(state, resolveAsset, onNavigate),
     update: (deco, tr) =>
-      tr.docChanged || tr.selection ? buildBlockDecorations(tr.state, resolveAsset) : deco,
+      tr.docChanged || tr.selection || tr.startState.readOnly !== tr.state.readOnly
+        ? buildBlockDecorations(tr.state, resolveAsset, onNavigate)
+        : deco,
     provide: (f) => EditorView.decorations.from(f),
   });
 

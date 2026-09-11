@@ -22,6 +22,10 @@
  * `side: -1` sorts above a block replace starting at the same position. Title,
  * then panel, then body.
  *
+ * The React-in-a-widget lifecycle itself (`flushSync` first paint, `updateDOM`
+ * returning true, deferred unmount) is `./reactWidget.ts`, shared with the
+ * editable table widget.
+ *
  * The `eq()` contract is load-bearing. The title widget compares only
  * `{path, readOnly, hasFrontmatter, mode}` — never document content — so typing
  * in the body reuses the exact same DOM node and the input keeps its focus and
@@ -48,9 +52,6 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
-import type { Root } from "react-dom/client";
-import { createRoot } from "react-dom/client";
-import { flushSync } from "react-dom";
 import { createElement, type ReactNode } from "react";
 import { InlineTitle } from "../../components/InlineTitle";
 import {
@@ -58,6 +59,7 @@ import {
   PropertiesPanel,
 } from "../../components/properties/PropertiesPanel";
 import { bodyStart, getHeaderFocus } from "./headerFocus";
+import { ReactWidget } from "./reactWidget";
 import {
   findFrontmatter,
   frontmatterField,
@@ -92,59 +94,6 @@ export interface NoteHeaderOptions {
   mode?: PropertiesMode;
   /** Owned by the caller (Editor.tsx) so a settings change can reconfigure. */
   modeCompartment?: Compartment;
-}
-
-// ---- React inside a CM6 widget ---------------------------------------------
-
-const roots = new WeakMap<HTMLElement, Root>();
-
-/**
- * The lifecycle contract, shared by both widgets.
- *
- * `flushSync` in `toDOM` is legal — we are inside a CM6 DOM-update callback,
- * not a React render phase — and it is what guarantees CM6 measures the real
- * height on the first frame instead of the estimate.
- *
- * `updateDOM` returning TRUE is the line the whole collaboration story hangs
- * on: CM6 keeps the host node, React reconciles into it, and the focused
- * `<input>` is the same DOM element before and after a remote keystroke. If it
- * ever returned false, CM6 would destroy and rebuild, and focus would be gone.
- */
-abstract class ReactWidget extends WidgetType {
-  protected abstract render(view: EditorView): ReactNode;
-  protected abstract hostClass(): string;
-
-  toDOM(view: EditorView): HTMLElement {
-    const host = document.createElement("div");
-    host.className = this.hostClass();
-    const root = createRoot(host);
-    roots.set(host, root);
-    flushSync(() => root.render(this.render(view)));
-    return host;
-  }
-
-  updateDOM(dom: HTMLElement, view: EditorView): boolean {
-    const root = roots.get(dom);
-    if (!root) return false; // no root to reconcile into — let CM6 rebuild
-    // Synchronous, like the first paint: a teammate's property edit has to land
-    // in the same frame as the document change, and CM6 measures this widget's
-    // height right after the update — an async render would measure the old
-    // one. We are inside a CM6 DOM-update callback, not a React render phase,
-    // so this is a legal place to flush.
-    flushSync(() => root.render(this.render(view)));
-    return true;
-  }
-
-  destroy(dom: HTMLElement): void {
-    const root = roots.get(dom);
-    roots.delete(dom);
-    // React refuses an unmount during render; defer it past this update.
-    if (root) queueMicrotask(() => root.unmount());
-  }
-
-  ignoreEvent(): boolean {
-    return true;
-  }
 }
 
 class TitleWidget extends ReactWidget {

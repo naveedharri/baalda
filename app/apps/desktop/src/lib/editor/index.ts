@@ -23,6 +23,7 @@ import { listKeymap } from "./lists";
 import { livePreview } from "./livePreview";
 import { noteHeader, type NoteHeaderOptions } from "./noteHeader";
 import { smartPaste, type SaveAttachment } from "./paste";
+import { tableAtomicRanges } from "./table/atomic";
 import { tripleClickLine } from "./selection";
 import { slashCompletions } from "./slash";
 import { checkboxes } from "./tasks";
@@ -111,7 +112,9 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     blockDecorations,
     // Live-preview inline rendering: hide markers off the active line, render
     // bullets/links/images/tables, and preview embedded HTML blocks (never run).
-    livePreview({ resolveAsset: opts.resolveAsset }),
+    livePreview({ resolveAsset: opts.resolveAsset, onNavigate: opts.onNavigate }),
+    // A table is always rendered, so the caret must never walk into one.
+    tableAtomicRanges,
     // Clickable `- [ ]` task checkboxes.
     checkboxes,
     // Paste a URL over a selection → link; paste/drop an image → attachment.

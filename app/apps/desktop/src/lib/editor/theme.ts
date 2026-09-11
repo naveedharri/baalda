@@ -225,6 +225,10 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     border: "1px solid var(--border)",
     padding: "var(--sp-1) var(--sp-3)",
     textAlign: "left",
+    // A cell is a click target for editing, and the anchor its column's hover
+    // `+` is positioned against.
+    position: "relative",
+    cursor: "text",
     // Undo the editor's inherited `.cm-lineWrapping` (overflow-wrap: anywhere,
     // word-break: break-word, white-space: break-spaces): those shrink a
     // cell's min-content width to a single character, which is what let the
@@ -236,6 +240,104 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   ".cm-md-table th": {
     backgroundColor: "var(--bg-subtle)",
     fontWeight: "700",
+  },
+
+  // ---- The editable table (./table/TableWidget) ----
+  // The widget's own container inside the scrolling `.cm-md-table` host, so the
+  // hover affordances have something positioned to hang off.
+  ".cm-md-table-wrap": {
+    position: "relative",
+    width: "max-content",
+    minWidth: "100%",
+  },
+  // The open cell: a quiet ring drawn INSIDE the cell, so the table's own grid
+  // lines never move by a pixel when a cell is being edited.
+  ".cm-md-table .cm-md-cell-open": {
+    backgroundColor: "var(--bg-subtle)",
+    boxShadow: "inset 0 0 0 2px var(--accent)",
+  },
+  // The input has to read as the cell's text, not as a form control: same font,
+  // no chrome, no background. The ring above is the only focus signal.
+  ".cm-md-table .cm-md-cell-input": {
+    display: "block",
+    width: "100%",
+    minWidth: "8ch",
+    boxSizing: "border-box",
+    margin: "0",
+    padding: "0",
+    border: "none",
+    outline: "none",
+    background: "transparent",
+    color: "var(--text-primary)",
+    font: "inherit",
+    textAlign: "inherit",
+  },
+  ".cm-md-table .cm-md-cell-content code": {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.9em",
+    padding: "0.1em 0.3em",
+    borderRadius: "var(--radius-sm)",
+    backgroundColor: "var(--bg-subtle)",
+  },
+  ".cm-md-table .cm-md-cell-content .cm-md-link, .cm-md-table .cm-md-cell-content .cm-wikilink":
+    {
+      cursor: "pointer",
+    },
+  // Hover affordances: a slim `+` at a column's right edge, and one under the
+  // last row. Both stay invisible until the pointer is in the table, so a table
+  // being read looks like a table.
+  ".cm-md-table .cm-md-add-col": {
+    position: "absolute",
+    top: "0",
+    right: "0",
+    bottom: "0",
+    width: "14px",
+    padding: "0",
+    border: "none",
+    background: "transparent",
+    color: "var(--text-tertiary)",
+    fontSize: "var(--fs-sm)",
+    lineHeight: "1",
+    cursor: "pointer",
+    opacity: "0",
+    transition: "opacity var(--t-fast) var(--ease)",
+  },
+  ".cm-md-table .cm-md-add-col.is-shown, .cm-md-table .cm-md-add-col:focus-visible": {
+    opacity: "1",
+  },
+  ".cm-md-table .cm-md-add-col:hover": {
+    color: "var(--accent)",
+    backgroundColor: "var(--accent-soft)",
+  },
+  ".cm-md-table .cm-md-add-row": {
+    display: "block",
+    width: "100%",
+    height: "14px",
+    marginTop: "2px",
+    padding: "0",
+    border: "none",
+    borderRadius: "var(--radius-sm)",
+    background: "transparent",
+    color: "var(--text-tertiary)",
+    fontSize: "var(--fs-sm)",
+    lineHeight: "1",
+    cursor: "pointer",
+    opacity: "0",
+    transition: "opacity var(--t-fast) var(--ease)",
+  },
+  ".cm-md-table-wrap:hover .cm-md-add-row, .cm-md-table .cm-md-add-row:focus-visible": {
+    opacity: "1",
+  },
+  ".cm-md-table .cm-md-add-row:hover": {
+    color: "var(--accent)",
+    backgroundColor: "var(--accent-soft)",
+  },
+  // "Changed by someone else while you were typing." — the same hint the
+  // Properties panel shows, in the same voice.
+  ".cm-md-table .cm-md-table-note": {
+    margin: "var(--sp-1) 0 0",
+    fontSize: "var(--fs-xs)",
+    color: "var(--text-tertiary)",
   },
 
   // Block replace widgets (tables, embedded HTML) are direct children of
