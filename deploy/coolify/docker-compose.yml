@@ -26,8 +26,12 @@
 # "Domains" settings, but won't pick the right service for you.
 #
 # POSTGRES_PASSWORD and JWT_SECRET are Coolify magic vars too
-# (SERVICE_PASSWORD_<ID> / SERVICE_REALBASE64_64_<ID>) — Coolify generates and
-# persists them per-deployment, so there is nothing to type in for either.
+# (SERVICE_PASSWORD_64_<ID> / SERVICE_REALBASE64_64_<ID>) — Coolify generates
+# and persists them per-deployment, so there is nothing to type in for
+# either. POSTGRES_PASSWORD specifically uses the "_64" (symbols-free)
+# variant, not the bare SERVICE_PASSWORD_<ID> one — that one may include
+# characters like `@ : /` that are unsafe unescaped inside DATABASE_URL's
+# postgres:// connection string.
 #
 # ⚠️ Do NOT use bash's `${VAR:?error message}` here for a required var, even
 # though ../compose/docker-compose.yml does (and should keep doing, for a
@@ -60,7 +64,7 @@ x-server-image: &server-image
 
 x-server-env: &server-env
   NODE_ENV: production
-  DATABASE_URL: postgres://baalda:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/baalda
+  DATABASE_URL: postgres://baalda:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/baalda
   JWT_SECRET: ${SERVICE_REALBASE64_64_JWT}
   BETTER_AUTH_URL: ${BETTER_AUTH_URL}
   PORT: "3010"
@@ -71,7 +75,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: baalda
-      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
       POSTGRES_DB: baalda
     volumes:
       - baalda_pgdata:/var/lib/postgresql/data
