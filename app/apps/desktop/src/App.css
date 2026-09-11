@@ -2475,7 +2475,14 @@ body:has(.sidebar-resizer.dragging) {
 /* ---- Open-file tabs (TabBar) ---- */
 .tab-strip {
   display: flex;
-  align-items: flex-end;
+  /* Tabs fill the strip's height (not content-sized and bottom-hung): the label
+     is centred in the tab's content box, which `--tab-inset` pulls up from the
+     bottom by the same amount the strip pads the top, so the text centre lands
+     on the header's centre — level with the sync badge and the icon buttons —
+     while the card itself still reaches the bottom rule. Content-sized tabs put
+     the text ~6px lower than everything else in the row. */
+  align-items: stretch;
+  --tab-inset: 6px;
   gap: var(--sp-1);
   overflow-x: auto;
   overflow-y: hidden;
@@ -2495,7 +2502,7 @@ body:has(.sidebar-resizer.dragging) {
 .main-header > .tab-strip {
   flex: 1 1 auto;
   min-width: 0;
-  padding: var(--sp-2) 0 0 var(--radius-sm);
+  padding: var(--tab-inset) 0 0 var(--radius-sm);
   margin-bottom: -1px;
   mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
@@ -2505,6 +2512,8 @@ body:has(.sidebar-resizer.dragging) {
   display: flex;
   align-items: center;
   flex: none;
+  /* Mirrors the strip's top padding, see `--tab-inset` above. */
+  padding-bottom: var(--tab-inset);
   max-width: 220px;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   color: var(--text-secondary);
@@ -2580,7 +2589,9 @@ body:has(.sidebar-resizer.dragging) {
   flex: none;
   width: 26px;
   height: 26px;
-  margin: 0 var(--sp-1) 3px;
+  /* Centred in the same band as the tab labels (the strip stretches tabs). */
+  align-self: center;
+  margin: 0 var(--sp-1) var(--tab-inset);
   border: 0;
   border-radius: var(--radius-sm);
   background: none;

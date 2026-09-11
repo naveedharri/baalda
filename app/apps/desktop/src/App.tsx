@@ -790,8 +790,15 @@ export default function App() {
       // store — surfaced only in Settings → Updates. App-lifetime interval —
       // never cleared, and the launch guard above keeps it single in dev
       // StrictMode.
-      void backgroundUpdateCheck();
-      setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
+      //
+      // Not in a dev build: `tauri dev` still has the updater plugin and it
+      // polls PRODUCTION's `latest.json`, so the day after any release every
+      // dev session opened the required-update wall — and "Install" then asked
+      // Tauri to relaunch a `cargo run` binary, which quit the app outright.
+      if (!import.meta.env.DEV) {
+        void backgroundUpdateCheck();
+        setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
+      }
     })();
   }, []);
 
