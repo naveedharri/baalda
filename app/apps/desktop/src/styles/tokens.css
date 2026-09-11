@@ -24,6 +24,12 @@
   --text-primary: #1a1a1e;
   --text-secondary: #6b6b76;
   --text-tertiary: #9a9aa5;
+  /* The faint tier: markdown syntax markers (#, **, `, >, -), the fold
+     chevrons and the line-number gutter. One step quieter than tertiary —
+     present enough to find, quiet enough that prose reads as prose. Every
+     theme block below must define it too: miss one and every marker in the
+     editor turns black for a frame (or forever, in that theme). */
+  --text-faint: #bfbfc8;
   --text-on-accent: #ffffff;
 
   /* Accent (Atomize violet — from the Figma kit) */
@@ -140,8 +146,21 @@
   --t-fast: 120ms;
   --t-med: 200ms;
 
-  /* How the editor's selection layer blends over content (see theme.ts
-     .cm-selectionLayer): darken on light, lighten on dark. */
+  /* ---- Editor syntax surfaces (see lib/editor/theme.ts + ofm/) ---- */
+
+  /* The `==highlight==` wash. A literal yellow on purpose: a highlighter is
+     the one editor colour that must NOT follow the accent — it reads as ink
+     on the page, not as UI chrome. */
+  --highlight-bg: rgba(255, 208, 0, 0.28);
+  /* How much of a callout's own colour tints its body. A percentage, so the
+     same value works against either theme's surface. */
+  --callout-tint: 8%;
+  /* The fold-chevron column to the left of the prose (Stage 3b). */
+  --editor-fold-gutter: 24px;
+  /* Indentation guides. Reuse the border tiers so they follow the theme
+     rather than introducing a third grey. */
+  --indent-guide: var(--border);
+  --indent-guide-active: var(--border-strong);
 }
 
 /* Traffic lights are ~12px tall centred around y≈19, so 28px clears them —
@@ -165,6 +184,7 @@
   --text-primary: #f2f2f5;
   --text-secondary: #a6a6b2;
   --text-tertiary: #6e6e78;
+  --text-faint: #55555f;
 
   --accent: #8f84ff;
   --accent-hover: #a49bff;
@@ -185,6 +205,7 @@
   --border-strong: rgba(255, 255, 255, 0.18);
   --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
 
+  --highlight-bg: rgba(255, 208, 0, 0.22);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -206,6 +227,7 @@
     --text-primary: #f2f2f5;
     --text-secondary: #a6a6b2;
     --text-tertiary: #6e6e78;
+    --text-faint: #55555f;
 
     --accent: #8f84ff;
     --accent-hover: #a49bff;
@@ -223,6 +245,7 @@
     --border-strong: rgba(255, 255, 255, 0.18);
     --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
 
+    --highlight-bg: rgba(255, 208, 0, 0.22);
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
     --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);

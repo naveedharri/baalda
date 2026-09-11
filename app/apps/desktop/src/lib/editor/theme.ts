@@ -10,6 +10,7 @@
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
+import { hashtagTag, highlightTag } from "./ofm/tags";
 
 // Exported as a plain object so tests can assert WHERE a value sits (jsdom does
 // no layout, so a computed-px assertion is impossible — see
@@ -57,7 +58,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   ".cm-gutters": {
     backgroundColor: "transparent",
     border: "none",
-    color: "var(--text-tertiary)",
+    color: "var(--text-faint)",
   },
 
   // No active-line highlight — only the accent caret blinks where you click.
@@ -123,7 +124,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // The BulletWidget stands in for a `ListMark`, so it belongs to the faint
   // marker tier, not the accent.
   ".cm-bullet": {
-    color: "var(--text-tertiary)",
+    color: "var(--text-faint)",
   },
   // Markdown links: the visible text, underlined + clickable (URL is hidden).
   ".cm-md-link": {
@@ -729,12 +730,48 @@ export const markdownHighlightSpec = [
     // correctly stays --text-secondary. The marker is t.processingInstruction
     // below. GFM `Task` is tags.list too, so task text inherits as well.
     //
-    // Markdown token characters (#, *, `, >, -, etc.) dimmed to recede.
-    { tag: t.meta, color: "var(--text-tertiary)" },
+    // ---- Code inside fenced blocks -------------------------------------
+    //
+    // Mapped onto the palette the rest of the app already uses, rather than a
+    // new one: a note is prose with code in it, not an IDE. CodeMirror's
+    // `defaultHighlightStyle` is deliberately never imported — it ships its own
+    // hardcoded colours, which ignore our theme and read wrong in dark mode.
+    //
+    // These sit before the markdown marker tiers purely for readability: none
+    // of these tags is an ancestor of `meta` / `processingInstruction` /
+    // `contentSeparator` (in @lezer/highlight `processingInstruction` derives
+    // from `meta`, not from `punctuation`), so the two groups cannot shadow
+    // one another.
+    { tag: t.keyword, color: "var(--accent)" },
+    { tag: [t.string, t.special(t.string)], color: "var(--success)" },
+    { tag: [t.number, t.bool, t.atom], color: "var(--warning)" },
+    { tag: [t.typeName, t.className, t.namespace], color: "var(--text-primary)" },
+    { tag: t.variableName, color: "var(--text-primary)" },
+    { tag: t.function(t.variableName), color: "var(--link)" },
+    { tag: [t.operator, t.punctuation], color: "var(--text-secondary)" },
+
+    // Markdown token characters (#, *, `, >, -, etc.) on the FAINT tier — one
+    // step quieter than the secondary text, so prose reads as prose and the
+    // syntax recedes until the caret lands on it.
+    { tag: t.meta, color: "var(--text-faint)" },
     {
       tag: [t.processingInstruction, t.contentSeparator],
-      color: "var(--text-tertiary)",
+      color: "var(--text-faint)",
     },
+    // A fence's language word (CodeInfo) and a link's LinkLabel.
+    { tag: t.labelName, color: "var(--text-faint)" },
+    // Comments — `%%obsidian ones%%` and code comments alike. Visible, faint
+    // and italic: a comment you cannot see is a comment you publish by mistake.
+    { tag: t.comment, color: "var(--text-faint)", fontStyle: "italic" },
+    // `==highlight==` — ink on the page, not UI chrome (see --highlight-bg).
+    {
+      tag: highlightTag,
+      background: "var(--highlight-bg)",
+      borderRadius: "2px",
+    },
+    // `#tag` — the pill's fill and padding are `.cm-hashtag` in the theme
+    // above; this is the text colour inside it.
+    { tag: hashtagTag, color: "var(--accent)" },
 ];
 
 export const markdownHighlight = syntaxHighlighting(

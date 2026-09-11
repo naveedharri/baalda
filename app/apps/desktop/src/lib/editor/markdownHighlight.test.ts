@@ -18,9 +18,12 @@ describe("markdownHighlight", () => {
 
   it("dims markdown markers to the faint tier", () => {
     // ListMark / HeaderMark / QuoteMark / LinkMark / EmphasisMark / CodeMark.
-    expect(ruleFor(t.processingInstruction)?.color).toBe("var(--text-tertiary)");
-    expect(ruleFor(t.contentSeparator)?.color).toBe("var(--text-tertiary)");
-    expect(ruleFor(t.meta)?.color).toBe("var(--text-tertiary)");
+    // `--text-faint`, not `--text-tertiary`: the markers sit one tier below the
+    // quietest TEXT so a line of prose reads as prose (Stage 3a).
+    expect(ruleFor(t.processingInstruction)?.color).toBe("var(--text-faint)");
+    expect(ruleFor(t.contentSeparator)?.color).toBe("var(--text-faint)");
+    expect(ruleFor(t.meta)?.color).toBe("var(--text-faint)");
+    expect(ruleFor(t.labelName)?.color).toBe("var(--text-faint)");
   });
 
   it("keeps quoted text on the muted tier, so a list inside a quote inherits it", () => {
