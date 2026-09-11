@@ -208,10 +208,12 @@ describe("requestReveal", () => {
 });
 
 describe("open gate after a vault switch", () => {
+  // NonNullable: `setVault` accepts `VaultInfo | null`, `adoptOpenedVault` does
+  // not, and both are called with this below.
   const vaultAt = (path: string) =>
-    ({ path, epoch: 1, name: path.split("/").pop() }) as unknown as Parameters<
-      ReturnType<typeof useStore.getState>["setVault"]
-    >[0];
+    ({ path, epoch: 1, name: path.split("/").pop() }) as unknown as NonNullable<
+      Parameters<ReturnType<typeof useStore.getState>["setVault"]>[0]
+    >;
 
   it("answers 'never synced' for an unstamped folder so an open does not sit out the gate", async () => {
     useStore.setState({ authStatus: "signed-in", vault: null });
