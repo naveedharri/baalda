@@ -31,6 +31,7 @@ vi.mock("../../ipc", () => ({
     memberFs.config = raw;
   }),
   listTree: vi.fn(async () => ({ id: "root", name: "", path: "", isDir: true, children: [], childrenLoaded: true })),
+  listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(async () => []),
   writeNote: vi.fn(async (relPath: string, content: string) => {
     memberFs.files.set(relPath, content);

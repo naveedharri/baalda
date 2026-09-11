@@ -4,6 +4,7 @@ vi.mock("../../ipc", () => ({
   getVaultConfig: vi.fn(),
   setVaultConfig: vi.fn(),
   listTree: vi.fn(),
+  listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(),
   writeNote: vi.fn(),
   writeNoteIfMissing: vi.fn(),

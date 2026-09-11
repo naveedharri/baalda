@@ -16,6 +16,11 @@
 // ATX headings are safe by construction: `# Heading`'s `#` is consumed by the
 // BLOCK parser as a `HeaderMark` and never reaches inline parsing.
 
+import type {
+  CompletionContext,
+  CompletionResult,
+  CompletionSource,
+} from "@codemirror/autocomplete";
 import type { MarkdownConfig } from "@lezer/markdown";
 import { syntaxTree } from "@codemirror/language";
 import type { Range } from "@codemirror/state";
@@ -106,3 +111,50 @@ export const hashtagPills = ViewPlugin.fromClass(
   },
   { decorations: (v) => v.decorations },
 );
+
+// ---- `#` autocomplete ------------------------------------------------------
+
+/** One tag as the completion list sees it (the shape `ipc.listTags` returns). */
+export interface TagSuggestion {
+  name: string;
+  count: number;
+}
+
+/**
+ * Suggest tags the vault already uses as soon as you type `#`.
+ *
+ * This is the half of the tag story the pill cannot tell: a tag only pays off
+ * when the SAME spelling is reused, and a vault that has drifted into `#idea`,
+ * `#ideas` and `#Idea` has three tags and no tag. Ranking by use count (Rust's
+ * `list_tags`) puts the spelling you actually settled on first.
+ *
+ * The match pattern mirrors the parser above — `#` plus body characters — so the
+ * completion fires exactly where a tag would parse, and it deliberately allows
+ * an EMPTY body: `#` on its own is the moment you most want the list, before
+ * you have typed a letter to filter it by.
+ */
+export function tagCompletions(opts: {
+  getTags: () => TagSuggestion[];
+}): CompletionSource {
+  return (ctx: CompletionContext): CompletionResult | null => {
+    const token = ctx.matchBefore(/#[\p{L}\p{N}_\-/]*$/u);
+    if (!token) return null;
+    // `a#b` is not a tag (see BEFORE_BLOCKS); don't offer one there either.
+    const before = ctx.state.sliceDoc(Math.max(0, token.from - 1), token.from);
+    if (before && BEFORE_BLOCKS.test(before)) return null;
+    const tags = opts.getTags();
+    if (!tags.length) return null;
+    return {
+      from: token.from,
+      options: tags.map((t, i) => ({
+        label: `#${t.name}`,
+        type: "keyword",
+        detail: t.count === 1 ? "1 note" : `${t.count} notes`,
+        // Preserve the index's ranking (most-used first) rather than letting the
+        // default scorer re-sort equally-good prefix matches alphabetically.
+        boost: Math.max(-99, 99 - i),
+      })),
+      validFor: /^#[\p{L}\p{N}_\-/]*$/u,
+    };
+  };
+}

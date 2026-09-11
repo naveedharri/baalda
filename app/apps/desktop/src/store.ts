@@ -48,11 +48,15 @@ import {
   type ActivityStatus,
   readActivityStatus,
   readMentionSound,
+  readLineNumbers,
   readPropertiesMode,
+  readReadableLineLength,
   readTreeSort,
   writeActivityStatus,
   writeMentionSound,
+  writeLineNumbers,
   writePropertiesMode,
+  writeReadableLineLength,
   writeTreeSort,
 } from "./lib/prefs";
 import type { PropertiesMode } from "./lib/editor/frontmatter";
@@ -186,6 +190,9 @@ interface AppStore {
   renameNoteFileExact: (oldPath: string, newPath: string) => Promise<boolean>;
   backlinks: ipc.Backlink[];
   titles: ipc.NoteTitle[];
+  /** Every `#tag` in the vault, most-used first — the editor's `#` completion
+   *  source. Refreshed alongside `titles`, from the same index. */
+  tags: ipc.TagCount[];
 
   // ---- Auth / vault / sync ----
   authStatus: AuthStatus;
@@ -371,6 +378,11 @@ interface AppStore {
   /** How the editor draws YAML frontmatter: a Properties panel, nothing, or
    *  plain source. Device-local (Settings → Appearance), not per-vault. */
   propertiesMode: PropertiesMode;
+  /** Cap the editor's prose column at a readable measure rather than letting it
+   *  fill the window. Device-local (Settings → Appearance). */
+  readableLineLength: boolean;
+  /** Show the editor's line-number gutter. Off by default. */
+  lineNumbers: boolean;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
    *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
   treeSort: TreeSort;
@@ -397,6 +409,7 @@ interface AppStore {
   /** Lazily load one folder's immediate children into the sidebar tree. */
   loadChildren: (path: string) => Promise<void>;
   refreshTitles: () => Promise<void>;
+  refreshTags: () => Promise<void>;
   /**
    * Bring `titles` current for just the notes a watcher batch named: re-read
    * those rows (one `getNoteMeta` each) and drop the removed ones, instead of
@@ -502,6 +515,8 @@ interface AppStore {
   setActivityStatus: (status: ActivityStatus) => void;
   setMentionSound: (enabled: boolean) => void;
   setPropertiesMode: (mode: PropertiesMode) => void;
+  setReadableLineLength: (on: boolean) => void;
+  setLineNumbers: (on: boolean) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
   /** Stop broadcasting and release the mic (button released). */
@@ -1327,6 +1342,7 @@ export const useStore = create<AppStore>((set, get) => ({
   revealedPath: null,
   backlinks: [],
   titles: [],
+  tags: [],
 
   authStatus: "unknown",
   session: null,
@@ -1366,6 +1382,8 @@ export const useStore = create<AppStore>((set, get) => ({
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
   propertiesMode: readPropertiesMode(),
+  readableLineLength: readReadableLineLength(),
+  lineNumbers: readLineNumbers(),
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
   memberJoined: null,
@@ -1569,6 +1587,24 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     if (!sameVault(get, epoch)) return;
     set({ titles });
+    // Tags ride along with titles: both are index-derived completion sources
+    // refreshed at the same moments (vault open, note create, structural
+    // batches), and neither is worth its own trigger. Fire-and-forget so a
+    // tag-query hiccup can never fail a title refresh.
+    void get().refreshTags();
+  },
+
+  refreshTags: async () => {
+    const epoch = get().vault?.epoch;
+    let tags: ipc.TagCount[];
+    try {
+      tags = await ipc.listTags(epoch);
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return; // the vault moved on (see refreshTree)
+      throw e;
+    }
+    if (!sameVault(get, epoch)) return;
+    set({ tags });
   },
 
   patchTitles: async (changes) => {
@@ -2414,6 +2450,16 @@ export const useStore = create<AppStore>((set, get) => ({
   setPropertiesMode: (mode) => {
     writePropertiesMode(mode);
     set({ propertiesMode: mode });
+  },
+
+  setReadableLineLength: (on) => {
+    writeReadableLineLength(on);
+    set({ readableLineLength: on });
+  },
+
+  setLineNumbers: (on) => {
+    writeLineNumbers(on);
+    set({ lineNumbers: on });
   },
 
   startBroadcast: async () => {

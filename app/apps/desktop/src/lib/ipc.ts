@@ -607,6 +607,35 @@ export const listPropertyKeys = (expectedEpoch?: VaultEpoch) =>
 export const listPropertyValues = (key: string, expectedEpoch?: VaultEpoch) =>
   invoke<string[]>("list_property_values", { key, expectedEpoch: expectedEpoch ?? null });
 
+/** One `#tag` and how many notes carry it, most-used first. */
+export interface TagCount {
+  name: string;
+  count: number;
+}
+
+/** Every tag in the vault, for the editor's `#` completion. Derived from the
+ *  index, so it follows the last re-index exactly like search does. */
+export const listTags = (expectedEpoch?: VaultEpoch) =>
+  invoke<TagCount[]>("list_tags", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Per-note editor UI state — which sections were folded — as opaque JSON this
+ * layer owns (`lib/editor/folding.ts` defines the shape). Stored in the vault's
+ * `index.sqlite`, keyed by doc_id: it is a property of how you read a note on
+ * THIS device, never of the note, so it must not reach the `.md` or the CRDT.
+ */
+export const getNoteUiState = (docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string | null>("get_note_ui_state", {
+    docId,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+export const setNoteUiState = (docId: string, uiState: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("set_note_ui_state", {
+    docId,
+    uiState,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
 /** Epoch of the currently-open vault (0 if none). Used to start a VaultScope for
  *  a vault this call site didn't open itself (e.g. enabling sync on the folder
  *  that is already open). */

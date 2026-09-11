@@ -99,6 +99,14 @@ pub struct NoteTitle {
     pub title: String,
 }
 
+/// One `#tag` and how many notes carry it. Feeds the editor's `#` completion,
+/// where "how often do I actually use this" is the only sensible ranking.
+#[derive(Debug, Serialize, Clone)]
+pub struct TagCount {
+    pub name: String,
+    pub count: i64,
+}
+
 /// One frontmatter key and how many notes carry it — the ordering the
 /// Properties panel's key suggestions use.
 #[derive(Debug, Serialize, Clone)]
@@ -251,6 +259,19 @@ impl Index {
                 seq          INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_yjs_updates_doc ON yjs_updates(doc_id);
+
+            -- Per-note editor UI state (Stage 3b: which sections are folded).
+            -- Keyed by doc_id and NOT touched by `rebuild()`, exactly like the
+            -- `yjs_*` tables above: it describes how you were reading a note,
+            -- which a re-index has no business forgetting. The `state` column is
+            -- opaque JSON owned by the TS layer (`lib/editor/folding.ts`), so a
+            -- new kind of UI state costs no migration here. Orphan rows are
+            -- swept by `prune_yjs_docs`.
+            CREATE TABLE IF NOT EXISTS note_ui_state (
+                doc_id     TEXT PRIMARY KEY,
+                state      TEXT,
+                updated_at INTEGER
+            );
             "#,
         )?;
         Ok(())
@@ -1215,6 +1236,31 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Every `#tag` in the vault with the number of notes using it, most-used
+    /// first (ties broken by name so the list is stable between calls).
+    ///
+    /// A LEFT JOIN, not an inner one: `tags` rows outlive the last note that
+    /// used them (nothing garbage-collects the name), and a tag at count 0 is
+    /// still a tag you typed once and may well mean to type again — it just
+    /// sorts last.
+    pub fn list_tags(&self, limit: usize) -> AppResult<Vec<TagCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, COUNT(nt.note_id) AS n
+               FROM tags t
+               LEFT JOIN note_tags nt ON nt.tag_id = t.id
+              GROUP BY t.id, t.name
+              ORDER BY n DESC, t.name ASC
+              LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(TagCount {
+                name: r.get(0)?,
+                count: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     // ---- Frontmatter property autocomplete --------------------------------
     //
     // Both readers parse `notes.frontmatter` in Rust with serde_json rather than
@@ -1486,6 +1532,15 @@ impl Index {
             "DELETE FROM yjs_updates WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
             [],
         )? as i64;
+        // Fold state for a note nobody can reach any more. Judged against the
+        // same live set as the CRDT rows rather than against `notes.id`: the
+        // live set is a superset of it (registry map ∪ local index ∪ open docs),
+        // so this can never throw away the folds of a note the index is merely
+        // between writes on.
+        tx.execute(
+            "DELETE FROM note_ui_state WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
+            [],
+        )?;
         tx.execute_batch("DROP TABLE IF EXISTS _live_docs;")?;
         tx.commit()?;
         Ok(YjsPruneReport {
@@ -1493,6 +1548,38 @@ impl Index {
             updates_removed,
             bytes_reclaimed: snapshot_bytes + update_bytes,
         })
+    }
+
+    // ---- Per-note editor UI state (fold state) ----------------------------
+
+    /// One note's stored editor UI state, or `None` if it has never been saved.
+    /// Absent is an ordinary answer (a note you have never folded), never an
+    /// error.
+    pub fn get_note_ui_state(&self, doc_id: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT state FROM note_ui_state WHERE doc_id = ?1",
+                params![doc_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Replace one note's editor UI state.
+    pub fn set_note_ui_state(&self, doc_id: &str, state: &str) -> AppResult<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO note_ui_state (doc_id, state, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(doc_id) DO UPDATE SET state = excluded.state,
+                                               updated_at = excluded.updated_at",
+            params![doc_id, state, now_ms],
+        )?;
+        Ok(())
     }
 
     /// Drop ONE doc's CRDT rows: its snapshot, state vector and update log.
@@ -1670,6 +1757,77 @@ mod tests {
         .unwrap();
         write_note(&v, "Gamma.md", "# Gamma\n\nDangling [[Nonexistent]] link.").unwrap();
         (tmp, v)
+    }
+
+    /// The editor's `#` completion: every tag, most-used first. Ties break by
+    /// name so the list is stable between calls, which is what keeps the picker
+    /// from reshuffling under the user's finger.
+    #[test]
+    fn list_tags_counts_and_orders_by_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "---\ntags: [common, zeta]\n---\nA #common").unwrap();
+        write_note(&v, "B.md", "B has #common and #alpha").unwrap();
+        write_note(&v, "C.md", "C has #common").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let tags = idx.list_tags(50).unwrap();
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names.first(), Some(&"common"), "most-used tag leads");
+        assert_eq!(tags[0].count, 3);
+        // Three notes, one each: alphabetical among the equals.
+        assert_eq!(&names[1..], &["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn list_tags_honours_its_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "#a #b #c #d").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.list_tags(2).unwrap().len(), 2);
+    }
+
+    /// Fold state describes how you were READING a note; a re-index of the
+    /// files has no business forgetting it. Same contract as the `yjs_*`
+    /// tables: keyed by doc_id, never touched by `rebuild()`.
+    #[test]
+    fn note_ui_state_survives_a_rebuild() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();
+
+        assert_eq!(idx.get_note_ui_state(&alpha.id).unwrap(), None);
+        idx.set_note_ui_state(&alpha.id, r##"{"v":1,"folds":[{"line":4,"text":"# Alpha"}]}"##)
+            .unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(
+            idx.get_note_ui_state(&alpha.id).unwrap().as_deref(),
+            Some(r##"{"v":1,"folds":[{"line":4,"text":"# Alpha"}]}"##),
+        );
+
+        // And a second save replaces rather than duplicating (doc_id is the PK).
+        idx.set_note_ui_state(&alpha.id, r#"{"v":1,"folds":[]}"#).unwrap();
+        assert_eq!(
+            idx.get_note_ui_state(&alpha.id).unwrap().as_deref(),
+            Some(r#"{"v":1,"folds":[]}"#),
+        );
+    }
+
+    #[test]
+    fn prune_yjs_docs_sweeps_orphan_ui_state() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.set_note_ui_state("live", r#"{"v":1,"folds":[]}"#).unwrap();
+        idx.set_note_ui_state("dead", r#"{"v":1,"folds":[]}"#).unwrap();
+        idx.append_yjs_update("live", &[1]).unwrap();
+
+        idx.prune_yjs_docs(&["live".to_string()]).unwrap();
+
+        assert!(idx.get_note_ui_state("live").unwrap().is_some());
+        assert_eq!(idx.get_note_ui_state("dead").unwrap(), None);
     }
 
     /// The Properties panel's name suggestions: every key in the vault, ordered

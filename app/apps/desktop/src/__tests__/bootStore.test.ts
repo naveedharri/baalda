@@ -100,6 +100,7 @@ vi.mock("../lib/ipc", () => ({
     children: [],
     childrenLoaded: true,
   })),
+  listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(async () => []),
   clearLastVault: vi.fn(async () => {}),
   getVaultEpoch: vi.fn(async () => 1),

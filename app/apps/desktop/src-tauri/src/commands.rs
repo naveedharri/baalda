@@ -1027,6 +1027,46 @@ pub async fn list_property_keys(
     Ok(keys)
 }
 
+/// Every `#tag` in the vault, most-used first. Feeds the editor's `#`
+/// completion. Capped at 500: a picker is a shortlist, and a vault with more
+/// distinct tags than that is not one where scrolling to number 501 is the
+/// answer.
+#[tauri::command]
+pub async fn list_tags(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<crate::index::TagCount>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let tags = index.lock().unwrap().list_tags(500)?;
+    Ok(tags)
+}
+
+/// One note's stored editor UI state (the folded sections), as opaque JSON the
+/// TS layer owns. `None` for a note that has never been folded.
+#[tauri::command]
+pub async fn get_note_ui_state(
+    state: State<'_, AppState>,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<String>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let value = index.lock().unwrap().get_note_ui_state(&doc_id)?;
+    Ok(value)
+}
+
+/// Replace one note's editor UI state.
+#[tauri::command]
+pub async fn set_note_ui_state(
+    state: State<'_, AppState>,
+    doc_id: String,
+    ui_state: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    index.lock().unwrap().set_note_ui_state(&doc_id, &ui_state)?;
+    Ok(())
+}
+
 /// Distinct values seen for one frontmatter key (array members flattened).
 #[tauri::command]
 pub async fn list_property_values(

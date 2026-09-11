@@ -20,4 +20,5 @@ export const ofmMarkdown: MarkdownConfig[] = [ofmHighlight, ofmComment, ofmHasht
 export const ofmDecorations: Extension[] = [callouts, hashtagPills];
 
 export { CALLOUT_RE } from "./callout";
+export { tagCompletions, type TagSuggestion } from "./hashtag";
 export { hashtagTag, highlightTag } from "./tags";
