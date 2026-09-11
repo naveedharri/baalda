@@ -2455,6 +2455,11 @@ body:has(.sidebar-resizer.dragging) {
   padding-left: var(--radius-sm);
   margin-bottom: -1px;
 }
+/* Only the strip stretches to the row's height; the badge and the icon buttons
+   keep their own box and sit centred, as they did in the old padded header. */
+.main-header > :not(.tab-strip) {
+  align-self: center;
+}
 .tab {
   position: relative; /* the active card's corner pseudos anchor here */
   display: flex;
@@ -2481,11 +2486,14 @@ body:has(.sidebar-resizer.dragging) {
 .tab.active:hover {
   background: var(--bg-surface);
 }
-/* Inverted corners: a `--bg-surface` square whose INNER corner is rounded, with
-   a box-shadow of the same colour offset downward. The rounded corner cuts a
-   concave notch and the shadow fills the sheet below, so the card's silhouette
-   curves outward into the note instead of stopping at a hard edge. Both pseudos
-   take the token, never a literal colour, so dark theme follows. */
+/* Inverted corners (fillets). Each pseudo is an r×r square just outside the
+   card's bottom corner, painted with a radial gradient centred on the square's
+   corner that touches the card's top edge: transparent inside radius r, the note
+   surface outside it. What remains is the region between the card's side, the
+   header's bottom edge and a concave arc — so the card's silhouette flares
+   outward into the sheet instead of stopping at a hard edge. The gradient takes
+   the token, never a literal colour, so dark theme follows. (A same-colour
+   box-shadow on a rounded square gives a convex bump, not a concave notch.) */
 .tab.active::before,
 .tab.active::after {
   content: "";
@@ -2493,18 +2501,23 @@ body:has(.sidebar-resizer.dragging) {
   bottom: 0;
   width: var(--radius-sm);
   height: var(--radius-sm);
-  background: var(--bg-surface);
   pointer-events: none;
 }
 .tab.active::before {
   left: calc(var(--radius-sm) * -1);
-  border-bottom-right-radius: var(--radius-sm);
-  box-shadow: 0 var(--radius-sm) 0 0 var(--bg-surface);
+  background: radial-gradient(
+    circle at 0 0,
+    transparent calc(var(--radius-sm) - 0.5px),
+    var(--bg-surface) var(--radius-sm)
+  );
 }
 .tab.active::after {
   right: calc(var(--radius-sm) * -1);
-  border-bottom-left-radius: var(--radius-sm);
-  box-shadow: 0 var(--radius-sm) 0 0 var(--bg-surface);
+  background: radial-gradient(
+    circle at 100% 0,
+    transparent calc(var(--radius-sm) - 0.5px),
+    var(--bg-surface) var(--radius-sm)
+  );
 }
 /* Click acknowledged, open in flight (same signal as the sidebar row). */
 .tab.opening {
