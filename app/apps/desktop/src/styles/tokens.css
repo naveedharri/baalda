@@ -90,6 +90,18 @@
   --editor-measure: 120ch;
   --editor-gutter: 64px;
 
+  /* The editor's horizontal inset. It lives on `.cm-line` (not `.cm-content`)
+     because CodeMirror's drawSelection() derives every selection rect from the
+     FIRST `.cm-line`'s padding and cannot see padding on the content element —
+     full-line rects used to start ~58px left of the text and overrun its right
+     edge. Percentages resolve at the USE site, and every consumer's containing
+     block is `.cm-content`'s content box, so the value is identical for lines,
+     block widgets (`cm-block-inset`) and the loading skeleton. */
+  --editor-pad-x: max(
+    var(--editor-gutter),
+    calc((100% - var(--editor-measure)) / 2)
+  );
+
   /* Height to keep clear at the very top of the window for system window
      controls. Zero everywhere the OS still draws its own title bar above the
      webview; only macOS runs `titleBarStyle: "Overlay"`, where the webview owns

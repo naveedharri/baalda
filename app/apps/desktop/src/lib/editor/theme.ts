@@ -11,7 +11,10 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 
-export const editorTheme = EditorView.theme({
+// Exported as a plain object so tests can assert WHERE a value sits (jsdom does
+// no layout, so a computed-px assertion is impossible — see
+// `__tests__/editorGeometry.test.ts`).
+export const editorThemeSpec: Record<string, Record<string, string>> = {
   "&": {
     height: "100%",
     color: "var(--text-primary)",
@@ -25,17 +28,28 @@ export const editorTheme = EditorView.theme({
     lineHeight: "var(--lh-body)",
     overflowX: "hidden",
   },
-  // Full-width content box so a click *anywhere* in the sheet lands on
-  // `.cm-content` (CodeMirror only maps clicks/drag-selection that hit the
-  // content element — a centred column via `margin:auto` leaves the side
-  // margins as dead `.cm-scroller` zones). We centre the `--editor-measure`
-  // column with symmetric auto-ish padding instead, and keep the tall bottom
-  // pad so there's always somewhere to click below the last line.
+  // Vertical padding only. The horizontal inset lives on `.cm-line` (see
+  // --editor-pad-x in tokens.css): drawSelection() computes its rects from the
+  // first `.cm-line`'s padding and is blind to padding on the content element,
+  // so a centring pad here made every full-line selection rect start ~58px left
+  // of the text and overrun its right edge. `.cm-content` stays FULL WIDTH so a
+  // click *anywhere* in the sheet still lands on it and places the caret
+  // (CodeMirror only maps clicks that hit the content element — a centred column
+  // via `margin:auto` leaves the side margins as dead `.cm-scroller` zones);
+  // the tall bottom pad keeps somewhere to click below the last line.
+  // `caretColor` is not set here: drawSelection injects a `Prec.highest`
+  // `caret-color: transparent !important` rule, so it would be dead. The visible
+  // caret is `.cm-cursor` below.
   ".cm-content": {
-    padding:
-      "var(--sp-8) max(var(--editor-gutter), calc((100% - var(--editor-measure)) / 2)) 40vh",
+    padding: "var(--sp-8) 0 40vh",
     minHeight: "100%",
-    caretColor: "var(--accent)",
+  },
+  // The prose column. Padding, not margin: drawSelection reads padding — and it
+  // reads it off the FIRST line only, so this must stay uniform across every
+  // line class (that is why `.cm-frontmatter` sets no horizontal padding, and
+  // why `.cm-blockquote`'s extra indent skews multi-line rects by its 16px).
+  ".cm-line": {
+    paddingInline: "var(--editor-pad-x)",
   },
   "&.cm-focused": { outline: "none" },
 
@@ -53,20 +67,21 @@ export const editorTheme = EditorView.theme({
     borderLeftWidth: "2px",
   },
 
-  // Selection: a clearly visible accent wash across both the drawSelection()
-  // layer and any native ::selection. `--accent-soft` was too faint to read as
-  // a selection on the white sheet.
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
-    {
-      backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
-    },
+  // Selection: a clearly visible accent wash on the drawSelection() layer.
+  // `--accent-soft` was too faint to read as a selection on the white sheet.
+  // (No `::selection` clause: drawSelection blanks the native one with a
+  // `Prec.highest` rule of its own, so styling it here would be dead CSS.)
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
+    backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
+  },
   // drawSelection() paints in a layer BEHIND the content, so opaque line
   // backgrounds (the .cm-codeblock well, rendered tables) swallow the wash —
-  // selecting inside a code block showed nothing while the layer's full-width
-  // rectangles bled into the margins around the well. Lift the layer above the
+  // selecting inside a code block showed nothing. Lift the layer above the
   // content and blend it so the wash tints every background and text stays
   // readable (multiply darkens on light; dark theme flips to screen via
-  // --selection-blend in tokens.css).
+  // --selection-blend in tokens.css). The margin overhang that used to be the
+  // other half of this rule's job is now fixed upstream, by insetting `.cm-line`
+  // rather than `.cm-content`.
   ".cm-selectionLayer": {
     zIndex: "1",
     pointerEvents: "none",
@@ -106,8 +121,10 @@ export const editorTheme = EditorView.theme({
 
   // Live-preview decorations (added by ./livePreview).
   // The • that replaces a `-`/`*`/`+` list marker.
+  // The BulletWidget stands in for a `ListMark`, so it belongs to the faint
+  // marker tier, not the accent.
   ".cm-bullet": {
-    color: "var(--accent)",
+    color: "var(--text-tertiary)",
   },
   // Markdown links: the visible text, underlined + clickable (URL is hidden).
   ".cm-md-link": {
@@ -118,8 +135,10 @@ export const editorTheme = EditorView.theme({
   },
   // Embedded HTML rendered inline (rendered, never run) — flows with the prose
   // rather than sitting in a box, so a note reads as one document.
+  // (The inline inset comes from the shared `.cm-block-inset` class below —
+  // `marginBlock` only, so the two do not fight.)
   ".cm-md-html": {
-    margin: "var(--sp-3) 0",
+    marginBlock: "var(--sp-3)",
   },
   ".cm-md-html img": {
     maxWidth: "100%",
@@ -167,7 +186,7 @@ export const editorTheme = EditorView.theme({
 
   // GFM tables rendered off the active line (added by ./livePreview).
   ".cm-md-table": {
-    margin: "var(--sp-3) 0",
+    marginBlock: "var(--sp-3)",
     overflowX: "auto",
     // Without inline-size containment the table's natural width propagates
     // into `.cm-content`'s intrinsic size (it's a flex item that sizes from
@@ -219,31 +238,87 @@ export const editorTheme = EditorView.theme({
     fontWeight: "700",
   },
 
+  // Block replace widgets (tables, embedded HTML) are direct children of
+  // `.cm-content`, siblings of `.cm-line`, so they never get the line inset.
+  // This hands them the same one. `margin`, not `padding`: the table wrapper is
+  // its own scroll container and padding would scroll away with the content
+  // instead of holding the column. See BLOCK_INSET_CLASS in livePreview.ts.
+  ".cm-block-inset": {
+    marginInline: "var(--editor-pad-x)",
+  },
+
   // Block-level markdown decorations (added by ./blocks): blockquote bar,
-  // fenced-code well, horizontal rule.
+  // fenced-code well, horizontal rule. All three are LINE classes, and a line
+  // box now spans the full sheet — so a border or a background on the line
+  // itself would reach the window edges. Each is re-cut to paint inside the
+  // prose column only.
   ".cm-blockquote": {
-    borderLeft: "3px solid var(--accent-soft-hover)",
-    paddingLeft: "var(--sp-4)",
+    position: "relative",
+    // The base inset plus the quote's own indent.
+    paddingLeft: "calc(var(--editor-pad-x) + var(--sp-4))",
     color: "var(--text-secondary)",
   },
+  // The bar, drawn at the prose left edge. `border-left` would sit at the window
+  // edge now that the line box is full width. `z-index: -1` keeps it under the
+  // text and the selection layer; `.cm-scroller` is the stacking context, so it
+  // cannot escape the sheet.
+  ".cm-blockquote::before": {
+    content: '""',
+    position: "absolute",
+    zIndex: "-1",
+    top: "0",
+    bottom: "0",
+    left: "var(--editor-pad-x)",
+    width: "3px",
+    backgroundColor: "var(--accent-soft-hover)",
+  },
+  // A filled well, clipped to the text column. The side hairlines and corner
+  // radii are dropped deliberately: a border on a full-width line box lands at
+  // the window edge, and `background-clip` cannot carry borders with it. (The
+  // `.cm-codeblock-open/-close` classes blocks.ts still emits now style
+  // nothing.)
   ".cm-codeblock": {
     backgroundColor: "var(--bg-subtle)",
-    borderLeft: "1px solid var(--border)",
-    borderRight: "1px solid var(--border)",
+    backgroundClip: "content-box",
   },
-  ".cm-codeblock-open": {
-    borderTop: "1px solid var(--border)",
-    borderTopLeftRadius: "var(--radius-sm)",
-    borderTopRightRadius: "var(--radius-sm)",
+  ".cm-hr": { position: "relative" },
+  // The hairline, inset to the prose column (an `inset` box-shadow would follow
+  // the full-width line box).
+  ".cm-hr::after": {
+    content: '""',
+    position: "absolute",
+    left: "var(--editor-pad-x)",
+    right: "var(--editor-pad-x)",
+    bottom: "0",
+    height: "1px",
+    backgroundColor: "var(--border)",
   },
-  ".cm-codeblock-close": {
-    borderBottom: "1px solid var(--border)",
-    borderBottomLeftRadius: "var(--radius-sm)",
-    borderBottomRightRadius: "var(--radius-sm)",
+
+  // ---- YAML frontmatter (see lib/editor/frontmatter.ts) ----
+  //
+  // Rendered as compact dimmed source. The descendant selector is load-bearing:
+  // with no frontmatter parser, lezer still reads `key: v\n---` as a
+  // SetextHeading2, so the syntax highlighter puts a heading class on the spans
+  // inside. `.cm-frontmatter span` is one class more specific than a
+  // HighlightStyle rule, so it wins deterministically rather than by module
+  // order.
+  //
+  // NOTE: no horizontal padding here, ever. drawSelection derives every
+  // selection rect from the FIRST `.cm-line`'s padding, so a line class that
+  // changes it shifts the whole document's selection geometry.
+  ".cm-frontmatter": {
+    backgroundColor: "var(--bg-subtle)",
+    backgroundClip: "content-box",
+    lineHeight: "1.5",
   },
-  ".cm-hr": {
-    // The `---` text is already dimmed; add a hairline through the line.
-    boxShadow: "inset 0 -1px 0 var(--border)",
+  ".cm-frontmatter span": {
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--fs-sm)",
+    fontWeight: "400",
+    color: "var(--text-secondary)",
+  },
+  ".cm-frontmatter-fence span": {
+    color: "var(--text-tertiary)",
   },
 
   // Autocomplete: a floating surface card with an accent-soft active row.
@@ -281,10 +356,14 @@ export const editorTheme = EditorView.theme({
     marginLeft: "var(--sp-2)",
     fontSize: "var(--fs-sm)",
   },
-});
+};
 
-export const markdownHighlight = syntaxHighlighting(
-  HighlightStyle.define([
+export const editorTheme = EditorView.theme(editorThemeSpec);
+
+// Exported for the same reason as `editorThemeSpec`: a `HighlightStyle` does not
+// expose the specs it was built from, and the absence of a `t.list` rule below is
+// a regression guard worth asserting.
+export const markdownHighlightSpec = [
     {
       tag: t.heading1,
       fontFamily: "var(--font-display)",
@@ -328,12 +407,22 @@ export const markdownHighlight = syntaxHighlighting(
       borderRadius: "var(--radius-sm)",
     },
     { tag: t.quote, color: "var(--text-secondary)", fontStyle: "italic" },
-    { tag: t.list, color: "var(--accent)" },
+    // NO `t.list` rule, on purpose. @lezer/markdown maps
+    // `"OrderedList/... BulletList/..."` to tags.list, and the `/...` inherits
+    // the tag to every descendant — so colouring t.list paints the whole item's
+    // TEXT, not its marker (that was the accent-purple list bug). Item text
+    // inherits: plain text gets --text-primary, and a list inside a blockquote
+    // correctly stays --text-secondary. The marker is t.processingInstruction
+    // below. GFM `Task` is tags.list too, so task text inherits as well.
+    //
     // Markdown token characters (#, *, `, >, -, etc.) dimmed to recede.
     { tag: t.meta, color: "var(--text-tertiary)" },
     {
       tag: [t.processingInstruction, t.contentSeparator],
       color: "var(--text-tertiary)",
     },
-  ])
+];
+
+export const markdownHighlight = syntaxHighlighting(
+  HighlightStyle.define(markdownHighlightSpec)
 );
