@@ -136,9 +136,10 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // Embedded HTML rendered inline (rendered, never run) — flows with the prose
   // rather than sitting in a box, so a note reads as one document.
   // (The inline inset comes from the shared `.cm-block-inset` class below —
-  // `marginBlock` only, so the two do not fight.)
+  // `paddingBlock` only, so the two do not fight.)
+  // Block widget: vertical spacing as PADDING (see `.cm-note-title`).
   ".cm-md-html": {
-    marginBlock: "var(--sp-3)",
+    paddingBlock: "var(--sp-3)",
   },
   ".cm-md-html img": {
     maxWidth: "100%",
@@ -186,7 +187,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
 
   // GFM tables rendered off the active line (added by ./livePreview).
   ".cm-md-table": {
-    marginBlock: "var(--sp-3)",
+    paddingBlock: "var(--sp-3)", // padding, not margin — measured height
     overflowX: "auto",
     // Without inline-size containment the table's natural width propagates
     // into `.cm-content`'s intrinsic size (it's a flex item that sizes from
@@ -327,8 +328,13 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // `.cm-line` and get the prose column's left edge from `cm-block-inset`
   // (see noteHeader.ts). The title's left edge being pixel-identical to the
   // body's is the single most visible way to get this feature wrong.
+  // PADDING, never margin, on every block widget host: CodeMirror measures a
+  // block's height with getBoundingClientRect(), which excludes margins, so a
+  // margin here left the height map 16px short of the real layout and every
+  // click below the title landed one line too low (a same-line drag then
+  // "selected" into the next line as well).
   ".cm-note-title": {
-    marginBottom: "var(--inline-title-gap)",
+    paddingBottom: "var(--inline-title-gap)",
   },
   ".inline-title-wrap": {
     display: "flex",
@@ -374,8 +380,9 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     opacity: "1",
   },
 
+  // Same rule as `.cm-note-title`: padding only, no vertical margin. The gap
+  // between the rule and the body comes from the first body line's own box.
   ".cm-note-properties": {
-    marginBottom: "var(--sp-4)",
     paddingBottom: "var(--sp-3)",
     borderBottom: "1px solid var(--border)",
   },
@@ -486,8 +493,11 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   ".prop-add:hover": { color: "var(--text-secondary)" },
 
   // YAML we refuse to rewrite: a banner, and the source left editable beneath.
+  // A block widget host, so the gap below it is a transparent border (counted
+  // by getBoundingClientRect), not a margin (which is not — see `.cm-note-title`).
   ".cm-fm-banner": {
-    marginBottom: "var(--sp-2)",
+    borderBottom: "var(--sp-2) solid transparent",
+    backgroundClip: "padding-box",
     padding: "var(--sp-2) var(--sp-3)",
     borderRadius: "var(--radius-sm)",
     backgroundColor: "var(--bg-subtle)",
