@@ -47,8 +47,31 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 
 - Markdown editor with live preview (headings, lists, links, images, tables, code blocks render
   in place while you type). Inline HTML is rendered but sanitized.
+- **Tables are edited like a table, not like text.** A table in a note shows as a real table
+  and stays that way: click any cell to type in it, Tab and Shift-Tab step between cells, Enter
+  drops to the next row and adds a new row when you are on the last one, and the arrow keys walk
+  out of the table at the top and the bottom. Hovering shows a `+` for a new column or row, and
+  right-clicking a cell offers insert row above/below, insert column left/right, delete row,
+  delete column, and align the column left, centre or right. Bold, italic, code, links and
+  `[[wikilinks]]` inside a cell render as themselves; clicking into the cell shows the markdown
+  behind them. The file on disk stays ordinary Markdown — an edit rewrites only the cell you
+  changed, so the spacing and alignment of every other cell are left exactly as you typed them.
 - `[[Wikilinks]]` between notes, with a backlinks panel. Links survive renames and moves.
-- `#tags` inline or in frontmatter.
+- `#tags` inline or in frontmatter. Typing `#` suggests the tags the vault already uses, the
+  ones you use most first, so a tag stays one tag instead of drifting into three spellings.
+- **Folding.** Hover the left edge of a heading, a list item, a callout or a code block and a
+  small `>` appears; click it to fold that section away, leaving a `…` you can click to bring it
+  back. Baalda remembers what you folded per note, on this device, and restores it the next time
+  you open the note — even if lines were added above it in the meantime. What you fold is a way
+  of reading; it never changes the file.
+- **Keyboard shortcuts** (beyond the usual ⌘N / ⌘W / ⌘F): ⌘B bold, ⌘I italic, ⌘E inline code,
+  ⌘⇧X strikethrough, ⌘⇧H highlight, ⌘K link (select a URL first and the cursor lands where the
+  words go), ⌘⌥1–⌘⌥6 heading level (press the same one again to clear it), ⌘L tick a task or turn
+  any line into one, ⇧⏎ a line break inside a paragraph, ⌘; add a property, Tab / ⇧Tab indent a
+  list item. Enter continues the list you are in and renumbers as you go.
+- **Readable line length** keeps the text in a comfortable column rather than stretching it
+  across the whole window. Turn it off in Settings → Appearance for full width; **Line numbers**
+  live in the same place, off by default. Faint guides mark each level of a nested list.
 - Tabs for open notes, with a right-click menu (close, close others, close to the right, close
   all).
 - Autosave. Undo/redo is shared correctly even during live collaboration.
@@ -58,6 +81,33 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - Light and dark themes. Colour-tag notes and folders in the sidebar; colours sync to the team.
 - Right-click any note or folder: rename, delete, move, share, lock, colour, reveal in
   Finder/Explorer, export.
+
+## The note's name, and its properties
+
+- **A note's name is its file name, and it sits at the top of the note.** Click it and type to
+  rename the file — the tab, the sidebar and every list follow, and links to the note keep
+  working (notes are tracked by an internal id, not their path). A new note opens with its name
+  selected, ready to type. Names with `/ \ : * ? " < > |`, a leading dot, or one already used by
+  a neighbouring note are refused with a message, not quietly changed.
+- **Properties** are the block of information at the very top of a Markdown file (what other
+  apps call "frontmatter" or "YAML"). Baalda shows it as a small table you fill in, one row per
+  property, with a type you can change from the icon at the left of the row:
+  - **Text** · **List** · **Number** · **Checkbox** · **Date** · **Date & time** · **Tags** ·
+    **Aliases**. Lists, tags and aliases show as chips: Enter adds one, × removes one.
+  - `tags` is always the tags type, because that is what feeds tag search.
+- `⌘;` (Ctrl-; on Windows/Linux) adds a property anywhere in a note, creating the block if the
+  note has none.
+- **It is still just text in your file.** Editing a property changes only that one value — your
+  comments, your quoting, and the order of your keys are left exactly as they were.
+- **If Baalda cannot read the properties, it shows them as plain text and never rewrites them.**
+  That happens with nested structures, multi-line values, anchors, or a repeated key. You will
+  see a short note saying so, and the text stays yours to fix by hand.
+- **Three display modes**, in Settings → Appearance → "Properties in document": *Visible* (the
+  panel), *Hidden* (nothing shown; the text is still in the file) and *Source* (plain YAML).
+  This is a per-device choice, not a per-vault one.
+- **The types you pick are remembered per vault, on that machine** (in the vault's hidden
+  `.context` folder). A teammate opening the same vault sees types worked out from the values
+  themselves until they choose their own — the same as Obsidian.
 
 ## Finding things
 

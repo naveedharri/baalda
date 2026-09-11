@@ -2485,6 +2485,16 @@ export class SyncManager implements InboundHost {
     // This doc's own provider will own its content sync + presence, so the
     // background vault feed must skip it (no two writers on one Y.Doc).
     this.docStore?.setSuppressedDoc(mapping.docId);
+    // Opening a note is the one way its text can grow WITHOUT the watcher event
+    // that would otherwise clear this verdict: an egest from the open note is
+    // suppressed in `handleLocalFileChanged` a few lines before the
+    // `emptyEverywhere.delete` there. Leaving a stale "empty everywhere" in
+    // place would make the next `ready.empty` skip the probe for a doc that is
+    // no longer empty — stranding the text until an app restart (create note →
+    // settle → go offline → type → close → reconnect). Every new note is now
+    // created EMPTY, so this is the common path, not an edge case. The cost is
+    // at most one extra `readNote` per opened-and-still-empty note per connect.
+    this.emptyEverywhere.delete(mapping.docId);
 
     const sync = new DocSync({
       api,

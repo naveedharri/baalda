@@ -1,89 +1,47 @@
-// Smart list / quote behaviour on Enter and Tab — the "it just continues the
-// list" feel. All edits are ordinary CodeMirror transactions so the Yjs binding
-// syncs them like any keystroke.
+// Tab / Shift-Tab indenting for lists and quotes.
 //
-//   Enter on a list/quote line     → start the next item with the same marker
-//                                     (numbered items auto-increment; tasks
-//                                     start unchecked).
-//   Enter on an *empty* item       → clear the marker and end the list.
-//   Tab / Shift-Tab on a list line → indent / outdent by two spaces.
+//   Tab / Shift-Tab on a list line → indent / outdent the item by one unit.
+//   Tab anywhere else              → insert a soft indent (never moves focus).
 //
-// Tab always stays inside the editor (never moves focus): off a list line it
-// inserts a soft two-space indent.
+// Enter deliberately does NOT live here. `@codemirror/lang-markdown` registers
+// `insertNewlineContinueMarkup` at `Prec.high`, so it runs before any keymap we
+// add and already does the whole job — continuing bullets, quotes and task
+// items, renumbering ordered lists, and clearing an empty item to end the list
+// (and `deleteMarkupBackward` mirrors it on Backspace). We used to ship a
+// `listEnter` command that duplicated a worse version of that; it could never
+// run, so it is gone. `commands.test.ts` asserts the behaviour through a real
+// view, so the day that keymap changes we find out from a test rather than from
+// a bug report.
+//
+// The indent unit is read from the `indentUnit` facet (set to two spaces in
+// `lib/editor/index.ts`), so there is one answer to "how wide is an indent" for
+// this file, `indentOnInput` and every CodeMirror command.
 
-import { EditorSelection } from "@codemirror/state";
+import { indentUnit } from "@codemirror/language";
+import type { EditorState } from "@codemirror/state";
 import { type Command, EditorView, keymap } from "@codemirror/view";
 
-const INDENT = "  ";
+/**
+ * A list or quote item: optional indent, then a bullet (`-`/`*`/`+`), an
+ * ordered marker (`1.`/`1)`) or a blockquote `>`, then whitespace. Only the
+ * question "is the caret on one of these?" is asked of it — continuing the item
+ * is lang-markdown's job (see the header comment).
+ */
+const ITEM_RE = /^\s*(?:[-*+]|\d+[.)]|>)\s/;
 
-// Leading indent, a marker, then the item body. `marker` is a bullet (`-`/`*`/
-// `+`), an ordered marker (`1.`/`1)`), or a blockquote `>`; an optional task box
-// follows a bullet.
-const ITEM_RE =
-  /^(\s*)(([-*+])|(\d+)([.)])|(>))(\s+)(\[[ xX]\]\s+)?(.*)$/;
-
-interface ItemLine {
-  indent: string;
-  /** The full marker text incl. trailing space, ready to prefix the next line. */
-  nextMarker: string;
-  /** Column where the item body starts (indent + marker + space + task box). */
-  bodyStart: number;
-  /** Whether the item body is empty (only the marker). */
-  empty: boolean;
+export function isItemLine(lineText: string): boolean {
+  return ITEM_RE.test(lineText);
 }
 
-/** Parse a list/quote item out of a line, or return null if it isn't one. */
-function parseItem(lineText: string): ItemLine | null {
-  const m = ITEM_RE.exec(lineText);
-  if (!m) return null;
-  const [, indent, , bullet, num, ordSep, quote, gap, task, body] = m;
-  let nextMarker: string;
-  if (bullet) nextMarker = `${bullet}${gap}${task ? "[ ] " : ""}`;
-  else if (num) nextMarker = `${Number(num) + 1}${ordSep}${gap}`;
-  else nextMarker = `${quote}${gap}`;
-  const bodyStart =
-    indent.length +
-    (bullet ? 1 : num ? num.length + 1 : 1) +
-    gap.length +
-    (task ? task.length : 0);
-  return { indent, nextMarker, bodyStart, empty: body.length === 0 };
+function unitOf(state: EditorState): string {
+  return state.facet(indentUnit);
 }
-
-/** Enter: continue the list/quote, or clear an empty item to end the list. */
-const listEnter: Command = (view) => {
-  if (view.state.readOnly) return false;
-  const { state } = view;
-  const range = state.selection.main;
-  if (!range.empty) return false; // let a normal split happen over a selection
-  const line = state.doc.lineAt(range.head);
-  const item = parseItem(line.text);
-  if (!item) return false;
-
-  // Empty item → drop the marker and stay on a blank line (ends the list).
-  if (item.empty) {
-    view.dispatch({
-      changes: { from: line.from, to: line.to, insert: item.indent },
-      selection: EditorSelection.cursor(line.from + item.indent.length),
-      userEvent: "input",
-    });
-    return true;
-  }
-
-  // Continue: newline + same indent + next marker, caret after the marker.
-  const insert = `\n${item.indent}${item.nextMarker}`;
-  view.dispatch({
-    changes: { from: range.head, insert },
-    selection: EditorSelection.cursor(range.head + insert.length),
-    scrollIntoView: true,
-    userEvent: "input",
-  });
-  return true;
-};
 
 /** Shift the indent of every line the selection touches by ±one unit. */
 function reindent(view: EditorView, outdent: boolean): boolean {
   if (view.state.readOnly) return false;
   const { state } = view;
+  const unit = unitOf(state);
   const changes = [];
   const seen = new Set<number>();
   for (const range of state.selection.ranges) {
@@ -94,10 +52,12 @@ function reindent(view: EditorView, outdent: boolean): boolean {
       seen.add(n);
       const line = state.doc.line(n);
       if (outdent) {
-        const strip = /^\s{1,2}/.exec(line.text)?.[0].length ?? 0;
+        // One tab, or up to one unit's worth of spaces — whichever the line
+        // actually starts with.
+        const strip = new RegExp(`^(?:\\t| {1,${unit.length}})`).exec(line.text)?.[0].length ?? 0;
         if (strip) changes.push({ from: line.from, to: line.from + strip });
       } else {
-        changes.push({ from: line.from, insert: INDENT });
+        changes.push({ from: line.from, insert: unit });
       }
     }
   }
@@ -111,10 +71,10 @@ const listTab: Command = (view) => {
   if (view.state.readOnly) return false;
   const { state } = view;
   const range = state.selection.main;
-  const onList = parseItem(state.doc.lineAt(range.head).text) != null;
+  const onList = isItemLine(state.doc.lineAt(range.head).text);
   if (onList || !range.empty) return reindent(view, false);
-  // Plain line, collapsed caret → insert a soft two-space tab.
-  view.dispatch(state.replaceSelection(INDENT), { userEvent: "input" });
+  // Plain line, collapsed caret → insert a soft indent.
+  view.dispatch(state.replaceSelection(unitOf(state)), { userEvent: "input" });
   return true;
 };
 
@@ -122,7 +82,6 @@ const listShiftTab: Command = (view) => reindent(view, true);
 
 export function listKeymap() {
   return keymap.of([
-    { key: "Enter", run: listEnter },
     { key: "Tab", run: listTab, preventDefault: true },
     { key: "Shift-Tab", run: listShiftTab, preventDefault: true },
   ]);

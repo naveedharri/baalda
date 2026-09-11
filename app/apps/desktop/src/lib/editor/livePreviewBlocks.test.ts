@@ -9,6 +9,7 @@
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import { createEditorState } from "./index";
+import { setFocused } from "./reveal";
 
 function mount(doc: string): EditorView {
   const parent = document.createElement("div");
@@ -69,9 +70,28 @@ describe("livePreview block widgets (real EditorView)", () => {
     view.destroy();
   });
 
+  it("re-renders a block once the caret leaves it again", () => {
+    // The block field is memoised on selection-only transactions (arrow keys
+    // used to re-parse the whole document). The memo must still notice a caret
+    // arriving at, and leaving, a block.
+    const doc = ["intro", "", "```html", "<h1>Hi</h1>", "```"].join("\n");
+    const view = mount(doc);
+    view.dispatch({ effects: setFocused.of(true) });
+    view.dispatch({ selection: { anchor: doc.indexOf("<h1>") } });
+    expect(view.dom.querySelector(".cm-md-html")).toBeNull();
+    view.dispatch({ selection: { anchor: 0 } });
+    expect(view.dom.querySelector(".cm-md-html")).not.toBeNull();
+    view.destroy();
+  });
+
   it("shows raw fence source while the cursor is inside it", () => {
     const doc = ["```html", "<h1>Hi</h1>", "```"].join("\n");
     const view = mount(doc);
+    // Focus first: a BLURRED editor has no active line at all (see reveal.ts),
+    // so an unfocused caret leaves the preview rendered — which is the point.
+    // The effect is dispatched directly because CodeMirror notices real DOM
+    // focus on a 10 ms timeout, which no synchronous test can observe.
+    view.dispatch({ effects: setFocused.of(true) });
     view.dispatch({ selection: { anchor: doc.indexOf("<h1>") } });
     expect(view.dom.querySelector(".cm-md-html")).toBeNull();
     view.destroy();

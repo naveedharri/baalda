@@ -6,10 +6,12 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { remoteCursors } from "../lib/editor/remoteCursors";
 import type { Awareness } from "y-protocols/awareness";
-import { createEditorState } from "../lib/editor";
+import { createEditorState, lineNumberExtension } from "../lib/editor";
+import { foldEffectsFor, parseNoteUiState, persistFolds } from "../lib/editor/folding";
+import { propertiesMode as propertiesModeFacet } from "../lib/editor/frontmatter";
+import { loadTypes } from "../lib/frontmatter/types";
 import { setActiveNote } from "../lib/editor/activeView";
 import { bindActiveNote } from "../lib/editor/activeNoteBinding";
-import { firstHeading, planTitleRename } from "../lib/editor/titleFollow";
 import { saveAttachment } from "../lib/attachments";
 import { bridgeManager, type NoteBridge } from "../lib/bridge";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
@@ -348,12 +350,19 @@ export function Editor() {
   // The open note's bridge — kept so the syncStatus effect can roll back
   // keystrokes the server rejected (typed before its read-only verdict landed).
   const bridgeRef = useRef<NoteBridge | null>(null);
-  // Set by the open effect; lets the cleanup commit a pending title rename.
-  const titleCommitRef = useRef<(() => void) | null>(null);
   // True once the server has confirmed edit access for THIS note session. Gates
   // the rollback above: a live mid-session lock must never undo edits the
   // server already accepted.
   const hadEditAccessRef = useRef(false);
+  // The Properties display mode, in a Compartment so the Settings row
+  // reconfigures the live view instead of rebuilding it (like `editable`).
+  const propsModeRef = useRef<Compartment | null>(null);
+  const propertiesMode = useStore((s) => s.propertiesMode);
+  // The line-number gutter, also compartmented: flipping the Settings switch
+  // must not tear the live view down (and with it the CRDT binding).
+  const lineNumbersRef = useRef<Compartment | null>(null);
+  const lineNumbers = useStore((s) => s.lineNumbers);
+  const readableLineLength = useStore((s) => s.readableLineLength);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   // Wraps the presence stack + its roster popover so an outside click can be
@@ -448,10 +457,9 @@ export function Editor() {
         const slash = target.lastIndexOf("/");
         const dir = slash === -1 ? "" : target.slice(0, slash);
         const name = slash === -1 ? target : target.slice(slash + 1);
-        const path = await ipc.createNote(dir, name);
-        await useStore.getState().refreshTree();
-        await useStore.getState().refreshTitles();
-        await useStore.getState().openNoteByPath(path);
+        // The name comes from the link, so this takes the explicit-name path —
+        // no rename box, unlike ⌘N / the sidebar's + (see `createNoteIn`).
+        await useStore.getState().createNoteAt(dir, name);
       } catch (err) {
         console.error("wiki-link navigation failed", err);
       }
@@ -461,9 +469,14 @@ export function Editor() {
       // Open the bridge; defer the disk-seed when this doc will sync so the
       // server's canonical state is pulled first (spec 03 §5 ordering).
       const willSync = syncManager.willSync(notePath);
-      const bridge = await bridgeManager.openNote(notePath, docId, {
-        seedFromFile: !willSync,
-      });
+      // The fold state is fetched ALONGSIDE the bridge, never after it: it has
+      // to be in hand by the time the view is constructed, so the folds can be
+      // applied in the same tick and no unfolded frame ever paints.
+      const uiEpoch = useStore.getState().vault?.epoch;
+      const [bridge, storedUiState] = await Promise.all([
+        bridgeManager.openNote(notePath, docId, { seedFromFile: !willSync }),
+        ipc.getNoteUiState(docId, uiEpoch).catch(() => null),
+      ]);
       if (cancelled || !hostRef.current) return;
 
       const opened = await syncManager.openDoc(bridge, notePath);
@@ -490,38 +503,61 @@ export function Editor() {
       setReadOnly(ro);
       const editable = new Compartment();
       editableRef.current = editable;
-
-      // Title follows heading (Obsidian-style): edit the `# Title` line and the
-      // file is renamed to match, as long as it was still named after that
-      // heading. Committed when the caret LEAVES line 1 (or the note closes),
-      // never while typing — the rename reopens the editor at the new path,
-      // which would drop the caret mid-word. Only OUR keystrokes arm it: a
-      // teammate's edit to the heading is theirs to commit, or two clients
-      // would race to rename the same file.
-      //
-      // `lastHeading` is read from the doc as it was BEFORE the first keystroke
-      // that touches line 1 — not at open: in a synced vault the text arrives
-      // after the editor mounts, so reading it here would see an empty doc.
-      let lastHeading: string | null = null;
-      let headingDirty = false;
-      const commitTitle = (doc: EditorState["doc"]) => {
-        headingDirty = false;
-        const heading = firstHeading(doc.line(1).text);
-        const to = planTitleRename({ path: notePath, lastHeading, heading });
-        if (!to) return;
-        void useStore
-          .getState()
-          .renameNoteFile(notePath, to)
-          .catch((e) => console.warn("[title] rename failed", notePath, e));
-      };
-      titleCommitRef.current = () => {
-        if (headingDirty && view) commitTitle(view.state.doc);
-      };
+      const propsMode = new Compartment();
+      propsModeRef.current = propsMode;
+      const lineNumberCompartment = new Compartment();
+      lineNumbersRef.current = lineNumberCompartment;
+      // Vault-wide inputs for the Properties panel. Loaded in the background:
+      // the panel renders from inferred types until they arrive.
+      const epoch = useStore.getState().vault?.epoch;
+      void loadTypes(epoch);
+      let propertyKeys: string[] = [];
+      const propertyValues = new Map<string, string[]>();
+      void ipc
+        .listPropertyKeys(epoch)
+        .then((rows) => {
+          propertyKeys = rows.map((r) => r.key);
+        })
+        .catch(() => {});
 
       const state = createEditorState({
         doc: bridge.text.toString(),
         collab: true,
+        header: {
+          path: notePath,
+          mode: useStore.getState().propertiesMode,
+          modeCompartment: propsMode,
+          // The inline title commits a RENAME, never a CRDT edit. `Exact`, not
+          // `renameNoteFile`: a name a person just typed must be refused on a
+          // collision, not silently turned into "Name 1".
+          renameTo: async (nextPath) => {
+            try {
+              await useStore.getState().renameNoteFileExact(notePath, nextPath);
+              return null;
+            } catch (e) {
+              console.error("rename from inline title failed", e);
+              return "That name couldn't be saved.";
+            }
+          },
+          noteExists: (p) => ipc.noteExists(p, useStore.getState().vault?.epoch),
+          getPropertyKeys: () => propertyKeys,
+          getPropertyValues: (key) => {
+            const cached = propertyValues.get(key);
+            if (cached) return cached;
+            propertyValues.set(key, []);
+            void ipc
+              .listPropertyValues(key, useStore.getState().vault?.epoch)
+              .then((values) => propertyValues.set(key, values))
+              .catch(() => {});
+            return [];
+          },
+        },
         getTitles: () => useStore.getState().titles,
+        getTags: () => useStore.getState().tags,
+        lineNumbers: {
+          on: useStore.getState().lineNumbers,
+          compartment: lineNumberCompartment,
+        },
         onNavigate: (t) => void navigate(t),
         resolveAsset: makeResolveAsset(
           useStore.getState().vault?.path ?? null,
@@ -539,35 +575,35 @@ export function Editor() {
             if (!u.selectionSet && !u.docChanged && !u.focusChanged) return;
             const line = u.state.doc.lineAt(u.state.selection.main.head).number;
             awareness?.setLocalStateField("activity", { line, at: Date.now() });
-            // Title-follow bookkeeping (see commitTitle above).
-            if (
-              u.docChanged &&
-              u.transactions.some(
-                (tr) =>
-                  tr.isUserEvent("input") ||
-                  tr.isUserEvent("delete") ||
-                  tr.isUserEvent("move"),
-              ) &&
-              u.changes.touchesRange(0, u.startState.doc.line(1).to)
-            ) {
-              if (!headingDirty) lastHeading = firstHeading(u.startState.doc.line(1).text);
-              headingDirty = true;
-            }
-            if (headingDirty && (line !== 1 || (u.focusChanged && !u.view.hasFocus))) {
-              commitTitle(u.state.doc);
-            }
           }),
           // View-only grants / locks: the editor cannot be typed into (spec
           // 04 §4). Compartmented so a live lock change can reconfigure it.
           editable.of(editableExtensions(ro)),
+          // Remember which sections were folded. Debounced well clear of the
+          // bridge's 150/300 ms timings — this writes to `index.sqlite`, never
+          // to the `.md`.
+          persistFolds((json) => {
+            void ipc
+              .setNoteUiState(docId, json, useStore.getState().vault?.epoch)
+              .catch(() => {});
+          }),
         ],
       });
 
+      // A note created by ⌘N / the sidebar's + wants the cursor in its TITLE,
+      // not the body — read before the view exists, because the title widget
+      // consumes the flag as it mounts inside the constructor below.
+      const titleWantsFocus = useStore.getState().pendingTitleFocus === notePath;
       view = new EditorView({ state, parent: hostRef.current });
+      // Restore the folds SYNCHRONOUSLY, in the tick the view is created. A
+      // `useEffect` or a rAF would be one painted frame too late, and the note
+      // would visibly collapse in front of the reader every time it opened.
+      const foldEffects = foldEffectsFor(view.state, parseNoteUiState(storedUiState));
+      if (foldEffects.length) view.dispatch({ effects: foldEffects });
       viewRef.current = view;
       setViewMounted(true);
       setActiveNote(bindActiveNote(view)); // let out-of-tree drops embed into this note
-      if (!ro) view.focus();
+      if (!ro && !titleWantsFocus) view.focus();
 
       // Live "who's here" avatar row + incoming pings addressed to this user.
       onAwarenessChange = () => {
@@ -593,15 +629,14 @@ export function Editor() {
 
     return () => {
       cancelled = true;
-      // A heading edited and then abandoned by switching notes still counts.
-      titleCommitRef.current?.();
-      titleCommitRef.current = null;
       if (onAwarenessChange && awareness) awareness.off("change", onAwarenessChange);
       setActiveNote(null);
       setViewMounted(false);
       if (view) view.destroy();
       viewRef.current = null;
       editableRef.current = null;
+      propsModeRef.current = null;
+      lineNumbersRef.current = null;
       bridgeRef.current = null;
       hadEditAccessRef.current = false;
       awarenessRef.current = null;
@@ -641,6 +676,24 @@ export function Editor() {
       setReadOnly(false);
     }
   }, [syncStatus]);
+
+  // Push the Properties display mode into the live view when it changes.
+  useEffect(() => {
+    const view = viewRef.current;
+    const compartment = propsModeRef.current;
+    if (!view || !compartment) return;
+    view.dispatch({
+      effects: compartment.reconfigure(propertiesModeFacet.of(propertiesMode)),
+    });
+  }, [propertiesMode]);
+
+  // Push the line-number gutter setting into the live view.
+  useEffect(() => {
+    const view = viewRef.current;
+    const compartment = lineNumbersRef.current;
+    if (!view || !compartment) return;
+    view.dispatch({ effects: compartment.reconfigure(lineNumberExtension(lineNumbers)) });
+  }, [lineNumbers]);
 
   // Push the current read-only state into the live CodeMirror view.
   useEffect(() => {
@@ -711,7 +764,10 @@ export function Editor() {
       : null;
 
   return (
-    <div className="editor-column">
+    <div
+      className="editor-column"
+      data-measure={readableLineLength ? "readable" : "full"}
+    >
       {(readOnly || showToolbar) && (
         <div className="editor-topbar">
           {readOnly && (

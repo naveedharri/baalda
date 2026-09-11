@@ -121,7 +121,7 @@ n/a = synchronous or sub-100ms by construction.
 | Action | Work | Latency | Feedback |
 | --- | --- | --- | --- |
 | Open a note | meta read + server register | 0.05–2s | ✅ row pre-selects, glyph → spinner, editor skeleton |
-| New note / New folder | atomic write + reindex | fast | n/a (row appears) |
+| New note / New folder | atomic write + reindex | fast | ✅ row appears, is revealed and opens in inline rename |
 | Rename (inline) | disk rename + registry | 0.1–1s | n/a — inline edit already commits visibly |
 | Delete (single / bulk) | deepest-first disk + server | 0.2s–10s | ✅ bulk progress counter |
 | Lock / Unlock selected | one round trip **per item** | 0.3s–10s | ✅ spinner replaces the padlock |
@@ -140,14 +140,31 @@ n/a = synchronous or sub-100ms by construction.
 | Search | local FTS5 | fast | n/a |
 | Graph view | in-memory sim | fast | n/a |
 | Ping a peer | awareness field | instant | ✅ existing ping toast |
+| New tab (`+` / ⌘N) | create + open + reveal | fast | ✅ row pulses in the sidebar, highlight slides to the new tab, cursor waits in the note's title |
+| Switch tab (click / Ctrl-Tab) | same as note open | 0.05–2s | ✅ tab dims while opening, then the highlight slides to it |
+| Rename via the inline title | file rename + registry + tabs | 0.1–1s | ✅ inline warning under the title for a refused or taken name; the tab and sidebar row follow |
+| Edit a property | one CM6 transaction over a span | instant | n/a (the value is the feedback) |
+| Property edited by someone else mid-typing | re-parse + span revalidate | instant | ✅ "Changed by someone else while you were typing." under the row |
 
 ### Known gaps (deliberate, not oversights)
 
 - **Rename** has no spinner. It is an inline edit that already commits visibly,
-  and a spinner over a text field you just typed into is noise.
+  and a spinner over a text field you just typed into is noise. Its one real
+  gap is closed: a name that is illegal or already taken now says so inline,
+  under the title, and keeps the focus instead of silently choosing another.
 - **`useAsyncAction` has no unit test.** It is a React hook and the repo has no
   `@testing-library/react`; adding one for a 140-line hook was not worth a new
   dependency. Its two constants are exported and documented, and the pure pieces
   around it (`lib/toast.ts`, `lib/vault/landing.ts`) are covered.
 - **Bulk lock/unlock has no per-item counter** the way bulk delete does. Same
   shape of work, so it should get one; the spinner is the floor, not the ceiling.
+- **The tab strip has no unit test.** Same reason as `useAsyncAction`: it is a
+  React component and the repo has no `@testing-library/react`. Its whole
+  contract lives in the store instead (`src/__tests__/tabStore.test.ts` covers
+  the stable tab order, what `closeTab` lands on, the shared create path and the reveal
+  request), and the strip itself is on the manual pass.
+- **Editor selection geometry is verified manually.** jsdom does no layout, so
+  `getComputedStyle(line).paddingLeft` cannot resolve the `max()`/`calc()`/`ch`
+  the inset is built from. `editorGeometry.test.ts` asserts WHERE the declaration
+  sits and the widget/DOM contract the CSS depends on; the pixels are a
+  two-minute look in both themes.

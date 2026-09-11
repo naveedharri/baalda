@@ -24,6 +24,12 @@
   --text-primary: #1a1a1e;
   --text-secondary: #6b6b76;
   --text-tertiary: #9a9aa5;
+  /* The faint tier: markdown syntax markers (#, **, `, >, -), the fold
+     chevrons and the line-number gutter. One step quieter than tertiary —
+     present enough to find, quiet enough that prose reads as prose. Every
+     theme block below must define it too: miss one and every marker in the
+     editor turns black for a frame (or forever, in that theme). */
+  --text-faint: #bfbfc8;
   --text-on-accent: #ffffff;
 
   /* Accent (Atomize violet — from the Figma kit) */
@@ -84,11 +90,38 @@
   /* The editor's prose column. One pair of tokens so the CM6 theme
      (`lib/editor/theme.ts`) and the loading skeleton (`components/editor.css`)
      can never drift — the skeleton must land exactly where the real text does.
-     Wide on purpose: the content should fill most of the window, with
-     `--editor-gutter` as the minimum breathing room at each edge on narrow
-     windows (see the `max(...)` the consumers wrap these in). */
-  --editor-measure: 120ch;
+     88ch is the readable measure — past roughly ninety characters the eye
+     loses the start of the next line, which is where every typographic rule of
+     thumb (and Obsidian's own default) lands. `--editor-gutter` is the minimum
+     breathing room at each edge on narrow windows (see the `max(...)` the
+     consumers wrap these in). Settings → Appearance → "Readable line length"
+     turns this off by setting the measure to 100% on `.editor-column`
+     (`components/editor.css`), which every consumer then follows for free. */
+  --editor-measure: 88ch;
   --editor-gutter: 64px;
+
+  /* The editor's horizontal inset. It lives on `.cm-line` (not `.cm-content`)
+     because CodeMirror's drawSelection() derives every selection rect from the
+     FIRST `.cm-line`'s padding and cannot see padding on the content element —
+     full-line rects used to start ~58px left of the text and overrun its right
+     edge. Percentages resolve at the USE site, and every consumer's containing
+     block is `.cm-content`'s content box, so the value is identical for lines,
+     block widgets (`cm-block-inset`) and the loading skeleton. */
+  --editor-pad-x: max(
+    var(--editor-gutter),
+    calc((100% - var(--editor-measure)) / 2)
+  );
+
+  /* The inline note title — the note's filename, rendered as an editable
+     heading above the body. Sized to match `t.heading1` in the editor's
+     HighlightStyle so a title and an H1 look like the same typography. */
+  --inline-title-size: 1.75em;
+  --inline-title-weight: 700;
+  --inline-title-family: var(--font-display);
+  --inline-title-color: var(--text-primary);
+  --inline-title-placeholder: var(--text-tertiary);
+  /* Title → properties/body. */
+  --inline-title-gap: var(--sp-4);
 
   /* Height to keep clear at the very top of the window for system window
      controls. Zero everywhere the OS still draws its own title bar above the
@@ -117,9 +150,21 @@
   --t-fast: 120ms;
   --t-med: 200ms;
 
-  /* How the editor's selection layer blends over content (see theme.ts
-     .cm-selectionLayer): darken on light, lighten on dark. */
-  --selection-blend: multiply;
+  /* ---- Editor syntax surfaces (see lib/editor/theme.ts + ofm/) ---- */
+
+  /* The `==highlight==` wash. A literal yellow on purpose: a highlighter is
+     the one editor colour that must NOT follow the accent — it reads as ink
+     on the page, not as UI chrome. */
+  --highlight-bg: rgba(255, 208, 0, 0.28);
+  /* How much of a callout's own colour tints its body. A percentage, so the
+     same value works against either theme's surface. */
+  --callout-tint: 8%;
+  /* The fold-chevron column to the left of the prose (Stage 3b). */
+  --editor-fold-gutter: 24px;
+  /* Indentation guides. Reuse the border tiers so they follow the theme
+     rather than introducing a third grey. */
+  --indent-guide: var(--border);
+  --indent-guide-active: var(--border-strong);
 }
 
 /* Traffic lights are ~12px tall centred around y≈19, so 28px clears them —
@@ -143,6 +188,7 @@
   --text-primary: #f2f2f5;
   --text-secondary: #a6a6b2;
   --text-tertiary: #6e6e78;
+  --text-faint: #55555f;
 
   --accent: #8f84ff;
   --accent-hover: #a49bff;
@@ -163,7 +209,7 @@
   --border-strong: rgba(255, 255, 255, 0.18);
   --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
 
-  --selection-blend: screen;
+  --highlight-bg: rgba(255, 208, 0, 0.22);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -185,6 +231,7 @@
     --text-primary: #f2f2f5;
     --text-secondary: #a6a6b2;
     --text-tertiary: #6e6e78;
+    --text-faint: #55555f;
 
     --accent: #8f84ff;
     --accent-hover: #a49bff;
@@ -202,7 +249,7 @@
     --border-strong: rgba(255, 255, 255, 0.18);
     --focus-ring: 0 0 0 3px rgba(143, 132, 255, 0.40);
 
-    --selection-blend: screen;
+    --highlight-bg: rgba(255, 208, 0, 0.22);
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
     --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);

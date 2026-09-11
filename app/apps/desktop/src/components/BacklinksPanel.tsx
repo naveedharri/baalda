@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { noteLabel } from "../lib/notePath";
 import { useStore } from "../store";
 
 export function BacklinksPanel() {
@@ -33,7 +34,10 @@ export function BacklinksPanel() {
                 className="backlink"
                 onClick={() => void useStore.getState().openNoteByPath(b.path)}
               >
-                <div className="backlink-title">{b.title || b.path}</div>
+                {/* The file name, like the tab and the sidebar — `b.title` is
+                    the INDEXED title, which for a note with an H1 or a
+                    frontmatter `title:` names the same note differently. */}
+                <div className="backlink-title">{noteLabel(b.path)}</div>
                 {b.linkText && <div className="backlink-text">{b.linkText}</div>}
               </li>
             ))}

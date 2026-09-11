@@ -3,3 +3,24 @@
 - Moving a Pro subscription to another vault now opens a clear dialog that shows each eligible vault with its members and explains what changes, instead of a bare dropdown
 - Large notes open faster and launching does less work up front: note history now moves between the app and its storage as raw data instead of text, and reopening a vault no longer rewrites index rows that did not change
 - Faster launch: the window now opens with the app already drawn instead of a blank frame, and Baalda loads about half as much code up front (and installs smaller)
+- The editor now selects text cleanly: highlighting a line or a paragraph no longer spills out into the margins
+- New notes start blank, and a note's title is simply its file name — the name in the tab, the sidebar and the search results all agree
+- Open notes moved into one row at the top: a soft highlight slides to the note you are reading, ⌘W closes it, Ctrl-Tab moves between them, and + starts a new note
+- Opening a note now reveals it in the sidebar, expanding the folders above it
+- Note properties at the top of a file (tags, dates) now render as a compact block instead of a giant bold heading
+- Lists read as normal text again, with only the bullet dimmed
+- A note's name now sits at the top of the note itself — click it to rename the file, and the tab, the sidebar and every list follow. New notes open with their name selected, ready to type
+- Properties at the top of a note are now a panel you can fill in, with real types for text, lists, numbers, checkboxes, dates and tags. Switch it to plain YAML or hide it in Settings → Appearance. Properties Baalda cannot read are shown as text and never rewritten, and the types you choose are remembered per vault (on this machine)
+- Tables are now editable in place: click a cell and type, Tab and Enter move between cells, Enter on the last row adds one, and right-clicking a cell inserts or deletes rows and columns or sets a column's alignment. The table stays a table the whole time — it never flips back to markdown pipes
+- The editor now reveals markdown one piece at a time: put the caret on a bold word and only that word's `**` appear, instead of every marker on the line. Click away and the whole note reads as a finished page
+- Bullets stay round dots while you type on the line, and every marker (#, >, quotes, backticks) is a quieter grey
+- `==Highlights==`, `%%private comments%%` and `#tags` now render properly — the same syntax Obsidian uses, so notes look right in both apps. Comments stay visible in the editor and tags become rounded pills
+- Callouts work: start a quote with `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` or `> [!quote]` and it gets a matching colour, tint and icon
+- Code blocks are syntax-highlighted for the common languages and carry a Copy button
+- `[[Links]]` now show what they mean: `[[Note|label]]` shows the label, `[[Note#Heading]]` shows `Note › Heading`, and the brackets come back when you edit them
+- Fold a section away: hover the left edge of a heading, a list item, a callout or a code block and click the ›. Baalda remembers what you folded and brings it back when you reopen the note
+- Typing `#` now suggests the tags this vault already uses, most-used first — so `#idea` stays `#idea` instead of quietly becoming `#ideas`
+- More editing shortcuts: **⌘⇧H** highlights, **⌘⌥1**–**⌘⌥6** set a heading level (press the same one again to clear it), **⌘L** ticks a task or turns any line into one, and **⇧⏎** adds a line break inside a paragraph
+- Selecting a word and pressing **⌘K** is smarter: paste a link, select it, press ⌘K and the cursor lands where the words go
+- Faint guides now run down each level of a nested list
+- The editor keeps text in a readable column instead of stretching it across the whole window. Prefer the full width? Settings → Appearance → Readable line length. Line numbers live there too, off by default

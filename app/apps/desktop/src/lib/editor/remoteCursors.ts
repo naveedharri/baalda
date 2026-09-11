@@ -13,6 +13,7 @@ import { Annotation, type Extension } from "@codemirror/state";
 import { EditorView, layer, ViewPlugin, type LayerMarker } from "@codemirror/view";
 import type { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
+import { insideFold } from "./folding";
 
 /** Dispatched to nudge the layer into recomputing when awareness changes. */
 const remoteCursorsSync = Annotation.define<boolean>();
@@ -54,6 +55,11 @@ function readCursors(view: EditorView, ytext: Y.Text, awareness: Awareness): Rem
     if (!cursor || cursor.head == null) return;
     const abs = Y.createAbsolutePositionFromRelativePosition(cursor.head, ydoc);
     if (!abs || abs.type !== ytext) return;
+    // A caret inside a section WE have folded has no coordinates of its own —
+    // `coordsAtPos` would answer with the placeholder's box, parking every
+    // hidden peer's flag on top of the same `…` pill. Theirs is not our fold to
+    // open, so the honest thing is to draw nothing.
+    if (insideFold(view.state, abs.index)) return;
     const pos = view.coordsAtPos(abs.index);
     if (!pos) return; // off-screen (outside the rendered viewport) — skip
     const top = pos.top - base.top;

@@ -2,10 +2,17 @@ import { useEffect, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
-import { ACTIVITY_STATUSES, type ActivityStatus, writeServerChoice } from "../lib/prefs";
+import {
+  ACTIVITY_STATUSES,
+  type ActivityStatus,
+  PROPERTIES_MODES,
+  writeServerChoice,
+} from "../lib/prefs";
+import type { PropertiesMode } from "../lib/editor/frontmatter";
 import { checkForUpdate, currentVersion, installUpdate, useUpdateState } from "../lib/updater";
 import { useStore } from "../store";
 import { Avatar } from "./Avatar";
+import { MenuSelect } from "./MenuSelect";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SettingsModal } from "./SettingsModal";
 import { Switch } from "./Switch";
@@ -329,11 +336,61 @@ function StatusTab() {
 }
 
 function AppearanceTab() {
+  const propertiesMode = useStore((s) => s.propertiesMode);
+  const readableLineLength = useStore((s) => s.readableLineLength);
+  const lineNumbers = useStore((s) => s.lineNumbers);
   return (
-    <div className="menu-row">
-      <span className="menu-row-label">Theme</span>
-      <ThemeToggle />
-    </div>
+    <>
+      <div className="menu-row">
+        <span className="menu-row-label">Theme</span>
+        <ThemeToggle />
+      </div>
+      <label className="menu-row toggle-row">
+        <span className="menu-row-label">
+          Readable line length
+          <span className="field-hint">
+            Keep the text in a narrow column instead of filling the window.
+          </span>
+        </span>
+        <Switch
+          checked={readableLineLength}
+          ariaLabel="Readable line length"
+          onChange={(next) => useStore.getState().setReadableLineLength(next)}
+        />
+      </label>
+      <label className="menu-row toggle-row">
+        <span className="menu-row-label">
+          Line numbers
+          <span className="field-hint">Show a line-number gutter in the editor.</span>
+        </span>
+        <Switch
+          checked={lineNumbers}
+          ariaLabel="Line numbers"
+          onChange={(next) => useStore.getState().setLineNumbers(next)}
+        />
+      </label>
+      {/* Appearance, not Vault settings: this describes how the editor draws,
+          not what a vault contains, so it must not flip as you switch vaults. */}
+      <div className="menu-row">
+        <span className="menu-row-label">
+          Properties in document
+          <span className="field-hint">
+            How a note's YAML frontmatter is shown at the top of the note.
+          </span>
+        </span>
+        <MenuSelect<PropertiesMode>
+          value={propertiesMode}
+          options={PROPERTIES_MODES.map((m) => ({
+            value: m.id,
+            label: m.label,
+            hint: m.hint,
+          }))}
+          onSelect={(mode) => useStore.getState().setPropertiesMode(mode)}
+          ariaLabel="Properties in document"
+          triggerClassName="role-trigger"
+        />
+      </div>
+    </>
   );
 }
 

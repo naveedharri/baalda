@@ -23,6 +23,7 @@ vi.mock("../../ipc", () => ({
     children: [],
     childrenLoaded: true,
   })),
+  listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(
     async () => [] as Array<{ id: string; path: string; title: string }>,
   ),

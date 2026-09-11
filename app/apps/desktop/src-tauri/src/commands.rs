@@ -948,12 +948,26 @@ pub async fn get_vault_config(
     expected_epoch: Option<u64>,
 ) -> AppResult<Option<String>> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    let p = vault.join(".context").join("config.json");
-    match std::fs::read_to_string(&p) {
+    read_context_file(&vault, "config.json")
+}
+
+/// Read one file out of `.context/`. Absent is `None`, never an error — a vault
+/// that has never synced (or never typed a property) has no such file, and that
+/// is an ordinary state, not a failure.
+fn read_context_file(vault: &Path, name: &str) -> AppResult<Option<String>> {
+    match std::fs::read_to_string(vault.join(".context").join(name)) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Replace one file in `.context/`, atomically. A bare `fs::write` truncates
+/// first, so a crash (or a full disk) mid-write leaves a half-written file —
+/// which for `config.json` reads as "this vault knows nothing about its notes"
+/// and re-registers everything. See `notefile::write_atomic_fsync`.
+fn write_context_file(vault: &Path, name: &str, content: &str) -> AppResult<()> {
+    notefile::write_atomic_fsync(&vault.join(".context").join(name), content.as_bytes())
 }
 
 /// Overwrite the open vault's `.context/config.json` with `content`.
@@ -964,13 +978,105 @@ pub async fn set_vault_config(
     expected_epoch: Option<u64>,
 ) -> AppResult<()> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    // Atomic + fsync'd: this file is the ONLY copy of the vault's doc-id map, and
-    // it is rewritten on every registry pull. A bare `fs::write` truncates first,
-    // so a crash (or a full disk) mid-write leaves a half-written or empty map —
-    // which the sync layer reads as "this vault knows nothing about its notes"
-    // and re-registers everything. See `notefile::write_atomic_fsync`.
-    let target = vault.join(".context").join("config.json");
-    notefile::write_atomic_fsync(&target, content.as_bytes())
+    // This file is the ONLY copy of the vault's doc-id map, and it is rewritten
+    // on every registry pull — see `write_context_file` for why that is atomic.
+    write_context_file(&vault, "config.json", &content)
+}
+
+/// Raw contents of the open vault's `.context/types.json`, or None if absent.
+/// The Properties panel's per-vault type registry (`{version, types:{key:type}}`
+/// — the TS layer owns that schema too). A dedicated pair rather than a generic
+/// `.context` file API: one more file does not justify a path parameter into a
+/// directory CLAUDE.md calls sacred and hidden, which would be a traversal
+/// surface for the sake of twenty lines.
+///
+/// Epoch-pinned like `get_vault_config`, and for the same reason: the result is
+/// written back to the SAME file, so reading the wrong vault's registry is how
+/// two vaults' types would get merged.
+#[tauri::command]
+pub async fn get_vault_types(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<String>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    read_context_file(&vault, "types.json")
+}
+
+/// Replace `.context/types.json`. Atomic + fsync'd like the config beside it:
+/// a half-written registry would read as "this vault types nothing" and every
+/// property would silently fall back to inference.
+#[tauri::command]
+pub async fn set_vault_types(
+    state: State<'_, AppState>,
+    content: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    write_context_file(&vault, "types.json", &content)
+}
+
+/// Frontmatter keys used anywhere in the vault, most-used first. Feeds the
+/// Properties panel's name suggestions.
+#[tauri::command]
+pub async fn list_property_keys(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<crate::index::PropertyKeyCount>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let keys = index.lock().unwrap().list_property_keys()?;
+    Ok(keys)
+}
+
+/// Every `#tag` in the vault, most-used first. Feeds the editor's `#`
+/// completion. Capped at 500: a picker is a shortlist, and a vault with more
+/// distinct tags than that is not one where scrolling to number 501 is the
+/// answer.
+#[tauri::command]
+pub async fn list_tags(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<crate::index::TagCount>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let tags = index.lock().unwrap().list_tags(500)?;
+    Ok(tags)
+}
+
+/// One note's stored editor UI state (the folded sections), as opaque JSON the
+/// TS layer owns. `None` for a note that has never been folded.
+#[tauri::command]
+pub async fn get_note_ui_state(
+    state: State<'_, AppState>,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<String>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let value = index.lock().unwrap().get_note_ui_state(&doc_id)?;
+    Ok(value)
+}
+
+/// Replace one note's editor UI state.
+#[tauri::command]
+pub async fn set_note_ui_state(
+    state: State<'_, AppState>,
+    doc_id: String,
+    ui_state: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    index.lock().unwrap().set_note_ui_state(&doc_id, &ui_state)?;
+    Ok(())
+}
+
+/// Distinct values seen for one frontmatter key (array members flattened).
+#[tauri::command]
+pub async fn list_property_values(
+    state: State<'_, AppState>,
+    key: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<String>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let values = index.lock().unwrap().list_property_values(&key, 200)?;
+    Ok(values)
 }
 
 /// Persist the sync server base URL (app config, next to last_vault).
@@ -1985,6 +2091,40 @@ mod tests {
         // the same folder, still counts as a different epoch (paths repeat, epochs
         // don't).
         assert!(check_epoch(Some(1), 3).is_err());
+    }
+
+    /// `.context/types.json` (the Properties panel's per-vault type registry)
+    /// and `config.json` share one reader/writer pair. Absent must be None, not
+    /// an error — a vault that has never typed a property has no such file, and
+    /// the panel would otherwise show a failure on every note. The epoch pin
+    /// itself is `check_epoch`'s, covered above.
+    #[test]
+    fn context_files_round_trip_and_report_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+
+        assert_eq!(read_context_file(vault, "types.json").unwrap(), None);
+
+        let body = r#"{"version":1,"types":{"due":"date"}}"#;
+        write_context_file(vault, "types.json", body).unwrap();
+        assert_eq!(
+            read_context_file(vault, "types.json").unwrap().as_deref(),
+            Some(body)
+        );
+
+        // A rewrite replaces, never appends — and it must not disturb the doc-id
+        // map living beside it.
+        write_context_file(vault, "config.json", r#"{"serverVaultId":"col-1"}"#).unwrap();
+        write_context_file(vault, "types.json", r#"{"version":1,"types":{}}"#).unwrap();
+        assert_eq!(
+            read_context_file(vault, "types.json").unwrap().as_deref(),
+            Some(r#"{"version":1,"types":{}}"#)
+        );
+        assert_eq!(
+            read_context_file(vault, "config.json").unwrap().as_deref(),
+            Some(r#"{"serverVaultId":"col-1"}"#)
+        );
     }
 
     /// Unpinned callers (UI reads, user-driven edits) keep the legacy behaviour:

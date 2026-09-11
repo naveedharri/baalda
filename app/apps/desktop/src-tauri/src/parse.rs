@@ -29,11 +29,21 @@ pub struct ParsedNote {
     pub body: String,
 }
 
-// `#tag` — starts with a letter, may contain word chars, `/`, `-`. Must be
-// preceded by start-of-string or whitespace so `#` in `# Heading` (space after)
-// and `foo#bar` are not captured as tags.
-static TAG_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?:^|\s)#([\p{L}][\p{L}\p{N}_/\-]*)").unwrap());
+// `#tag`. This rule is shared, character for character, with the editor's
+// hashtag parser (`src/lib/editor/ofm/hashtag.ts`) — a word the editor draws as
+// a pill but this regex ignores is a tag that does not exist when you search
+// for it. Three parts:
+//   • the `#` is not preceded by `[\p{L}\p{N}_/]`  → `foo#bar` is not a tag,
+//     while `(#tag)` and a tag at the start of a line are;
+//   • the body is `[\p{L}\p{N}_/-]+`               → `#nested/tag`, `#a-b`;
+//   • the body holds at least one NON-DIGIT         → `#2026goals` is a tag,
+//     the issue number `#2026` is not.
+// The leading rule is written as "a character that is not one of those" rather
+// than as a lookbehind because the `regex` crate has none; the capture group is
+// the tag body, so the extra character is discarded either way.
+static TAG_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?:^|[^\p{L}\p{N}_/])#(\d*[\p{L}_/-][\p{L}\p{N}_/-]*)").unwrap()
+});
 
 // `[[target]]`, `[[target|alias]]`, `[[target#heading]]`.
 static WIKILINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]\n]+)\]\]").unwrap());
@@ -228,6 +238,17 @@ mod tests {
         assert_eq!(p2.title, "the-stem");
     }
 
+    /// New notes are created empty (`notefile.rs create_note`) and the UI shows a
+    /// note's filename stem as its title. `derive_title` is deliberately NOT
+    /// collapsed to the stem: it stays the *index* title (frontmatter `title:` →
+    /// first H1 → stem) because `index.rs` resolves `[[wikilinks]]` by basename
+    /// and then by title, and `notes_fts` indexes the title column. This pins the
+    /// empty-note half of that contract.
+    #[test]
+    fn empty_note_titles_from_its_stem() {
+        assert_eq!(parse_note("", "My Note").title, "My Note");
+    }
+
     #[test]
     fn extracts_wikilinks_with_alias_and_heading() {
         let p = parse_note("see [[Target Note]] and [[Other|alias]] and [[Third#sec]]", "s");
@@ -240,6 +261,44 @@ mod tests {
         let p = parse_note("# Real Heading\n\n#actualtag", "s");
         assert!(p.tags.contains(&"actualtag".to_string()));
         assert!(!p.tags.contains(&"Real".to_string()));
+    }
+
+    /// The tag rule, pinned against the editor's `ofm/hashtag.ts`. These six
+    /// cases ARE the shared contract: the editor draws a pill for exactly the
+    /// spans this regex indexes, so a disagreement is a tag you can see but
+    /// cannot search for.
+    fn tags_of(body: &str) -> Vec<String> {
+        parse_note(body, "s").tags
+    }
+
+    #[test]
+    fn tag_may_start_with_digits_if_it_is_not_all_digits() {
+        assert!(tags_of("plan #2026goals now").contains(&"2026goals".to_string()));
+    }
+
+    #[test]
+    fn a_bare_number_is_not_a_tag() {
+        assert!(tags_of("see issue #2026 please").is_empty());
+    }
+
+    #[test]
+    fn tag_in_parentheses_is_a_tag() {
+        assert!(tags_of("aside (#tag) here").contains(&"tag".to_string()));
+    }
+
+    #[test]
+    fn hash_inside_a_word_is_not_a_tag() {
+        assert!(tags_of("foo#bar baz").is_empty());
+    }
+
+    #[test]
+    fn atx_heading_hash_is_not_a_tag() {
+        assert!(tags_of("# Heading").is_empty());
+    }
+
+    #[test]
+    fn nested_tag_keeps_its_slashes() {
+        assert!(tags_of("a #nested/tag b").contains(&"nested/tag".to_string()));
     }
 
     #[test]

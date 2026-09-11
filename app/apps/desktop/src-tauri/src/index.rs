@@ -99,6 +99,33 @@ pub struct NoteTitle {
     pub title: String,
 }
 
+/// One `#tag` and how many notes carry it. Feeds the editor's `#` completion,
+/// where "how often do I actually use this" is the only sensible ranking.
+#[derive(Debug, Serialize, Clone)]
+pub struct TagCount {
+    pub name: String,
+    pub count: i64,
+}
+
+/// One frontmatter key and how many notes carry it — the ordering the
+/// Properties panel's key suggestions use.
+#[derive(Debug, Serialize, Clone)]
+pub struct PropertyKeyCount {
+    pub key: String,
+    pub count: i64,
+}
+
+/// A JSON scalar as the panel would show it. Objects and arrays are skipped:
+/// a value suggestion has to be something a single field can hold.
+fn scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedLink {
@@ -232,6 +259,19 @@ impl Index {
                 seq          INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_yjs_updates_doc ON yjs_updates(doc_id);
+
+            -- Per-note editor UI state (Stage 3b: which sections are folded).
+            -- Keyed by doc_id and NOT touched by `rebuild()`, exactly like the
+            -- `yjs_*` tables above: it describes how you were reading a note,
+            -- which a re-index has no business forgetting. The `state` column is
+            -- opaque JSON owned by the TS layer (`lib/editor/folding.ts`), so a
+            -- new kind of UI state costs no migration here. Orphan rows are
+            -- swept by `prune_yjs_docs`.
+            CREATE TABLE IF NOT EXISTS note_ui_state (
+                doc_id     TEXT PRIMARY KEY,
+                state      TEXT,
+                updated_at INTEGER
+            );
             "#,
         )?;
         Ok(())
@@ -1196,6 +1236,106 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Every `#tag` in the vault with the number of notes using it, most-used
+    /// first (ties broken by name so the list is stable between calls).
+    ///
+    /// A LEFT JOIN, not an inner one: `tags` rows outlive the last note that
+    /// used them (nothing garbage-collects the name), and a tag at count 0 is
+    /// still a tag you typed once and may well mean to type again — it just
+    /// sorts last.
+    pub fn list_tags(&self, limit: usize) -> AppResult<Vec<TagCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, COUNT(nt.note_id) AS n
+               FROM tags t
+               LEFT JOIN note_tags nt ON nt.tag_id = t.id
+              GROUP BY t.id, t.name
+              ORDER BY n DESC, t.name ASC
+              LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(TagCount {
+                name: r.get(0)?,
+                count: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ---- Frontmatter property autocomplete --------------------------------
+    //
+    // Both readers parse `notes.frontmatter` in Rust with serde_json rather than
+    // with SQLite's JSON1. `json_each` over a row whose blob is not an object
+    // raises, and SQLite gives no ordering guarantee that a `json_type(…) =
+    // 'object'` filter runs before it — so the safe SQL is uglier than the
+    // parse, and a few thousand short blobs is microseconds either way.
+
+    /// Every frontmatter key in the vault with the number of notes using it,
+    /// most-used first (ties broken by name so the list is stable).
+    pub fn list_property_keys(&self) -> AppResult<Vec<PropertyKeyCount>> {
+        let mut counts: HashMap<String, i64> = HashMap::new();
+        for value in self.frontmatter_objects()? {
+            if let serde_json::Value::Object(map) = value {
+                for key in map.keys() {
+                    *counts.entry(key.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut out: Vec<PropertyKeyCount> = counts
+            .into_iter()
+            .map(|(key, count)| PropertyKeyCount { key, count })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+        Ok(out)
+    }
+
+    /// Distinct scalar values seen for one key, array members flattened. Capped
+    /// so a key like `updated` (one value per note) can't return the vault.
+    pub fn list_property_values(&self, key: &str, limit: usize) -> AppResult<Vec<String>> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for value in self.frontmatter_objects()? {
+            let serde_json::Value::Object(map) = value else {
+                continue;
+            };
+            let Some(found) = map.get(key) else { continue };
+            let members: Vec<&serde_json::Value> = match found {
+                serde_json::Value::Array(items) => items.iter().collect(),
+                other => vec![other],
+            };
+            for member in members {
+                let Some(text) = scalar_to_string(member) else {
+                    continue;
+                };
+                if text.is_empty() || !seen.insert(text.clone()) {
+                    continue;
+                }
+                out.push(text);
+                if out.len() >= limit {
+                    out.sort();
+                    return Ok(out);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Every note's parsed `frontmatter` blob. Invalid JSON is skipped, not
+    /// raised: one note with a broken blob must not empty the whole list.
+    fn frontmatter_objects(&self) -> AppResult<Vec<serde_json::Value>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT frontmatter FROM notes WHERE frontmatter IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&row?) {
+                out.push(parsed);
+            }
+        }
+        Ok(out)
+    }
+
     // ---- Local CRDT persistence (spec 02 §4) ------------------------------
     //
     // The append-only `yjs_updates` log + periodic `yjs_snapshot` per doc,
@@ -1392,6 +1532,15 @@ impl Index {
             "DELETE FROM yjs_updates WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
             [],
         )? as i64;
+        // Fold state for a note nobody can reach any more. Judged against the
+        // same live set as the CRDT rows rather than against `notes.id`: the
+        // live set is a superset of it (registry map ∪ local index ∪ open docs),
+        // so this can never throw away the folds of a note the index is merely
+        // between writes on.
+        tx.execute(
+            "DELETE FROM note_ui_state WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
+            [],
+        )?;
         tx.execute_batch("DROP TABLE IF EXISTS _live_docs;")?;
         tx.commit()?;
         Ok(YjsPruneReport {
@@ -1399,6 +1548,38 @@ impl Index {
             updates_removed,
             bytes_reclaimed: snapshot_bytes + update_bytes,
         })
+    }
+
+    // ---- Per-note editor UI state (fold state) ----------------------------
+
+    /// One note's stored editor UI state, or `None` if it has never been saved.
+    /// Absent is an ordinary answer (a note you have never folded), never an
+    /// error.
+    pub fn get_note_ui_state(&self, doc_id: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT state FROM note_ui_state WHERE doc_id = ?1",
+                params![doc_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Replace one note's editor UI state.
+    pub fn set_note_ui_state(&self, doc_id: &str, state: &str) -> AppResult<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO note_ui_state (doc_id, state, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(doc_id) DO UPDATE SET state = excluded.state,
+                                               updated_at = excluded.updated_at",
+            params![doc_id, state, now_ms],
+        )?;
+        Ok(())
     }
 
     /// Drop ONE doc's CRDT rows: its snapshot, state vector and update log.
@@ -1576,6 +1757,122 @@ mod tests {
         .unwrap();
         write_note(&v, "Gamma.md", "# Gamma\n\nDangling [[Nonexistent]] link.").unwrap();
         (tmp, v)
+    }
+
+    /// The editor's `#` completion: every tag, most-used first. Ties break by
+    /// name so the list is stable between calls, which is what keeps the picker
+    /// from reshuffling under the user's finger.
+    #[test]
+    fn list_tags_counts_and_orders_by_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "---\ntags: [common, zeta]\n---\nA #common").unwrap();
+        write_note(&v, "B.md", "B has #common and #alpha").unwrap();
+        write_note(&v, "C.md", "C has #common").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let tags = idx.list_tags(50).unwrap();
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names.first(), Some(&"common"), "most-used tag leads");
+        assert_eq!(tags[0].count, 3);
+        // Three notes, one each: alphabetical among the equals.
+        assert_eq!(&names[1..], &["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn list_tags_honours_its_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "#a #b #c #d").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.list_tags(2).unwrap().len(), 2);
+    }
+
+    /// Fold state describes how you were READING a note; a re-index of the
+    /// files has no business forgetting it. Same contract as the `yjs_*`
+    /// tables: keyed by doc_id, never touched by `rebuild()`.
+    #[test]
+    fn note_ui_state_survives_a_rebuild() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();
+
+        assert_eq!(idx.get_note_ui_state(&alpha.id).unwrap(), None);
+        idx.set_note_ui_state(&alpha.id, r##"{"v":1,"folds":[{"line":4,"text":"# Alpha"}]}"##)
+            .unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(
+            idx.get_note_ui_state(&alpha.id).unwrap().as_deref(),
+            Some(r##"{"v":1,"folds":[{"line":4,"text":"# Alpha"}]}"##),
+        );
+
+        // And a second save replaces rather than duplicating (doc_id is the PK).
+        idx.set_note_ui_state(&alpha.id, r#"{"v":1,"folds":[]}"#).unwrap();
+        assert_eq!(
+            idx.get_note_ui_state(&alpha.id).unwrap().as_deref(),
+            Some(r#"{"v":1,"folds":[]}"#),
+        );
+    }
+
+    #[test]
+    fn prune_yjs_docs_sweeps_orphan_ui_state() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.set_note_ui_state("live", r#"{"v":1,"folds":[]}"#).unwrap();
+        idx.set_note_ui_state("dead", r#"{"v":1,"folds":[]}"#).unwrap();
+        idx.append_yjs_update("live", &[1]).unwrap();
+
+        idx.prune_yjs_docs(&["live".to_string()]).unwrap();
+
+        assert!(idx.get_note_ui_state("live").unwrap().is_some());
+        assert_eq!(idx.get_note_ui_state("dead").unwrap(), None);
+    }
+
+    /// The Properties panel's name suggestions: every key in the vault, ordered
+    /// by how many notes use it. A note whose `frontmatter` blob is not an
+    /// object (a bare string is legal YAML) or is unreadable must be skipped,
+    /// not raised — one odd note cannot empty the whole list.
+    #[test]
+    fn list_property_keys_counts_across_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "---\nstatus: draft\ntags: [x]\n---\nA").unwrap();
+        write_note(&v, "B.md", "---\nstatus: final\n---\nB").unwrap();
+        write_note(&v, "C.md", "---\njust a string\n---\nC").unwrap();
+        write_note(&v, "D.md", "No frontmatter at all.").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let keys = idx.list_property_keys().unwrap();
+        let pairs: Vec<(String, i64)> = keys.into_iter().map(|k| (k.key, k.count)).collect();
+        assert_eq!(
+            pairs,
+            vec![("status".to_string(), 2), ("tags".to_string(), 1)]
+        );
+    }
+
+    /// Value suggestions flatten arrays, drop duplicates and sort, so the same
+    /// tag typed in two notes offers itself once.
+    #[test]
+    fn list_property_values_flattens_and_dedups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "---\ntags: [youtube, ai]\nn: 3\n---\nA").unwrap();
+        write_note(&v, "B.md", "---\ntags: [ai, rust]\n---\nB").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        assert_eq!(
+            idx.list_property_values("tags", 200).unwrap(),
+            vec!["ai", "rust", "youtube"]
+        );
+        // Non-string scalars still suggest; an unknown key is empty, not an error.
+        assert_eq!(idx.list_property_values("n", 200).unwrap(), vec!["3"]);
+        assert!(idx.list_property_values("nope", 200).unwrap().is_empty());
+        // The cap is a cap, not a suggestion.
+        assert_eq!(idx.list_property_values("tags", 2).unwrap().len(), 2);
     }
 
     #[test]
