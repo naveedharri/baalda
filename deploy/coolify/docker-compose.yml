@@ -39,8 +39,18 @@
 # guard clauses here meant an unset var silently became the literal string
 # "set POSTGRES_PASSWORD in .env" instead of failing — DATABASE_URL, JWT_SECRET
 # and BETTER_AUTH_URL all came out as garbage and the deploy failed opaquely
-# downstream. BETTER_AUTH_URL below uses the correct bare `${BETTER_AUTH_URL:?}`
-# instead, which Coolify shows as a required, empty field in its UI.
+# downstream.
+#
+# BETTER_AUTH_URL is left with NO `:?` at all (just `${BETTER_AUTH_URL}`) so
+# the first deploy succeeds without any manual input — Coolify's own
+# `${VAR:?}` would block deployment entirely until the field is filled in
+# (see the same doc page), and the real public URL isn't known before this
+# first deploy generates a domain via SERVICE_FQDN_SERVER below anyway. The
+# app (app/apps/server/src/config.ts) treats an unset/empty BETTER_AUTH_URL
+# as `http://localhost:3010` rather than crashing, so the container comes up
+# fine with that placeholder. Once you have the real domain (Domains tab on
+# `server`), set BETTER_AUTH_URL to it — https://…, no trailing slash — and
+# redeploy; auth/invitation links are wrong until you do.
 name: baalda
 
 x-server-image: &server-image
@@ -52,7 +62,7 @@ x-server-env: &server-env
   NODE_ENV: production
   DATABASE_URL: postgres://baalda:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/baalda
   JWT_SECRET: ${SERVICE_REALBASE64_64_JWT}
-  BETTER_AUTH_URL: ${BETTER_AUTH_URL:?}
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL}
   PORT: "3010"
 
 services:

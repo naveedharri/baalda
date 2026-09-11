@@ -245,26 +245,30 @@ terminates TLS and reaches the container on the internal network instead.
 2. **Base Directory:** `/` (repo root) — this is what makes `context: .` in
    the compose file resolve correctly.
 3. **Docker Compose Location:** `/deploy/coolify/docker-compose.yml`.
-4. `POSTGRES_PASSWORD` and `JWT_SECRET` need nothing from you — the compose
-   file generates both via Coolify's magic env vars
-   (`SERVICE_PASSWORD_POSTGRES`, `SERVICE_REALBASE64_64_JWT`). Only
-   `BETTER_AUTH_URL` is a var you set, and it needs the domain from step 5
-   first, so deploy once to get there.
-5. Deploy — `migrate` must complete successfully before `server` starts, so a
-   deploy never briefly answers requests against an old schema. `server`
-   declares Coolify's `SERVICE_FQDN_SERVER` magic env var, so a domain
-   (targeting its exposed port `3010`) is generated and assigned to it
-   automatically; if that doesn't happen, assign one by hand (Service →
-   `server`, Port → `3010`, Protocol → `http`). Either way, once you have the
-   domain, set `BETTER_AUTH_URL` to it (`https://…`, no trailing slash, no
-   port) and redeploy — the sync WebSocket rides the same port at `/sync`, so
-   nothing else needs routing.
+4. Deploy — no env vars to fill in first. `POSTGRES_PASSWORD` and
+   `JWT_SECRET` come from Coolify's magic env vars
+   (`SERVICE_PASSWORD_POSTGRES`, `SERVICE_REALBASE64_64_JWT`);
+   `BETTER_AUTH_URL` starts unset and the app falls back to a placeholder
+   rather than refusing to start, so the stack comes up on its own. `migrate`
+   must complete successfully before `server` starts, so a deploy never
+   briefly answers requests against an old schema. `server` also declares
+   Coolify's `SERVICE_FQDN_SERVER` magic env var, so a domain (targeting its
+   exposed port `3010`) is generated and assigned to it automatically; if
+   that doesn't happen, assign one by hand (Service → `server`, Port →
+   `3010`, Protocol → `http`).
+5. Once it's up, set `BETTER_AUTH_URL` to the real domain from step 4
+   (`https://…`, no trailing slash, no port) in the `server` service's own
+   Environment Variables — not a global Coolify setting — and redeploy. Until
+   then, auth/invitation links point at the placeholder instead. The sync
+   WebSocket rides the same port at `/sync`, so nothing else needs routing.
 
    Don't reuse bash's `${VAR:?error message}` pattern here if you customize
    this file — Coolify's compose parser reads the text after `:?` as a
    *prefilled default value*, not an error message, so an unset var silently
-   becomes that literal text instead of failing loudly. Use bare `${VAR:?}`
-   for a var Coolify should require empty, as `BETTER_AUTH_URL` does.
+   becomes that literal text instead of failing loudly. `${VAR:?}` (bare) also
+   *blocks deployment* until filled in, which is why `BETTER_AUTH_URL` above
+   deliberately has no `:?` at all — the domain isn't known before this first
+   deploy runs.
 
 Full walkthrough and the differences from `deploy/compose`:
 [`deploy/coolify/README.md`](../deploy/coolify/README.md).
