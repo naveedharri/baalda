@@ -335,6 +335,13 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   ".cm-note-title": {
     paddingBottom: "var(--inline-title-gap)",
   },
+  // Mirrors the selection wash onto the title while a selection reaches the
+  // start of the document (see `titleSelectionMirror` in noteHeader.ts). Same
+  // colour as `.cm-selectionBackground` above.
+  ".cm-note-title.is-selected": {
+    backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
+    borderRadius: "var(--radius-sm)",
+  },
   ".inline-title-wrap": {
     display: "flex",
     flexDirection: "column",

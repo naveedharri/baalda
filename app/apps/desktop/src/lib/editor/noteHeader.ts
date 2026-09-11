@@ -44,6 +44,8 @@ import {
   type DecorationSet,
   EditorView,
   keymap,
+  ViewPlugin,
+  type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
 import type { Root } from "react-dom/client";
@@ -300,6 +302,34 @@ function build(state: EditorState, opts: NoteHeaderOptions): DecorationSet {
  * has a note path — the version-preview view and the geometry tests build an
  * editor without one and keep Stage 1's dimmed frontmatter block.
  */
+/**
+ * The title is a zero-length widget above position 0, so drawSelection's wash
+ * stops at the top of the body and a ⌘A visibly "leaves the title out". The
+ * title is not document text (copying still copies the note, not the file
+ * name), but a selection that reaches the very start of the document should
+ * READ as whole, so mirror it: while a non-empty selection includes position 0,
+ * the title host carries `is-selected` and paints the same wash.
+ */
+const titleSelectionMirror = ViewPlugin.fromClass(
+  class {
+    constructor(view: EditorView) {
+      this.sync(view);
+    }
+    update(u: ViewUpdate) {
+      if (u.selectionSet || u.docChanged || u.focusChanged || u.viewportChanged) {
+        this.sync(u.view);
+      }
+    }
+    private sync(view: EditorView) {
+      const host = view.contentDOM.querySelector(".cm-note-title");
+      if (!host) return;
+      const sel = view.state.selection.main;
+      const on = !sel.empty && sel.from === 0;
+      host.classList.toggle("is-selected", on);
+    }
+  },
+);
+
 export function noteHeader(opts: NoteHeaderOptions): Extension {
   const modeExt = propertiesMode.of(opts.mode ?? "visible");
   const field = StateField.define<DecorationSet>({
@@ -318,6 +348,7 @@ export function noteHeader(opts: NoteHeaderOptions): Extension {
     frontmatterField,
     opts.modeCompartment ? opts.modeCompartment.of(modeExt) : modeExt,
     field,
+    titleSelectionMirror,
     // `Prec.high` so these beat defaultKeymap's own arrow handling.
     Prec.high(
       keymap.of([
