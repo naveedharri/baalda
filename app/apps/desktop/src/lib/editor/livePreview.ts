@@ -10,7 +10,17 @@
 //   >                → blockquote marker hidden (the bar comes from blocks.ts)
 //   - * +            → replaced with a • bullet
 //   [text](url)      → shows just `text`, underlined + clickable
-// Put the cursor on a line and its raw markers reappear, so editing is direct.
+// Put the caret ON a construct and its raw markers reappear, so editing is
+// direct. "On" is measured two different ways, and the difference is the whole
+// feel of the editor (see ./reveal.ts):
+//   LINE scope   — structure markers (#, >, the task dash) and the block
+//                  widgets. Editing a heading is editing the whole line.
+//   TOKEN scope  — inline markers (**, *, ~~, ==, %%, `, [](), ![]()). Only
+//                  the span the selection touches unfolds, so `# Head **bold**`
+//                  with the caret at the end of the line shows its `#` and
+//                  keeps the `**` hidden.
+// Blur the editor and NOTHING is active: click into the sidebar and the note
+// reads as a finished page.
 //
 // Raw HTML *blocks* embedded in a note render in place (never execute — see
 // HtmlEmbedWidget) unless the cursor is inside them, in which case the source
@@ -30,11 +40,21 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
+import type { SyntaxNodeRef } from "@lezer/common";
 import { openExternal } from "../ipc";
 import { previewKind } from "../preview";
 import { frontmatterField } from "./frontmatter";
+import {
+  focusMoved,
+  isFocused,
+  revealState,
+  selectionTouches,
+  setFocused,
+  tokenOwner,
+} from "./reveal";
 import { TableWidget } from "./table/TableWidget";
 import { TASK_RE } from "./tasks";
+import { wikilinkRe } from "./wikilinks";
 
 /** Turns an image `src` into a webview-loadable URL (see CreateEditorOptions). */
 type ResolveAsset = (src: string) => string;
@@ -208,11 +228,11 @@ const hidden = Decoration.replace({});
 export const BLOCK_INSET_CLASS = "cm-block-inset";
 
 /**
- * Lines touched by any selection stay "raw" so the writer edits real markdown.
- * Shared by the inline plugin and the block-widget field so both agree on what
- * "being edited" means.
+ * Does `[from, to]` share a line with any selection range? The LINE scope with
+ * the focus rule left off — the memoisation below has to ask this about a state
+ * whose focus flag has just flipped.
  */
-function activeLineChecker(state: EditorState): (from: number, to: number) => boolean {
+function lineSpanChecker(state: EditorState): (from: number, to: number) => boolean {
   const doc = state.doc;
   const activeLines = new Set<number>();
   for (const r of state.selection.ranges) {
@@ -226,6 +246,19 @@ function activeLineChecker(state: EditorState): (from: number, to: number) => bo
     for (let n = first; n <= last; n++) if (activeLines.has(n)) return true;
     return false;
   };
+}
+
+/**
+ * Lines touched by any selection stay "raw" so the writer edits real markdown.
+ * Shared by the inline plugin, the block-widget field and ./ofm/callout.ts, so
+ * all three agree on what "being edited" means.
+ *
+ * A BLURRED editor has no active line at all: the caret it is still carrying is
+ * not where anyone is looking.
+ */
+export function activeLineChecker(state: EditorState): (from: number, to: number) => boolean {
+  if (!isFocused(state)) return () => false;
+  return lineSpanChecker(state);
 }
 
 /**
@@ -248,13 +281,31 @@ function frontmatterChecker(state: EditorState): (from: number, to: number) => b
  * live here, computed over the whole document, while the inline marker work
  * stays in the (viewport-scoped) plugin below.
  */
+/**
+ * The block field's value: the decorations, plus every block whose rendering
+ * DEPENDS ON THE SELECTION — an HTML block or a fenced block, which show source
+ * while you edit them. (A table is not among them: it is always the editable
+ * widget, so no caret move can change its decoration.)
+ *
+ * Those ranges are what makes the memoisation below safe. On a selection-only
+ * transaction the only thing that can change is whether one of them is being
+ * edited, so when no caret is near one on EITHER side of the move, the previous
+ * set is still correct. Without this, every arrow key re-parsed the whole
+ * document (`ensureSyntaxTree` over `doc.length`) before the cursor moved.
+ */
+interface BlockDecorations {
+  deco: DecorationSet;
+  blocks: Array<[number, number]>;
+}
+
 function buildBlockDecorations(
   state: EditorState,
   resolveAsset: ResolveAsset,
   onNavigate?: (target: string) => void,
-): DecorationSet {
+): BlockDecorations {
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
+  const blocks: Array<[number, number]> = [];
   const isActive = activeLineChecker(state);
   const inFrontmatter = frontmatterChecker(state);
 
@@ -265,6 +316,12 @@ function buildBlockDecorations(
     enter: (node) => {
       // Nothing decorates inside the frontmatter region (see frontmatter.ts).
       if (inFrontmatter(node.from, node.to)) return false;
+      // Record the selection-dependent candidates for the memo before the
+      // branches decide anything, so the bookkeeping stays out of the rendering
+      // logic. Over-recording (a non-html fence) only costs a rebuild.
+      if (node.name === "HTMLBlock" || node.name === "FencedCode") {
+        blocks.push([node.from, node.to]);
+      }
       if (node.name === "HTMLBlock") {
         if (!isActive(node.from, node.to)) {
           const html = doc.sliceString(node.from, node.to);
@@ -319,7 +376,14 @@ function buildBlockDecorations(
     },
   });
 
-  return Decoration.set(decos, true);
+  return { deco: Decoration.set(decos, true), blocks };
+}
+
+/** Is any selection-dependent block on a line this state's selection touches? */
+function blocksTouched(blocks: Array<[number, number]>, state: EditorState): boolean {
+  if (blocks.length === 0) return false;
+  const onLine = lineSpanChecker(state);
+  return blocks.some(([from, to]) => onLine(from, to));
 }
 
 function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): DecorationSet {
@@ -327,13 +391,25 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const isActive = activeLineChecker(state);
+  const touches = selectionTouches(state);
   const inFrontmatter = frontmatterChecker(state);
 
+  /**
+   * TOKEN scope: is the inline construct this marker belongs to being edited?
+   * A marker with no inline owner answers for itself.
+   */
+  const isActiveToken = (node: SyntaxNodeRef): boolean => {
+    const owner = tokenOwner(node.node);
+    return owner ? touches(owner.from, owner.to) : touches(node.from, node.to);
+  };
+
   // `[[wiki-links]]` are owned by the wikilinks plugin; never touch their marks.
+  // (`wikilinkRe()` mints a fresh regex per call — the `g` flag carries
+  // `lastIndex` state, so one shared instance silently skips matches.)
   const wikiRanges: Array<[number, number]> = [];
   for (const { from, to } of view.visibleRanges) {
     const text = doc.sliceString(from, to);
-    const re = /\[\[[^\]\n]+\]\]/g;
+    const re = wikilinkRe();
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
       wikiRanges.push([from + m.index, from + m.index + m[0].length]);
@@ -378,47 +454,71 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
         // nothing underneath one is ever on screen — never style its children.
         if (node.name === "Table") return false;
 
-        // On the active line(s) we show raw markers; likewise inside wiki-links.
-        if (isActive(node.from, node.to)) return;
+        // Wiki-links are the wikilinks plugin's territory, marks and all.
         if (inWiki(node.from)) return;
 
         switch (node.name) {
+          // ---- LINE scope: the markers that give a LINE its shape ----------
           case "HeaderMark": {
+            if (isActive(node.from, node.to)) break;
             // Swallow the single space between the marker and the heading text.
             let end = node.to;
             if (doc.sliceString(end, end + 1) === " ") end += 1;
             hide(node.from, end);
             break;
           }
+          case "QuoteMark":
+            if (!isActive(node.from, node.to)) hide(node.from, node.to);
+            break;
+          case "Escape":
+            // `\*` — hide the backslash, keep the character it protects. Put
+            // the caret on the line and the backslash returns for editing.
+            if (!isActive(node.from, node.to)) hide(node.from, node.from + 1);
+            break;
+          case "ListMark": {
+            if (!/^[-*+]$/.test(doc.sliceString(node.from, node.to))) break;
+            const line = doc.lineAt(node.from);
+            const task = TASK_RE.exec(line.text);
+            if (task) {
+              // Task item (`- [ ]`) → hide the dash so the checkbox (rendered
+              // by ./tasks) stands alone. LINE-scoped, because the raw `- [ ]`
+              // has to come back for editing and ./tasks drops the checkbox on
+              // exactly the same rule.
+              if (isActive(node.from, node.to)) break;
+              const boxFrom = line.from + line.text.indexOf(task[1]);
+              hide(node.from, boxFrom);
+            } else {
+              // A plain bullet is a • even while you type on the line: a marker
+              // that changes shape under the caret is the flicker this stage
+              // exists to remove. Backspace still deletes the real `-`
+              // (deleteMarkupBackward) — the decoration never touches the doc.
+              decos.push(bullet.range(node.from, node.to));
+            }
+            break;
+          }
+          // ---- TOKEN scope: inline markers unfold one span at a time -------
           case "EmphasisMark":
           case "StrikethroughMark":
-          case "QuoteMark":
+          case "HighlightMark":
+          case "OfmCommentMark":
           case "LinkMark":
-            hide(node.from, node.to);
+            if (!isActiveToken(node)) hide(node.from, node.to);
             break;
           case "CodeMark":
             // Only inline-code backticks; leave fenced-code fences visible.
-            if (node.node.parent?.name === "InlineCode") hide(node.from, node.to);
+            if (node.node.parent?.name === "InlineCode" && !isActiveToken(node)) {
+              hide(node.from, node.to);
+            }
             break;
           case "URL":
-            // Hide the (url) of a real link; leave bare autolinks as-is.
-            if (node.node.parent?.name === "Link") hide(node.from, node.to);
-            break;
-          case "ListMark":
-            if (/^[-*+]$/.test(doc.sliceString(node.from, node.to))) {
-              // Task item (`- [ ]`) → hide the dash so the checkbox (rendered by
-              // ./tasks) stands alone; a plain bullet becomes a •.
-              const line = doc.lineAt(node.from);
-              const task = TASK_RE.exec(line.text);
-              if (task) {
-                const boxFrom = line.from + line.text.indexOf(task[1]);
-                hide(node.from, boxFrom);
-              } else {
-                decos.push(bullet.range(node.from, node.to));
-              }
+          case "LinkTitle":
+            // Hide the (url "title") of a real link; leave autolinks as-is.
+            if (node.node.parent?.name === "Link" && !isActiveToken(node)) {
+              hide(node.from, node.to);
             }
             break;
           case "Image": {
+            if (isActiveToken(node)) break;
             // Render `![alt](src)` in place; skip its child marks. Images become
             // an inline <img>; PDFs become a framed preview block. (Both embed
             // the same way — the file type picks the widget.)
@@ -440,7 +540,10 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
           }
           case "Link": {
             // Underline + make the visible text clickable; the URL is opened
-            // externally on click (see the mousedown handler below).
+            // externally on click (see the mousedown handler below). Dropped
+            // while the link is being edited, or a click meant to place the
+            // caret in the link text would navigate away instead.
+            if (isActiveToken(node)) break;
             const urlNode = node.node.getChild("URL");
             const url = urlNode ? doc.sliceString(urlNode.from, urlNode.to) : "";
             if (url) {
@@ -474,13 +577,27 @@ export function livePreview(
   const resolveAsset = opts.resolveAsset ?? identityAsset;
   const onNavigate = opts.onNavigate;
 
-  const blockWidgets = StateField.define<DecorationSet>({
+  const blockWidgets = StateField.define<BlockDecorations>({
     create: (state) => buildBlockDecorations(state, resolveAsset, onNavigate),
-    update: (deco, tr) =>
-      tr.docChanged || tr.selection || tr.startState.readOnly !== tr.state.readOnly
-        ? buildBlockDecorations(tr.state, resolveAsset, onNavigate)
-        : deco,
-    provide: (f) => EditorView.decorations.from(f),
+    update(value, tr) {
+      if (tr.docChanged || tr.startState.readOnly !== tr.state.readOnly) {
+        return buildBlockDecorations(tr.state, resolveAsset, onNavigate);
+      }
+      const selectionMoved = !tr.startState.selection.eq(tr.state.selection);
+      const focusMovedHere = tr.effects.some((e) => e.is(setFocused));
+      if (!selectionMoved && !focusMovedHere) return value;
+      // Nothing near a selection-dependent block changed hands → the previous
+      // set still holds. (The table widget is selection-independent, so it is
+      // never a reason to rebuild.)
+      if (
+        !blocksTouched(value.blocks, tr.startState) &&
+        !blocksTouched(value.blocks, tr.state)
+      ) {
+        return value;
+      }
+      return buildBlockDecorations(tr.state, resolveAsset, onNavigate);
+    },
+    provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
   });
 
   const inlinePlugin = ViewPlugin.fromClass(
@@ -490,7 +607,9 @@ export function livePreview(
         this.decorations = buildDecorations(view, resolveAsset);
       }
       update(u: ViewUpdate) {
-        if (u.docChanged || u.viewportChanged || u.selectionSet) {
+        // `focusMoved`: blurring hides every marker, so the set goes stale the
+        // moment focus moves even though neither doc nor selection did.
+        if (u.docChanged || u.viewportChanged || u.selectionSet || focusMoved(u)) {
           this.decorations = buildDecorations(u.view, resolveAsset);
         }
       }
@@ -510,5 +629,5 @@ export function livePreview(
     }
   );
 
-  return [blockWidgets, inlinePlugin];
+  return [...revealState, blockWidgets, inlinePlugin];
 }

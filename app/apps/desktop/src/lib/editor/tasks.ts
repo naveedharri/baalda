@@ -14,6 +14,7 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
+import { focusMoved, isFocused } from "./reveal";
 
 // A task marker: indent, a bullet, then `[ ]`/`[x]`. Group 1 is the box.
 export const TASK_RE = /^\s*[-*+]\s+(\[[ xX]\])\s/;
@@ -50,10 +51,14 @@ class CheckboxWidget extends WidgetType {
 function buildDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const { doc, selection } = view.state;
+  // Same LINE rule as livePreview's task-dash hiding, focus and all: a blurred
+  // editor has no active line, so every checkbox renders (see ./reveal.ts).
   const active = new Set<number>();
-  for (const r of selection.ranges) {
-    for (let n = doc.lineAt(r.from).number; n <= doc.lineAt(r.to).number; n++) {
-      active.add(n);
+  if (isFocused(view.state)) {
+    for (const r of selection.ranges) {
+      for (let n = doc.lineAt(r.from).number; n <= doc.lineAt(r.to).number; n++) {
+        active.add(n);
+      }
     }
   }
   for (const { from, to } of view.visibleRanges) {
@@ -84,7 +89,7 @@ export const checkboxes = ViewPlugin.fromClass(
       this.decorations = buildDecorations(view);
     }
     update(u: ViewUpdate) {
-      if (u.docChanged || u.viewportChanged || u.selectionSet) {
+      if (u.docChanged || u.viewportChanged || u.selectionSet || focusMoved(u)) {
         this.decorations = buildDecorations(u.view);
       }
     }

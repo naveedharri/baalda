@@ -24,6 +24,7 @@
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@fontsource/radio-canada-big": "^5.2.7",
     "@hocuspocus/provider": "catalog:",
+    "@lezer/common": "^1.5.2",
     "@lezer/highlight": "^1.2.3",
     "@lezer/markdown": "^1.7.1",
     "@tauri-apps/api": "^2",

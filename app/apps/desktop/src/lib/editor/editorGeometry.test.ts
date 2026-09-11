@@ -94,7 +94,7 @@ describe("editor theme geometry", () => {
   });
 
   it("dims the • bullet to the faint marker tier, not the accent", () => {
-    expect(editorThemeSpec[".cm-bullet"].color).toBe("var(--text-tertiary)");
+    expect(editorThemeSpec[".cm-bullet"].color).toBe("var(--text-faint)");
   });
 
   it("sets no horizontal padding on the frontmatter line class", () => {

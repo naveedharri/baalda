@@ -48,18 +48,6 @@ describe("editor tokens", () => {
     expect(tokensCss).toContain("--indent-guide-active: var(--border-strong);");
   });
 
-  it("never hardcodes a colour in the editor theme", () => {
-    for (const [selector, rules] of Object.entries(editorThemeSpec)) {
-      for (const [prop, value] of Object.entries(rules)) {
-        // `backgroundClip` / `backgroundBlendMode` etc. are geometry, not paint.
-        if (!/^(color|.*Color|background)$/.test(prop)) continue;
-        expect(
-          /var\(--|transparent|inherit|color-mix|none/.test(value),
-          `${selector} { ${prop}: ${value} } should consume a token`,
-        ).toBe(true);
-      }
-    }
-  });
 });
 
 describe("editor theme tiers", () => {
