@@ -1412,6 +1412,29 @@ body:has(.sidebar-resizer.dragging) {
   background: var(--bg-active);
   color: var(--text-primary);
 }
+/* A one-shot "here it is" pulse on a row the app just revealed (store
+   `revealedPath`). Subtle by design: the row's own `.selected` highlight is the
+   lasting signal, this only catches the eye once. Declared BEFORE `.selected` so
+   the held end state (`both`, transparent) never outranks the selection fill. */
+@keyframes tree-reveal {
+  0% {
+    background: var(--accent-soft);
+  }
+  35% {
+    background: var(--accent-soft-hover);
+  }
+  100% {
+    background: transparent;
+  }
+}
+.tree-row.revealed {
+  animation: tree-reveal 600ms var(--ease) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-row.revealed {
+    animation: none;
+  }
+}
 .tree-row.selected {
   background: var(--accent-soft);
   color: var(--text-primary);
@@ -2398,32 +2421,22 @@ body:has(.sidebar-resizer.dragging) {
     animation: none;
   }
 }
+/* The tab strip is the header's title row (see App.tsx), so the header holds no
+   vertical padding of its own and stretches its children: the active tab is a
+   card that has to reach the bottom edge to join the note sheet below. */
 .main-header {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: var(--sp-3);
-  padding: var(--sp-4) var(--sp-6);
+  min-height: 44px;
+  padding: 0 var(--sp-6) 0 var(--sp-3);
   border-bottom: 1px solid var(--border);
-}
-.note-title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: var(--fs-lg);
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-right: auto;
 }
 /* ---- Open-file tabs (TabBar) ---- */
 .tab-strip {
   display: flex;
   align-items: stretch;
   gap: var(--sp-1);
-  flex: none;
-  padding: 0 var(--sp-3);
-  border-bottom: 1px solid var(--border);
   overflow-x: auto;
   /* The strip scrolls (wheel/trackpad/drag-into-view), but a scrollbar under
      a row of tabs reads as clutter, so it's hidden in both engines. */
@@ -2432,29 +2445,92 @@ body:has(.sidebar-resizer.dragging) {
 .tab-strip::-webkit-scrollbar {
   display: none;
 }
+/* Inside the header: take the row, shrink rather than push the buttons off, and
+   sit ON the header's bottom border so the active card can paint over it. The
+   left pad keeps the first tab off the scroll container's clip edge, where the
+   active card's left corner notch would otherwise be cut. */
+.main-header > .tab-strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-left: var(--radius-sm);
+  margin-bottom: -1px;
+}
 .tab {
+  position: relative; /* the active card's corner pseudos anchor here */
   display: flex;
   align-items: center;
   flex: none;
   max-width: 220px;
-  margin: var(--sp-1) 0;
-  border-radius: var(--radius-sm);
+  margin: var(--sp-1) 0 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   color: var(--text-secondary);
 }
 .tab:hover {
   background: var(--bg-hover);
 }
-/* Same selected idiom as the sidebar's .tree-row.selected. */
+/* The active tab is a raised card: the note surface itself, lifted out of the
+   header, its bottom edge dissolving into the sheet below. `--bg-surface` is the
+   editor sheet, so the card and the note read as one piece of paper. (This
+   replaces the sidebar-row `--accent-soft` pill idiom the strip used to borrow.) */
 .tab.active {
-  background: var(--accent-soft);
+  background: var(--bg-surface);
   color: var(--text-primary);
+  margin-bottom: 0;
+  z-index: 1; /* over the header's bottom border */
 }
 .tab.active:hover {
-  background: var(--accent-soft-hover);
+  background: var(--bg-surface);
+}
+/* Inverted corners: a `--bg-surface` square whose INNER corner is rounded, with
+   a box-shadow of the same colour offset downward. The rounded corner cuts a
+   concave notch and the shadow fills the sheet below, so the card's silhouette
+   curves outward into the note instead of stopping at a hard edge. Both pseudos
+   take the token, never a literal colour, so dark theme follows. */
+.tab.active::before,
+.tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: var(--radius-sm);
+  height: var(--radius-sm);
+  background: var(--bg-surface);
+  pointer-events: none;
+}
+.tab.active::before {
+  left: calc(var(--radius-sm) * -1);
+  border-bottom-right-radius: var(--radius-sm);
+  box-shadow: 0 var(--radius-sm) 0 0 var(--bg-surface);
+}
+.tab.active::after {
+  right: calc(var(--radius-sm) * -1);
+  border-bottom-left-radius: var(--radius-sm);
+  box-shadow: 0 var(--radius-sm) 0 0 var(--bg-surface);
 }
 /* Click acknowledged, open in flight (same signal as the sidebar row). */
 .tab.opening {
   opacity: 0.6;
+}
+/* `+` new note, after the last tab. */
+.tab-new {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  align-self: center;
+  margin-left: var(--sp-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.tab-new:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.tab-new svg {
+  width: 13px;
+  height: 13px;
 }
 .tab-label {
   background: none;
@@ -2469,7 +2545,7 @@ body:has(.sidebar-resizer.dragging) {
   cursor: pointer;
 }
 .tab.active .tab-label {
-  font-weight: 500;
+  font-weight: 600;
 }
 .tab-close {
   display: grid;

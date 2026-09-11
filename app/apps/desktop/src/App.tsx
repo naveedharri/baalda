@@ -35,6 +35,7 @@ import {
 } from "./lib/updater";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
+import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
 import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
@@ -129,7 +130,7 @@ function RemovedBanner() {
   return (
     <Banner show={!!noteRemoved && !!openNote}>
       <span>
-        <strong>{openNote?.title}</strong> was deleted on disk
+        <strong>{openNote ? noteLabel(openNote.path) : ""}</strong> was deleted on disk
         {synced ? " and removed for the team. A copy is kept in the vault's trash." : "."}
       </span>
       <div className="banner-actions">
@@ -902,10 +903,12 @@ export default function App() {
     };
   }, []);
 
-  // ⌘N / Ctrl+N → new note at vault root.
+  // Window commands: ⌘N new note, ⌘W close tab, Ctrl-Tab cycle, ⌘S/⌘G/⌘F, reload.
   useEffect(() => {
     // Timestamp of the last bare "r" press, for the "rr" reload chord below.
     let lastRAt = 0;
+    // The tab order as it was when a Ctrl-Tab chord began — see the handler.
+    let tabCycle: string[] | null = null;
 
     // True when focus is in the editor or any text field, so bare-key chords
     // (like "rr") never fire mid-typing — they only work when just viewing.
@@ -936,24 +939,39 @@ export default function App() {
     const onKey = async (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        // ⌘N creates at the vault root, so it honours the same freeze latch as
-        // the tree's New-note button — silently writing a root file here would
-        // leave it permanently unsyncable (the server refuses to register it).
-        if (useStore.getState().rootFrozen) {
-          toast(
-            "This vault's root is frozen — create this inside a folder instead.",
-            "error",
-          );
-          return;
-        }
-        try {
-          const path = await ipc.createNote("", `Untitled ${Date.now()}`);
-          await useStore.getState().refreshTree();
-          await useStore.getState().refreshTitles();
-          await useStore.getState().openNoteByPath(path);
-        } catch (err) {
-          console.error(err);
-        }
+        // One shared create path with the sidebar's New-note button and the tab
+        // strip's `+`: the same `Untitled` / `Untitled N` naming, the same root
+        // freeze latch (writing a root file past it would leave the note
+        // permanently unsyncable — the server refuses to register it), and the
+        // same reveal-into-rename. This used to invent `Untitled ${Date.now()}`.
+        void useStore.getState().createNoteIn("");
+        return;
+      }
+      // ⌘W closes the active tab (and clears the editor with the last one).
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        const active = useStore.getState().openNote?.path;
+        if (active) useStore.getState().closeTab(active);
+        return;
+      }
+      // Ctrl-Tab / Ctrl-Shift-Tab walk the strip. Ctrl, not ⌘, on every
+      // platform: ⌘-Tab is the macOS app switcher and never reaches the webview.
+      //
+      // Over a SNAPSHOT of the order taken on the first press of the chord: the
+      // strip is most-recently-active first, so switching moves the target to
+      // index 0 and a live read would ping-pong between two tabs forever. The
+      // snapshot is dropped when Control comes up (see `onKeyUp`).
+      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") {
+        e.preventDefault();
+        const { openTabs, openNote } = useStore.getState();
+        const strip = tabCycle ?? openTabs;
+        tabCycle = strip;
+        if (strip.length < 2) return;
+        const i = openNote ? strip.indexOf(openNote.path) : -1;
+        const step = e.shiftKey ? -1 : 1;
+        const next = strip[(i + step + strip.length) % strip.length];
+        if (next) void useStore.getState().openNoteByPath(next);
+        return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -998,8 +1016,17 @@ export default function App() {
         return;
       }
     };
+    // Releasing Control ends the Ctrl-Tab chord, so the next one re-snapshots
+    // the (by then re-ordered) strip.
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Control") tabCycle = null;
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, []);
 
   // Only while we still don't know WHICH folder to show. `setVault` lands
@@ -1071,7 +1098,11 @@ export default function App() {
               to drag the window by. "deep" hands the whole row over as a drag
               region; Tauri exempts the buttons on the right, so they still click. */}
           <header className="main-header" data-tauri-drag-region="deep">
-            <span className="note-title">{openNote?.title ?? "No note open"}</span>
+            {/* The tab strip IS the header's title row — the note's one and only
+                title. A `.note-title` span used to sit here showing the *indexed*
+                title, which for a legacy note whose H1 and filename disagree said
+                something different from its own tab. */}
+            <TabBar />
             <SyncIndicator noteOpen={openNote != null && !isPreview} />
             {/* Vault-wide, so it sits in the header regardless of the open note. */}
             <TalkButton />
@@ -1147,7 +1178,6 @@ export default function App() {
               </svg>
             </button>
           </header>
-          <TabBar />
           <RemovedBanner />
           <DeletedByTeammateBanner />
           <div className="editor-wrap">

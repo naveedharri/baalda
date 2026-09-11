@@ -92,6 +92,13 @@ export interface OpenNote {
   path: string;
   /** doc_id from the index — the stable Yjs document id for this note. */
   id: string | null;
+  /**
+   * The INDEXED title (frontmatter `title:` → first H1 → stem, from Rust
+   * `parse.rs derive_title`), snapshotted at open. Never a display label: the
+   * UI shows the file name through `lib/notePath.ts noteLabel`, which is what
+   * stopped the header, the tab and the sidebar from disagreeing. This field
+   * exists only to hand `registry.registerNote` the server-side registry title.
+   */
   title: string;
 }
 
@@ -130,9 +137,11 @@ interface AppStore {
   vault: ipc.VaultInfo | null;
   tree: ipc.TreeNode | null;
   openNote: OpenNote | null;
-  /** Paths of the files held open as tabs, in the order they were opened. The
-   *  ACTIVE tab is `openNote.path` — this list is only which tabs exist, so the
-   *  two never disagree about what's on screen. Session-only, vault-scoped. */
+  /** Paths of the files held open as tabs, most-recently-active FIRST —
+   *  `openTabs[0]` is always the active tab, so the card you are looking at is
+   *  the leftmost one and the note you came from is right behind it. The ACTIVE
+   *  tab is `openNote.path`; this list is only which tabs exist, so the two
+   *  never disagree about what's on screen. Session-only, vault-scoped. */
   openTabs: string[];
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
@@ -386,6 +395,35 @@ interface AppStore {
   openWelcomeIfPresent: () => Promise<void>;
 
   openNoteByPath: (path: string) => Promise<void>;
+  /**
+   * Create a note at `dir` with an explicit name, open it, and reveal it in the
+   * sidebar. The one path every caller shares — the ⌘N handler used to invent
+   * `Untitled ${Date.now()}` while the sidebar's New-note button used
+   * `Untitled`, `Untitled 1`, … Returns the created path, or null when the root
+   * freeze latch refused it. Throws what `ipc.createNote` throws (a taken name
+   * included) so `createNoteIn` can walk to the next candidate.
+   */
+  createNoteAt: (dir: string, name: string) => Promise<string | null>;
+  /**
+   * `createNoteAt` with the sidebar's `Untitled` / `Untitled N` search, plus
+   * inline rename armed on the new row. New notes are created EMPTY (Rust
+   * `create_note`), so the sidebar's rename box is how they get named.
+   */
+  createNoteIn: (dir: string) => Promise<string | null>;
+  /**
+   * "Show me this path in the sidebar." Bumped by `openNoteByPath` and by
+   * `createNoteIn`; consumed by an effect in `FileTree`, which is the only place
+   * that holds the arborist handle (lazy children must be listed in ancestor
+   * order before the row exists). `token` makes a repeat request for the SAME
+   * path re-fire — a reveal is an event, not a state.
+   */
+  revealRequest: { path: string; edit: boolean; token: number } | null;
+  requestReveal: (path: string, opts?: { edit?: boolean }) => void;
+  /** The path the sidebar just revealed, for a one-shot highlight pulse.
+   *  Cleared by a timer in the FileTree; read per-row as a BOOLEAN so a pulse on
+   *  one row does not re-render the other 6,000. */
+  revealedPath: string | null;
+  setRevealedPath: (path: string | null) => void;
   /**
    * Follow a `baalda://note/<orgId>/<docId>` link: switch to that vault if
    * needed, then open the note. Never grants anything — the recipient's own
@@ -1107,6 +1145,45 @@ function sameVault(get: () => AppStore, epoch: number | null | undefined): boole
 }
 
 /**
+ * Refuse a create at the vault root while the freeze latch is on, and say why.
+ * Client-side purely so the user gets a sentence instead of a failed write — the
+ * server enforces the same latch and is the authority. (A note written past it
+ * would be permanently unsyncable: the server refuses to register it.)
+ */
+function rootCreateBlocked(get: () => AppStore, dir: string): boolean {
+  if (dir !== "" || !get().rootFrozen) return false;
+  toast(
+    "This vault's root is frozen — create this inside a folder instead.",
+    "error",
+  );
+  return true;
+}
+
+/**
+ * Everything a freshly created note needs after its file exists: the tree and
+ * title list catch up, the note opens, and its row is revealed (in the sidebar's
+ * rename box when the name was auto-picked, since a new note is EMPTY and that
+ * box is the only way to name it).
+ *
+ * Kept out of `createNoteAt` so `createNoteIn`'s name search can retry the
+ * *create* alone: if a failure in here counted as "name taken", the retry would
+ * leave a second `Untitled` behind.
+ */
+async function finishNoteCreate(
+  get: () => AppStore,
+  path: string,
+  opts?: { edit?: boolean },
+): Promise<string> {
+  await get().refreshTree();
+  await get().refreshTitles();
+  await get().openNoteByPath(path);
+  // `openNoteByPath` already requested a plain reveal; re-request with `edit` so
+  // the row lands in its rename box.
+  if (opts?.edit) get().requestReveal(path, { edit: true });
+  return path;
+}
+
+/**
  * Sync view-state that belongs to ONE vault and must never survive a switch.
  * Spread into every `set()` on a vault-change path, right after
  * `leaveVaultSync()` has torn the sync layer down.
@@ -1183,6 +1260,8 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemoved: false,
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
+  revealRequest: null,
+  revealedPath: null,
   backlinks: [],
   titles: [],
 
@@ -1555,10 +1634,20 @@ export const useStore = create<AppStore>((set, get) => ({
         openNote: { path, id: meta?.id ?? null, title },
         noteRemoved: false,
         noteRemovedSynced: false,
-        // Every open gets (or keeps) a tab; switching tabs re-runs this path,
-        // so membership is checked rather than blindly appended.
-        openTabs: s.openTabs.includes(path) ? s.openTabs : [...s.openTabs, path],
+        // The active tab leads. Obsidian-style most-recently-used order: the
+        // card you are looking at is always the leftmost one, and the tab you
+        // came from is right behind it (which is also what makes `closeTab`
+        // land on the previously active note). Membership was already checked
+        // here — switching tabs re-runs this path — and the reorder subsumes it.
+        // Done in THIS set, not next to `openingNotePath` above, so the strip
+        // does not reshuffle for an open that then bails on a vault switch.
+        openTabs: [path, ...s.openTabs.filter((p) => p !== path)],
       }));
+      // Whichever note becomes active gets shown in the sidebar. Unconditional
+      // on purpose: it is idempotent (`openParents` on open parents and
+      // `scrollTo(…, "auto")` on a visible row both do nothing), and the
+      // alternative is threading a flag through all of this action's callers.
+      get().requestReveal(path);
       // Tell teammates which note we're now viewing (drives their sidebar dots).
       // The announced id must be the SERVER doc_id — see `viewingDocId`, which
       // exists to hold that reasoning and a regression test for it.
@@ -1572,6 +1661,38 @@ export const useStore = create<AppStore>((set, get) => ({
       if (get().openingNotePath === path) set({ openingNotePath: null });
     }
   },
+
+  createNoteAt: async (dir, name) => {
+    if (rootCreateBlocked(get, dir)) return null;
+    return finishNoteCreate(get, await ipc.createNote(dir, name));
+  },
+
+  createNoteIn: async (dir) => {
+    if (rootCreateBlocked(get, dir)) return null;
+    for (let i = 0; i < 50; i++) {
+      const candidate = i === 0 ? "Untitled" : `Untitled ${i}`;
+      let path: string;
+      try {
+        path = await ipc.createNote(dir, candidate);
+      } catch {
+        continue; // name taken → try the next one
+      }
+      return finishNoteCreate(get, path, { edit: true });
+    }
+    return null;
+  },
+
+  requestReveal: (path, opts) => {
+    set((s) => ({
+      revealRequest: {
+        path,
+        edit: opts?.edit ?? false,
+        token: (s.revealRequest?.token ?? 0) + 1,
+      },
+    }));
+  },
+
+  setRevealedPath: (path) => set({ revealedPath: path }),
 
   openNoteLink: async (url) => {
     const target = parseNoteLink(url);

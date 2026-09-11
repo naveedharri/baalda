@@ -1,16 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { placeMenu, type Placement } from "../lib/menuPlacement";
+import { noteLabel } from "../lib/notePath";
 import { useStore } from "../store";
-
-/** Tab label: the note's indexed title when we have one, else the filename.
- *  Notes/pages hide their extension (same rule as the rename input); other
- *  file types keep it, since the extension is how you tell two previews apart. */
-function tabLabel(path: string, titleByPath: Map<string, string>): string {
-  const title = titleByPath.get(path);
-  if (title) return title;
-  const base = path.split("/").pop() ?? path;
-  return base.replace(/\.(md|html?)$/i, "");
-}
 
 /** Right-click menu state: the tab it was opened on plus the cursor anchor. */
 interface TabMenu {
@@ -20,29 +12,27 @@ interface TabMenu {
 }
 
 /**
- * The open-files strip under the main header. Every `openNoteByPath` keeps its
+ * The main header's top row: the open files. Every `openNoteByPath` keeps its
  * file as a tab (store `openTabs`), so moving between notes no longer loses
- * where you were — click to switch back, × or middle-click to close, and
- * right-click for the bulk close actions (others / to the right / all).
+ * where you were — click to switch back, × or middle-click to close,
+ * right-click for the bulk close actions (others / to the right / all), and `+`
+ * for a new note.
+ *
+ * This is the note's ONE title. The header used to carry a `.note-title` span
+ * as well, which for a legacy note whose H1 and filename disagree said
+ * something different; the label here is the FILE NAME (`noteLabel`), never the
+ * indexed title.
  *
  * The ACTIVE tab is derived from `openNote.path`, never tracked separately, so
- * the strip can't disagree with the editor about what's on screen.
+ * the strip can't disagree with the editor about what's on screen. `openTabs` is
+ * most-recently-active first, so the active card is always leftmost and
+ * switching tabs animates the strip re-ordering (`layout`, the Toasts pattern).
  */
 export function TabBar() {
   const openTabs = useStore((s) => s.openTabs);
   const activePath = useStore((s) => s.openNote?.path ?? null);
-  const activeTitle = useStore((s) => s.openNote?.title ?? null);
   const openingPath = useStore((s) => s.openingNotePath);
-  const titles = useStore((s) => s.titles);
-
-  const titleByPath = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const t of titles) m.set(t.path, t.title);
-    // The open note's own title is fresher than the index while its H1 is
-    // being typed — let it win for the active tab.
-    if (activePath && activeTitle) m.set(activePath, activeTitle);
-    return m;
-  }, [titles, activePath, activeTitle]);
+  const reduceMotion = useReducedMotion();
 
   // Vault machinery can reset the list while a note is still open (see
   // `vaultScopedSyncReset`) — the file on screen always earns a tab.
@@ -91,22 +81,25 @@ export function TabBar() {
     );
   }, [menu]);
 
-  if (tabs.length === 0) return null;
-
+  // No early return on an empty strip: it is the header's top row now, and it
+  // still holds the `+` with nothing open.
   const menuIdx = menu ? tabs.indexOf(menu.path) : -1;
-  const menuLabel = menu ? tabLabel(menu.path, titleByPath) : "";
+  const menuLabel = menu ? noteLabel(menu.path) : "";
 
   return (
     <div className="tab-strip" role="tablist" aria-label="Open files">
-      {tabs.map((path) => {
+      <LayoutGroup>
+        {tabs.map((path) => {
         const active = path === activePath;
         // The openingNotePath acknowledgement, same as the sidebar row: a tab
         // click in a synced vault takes a round trip before the editor swaps.
         const opening = path === openingPath && !active;
-        const label = tabLabel(path, titleByPath);
+        const label = noteLabel(path);
         return (
-          <div
+          <motion.div
             key={path}
+            layout={!reduceMotion}
+            transition={{ type: "spring", stiffness: 520, damping: 40 }}
             className={`tab${active ? " active" : ""}${opening ? " opening" : ""}`}
             role="tab"
             aria-selected={active}
@@ -151,9 +144,32 @@ export function TabBar() {
                 <path d="M6 6l12 12M18 6L6 18" />
               </svg>
             </button>
-          </div>
+          </motion.div>
         );
-      })}
+        })}
+      </LayoutGroup>
+
+      {/* New note at the vault root, exactly like ⌘N — `createNoteIn` handles the
+          root-freeze latch and arms the sidebar's rename box. */}
+      <button
+        className="tab-new"
+        title="New note (⌘N)"
+        aria-label="New note"
+        onClick={() => {
+          void useStore.getState().createNoteIn("");
+        }}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          aria-hidden="true"
+        >
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
 
       {menu && (
         <ul
