@@ -99,6 +99,25 @@ pub struct NoteTitle {
     pub title: String,
 }
 
+/// One frontmatter key and how many notes carry it — the ordering the
+/// Properties panel's key suggestions use.
+#[derive(Debug, Serialize, Clone)]
+pub struct PropertyKeyCount {
+    pub key: String,
+    pub count: i64,
+}
+
+/// A JSON scalar as the panel would show it. Objects and arrays are skipped:
+/// a value suggestion has to be something a single field can hold.
+fn scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedLink {
@@ -1196,6 +1215,81 @@ impl Index {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    // ---- Frontmatter property autocomplete --------------------------------
+    //
+    // Both readers parse `notes.frontmatter` in Rust with serde_json rather than
+    // with SQLite's JSON1. `json_each` over a row whose blob is not an object
+    // raises, and SQLite gives no ordering guarantee that a `json_type(…) =
+    // 'object'` filter runs before it — so the safe SQL is uglier than the
+    // parse, and a few thousand short blobs is microseconds either way.
+
+    /// Every frontmatter key in the vault with the number of notes using it,
+    /// most-used first (ties broken by name so the list is stable).
+    pub fn list_property_keys(&self) -> AppResult<Vec<PropertyKeyCount>> {
+        let mut counts: HashMap<String, i64> = HashMap::new();
+        for value in self.frontmatter_objects()? {
+            if let serde_json::Value::Object(map) = value {
+                for key in map.keys() {
+                    *counts.entry(key.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut out: Vec<PropertyKeyCount> = counts
+            .into_iter()
+            .map(|(key, count)| PropertyKeyCount { key, count })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+        Ok(out)
+    }
+
+    /// Distinct scalar values seen for one key, array members flattened. Capped
+    /// so a key like `updated` (one value per note) can't return the vault.
+    pub fn list_property_values(&self, key: &str, limit: usize) -> AppResult<Vec<String>> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for value in self.frontmatter_objects()? {
+            let serde_json::Value::Object(map) = value else {
+                continue;
+            };
+            let Some(found) = map.get(key) else { continue };
+            let members: Vec<&serde_json::Value> = match found {
+                serde_json::Value::Array(items) => items.iter().collect(),
+                other => vec![other],
+            };
+            for member in members {
+                let Some(text) = scalar_to_string(member) else {
+                    continue;
+                };
+                if text.is_empty() || !seen.insert(text.clone()) {
+                    continue;
+                }
+                out.push(text);
+                if out.len() >= limit {
+                    out.sort();
+                    return Ok(out);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Every note's parsed `frontmatter` blob. Invalid JSON is skipped, not
+    /// raised: one note with a broken blob must not empty the whole list.
+    fn frontmatter_objects(&self) -> AppResult<Vec<serde_json::Value>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT frontmatter FROM notes WHERE frontmatter IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&row?) {
+                out.push(parsed);
+            }
+        }
+        Ok(out)
+    }
+
     // ---- Local CRDT persistence (spec 02 §4) ------------------------------
     //
     // The append-only `yjs_updates` log + periodic `yjs_snapshot` per doc,
@@ -1576,6 +1670,51 @@ mod tests {
         .unwrap();
         write_note(&v, "Gamma.md", "# Gamma\n\nDangling [[Nonexistent]] link.").unwrap();
         (tmp, v)
+    }
+
+    /// The Properties panel's name suggestions: every key in the vault, ordered
+    /// by how many notes use it. A note whose `frontmatter` blob is not an
+    /// object (a bare string is legal YAML) or is unreadable must be skipped,
+    /// not raised — one odd note cannot empty the whole list.
+    #[test]
+    fn list_property_keys_counts_across_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "---\nstatus: draft\ntags: [x]\n---\nA").unwrap();
+        write_note(&v, "B.md", "---\nstatus: final\n---\nB").unwrap();
+        write_note(&v, "C.md", "---\njust a string\n---\nC").unwrap();
+        write_note(&v, "D.md", "No frontmatter at all.").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let keys = idx.list_property_keys().unwrap();
+        let pairs: Vec<(String, i64)> = keys.into_iter().map(|k| (k.key, k.count)).collect();
+        assert_eq!(
+            pairs,
+            vec![("status".to_string(), 2), ("tags".to_string(), 1)]
+        );
+    }
+
+    /// Value suggestions flatten arrays, drop duplicates and sort, so the same
+    /// tag typed in two notes offers itself once.
+    #[test]
+    fn list_property_values_flattens_and_dedups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A.md", "---\ntags: [youtube, ai]\nn: 3\n---\nA").unwrap();
+        write_note(&v, "B.md", "---\ntags: [ai, rust]\n---\nB").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        assert_eq!(
+            idx.list_property_values("tags", 200).unwrap(),
+            vec!["ai", "rust", "youtube"]
+        );
+        // Non-string scalars still suggest; an unknown key is empty, not an error.
+        assert_eq!(idx.list_property_values("n", 200).unwrap(), vec!["3"]);
+        assert!(idx.list_property_values("nope", 200).unwrap().is_empty());
+        // The cap is a cap, not a suggestion.
+        assert_eq!(idx.list_property_values("tags", 2).unwrap().len(), 2);
     }
 
     #[test]
