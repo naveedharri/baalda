@@ -1,3 +1,7 @@
+- Baalda now connects to your vault almost as soon as it opens. The connection used to wait for the whole vault to be checked over first; now it starts straight away and the two happen together, so the sync light settles in about a second instead of five — on launch and when you switch vaults
+- Opening a note no longer says "Syncing". The light at the top now describes your vault's connection, not whichever note you happen to have open, so it stops flickering every time you click a file
+- Fixed a loop where notes that were already synced kept syncing again: switching vaults could quietly drop incoming changes, and a note shared with you as view-only could never finish. Both now settle for good
+- If the connection drops, Baalda reconnects almost immediately instead of pausing for several seconds, and it can now tell a sign-in problem apart from a server that is simply restarting
 - Baalda now opens straight into your vault: the sidebar appears right away and signing in, syncing and indexing carry on in the background. Notes you click in those first moments still open safely
 - You can now leave a vault you don't own: Vault Settings → Vaults → Leave. The vault is removed from your devices, the owner is notified by email, and you get a receipt
 - Moving a Pro subscription to another vault now opens a clear dialog that shows each eligible vault with its members and explains what changes, instead of a bare dropdown

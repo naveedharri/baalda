@@ -33,6 +33,19 @@ function emit(line: string): void {
   if (!attached) early.push(line);
 }
 
+// Stages that repeat — the vault channel reconnects, and a vault switch runs the
+// whole connect chain again — still want ONE line on the launch timeline. Marking
+// every lap would bury the boot numbers under a reconnect storm, which is exactly
+// the condition we most need the timeline to stay readable through.
+const once = new Set<string>();
+
+/** `mark`, but only the first time this stage is reached in this session. */
+export function markOnce(name: string): void {
+  if (once.has(name)) return;
+  once.add(name);
+  mark(name);
+}
+
 export function mark(name: string): void {
   const at = performance.now();
   try {

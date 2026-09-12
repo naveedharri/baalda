@@ -79,6 +79,18 @@ export interface VaultChannelDeps {
  *  creates one row per folder/note, each firing `onRegistryChanged`; folding them
  *  into one frame per window is the difference between ~1,100 broadcasts (and
  *  ~1,100 per-subscriber ACL recomputes) and a handful. */
+/**
+ * Close codes this channel sends, in the 4000-4999 application range.
+ *
+ * `UNAUTHORIZED` is fatal — the client must stop retrying, the way it already
+ * stops on an HTTP 403 from the token mint. `PROTOCOL` covers a client that did
+ * not speak `hello` correctly or whose ACL could not be resolved; those are also
+ * not worth an immediate retry, but they are not a credential problem.
+ * Mirrored in `desktop/src/lib/sync/vaultSyncEngine.ts` as `WS_CLOSE_*`.
+ */
+export const WS_CLOSE_UNAUTHORIZED = 4401;
+export const WS_CLOSE_PROTOCOL = 4400;
+
 export const REGISTRY_COALESCE_MS = 120;
 
 /** Most docs one `ready.behind` names — the same bound `ready.empty` uses. */
@@ -423,7 +435,8 @@ class VaultConnection {
     try {
       claims = await this.deps.verifyToken(hello.token);
     } catch {
-      return this.fail("invalid or expired vault token");
+      // Fatal: retrying with the same token only burns the ladder.
+      return this.fail("invalid or expired vault token", WS_CLOSE_UNAUTHORIZED);
     }
     this.userId = claims.userId;
     this.vaultId = claims.vaultId;
@@ -734,19 +747,25 @@ class VaultConnection {
       // provider down and back up) plus a full registry pull, whose own writes
       // then published the next `registry-changed`. On a vault with work left to
       // do that never settled: the badge blinked Syncing/Synced indefinitely (#93).
-      void this.refreshAcl({ reauth: "if-changed" });
-      // Self-exclusion applies to the re-pull only. This client already holds the
-      // ids the API returned it, so asking it to re-pull its own writes is a
-      // wasted round trip (listFolders + listNotes + a full client syncStructure).
       // Skipped only when EVERY origin folded into this window is ours; a window
       // that also carried someone else's change — or an unattributed one — lands.
-      if (
+      const selfOnly =
         this.clientId !== null &&
         msg.origins.length > 0 &&
-        msg.origins.every((o) => o === this.clientId)
-      ) {
-        return;
-      }
+        msg.origins.every((o) => o === this.clientId);
+      // The readable set is recomputed either way — it must never go stale — but a
+      // client is not told that its OWN writes changed what it can read. It made
+      // those rows and already holds them, so the announcement bought nothing and
+      // cost a great deal: registering notes grew this client's own readable set,
+      // `if-changed` fired `reauth` straight back at it, the open note's provider
+      // was torn down and rebuilt (badge: synced→offline→connecting→synced), and
+      // the registry pull that followed published the next `registry-changed`. An
+      // idle client reauthed itself nine times in half an hour that way.
+      void this.refreshAcl({ reauth: selfOnly ? "never" : "if-changed" });
+      // Self-exclusion applies to the re-pull too. This client already holds the
+      // ids the API returned it, so asking it to re-pull its own writes is a
+      // wasted round trip (listFolders + listNotes + a full client syncStructure).
+      if (selfOnly) return;
       this.send({ t: "registry" });
       return;
     }
@@ -812,7 +831,9 @@ class VaultConnection {
     void this.refreshAcl();
   }
 
-  private async refreshAcl(opts: { reauth?: "always" | "if-changed" } = {}): Promise<void> {
+  private async refreshAcl(
+    opts: { reauth?: "always" | "if-changed" | "never" } = {},
+  ): Promise<void> {
     if (!this.userId || !this.vaultId) return;
     let next: Set<string>;
     try {
@@ -841,7 +862,11 @@ class VaultConnection {
     // caller opts out with `if-changed`, which still re-mints whenever the set
     // actually moved. A re-mint the client does not need is not free: it drops and
     // reopens the open note's socket.
-    if ((opts.reauth ?? "always") === "always" || added.length > 0 || lost > 0) {
+    // `never` is for a change this very client authored: the drops above still go
+    // out (losing access is news however it happened), but there is nothing to
+    // re-mint for writes it made itself.
+    const mode = opts.reauth ?? "always";
+    if (mode !== "never" && (mode === "always" || added.length > 0 || lost > 0)) {
       this.send({ t: "reauth" });
     }
     if (added.length > 0 && this.vaultId) {
@@ -1051,12 +1076,22 @@ class VaultConnection {
     this.ws.send(payload, { binary });
   }
 
-  private fail(message: string): void {
+  /**
+   * Refuse this connection, telling the client WHY in the close frame.
+   *
+   * The `{t:"err"}` message races the close and routinely loses, so the code is
+   * the only signal the client can rely on. Closing with no code at all (which is
+   * what a bare `ws.close()` sends — 1005) left a rejected token indistinguishable
+   * from a rebooting server, so the client blind-retried a credential the server
+   * had already refused, all the way up its backoff ladder. Keep these in lockstep
+   * with `WS_CLOSE_*` in `desktop/src/lib/sync/vaultSyncEngine.ts`.
+   */
+  private fail(message: string, code: number = WS_CLOSE_PROTOCOL): void {
     console.warn(
       `[vault-channel] refusing user=${this.userId ?? "?"} vault=${this.vaultId ?? "?"}: ${message}`,
     );
     this.send({ t: "err", message });
-    this.ws.close();
+    this.ws.close(code, message.slice(0, 120));
     this.cleanup();
   }
 

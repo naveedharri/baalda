@@ -15,6 +15,7 @@ import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
 import type { NoteLastEdited, SessionInfo } from "../api";
 import * as ipc from "../ipc";
+import { markOnce } from "../perf";
 import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
 import type { ActivityStatus } from "../prefs";
@@ -218,6 +219,28 @@ export function shouldReportOpenDocState(state: DocSyncState, confirmed: boolean
   return state === "synced" || !confirmed;
 }
 
+/**
+ * The open note's statuses that speak for the WHOLE app, not just that note.
+ *
+ * Each is something the vault channel has no way to express and the user has to
+ * know: a view-only grant, a doc the server refused or no longer has, one over
+ * the size cap. Everything outside this set ("connecting", "offline", "synced")
+ * is one note's socket doing ordinary work and belongs on its own row — see
+ * `effectiveStatus`.
+ */
+/** How long a drop out of a settled state must persist before it is painted. */
+const STATUS_HOLD_MS = 400;
+
+/** The states worth protecting from a blink — see `emitStatus`. */
+const STATUS_IS_GOOD: ReadonlySet<SyncStatus> = new Set<SyncStatus>(["synced", "read-only"]);
+
+const DOC_STATUS_OWNS_BADGE: ReadonlySet<SyncStatus> = new Set<SyncStatus>([
+  "read-only",
+  "no-access",
+  "deleted",
+  "too-large",
+]);
+
 export class SyncManager implements InboundHost {
   readonly registry = new VaultRegistry(api);
 
@@ -293,6 +316,19 @@ export class SyncManager implements InboundHost {
   // opening it. Present only while sync is enabled.
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
+  /**
+   * The collection id {@link vaultEngine} was started for.
+   *
+   * `startVaultEngine` is called TWICE per enable — once during the prime window
+   * and once after the reconcile (see `enable`) — so it needs to recognise a
+   * channel it already owns. Restarting a live one would discard precisely the
+   * head start the early call exists to buy.
+   */
+  private vaultEngineId: string | null = null;
+  /** The last status actually handed to the UI, so `emitStatus` can tell a real
+   *  change from a repaint and know what it is protecting. */
+  private emittedStatus: SyncStatus | null = null;
+  private statusHoldTimer: ReturnType<typeof setTimeout> | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
 
   // ---- push-to-talk voice ----
@@ -524,13 +560,68 @@ export class SyncManager implements InboundHost {
     }
   }
 
-  /** Push the effective status to the UI: an open networked note owns the
-   *  indicator; with none open we fall back to the always-on vault channel. */
+  /**
+   * Push the effective status to the UI.
+   *
+   * The vault channel is the app's connection; ONE note's provider is not. The
+   * open note used to own this indicator outright, which meant every note you
+   * opened repainted the vault-wide pill "connecting" while its provider did its
+   * own handshake — the app reported itself as re-syncing on every single file
+   * open, and a provider bounce (a token re-mint, a reauth) strobed the pill on
+   * a vault that had never actually disconnected.
+   *
+   * So the note only speaks for the whole app when it has something to say that
+   * the channel cannot express: permissions and per-doc terminal failures. Its
+   * ordinary connect churn stays on the note's own sidebar row, where
+   * `reportOpenDocState` already puts it.
+   */
   private emitStatus(): void {
-    const effective = this.current
-      ? (this.docStatus ?? this.current.status)
-      : this.vaultStatusAsSync();
-    this.onStatus?.(effective);
+    const next = this.effectiveStatus();
+    if (next === this.emittedStatus) return;
+    // Settling INTO a good state is always immediate — nobody wants green held
+    // back. Only the drop OUT of one waits, and only briefly: a reconnect that
+    // resolves inside the window never reaches the UI at all, which is what turns
+    // a token re-mint or a server blip from a visible strobe into nothing. The
+    // status is still correct the moment it matters; it is simply not repainted
+    // for a blink that is already over.
+    const leavingGood =
+      (this.emittedStatus === "synced" || this.emittedStatus === "read-only") &&
+      !STATUS_IS_GOOD.has(next);
+    if (!leavingGood) {
+      this.clearStatusHold();
+      this.publishStatus(next);
+      return;
+    }
+    if (this.statusHoldTimer) return; // a hold is already running
+    this.statusHoldTimer = setTimeout(() => {
+      this.statusHoldTimer = null;
+      const settled = this.effectiveStatus();
+      if (settled !== this.emittedStatus) this.publishStatus(settled);
+    }, STATUS_HOLD_MS);
+  }
+
+  private publishStatus(s: SyncStatus): void {
+    this.emittedStatus = s;
+    this.onStatus?.(s);
+  }
+
+  private clearStatusHold(): void {
+    if (!this.statusHoldTimer) return;
+    clearTimeout(this.statusHoldTimer);
+    this.statusHoldTimer = null;
+  }
+
+  private effectiveStatus(): SyncStatus {
+    const vault = this.vaultStatusAsSync();
+    if (!this.current) return vault;
+    const doc = this.docStatus ?? this.current.status;
+    // Permissions and terminal per-doc failures must reach the pill: nothing
+    // else in the UI tells the user this note is view-only, gone, or too big.
+    if (DOC_STATUS_OWNS_BADGE.has(doc)) return doc;
+    // Otherwise a healthy channel means the app IS connected, whatever this one
+    // note's socket is doing. Only when the channel itself is unhealthy does the
+    // note's view of the world add anything.
+    return vault === "synced" ? "synced" : doc;
   }
 
   /** Record the open note's provider status and re-emit the effective status.
@@ -1940,6 +2031,20 @@ export class SyncManager implements InboundHost {
         // Sidebar badges + `store.docIdByPath`, immediately.
         this.publishRegistryMap();
         hooks?.onPrimed?.();
+        // OPEN THE CHANNEL NOW, alongside the reconcile below rather than after
+        // it. The collection id is the only thing the socket needs and the prime
+        // just read it out of `.context/config.json`, so waiting costs the user
+        // the reconcile's whole serial HTTP chain (listVaults, then folders and
+        // notes) before the connection even starts — seconds, on every launch and
+        // every vault switch.
+        //
+        // Safe because the two flags that gate anything destructive are still
+        // false: `enabled` (which `startContentRunIfNeeded` requires, so nothing
+        // uploads) and `pulledOnce` (so `markLive` cannot arm, and the revocation
+        // and disk-delete paths stay inert). All the early socket can do is
+        // backfill content for docs the prime already mapped — which is exactly
+        // the work we want overlapped.
+        this.startVaultEngine(scope);
       }
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);
@@ -2322,6 +2427,10 @@ export class SyncManager implements InboundHost {
   private teardown(): void {
     this.enabled = false;
     this.primed = false;
+    // A pending badge hold belongs to the vault we are leaving; letting it fire
+    // would paint that vault's status over the next one's.
+    this.clearStatusHold();
+    this.emittedStatus = null;
     this.presence = null;
     this.viewingDocId = null;
     this.vaultStatus = "idle";
@@ -2535,7 +2644,12 @@ export class SyncManager implements InboundHost {
   private startVaultEngine(scope: VaultScope): void {
     const vaultId = this.registry.vaultId;
     if (!vaultId) return;
+    // Already live for this collection (the prime window got there first) — leave
+    // it alone. See `vaultEngineId`.
+    if (this.vaultEngine && this.vaultEngineId === vaultId) return;
     this.stopVaultEngine();
+    this.vaultEngineId = vaultId;
+    markOnce("channel-start");
     // Reflect "connecting" the moment we switch into a vault, so the light
     // moves off a stale value before the socket reports back.
     this.vaultStatus = "connecting";
@@ -2651,6 +2765,7 @@ export class SyncManager implements InboundHost {
   private stopVaultEngine(): void {
     this.vaultEngine?.stop();
     this.vaultEngine = null;
+    this.vaultEngineId = null;
     // Cut any audio still playing: it belongs to the vault we're leaving, and
     // hearing a teammate from the previous vault after switching would be a bug
     // with an unpleasant privacy flavour.
