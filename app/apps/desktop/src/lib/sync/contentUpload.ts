@@ -483,7 +483,16 @@ export class ContentUploader {
         // stale file against the merged doc would DELETE those server ops.
         if (this.opts.ingestFromFile && !preIngested) await bridge.ingestNow();
       }
-      const flushed = await push.whenFlushed(this.flushTimeoutMs);
+      // A view-only grant has nothing to push: the seed and the ingest above were
+      // both skipped, and the server would refuse the write anyway — so there is
+      // no ack coming and waiting for one only ends in a spurious failure. The
+      // server's copy IS the content, which makes this doc confirmed.
+      //
+      // `confirmOpenDoc` has always taken this exemption; the bulk path did not,
+      // so a doc whose grant was downgraded while it still held local-only ops
+      // failed here on every pass, never reached `markPushed`, and came straight
+      // back on the next `ready.behind` — a re-sync that could never finish.
+      const flushed = push.readOnly || (await push.whenFlushed(this.flushTimeoutMs));
       // Whatever the server had for this doc has landed in the Y.Doc by now;
       // write it out so the .md on disk matches. (The watcher will see this
       // write, but every ingest side runs behind the bridge's echo-hash guard —

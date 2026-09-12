@@ -11,6 +11,7 @@
 // CodeMirror — it moves opaque Yjs updates to the sink.
 
 import { ApiClient, ApiError } from "../api";
+import { markOnce } from "../perf";
 import type { ActivityStatus } from "../prefs";
 import {
   bytesToBase64,
@@ -78,6 +79,9 @@ type WsFactory = (url: string) => WebSocketLike;
 /** The slice of the WebSocket API the engine uses (so tests can fake it). */
 export interface WebSocketLike {
   binaryType: string;
+  /** CONNECTING/OPEN/CLOSING/CLOSED. Optional so test fakes need not model it;
+   *  it is only read to say WHY a connection failed, never to decide anything. */
+  readonly readyState?: number;
   send(data: string | ArrayBufferLike | ArrayBufferView): void;
   close(): void;
   onopen: ((ev: unknown) => void) | null;
@@ -204,6 +208,40 @@ export interface VaultSyncEngineOptions {
 export const INBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
+ * Close codes the vault channel understands, in the 4000-4999 application range.
+ *
+ * The server used to close every failure with a bare `ws.close()` (1005, "no
+ * status") or `terminate()` (1006), which left the client unable to tell a
+ * rejected token from a rebooting server — so it blind-retried both. These two
+ * codes are the contract that lets a fatal failure stop the ladder immediately.
+ * Keep in lockstep with `server/src/sync/vault-channel.ts`.
+ */
+export const WS_CLOSE_UNAUTHORIZED = 4401;
+export const WS_CLOSE_PROTOCOL = 4400;
+
+/**
+ * Delay before the FIRST reconnect attempt. Not zero — a server that refuses
+ * instantly would otherwise spin the event loop — but short enough that a dev
+ * server bounce or a dropped wifi frame costs a blink rather than a visible
+ * stall on the sync badge.
+ */
+const IMMEDIATE_RETRY_MS = 50;
+
+/**
+ * Rust refusing a call because the vault moved out from under its caller.
+ *
+ * Matched on the marker string rather than by importing `ipc.isVaultMismatch`,
+ * because this engine deliberately depends on nothing that touches disk or Tauri
+ * — it runs under vitest in Node. The contract is `VAULT_MISMATCH` in
+ * `src-tauri/src/commands.rs`; change one, change both.
+ */
+function isVaultMismatch(err: unknown): boolean {
+  return typeof err === "string"
+    ? err.startsWith("vault-mismatch")
+    : err instanceof Error && err.message.startsWith("vault-mismatch");
+}
+
+/**
  * Derive the vault channel's WebSocket URL. Unlike the per-doc `deriveWsUrl`
  * (which bumps a local :3010 to the dedicated Hocuspocus :3011), the vault
  * channel ALWAYS lives on the HTTP port at `/vault-sync` — same origin, scheme
@@ -247,6 +285,15 @@ export class VaultSyncEngine {
   private readonly clearTimeoutImpl: (h: ReturnType<typeof setTimeout>) => void;
 
   private ws: WebSocketLike | null = null;
+  /**
+   * The vault token being minted for the CURRENT connect attempt.
+   *
+   * Started in `connect()` so the mint overlaps the socket handshake, and
+   * awaited in `onOpen()`. Cleared on every disconnect: a token is scoped to the
+   * attempt that asked for it, and reusing one across a reconnect would re-send
+   * credentials the server may have just refused.
+   */
+  private tokenPromise: Promise<string> | null = null;
   private status: VaultSyncStatus = "idle";
   private stopped = false;
   private attempt = 0;
@@ -311,7 +358,7 @@ export class VaultSyncEngine {
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
-    this.baseMs = opts.reconnect?.baseMs ?? 500;
+    this.baseMs = opts.reconnect?.baseMs ?? 150;
     this.maxMs = opts.reconnect?.maxMs ?? 15_000;
     this.random = opts.random ?? Math.random;
     this.setTimeoutImpl = opts.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
@@ -440,6 +487,19 @@ export class VaultSyncEngine {
 
   private connect(): void {
     this.setStatus("connecting");
+    // Mint the vault token NOW, alongside the TCP/TLS/upgrade handshake instead
+    // of after it. Nothing about the mint depends on the socket existing, so
+    // doing them in sequence (which is what waiting until `onopen` meant) made
+    // every connect pay both latencies end to end. `onOpen` awaits this.
+    //
+    // Attached immediately so a rejection can never surface as an unhandled
+    // rejection while the handshake is still in flight; `onOpen` does the real
+    // error handling, including the 403 that stops the retry ladder.
+    const minting = this.api.vaultSyncToken(this.vaultId).then((r) => r.token);
+    minting.catch(() => {
+      /* handled in onOpen */
+    });
+    this.tokenPromise = minting;
     let ws: WebSocketLike;
     try {
       ws = this.wsFactory(this.wsUrl);
@@ -450,26 +510,59 @@ export class VaultSyncEngine {
     ws.binaryType = "arraybuffer";
     this.ws = ws;
 
-    ws.onopen = () => void this.onOpen();
+    ws.onopen = () => {
+      markOnce("socket-open");
+      void this.onOpen();
+    };
     ws.onmessage = (ev) => void this.onMessage(ev.data);
     ws.onclose = (ev) => {
-      const e = ev as { code?: number; reason?: string; wasClean?: boolean } | undefined;
-      console.warn(
-        `[vault-sync] socket closed code=${e?.code ?? "?"} reason=${JSON.stringify(e?.reason ?? "")} clean=${e?.wasClean ?? "?"}`,
-      );
+      // A close code the server chose is the ONLY signal that distinguishes
+      // "your token is bad" from "the server is rebooting". Read it before
+      // deciding whether to keep retrying.
+      if (this.handleClose(ev)) return;
       this.onDisconnect();
     };
     ws.onerror = () => {
-      console.warn("[vault-sync] socket error");
+      // The Event carries nothing useful, so log the state we DO have. When the
+      // socket never opened at all this is a TCP/TLS/upgrade failure — refused
+      // connection, wrong port, or a path the server's upgrade handler destroys
+      // — and no close frame is coming to explain it.
+      console.warn(
+        `[vault-sync] socket error readyState=${ws.readyState ?? "?"} attempt=${this.attempt} url=${this.wsUrl}`,
+      );
       this.onDisconnect();
     };
+  }
+
+  /**
+   * Log a close frame and decide whether it is fatal. Returns true when the
+   * engine has stopped and the caller must NOT schedule a reconnect.
+   *
+   * `4401` is the server saying the vault token was rejected: retrying with the
+   * same credentials just burns the ladder, exactly as an HTTP 403 from the mint
+   * does. Everything else is treated as transient.
+   */
+  private handleClose(ev: unknown): boolean {
+    const e = ev as { code?: number; reason?: string; wasClean?: boolean } | undefined;
+    console.warn(
+      `[vault-sync] socket closed code=${e?.code ?? "?"} reason=${JSON.stringify(e?.reason ?? "")} clean=${e?.wasClean ?? "?"} attempt=${this.attempt}`,
+    );
+    if (e?.code === WS_CLOSE_UNAUTHORIZED) {
+      this.stopped = true;
+      this.closeSocket();
+      this.setStatus("no-access");
+      return true;
+    }
+    return false;
   }
 
   private async onOpen(): Promise<void> {
     // Mint the vault token; a 403 means we're not a member — stop retrying.
     let token: string;
     try {
-      token = (await this.api.vaultSyncToken(this.vaultId)).token;
+      token = await (this.tokenPromise ??
+        this.api.vaultSyncToken(this.vaultId).then((r) => r.token));
+      markOnce("token-minted");
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         this.stopped = true;
@@ -511,6 +604,7 @@ export class VaultSyncEngine {
       }),
     );
     this.helloSent = true;
+    markOnce("hello-sent");
     // First announce rides right behind the hello. Waiting for `ready` meant a
     // teammate connecting to a big vault stayed invisible — and saw nobody,
     // because the roster re-announce round is triggered by this very frame —
@@ -557,6 +651,9 @@ export class VaultSyncEngine {
         // applied, so this is the edge that settles the download phase. Checking
         // only on drain would strand it: no further frame is coming to trigger one.
         this.maybeSignalIdle();
+        // The one mark that answers "how long until the app is actually live?" —
+        // `ready` is the only frame that turns the badge green.
+        markOnce("channel-ready");
         this.setStatus("synced");
         // (Re)announce our presence now the channel is live — covers first
         // connect and every reconnect so teammates never see us go stale.
@@ -688,6 +785,21 @@ export class VaultSyncEngine {
       try {
         await this.sink.applyUpdate(frame.docId, frame.update);
       } catch (err) {
+        // A stale vault epoch is not a per-frame failure — it means Rust has
+        // swapped vaults underneath this engine, so EVERY remaining frame will
+        // fail the same way. Logging and carrying on (what this used to do)
+        // dropped a whole backfill one doc at a time, and because a dropped frame
+        // never advances the doc's state vector the server re-offered exactly the
+        // same ops on the next connect. If the engine outlives its epoch that
+        // repeats forever, which is the permanent re-sync loop.
+        if (isVaultMismatch(err)) {
+          console.warn(
+            `[vault-sync] vault epoch is stale — stopping this engine (${this.inbound.length} frames dropped)`,
+            err,
+          );
+          this.stop();
+          return;
+        }
         console.warn(`[vault-sync] applyUpdate failed for ${frame.docId}`, err);
       }
       if (frame.counted) {
@@ -720,7 +832,17 @@ export class VaultSyncEngine {
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) return;
     // Exponential backoff with 50–100% jitter (spec 05 §4 anti-stampede).
-    const backoff = Math.min(this.maxMs, this.baseMs * 2 ** this.attempt);
+    //
+    // The FIRST retry is near-immediate on purpose. By far the most common cause
+    // of a drop is a server that is restarting and will be listening again in
+    // well under a second; the old 500ms base spent ~3.5s across three laps
+    // before the client found that out, and the user watches every millisecond of
+    // it on the badge. Jitter from attempt 1 onward still covers the stampede
+    // case the backoff exists for.
+    const backoff =
+      this.attempt === 0
+        ? IMMEDIATE_RETRY_MS
+        : Math.min(this.maxMs, this.baseMs * 2 ** this.attempt);
     const delay = backoff * (0.5 + 0.5 * this.random());
     this.attempt++;
     this.reconnectTimer = this.setTimeoutImpl(() => {
@@ -730,10 +852,23 @@ export class VaultSyncEngine {
   }
 
   private closeSocket(): void {
+    this.tokenPromise = null;
     if (!this.ws) return;
     const ws = this.ws;
     this.ws = null;
-    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+    ws.onopen = ws.onmessage = ws.onerror = null;
+    // `onclose` stays attached, deliberately. `onerror` fires with no detail, and
+    // it reaches us FIRST — so nulling the close handler here (as this used to)
+    // threw away the code/reason frame that was still in flight, which is why
+    // every failure in the log read as a bare "socket error" with no cause.
+    // It must not re-enter `onDisconnect`: whoever called us owns the reconnect.
+    ws.onclose = (ev) => {
+      const e = ev as { code?: number; reason?: string } | undefined;
+      if (e?.code === undefined) return; // nothing to add beyond what we logged
+      console.warn(
+        `[vault-sync] socket closed (after detach) code=${e.code} reason=${JSON.stringify(e.reason ?? "")}`,
+      );
+    };
     try {
       ws.close();
     } catch {

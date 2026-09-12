@@ -304,6 +304,12 @@ export class DocSync {
           if (isTerminalSyncStatus(this._status)) return;
           this.setStatus("connecting");
         } else if (status === "disconnected") {
+          // A re-mint we asked for ourselves is not an outage. `refreshAccess`
+          // deliberately drops the socket to pick up a new token (a reauth, a TTL
+          // refresh), and reporting that as "offline" is what made the badge
+          // strobe synced→offline→connecting→synced on an ACL announcement about
+          // somebody else's note. The reconnect is already in flight.
+          if (this.reconnectPending) return;
           if (!isTerminalSyncStatus(this._status)) this.setStatus("offline");
         }
       },

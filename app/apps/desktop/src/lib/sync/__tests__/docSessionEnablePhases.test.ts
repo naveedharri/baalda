@@ -273,10 +273,15 @@ describe("SyncManager.enable — the prime window", () => {
     expect(sm.isSyncable()).toBe(true);
   });
 
-  it("re-suppresses the note opened in the window on the store the engine creates", async () => {
-    // `openDoc` sets the suppressed doc on the store that exists at open time —
-    // which during the window is null. A fresh store that doesn't know about the
-    // open note makes the background feed a SECOND writer on its Y.Doc.
+  it("suppresses the note opened in the window, and keeps the channel it already started", async () => {
+    // The invariant: the background feed must never become a SECOND writer on the
+    // Y.Doc of a note that already has a provider.
+    //
+    // The channel now opens during the PRIME window (in parallel with the
+    // reconcile, which is what makes connecting fast), so the store exists before
+    // the note is opened and `openDoc` suppresses on it directly. The post-
+    // reconcile call must then NOT build a second store — that would both drop the
+    // head start and resurrect the two-writer bug from the other side.
     const held = gate();
     fakeRegistry.reconcile.mockImplementation(async () => {
       await held.waited;
@@ -290,13 +295,18 @@ describe("SyncManager.enable — the prime window", () => {
       epoch: 1,
     });
     await flush();
+    // The prime read the collection id out of config.json, so the channel is
+    // already up before the reconcile has made a single request.
+    expect(storeHooks.created).toBe(1);
+
     await sm.openDoc(bridge(), MAPPED);
-    expect(storeHooks.created).toBe(0); // no engine yet
+    expect(storeHooks.suppressed).toBe(MAPPED_DOC);
 
     held.open();
     await enabling;
     await flush();
 
+    // Still ONE store: the reconcile adopted the channel the prime started.
     expect(storeHooks.created).toBe(1);
     expect(storeHooks.suppressed).toBe(MAPPED_DOC);
   });

@@ -258,10 +258,18 @@ describe("VaultSyncEngine", () => {
 
     created[0].onclose?.(null); // disconnect
     expect(scheduled).toHaveLength(1);
-    expect(scheduled[0].ms).toBe(500); // 1000 * 2^0 * 0.5
+    // The FIRST retry ignores `baseMs` and goes almost immediately: a drop is
+    // nearly always a server that is coming straight back, and making the user
+    // watch a backoff ladder for that is the whole reason reconnects felt slow.
+    expect(scheduled[0].ms).toBe(25); // IMMEDIATE_RETRY_MS 50 * 0.5
 
     scheduled[0].fn(); // fire the reconnect
     expect(created).toHaveLength(2);
+
+    // From here the ladder is the ordinary jittered exponential one.
+    created[1].onclose?.(null);
+    expect(scheduled).toHaveLength(2);
+    expect(scheduled[1].ms).toBe(1000); // 1000 * 2^1 * 0.5
   });
 });
 
