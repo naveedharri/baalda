@@ -94,23 +94,13 @@
      loses the start of the next line, which is where every typographic rule of
      thumb (and Obsidian's own default) lands. `--editor-gutter` is the minimum
      breathing room at each edge on narrow windows (see the `max(...)` the
-     consumers wrap these in). Settings → Appearance → "Readable line length"
-     turns this off by setting the measure to 100% on `.editor-column`
-     (`components/editor.css`), which every consumer then follows for free. */
+     consumers wrap these in). This is only the DEFAULT: Settings → Appearance →
+     "Content width" overrides `--editor-measure` inline on `.editor-column`
+     (60–120ch, or 100% for full width — `lib/editorMeasure.ts`), and every
+     consumer then follows for free — which only works because `--editor-pad-x`
+     is composed on `.editor-column` and not here. See the note on it below. */
   --editor-measure: 88ch;
   --editor-gutter: 64px;
-
-  /* The editor's horizontal inset. It lives on `.cm-line` (not `.cm-content`)
-     because CodeMirror's drawSelection() derives every selection rect from the
-     FIRST `.cm-line`'s padding and cannot see padding on the content element —
-     full-line rects used to start ~58px left of the text and overrun its right
-     edge. Percentages resolve at the USE site, and every consumer's containing
-     block is `.cm-content`'s content box, so the value is identical for lines,
-     block widgets (`cm-block-inset`) and the loading skeleton. */
-  --editor-pad-x: max(
-    var(--editor-gutter),
-    calc((100% - var(--editor-measure)) / 2)
-  );
 
   /* The inline note title — the note's filename, rendered as an editable
      heading above the body. Sized to match `t.heading1` in the editor's
@@ -165,6 +155,37 @@
      rather than introducing a third grey. */
   --indent-guide: var(--border);
   --indent-guide-active: var(--border-strong);
+}
+
+/* The editor's horizontal inset. It lives on `.cm-line` (not `.cm-content`)
+   because CodeMirror's drawSelection() derives every selection rect from the
+   FIRST `.cm-line`'s padding and cannot see padding on the content element —
+   full-line rects used to start ~58px left of the text and overrun its right
+   edge. Percentages resolve at the USE site, and every consumer's containing
+   block is `.cm-content`'s content box, so the value is identical for lines,
+   block widgets (`cm-block-inset`) and the loading skeleton.
+
+   DECLARED ON `.editor-column`, AND IT HAS TO BE. `var()` inside a custom
+   property is substituted at computed-value time ON THE DECLARING ELEMENT, and
+   the result inherits as a finished token stream. Declared on `:root` — where
+   it lived until 2026-09-11 — this baked `:root`'s own 88ch into the stream, so
+   overriding `--editor-measure` further down the tree changed nothing at all
+   and the width control was inert. (The two-state "Readable line length" switch
+   this replaced never worked either, for exactly this reason: its
+   `.editor-column[data-measure="full"] { --editor-measure: 100% }` had no other
+   consumer to reach.) `--editor-measure` and `--editor-gutter` keep their
+   defaults on `:root`; only the element that composes them moves, to the one
+   element the inline override is set on (`lib/editorMeasure.ts`). Every
+   consumer — the CM6 theme's `.cm-line`, block widgets, blockquote, rule, copy
+   button and indent guides, plus the loading skeleton — lives inside an
+   `.editor-column`, including the version-history preview's own CodeMirror.
+   Anything mounted outside one would resolve `var(--editor-pad-x)` to nothing
+   and lose its inset, so keep it here. */
+.editor-column {
+  --editor-pad-x: max(
+    var(--editor-gutter),
+    calc((100% - var(--editor-measure)) / 2)
+  );
 }
 
 /* Traffic lights are ~12px tall centred around y≈19, so 28px clears them —

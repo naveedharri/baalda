@@ -2,7 +2,14 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { filterReadableBlobs } from "../src/permissions/http-gates.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
-import { seedMember, seedNote, seedOrg, seedUser, seedVault } from "./helpers/seed.js";
+import {
+  seedMember,
+  seedNote,
+  seedOrg,
+  seedUser,
+  seedVault,
+  seedVaultGrant,
+} from "./helpers/seed.js";
 
 /**
  * `filterReadableBlobs` decides which attachments a SCOPED member (no vault-wide
@@ -113,6 +120,12 @@ describe("filterReadableBlobs (attachment visibility)", () => {
   });
 
   it("gives a vault-wide reader every blob, referenced or not", async () => {
+    // "Vault-wide" is the org grant, not the role. The rest of this file keeps
+    // the vault Private on purpose — that is what gives the member an empty
+    // readable set — so the grant goes on here and nowhere else. Before
+    // Private stopped exempting owners, the role alone answered this and the
+    // distinction was invisible.
+    await seedVaultGrant(org, "edit");
     const all = [blob("attachments/pic.png"), blob("attachments/orphan.png"), blob(null)];
     // Owner: no note_index rows at all, and still sees everything.
     expect(await filterReadableBlobs(owner, vault, all)).toEqual(all);

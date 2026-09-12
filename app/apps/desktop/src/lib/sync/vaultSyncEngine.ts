@@ -153,6 +153,32 @@ export interface VaultSyncEngineOptions {
    * already has them queued.
    */
   onServerBehind?: (docIds: string[]) => void;
+  /**
+   * The server named docs OUR manifest holds that we may no longer read
+   * (`ready.revoked`) — a revocation the server STATES rather than one the
+   * client infers from a listing that came back short.
+   *
+   * Fired on every `ready` and BEFORE the status flips to `synced`, which is
+   * what makes it useful on a cold launch: the authority it grants is recorded
+   * before the reconnect's own registry pull is even armed, so that pull is the
+   * one that acts on it. Never fired with an empty list.
+   *
+   * `truncated` means the server had more than it would name in one frame.
+   */
+  onServerRevoked?: (docIds: string[], truncated: boolean) => void;
+  /**
+   * The server dropped a doc from our readable set mid-session (`drop`).
+   *
+   * `refreshAcl` sends one of these per lost doc immediately before the `reauth`
+   * that announces the change, so the LIVE path names its docs exactly as
+   * `ready.revoked` does on connect. Both feed the same named-revocation set,
+   * which is what keeps a `reauth` from ever widening an authority instead of
+   * describing one.
+   *
+   * Fired in addition to `sink.drop`, which releases the doc's live state; this
+   * one is about what the session is allowed to remove from disk.
+   */
+  onServerDrop?: (docId: string) => void;
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
   /** Backoff bounds (ms). */
@@ -210,6 +236,8 @@ export class VaultSyncEngine {
   private readonly onInboundIdle?: () => void;
   private readonly onServerEmpty?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerBehind?: (docIds: string[]) => void;
+  private readonly onServerRevoked?: (docIds: string[], truncated: boolean) => void;
+  private readonly onServerDrop?: (docId: string) => void;
   private readonly wsFactory: WsFactory;
   private readonly inboundMaxBytes: number;
   private readonly baseMs: number;
@@ -278,6 +306,8 @@ export class VaultSyncEngine {
     this.onInboundIdle = opts.onInboundIdle;
     this.onServerEmpty = opts.onServerEmpty;
     this.onServerBehind = opts.onServerBehind;
+    this.onServerRevoked = opts.onServerRevoked;
+    this.onServerDrop = opts.onServerDrop;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
@@ -510,10 +540,18 @@ export class VaultSyncEngine {
         this.attempt = 0; // a clean sync resets backoff
         this.ready = true;
         this.backfilling = false;
+        // FIRST, and ahead of `setStatus("synced")` below: this is the frame
+        // that authorises removing files, and the status flip is what arms the
+        // reconnect's registry pull. Recording the authority after arming the
+        // pull it is meant to authorise would be one pull too late — which, on a
+        // cold launch, is the entire gap this frame exists to close.
+        if (control.revoked && control.revoked.length > 0) {
+          this.onServerRevoked?.(control.revoked, control.revokedTruncated === true);
+        }
+        this.onServerBehind?.(control.behind ?? []);
         // BEFORE the idle signal: `maybeSignalIdle` is what starts the content
         // run, and a run that starts without this frame's `empty` list would
         // work from the stale one (or none at all on a first connect).
-        this.onServerBehind?.(control.behind ?? []);
         this.onServerEmpty?.(control.empty ?? [], control.emptyTruncated === true);
         // `ready` routinely arrives AFTER the last backfill frame has already been
         // applied, so this is the edge that settles the download phase. Checking
@@ -525,6 +563,9 @@ export class VaultSyncEngine {
         this.sendPresence();
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
+        // …and tell the session WHICH doc left, so the live revocation path
+        // names its docs the way `ready.revoked` does on connect.
+        this.onServerDrop?.(control.docId);
       } else if (control.t === "reauth") {
         // ACL changed in this vault — the open note (synced over its own socket)
         // must re-mint its token to flip read-only/edit live. See onAclChanged.

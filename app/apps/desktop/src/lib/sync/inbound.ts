@@ -63,6 +63,86 @@ export interface InboundInput {
    * "came back" for the whole team as an empty twin.
    */
   serverFolderIds?: Map<string, string>;
+  /**
+   * True when this pass's listings are a TRUSTWORTHY statement of what the
+   * caller may read — not merely the absence of an answer.
+   *
+   * Three things have to hold, and the caller
+   * (`SyncManager.revocationAuthority`, read through `InboundHost`) checks all
+   * three:
+   *
+   *  1. The whole listing round trip succeeded — `GET /api/notes` and
+   *     `GET /api/folders` both returned 200. Neither is paginated, so a 200 is
+   *     the complete permission-filtered set, and a transport failure throws
+   *     long before this function is reached.
+   *  2. The session is LIVE: the vault channel has reached `synced` and a
+   *     structure pull has already completed. That is the same bar
+   *     `SyncManager.drainDiskDeletes` uses before it believes a missing file,
+   *     and for the same reason — at startup, "not there yet" and "gone" look
+   *     identical.
+   *  3. The server ANNOUNCED an access change in the last minute (`acl-changed`
+   *     → the `reauth` frame that asked for this pull). Liveness alone is not
+   *     enough: a regression in the server's readable-set filter would make
+   *     every routine pull — one per reconnect — look like a total revocation,
+   *     and one bad deploy would then take every member's local copies. A
+   *     shrunken listing nobody announced is treated as a fault, not a decision.
+   *
+   * The window rather than "the very next pull" is deliberate: pulls are
+   * debounced and coalesced, so the pass that reads the new listing may be
+   * several triggers downstream of the frame that announced the change.
+   *
+   * What it buys: the revocation caps below are lifted. They exist to stop a
+   * hiccup from looking like a mass revoke, and a whole-vault revocation is
+   * exactly the shape they cannot tell from one — Vault Settings → Access →
+   * Private takes EVERY doc away at once, which is 100% of the mapped set and so
+   * can never fit under a 50% ceiling. Refusing it left the vault's notes in the
+   * ex-reader's sidebar and on their disk while the same action on a single
+   * folder worked, because a folder is a small enough slice to fit.
+   *
+   * Nothing else is relaxed. Deletions and renames keep their caps (a wrong
+   * delete destroys work; a wrong revoke does not — the server holds every byte
+   * of a revoked doc by definition, and the executor still refuses any doc whose
+   * content this device never confirmed upstream).
+   */
+  authoritative?: boolean;
+  /**
+   * WHICH docs the server named as no longer readable — the union of the vault
+   * channel's `ready.revoked` and its live `drop` frames.
+   *
+   * `authoritative` says an access change was announced; this says what the
+   * announcement was ABOUT, and the cap is lifted only for the docs it names.
+   *
+   * What this is NOT: an independent second opinion. Both the names and the
+   * absences below come from the SAME server function
+   * (`permissions/vault-docs.ts listReadableDocsInVault` — the channel and
+   * `GET /api/notes` both call it), so a bug inside that one function produces
+   * the short listing and the announcement together. What agreement between
+   * them does buy is narrower and still worth having: the two readings are taken
+   * at different moments over different transports, so a transient or racy short
+   * answer on one of them alone removes nothing.
+   *
+   * The real cross-check is {@link InboundPlan.needsAccessCheck}, which the
+   * executor resolves against `permissions/resolver.ts effectivePermission` — a
+   * different query — before it deletes anything past the cap.
+   *
+   * Absent ⇒ `authoritative` alone lifts the cap for every revoked doc. That is
+   * the old-server path: a server that names nothing here also never sends
+   * `ready.revoked`, so its only authority is the live `reauth`.
+   *
+   * Only meaningful when `authoritative` is true; ignored otherwise.
+   */
+  authoritativeRevoked?: ReadonlySet<string>;
+  /**
+   * doc_ids the LOCAL user created (from the listing's `created_by`).
+   *
+   * Authorship does not survive an item set to Private — that is deliberate
+   * (spec 04: a restriction its author is exempt from is not a restriction), so
+   * these docs genuinely can be revoked. What it does change is HOW the file
+   * leaves: the author gets the recoverable `.context/trash` copy a deleted note
+   * gets, instead of an outright `deletePath`. Losing read access to a note is
+   * not a reason to destroy the only local copy of something this person wrote.
+   */
+  authoredByMe?: ReadonlySet<string>;
 }
 
 export interface InboundRename {
@@ -90,6 +170,16 @@ export interface InboundTrash {
    * same from here.
    */
   reason: "deleted" | "revoked";
+  /**
+   * Does the file get a copy in `.context/trash` before it goes?
+   *
+   * Always for `deleted` — the trash IS the undo. For `revoked` only when the
+   * LOCAL user authored the note: leaving an ex-reader a readable `.md` would
+   * defeat the revocation, but a person losing access to something they wrote
+   * themselves must not have their only local copy destroyed by a permission
+   * change. See {@link InboundInput.authoredByMe}.
+   */
+  recoverable: boolean;
 }
 
 export interface InboundRejection {
@@ -117,13 +207,6 @@ export interface InboundPlan {
   renames: InboundRename[];
   trash: InboundTrash[];
   /**
-   * Docs that vanished from the server listing WITHOUT a tombstone — i.e. access
-   * was revoked. This stops us treating them as ours; the file itself leaves via
-   * a `revoked` entry in {@link trash}, which is gated on the server having
-   * answered about deletions at all.
-   */
-  revoked: Set<string>;
-  /**
    * Local note paths the OUTBOUND half must not re-register.
    *
    * This one field is the whole ghost fix. A tombstoned or revoked note is still
@@ -142,6 +225,22 @@ export interface InboundPlan {
    * Never populated for revoked notes or when tombstones were not reported.
    */
   stubs: string[];
+  /**
+   * doc_ids among {@link trash} whose `revoked` removal survives ONLY because an
+   * authoritative pass lifted the safety cap.
+   *
+   * The executor must not act on these from this plan alone. It asks the server
+   * a second, differently-computed question first
+   * (`POST /api/vaults/:id/access-check` → `effectivePermission` per doc) and
+   * removes only the ids that also come back with no access; anything the
+   * resolver still grants is left on disk and reported, and a request that fails
+   * removes nothing at all.
+   *
+   * Empty when the revoked group fitted under its cap on its own — an ordinary
+   * revocation of a few notes needs no corroboration, because the cap is already
+   * the thing bounding the damage.
+   */
+  needsAccessCheck: string[];
   rejected: InboundRejection[];
 }
 
@@ -241,8 +340,12 @@ function trashCap(mapped: number): number {
  *
  * Losing a whole shared folder at once is an ordinary thing for an admin to do,
  * so the deletion cap (20%) would refuse the common case. The looser limit is
- * affordable because the blast radius is smaller: the server still holds every
- * one of these docs by definition, and the files land in the vault's trash.
+ * affordable because the server still holds every one of these docs by
+ * definition, so nothing is destroyed that cannot be handed back by restoring
+ * access. The local file itself IS destroyed — a revoked note is removed
+ * outright, with no `.context/trash` copy, because a copy there would leave the
+ * ex-reader exactly the readable `.md` the revocation exists to take away (the
+ * one exception is a note the local user authored; see `InboundTrash.recoverable`).
  * It is still a limit, because a truncated `GET /api/notes` looks exactly like
  * a mass revoke from here — and when it trips we keep the files, which is the
  * safe direction.
@@ -265,9 +368,9 @@ export function planInbound(input: InboundInput): InboundPlan {
     removeFolders: [],
     renames: [],
     trash: [],
-    revoked: new Set(),
     suppress: new Set(),
     stubs: [],
+    needsAccessCheck: [],
     rejected: [],
   };
 
@@ -382,8 +485,20 @@ export function planInbound(input: InboundInput): InboundPlan {
       }
       revoked.push(path);
     }
+    // The folder lift is narrower than the note one: it needs authority that
+    // named NOTHING. A pass carrying a named list has a doc-level cross-check
+    // behind it (`needsAccessCheck`) that folders have no equivalent of — folder
+    // ids are not doc ids, so neither `ready.revoked` nor the access-check route
+    // can speak about them — so a named pass keeps the folder cap.
+    //
+    // What makes the remainder acceptable either way: removal is EMPTY-ONLY.
+    // `plan.removeFolders` reaches `ipc.deleteFolderIfEmpty`, which is
+    // `remove_dir` and never recursive, so the worst a wrong folder revocation
+    // can do is take away directories that hold nothing. Any folder still
+    // holding a note the note pass refused to trash stays on disk.
     const cap = revokeCap(input.localFolderIds.size);
-    if (revoked.length > cap) {
+    const folderLift = input.authoritative === true && input.authoritativeRevoked === undefined;
+    if (!folderLift && revoked.length > cap) {
       for (const path of revoked) {
         plan.rejected.push({
           kind: "folder",
@@ -469,34 +584,47 @@ export function planInbound(input: InboundInput): InboundPlan {
       // Belt as well as braces: if the trash step is skipped or fails, this still
       // stops the note being re-registered as a ghost.
       plan.suppress.add(loc);
-      pushTrash(plan, docId, loc, "deleted");
+      pushTrash(plan, docId, loc, "deleted", true);
       continue;
     }
 
-    // Absent from BOTH lists ⇒ we lost access.
-    plan.revoked.add(docId);
+    // Absent from BOTH lists ⇒ we lost access. What follows from that is the
+    // `suppress` entry (stop re-registering the file) and the `revoked` trash
+    // entry below; there is deliberately no separate set of revoked ids, because
+    // nothing downstream ever read one.
     if (loc !== undefined) plan.suppress.add(loc);
     // …and the local copy goes with it. A revocation that leaves a full,
     // readable `.md` on the ex-reader's disk is cosmetic: they can open it in
-    // any editor forever. The server keeps the content (this only ever runs for
-    // a doc we previously AGREED was server-owned — `prev !== undefined` above),
-    // the file moves to the vault's recoverable trash rather than being
-    // destroyed, and the executor still refuses any doc whose content this
-    // device never confirmed upstream.
+    // any editor forever. So the file is REMOVED OUTRIGHT, not trashed — a copy
+    // under `.context/trash` would hand back the very thing being taken away.
+    // The content is not lost: this only ever runs for a doc we previously
+    // AGREED was server-owned (`prev !== undefined` above), so the server holds
+    // every byte and restoring access brings it straight back. The executor
+    // still refuses any doc whose content this device never confirmed upstream.
+    //
+    // The one exception is a note the LOCAL user wrote. Authorship does not
+    // survive an item-Private server-side, so their own note can genuinely be
+    // revoked — but taking someone's own writing off their disk with no undo is
+    // a different act from taking back something they were merely shown.
     //
     // Gated on the server having actually ANSWERED about deletions. A `null`
     // tombstone list means "I don't know", and absence is then uninformative —
     // it could equally be a truncated response. Removing files on the strength
     // of a maybe is precisely the mistake this module exists to avoid.
     if (loc !== undefined && input.tombstones !== null) {
-      pushTrash(plan, docId, loc, "revoked");
+      pushTrash(plan, docId, loc, "revoked", input.authoredByMe?.has(docId) === true);
     }
   }
 
   // Trash deepest-first, so a folder's contents leave before anything prunes it.
   plan.trash.sort((a, b) => b.path.split("/").length - a.path.split("/").length);
 
-  applyBreakers(plan, input.baseline.size);
+  applyBreakers(
+    plan,
+    input.baseline.size,
+    input.authoritative === true,
+    input.authoritativeRevoked ?? null,
+  );
   return plan;
 }
 
@@ -514,25 +642,62 @@ function pushTrash(
   docId: string,
   path: string,
   reason: InboundTrash["reason"],
+  recoverable: boolean,
 ): void {
   if (!isSafeNotePath(path)) {
     plan.rejected.push({ kind: "trash", path, docId, reason: "unsafe local path" });
     return;
   }
-  plan.trash.push({ docId, path, reason });
+  plan.trash.push({ docId, path, reason, recoverable });
 }
 
-function applyBreakers(plan: InboundPlan, mapped: number): void {
+function applyBreakers(
+  plan: InboundPlan,
+  mapped: number,
+  authoritative: boolean,
+  namedRevoked: ReadonlySet<string> | null,
+): void {
   // Each reason is capped against its own budget, and independently: a mass
   // revoke must not blow away the allowance for a legitimate single delete
   // riding in the same pass.
+  //
+  // On an AUTHORITATIVE pass the revocation budget is lifted (see
+  // `InboundInput.authoritative`): the cap's whole job is to disbelieve a
+  // shrunken listing, and here the listing is the server's completed answer to
+  // "what may this user read now". The DELETION budget is never lifted — that
+  // one guards work, not access.
+  //
+  // When the server also NAMED the revoked docs (`InboundInput.authoritativeRevoked`)
+  // the lift is narrowed to those, so a listing that shrinks with nothing
+  // announcing those particular docs still hits the cap. The named entries are
+  // taken out of the group BEFORE it is measured, so they cannot push the rest
+  // over their own limit.
+  //
+  // Nothing lifted here is FINAL. Every entry the lift saves is recorded in
+  // `plan.needsAccessCheck`, and the executor has to get a second, differently
+  // computed answer (`effectivePermission`, per doc) before it removes any of
+  // them — because the names and the absences both come from one server
+  // function, and a pass authorised past its own safety limit deserves a source
+  // that could disagree.
+  // How large the revoked group is BEFORE anything is refused. Measuring after
+  // the refusal was a hole: when the unnamed half blows its own cap and is
+  // dropped, the named survivors can fall back under the cap and skip the second
+  // opinion — even though the lift is the only reason they are still here. 45
+  // named out of 100 mapped was 45 files deleted with no corroboration at all.
+  const allRevoked = plan.trash.filter((t) => t.reason === "revoked").length;
+  const exempt = authoritative
+    ? namedRevoked === null
+      ? (t: InboundTrash) => t.reason === "revoked"
+      : (t: InboundTrash) => t.reason === "revoked" && namedRevoked.has(t.docId)
+    : () => false;
   const caps: Array<[InboundTrash["reason"], number, string]> = [
     ["deleted", trashCap(mapped), "deletions"],
     ["revoked", revokeCap(mapped), "access removals"],
   ];
   for (const [reason, cap, label] of caps) {
-    const group = plan.trash.filter((t) => t.reason === reason);
+    const group = plan.trash.filter((t) => t.reason === reason && !exempt(t));
     if (group.length <= cap) continue;
+    const refused = new Set(group);
     for (const t of group) {
       plan.rejected.push({
         kind: "trash",
@@ -541,7 +706,17 @@ function applyBreakers(plan: InboundPlan, mapped: number): void {
         reason: `refused: ${group.length} ${label} in one pass exceeds the ${cap} safety limit`,
       });
     }
-    plan.trash = plan.trash.filter((t) => t.reason !== reason);
+    plan.trash = plan.trash.filter((t) => !refused.has(t));
+  }
+  // Which survivors owe the executor a second opinion. The question is whether
+  // the group AS PLANNED needed the lift — not whether what is left of it still
+  // looks large — so every surviving revoked entry is flagged whenever the
+  // original group was over the cap. A small revocation, one that needed no lift
+  // at all, still costs no round trip.
+  if (allRevoked > revokeCap(mapped)) {
+    plan.needsAccessCheck = plan.trash
+      .filter((t) => t.reason === "revoked")
+      .map((t) => t.docId);
   }
   const rCap = renameCap(mapped);
   if (plan.renames.length > rCap) {

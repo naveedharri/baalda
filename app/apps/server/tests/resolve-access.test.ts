@@ -14,6 +14,7 @@ import {
   seedShare,
   seedUser,
   seedVault,
+  seedVaultGrant,
 } from "./helpers/seed.js";
 
 /** Insert a `locked` share (seedShare only covers user view/edit grants). */
@@ -40,13 +41,15 @@ describe("resolve-access: buildAccessContext + resolveAccessForUser", () => {
     await pool.end();
   });
 
-  it("file resource: owner -> edit; unshared member -> none", async () => {
+  it("file resource: a Shared vault gives owner and member edit alike", async () => {
     const org = await seedOrg("Acme", "acme-ra1");
     const owner = await seedUser("owner@a.com");
     await seedMember(org, owner, "owner");
     const member = await seedUser("m@a.com");
     await seedMember(org, member, "member");
     const vault = await seedVault(org);
+    // Shared, the state POST /api/vaults leaves a new vault in.
+    await seedVaultGrant(org, "edit");
     const folder = await seedFolder(vault, null, "F", "F");
     const doc = await seedNote(vault, folder, "F/n.md");
 
@@ -55,7 +58,32 @@ describe("resolve-access: buildAccessContext + resolveAccessForUser", () => {
     expect(ctx!.docId).toBe(doc);
     expect(ctx!.folderIds).toContain(folder);
     expect((await resolveAccessForUser(ctx!, owner, "owner")).permission).toBe("edit");
+    expect((await resolveAccessForUser(ctx!, member, "member")).permission).toBe("edit");
+  });
+
+  it("file resource: a Private vault gives the owner no more than the member", async () => {
+    // The panel's "who can access" list and the enforcer have to agree, and
+    // this is the row people check first: with no org grant the vault is
+    // Private, and Private stopped exempting the person who owns it. Neither
+    // of these two wrote the note, so neither can reach it.
+    const org = await seedOrg("Acme", "acme-ra1b");
+    const owner = await seedUser("owner@b.com");
+    await seedMember(org, owner, "owner");
+    const member = await seedUser("m@b.com");
+    await seedMember(org, member, "member");
+    const vault = await seedVault(org);
+    const folder = await seedFolder(vault, null, "F", "F");
+    const doc = await seedNote(vault, folder, "F/n.md");
+
+    const ctx = await buildAccessContext("file", doc);
+    expect((await resolveAccessForUser(ctx!, owner, "owner")).permission).toBe("none");
     expect((await resolveAccessForUser(ctx!, member, "member")).permission).toBe("none");
+
+    // Authorship is what a Private vault leaves standing, for both of them.
+    const mine = await seedNote(vault, folder, "F/mine.md", owner);
+    const mineCtx = await buildAccessContext("file", mine);
+    expect((await resolveAccessForUser(mineCtx!, owner, "owner")).permission).toBe("edit");
+    expect((await resolveAccessForUser(mineCtx!, member, "member")).permission).toBe("none");
   });
 
   it("folder resource resolves via folder shares (docId is null)", async () => {
@@ -94,6 +122,7 @@ describe("resolve-access: buildAccessContext + resolveAccessForUser", () => {
     const owner = await seedUser("o@a.com");
     await seedMember(org, owner, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit"); // the lock has to have an edit to cap
     const doc = await seedNote(vault, null, "n.md");
     await seedLock(org, "file", doc, "org", org);
 

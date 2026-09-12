@@ -4,7 +4,10 @@ import { pool as defaultPool } from "../db/pool.js";
 /**
  * Effective-permission resolver (spec 04 §3, plus locks).
  *
- *   1. Vault owner/admin  -> `edit` on everything in the vault.
+ *   1. Vault owner/admin  -> `edit` on everything in the vault, UNLESS the
+ *      vault's posture withdraws it: Read-only and `sealed` take the shortcut
+ *      AND the creator rule from everyone alike, and a vault that was simply
+ *      never shared takes the shortcut only.
  *   2. Else take the MAX of: a share on the file itself, a share on a
  *      containing folder (walking parent_id up to the root), and a
  *      vault-scoped grant (org-wide "Open"/"Read-only", or per-user).
@@ -13,8 +16,11 @@ import { pool as defaultPool } from "../db/pool.js";
  *
  * A plain `member` inherits the vault grant and so gets `edit` in a vault that
  * is Shared — which a new vault is, by default (`POST /api/vaults`). With no
- * grant at all (a vault set to Private, or one created while private-by-default
- * was the rule) a member has no content access beyond notes it created: `none`.
+ * grant at all (one created while private-by-default was the rule) people keep
+ * the notes they created and nothing else — owners and admins included, since
+ * nobody is exempt from a vault that was never shared. A vault someone actually
+ * SET to Private is a different row and a stricter rule: see `sealed` in
+ * {@link vaultBaseline}.
  *
  * Denies (permission = 'denied') come in two flavours, both resolved BEFORE the
  * rules above and both applying to owners and admins: a per-USER deny is
@@ -224,20 +230,47 @@ export async function isLocked(
  * shortcuts are skipped and the ordinary highest-wins grant lookup decides —
  * which still lets a folder marked Shared, or a personal edit grant, lift an
  * individual out of it. That is exactly what the panel offers.
+ *
+ * `sealed` — an org-principal `denied` row on the vault resource — is the
+ * Access panel's **Private**, and it is the same rule with nothing left at the
+ * bottom: the role shortcut and authorship are both skipped and the vault
+ * confers nothing, so only a GRANT reaches a doc. Nobody reads anything, the
+ * person who created the vault and wrote every note in it included, until
+ * something is shared by name or a folder is shared with the team.
+ *
+ * It is a row rather than the ABSENCE of one because absence already means
+ * something else. "Never shared" and "deliberately sealed" were the same state
+ * — no row — and they want opposite answers about the notes people wrote: the
+ * first is the private-by-default space `created_by` exists for, the second is
+ * a setting whose whole point is that it applies to the person who chose it.
+ * Writing the row is also what lets an old vault keep working until someone
+ * presses the button, at which point it means what it says.
+ *
+ * The one thing an item set Private does that `sealed` does not is drop ORG
+ * grants on that item. Here they still lift: a sealed vault is a floor you
+ * raise things out of one at a time, while an item set Private withdraws one
+ * thing from a team that can otherwise reach it.
+ *
+ * The management path is untouched and role-based (`canManage` in
+ * `http/routes/shares.ts`), so an owner who cannot read a note can still
+ * change the posture back.
  */
+export type VaultPosture = "edit" | "view" | "sealed" | null;
+
 export async function vaultBaseline(
   db: Queryable,
   organizationId: string,
-): Promise<Permission | null> {
+): Promise<VaultPosture> {
   const { rows } = await db.query<{ permission: string }>(
     `SELECT permission FROM shares
       WHERE resource_type = 'vault' AND resource_id = $1
-        AND principal_type = 'org' AND permission IN ('view', 'edit')
+        AND principal_type = 'org' AND permission IN ('view', 'edit', 'denied')
       LIMIT 1`,
     [organizationId],
   );
   const p = rows[0]?.permission;
-  return p === "edit" || p === "view" ? p : null;
+  if (p === "edit" || p === "view") return p;
+  return p === "denied" ? "sealed" : null;
 }
 
 /**
@@ -309,8 +342,14 @@ export async function effectivePermission(
   const itemPrivate = await isDenied(db, "org", loc.organizationId, docId, folderIds);
 
   const role = await memberRole(db, loc.organizationId, userId);
-  // A Read-only vault caps EVERY shortcut below it (see `vaultBaseline`).
-  const readOnlyVault = (await vaultBaseline(db, loc.organizationId)) === "view";
+  // The vault's posture caps EVERY shortcut below it (see `vaultBaseline`).
+  // Read-only and Private both skip the role AND the creator rule; they differ
+  // only in what the vault itself then confers — `view` for one, nothing at all
+  // for the other.
+  const baseline = await vaultBaseline(db, loc.organizationId);
+  const readOnlyVault = baseline === "view";
+  const sealedVault = baseline === "sealed";
+  const ungrantedVault = baseline === null;
   let granted: Permission;
   if (itemPrivate) {
     // Private = "nobody, until you name them". ONLY explicit per-user grants
@@ -330,7 +369,22 @@ export async function effectivePermission(
       false,
       false,
     );
-  } else if (readOnlyVault) {
+  } else if (readOnlyVault || sealedVault) {
+    // The two postures that take BOTH shortcuts away from everyone: the
+    // owner/admin blanket edit, and authorship.
+    //
+    // `sealed` is the Private button, and it had to stop sparing the author to
+    // mean anything. In a vault you set up yourself you wrote nearly every note
+    // in it, so a Private that spares the author is one you can never observe —
+    // press it and the vault looks untouched, which from the seat that pressed
+    // it is indistinguishable from a control that does not work.
+    //
+    // What still reaches through is a GRANT: a per-user share, or an org share
+    // on a folder or note ("share this one folder with the team"). That is the
+    // shape of a sealed vault — a floor you lift things out of one at a time by
+    // naming them. It is also the one difference from an item set Private,
+    // which drops org grants on that item too, because there the point is the
+    // opposite: withdrawing one thing from a team that can otherwise reach it.
     granted = await sharePermission(
       db,
       userId,
@@ -339,7 +393,11 @@ export async function effectivePermission(
       loc.organizationId,
       role !== null,
     );
-  } else if (role === "owner" || role === "admin") {
+  } else if (!ungrantedVault && (role === "owner" || role === "admin")) {
+    // The blanket role shortcut. A vault that was never shared withdraws it —
+    // an owner is not exempt from a vault nobody has been given — but leaves
+    // the creator rule below standing, because "no grant" is also the state
+    // every private-by-default vault sits in, where people keep what they wrote.
     granted = "edit";
   } else if (role !== null && loc.createdBy && loc.createdBy === userId) {
     // Private-by-default: a member always has edit on a note they created, even
@@ -445,13 +503,18 @@ export async function resolveAccessForUser(
   // Mirrors `effectivePermission` branch for branch. They MUST agree: this one
   // renders the "who can access" list, and a list that disagrees with the
   // enforcer is worse than no list.
-  const readOnlyVault = (await vaultBaseline(db, ctx.organizationId)) === "view";
+  const baseline = await vaultBaseline(db, ctx.organizationId);
+  const readOnlyVault = baseline === "view";
+  const sealedVault = baseline === "sealed";
+  const ungrantedVault = baseline === null;
   const isCreator = role !== null && !!ctx.createdBy && ctx.createdBy === userId;
   const granted: Permission = itemPrivate
     ? // Private: only explicit per-user grants survive — authorship included.
       await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false)
-    : readOnlyVault
-      ? await sharePermission(
+    : readOnlyVault || sealedVault
+      ? // Both postures skip the role AND authorship; only a grant reaches
+        // through. Mirrors `effectivePermission` branch for branch.
+        await sharePermission(
           db,
           userId,
           ctx.docId,
@@ -459,7 +522,7 @@ export async function resolveAccessForUser(
           ctx.organizationId,
           role !== null,
         )
-      : role === "owner" || role === "admin"
+      : !ungrantedVault && (role === "owner" || role === "admin")
         ? "edit"
         : isCreator
           ? "edit"

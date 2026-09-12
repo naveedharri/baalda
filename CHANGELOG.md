@@ -23,11 +23,120 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Changed
+- **Pressing Private seals the vault, for the person who pressed it too.** The
+  control used to express Private by DELETING the vault's grant row, and absence
+  already meant something else: a vault that was never shared, which is the
+  private-by-default space `created_by` exists for, where people keep the notes
+  they wrote. One state, two meanings, wanting opposite answers about
+  authorship — so Private spared the author, and in a vault you set up yourself
+  you wrote nearly every note in it, which made it a setting you could press and
+  see nothing happen. `PUT /orgs/:orgId/team-access { mode: "private" }` now
+  upserts an org-principal **`denied`** row on the vault resource (all three
+  modes upsert one row in place, so `grantId` is stable and there is no instant
+  mid-transaction where the vault reads as never-shared), and
+  `resolver.vaultBaseline` reports it as a fourth posture, `sealed`. Sealed
+  skips the role shortcut AND authorship: nobody reads anything until something
+  is shared by name or a folder is shared with the team, which still lifts —
+  sealed is a floor, not a wall, and that is the one thing an item set Private
+  does differently, since there the point is to withdraw one item from a team
+  that can otherwise reach it. Creation closes with reading
+  (`vaultRootWritable`, `canEditFolder`): a note you make in a sealed vault is a
+  note you instantly cannot open, so the root refuses one unless a per-user
+  vault-scoped `edit` grant lifts you. Sealing narrows even from no row at all,
+  so it kicks every live socket and broadcasts the ACL change, which ranking by
+  grant alone would have missed (`denied` and absence both rank 0). A vault that
+  merely never had a grant is untouched and keeps working exactly as it does
+  today — pressing the button is what upgrades it.
+- **Private means the same thing at every scope, owners and admins included.**
+  An item set to Private already dropped them (the org `denied` row resolves
+  above the role branch), but the vault-wide Private posture did not: with no
+  org grant on the vault, `effectivePermission` still short-circuited
+  owner/admin to `edit`, and `vault-docs.ts vaultAccess` answered
+  `vaultWide: true` for the role before reading a single grant — the widest
+  bypass in the system, feeding the readable set, the folder tree, blob reads,
+  the graph, MCP search, the registry pull and the vault channel's
+  `ready.revoked`. So one word meant two different things depending on which
+  control you reached for, and the person who set it was the one person who
+  could not observe it working. The role shortcut is now withdrawn under a
+  Private posture in `effectivePermission`, in `resolveAccessForUser` (the "who
+  can access" list, which must agree branch for branch), in `vaultAccess` (the
+  early return is gone; the role reaches vault-wide read through the org grant
+  like everyone else) and in `canEditFolder`. **Authorship survives** — everyone
+  keeps the notes and folders they created, which is what the Private card has
+  always promised members — and it deliberately does not survive an *item* set
+  to Private: an item is one thing you withdraw from the team, while the posture
+  is the state every vault sits in from birth, and a Private vault that dropped
+  authorship too would be unreadable to the person who just made it. Managing
+  access is untouched and role-based (`shares.ts canManage`), so an owner can
+  always put it back. Two gates that used to ride on the role closed with it:
+  minting a public link now requires read access as well as the management gate
+  (publishing a note you cannot open would put it on the open web), and a
+  whole-vault checkpoint revert requires vault-wide read (403
+  `no_vault_wide_access`) because a partial revert restores the structure whole
+  and the contents in part. Fixtures that seeded a vault directly were quietly
+  testing a Private vault driven by an owner; they now seed the org grant
+  `POST /api/vaults` creates, and `seedFolder` takes a creator like `seedNote`.
+- **The "Entire vault" control reads what the team can actually reach.** Setting
+  every folder and note to Private one at a time left the control saying
+  **Shared**, because a per-item Private is a `denied` row on that item and
+  never touches the vault row above it — two controls answering one question,
+  and the one at the top was answering about a row. `lib/accessMode.ts`
+  `effectiveVaultMode` now rolls the root items up: when they unanimously agree
+  on a mode the posture disagrees with, that mode is what the control marks
+  active and a line underneath names the posture. Unanimity, not the maximum —
+  an item with no row of its own really is whatever the posture says, so one
+  Private folder among many leaves "Shared" the honest answer. Root items are a
+  sufficient sample because nothing under a Private folder is reachable however
+  it is marked. Three pieces of copy that promised owners and admins keep access
+  were wrong and are fixed, including the item-Private confirm, which had been
+  describing the opposite of what the server did since the org deny was added.
+- **The Access panel's vault-level control enforces a mode instead of merely
+  defaulting to it.** "This vault, by default" wrote one `shares` row on the
+  vault resource and left every per-folder and per-note override standing, so
+  "set the whole vault to Shared" quietly skipped everything anyone had ever
+  overridden — which people read, correctly, as the control not working. It is
+  now labelled **Entire vault** and calls `PUT /api/orgs/:orgId/team-access`,
+  which in one transaction deletes every org-principal row on every folder and
+  file in the vault's collections and then writes the new vault row (none, for
+  Private). Per-**user** rows are untouched: people shared with by name keep
+  their access. The confirm names what it is about to replace with exact counts
+  (`accessMode.ts` `overrideCountPhrase` — "This replaces 3 folder settings and
+  1 note setting"), and the toast afterwards quotes the server's own `cleared`
+  count, because a teammate can add an override between the confirm and the
+  write. Wording moved with it: `MODE_LABEL` makes `open` **"Shared"**
+  everywhere (one hint in the detail pane still said "Open", which read as a
+  fourth state nobody could find), and the per-member tri-state's "Default" is
+  now **"Inherited"**. `docs/specs/04-team-collaboration.md` lost its stale
+  "Private by default" paragraph, which still described the posture reversed on
+  2026-08-07, and gained the two-control model.
+- **"Readable line length" is now a Content width slider.** The two-state switch
+  could only answer 88ch or the whole window; the slider runs 60–120ch in steps
+  of 4 with one stop past the end that means full width (`lib/editorMeasure.ts`
+  `sliderToMeasure`), and applies live as an inline `--editor-measure` on
+  `.editor-column` rather than the old `data-measure="full"` attribute — so
+  `--editor-pad-x` and its consumers still follow with no JavaScript at all.
+  `context.readableLineLength` is read once to migrate a device that still has
+  it ("off" ⇒ Full) and never written again; the new key is
+  `context.editorMeasure`. The Suspense-fallback `EditorSkeleton` column takes
+  the same style, so its bars no longer sit at the default 88ch and jump
+  sideways when the real note lands. The graph panel's private restyling of the
+  native range input was lifted into app-wide `.range-input` / `.range-value`
+  rather than copied.
+- **Settings rows have height and dividers.** `.menu-row` is the account
+  popover's row rendered on a surface eight times the size, and at the popover's
+  4px padding a column of them reads as one paragraph, with no line between the
+  control you meant to reach and the one below it. A row that is a DIRECT child
+  of `.settings-content` now gets `min-height: 40px`, `var(--sp-3)` vertical
+  padding and a hairline between siblings. Side padding goes to zero rather than
+  up, so rows stay aligned with the section headings above them;
+  `.settings-footer-row` still wins on specificity, and rows nested inside a
+  card (the billing plan, the Updates tab) are deliberately untouched because
+  their container already spaces them.
 - **The editor's default measure is 88ch, down from 120ch — a visible
   narrowing.** Past roughly ninety characters the eye loses the start of the
   next line; this is where every typographic rule of thumb, and Obsidian's own
-  default, lands. Settings → Appearance → "Readable line length" restores the
-  full width.
+  default, lands. Settings → Appearance → "Content width" moves it, and dragging
+  that slider past its last stop, to Full, restores the full width.
 - **`indentUnit.of("  ")`** is now set explicitly, so `lists.ts`'s Tab/Shift-Tab,
   `indentOnInput` and every CodeMirror indent command share one answer to "how
   wide is a level". `lists.ts` lost its dead `listEnter` command and the unused
@@ -141,6 +250,179 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **`ready.revoked` — the server STATES a revocation on every connect.** The
+  vault channel's `ready` frame gained `revoked` / `revokedTruncated`
+  (`sync/vault-protocol.ts`), the third of its doc lists after `empty` and
+  `behind`: the docs THIS CLIENT'S OWN hello manifest claims it holds that are
+  not in its readable set any more. `vault-channel.ts` `revokedFromManifest` is
+  set arithmetic over two things already in hand, so it costs **no query**, and
+  `REVOKED_CAP = 2000` bounds it — bounded by what the client holds, never by
+  the vault, so a member of a private vault full of docs they never had is named
+  none of them, and every id named is one the client itself sent us. The desktop
+  fires `onServerRevoked` inside the `ready` handler FIRST, ahead of
+  `setStatus("synced")`, because that flip is what arms the reconnect's registry
+  pull and recording the authority afterwards would be one pull too late.
+  `docSession.handleServerRevoked` stamps `aclChangedAt`, records the set and
+  queues an `acl-revoked` pull; `authoritativeRevoked()` hands it to the planner,
+  which NARROWS the allow-list instead of lifting `revokeCap` wholesale: only
+  docs the server named are exempt from the cap, and the residue is measured on
+  its own size once they leave the group. What that agreement buys is narrow and
+  worth stating exactly: `GET /api/notes` and `revokedFromManifest` both call
+  `listReadableDocsInVault`, so the named list is ONE resolver read twice, at two
+  moments over two transports. It catches a transient or racy short answer and
+  nothing else — a regression inside that function would produce the short
+  listing and the announcement together. The answer that can genuinely disagree
+  is `access-check` (below), which every cap-lifted removal now waits for.
+  The named set is a UNION for the vault session: `handleServerReauth` no longer
+  clears it, and the live path feeds it too, because `refreshAcl` sends one
+  `drop` per lost doc immediately before the `reauth` and `onServerDrop` records
+  each id — so an announcement that names nothing (a lock toggled on a note this
+  user cannot see) can never widen a three-note authority into a whole-vault
+  one. A truncated list likewise keeps the 2000 ids it did carry as the
+  allow-list rather than lifting wholesale; the residue rides the ordinary cap
+  and the next connect names the next batch, so a very large revocation
+  converges over a few connects. The DELETION cap is never lifted by any of it.
+  Folders are separate: `folderLift` requires an authoritative pass that named
+  NOTHING, because folder ids are not doc ids and neither the named list nor the
+  access-check can speak about them — and folder removal is empty-only all the
+  way down (`ipc.deleteFolderIfEmpty` is `remove_dir`, never recursive), so the
+  worst a wrong folder revocation can do is take away directories holding
+  nothing. Old clients ignore the new fields (`parseServerControl` rebuilds the
+  frame from the keys it knows) and an old server's bare `ready` fires nothing.
+- **`POST /api/vaults/:vaultId/access-check` — a second, differently computed
+  answer before any file leaves the disk.** Member-gated, body `{ docIds }`
+  capped at `ACCESS_CHECK_MAX = 2000` (the same bound the channel frame carries),
+  replying `{ none }` computed per doc with `permissions/resolver.ts`
+  `effectivePermission` — the resolver DUAL of the listing, so a bug in
+  `listReadableDocsInVault` can no longer corroborate itself. It enumerates
+  nothing: the response is a subset of what was asked. An id with no row in THIS
+  vault is left UNANSWERED rather than reported unreadable — the client's rule for
+  an unanswered id is to keep the file, and saying `none` for an id the caller
+  reads perfectly well in a different vault would be a false confirmation on the
+  one route whose whole job is to be a second opinion. There is deliberately no
+  `deleted_at` filter: a soft-deleted note does have a row and should reach the
+  resolver, which answers `none` for it through `locateDoc`, and a merely REVOKED
+  doc always has a live row, so a real revocation is always answered. The ids run
+  through a `runPool` at `config.backfillConcurrency` — the same width the vault
+  channel backfills at — because `effectivePermission` is roughly seven queries
+  per doc and awaiting them in series held one pool connection for thousands of
+  sequential round trips (300 ids, same data: 1067 ms → 285 ms).
+  The client pays for it only where it matters. `planInbound` emits
+  `InboundPlan.needsAccessCheck` — the revoked entries that survive only because
+  the cap was lifted, measured against the revoked group as it stood BEFORE any
+  refusal, so a named survivor cannot skip corroboration just because the unnamed
+  half blew its own cap and left it back under the line — and `applyInbound` runs
+  `confirmRevocations` before anything is deleted: the resolver agreeing lets the
+  removal stand; the resolver still granting pulls the entry out of `plan.trash`
+  AND `plan.suppress` (so the next pass treats it as an ordinary note instead of
+  freezing it out) and hands the id back through `InboundHost.revocationRefused`,
+  which is the one way the named set ever shrinks; a request that throws removes
+  nothing in the group. The call is chunked in slices of `ACCESS_CHECK_MAX` and
+  the answers unioned, because the route 400s above the bound and a 400 reads as
+  "no answer" — unchunked, every revocation on a vault of more than 2000 mapped
+  notes was struck in full on every connect, forever. A throw on ANY slice fails
+  the WHOLE group, never just that slice: the answers corroborate one decision,
+  and acting on the half that came back would delete files on a partial second
+  opinion. The bound is mirrored as `lib/api.ts ACCESS_CHECK_MAX` (the two
+  packages cannot import each other) and pinned by `accessCheckBound.test.ts`,
+  which reads the number out of the server source — drift there reinstates
+  exactly that bug. `ApiClient.request` also gained a `timeoutMs`
+  (`AbortController`, cleared in a `finally`) and `accessCheck` passes
+  `ACCESS_CHECK_TIMEOUT_MS = 30_000`, so a wedged proxy reads as "no answer" and
+  removes nothing rather than holding up the pull. A revocation small enough to
+  have needed no lift still costs no round trip at all.
+- **`tests/root-freeze.test.ts` pins the frozen-root contract**, 16 cases across
+  both surfaces: the toggle's owner/admin gate, a plain member's root note and
+  root folder refused with `code: "root_frozen"` while creation inside an
+  existing root folder still works, a move out to the root refused through all
+  four spellings (`folderId:null`, `relPath` alone, `parentId:null`, `path`
+  alone), a `rel_path`/`folder_id` disagreement refused as a 400
+  `path_folder_mismatch` rather than resolved to the root, a soft-deleted root
+  note that cannot come back under a new doc_id, and MCP `create_note` /
+  `create_folder` parity, which had no coverage at all. Every assertion reads
+  the `notes`/`folders` tables rather than trusting the response body.
+- **A read-only vault shows the padlock on every folder and note.**
+  `GET /api/vaults/:vaultId/locks` now returns one synthetic row —
+  `resource_type: 'vault'`, `permission: 'locked'`, id `vault:<orgId>` so it can
+  never collide with a routable share id — when the vault's posture is `view`,
+  while the stored row still says `view`. The rewrite is unambiguous precisely
+  because a vault-scoped `locked` cannot exist in the table: it would collide
+  with the vault GRANT on (`resource_type`, `resource_id`, `principal_type`,
+  `principal_id`), which is why `isLocked` is folder/file only. So a `vault` row
+  on the wire always means the Read-only posture and never a stored lock. The
+  same response also carries the LIFTS — the `edit` rows on a folder or file
+  that survive the posture: the org-principal ones plus the caller's OWN
+  per-user ones, and nobody else's — because the padlock has to stop where
+  someone's real access starts. `store.refreshLocks` splits the overlay three
+  ways and keeps those in a separate `lifts` bucket, so no consumer of `locks`
+  can ever see an `edit` row and offer to Unlock a grant. `lib/locks.ts`
+  `lockScopesByPath` seeds every path in the tree from the posture
+  (`hasVaultLock`) at a `vault` scope that outranks the per-person ones but sits
+  below `all`, so only an item carrying an Everyone row of its own keeps the
+  per-item wording; the badge reads "This vault is read-only — changes won't
+  sync". It then subtracts each lifted subtree from that seed, and `vault` is
+  the one scope `effectiveLockForPath` never INHERITS — the posture marks every
+  path directly, so a path without the mark lacks it deliberately and a note
+  freed by a personal grant cannot take the padlock straight back from its
+  folder. Both panel consumers read through the new `itemLockRows`, and
+  `Share.resourceType` widened to `"folder" | "file" | "vault"`. On a row whose
+  padlock comes only from the posture (`vaultLockedOnly`) the context menu shows
+  a disabled **"Locked by the vault"** entry rather than hiding one — the
+  padlock is right beside it, and a vanished entry reads as a bug — the
+  selection bar's Lock/Unlock pair hides outright, and the folder "empty" hint
+  is back, because a vault-wide lock is no reason to stop saying a folder is
+  empty. The padlocks update live, because the ACL frame already runs
+  `refreshLocks`. The editor was ALREADY read-only under a read-only vault (the
+  sync token says so); this is what makes the sidebar say it too, from the first
+  frame.
+- **`GET` / `PUT /api/orgs/:orgId/team-access`** (`http/routes/shares.ts`,
+  owner/admin only, gated by `canManage` on the vault resource). GET reports the
+  vault's mode, the grant row backing it, and every per-item org row that
+  currently survives it — one request, because the Access panel has to state how
+  many settings it will clear *before* the confirm, and a count assembled from
+  several round trips is a count that can be wrong. PUT applies a mode to the
+  whole vault in a transaction, then force-closes the sync sockets of exactly
+  what NARROWED — a client reconnects and re-mints its own token, so a change
+  that gives people more access arrives by itself. Grants rank `edit=2 >
+  view=1 > everything else 0` (`locked`/`denied` grant nothing, they only cap,
+  so clearing one kicks nobody): a cleared item row kicks its docs iff its rank
+  exceeds the target's, and the vault posture kicks every doc iff it dropped, so
+  Read-only→Shared kicks nobody and Shared→Private kicks everything. A narrowed
+  posture already reaches every doc in the org's collections, which makes the
+  per-item walks underneath it pure duplication — they are skipped; otherwise
+  the items resolve in one batched `permissions/lookup.ts` `docsForResources`
+  instead of a recursive walk apiece. The disconnects are best effort, one doc
+  at a time: the write is already committed, so a transport that throws on one
+  socket must not cost the caller a 500 or strand the docs behind it.
+  `onAclChanged` fires per collection only on a real change, or an idempotent
+  PUT would make every vault-channel subscriber recompute its readable set for
+  nothing. It answers `{ mode, cleared, postureChanged, disconnectedDocs }`,
+  where `cleared` counts ITEM rows only — the ones GET would have listed — and
+  `postureChanged` is the separate yes/no of whether the vault row itself moved,
+  because the desktop reports the two as different sentences. Org rows stranded
+  on soft-deleted notes are swept in the same transaction, silently and outside
+  that count: the user never saw them, a deleted doc has no live editors for the
+  row to have been protecting, and left behind a restored note would come back
+  carrying the very override the whole-vault change was made to remove. New
+  `tests/team-access.test.ts` covers the clearing, the per-user survivors and
+  the role gate.
+- **Clicking a folder or note row scrolls its controls into view.** New pure
+  `lib/scrollPlan.ts` finds the one ancestor that actually scrolls by computed
+  style (`Element.scrollIntoView` moves EVERY scrollable ancestor, which inside a
+  modal drags the page behind it too) and plans a target that guarantees the
+  per-item mode buttons rather than just the pane's title — the pane opens with a
+  breadcrumb, a title and up to two banners above them, so on a short window
+  "scroll the pane to the top" still left the three buttons the click was about
+  below the fold. An already-visible pane and a sub-pixel move both plan `null`,
+  and `prefers-reduced-motion` drops the smooth behaviour.
+- **A live miniature under the Content width slider**
+  (`components/ContentWidthPreview.tsx` + `lib/editorMeasure.ts`
+  `computePreviewColumn`). It measures the real editor pane and the real width of
+  a `0` in the editor's body font — `ch` resolves at the element using the token,
+  which is `.cm-line`, not the settings panel — runs the same arithmetic the
+  browser runs for `--editor-pad-x`, and scales the answer down. A window too
+  narrow to grant the measure being dragged towards therefore shows the column
+  stop growing, which is the one thing a fixed illustration could never say.
 - **Tables are edited in place, not as markdown source.** A GFM table is now
   always the rendered table (`lib/editor/table/`): the `"Table"` branch in
   `livePreview.ts` no longer yields to the active line, and clicking a cell
@@ -220,12 +502,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   guides track a webfont landing and any zoom.
 - **Two layout settings** (Settings → Appearance, device-local like the theme):
   **Readable line length** (on by default) and **Line numbers** (off by
-  default — a gutter takes real width from the prose column). The width toggle
-  is pure CSS: `.editor-column[data-measure="full"] { --editor-measure: 100% }`,
-  which `--editor-pad-x` and therefore `.cm-line`, `cm-block-inset`, the fold
-  chevrons and the loading skeleton all follow with no JS. `lineNumbers()` sits
-  in a Compartment so the switch reconfigures the live view instead of rebuilding
-  it (and with it the CRDT binding).
+  default — a gutter takes real width from the prose column). The width control
+  has since become the Content width slider (see the Changed entry above): it
+  now sets `--editor-measure` inline on `.editor-column` rather than flipping a
+  single attribute, but it is still only that one token, which `--editor-pad-x`
+  and therefore `.cm-line`, `cm-block-inset`, the fold chevrons and the loading
+  skeleton all follow with no JS. `lineNumbers()` sits in a Compartment so the
+  switch reconfigures the live view instead of rebuilding it (and with it the
+  CRDT binding).
 
 - **Live preview reveals one token at a time.** New `lib/editor/reveal.ts` holds
   the two scopes the editor now distinguishes: LINE (headings, quote markers,
@@ -329,6 +613,278 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **A note could double one block of its own text, geometrically, until it was
+  megabytes of one paragraph.** `vaultDocStore.coldApply` opens a TRANSIENT
+  bridge for a background note — a fresh `Y.Doc`, so a fresh clientID every
+  time — hydrates it from the local CRDT store, folds in the `.md` on disk,
+  applies the server's update and egests the result. Folding the file in first
+  is a three-way merge and has to stay one (an AI that edited the file while no
+  bridge was alive would otherwise be overwritten by the egest), but ingest
+  turns file bytes into ops attributed to THIS client. So when the file already
+  held the text of the update about to be applied — which is exactly what a
+  local store that has fallen behind its own file looks like — that text was
+  inserted TWICE, once as this client's fresh ops and once as the server's, and
+  Yjs keeps both. The egest wrote the doubled text back to the file, so the next
+  update through the same path doubled twice as much.
+  A customer's `Map of Content.md` ran that eighteen times in an hour: eighteen
+  updates, each from a different clientID, each re-inserting the whole current
+  delta, 276 bytes → 8 MB, ending at 2^16 copies of one added block — 16 MB of
+  Yjs state for a 686-byte note, 1,179,679 lines of 35 distinct ones. It is NOT
+  the 2026-09-04 seed-vs-pull race (that duplicates the whole note, from two
+  versions interleaved); this one duplicates only the delta and leaves the rest
+  intact, which is what the line-frequency profile shows.
+  `isExternalEdit` is the fix and it is exact rather than heuristic: ask what
+  the update ALONE would make the text, and if the file already says that, the
+  file is this loop's own echo, not an edit worth ingesting. Three more doors of
+  the same family closed alongside it — `NoteBridge.drainIngest` now serialises
+  its passes (two that overlap each diffed against the same text and each
+  applied their own copy), re-diffs after the recovery snapshot's `await` (the
+  one window between reading the doc and applying a diff computed from it), and
+  refuses a whole-file insert into a doc still waiting for its first pull (a
+  seed by another name, outside the pull-then-seed order). `destroy()` no longer
+  drops updates the store never got: persistence was fire-and-forget and the
+  teardown synchronous, which is how the local store ends up behind its own file
+  in the first place — `whenPersisted()` closes that gap, and both cold apply
+  and LRU retire await it. Pinned by `sync/__tests__/coldApplyDoubling.test.ts`
+  and `bridge/__tests__/doubling-ingest.test.ts`.
+- **The note size ceiling capped each message, not the note.** A note that
+  doubles doubles from small, so every single update in the cascade above was
+  comfortably under `MAX_NOTE_MB` and the cap never fired — which is how a 10 MB
+  limit produced a 16 MB note. `beforeHandleMessage` now also refuses any write
+  to a doc whose `Y.Text` is already over the cap (its own length counter, so
+  O(1)), making the limit a wall rather than a step size: a doc under it always
+  accepts one more message so it can be edited down, a doc over it accepts none
+  and is a repair job (`POST /api/notes/:id/reset-crdt`). Extracted as
+  `noteSizeRefusal` and pinned in `tests/repair-oversized-doc.test.ts`.
+- **Read-only was enforced on the surfaces people type into, not on the ones
+  they create with.** Three write paths asked only whether the caller was a
+  MEMBER of the vault, so someone who could not change a single note in a folder
+  could fill that folder with new ones. `POST /api/notes`, `/api/folders` and
+  `/api/files` now go through a shared `permissions/http-gates.ts`
+  `canCreateIn`, applied AFTER the parent is resolved so it judges the real
+  parent: inside a folder it is exactly `canEditFolder`, byte for byte MCP's
+  `folderWritePermission` already applied, so the two surfaces cannot drift; at
+  the vault root it is `vaultRootWritable`, which refuses under the Read-only
+  posture unless a per-user vault-scoped `edit` grant lifts that one caller —
+  the same escape the resolver already honours for editing an existing root
+  note. MCP had the mirror-image hole: its root branch returned `edit` for any
+  admin, so in a Read-only vault an owner could not touch one existing note but
+  could keep creating new ones at the top; it now checks `vaultRootWritable`
+  too. `POST /api/vaults/:vaultId/blobs` was membership-gated as well and now
+  calls `canWriteAttachment` — vault posture only, and documented as such,
+  because a blob carries no `folder_id` and no ACL row of its own, so there is
+  no folder to resolve a lock against. The idempotent adopt paths still run
+  BEFORE every one of these gates, so a read-only client's sync reconcile
+  re-registers what already exists exactly as before. Permission refusals carry
+  `code: "no_write_access"`, and permission is checked BEFORE the `root_frozen`
+  latch on purpose: "move it into a folder" is useless advice for someone who
+  may not write to that folder either, and it would leak the latch to a caller
+  with no write access at all — a caller who MAY write still gets `root_frozen`,
+  which is the case the desktop's toast exists for. `POST /api/notes` naming an
+  existing doc_id at a new path now answers 200 with the row's canonical
+  `relPath`/`folderId` (the same shape the adopt paths use) instead of a 201
+  echoing a path `ON CONFLICT (id) DO NOTHING` never wrote, so the client stops
+  re-sending a location the server disagrees with. And `sync/hocuspocus.ts`
+  `onAuthenticate` now re-resolves `effectivePermission` at connect instead of
+  trusting the JWT's `readOnly` claim, which closes a replay window exactly as
+  wide as `SYNC_TOKEN_TTL_SECONDS` (600 s by default): `disconnectDoc` closes
+  live sockets the instant access narrows, but a kick is a disconnection, not a
+  revocation, and the edit token the client still held let it reconnect as an
+  editor. `none` now rejects the connection, anything short of `edit` connects
+  read-only whatever the claim said, never the reverse (a regained grant still
+  has to re-mint), and a resolver that throws fails CLOSED. New
+  `tests/readonly-enforcement.test.ts` is the single place the read-only
+  contract is proven end to end — 32 cases over sync-token minting, the
+  Hocuspocus socket, every MCP write tool, the registry routes, versions, CRDT
+  repair, blobs, public links and the vault channel, each run against all three
+  ways read-only arises (an item or ancestor `locked` row, a bare `view` grant,
+  and the vault-wide posture, which caps owners, admins and a note's own creator
+  alike).
+- **An external move to a frozen vault root was silently undone.**
+  `VaultRegistry.renamePath` swallowed the server's 403 — `console.error` and
+  return — so a note moved out to the root from outside Baalda was treated as
+  renamed, rebound to the new path locally, and then quietly pulled back into
+  its old folder by the next inbound pull, with nothing said to the person who
+  moved it. Both catch blocks (the `api.updateFolder` branch and the
+  `api.updateNote` one) now `recordFailure` with `reasonOf(e)` and
+  `errorCode(e)`, keyed on the DESTINATION path because that is where the file
+  now sits on disk. The existing one-toast-per-path explanation does the rest —
+  "X can't sync — this vault's root is frozen. Move it into a folder to sync
+  it." — and an ordinary 500 records a failure with a `null` code instead of
+  vanishing into the console. New `__tests__/renameRefusal.test.ts` (5 cases)
+  also pins that the path maps stay on the OLD path after a refusal, so the next
+  pull can still reconcile them.
+- **"Entire vault → Private" left every note sitting on the member's device.**
+  The server was right all along — the readable set, the visible folders and
+  both `/api/notes` and `/api/folders` come back empty, now asserted in
+  `tests/team-access.test.ts` — and the desktop threw the answer away.
+  `lib/sync/inbound.ts` `planInbound` carries a revocation circuit breaker,
+  `revokeCap = max(20, ceil(mapped * 0.5))`, whose whole job is to disbelieve a
+  shrunken listing: from the client a transport failure and a mass revoke look
+  identical. A whole-vault revocation is 100% of the set, so it tripped the cap
+  on every pass, and because `plan.suppress` still held those paths the member
+  was left with a complete, permanently unsyncable copy of a vault they could no
+  longer read. Per-item Private only ever worked because one folder fits under
+  the cap. A revoked file now leaves the disk only when ALL SEVEN of these hold:
+  (1) both listings of the pull returned 200 — a failure throws before planning;
+  (2) the server ANSWERED the tombstone question (`tombstones !== null`); (3) the
+  session is LIVE — vault channel `synced` plus a completed structure pull
+  (`SyncManager.isLive`); (4) the server ANNOUNCED an access change within 60 s,
+  either `ready.revoked` on connect or `acl-changed` → `reauth` live; (5) the doc
+  is within the removal budget — either the revoked group fits under
+  `revokeCap = max(20, ceil(mapped * 0.5))`, or the server NAMED this doc (a
+  `ready.revoked` entry or a live `drop`) and is exempt from that cap; (6) when
+  the cap lift is what saved it, the server's OTHER resolver answers "no access"
+  too, via `POST /api/vaults/:vaultId/access-check` — a disagreement, or no
+  answer at all, leaves the file; and (7) this device confirmed the doc's content
+  upstream (`pushed`), or the file is empty on disk. The DELETION budget is
+  untouched — that one guards work, not access. Revoked files are removed
+  OUTRIGHT rather than trashed: the server holds every byte and the note returns
+  the moment access does, while a copy in `.context/trash` would leave the
+  ex-reader with exactly the readable `.md` the revocation exists to take away.
+  The one exception is a note this user WROTE (below).
+  That covered a member whose app was OPEN when the owner went Private, because
+  it hangs off the live `reauth` frame. A member whose app was CLOSED at the
+  time got no frame at all, so their next launch pulled with no authority and
+  the revoked notes stayed readable on their disk until some unrelated ACL change
+  happened to announce itself. `ready.revoked` (above) closes that half: the
+  cleanup lands on the launch itself. Three gaps are known and left standing: on
+  a vault with more than about 50 mapped folders a named-authority revocation
+  leaves the emptied directories behind, because `folderLift` keeps the folder
+  cap for a pass that named docs and the breaker abandons the group rather than
+  draining it. A 0-byte materialized placeholder that was never opened holds no
+  CRDT state, so `ready.revoked` cannot name it and it rides the ordinary cap —
+  which is why the named list is a narrowing rather than a complete description.
+  And a cold launch after an offline revocation still flashes one refusal per doc
+  from the non-authoritative reconcile, for about a second, before the
+  authoritative pull removes them.
+- **A deleted folder reached a share-only member as a REVOCATION.**
+  `registry/tree-ops.ts` `deleteFolderCascade` hard-deletes the `folders` rows
+  while the notes under them are only soft-deleted, and the tombstone query
+  resolved a folder share through the `folders` table — so once the row was gone,
+  a member whose only grant ran through that folder got no tombstone, and "absent
+  from both lists" is exactly how the desktop spells revoked. A deliberate delete
+  therefore arrived as a loss of access: removed outright, with none of the trash
+  path's gentleness. `permissions/vault-docs.ts` `listDocsInVault`'s
+  `deleted: true` branch now recovers the ancestry from `folder_tombstones`,
+  which still holds the deleted subtree's ids, paths and `deleted_at`, matched
+  with `starts_with(lower(n.rel_path), lower(d.path) || '/')` and case-folded like
+  every other path comparison in the system. The match is dated as well as
+  spelled: `AND d.deleted_at >= n.created_at`, because folder shares survive the
+  hard delete and a long-dead tombstone would otherwise keep claiming whatever
+  later came to live at the same path. Compared against `created_at` rather than
+  `deleted_at` deliberately — `deleteFolderCascade` soft-deletes the notes BEFORE
+  it writes the folder tombstone, so the tombstone is always marginally the later
+  of the two, and only "the note already existed when this folder died" expresses
+  the intent. It is injected only for the
+  tombstone question, so the hot `listReadableDocsInVault` path is unchanged and
+  a live note's `folder_id` stays the only thing that decides it. New
+  `tests/revocation-safety.test.ts` (9 cases) pins it, including a note under a
+  deleted subfolder of a still-live shared folder, that a stranger still gets
+  nothing, and the access-check route's own gating.
+- **A revoked note you wrote yourself is now recoverable.**
+  `InboundTrash.recoverable` is true for every `deleted` note and for a `revoked`
+  note this user authored, and the executor then calls `ipc.trashNote` instead of
+  `ipc.deleteFile`. Authorship cannot be read at plan time — a revoked doc is
+  absent from the listing by definition — so it is learned in `syncStructure`
+  from the listing's `created_by` (`learnAuthorship`, ahead of the inbound guard
+  so a first pass with no baseline still learns it), accumulated like the
+  baseline, and PERSISTED in `.context/config.json` as
+  `authored: { userId, docIds }`. Without the persistence the exemption would
+  have covered only a revocation that happened while the app was open, not the
+  cold-launch case the path exists for; without the `userId` it would have been a
+  leak, because that file travels with the vault and a device can be signed into
+  another account tomorrow — inheriting someone else's list would write a full
+  readable `.md` of THEIR note into THIS user's `.context/trash`, which is the
+  one thing the outright removal exists to prevent. A record whose `userId` does
+  not match the session is dropped rather than adopted (so is an older config's
+  unattributed `string[]`), and `learnAuthorship` claims the list for the current
+  user before adding to it. A stale entry costs a trash copy of a note the user
+  did not write, which is the harmless direction. An item set to Private still
+  beats authorship, per `docs/specs/04-team-collaboration.md`.
+- **The no-undo delete can no longer be handed a directory.** The revocation
+  branch called `ipc.deletePath`, whose Rust side is documented as recursive
+  because the sidebar's folder Delete means that recursion. New Rust
+  `notefile.rs delete_file` (plus `commands.rs`, `lib.rs` and `ipc.deleteFile`)
+  refuses an ignored path with an `AppError` — `rel_path_is_ignored` FIRST, the
+  same refusal `trash_note` and `delete_folder_if_empty` make, so `.context` is
+  refused on its own merits and `.context/config.json` cannot slip through for
+  being a file — then refuses a directory, and no-ops on a missing path; the
+  revocation branch calls it instead. `delete_path` keeps its documented
+  recursion and is now reachable only from the sidebar, where a person picked the
+  folder themselves. The guard lives in Rust, not in the caller, so it cannot be
+  refactored away from.
+- **A revoked doc was re-announced on every reconnect, and its text stayed
+  readable locally.** The removal only RELEASED the doc, which deliberately keeps
+  its state vector, so the next `hello` still advertised it, `ready.revoked` named
+  it again and `aclChangedAt` was re-stamped continuously — making "the server
+  announced a change in the last minute" permanently true. `noteRemoved` now
+  calls `docStore.drop(docId)` and `ipc.clearYjsDoc(docId, epoch)` on a `revoked`
+  removal, so the id leaves the in-memory manifest for this session and the
+  persisted CRDT rows leave `.context/index.sqlite`. That is also the right
+  privacy answer: leaving the note's full text in the local log would keep
+  readable exactly what deleting the `.md` took away.
+- **The editor's width control had never actually worked.** `--editor-pad-x` —
+  the inset every consumer follows — was composed on `:root` out of
+  `var(--editor-measure)`, and a `var()` inside a custom property is substituted
+  at computed-value time ON THE DECLARING ELEMENT: `:root`'s own 88ch was baked
+  into the token stream before it inherited, so no override further down the tree
+  could reach it. Neither the old
+  `.editor-column[data-measure="full"] { --editor-measure: 100% }` rule nor the
+  new inline measure changed a single line, which is why "Readable line length"
+  off left the column exactly where it was. The declaration moved to
+  `.editor-column` (`src/styles/tokens.css`) — the one element the override is
+  set on — while `--editor-measure` and `--editor-gutter` stay `:root` defaults.
+  `lib/__tests__/editorMeasure.test.ts` reads the stylesheet back and asserts
+  both the selector and that the inset is declared exactly once, because a
+  second declaration would reintroduce the ambiguity.
+- **The Access page no longer paints Private and then jumps to Shared.** The
+  vault mode was initialised to the Private end of the tri-state and corrected
+  only when the shares GET landed, so every open of a Shared vault showed the
+  opposite of the truth — on the cards AND on every row badge — for as long as
+  the network took. The mode is now `null` until fetched: badges render a blank
+  loading pill (`.access-badge.loading`), no card is marked active, and a write
+  is refused (`vaultModeKnown`) because the confirm has to count overrides it has
+  not fetched yet. New `lib/teamAccessCache.ts` remembers the last known mode per
+  (server URL, vault) in `localStorage` for an instant correct first paint, keyed
+  like `store.knownVaultsKey` because a vault id means nothing across two
+  servers; it is never allowed to authorise a write.
+- **A row badge and the item's own controls now give the same answer.** The
+  badges read only the lock/deny overlay and then fell straight back to the vault
+  mode, so a folder explicitly set to Shared inside a Private vault badged
+  "Private" while the detail pane two inches away read the item's own share rows
+  and said Shared. Both now call `lib/accessMode.ts` `effectiveTeamMode`, which
+  mirrors `permissions/resolver.ts` at the ORG level: a `denied` on the item or
+  any ancestor wins, then a `locked`, then the vault being open or an `edit`
+  above, then the vault being read-only or a `view`, else private. It also
+  reports where the answer came from, so the pane can name the folder that is
+  deciding rather than sending someone to clear a row that is not.
+- **The Properties-in-document dropdown had no styling.** Its `triggerClassName`
+  was `role-trigger`, which matches no CSS anywhere — the member-role menus use
+  `role-field-trigger` — so the one select on the Appearance tab rendered as a
+  bare button beside properly framed controls.
+- **Opening a note no longer flashes the whole app.** Three things fired on
+  every click. The editor pane went bare for ~180 ms: the loading skeleton is
+  held back so a 40 ms open never flashes one, but a note-to-note switch
+  destroys the outgoing CodeMirror view first, so the delay showed an empty
+  surface instead — `EditorSkeleton` now takes `immediate` and `Editor` sets it
+  whenever a view was just torn down. The clicked sidebar row blinked: the
+  `tree-reveal` pulse ended on `transparent` and, as a held animation end state,
+  outranked `.selected` whatever the source order, so the row went bare and then
+  snapped back to accent when the class dropped; the keyframes now land on the
+  selection fill (a folder gets a variant that ends transparent), and a row that
+  was already on screen is not pulsed at all — the selection is the signal. And
+  the reveal re-listed every ancestor folder on every open, committing a fresh
+  `tree` per level and re-sorting and re-rendering the whole sidebar mid-click;
+  it now skips folders already carrying `childrenLoaded`, like `onToggle`. The
+  row context value is memoized too — a fresh object literal there re-rendered
+  every row on every `FileTree` render, and `FileTree` renders on every open.
+- **Revealing a note in the sidebar glides instead of jumping.** `.filetree-scroll`
+  sets `scroll-behavior: smooth` (react-window assigns `scrollTop`, which honours
+  it; wheel scrolling is unaffected), the scroll is deferred one frame so the
+  expanded rows start their `top` glide first, and it uses arborist's `"smart"`
+  align so a visible row is left alone. Reduced-motion restores the instant
+  scroll.
 - **Opening a note in a never-synced folder no longer waits 3 s.** After a vault
   switch the open gate was re-armed and `openFolderIsSynced` reset to `null`,
   and nothing answered for an unstamped folder — so, while signed in, every

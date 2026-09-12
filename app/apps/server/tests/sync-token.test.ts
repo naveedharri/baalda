@@ -5,7 +5,15 @@ import { mintSyncToken, verifySyncToken } from "../src/tokens/sync-token.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, signUp } from "./helpers/auth.js";
-import { seedFolder, seedMember, seedNote, seedOrg, seedShare, seedVault } from "./helpers/seed.js";
+import {
+  seedFolder,
+  seedMember,
+  seedNote,
+  seedOrg,
+  seedShare,
+  seedVault,
+  seedVaultGrant,
+} from "./helpers/seed.js";
 
 const app = createApp(testAppDeps());
 
@@ -34,6 +42,7 @@ describe("POST /api/sync-token (spec 03 §7)", () => {
     const org = await seedOrg("Acme", "acme-t1");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit"); // Shared, as POST /api/vaults leaves it
     const doc = await seedNote(vault, null, "n.md");
 
     const res = await postSyncToken(owner.token, doc);

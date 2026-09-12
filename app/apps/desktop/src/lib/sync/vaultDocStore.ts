@@ -416,6 +416,43 @@ export class VaultDocStore implements DocUpdateSink {
     return this.hot.get(docId)?.bridge ?? null;
   }
 
+  /**
+   * Does the file hold an edit neither the doc nor the incoming update has?
+   *
+   * Three answers, and only the third is an edit worth ingesting:
+   *  - the file matches the doc ⇒ nothing to fold in;
+   *  - the file matches what the update alone would produce ⇒ the file is the
+   *    echo of an apply that already happened (this doc's local CRDT is simply
+   *    behind its own file), and ingesting it would re-create the update's text
+   *    under this bridge's fresh clientID — the doubling loop;
+   *  - anything else ⇒ a genuine out-of-band write, ingest it.
+   *
+   * The probe costs one doc copy and only runs when the file and the doc already
+   * disagree, which is the uncommon case. A read failure answers "not external",
+   * because the flush below is a no-op against a file we cannot read anyway.
+   */
+  private async isExternalEdit(
+    bridge: NoteBridge,
+    path: string,
+    update: Uint8Array,
+  ): Promise<boolean> {
+    let fileText: string;
+    try {
+      fileText = await this.io.readFile(path);
+    } catch {
+      return false;
+    }
+    if (fileText === bridge.serialize()) return false;
+    const probe = new Y.Doc();
+    try {
+      Y.applyUpdate(probe, Y.encodeStateAsUpdate(bridge.doc));
+      Y.applyUpdate(probe, update);
+      return fileText !== probe.getText("content").toString();
+    } finally {
+      probe.destroy();
+    }
+  }
+
   private async coldApply(docId: string, update: Uint8Array): Promise<void> {
     const path = this.resolvePath(docId);
     if (!path) return; // unknown doc (not yet materialised) — skip; next reconnect retries
@@ -423,13 +460,6 @@ export class VaultDocStore implements DocUpdateSink {
     // evict. seedFromFile:false — the server feed is the source for background docs.
     const bridge = await NoteBridge.open(this.io, { docId, path, seedFromFile: false });
     try {
-      // Fold in any external edit sitting on disk BEFORE the remote delta lands
-      // and gets egested: the flush below rewrites the file from the doc, and a
-      // file the doc has never ingested (an AI edited it while no bridge was
-      // alive) would be silently overwritten. The doc-non-empty guard keeps an
-      // unhydrated placeholder on the pull-before-seed path (never a pre-sync
-      // seed); converged content makes this a no-op read. A genuine merge is
-      // reported up so the session pushes it (see `onExternalMerge`).
       // Whether this doc held ANY local CRDT ops before the remote state landed.
       // Only a doc that had none — the empty placeholder a fresh join
       // materializes — can be declared converged below: a doc with prior local
@@ -437,8 +467,36 @@ export class VaultDocStore implements DocUpdateSink {
       // before the flush; NOT in `divergedDocs`, which only tracks out-of-band
       // file merges), and marking it pushed would strand exactly those bytes.
       const hadLocalState = bridge.doc.store.clients.size > 0;
+      // Fold in any external edit sitting on disk BEFORE the remote delta lands
+      // and gets egested: the flush below rewrites the file from the doc, and a
+      // file the doc has never ingested (an AI edited it while no bridge was
+      // alive) would be silently overwritten. Ingesting FIRST is what makes that
+      // a three-way merge — the file is diffed against the doc as it was, so the
+      // file's contribution and the server's both survive. The doc-non-empty
+      // guard keeps an unhydrated placeholder on the pull-before-seed path
+      // (never a pre-sync seed); converged content makes this a no-op read. A
+      // genuine merge is reported up so the session pushes it (`onExternalMerge`).
+      //
+      // But only for a file that really is an external edit. Ingest turns file
+      // bytes into ops attributed to THIS client, and this bridge is a brand-new
+      // Y.Doc with a brand-new clientID every time — so a file that already
+      // holds the text of the update about to be applied gets that text inserted
+      // TWICE, once as this client's fresh ops and once as the server's, and Yjs
+      // keeps both. `flushEgest` then writes the doubled text back to the file,
+      // and the next update through here doubles twice as much. That is the
+      // 16 MB `Map of Content.md` in a customer vault on 2026-09-04: eighteen
+      // updates, each from a different clientID, each re-inserting the whole
+      // current delta, ending at 2^16 copies of one added block.
+      //
+      // `isExternalEdit` is the distinction, and it is exact rather than
+      // heuristic: ask what the update ALONE would make the text, and if the
+      // file already says that, the file is this loop's own echo, not an edit.
       let merged = false;
-      if (bridge.serialize().length > 0 && (await bridge.ingestNow())) {
+      if (
+        bridge.serialize().length > 0 &&
+        (await this.isExternalEdit(bridge, path, update)) &&
+        (await bridge.ingestNow())
+      ) {
         merged = true;
         this.onExternalMerge?.(docId);
       }
@@ -454,6 +512,11 @@ export class VaultDocStore implements DocUpdateSink {
       // there is" holds by construction.
       if (!merged && !hadLocalState) this.onConverged?.(docId);
     } finally {
+      // The ops this bridge just applied must reach the local CRDT store before
+      // it goes away: the file already holds their text (`flushEgest` above), so
+      // dropping them here would leave the store behind its own file — the exact
+      // gap the next cold apply re-inserts from, and doubles.
+      await bridge.whenPersisted();
       bridge.destroy();
     }
   }
@@ -485,6 +548,7 @@ export class VaultDocStore implements DocUpdateSink {
     } catch (e) {
       console.error("[vaultDocStore] flush on retire failed", e);
     }
+    await bridge.whenPersisted();
     bridge.destroy();
   }
 }

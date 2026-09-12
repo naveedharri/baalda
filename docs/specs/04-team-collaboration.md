@@ -163,9 +163,48 @@ segment snapped straight back to Shared.
 The readable-set dual (`permissions/vault-docs.ts`) subtracts both sets under the same rules, so a
 denied doc leaves the tree and stops syncing rather than merely failing to resolve.
 
-**Private by default:** a new vault grants nothing org-wide, so members see only what they create
-or what's shared with them / the team. (Owner sets the whole vault to Shared/Read-only, or shares
-individual folders, in the Access panel; vaults created before this stay Open.)
+**Shared with the team by default:** `POST /api/vaults` creates an org-wide `edit` grant on the
+vault alongside the org's *first* collection, so a new vault is Shared and an invited teammate
+lands on a vault with something in it. (The private-by-default posture of 2026-07-21 was reversed
+on 2026-08-07: it left an invited teammate on an empty sidebar with no way to ask for access. The
+grant is written only alongside that first collection, so re-running the call cannot resurrect a
+grant an owner revoked.) **Vaults created before the reversal are untouched** — no grant means
+private, and the owner flips it in the Access panel whenever they choose.
+
+### The Access panel
+
+Two controls, one model.
+
+- **Entire vault** — Shared / Read-only / Private, applied to *every* folder and note. Choosing a
+  mode calls `PUT /api/orgs/:orgId/team-access`, which in one transaction deletes every
+  org-principal row on every folder and file in the vault's collections and then writes the new
+  vault row (none, for Private). It **enforces**, it does not default: a vault-wide setting that
+  stopped at the first folder someone had overridden could not answer "who can reach this vault",
+  and the panel had no way to say which folders were disagreeing with it. Per-**user** rows are
+  untouched, so people shared with by name keep their access. Owner/admin only.
+  `GET /api/orgs/:orgId/team-access` returns the mode plus every per-item org row, which is what
+  lets the desktop name the count it is about to replace *before* the confirm.
+- **One folder or note** — the same three modes on a single item, as an org row on that resource.
+  Folder settings inherit downwards.
+
+The displayed mode for an item resolves the same way on both surfaces (the row badges and the
+item's own tri-state), through one shared function mirroring §3 at the org level: a `denied` on
+the item or any ancestor is Private; else a `locked` on either is Read-only, *provided something
+grants access for it to cap* — a lock never grants, so a bare `locked` under a Private vault is
+Private, exactly as `effectivePermission` resolves it; else the vault being Shared, or an `edit` on
+the item/an ancestor, is Shared; else the vault being Read-only, or a `view` on either, is
+Read-only; else Private. A lock naming only particular people is not a mode at all — it shows as
+**Restricted**, a per-user overlay on whatever the item's mode is.
+
+Under a **Read-only** vault the sidebar padlocks *every* folder and note, not only the ones
+carrying a lock of their own — to the person reading it, an item they may not edit and an item
+someone locked are the same state. `GET /api/vaults/:id/locks` says so directly: one synthetic
+`vault` row, plus the **lifts**, the `edit` rows the posture does not cap (org-wide ones and the
+caller's own per-user ones, never anybody else's). The client subtracts each lifted subtree from
+the padlock, so a folder or note you were granted edit on carries none, and that scope is never
+inherited downwards — otherwise a note freed by a personal grant would take the padlock straight
+back from its folder. A row padlocked only by the posture offers no Unlock: it holds no row to
+clear, and the Entire vault control is the one place that state lives.
 
 Folder grants are **inherited by descendants**; a file-level `share` can only *raise* permission
 (Outline's "read-only collection + writable document" pattern).

@@ -3,7 +3,7 @@ import { pool } from "../db/pool.js";
 import { orgRole } from "../permissions/lookup.js";
 import { effectivePermission, type Permission } from "../permissions/resolver.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
-import { canEditFolder } from "../permissions/http-gates.js";
+import { canEditFolder, vaultRootWritable } from "../permissions/http-gates.js";
 import {
   TreeOpError,
   deleteFolderCascade,
@@ -99,7 +99,15 @@ async function folderWritePermission(
   // two gates legitimately differ, and callers that MOVE things to the root have
   // to skip this check rather than inherit the admin-only rule (HTTP doesn't
   // apply it either).
-  if (!folderId) return (await isAdmin(auth)) ? "edit" : "none";
+  //
+  // The Read-only posture cuts across even that: `vaultBaseline` caps every
+  // shortcut for everyone, so an admin must not be able to keep creating notes
+  // at the root of a vault whose existing notes they cannot touch. That was the
+  // one hole this gate had — admin-only is not the same as "always allowed".
+  if (!folderId) {
+    if (!(await isAdmin(auth))) return "none";
+    return (await vaultRootWritable(auth.userId, auth.organizationId)) ? "edit" : "none";
+  }
   // Otherwise defer to the HTTP gate rather than keeping a second implementation.
   // The copy that used to live here was missing the creator rule, so a member who
   // made a folder in the app could rename and delete it over HTTP but couldn't

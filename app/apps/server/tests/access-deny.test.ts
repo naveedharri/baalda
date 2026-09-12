@@ -82,6 +82,10 @@ describe("per-member deny", () => {
     await seedMember(org, owner, "owner");
     await seedMember(org, admin, "admin");
     const vault = await seedVault(org);
+    // Shared: a lock CAPS an edit, so there has to be an edit. In a Private
+    // vault neither of these two has one to cap — the posture is a baseline for
+    // owners and admins as much as for members.
+    await seedVaultGrant(org, "edit");
     const folder = await seedFolder(vault, null, "Private", "Private");
     const doc = await seedNote(vault, folder, "Private/note.md");
 
@@ -499,6 +503,7 @@ describe("vault-wide read-only cap", () => {
     const owner = await seedUser("o@a.com");
     await seedMember(org, owner, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit"); // Shared first, so there is an edit to cap
     const doc = await seedNote(vault, null, "root.md");
 
     expect(await effectivePermission(owner, doc)).toBe("edit");
@@ -513,6 +518,7 @@ describe("vault-wide read-only cap", () => {
     await seedMember(orgA, owner, "owner");
     await seedMember(orgB, owner, "owner");
     const vaultB = await seedVault(orgB);
+    await seedVaultGrant(orgB, "edit"); // B is Shared; only A is being capped
     const doc = await seedNote(vaultB, null, "b.md");
 
     await setVaultPosture(orgA, "view");

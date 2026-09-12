@@ -170,6 +170,11 @@ export interface RegisteredNote {
   last_edited_at?: string | null;
   /** Palette id (see `lib/appearance`), shared by the whole team. */
   color?: string | null;
+  /** Who created the note. Read by the inbound reconciler: a note the LOCAL user
+   *  authored keeps a recoverable `.context/trash` copy when access to it is
+   *  revoked, instead of being removed outright. */
+  createdBy?: string | null;
+  created_by?: string | null;
 }
 
 /** The normalized "last edited by" fact for one note (see {@link noteLastEdited}). */
@@ -200,8 +205,11 @@ export interface RegisteredFolder {
 
 export interface Share {
   id: string;
-  resourceType?: "folder" | "file";
-  resource_type?: "folder" | "file";
+  // `vault` appears on exactly one row: the whole-vault Read-only posture that
+  // `GET /vaults/:id/locks` reports as a synthetic lock. Item shares are only
+  // ever folder/file.
+  resourceType?: "folder" | "file" | "vault";
+  resource_type?: "folder" | "file" | "vault";
   resourceId?: string;
   resource_id?: string;
   principalType?: "user" | "org";
@@ -214,6 +222,44 @@ export interface Share {
 }
 
 export type Permission = "view" | "edit";
+
+/** The vault-wide access mode (see {@link ContextApi.getTeamAccess}). */
+export type TeamAccessMode = "open" | "readonly" | "private";
+
+/** One org-principal share row sitting on a folder or note *inside* the vault. */
+export interface TeamAccessOverride {
+  id: string;
+  vaultId: string;
+  resourceType: "folder" | "file";
+  resourceId: string;
+  permission: "edit" | "view" | "locked" | "denied";
+}
+
+/**
+ * The vault's team access as one answer: the mode, the grant row backing it,
+ * and every per-item org row a whole-vault change would replace.
+ *
+ * One request rather than "list the vault's shares, then work the rest out"
+ * because the Access panel has to say how many settings it is about to clear
+ * *before* the user confirms, and a count assembled from several round trips
+ * is a count that can be wrong.
+ */
+export interface TeamAccess {
+  mode: TeamAccessMode;
+  grantId: string | null;
+  overrides: TeamAccessOverride[];
+}
+
+/** What a whole-vault mode change actually did. */
+export interface TeamAccessResult {
+  mode: TeamAccessMode;
+  /** Per-item org rows deleted. */
+  cleared: number;
+  /** Live sync sockets force-closed because the new mode revoked their access. */
+  disconnectedDocs: number;
+  /** False when the mode was already this and only the per-item rows went. */
+  postureChanged: boolean;
+}
 
 /** One member's effective access to a resource, as resolved server-side. */
 export interface ResolvedMemberAccess {
@@ -480,6 +526,29 @@ export class ServerCheckError extends Error {
 /** How long a server gets to answer `/health` before we call it unreachable. */
 export const HEALTH_TIMEOUT_MS = 6000;
 
+/**
+ * Most doc ids one {@link ContextApi.accessCheck} call may carry.
+ *
+ * MIRRORS the server's `ACCESS_CHECK_MAX` (`http/routes/registry.ts`), which
+ * answers 400 above it. The two cannot import from each other — separate
+ * packages — so the equality is pinned by a test that reads the server source
+ * (`__tests__/accessCheckBound.test.ts`). Drift here is not cosmetic: the client
+ * treats a 400 as "no answer", so one oversized request turns every revocation
+ * on a vault this large into a permanent, repeating failure.
+ */
+export const ACCESS_CHECK_MAX = 2000;
+
+/**
+ * Abort an access-check that has not answered in this long.
+ *
+ * The server resolves each id through `effectivePermission`, so its work grows
+ * with the list. Generous enough for a full 2000-id slice on a remote database,
+ * short enough that a wedged proxy does not hold up the pull that decides
+ * whether files leave the disk. A timeout reads as "no answer", which removes
+ * nothing.
+ */
+export const ACCESS_CHECK_TIMEOUT_MS = 30_000;
+
 // The two things a person can actually act on. Kept as constants so the dialog
 // and Settings → Connection say the same words for the same failure.
 const UNREACHABLE_MESSAGE =
@@ -558,7 +627,22 @@ export class ApiClient {
   private async request<T>(
     method: string,
     path: string,
-    opts: { body?: unknown; captureAuthToken?: boolean; query?: Record<string, string | undefined> } = {},
+    opts: {
+      body?: unknown;
+      captureAuthToken?: boolean;
+      query?: Record<string, string | undefined>;
+      /**
+       * Abort the request after this many ms.
+       *
+       * Off by default — most calls are small and the caller has nothing better
+       * to do than wait. Set it where the SERVER's work is proportional to what
+       * we asked for, so a slow answer is a real possibility rather than a
+       * pathology: a host that accepts the connection and then takes minutes
+       * leaves the caller hanging, and for the access-check that means a pull
+       * that never finishes deciding whether to delete files.
+       */
+      timeoutMs?: number;
+    } = {},
   ): Promise<{ data: T; authToken: string | null }> {
     const url = new URL(this.baseUrl + path);
     if (opts.query) {
@@ -587,7 +671,23 @@ export class ApiClient {
       bodyInit = JSON.stringify(opts.body);
     }
 
-    const res = await this.fetchImpl(url.toString(), { method, headers, body: bodyInit });
+    let controller: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (opts.timeoutMs !== undefined) {
+      controller = new AbortController();
+      timer = setTimeout(() => controller?.abort(), opts.timeoutMs);
+    }
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url.toString(), {
+        method,
+        headers,
+        body: bodyInit,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
 
     // Better Auth returns the opaque session token in this header on sign-in/up.
     const authToken = opts.captureAuthToken ? res.headers.get("set-auth-token") : null;
@@ -1331,6 +1431,31 @@ export class ApiClient {
     await this.request<unknown>("DELETE", `/api/folders/${encodeURIComponent(id)}`);
   }
 
+  /**
+   * Ask the server, per doc, whether the caller still has ANY access — the
+   * second opinion the inbound reconciler needs before it deletes files.
+   *
+   * `GET /api/notes` and the vault channel's `ready.revoked` are the same
+   * resolver read twice (`listReadableDocsInVault`), so they cannot corroborate
+   * each other: one regression inside it produces both an empty listing and a
+   * "these are revoked" announcement, which together are exactly the authority
+   * needed to wipe a member's disk. This route answers through
+   * `permissions/resolver.ts effectivePermission` instead — different SQL, a
+   * different walk — so a disagreement is detectable, and a disagreement means
+   * the file stays.
+   *
+   * Returns the subset that resolves to NO access. A throw means "no answer",
+   * and the caller's rule for that is to remove nothing.
+   */
+  async accessCheck(vaultId: string, docIds: string[]): Promise<string[]> {
+    const { data } = await this.request<{ none: string[] }>(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/access-check`,
+      { body: { docIds }, timeoutMs: ACCESS_CHECK_TIMEOUT_MS },
+    );
+    return data.none ?? [];
+  }
+
   async listNotes(vaultId: string): Promise<RegisteredNote[]> {
     const { data } = await this.request<{ notes: RegisteredNote[] }>("GET", "/api/notes", {
       query: { vaultId },
@@ -1545,6 +1670,46 @@ export class ApiClient {
     await this.request<unknown>("DELETE", `/api/shares/${encodeURIComponent(shareId)}`);
   }
 
+  /**
+   * The vault's team access in one shot: the vault-wide mode plus every
+   * per-item org row underneath it. Owner/admin only.
+   */
+  async getTeamAccess(orgId: string): Promise<TeamAccess> {
+    const { data } = await this.request<TeamAccess>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/team-access`,
+    );
+    return {
+      mode: data.mode ?? "private",
+      grantId: data.grantId ?? null,
+      overrides: data.overrides ?? [],
+    };
+  }
+
+  /**
+   * Set the mode for the WHOLE vault — every folder and note.
+   *
+   * The server does this transactionally: it deletes every per-item org row
+   * first, then writes the new vault row. That is the point of the endpoint.
+   * Doing it client-side as revoke-then-create left the per-item rows standing,
+   * so "set the entire vault to Shared" quietly skipped everything a folder had
+   * overridden. Per-user rows are untouched: people shared with by name keep
+   * their access.
+   */
+  async setTeamAccess(orgId: string, mode: TeamAccessMode): Promise<TeamAccessResult> {
+    const { data } = await this.request<TeamAccessResult>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/team-access`,
+      { body: { mode } },
+    );
+    return {
+      mode: data.mode ?? mode,
+      cleared: data.cleared ?? 0,
+      disconnectedDocs: data.disconnectedDocs ?? 0,
+      postureChanged: data.postureChanged ?? true,
+    };
+  }
+
   /** Resolve every member's effective access to a resource (the "who can access"
    *  view). Same manage-gate as {@link listShares}. */
   async resolveAccess(
@@ -1672,6 +1837,10 @@ export function noteVaultId(n: RegisteredNote): string | undefined {
 export function noteRelPath(n: RegisteredNote): string | undefined {
   return n.relPath ?? n.rel_path;
 }
+/** Who created the note, or null when the server didn't say. */
+export function noteCreatedBy(n: RegisteredNote): string | null {
+  return n.createdBy ?? n.created_by ?? null;
+}
 /**
  * The note's last-edit stamp, or null when it has never been edited (or the
  * server predates versioning). Null is the honest answer — a row with no
@@ -1699,7 +1868,7 @@ export function sharePrincipalId(s: Share): string {
 export function sharePrincipalType(s: Share): "user" | "org" {
   return s.principalType ?? s.principal_type ?? "user";
 }
-export function shareResourceType(s: Share): "folder" | "file" {
+export function shareResourceType(s: Share): "folder" | "file" | "vault" {
   return s.resourceType ?? s.resource_type ?? "file";
 }
 export function shareResourceId(s: Share): string {

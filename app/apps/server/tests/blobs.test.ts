@@ -5,7 +5,14 @@ import { testAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, signUp } from "./helpers/auth.js";
-import { seedMember, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
+import {
+  seedMember,
+  seedNote,
+  seedOrg,
+  seedVault,
+  seedVaultGrant,
+  seedUserVaultGrant,
+} from "./helpers/seed.js";
 
 /** Insert a note_index row so an attachment reference is discoverable by the
  *  per-attachment ACL (which scans indexed note content). */
@@ -69,6 +76,7 @@ describe("attachment blob store (spec 02 §2/§5A)", () => {
     const org = await seedOrg("Acme", "acme-blob1");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
 
     // Non-UTF8 binary payload to prove byte fidelity.
     const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10, 0x42]);
@@ -113,6 +121,7 @@ describe("attachment blob store (spec 02 §2/§5A)", () => {
     const org = await seedOrg("Acme", "acme-blob2");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
     const bytes = new Uint8Array([1, 2, 3, 4, 5]);
 
     const first = await uploadBlob(owner.token, vault, bytes, { relPath: "attachments/a.bin" });
@@ -165,6 +174,10 @@ describe("attachment blob store (spec 02 §2/§5A)", () => {
     const org = await seedOrg("Acme", "acme-blob5");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    // The vault stays PRIVATE — that is what gives the member an empty readable
+    // set. The owner is a vault-wide reader by an explicit per-user grant,
+    // which is what "vault-wide" means now that the role alone is not.
+    await seedUserVaultGrant(org, owner.userId, "edit");
     // Private-by-default vault: a plain member with no shares.
     const member = await signUp("member@blob5.com");
     await seedMember(org, member.userId, "member");

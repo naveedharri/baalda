@@ -12,7 +12,14 @@ import { sha256Hex } from "../src/versions/capture.js";
 import { recordingAppDeps, type RecordingAppDeps } from "./helpers/app.js";
 import { signUp, type TestUser } from "./helpers/auth.js";
 import { resetDb } from "./helpers/db.js";
-import { seedFolder, seedMember, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
+import {
+  seedFolder,
+  seedMember,
+  seedNote,
+  seedOrg,
+  seedVault,
+  seedVaultGrant,
+} from "./helpers/seed.js";
 
 /**
  * Vault-wide checkpoints and the vault revert.
@@ -73,6 +80,9 @@ describe("vault checkpoints", () => {
     await seedMember(org, owner.userId, "owner");
     await seedMember(org, member.userId, "member");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const a = await seedNote(vault, null, "a.md", owner.userId);
     const b = await seedNote(vault, null, "b.md", owner.userId);
     rec.docWriter.store.set(a, "alpha");
@@ -105,6 +115,30 @@ describe("vault checkpoints", () => {
     expect(JSON.stringify(body)).not.toContain("alpha");
   });
 
+  it("refuses a whole-vault revert in a Private vault, even for the owner", async () => {
+    // The role is not vault-wide read any more, and this rewrites every note at
+    // once. Reverting from a seat that can see only some of them would restore
+    // the structure whole and the contents partially — worse than refusing.
+    const owner = await signUp("p-owner@t.com");
+    const org = await seedOrg("Acme", "acme-c-private");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org); // no grant == Private
+    await seedNote(vault, null, "n.md", owner.userId);
+
+    const created = await api(owner, `/api/vaults/${vault}/checkpoints`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(created.status).toBe(201);
+    const { id } = (await created.json()) as { id: string };
+
+    const res = await api(owner, `/api/vaults/${vault}/checkpoints/${id}/revert`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()) as unknown).toMatchObject({ code: "no_vault_wide_access" });
+  });
+
   it("gates create/delete/revert to owner+admin, and shuts members out", async () => {
     const owner = await signUp("g-owner@t.com");
     const admin = await signUp("g-admin@t.com");
@@ -115,6 +149,9 @@ describe("vault checkpoints", () => {
     await seedMember(org, admin.userId, "admin");
     await seedMember(org, member.userId, "member");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
 
     expect(
       (await api(member, `/api/vaults/${vault}/checkpoints`, { method: "POST", body: "{}" }))
@@ -162,6 +199,9 @@ describe("vault checkpoints", () => {
   it("prunes the oldest automatic checkpoints first, then the oldest manual ones", async () => {
     const org = await seedOrg("Acme", "acme-c3");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const oldAuto = await seedCheckpoint(vault, "auto", "2026-01-01T00:00:00Z");
     const newAuto = await seedCheckpoint(vault, "auto", "2026-01-02T00:00:00Z");
     const m1 = await seedCheckpoint(vault, "manual", "2026-01-03T00:00:00Z");
@@ -183,6 +223,9 @@ describe("vault checkpoints", () => {
   it("never prunes a checkpoint that is mid-flight", async () => {
     const org = await seedOrg("Acme", "acme-c4");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const target = await seedCheckpoint(vault, "auto", "2026-01-01T00:00:00Z");
     const second = await seedCheckpoint(vault, "auto", "2026-01-02T00:00:00Z");
     for (let i = 3; i <= 7; i++) {
@@ -203,6 +246,9 @@ describe("vault checkpoints", () => {
   it("takes the daily checkpoint once, and not again within the day", async () => {
     const org = await seedOrg("Acme", "acme-c5");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const docId = await seedNote(vault, null, "n.md");
     rec.docWriter.store.set(docId, "daily");
 
@@ -223,6 +269,9 @@ describe("vault checkpoints", () => {
   it("two simultaneous daily checks produce ONE checkpoint (advisory lock)", async () => {
     const org = await seedOrg("Acme", "acme-c6");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const docId = await seedNote(vault, null, "n.md");
     rec.docWriter.store.set(docId, "stampede");
 
@@ -239,6 +288,9 @@ describe("vault checkpoints", () => {
     const org = await seedOrg("Acme", "acme-c7");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
 
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -269,6 +321,9 @@ describe("vault checkpoints", () => {
     const org = await seedOrg("Acme", "acme-c8");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const folder = await seedFolder(vault, null, "Docs", "Docs");
     const kept = await seedNote(vault, folder, "Docs/kept.md", owner.userId);
     const removed = await seedNote(vault, null, "gone.md", owner.userId);
@@ -363,6 +418,9 @@ describe("vault checkpoints", () => {
     const org = await seedOrg("Lag", "lag-c8");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const uploaded = await seedNote(vault, null, "uploaded.md", owner.userId);
     const lagging = await seedNote(vault, null, "lagging.md", owner.userId);
     rec.docWriter.store.set(uploaded, "made it up");
@@ -398,6 +456,9 @@ describe("vault checkpoints", () => {
     const org = await seedOrg("Guard", "guard-c8");
     await seedMember(org, owner.userId, "owner");
     const vault = await seedVault(org);
+    // Shared: a whole-vault revert needs whole-vault read, which the role alone
+    // no longer confers (a Private vault scopes owners too).
+    await seedVaultGrant(org, "edit");
     const doc = await seedNote(vault, null, "precious.md", owner.userId);
     rec.docWriter.store.set(doc, "precious words");
 
@@ -427,6 +488,7 @@ describe("vault checkpoints", () => {
     const org = await seedOrg("Acme", "acme-c9");
     await seedMember(org, owner.userId, "owner");
     const vaultA = await seedVault(org, "A");
+    await seedVaultGrant(org, "edit");
     const vaultB = await seedVault(org, "B");
     const created = await api(owner, `/api/vaults/${vaultA}/checkpoints`, {
       method: "POST",

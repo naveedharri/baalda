@@ -8,10 +8,19 @@ import {
   PROPERTIES_MODES,
   writeServerChoice,
 } from "../lib/prefs";
+import {
+  EDITOR_MEASURE_SLIDER_MAX,
+  EDITOR_MEASURE_SLIDER_MIN,
+  EDITOR_MEASURE_STEP,
+  measureLabel,
+  measureToSlider,
+  sliderToMeasure,
+} from "../lib/editorMeasure";
 import type { PropertiesMode } from "../lib/editor/frontmatter";
 import { checkForUpdate, currentVersion, installUpdate, useUpdateState } from "../lib/updater";
 import { useStore } from "../store";
 import { Avatar } from "./Avatar";
+import { ContentWidthPreview } from "./ContentWidthPreview";
 import { MenuSelect } from "./MenuSelect";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { SettingsModal } from "./SettingsModal";
@@ -337,7 +346,7 @@ function StatusTab() {
 
 function AppearanceTab() {
   const propertiesMode = useStore((s) => s.propertiesMode);
-  const readableLineLength = useStore((s) => s.readableLineLength);
+  const editorMeasure = useStore((s) => s.editorMeasure);
   const lineNumbers = useStore((s) => s.lineNumbers);
   return (
     <>
@@ -345,19 +354,39 @@ function AppearanceTab() {
         <span className="menu-row-label">Theme</span>
         <ThemeToggle />
       </div>
-      <label className="menu-row toggle-row">
-        <span className="menu-row-label">
-          Readable line length
+      {/* The slider applies on every change rather than on release: the
+          preview under it — and the note behind the card — are the answer to
+          "how wide is that?", and they have to move with the thumb. */}
+      <div className="menu-row measure-row">
+        {/* A real <label>, not the row: wrapping a range in one would hijack
+            the drag. The row's text is still a click target for the slider. */}
+        <label className="menu-row-label" htmlFor="content-width">
+          Content width
           <span className="field-hint">
-            Keep the text in a narrow column instead of filling the window.
+            How wide the text runs before it wraps. Drag to the end for the full window.
           </span>
+        </label>
+        <span className="range-field">
+          <input
+            id="content-width"
+            className="range-input"
+            type="range"
+            min={EDITOR_MEASURE_SLIDER_MIN}
+            max={EDITOR_MEASURE_SLIDER_MAX}
+            step={EDITOR_MEASURE_STEP}
+            value={measureToSlider(editorMeasure)}
+            // The <label> also carries the hint line; name the control with the
+            // row's title alone rather than reading the whole paragraph out.
+            aria-label="Content width"
+            aria-valuetext={measureLabel(editorMeasure)}
+            onChange={(e) =>
+              useStore.getState().setEditorMeasure(sliderToMeasure(Number(e.target.value)))
+            }
+          />
+          <span className="range-value">{measureLabel(editorMeasure)}</span>
         </span>
-        <Switch
-          checked={readableLineLength}
-          ariaLabel="Readable line length"
-          onChange={(next) => useStore.getState().setReadableLineLength(next)}
-        />
-      </label>
+        <ContentWidthPreview measure={editorMeasure} />
+      </div>
       <label className="menu-row toggle-row">
         <span className="menu-row-label">
           Line numbers
@@ -387,7 +416,7 @@ function AppearanceTab() {
           }))}
           onSelect={(mode) => useStore.getState().setPropertiesMode(mode)}
           ariaLabel="Properties in document"
-          triggerClassName="role-trigger"
+          triggerClassName="role-field-trigger"
         />
       </div>
     </>

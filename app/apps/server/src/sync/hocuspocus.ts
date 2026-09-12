@@ -2,6 +2,7 @@ import { Server } from "@hocuspocus/server";
 import * as Y from "yjs";
 import { config } from "../config.js";
 import { verifySyncToken } from "../tokens/sync-token.js";
+import { effectivePermission } from "../permissions/resolver.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
 import { scheduleIndex } from "../index/indexer.js";
 import { formatDocName, parseDocName } from "./doc-name.js";
@@ -86,6 +87,34 @@ export type DocEditedHook = (
   userId: string | null,
 ) => void;
 
+/**
+ * Why this message must be refused, or null to let it through.
+ *
+ * TWO ceilings, and the second is the one experience added. Capping the MESSAGE
+ * alone bounds a single step, and a note that doubles doubles from small: a
+ * customer's `Map of Content.md` went 276 bytes → 8 MB in seventeen messages,
+ * not one of them near the cap, and ended at 16 MB of Yjs state holding
+ * 1,179,679 lines of 35 distinct ones. Capping the DOC makes the limit a wall
+ * the note cannot be pushed through rather than a step size: a doc under it
+ * always accepts one more message, a doc over it accepts none and is a repair
+ * job (`POST /api/notes/:id/reset-crdt`).
+ *
+ * The doc length is `Y.Text`'s own counter, so asking costs nothing.
+ */
+export function noteSizeRefusal(
+  updateBytes: number,
+  docChars: number,
+  capBytes: number = config.maxNoteMb * 1024 * 1024,
+): string | null {
+  if (updateBytes > capBytes) {
+    return `Rejecting oversized sync message: ${updateBytes} bytes (cap ${capBytes})`;
+  }
+  if (docChars > capBytes) {
+    return `Refusing writes to oversized doc: ${docChars} chars (cap ${capBytes}) — needs /reset-crdt`;
+  }
+  return null;
+}
+
 export function createSyncServer(
   port: number = config.hocuspocusPort,
   onDocChanged?: DocChangedHook,
@@ -116,12 +145,12 @@ export function createSyncServer(
      * a second for as long as the app was open.
      */
     async beforeHandleMessage(data) {
-      const cap = config.maxNoteMb * 1024 * 1024;
-      if (data.update.byteLength > cap) {
-        console.error(
-          `Rejecting oversized sync message for ${data.documentName}: ` +
-            `${data.update.byteLength} bytes (cap ${cap})`,
-        );
+      const refusal = noteSizeRefusal(
+        data.update.byteLength,
+        data.document.getText("content").length,
+      );
+      if (refusal) {
+        console.error(`${refusal} for ${data.documentName}`);
         throw new NoteTooLargeError();
       }
     },
@@ -154,15 +183,58 @@ export function createSyncServer(
         throw new Error("Sync token does not match requested document");
       }
 
+      // The DB is the authority on permission; the token's `readOnly` claim is
+      // only a hint.
+      //
+      // Trusting the claim alone left a revocation hole exactly as wide as the
+      // token TTL (`SYNC_TOKEN_TTL_SECONDS`, 10 min by default): the moment a
+      // vault went Read-only, or a lock landed, `disconnectDoc` closed every
+      // live socket — but it could not invalidate a token a client already
+      // held, so that client reconnected inside the window and was re-admitted
+      // as an editor. A kick is a disconnection, not a revocation.
+      //
+      // One resolver call per connect, which is the right unit: a token is
+      // minted per connect anyway, so this adds one query to a path that
+      // already did several. `none` rejects the connection outright — the doc
+      // was deleted, or the grant is gone — and anything less than `edit` is
+      // read-only regardless of what the token says. Never the other way round:
+      // a `readOnly` token whose user has since regained `edit` still has to
+      // re-mint, because the claim is what the client was told it holds.
+      let readOnly = claims.readOnly;
+      if (claims.userId) {
+        let permission;
+        try {
+          permission = await effectivePermission(claims.userId, parsed.docId);
+        } catch (err) {
+          // Fail CLOSED. A resolver that cannot answer must not be read as
+          // "carry on with whatever the token claimed" — that is the hole this
+          // check exists to close, re-opened by a database blip.
+          console.error(
+            `[onAuthenticate] permission re-check failed for ${data.documentName}:`,
+            err,
+          );
+          throw new Error("Could not verify access to this document");
+        }
+        if (permission === "none") {
+          throw new Error("No access to this document");
+        }
+        readOnly = claims.readOnly || permission !== "edit";
+      }
+      // An attribution-less token (`userId` absent) has nobody to resolve, so it
+      // keeps the claim. Those predate the `userId` claim and no route can mint
+      // one any more — `POST /api/sync-token` always sets it — so this branch
+      // covers only tokens already in flight at deploy time, and it dies with
+      // them. It is reachable only by someone who can sign with `JWT_SECRET`.
+
       // View grants: server silently rejects updates from this connection.
-      if (claims.readOnly) {
+      if (readOnly) {
         data.connectionConfig.readOnly = true;
       }
 
       const context: SyncContext = {
         docId: parsed.docId,
         vaultId: parsed.vaultId,
-        readOnly: claims.readOnly,
+        readOnly,
         userId: claims.userId ?? null,
       };
       return context;

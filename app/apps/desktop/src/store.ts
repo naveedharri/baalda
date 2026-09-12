@@ -46,17 +46,18 @@ import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
 import {
   type ActivityStatus,
+  type EditorMeasure,
   readActivityStatus,
   readMentionSound,
+  readEditorMeasure,
   readLineNumbers,
   readPropertiesMode,
-  readReadableLineLength,
   readTreeSort,
   writeActivityStatus,
   writeMentionSound,
+  writeEditorMeasure,
   writeLineNumbers,
   writePropertiesMode,
-  writeReadableLineLength,
   writeTreeSort,
 } from "./lib/prefs";
 import type { PropertiesMode } from "./lib/editor/frontmatter";
@@ -319,6 +320,18 @@ interface AppStore {
    */
   denies: Share[];
   /**
+   * `edit` rows that LIFT the whole-vault Read-only posture for this user — an
+   * item shared with the team, or a personal grant — in the synced vault.
+   *
+   * A third bucket rather than a flag on `locks`, because every consumer of
+   * `locks` treats its rows as locks: the row menu's Unlock, the bulk unlock
+   * and the Access panel's lock map would all read an `edit` row as a padlock
+   * to remove. They are grants, they only ever arrive under a Read-only
+   * posture, and the one thing that wants them is the tree badge — which uses
+   * them to subtract a lifted subtree from the vault-wide seed.
+   */
+  lifts: Share[];
+  /**
    * Who last edited each note's CONTENT, keyed by **docId** (never by path, and
    * dropped on every vault switch — two vaults both have a `Welcome.md`).
    * Refreshed by the registry pull; empty when sync is off.
@@ -378,9 +391,9 @@ interface AppStore {
   /** How the editor draws YAML frontmatter: a Properties panel, nothing, or
    *  plain source. Device-local (Settings → Appearance), not per-vault. */
   propertiesMode: PropertiesMode;
-  /** Cap the editor's prose column at a readable measure rather than letting it
-   *  fill the window. Device-local (Settings → Appearance). */
-  readableLineLength: boolean;
+  /** How wide the editor's prose column runs: a measure in `ch`, or "full" for
+   *  the whole pane. Device-local (Settings → Appearance). */
+  editorMeasure: EditorMeasure;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
@@ -515,7 +528,7 @@ interface AppStore {
   setActivityStatus: (status: ActivityStatus) => void;
   setMentionSound: (enabled: boolean) => void;
   setPropertiesMode: (mode: PropertiesMode) => void;
-  setReadableLineLength: (on: boolean) => void;
+  setEditorMeasure: (measure: EditorMeasure) => void;
   setLineNumbers: (on: boolean) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
@@ -1316,6 +1329,7 @@ function vaultScopedSyncReset() {
     docIdByPath: {} as Record<string, string>,
     locks: [] as Share[],
     denies: [] as Share[],
+    lifts: [] as Share[],
     noteLastEdited: {} as Record<string, NoteLastEdited>,
     versionPanelDocId: null,
     noteVersions: null,
@@ -1382,7 +1396,7 @@ export const useStore = create<AppStore>((set, get) => ({
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
   propertiesMode: readPropertiesMode(),
-  readableLineLength: readReadableLineLength(),
+  editorMeasure: readEditorMeasure(),
   lineNumbers: readLineNumbers(),
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
@@ -2452,9 +2466,9 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ propertiesMode: mode });
   },
 
-  setReadableLineLength: (on) => {
-    writeReadableLineLength(on);
-    set({ readableLineLength: on });
+  setEditorMeasure: (measure) => {
+    writeEditorMeasure(measure);
+    set({ editorMeasure: measure });
   },
 
   setLineNumbers: (on) => {
@@ -3371,7 +3385,7 @@ export const useStore = create<AppStore>((set, get) => ({
   refreshLocks: async () => {
     const vaultId = syncManager.registry.vaultId;
     if (!vaultId || !get().syncEnabled) {
-      set({ locks: [], denies: [] });
+      set({ locks: [], denies: [], lifts: [] });
       return;
     }
     const epoch = get().vault?.epoch;
@@ -3380,18 +3394,24 @@ export const useStore = create<AppStore>((set, get) => ({
       // Locks are per-vault; publishing another vault's set would badge the
       // wrong rows in the sidebar.
       if (!sameVault(get, epoch) || syncManager.registry.vaultId !== vaultId) return;
-      // The endpoint returns both overlay kinds. They MUST stay apart here:
-      // everything downstream of `locks` (badges, tooltips, the read-only cap)
-      // assumes every row is a lock, and a Private row rendered as a lock would
-      // put a padlock on a folder that is not read-only at all.
+      // The endpoint returns THREE kinds of row on one response. They MUST stay
+      // apart here: everything downstream of `locks` (badges, tooltips, the
+      // read-only cap, the row menu's Unlock) assumes every row is a lock. A
+      // Private row rendered as a lock would padlock a folder that isn't
+      // read-only at all, and an `edit` lift rendered as one would offer Unlock
+      // on a grant — which would revoke it.
+      //
+      // Split on `permission`, not on absence, so a kind this build has never
+      // heard of lands in none of the three rather than in the wrong one.
       set({
         locks: overlay.filter((s) => s.permission === "locked"),
         denies: overlay.filter((s) => s.permission === "denied"),
+        lifts: overlay.filter((s) => s.permission === "edit"),
       });
     } catch (e) {
       console.warn("[locks] refresh failed", e);
       if (!sameVault(get, epoch)) return;
-      set({ locks: [], denies: [] });
+      set({ locks: [], denies: [], lifts: [] });
     }
   },
 

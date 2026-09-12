@@ -2,6 +2,7 @@ import {
   createContext,
   lazy,
   Suspense,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -150,6 +151,10 @@ interface MenuState {
   node: NodeApi<TreeNode> | null;
 }
 
+/** How long a revealed row wears `.revealed`: the `tree-reveal` animation in
+ *  App.css (900ms) plus a margin, so the class never drops mid-pulse. */
+const REVEAL_PULSE_MS = 1000;
+
 /* Toolbar glyphs — file+ / folder+ mirror the tree's own icons so the "create"
    actions read as "a new one of these"; the chevron pairs fold in / fan out. */
 const ICON_NEW_NOTE = (
@@ -216,6 +221,7 @@ export function FileTree() {
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locks = useStore((s) => s.locks);
+  const lifts = useStore((s) => s.lifts);
   const vaultPresence = useStore((s) => s.vaultPresence);
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
@@ -348,13 +354,37 @@ export function FileTree() {
   // Resolve lock rows (server resource ids) to tree paths for the badges.
   const lockByPath = useMemo(
     () =>
-      syncEnabled ? lockScopesByPath(tree, locks, session?.user.id) : new Map(),
-    [tree, locks, syncEnabled, session?.user.id],
+      syncEnabled
+        ? lockScopesByPath(tree, locks, session?.user.id, lifts)
+        : new Map<string, LockScope>(),
+    [tree, locks, lifts, syncEnabled, session?.user.id],
   );
+
+  /**
+   * True when a path's padlock comes ONLY from the whole-vault Read-only
+   * posture — there is no lock row on the item to unlock.
+   *
+   * The Lock/Unlock controls speak to an item's own row, so on these rows they
+   * have nothing to act on: Unlock would find no share, and Lock would write a
+   * redundant per-item row that changes nothing except the wording of the badge
+   * it already has. The vault posture is changed in Access, not here.
+   */
+  const vaultLockedOnly = (path: string) => lockByPath.get(path) === "vault";
 
   // Owners/admins can lock and unlock straight from the row menu.
   const myRole = members.find((m) => m.userId === session?.user.id)?.role;
   const canManage = myRole === "owner" || myRole === "admin";
+
+  /**
+   * Whether the selection bar's Lock/Unlock pair has anything to do.
+   *
+   * Hidden outright when every selected row is padlocked by the vault posture
+   * alone: Lock would write rows that change nothing and Unlock would find none
+   * to remove, so the pair would report success and leave every padlock exactly
+   * where it was. One selected row with a real item lock is enough to keep them.
+   */
+  const bulkLockUseful =
+    selected.size === 0 || [...selected].some((p) => !vaultLockedOnly(p));
 
   /** Resolve a path (+ kind) to a server share resource, if the vault is synced. */
   function shareTargetForPath(
@@ -427,14 +457,16 @@ export function FileTree() {
     requestAnimationFrame(() => setTreeCollapsed(!anyFolderOpen()));
   };
 
-  function toggleSelect(path: string) {
+  // Stable: it goes into the row context (`rowShared`), whose identity must
+  // only change when a row-visible value does.
+  const toggleSelect = useCallback((path: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
     });
-  }
+  }, []);
 
   function toggleSelectAll() {
     setSelected(allSelected ? new Set() : new Set(nodeByPath.keys()));
@@ -504,6 +536,9 @@ export function FileTree() {
       if (!target) continue;
       // Skip anything already locked directly (avoids a duplicate share row).
       if (locks.some((l) => shareResourceId(l) === target.resourceId)) continue;
+      // And anything the read-only vault already covers: the row would change
+      // nothing an unlock could then undo.
+      if (vaultLockedOnly(p)) continue;
       try {
         await store.createLock(target.resourceType, target.resourceId, null);
       } catch (e) {
@@ -1144,10 +1179,11 @@ export function FileTree() {
     };
   }
 
-  /** Arm a press. It only becomes a drag once the pointer actually travels. */
-  function beginProbe(path: string, x: number, y: number) {
+  /** Arm a press. It only becomes a drag once the pointer actually travels.
+   *  Stable (ref write only) so the row context it rides in stays put. */
+  const beginProbe = useCallback((path: string, x: number, y: number) => {
     probe.current = { path, x, y };
-  }
+  }, []);
 
   // One window-level listener pair for the whole tree, live only while a press
   // is armed or a drag is running. Window scope because the pointer routinely
@@ -1254,8 +1290,15 @@ export function FileTree() {
     const { path, edit } = revealRequest;
     let cancelled = false;
     void (async () => {
+      // Ancestor order, because `setChildrenAt` can only place a listing under
+      // a folder node that already exists. Folders already listed are skipped —
+      // the same `childrenLoaded` guard `onToggle` uses. Without it every open
+      // re-listed every ancestor and committed a fresh `tree` per level, and
+      // each of those re-sorted and re-rendered the whole sidebar mid-click.
       for (const dir of ancestorPaths(path)) {
         if (cancelled) return;
+        const root = useStore.getState().tree;
+        if (root && nodeAt(root, dir)?.childrenLoaded === true) continue;
         try {
           await useStore.getState().loadChildren(dir);
         } catch {
@@ -1279,18 +1322,35 @@ export function FileTree() {
         const known = treeHasPath(useStore.getState().tree, path);
         if (tree && known) {
           const t = tree; // narrowed copy for the closure below
+          // Was the row already on screen before we touched anything? Then the
+          // user is looking at it (they probably clicked it), the selection
+          // highlight is the whole signal, and a pulse would only make the row
+          // it was just clicked on blink. `idToIndex` covers rows whose parents
+          // are open; the start/stop indices are react-window's viewport.
+          const idx = t.idToIndex[path];
+          const wasOnScreen =
+            idx != null && idx >= t.visibleStartIndex && idx <= t.visibleStopIndex;
           t.openParents(path);
-          void t.scrollTo(path, "auto")?.then(() => {
+          // Let the expansion commit and its rows start their `top` glide before
+          // the list scrolls, so the camera and the layout move on one clock
+          // rather than the scroll jumping into a half-settled list. "smart"
+          // leaves an already-visible row alone and otherwise scrolls the least
+          // distance that brings it into view.
+          requestAnimationFrame(() => {
             if (cancelled) return;
-            // Only a visible row can be edited, so this waits for the scroll.
-            if (edit) void t.edit(path);
+            void t.scrollTo(path, "smart")?.then(() => {
+              if (cancelled) return;
+              // Only a visible row can be edited, so this waits for the scroll.
+              if (edit) void t.edit(path);
+              if (wasOnScreen) return;
+              useStore.getState().setRevealedPath(path);
+              window.setTimeout(() => {
+                if (useStore.getState().revealedPath === path) {
+                  useStore.getState().setRevealedPath(null);
+                }
+              }, REVEAL_PULSE_MS);
+            });
           });
-          useStore.getState().setRevealedPath(path);
-          window.setTimeout(() => {
-            if (useStore.getState().revealedPath === path) {
-              useStore.getState().setRevealedPath(null);
-            }
-          }, 700);
           return;
         }
         if (tries < 30) requestAnimationFrame(() => land(tries + 1));
@@ -1387,6 +1447,8 @@ export function FileTree() {
   const menuLock = menuTarget
     ? (locks.find((l) => shareResourceId(l) === menuTarget.resourceId) ?? null)
     : null;
+  // The padlock on this row comes from the vault posture and nothing else.
+  const menuVaultLockedOnly = !!menu?.node && vaultLockedOnly(menu.node.data.path);
 
   async function lockFromMenu(target: ShareTarget) {
     try {
@@ -1405,6 +1467,48 @@ export function FileTree() {
       console.error("unlock failed", e);
     }
   }
+
+  const onRowMenu = useCallback(
+    (x: number, y: number, node: NodeApi<TreeNode>, flipY?: number) =>
+      setMenu({ x, y, flipY, node }),
+    [],
+  );
+  // Context is the ONLY channel to the rows (arborist memoizes its row
+  // container), so a fresh object literal here re-rendered all 6,000 of them on
+  // every FileTree render — and FileTree renders on every note open, because it
+  // subscribes to `openNote`. Memoized on the row-visible values only.
+  const selectedPath = openNote?.path ?? null;
+  const dragPath = drag?.path ?? null;
+  const rowShared = useMemo<RowShared>(
+    () => ({
+      selectedPath,
+      lockByPath,
+      syncIndex,
+      presenceByDoc,
+      itemColors,
+      onMenu: onRowMenu,
+      selectMode,
+      selected,
+      onToggleCheck: toggleSelect,
+      onDragProbe: beginProbe,
+      dragPath,
+      dropInto,
+    }),
+    [
+      selectedPath,
+      lockByPath,
+      syncIndex,
+      presenceByDoc,
+      itemColors,
+      onRowMenu,
+      selectMode,
+      selected,
+      toggleSelect,
+      beginProbe,
+      dragPath,
+      dropInto,
+    ],
+  );
 
   return (
     // `row-dragging` is added/removed imperatively by the drag listener above,
@@ -1585,7 +1689,7 @@ export function FileTree() {
           <span className="selbar-count">{selected.size} selected</span>
           {selected.size > 0 && (
             <div className="selbar-actions">
-              {canManage && syncEnabled && (
+              {canManage && syncEnabled && bulkLockUseful && (
                 <>
                   {/* One server round trip per selected item, so a lock over a
                       large selection is a real wait. `replaceLabel` swaps the
@@ -1635,22 +1739,7 @@ export function FileTree() {
       {data.length === 0 ? (
         <div className="filetree-empty">No notes yet</div>
       ) : (
-        <RowSharedContext.Provider
-          value={{
-            selectedPath: openNote?.path ?? null,
-            lockByPath,
-            syncIndex,
-            presenceByDoc,
-            itemColors,
-            onMenu: (x, y, node, flipY) => setMenu({ x, y, flipY, node }),
-            selectMode,
-            selected,
-            onToggleCheck: toggleSelect,
-            onDragProbe: beginProbe,
-            dragPath: drag?.path ?? null,
-            dropInto,
-          }}
-        >
+        <RowSharedContext.Provider value={rowShared}>
           <Tree<TreeNode>
             ref={treeRef}
             className="filetree-scroll"
@@ -1799,6 +1888,19 @@ export function FileTree() {
             canManage &&
             (menuLock ? (
               <li onClick={() => void unlockFromMenu(menuLock.id)}>Unlock</li>
+            ) : menuVaultLockedOnly ? (
+              // The row shows a padlock but has no row of its own to unlock,
+              // and locking it would change nothing. Shown disabled rather than
+              // hidden, because the padlock is right there and an entry that
+              // simply vanished would read as a bug — this says who decides.
+              <li
+                className="disabled"
+                aria-disabled="true"
+                title="The vault is read-only — change it in Access"
+                onClick={(e) => e.stopPropagation()}
+              >
+                Locked by the vault
+              </li>
             ) : (
               <li
                 title="Read-only for everyone — changes won't sync"
@@ -2308,7 +2410,13 @@ function Node({
           <span className="tree-label">
             {displayName(node.data.name, isDir)}
           </span>
-          {isEmpty && !lock && <span className="tree-hint">empty</span>}
+          {/* The `lock` guard keeps two badges off one row — but a read-only
+              vault padlocks EVERY row, and suppressing the hint everywhere
+              would cost the whole vault a signal to spare a collision that is
+              no longer rare. An item's own lock still wins the space. */}
+          {isEmpty && (!lock || lock === "vault") && (
+            <span className="tree-hint">empty</span>
+          )}
           {lock && (
             <span
               className={`tree-lock ${lock}`}

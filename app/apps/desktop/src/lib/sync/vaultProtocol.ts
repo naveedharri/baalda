@@ -72,6 +72,25 @@ export type ServerControl =
       behind?: string[];
       /** More than one frame would name (cap 2000). */
       behindTruncated?: boolean;
+      /**
+       * Readable-no-longer docIds: docs OUR OWN manifest told the server we
+       * hold, which are not in our readable set any more. The server STATING a
+       * revocation instead of us inferring one from a short listing.
+       *
+       * This is what covers a revocation that happened while the app was shut.
+       * The live announcement (`reauth`) only reaches a client that was
+       * connected at the time, so "Vault -> Private while the member's app is
+       * closed" left the notes readable on their disk indefinitely. This rides
+       * every `ready`, so the next launch carries the authority the removal
+       * needs — and, unlike `reauth`, it NAMES the docs, which lets the planner
+       * cross-check the registry listing against it.
+       *
+       * Bounded by our own manifest: a vault full of docs we never had names
+       * none of them. Absent when there are none.
+       */
+      revoked?: string[];
+      /** More than one frame would name (cap 2000). */
+      revokedTruncated?: boolean;
     }
   | { t: "drop"; docId: string }
   | { t: "reauth" }
@@ -115,12 +134,15 @@ export function parseServerControl(text: string): ServerControl | null {
       Array.isArray(v) ? v.filter((d): d is string => typeof d === "string" && d.length > 0) : null;
     const empty = ids(o.empty);
     const behind = ids(o.behind);
+    const revoked = ids(o.revoked);
     return {
       t: "ready",
       ...(empty && empty.length > 0 ? { empty } : {}),
       ...(o.emptyTruncated === true ? { emptyTruncated: true } : {}),
       ...(behind && behind.length > 0 ? { behind } : {}),
       ...(o.behindTruncated === true ? { behindTruncated: true } : {}),
+      ...(revoked && revoked.length > 0 ? { revoked } : {}),
+      ...(o.revokedTruncated === true ? { revokedTruncated: true } : {}),
     };
   }
   if (t === "reauth") return { t: "reauth" };

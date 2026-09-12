@@ -5,6 +5,7 @@ import { pool } from "../../db/pool.js";
 import { config } from "../../config.js";
 import { BRAND_NAME } from "../../brand.js";
 import { orgRole } from "../../permissions/lookup.js";
+import { effectivePermission } from "../../permissions/resolver.js";
 import { getSession } from "../session.js";
 import { renderNoteHtml } from "../../render/note-html.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
@@ -85,6 +86,13 @@ export const publicLinkApiRoutes = new Hono();
  * Same authority as `shares.ts` canManage for a file: org owner/admin or the
  * note's creator. Publishing a note to the open web is the widest possible
  * share, so it deliberately uses the share-management gate, not edit access.
+ *
+ * Read access is required ON TOP of it, and that is not redundant: the role no
+ * longer implies read. In a Private vault, or under an item set to Private, an
+ * owner can hold the management gate over a note they cannot open — and minting
+ * a public link would have published its contents to the open web from a seat
+ * that is not allowed to see them. Managing a restriction and reading through
+ * it are different powers; only the first one is role-based.
  */
 async function gate(
   userId: string,
@@ -100,6 +108,9 @@ async function gate(
   const isCreator = note.createdBy !== null && note.createdBy === userId;
   if (!isAdmin && !isCreator) {
     return { ok: false, status: 403, error: "Not allowed to manage sharing here" };
+  }
+  if ((await effectivePermission(userId, docId)) === "none") {
+    return { ok: false, status: 403, error: "No access to this note" };
   }
   return { ok: true, note };
 }

@@ -12,6 +12,7 @@ import {
   seedShare,
   seedUser,
   seedVault,
+  seedVaultGrant,
 } from "./helpers/seed.js";
 import { createMcpToken, listMcpTokens } from "../src/mcp/tokens.js";
 
@@ -539,6 +540,9 @@ describe("MCP server", () => {
       org = await seedOrg("Acme", "acme-mcp-live");
       await seedMember(org, owner, "owner");
       vault = await seedVault(org);
+      // Shared, as POST /api/vaults leaves a new vault. Seeded directly it has
+      // no grant and is Private, which no longer exempts the owner.
+      await seedVaultGrant(org, "edit");
       token = await tokenFor(owner, org);
       registryBroadcasts.length = 0;
     });
@@ -649,6 +653,9 @@ describe("MCP server", () => {
       org = await seedOrg("Acme", "acme-mcp-move");
       await seedMember(org, owner, "owner");
       vault = await seedVault(org);
+      // Shared, as POST /api/vaults leaves a new vault. Seeded directly it has
+      // no grant and is Private, which no longer exempts the owner.
+      await seedVaultGrant(org, "edit");
       token = await tokenFor(owner, org);
       registryBroadcasts.length = 0;
     });

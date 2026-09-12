@@ -143,14 +143,22 @@ describe("end-to-end Yjs sync through the server (spec 03 §3, 04 §4)", () => {
   // ── attribution (versioning / "last edited by") ─────────────────────────────
 
   it("attributes a client edit to the token's userId", async () => {
-    const docId = "e2e-attrib-client";
-    const c = await connect(docId, false, "user-abc");
+    // Real rows, not a synthetic id: `onAuthenticate` re-resolves the caller's
+    // permission against the database for any token carrying a `userId`, so a
+    // named editor has to be a member who actually has edit on this note.
+    const owner = await signUp("e2e-attrib@t.com");
+    const org = await seedOrg("Acme", "acme-e2e-attrib");
+    await seedMember(org, owner.userId, "owner");
+    const vaultId = await seedVault(org);
+    const docId = await seedNote(vaultId, null, "attrib.md", owner.userId);
+
+    const c = await connect(docId, false, owner.userId, vaultId);
     c.text.insert(0, "typed by a human");
 
     await waitFor(() => edits.some((e) => e.docId === docId), 8000, "onDocEdited fired");
     const mine = edits.filter((e) => e.docId === docId);
-    expect(mine[0].vaultId).toBe(VAULT);
-    expect(mine[0].userId).toBe("user-abc");
+    expect(mine[0].vaultId).toBe(vaultId);
+    expect(mine[0].userId).toBe(owner.userId);
 
     c.provider.destroy();
   });
@@ -173,12 +181,20 @@ describe("end-to-end Yjs sync through the server (spec 03 §3, 04 §4)", () => {
     // `LocalTransactionOrigin` object; if Hocuspocus only string-compared origins
     // (as `LOAD_ORIGIN` is), the context — and with it the whole attribution
     // chain for MCP/AI and revert writes — would never arrive.
-    const docId = "e2e-attrib-local-origin";
-    const c = await connect(docId, false, "human");
+    const owner = await signUp("e2e-origin@t.com");
+    const org = await seedOrg("Acme", "acme-e2e-origin");
+    await seedMember(org, owner.userId, "owner");
+    const vaultId = await seedVault(org);
+    const docId = await seedNote(vaultId, null, "origin.md", owner.userId);
+
+    const c = await connect(docId, false, owner.userId, vaultId);
     await waitFor(() => c.provider.isSynced);
 
     const writer = createDocWriter(server);
-    await writer.setContent(VAULT, docId, "written by the assistant", {
+    // The ACTOR stays synthetic on purpose: a server-side write authenticates
+    // nothing — it goes straight at the in-memory Document, never through
+    // `onAuthenticate` — so its attribution is whatever the caller declares.
+    await writer.setContent(vaultId, docId, "written by the assistant", {
       userId: "assistant-user",
     });
 

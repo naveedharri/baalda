@@ -3,7 +3,7 @@ import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedFolder, seedNote, seedVault } from "./helpers/seed.js";
+import { seedFolder, seedNote, seedVault, seedVaultGrant } from "./helpers/seed.js";
 import { recordingAppDeps } from "./helpers/app.js";
 import { createMcpToken } from "../src/mcp/tokens.js";
 
@@ -83,6 +83,10 @@ describe("case-insensitive path identity", () => {
     owner = await signUp("owner@case.test");
     org = (await createOrg(owner, "Case Co", "case-co")).id;
     vault = await seedVault(org);
+    // The org-wide grant `POST /api/vaults` gives a new vault. Seeded directly a
+    // vault has none, so it is Private — and Private stopped exempting owners,
+    // which would silently make these tests about the posture instead.
+    await seedVaultGrant(org, "edit");
     projects = await seedFolder(vault, null, "Projects", "Projects");
     community = await seedFolder(vault, projects, "Community", "Projects/Community");
   });

@@ -7,7 +7,7 @@ import { appendUpdate } from "../src/yjs/persistence.js";
 import { indexDoc } from "../src/index/indexer.js";
 import { resetDb } from "./helpers/db.js";
 import { createOrg, signUp } from "./helpers/auth.js";
-import { seedNote, seedVault } from "./helpers/seed.js";
+import { seedNote, seedVault, seedVaultGrant } from "./helpers/seed.js";
 
 const app = createApp(testAppDeps());
 
@@ -46,6 +46,7 @@ describe("note index: graph + search endpoints", () => {
     const owner = await signUp("owner@graph.com");
     const org = await createOrg(owner, "Acme", "acme-graph1");
     const vault = await seedVault(org.id);
+    await seedVaultGrant(org.id, "edit");
     const alpha = await seedNote(vault, null, "Alpha.md");
     const beta = await seedNote(vault, null, "Beta.md");
 
@@ -73,6 +74,7 @@ describe("note index: graph + search endpoints", () => {
     const owner = await signUp("owner@search.com");
     const org = await createOrg(owner, "Acme", "acme-search1");
     const vault = await seedVault(org.id);
+    await seedVaultGrant(org.id, "edit");
     const dbNote = await seedNote(vault, null, "Databases.md");
     const cooking = await seedNote(vault, null, "Cooking.md");
 
@@ -95,6 +97,7 @@ describe("note index: graph + search endpoints", () => {
     const owner = await signUp("owner@graph2.com");
     const org = await createOrg(owner, "Acme", "acme-graph2");
     const vault = await seedVault(org.id);
+    await seedVaultGrant(org.id, "edit");
 
     const stranger = await signUp("stranger@graph2.com");
     expect((await graph(stranger.token, vault)).status).toBe(403);

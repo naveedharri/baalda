@@ -322,6 +322,12 @@ pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
 const OS_METADATA_FILES: &[&str] = &[".DS_Store", "desktop.ini", "Thumbs.db"];
 
 /// Delete a file or folder (recursively for folders).
+///
+/// The recursion is deliberate and is used by exactly one caller: the sidebar's
+/// own Delete, where the user picked a folder and meant its contents. Nothing
+/// driven by the SERVER may reach it — an inbound removal (a tombstone, a
+/// revocation) takes a note path and must be unable to erase a tree even if some
+/// later refactor hands it a directory. That caller uses [`delete_file`].
 pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
@@ -332,6 +338,41 @@ pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
     } else {
         std::fs::remove_file(&abs)?;
     }
+    Ok(())
+}
+
+/// Delete a single FILE. Refuses a directory outright.
+///
+/// This is the delete the inbound reconciler uses for a revoked note — the one
+/// code path that removes something from disk with no recoverable copy anywhere
+/// (a revocation is deliberately not trashed; a trash copy would hand the
+/// ex-reader back the readable `.md` the revocation exists to take away).
+///
+/// Today the paths reaching it come from the local note listing and have already
+/// passed `isSafeNotePath`, so none of them is a directory and none of them is
+/// under `.context/`. Those are properties of the CALLER, not of this function,
+/// and `resolve_in_vault` deliberately permits `.context/` — so one refactor
+/// upstream is all it would take for the no-undo delete to become
+/// `remove_dir_all` on a tree, or to remove the vault's own doc-id map and CRDT
+/// store. Both guards belong here, where they cannot be refactored away from.
+pub fn delete_file(vault: &Path, rel: &str) -> AppResult<()> {
+    // `.context/`, `.git`, dotfiles — the same refusal `trash_note` and
+    // `delete_folder_if_empty` make. Checked BEFORE the directory test, so
+    // `.context/config.json` is refused on its own merits rather than surviving
+    // because it happens to be a file.
+    if crate::vault::rel_path_is_ignored(rel) {
+        return Err(AppError::new(format!("refusing to delete an ignored path: {rel}")));
+    }
+    let abs = resolve_in_vault(vault, rel)?;
+    if !abs.exists() {
+        return Ok(());
+    }
+    if abs.is_dir() {
+        return Err(AppError::new(format!(
+            "refusing to delete a directory as a file: {rel}"
+        )));
+    }
+    std::fs::remove_file(&abs)?;
     Ok(())
 }
 
@@ -374,6 +415,47 @@ fn join_rel(parent_rel: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_file_removes_a_file_and_refuses_a_directory() {
+        // The revocation removal is the one delete with no recoverable copy, so
+        // it must be structurally incapable of taking a tree with it — including
+        // `.context/`, which `resolve_in_vault` deliberately permits.
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "Docs/a.md", "keep me").unwrap();
+        write_note(tmp.path(), ".context/config.json", "{}").unwrap();
+
+        delete_file(tmp.path(), "Docs/a.md").unwrap();
+        assert!(!tmp.path().join("Docs/a.md").exists());
+        // The directory that held it is untouched.
+        assert!(tmp.path().join("Docs").is_dir());
+
+        let err = delete_file(tmp.path(), "Docs").unwrap_err();
+        assert!(err.0.contains("refusing to delete a directory"), "{}", err.0);
+        assert!(tmp.path().join("Docs").is_dir());
+
+        // `.context/` and everything in it, file or directory. The vault's doc-id
+        // map and CRDT store live there; the no-undo delete must not be able to
+        // reach them even if a caller hands it the path.
+        let err = delete_file(tmp.path(), ".context").unwrap_err();
+        assert!(err.0.contains("refusing to delete an ignored path"), "{}", err.0);
+        let err = delete_file(tmp.path(), ".context/config.json").unwrap_err();
+        assert!(err.0.contains("refusing to delete an ignored path"), "{}", err.0);
+        assert!(tmp.path().join(".context/config.json").exists());
+
+        // A path that isn't there is a no-op, like `delete_path` — an inbound
+        // removal for a file someone already deleted is not an error.
+        delete_file(tmp.path(), "Docs/gone.md").unwrap();
+    }
+
+    #[test]
+    fn delete_path_still_removes_a_directory_tree() {
+        // The sidebar's own Delete is the one caller that means it.
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "Docs/sub/a.md", "x").unwrap();
+        delete_path(tmp.path(), "Docs").unwrap();
+        assert!(!tmp.path().join("Docs").exists());
+    }
 
     #[test]
     fn atomic_write_and_read_roundtrip() {
