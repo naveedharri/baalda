@@ -1,0 +1,136 @@
+# Baalda server — Coolify / PaaS Compose bundle (server + Postgres).
+#
+# This is the same stack as ../compose/docker-compose.yml, adapted for
+# platforms (Coolify and similar) that run `docker compose` with the repo
+# root as the project directory, rather than the directory the compose file
+# lives in. That changes how a relative `build.context` resolves, which is
+# why this file is separate from ../compose/ instead of replacing it:
+#
+#   - ../compose/docker-compose.yml uses `context: ../..` and is meant to be
+#     run with `cd deploy/compose && docker compose up`, i.e. context
+#     resolves relative to the compose file.
+#   - This file uses `context: .` because Coolify's project directory *is*
+#     the repo root, so `.` already points at the right place. Point Coolify's
+#     "Base Directory" at the repo root (`/`) and its "Compose file location"
+#     at `/deploy/coolify/docker-compose.yml`.
+#
+# No host ports are published here — Coolify's own proxy (Traefik) terminates
+# TLS and reaches the container directly on its internal network, so `server`
+# only needs to `expose` the port, not publish it.
+#
+# `server` declares SERVICE_FQDN_SERVER (Coolify's magic env var convention,
+# https://coolify.io/docs/knowledge-base/environment-variables) so Coolify
+# generates and assigns a domain to THIS service automatically on first
+# deploy, targeting its one exposed port. Without it Coolify still lets you
+# assign a domain by hand (Service → server, Port → 3010) in each service's
+# "Domains" settings, but won't pick the right service for you.
+#
+# POSTGRES_PASSWORD and JWT_SECRET are Coolify magic vars too
+# (SERVICE_PASSWORD_64_<ID> / SERVICE_REALBASE64_64_<ID>) — Coolify generates
+# and persists them per-deployment, so there is nothing to type in for
+# either. POSTGRES_PASSWORD specifically uses the "_64" (symbols-free)
+# variant, not the bare SERVICE_PASSWORD_<ID> one — that one may include
+# characters like `@ : /` that are unsafe unescaped inside DATABASE_URL's
+# postgres:// connection string.
+#
+# ⚠️ Do NOT use bash's `${VAR:?error message}` here for a required var, even
+# though ../compose/docker-compose.yml does (and should keep doing, for a
+# plain `docker compose` CLI, which implements it correctly: fail fast with
+# your message if VAR is unset). Coolify's compose parser gives `:?` a
+# DIFFERENT meaning — https://coolify.io/docs/knowledge-base/docker/compose —
+# `${VAR:?}` marks VAR required (blank in the UI), while `${VAR:?text}` treats
+# `text` as a *prefilled default value*, not an error message. Using our old
+# guard clauses here meant an unset var silently became the literal string
+# "set POSTGRES_PASSWORD in .env" instead of failing — DATABASE_URL, JWT_SECRET
+# and BETTER_AUTH_URL all came out as garbage and the deploy failed opaquely
+# downstream.
+#
+# BETTER_AUTH_URL uses `${BETTER_AUTH_URL:-http://localhost:3010}` — a real
+# bash-style default (Coolify's docs confirm `:-` gets standard behavior,
+# unlike `:?`) — so the first deploy succeeds without any manual input, and
+# the real public URL isn't known before this first deploy generates a domain
+# via SERVICE_FQDN_SERVER below anyway.
+#
+# This can't be `${BETTER_AUTH_URL}` bare relying on the app's own fallback
+# (app/apps/server/src/config.ts's `required(name, fallback)`): Coolify
+# interpolates a genuinely-unset var to an EMPTY STRING in the container's
+# environment, not to an absent key. `required()` only applies its fallback
+# via `??`, which empty string does not trigger, so it throws `Missing
+# required env var: BETTER_AUTH_URL` and the process exits immediately —
+# this crashed BOTH `migrate` and `server` on startup, before either reached
+# any Postgres-related code. The default has to be supplied here, in the
+# compose interpolation, so the container never sees an empty value at all.
+#
+# Once you have the real domain (Domains tab on `server`), set
+# BETTER_AUTH_URL to it — https://…, no trailing slash — and redeploy;
+# auth/invitation links are wrong until you do.
+name: baalda
+
+x-server-image: &server-image
+  build:
+    context: .
+    dockerfile: app/apps/server/Dockerfile
+
+x-server-env: &server-env
+  NODE_ENV: production
+  DATABASE_URL: postgres://baalda:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/baalda
+  JWT_SECRET: ${SERVICE_REALBASE64_64_JWT}
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3010}
+  PORT: "3010"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: baalda
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
+      POSTGRES_DB: baalda
+    volumes:
+      - baalda_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baalda -d baalda"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Runs to completion, then the server starts. Same ordering guarantee as
+  # ../compose/docker-compose.yml: schema changes land before anything serves
+  # traffic.
+  migrate:
+    <<: *server-image
+    command: ["node", "dist/db/migrate.js"]
+    environment: *server-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    <<: *server-image
+    environment:
+      <<: *server-env
+      # Bare (unset) magic var — Coolify generates a domain and assigns it to
+      # this service's exposed port. See the file-level comment above.
+      SERVICE_FQDN_SERVER:
+    # No `ports:` — Coolify's proxy reaches the container on the internal
+    # network. `expose` documents the port without publishing it to the host.
+    expose:
+      - "3010"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  baalda_pgdata:
