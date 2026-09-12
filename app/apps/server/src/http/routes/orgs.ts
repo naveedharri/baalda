@@ -412,6 +412,9 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       if (docIds.length) {
         await client.query("DELETE FROM doc_updates WHERE doc_id = ANY($1)", [docIds]);
         await client.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1)", [docIds]);
+        // The cached state vectors describe state that no longer exists; leaving
+        // them would have a recreated doc_id inherit a stranger's clocks.
+        await client.query("DELETE FROM doc_state_vectors WHERE doc_id = ANY($1)", [docIds]);
       }
       await client.query("DELETE FROM blobs WHERE org_id = $1", [orgId]);
       if (vaultIds.length) {

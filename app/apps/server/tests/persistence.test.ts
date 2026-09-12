@@ -324,6 +324,55 @@ describe("loadDocDiff (vault-channel backfill)", () => {
     expect(client.getText("content").toString()).toBe("# shared + local only");
   });
 
+  it("caches a doc's state vector so an unchanged doc costs one query and no merge", async () => {
+    // The point of migration 025. A note edited fewer than COMPACTION_THRESHOLD
+    // times has no `doc_snapshots` row, so before the cache EVERY connect read its
+    // whole update log and ran `Y.mergeUpdates` over it, only to conclude the
+    // client was already current — thousands of queries and hundreds of
+    // single-threaded merges standing in front of one `ready` frame.
+    const doc = await seedDoc("cached");
+    const sv = Y.encodeStateVector(doc);
+
+    // First read pays the slow path and populates the cache.
+    const cold = await loadDocDiff(DOC, sv);
+    expect(cold!.upToDate).toBe(true);
+
+    const { db, sql } = countingDb();
+    const warm = await loadDocDiff(DOC, sv, db);
+    expect(warm!.upToDate).toBe(true);
+    expect(warm!.update.length).toBe(0);
+    // Neither the log nor the snapshot was touched.
+    expect(sql.some((q) => q.includes(SNAPSHOT_READ))).toBe(false);
+    expect(sql.some((q) => q.includes("SELECT id, update FROM doc_updates"))).toBe(false);
+    expect(sql).toHaveLength(1);
+  });
+
+  it("a new update invalidates the cached vector instead of being missed by it", async () => {
+    // The hazard the watermark exists for: a cached vector that is TRUSTED and
+    // stale would report a client up to date while ops it has never seen sit in
+    // the log — withholding content silently, the one failure this must not have.
+    const doc = await seedDoc("before");
+    const sv = Y.encodeStateVector(doc);
+    // A snapshot of the client as it stands now, before the server moves on.
+    const before = new Y.Doc();
+    Y.applyUpdate(before, Y.encodeStateAsUpdate(doc));
+    await loadDocDiff(DOC, sv); // populate the cache
+
+    const later: Uint8Array[] = [];
+    doc.on("update", (u: Uint8Array) => later.push(u));
+    doc.getText("content").insert(6, " and after");
+    for (const u of later) await appendUpdate(DOC, u, pool, 1000);
+
+    const diff = await loadDocDiff(DOC, sv);
+    expect(diff!.upToDate).toBe(false);
+    // `update` is a DIFF against `sv`, so it only means anything applied to a doc
+    // already at that state — which is exactly the client the server is answering.
+    const behind = new Y.Doc();
+    Y.applyUpdate(behind, Y.encodeStateAsUpdate(before));
+    Y.applyUpdate(behind, diff!.update);
+    expect(behind.getText("content").toString()).toBe("before and after");
+  });
+
   it("an equal or merely behind client is not `clientAhead`", async () => {
     const doc = await seedDoc("base");
     const equal = await loadDocDiff(DOC, Y.encodeStateVector(doc));

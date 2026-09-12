@@ -144,11 +144,96 @@ export function compareStateVectors(
   return { serverCovered, clientAhead };
 }
 
+/** Drop the cached vector for a doc whose history was rewritten underneath it. */
+async function invalidateStateVector(docId: string, db: Queryable): Promise<void> {
+  try {
+    await db.query("DELETE FROM doc_state_vectors WHERE doc_id = $1", [docId]);
+  } catch (err) {
+    console.warn(`[yjs] state-vector cache invalidate failed for ${docId}:`, err);
+  }
+}
+
+/**
+ * The cached state vector for `docId`, but ONLY when it provably describes the
+ * doc's current log. `upto_update_id` must equal the log's max id (both NULL when
+ * the log is empty); anything else means an append landed after the vector was
+ * written, and a vector that is merely close is worse than none — it would report
+ * a client "up to date" while ops it has never seen sit in the log.
+ *
+ * One indexed query, no BYTEA of the log, no merge.
+ */
+async function currentStateVector(
+  docId: string,
+  db: Queryable,
+): Promise<Uint8Array | null> {
+  const { rows } = await db.query<{ state_vector: Buffer; fresh: boolean }>(
+    `SELECT v.state_vector,
+            v.upto_update_id IS NOT DISTINCT FROM
+              (SELECT max(u.id) FROM doc_updates u WHERE u.doc_id = $1) AS fresh
+       FROM doc_state_vectors v
+      WHERE v.doc_id = $1`,
+    [docId],
+  );
+  const row = rows[0];
+  if (!row || !row.fresh) return null;
+  return new Uint8Array(row.state_vector);
+}
+
+/**
+ * Record the state vector for `docId` along with the log position it accounts
+ * for. Safe to call from a read path: the pair is written together, so a stale
+ * write is detected by the freshness check rather than trusted.
+ */
+async function rememberStateVector(
+  docId: string,
+  stateVector: Uint8Array,
+  uptoUpdateId: string | null,
+  db: Queryable,
+): Promise<void> {
+  try {
+    await db.query(
+      `INSERT INTO doc_state_vectors (doc_id, state_vector, upto_update_id, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (doc_id) DO UPDATE
+         SET state_vector = EXCLUDED.state_vector,
+             upto_update_id = EXCLUDED.upto_update_id,
+             updated_at = now()`,
+      [docId, Buffer.from(stateVector), uptoUpdateId],
+    );
+  } catch (err) {
+    // A cache miss is a slow read, never a failed one — this must not be able to
+    // fail a sync.
+    console.warn(`[yjs] state-vector cache write failed for ${docId}:`, err);
+  }
+}
+
 export async function loadDocDiff(
   docId: string,
   clientStateVector: Uint8Array | null,
   db: Queryable = defaultPool,
 ): Promise<DocDiff | null> {
+  // FAST PATH, and the one that matters at scale: a cached per-doc state vector
+  // that is provably current. This is the question the vault channel asks for
+  // every readable doc on every connect, and the honest answer is almost always
+  // "you already have everything" — which this settles in ONE indexed query with
+  // no log read and no merge. Only a client that is genuinely behind pays for the
+  // work below. See `doc_state_vectors` (migration 025).
+  if (clientStateVector) {
+    const cached = await currentStateVector(docId, db);
+    if (cached) {
+      const cmp = bytesEqual(clientStateVector, cached)
+        ? { serverCovered: true, clientAhead: false }
+        : compareStateVectors(clientStateVector, cached);
+      if (cmp.serverCovered) {
+        return {
+          update: new Uint8Array(0),
+          serverStateVector: cached,
+          upToDate: true,
+          clientAhead: cmp.clientAhead,
+        };
+      }
+    }
+  }
   // Probe: does a snapshot exist, is its stored state vector usable, and is
   // anything sitting in the log on top of it? Deliberately selects no BYTEA.
   const probe = await db.query<{ state_vector: Buffer | null; pending: boolean }>(
@@ -193,8 +278,8 @@ export async function loadDocDiff(
     "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
     [docId],
   );
-  const updates = await db.query<{ update: Buffer }>(
-    "SELECT update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+  const updates = await db.query<{ id: string; update: Buffer }>(
+    "SELECT id, update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
     [docId],
   );
   const snapshotBuf = snap.rows[0]?.snapshot ?? null;
@@ -202,6 +287,15 @@ export async function loadDocDiff(
 
   const merged = mergeParts(snapshotBuf, updates.rows);
   const serverStateVector = Y.encodeStateVectorFromUpdate(merged);
+  // Seed the cache from the work we just did, so a doc that predates migration
+  // 025 pays this once rather than on every connect. `updates.rows` is the log we
+  // actually read, so its last id is exactly what this vector accounts for.
+  void rememberStateVector(
+    docId,
+    serverStateVector,
+    updates.rows.length > 0 ? (updates.rows[updates.rows.length - 1]?.id ?? null) : null,
+    db,
+  );
   const cmp = clientStateVector
     ? bytesEqual(clientStateVector, serverStateVector)
       ? { serverCovered: true, clientAhead: false }
@@ -281,6 +375,15 @@ export async function appendUpdate(
     "INSERT INTO doc_updates (doc_id, update) VALUES ($1, $2)",
     [docId, Buffer.from(update)],
   );
+  // The cached state vector is deliberately NOT updated here. Appending moves the
+  // log's max id past the watermark the cache recorded, which makes the cache read
+  // as stale on its own — so the next reader recomputes and re-caches.
+  //
+  // Maintaining it from this side looks cheaper and is not safe: two concurrent
+  // appends would each fold their own update into whatever they had read, and the
+  // one that wrote last would stamp a watermark covering an update its vector
+  // never saw. A vector that is trusted and wrong withholds ops from a client
+  // silently, which is the one failure mode this cache must never have.
 
   const { rows } = await db.query<{ count: string }>(
     "SELECT count(*)::text AS count FROM doc_updates WHERE doc_id = $1",
@@ -351,6 +454,11 @@ export async function compact(
       "DELETE FROM doc_updates WHERE doc_id = $1 AND id <= $2",
       [docId, maxId],
     );
+    // Compacting rewrites what the log contains, so any cached vector's watermark
+    // now describes rows that are gone. Drop it and let the next read recompute —
+    // same reasoning as `appendUpdate`: an update appended while we were merging
+    // would otherwise be covered by a watermark whose vector predates it.
+    await invalidateStateVector(docId, db);
   } finally {
     doc.destroy();
   }
@@ -406,6 +514,10 @@ export async function resetDocCrdt(
              updated_at = now()`,
       [docId, snapshot, stateVector],
     );
+    // REPLACE, never merge: this doc's history was deliberately discarded, so the
+    // new vector is not a superset of the old one and folding them together would
+    // claim clocks that no longer exist. The log is empty, hence a NULL watermark.
+    await rememberStateVector(docId, new Uint8Array(stateVector), null, db);
     return { bytes: snapshot.byteLength };
   } finally {
     doc.destroy();
