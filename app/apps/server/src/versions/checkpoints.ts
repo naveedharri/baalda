@@ -141,6 +141,18 @@ export async function captureCheckpoint(
   );
 
   let noteCount = 0;
+  // Counted, not logged per note. Both of these are ORDINARY for a large vault
+  // — a freshly-synced client has thousands of notes whose CRDT has not arrived
+  // yet — and a line apiece made one daily checkpoint emit thousands of them:
+  // in production a 4,445-note vault buried every other log line and tripped
+  // the host's 500 logs/sec ceiling, which DROPS messages. Losing the rest of
+  // the log to a routine housekeeping pass is worse than not knowing which
+  // individual note was skipped, so the ids are sampled and the rest counted.
+  let emptyCount = 0;
+  let oversizedCount = 0;
+  const skippedEmpty: string[] = [];
+  const skippedOversized: string[] = [];
+  const SAMPLE = 5;
   for (const note of structure.notes) {
     const raw = await opts.docWriter.peekContent(vaultId, note.id);
     // NUL would abort the whole checkpoint transaction (see `pgText`).
@@ -151,11 +163,13 @@ export async function captureCheckpoint(
     // data-loss this feature exists to prevent. Structure keeps the note; the
     // revert leaves its content alone.
     if (content == null) {
-      console.warn(`[checkpoints] no server content yet for ${note.id}; structure-only`);
+      if (skippedEmpty.length < SAMPLE) skippedEmpty.push(note.id);
+      emptyCount++;
       continue;
     }
     if (Buffer.byteLength(content, "utf8") > MAX_CHECKPOINT_DOC_BYTES) {
-      console.warn(`[checkpoints] skipping oversized doc ${note.id} in vault ${vaultId}`);
+      if (skippedOversized.length < SAMPLE) skippedOversized.push(note.id);
+      oversizedCount++;
       continue;
     }
     await db.query(
@@ -167,8 +181,28 @@ export async function captureCheckpoint(
     noteCount++;
   }
 
+  if (emptyCount > 0 || oversizedCount > 0) {
+    const parts: string[] = [];
+    if (emptyCount > 0) {
+      parts.push(`${emptyCount} with no server content yet (${sample(skippedEmpty, emptyCount)})`);
+    }
+    if (oversizedCount > 0) {
+      parts.push(`${oversizedCount} oversized (${sample(skippedOversized, oversizedCount)})`);
+    }
+    console.warn(
+      `[checkpoints] vault ${vaultId}: captured ${noteCount}/${structure.notes.length} notes; ` +
+        `structure-only for ${parts.join(", ")}`,
+    );
+  }
+
   await pruneCheckpoints(db, vaultId, [id, ...(opts.excludeFromPrune ?? [])]);
   return { id, noteCount };
+}
+
+/** `a, b, c …+97 more` — enough to chase one, never enough to flood. */
+function sample(ids: string[], total: number): string {
+  const more = total - ids.length;
+  return more > 0 ? `${ids.join(", ")} …+${more} more` : ids.join(", ");
 }
 
 /**
