@@ -1780,7 +1780,20 @@ export class VaultRegistry {
     // to resolve. Memoized so the two of them share one read when they do.
     let titlesCache: ipc.NoteTitle[] | null = null;
     const titles = async (): Promise<ipc.NoteTitle[]> =>
-      (titlesCache ??= await ipc.listNoteTitles(this.epoch()));
+      (titlesCache ??= await (async () => {
+        // Timed, because this is the one call on the launch path that can park
+        // for seconds on a lock nothing here controls. When a launch is slow and
+        // the network numbers look fine, this is where to look first.
+        const started = performance.now();
+        const rows = await ipc.listNoteTitles(this.epoch());
+        const ms = Math.round(performance.now() - started);
+        if (ms > 250) {
+          console.warn(
+            `[sync] listNoteTitles parked ${ms}ms on the index lock (${rows.length} notes)`,
+          );
+        }
+        return rows;
+      })());
 
     // Learn who wrote what, BEFORE any of the steps below and outside the inbound
     // guard: the very first pass of a fresh vault has no baseline and so runs no

@@ -8,6 +8,36 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Performance
+- **Time to connect, on launch and on every vault switch.** The vault channel is
+  now opened during the PRIME window, in parallel with `registry.reconcile()`,
+  instead of after it (`docSession.ts enable`). The collection id is the only
+  thing the socket needs and the prime has already read it out of
+  `.context/config.json`, so waiting cost the user the reconcile's whole serial
+  HTTP chain first. Safe because `enabled` and `pulledOnce` both stay false until
+  the reconcile returns, which is what gates uploads, `markLive` and the
+  revocation/disk-delete paths. Alongside it: the vault token is minted
+  concurrently with the TCP/TLS handshake rather than after `onopen`; the folder
+  and note listings are prefetched optimistically against the cached collection id
+  in parallel with the `listVaults` call that validates it; and `initAuth` no
+  longer holds the landing behind the member roster and both invitation lists
+  (`refreshVault({ rosterInBackground: true })` resolves once `organizations` is
+  published). New `[boot]` marks cover the whole WS phase — `channel-start`,
+  `socket-open`, `token-minted`, `hello-sent`, `channel-ready` — because nothing
+  after `reconcile-done` was measurable before.
+- **`ready` no longer merges the whole vault's CRDT history on every connect.**
+  `loadDocDiff`'s only fast answer lived on `doc_snapshots.state_vector`, which
+  exists solely for docs past `COMPACTION_THRESHOLD` (50) lifetime updates — so an
+  ordinary note took the slow path every time: an EXISTS probe, a snapshot read,
+  the full `doc_updates` log and a `Y.mergeUpdates` over its history, usually only
+  to conclude the client was already current. For a few-hundred-note vault that is
+  thousands of queries and hundreds of single-threaded merges in front of one
+  `ready` frame. Migration 025 adds `doc_state_vectors`, whose `upto_update_id`
+  watermark makes the cached vector trustworthy: a reader trusts it only when it
+  matches the log's current max id, so a racing append can never be mistaken for
+  "nothing changed". Written by the read path (self-backfilling for existing
+  docs); `appendUpdate` and `compact` deliberately do NOT maintain it — two
+  concurrent appends could stamp a watermark covering an update the vector never
+  saw, and a vector that is trusted and wrong withholds ops silently.
 - **Startup and note loading, Rust side.** CRDT state, state-vector manifests
   and attachment bytes now cross the desktop IPC boundary as raw bytes in both
   directions (framed; `src/lib/ipcCodec.ts` ↔ `commands.rs`) instead of JSON
@@ -21,6 +51,40 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   re-resolution pass. `open_vault` reports per-phase timings (on `VaultInfo`
   and as one log line) and `rebuild` logs one line unconditionally. Release
   builds now use thin LTO, one codegen unit and a stripped binary.
+
+### Fixed
+- **A client reauthed itself over its own registry writes.** Every
+  `registry-changed` ran `refreshAcl({ reauth: "if-changed" })` with no origin
+  self-exclusion, so a client's own pull registering notes grew its own readable
+  set, fired `reauth` straight back at it, tore the open note's provider down and
+  back up, and published the next `registry-changed`. An idle client did this nine
+  times in half an hour. The recompute still runs; the announcement is suppressed
+  for a change this connection authored (`reauth: "never"`).
+- **The sync badge described the open note, not the vault.** `emitStatus` gave one
+  note's provider status priority over the vault channel, so every file you opened
+  repainted the vault-wide pill "connecting" and every provider bounce strobed it.
+  The note now speaks for the app only when it has something the channel cannot
+  express (`read-only`, `no-access`, `deleted`, `too-large`); its ordinary connect
+  churn stays on its own sidebar row. A drop out of a settled state is also held
+  ~400ms, so a reconnect that resolves inside the window is never painted, and a
+  deliberate token re-mint no longer reports itself as `offline`.
+- **A vault switch dropped inbound updates permanently.** `drainInbound` caught a
+  Rust `vault-mismatch` per frame and carried on, so a whole backfill was discarded
+  one doc at a time — and because a dropped frame never advances the doc's state
+  vector, the server re-offered exactly the same ops on the next connect, forever
+  if the engine outlived its epoch. A stale epoch now stops the engine.
+- **A view-only note could never finish syncing.** `ContentUploader.pushOne`
+  waited for a flush ack that a read-only grant will never produce, failed, and so
+  never reached `markPushed` — coming back on every `ready.behind`. It now takes
+  the same exemption `confirmOpenDoc` has always taken.
+- **Reconnects paused for seconds and never said why.** The backoff ladder spent
+  ~3.5s across three laps before discovering a server that was already back; the
+  first retry is now near-immediate (50ms) with the jittered ladder from the
+  second onward. `ws.onerror` discarded its event and `closeSocket` detached
+  `onclose` before the close frame could land, which is why every failure logged
+  as a bare "socket error" with no cause; the close handler now survives the
+  detach, and the server sends real close codes (`4401` auth, `4400` protocol)
+  so a refused credential stops the ladder instead of being retried.
 
 ### Changed
 - **Pressing Private seals the vault, for the person who pressed it too.** The
