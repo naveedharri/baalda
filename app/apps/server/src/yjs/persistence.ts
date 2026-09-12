@@ -290,7 +290,15 @@ export async function loadDocDiff(
   // Seed the cache from the work we just did, so a doc that predates migration
   // 025 pays this once rather than on every connect. `updates.rows` is the log we
   // actually read, so its last id is exactly what this vector accounts for.
-  void rememberStateVector(
+  //
+  // AWAITED, not fire-and-forget. One INSERT is noise next to what this path has
+  // already spent — a snapshot BYTEA, the whole update log and a `Y.mergeUpdates`
+  // over it — and un-awaited it bought two problems. The write escaped the pool's
+  // backpressure, so a large vault's first connect fired a burst of unobserved
+  // INSERTs competing with `runPool`'s own backfill reads for the same
+  // connections. And the cache was not yet readable when this call returned, so
+  // the very next read of the same doc could still miss it and redo the merge.
+  await rememberStateVector(
     docId,
     serverStateVector,
     updates.rows.length > 0 ? (updates.rows[updates.rows.length - 1]?.id ?? null) : null,
