@@ -314,6 +314,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **A Coolify deploy path for self-hosters** (`deploy/coolify/`, contributed by
+  [@JotaSXBR](https://github.com/JotaSXBR), #135, closes #97). Coolify — and any
+  PaaS that runs `docker compose` with the REPO ROOT as the project directory —
+  resolves `deploy/compose/docker-compose.yml`'s `context: ../..` two levels
+  ABOVE the repo root, so the build fails before it starts. The new file is the
+  same `postgres → migrate → server` stack with `context: .` and no published
+  ports (Coolify's own Traefik terminates TLS and reaches the container on the
+  internal network), leaving `deploy/compose/` untouched for the VPS + nginx path.
+  `POSTGRES_PASSWORD` and `JWT_SECRET` come from Coolify's magic env vars, so a
+  first deploy needs nothing typed in. Three Coolify-specific traps are documented
+  in `deploy/coolify/README.md` because none of them are obvious from Coolify's
+  docs: its parser reads `${VAR:?text}` as a PREFILLED DEFAULT, not bash's error
+  message, so our guard clauses would have become literal garbage values; an unset
+  `${VAR}` arrives as an EMPTY STRING rather than an absent key, which
+  `config.ts`'s `required(name, fallback)` does not catch (`??` only fires on
+  undefined), so the default has to live in the compose interpolation; and a
+  since-fixed Coolify bug (v4.3.19) could corrupt a saved domain into a bare
+  `https://`. Verified end-to-end on a live instance, desktop sync included.
 - **`ready.revoked` — the server STATES a revocation on every connect.** The
   vault channel's `ready` frame gained `revoked` / `revokedTruncated`
   (`sync/vault-protocol.ts`), the third of its doc lists after `empty` and
