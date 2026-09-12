@@ -542,7 +542,16 @@ interface AppStore {
   dismissMemberJoined: () => void;
 
   // Vault actions
-  refreshVault: () => Promise<void>;
+  /**
+   * Re-read the vault list, the member roster and both invitation lists.
+   *
+   * `rosterInBackground` resolves as soon as `organizations` is published and
+   * lets the three roster/invitation GETs finish detached. The launch path uses
+   * it because the landing's only dependency here is the vault list — see
+   * `planLanding`'s membership test — and awaiting the rest put three more
+   * round trips in front of every app start.
+   */
+  refreshVault: (opts?: { rosterInBackground?: boolean }) => Promise<void>;
   createOrganization: (name: string) => Promise<void>;
   /** Promote the currently-open local folder into a synced vault, adopting
    *  the files already in it (no new empty folder). This is "Turn on sync". */
@@ -2198,7 +2207,15 @@ export const useStore = create<AppStore>((set, get) => ({
         // Independent of each other: the vault roster + invitations, and the
         // billing feature flag. Serial, these were two round trips in front of
         // the landing for no reason.
-        await Promise.all([get().refreshVault(), get().refreshBillingConfig()]);
+        // The landing needs the vault LIST and nothing else from these two: the
+        // member roster, both invitation lists and the billing flag are panel
+        // data that no part of getting a vault on screen reads. Awaiting them
+        // here is what put four round trips between sign-in and the first byte
+        // of sync. `refreshVault` resolves once `organizations` is set.
+        await Promise.all([
+          get().refreshVault({ rosterInBackground: true }),
+          get().refreshBillingConfig(),
+        ]);
         if (superseded()) return;
         // An invitation link may have LAUNCHED the app too, and the vault it
         // names is where the user must land — so the ordinary landing is
@@ -2532,7 +2549,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // ---- Vault ----
 
-  refreshVault: async () => {
+  refreshVault: async (opts) => {
     const { api } = authManager;
     // The session generation this refresh describes: called from `initAuth`
     // (detached, so a sign-out can land under it) as well as from live
@@ -2552,28 +2569,43 @@ export const useStore = create<AppStore>((set, get) => ({
         if (authInitGen !== gen) return;
         if (refreshed) set({ session: refreshed });
       }
-      // Three independent GETs. Run serially they were three round trips in the
-      // launch chain; none of them depends on another's answer.
-      const [members, pendingInvitations, userInvitations] = await Promise.all([
-        activeOrgId
-          ? api.listMembers(activeOrgId).catch(() => [] as Member[])
-          : Promise.resolve([] as Member[]),
-        activeOrgId
-          ? api
-              .listInvitations(activeOrgId)
-              .then((invs) => invs.filter((i) => i.status === "pending"))
-              .catch(() => [] as Invitation[])
-          : Promise.resolve([] as Invitation[]),
-        api
-          .listUserInvitations()
-          .then((invs) => invs.filter((i) => i.status === "pending"))
-          .catch(() => [] as Invitation[]),
-      ]);
       if (authInitGen !== gen) return;
-      set({ organizations, members, pendingInvitations, userInvitations });
+      // Publish the vault list the MOMENT we have it, ahead of the roster below.
+      // This is the only part of this call the landing waits on, and holding it
+      // back until three more GETs returned is what put them in front of every
+      // launch. Everything after this point is panel data.
+      set({ organizations });
       // Cache the vault list locally so the signed-out welcome screen can
       // still offer them (kept across sign-out; refreshed here while signed in).
       writeKnownVaults(organizations.map((o) => ({ id: o.id, name: o.name })));
+      // Three independent GETs. Run serially they were three round trips in the
+      // launch chain; none of them depends on another's answer.
+      const roster = (async () => {
+        const [members, pendingInvitations, userInvitations] = await Promise.all([
+          activeOrgId
+            ? api.listMembers(activeOrgId).catch(() => [] as Member[])
+            : Promise.resolve([] as Member[]),
+          activeOrgId
+            ? api
+                .listInvitations(activeOrgId)
+                .then((invs) => invs.filter((i) => i.status === "pending"))
+                .catch(() => [] as Invitation[])
+            : Promise.resolve([] as Invitation[]),
+          api
+            .listUserInvitations()
+            .then((invs) => invs.filter((i) => i.status === "pending"))
+            .catch(() => [] as Invitation[]),
+        ]);
+        if (authInitGen !== gen) return;
+        set({ members, pendingInvitations, userInvitations });
+      })();
+      // The launch path does not wait for the roster; every other caller (the
+      // members panel, an invite accept) still gets the full refresh it expects.
+      if (opts?.rosterInBackground) {
+        void roster.catch((e) => console.warn("[vault] roster refresh failed", e));
+        return;
+      }
+      await roster;
     } catch (e) {
       // A failure that belongs to a session the user has since left is not this
       // session's error to show.

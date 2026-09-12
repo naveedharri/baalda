@@ -15,6 +15,7 @@ import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
 import type { NoteLastEdited, SessionInfo } from "../api";
 import * as ipc from "../ipc";
+import { markOnce } from "../perf";
 import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
 import type { ActivityStatus } from "../prefs";
@@ -293,6 +294,15 @@ export class SyncManager implements InboundHost {
   // opening it. Present only while sync is enabled.
   private docStore: VaultDocStore | null = null;
   private vaultEngine: VaultSyncEngine | null = null;
+  /**
+   * The collection id {@link vaultEngine} was started for.
+   *
+   * `startVaultEngine` is called TWICE per enable — once during the prime window
+   * and once after the reconcile (see `enable`) — so it needs to recognise a
+   * channel it already owns. Restarting a live one would discard precisely the
+   * head start the early call exists to buy.
+   */
+  private vaultEngineId: string | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
 
   // ---- push-to-talk voice ----
@@ -1940,6 +1950,20 @@ export class SyncManager implements InboundHost {
         // Sidebar badges + `store.docIdByPath`, immediately.
         this.publishRegistryMap();
         hooks?.onPrimed?.();
+        // OPEN THE CHANNEL NOW, alongside the reconcile below rather than after
+        // it. The collection id is the only thing the socket needs and the prime
+        // just read it out of `.context/config.json`, so waiting costs the user
+        // the reconcile's whole serial HTTP chain (listVaults, then folders and
+        // notes) before the connection even starts — seconds, on every launch and
+        // every vault switch.
+        //
+        // Safe because the two flags that gate anything destructive are still
+        // false: `enabled` (which `startContentRunIfNeeded` requires, so nothing
+        // uploads) and `pulledOnce` (so `markLive` cannot arm, and the revocation
+        // and disk-delete paths stay inert). All the early socket can do is
+        // backfill content for docs the prime already mapped — which is exactly
+        // the work we want overlapped.
+        this.startVaultEngine(scope);
       }
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);
@@ -2535,7 +2559,12 @@ export class SyncManager implements InboundHost {
   private startVaultEngine(scope: VaultScope): void {
     const vaultId = this.registry.vaultId;
     if (!vaultId) return;
+    // Already live for this collection (the prime window got there first) — leave
+    // it alone. See `vaultEngineId`.
+    if (this.vaultEngine && this.vaultEngineId === vaultId) return;
     this.stopVaultEngine();
+    this.vaultEngineId = vaultId;
+    markOnce("channel-start");
     // Reflect "connecting" the moment we switch into a vault, so the light
     // moves off a stale value before the socket reports back.
     this.vaultStatus = "connecting";
@@ -2651,6 +2680,7 @@ export class SyncManager implements InboundHost {
   private stopVaultEngine(): void {
     this.vaultEngine?.stop();
     this.vaultEngine = null;
+    this.vaultEngineId = null;
     // Cut any audio still playing: it belongs to the vault we're leaving, and
     // hearing a teammate from the previous vault after switching would be a bug
     // with an unpleasant privacy flavour.

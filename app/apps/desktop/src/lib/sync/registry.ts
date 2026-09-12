@@ -339,8 +339,29 @@ function reasonOf(err: unknown): string {
   return String(err);
 }
 
+/** The shapes `listFolderRegistry` / `listNoteRegistry` resolve to, named here so
+ *  the optimistic prefetch can hold onto them. Inferred rather than re-declared,
+ *  so they cannot drift from the api client. */
+type FolderRegistry = Awaited<ReturnType<ApiClient["listFolderRegistry"]>>;
+type NoteRegistry = Awaited<ReturnType<ApiClient["listNoteRegistry"]>>;
+
 export class VaultRegistry {
   private serverVaultId: string | null = null;
+  /**
+   * The folder + note listings, started OPTIMISTICALLY against the collection id
+   * `.context/config.json` already names, in parallel with the `listVaults` call
+   * whose only job is to validate that id.
+   *
+   * On every warm relaunch the cached id is correct, so this takes a whole
+   * serial round trip out of the launch chain. When validation resolves a
+   * DIFFERENT collection the prefetch is simply discarded and the listings are
+   * re-issued — the id is the cache key precisely so a wrong guess cannot be
+   * mistaken for the right one.
+   */
+  private prefetchedListings: {
+    vaultId: string;
+    p: Promise<[FolderRegistry, NoteRegistry]>;
+  } | null = null;
   /** The org this registry is reconciling under (see `VaultSyncConfig.organizationId`). */
   private organizationId: string | null = null;
   private byPath = new Map<string, DocMapping>();
@@ -1498,6 +1519,9 @@ export class VaultRegistry {
     //         collection (and 403 for plain members, who can't create them),
     //         which is why a freshly-joined device saw an empty vault;
     //      c. create one (owner/admin bootstrapping a brand-new vault).
+    // Start the listings for the id we already believe in, so they fly alongside
+    // the validation rather than behind it. See `prefetchedListings`.
+    if (cfg.serverVaultId) this.prefetchListings(cfg.serverVaultId);
     const vaults = await this.api.listVaults();
     if (this.stale()) return { seeded: false };
     const inOrg = vaults.filter((v) => vaultOrgId(v) === input.organizationId);
@@ -1659,6 +1683,40 @@ export class VaultRegistry {
     return run;
   }
 
+  /**
+   * Kick the folder + note listings for `vaultId` without awaiting them. Idempotent
+   * per collection id: a second call for the same id reuses the flight in progress.
+   */
+  private prefetchListings(vaultId: string): void {
+    if (this.prefetchedListings?.vaultId === vaultId) return;
+    const p = Promise.all([
+      this.api.listFolderRegistry(vaultId),
+      this.api.listNoteRegistry(vaultId),
+    ]) as Promise<[FolderRegistry, NoteRegistry]>;
+    // The consumer awaits this and handles the failure; attach here so a reject
+    // that arrives before `takeListings` runs is never an unhandled rejection.
+    p.catch(() => {
+      /* surfaced at the await in takeListings */
+    });
+    this.prefetchedListings = { vaultId, p };
+  }
+
+  /**
+   * The listings for `vaultId`, using the optimistic prefetch when it was started
+   * for this same collection. Consumed once — a later pull re-issues them, because
+   * these describe the server as of one moment and a pull's whole job is to ask
+   * again.
+   */
+  private async takeListings(vaultId: string): Promise<[FolderRegistry, NoteRegistry]> {
+    const hit = this.prefetchedListings;
+    this.prefetchedListings = null;
+    if (hit && hit.vaultId === vaultId) return hit.p;
+    return Promise.all([
+      this.api.listFolderRegistry(vaultId),
+      this.api.listNoteRegistry(vaultId),
+    ]) as Promise<[FolderRegistry, NoteRegistry]>;
+  }
+
   private async pullOnce(): Promise<boolean> {
     // Scope-guarded because this is THE historical corruption path: a debounced
     // pull that survived a vault switch still held vault A's `serverVaultId`
@@ -1699,10 +1757,7 @@ export class VaultRegistry {
     // back from "N not synced" even after the underlying cause was gone.
     this.failed = [];
     this.limitReached = null;
-    const [folderRegistry, noteRegistry] = await Promise.all([
-      this.api.listFolderRegistry(vaultId),
-      this.api.listNoteRegistry(vaultId),
-    ]);
+    const [folderRegistry, noteRegistry] = await this.takeListings(vaultId);
     if (this.stale()) return false;
     const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
