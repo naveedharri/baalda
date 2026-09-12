@@ -21,6 +21,11 @@ const TABLES = [
   "files",
   "folders",
   "vaults",
+  // Trusted by `loadDocDiff`'s fast path, and `RESTART IDENTITY` below rewinds
+  // `doc_updates`' ids — so a row left behind by an earlier test can have a
+  // watermark that accidentally matches the next test's fresh log, and a stale
+  // vector then reads as valid. It has to be reset with the log it describes.
+  "doc_state_vectors",
   "doc_updates",
   "doc_snapshots",
   "blobs",

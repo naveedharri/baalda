@@ -695,6 +695,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **The state-vector cache was seeded by a fire-and-forget write, and its test
+  raced it.** `loadDocDiff`'s slow path ended in `void rememberStateVector(...)`,
+  so the function RETURNED BEFORE the INSERT committed. `persistence.test.ts`'s
+  "caches a doc's state vector" does a cold read and then immediately a warm one
+  and asserts the warm read never touched the snapshot — which is only true if
+  the write won the race. It often did not: measured locally, the row was still
+  absent the instant the cold call returned **35 times out of 40**, and the
+  unmodified suite failed 3 runs in 8. That is the intermittent
+  `expected true to be false` at `persistence.test.ts:345` that reddened `main`
+  while the SAME commit passed on `staging`. Awaiting the write settles it (0 in
+  8). Nothing was ever wrong in production: the watermark guard means a late or
+  out-of-order write is either correct or correctly DISTRUSTED — a vector is
+  trusted only while `upto_update_id` still equals the log's `max(id)` — so no
+  client was served a stale vector. What the `void` did cost was real though:
+  the write escaped the pool's backpressure, so a big vault's first connect
+  fired a burst of unobserved INSERTs against the same connections `runPool`
+  was using for backfill reads.
+- **`doc_state_vectors` was never truncated between server tests.** It was
+  missing from `resetDb`'s table list while the table it describes,
+  `doc_updates`, is truncated WITH `RESTART IDENTITY` — so a row left by an
+  earlier test could carry a watermark that accidentally matched the next test's
+  rewound log, and `loadDocDiff` would then trust a vector belonging to a
+  different document. Not the cause of the flake above (adding it changed the
+  failure rate not at all), but a cache the code trusts has to be reset with the
+  log it describes.
 - **One daily checkpoint could drown out every other server log.**
   `captureCheckpoint` walked a vault's notes and `console.warn`ed a line per
   note it skipped, for two reasons that are both ORDINARY at scale: a note
