@@ -677,6 +677,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **One daily checkpoint could drown out every other server log.**
+  `captureCheckpoint` walked a vault's notes and `console.warn`ed a line per
+  note it skipped, for two reasons that are both ORDINARY at scale: a note
+  whose CRDT has not reached the server yet (every freshly-synced client has
+  thousands) and a note over `MAX_CHECKPOINT_DOC_BYTES`. On a 4,445-note vault
+  in production that was thousands of lines from one routine housekeeping pass,
+  which pushed the service past the host's 500 logs/sec ceiling — and over that
+  ceiling messages are DROPPED, so a scheduled snapshot could cost us the logs
+  for whatever else happened in that second. The two cases are now counted, not
+  narrated: at most five ids apiece are sampled and the remainder summarised
+  (`a, b, c …+97 more`) in a single line per vault that also reports how many of
+  the vault's notes were captured. Knowing which individual note was skipped was
+  never worth the rest of the log.
 - **A note could double one block of its own text, geometrically, until it was
   megabytes of one paragraph.** `vaultDocStore.coldApply` opens a TRANSIENT
   bridge for a background note — a fresh `Y.Doc`, so a fresh clientID every
