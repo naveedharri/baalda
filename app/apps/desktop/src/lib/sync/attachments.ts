@@ -482,8 +482,13 @@ export class AttachmentSync {
   constructor(
     private readonly deps: AttachmentSyncDeps,
     private readonly debounceMs = 400,
-    private readonly setTimeoutImpl: typeof setTimeout = setTimeout,
-    private readonly clearTimeoutImpl: typeof clearTimeout = clearTimeout,
+    // Wrapped, not passed by reference: these are stored as fields and called as
+    // `this.setTimeoutImpl(...)`, and WebKit refuses a bare `setTimeout` whose
+    // receiver is not the Window ("Can only call Window.setTimeout on instances
+    // of Window"). Node and jsdom do not enforce it, so only the real app broke.
+    private readonly setTimeoutImpl: (fn: () => void, ms: number) => ReturnType<typeof setTimeout> = (fn, ms) =>
+      setTimeout(fn, ms),
+    private readonly clearTimeoutImpl: (t: ReturnType<typeof setTimeout>) => void = (t) => clearTimeout(t),
   ) {}
 
   /** Is the vault this sync belongs to still the open one? */

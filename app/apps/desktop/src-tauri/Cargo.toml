@@ -75,13 +75,26 @@ quick-xml = "0.37"
 # the features it already turns on (`cargo tree -i reqwest -e features`:
 # json/stream/rustls-no-provider), so this is the same single copy rather than a
 # second one. `default-features = false` is load-bearing — reqwest's defaults
-# pull native-tls/openssl, which nothing here builds today. `rustls-no-provider`
-# leaves the crypto provider to rustls' own crate features (ring), which is what
-# the updater already relies on; `stream` is what lets a request body be a file
-# read incrementally instead of a Vec.
+# pull native-tls/openssl, which nothing here builds today. `stream` is what
+# lets a request body be a file read incrementally instead of a Vec.
+#
+# `rustls-no-provider` means the crypto provider is NOT chosen by a crate
+# feature: rustls 0.23 requires one to be INSTALLED as the process default
+# before any `ClientConfig` is built, and with no install `Client::builder()
+# .build()` panics ("No rustls crypto provider is configured"). The updater
+# installs its own on its own path, so `attachments.rs` installs ring once next
+# to its shared client — see the comment there. `rustls` is therefore a direct
+# dependency, pinned to the SAME 0.23 the tree already resolves (verify with
+# `cargo tree -d | grep rustls`: no duplicate), with exactly the features
+# hyper-rustls already turns on so nothing extra compiles.
 reqwest = { version = "0.13", default-features = false, features = [
     "stream",
     "rustls-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
 ] }
 # Async file I/O for the same streaming path. Both are already in the tree under
 # reqwest/hyper; naming them here only makes the dependency honest.

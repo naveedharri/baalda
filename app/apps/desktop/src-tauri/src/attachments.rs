@@ -390,6 +390,24 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Cap on how much of a failed response we quote back to the TS layer.
 const ERROR_BODY_MAX: usize = 2048;
 
+/// Truncate to at most `max` BYTES, backing up to the nearest char boundary.
+///
+/// `String::truncate` panics when the index splits a multibyte char, and the
+/// only caller is an error path — an S3/MinIO XML fault naming a non-ASCII key,
+/// or a proxy's localized HTML — so the crash would arrive exactly when the
+/// transport was already failing. (`str::floor_char_boundary` is still
+/// unstable, hence the hand-rolled walk.)
+fn truncate_at_char_boundary(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 /// One shared client, built once.
 ///
 /// `redirect(none)` is a SECURITY setting, not a preference: reqwest forwards
@@ -398,7 +416,26 @@ const ERROR_BODY_MAX: usize = 2048;
 /// bearer. The desktop therefore asks `GET /api/blobs/:id/url` for the target
 /// and fetches THAT; a 3xx arriving here is a bug or a hostile server, and is
 /// surfaced as the status rather than followed.
+///
+/// The crypto provider is INSTALLED here, not left to a crate feature: reqwest
+/// is built with `rustls-no-provider` (matching what `tauri-plugin-updater`
+/// already turns on, so there is one copy of reqwest), and rustls 0.23 wants a
+/// process-default provider before ANY `ClientConfig` exists — without one,
+/// `build()` panics from inside rather than returning an error, which is how a
+/// dropped PDF turned into "No rustls crypto provider is configured" the first
+/// time the transport ran. It lives next to the client rather than in `lib.rs`
+/// setup for two reasons: this transport is the only consumer, so a `setup`
+/// hook would be action-at-a-distance for a panic that happens here; and the
+/// updater installs its own provider on its own path, so there is no single
+/// startup point that owns the choice. `install_default` returns `Err` when one
+/// is ALREADY installed (the updater got there first, or a second `Lazy` init
+/// raced) — that is the success case too, so the result is deliberately
+/// ignored. `ring` is the same backend hyper-rustls already compiles in.
+///
+/// The build error is mapped rather than unwrapped so a future misconfiguration
+/// surfaces as a command error instead of killing the invoke.
 static HTTP: Lazy<Result<reqwest::Client, String>> = Lazy::new(|| {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
@@ -534,7 +571,7 @@ pub async fn upload_file(
         None
     } else {
         let mut body = res.text().await.unwrap_or_default();
-        body.truncate(ERROR_BODY_MAX);
+        truncate_at_char_boundary(&mut body, ERROR_BODY_MAX);
         Some(body)
     };
     Ok(UploadOutcome { status, etag, error })
@@ -587,7 +624,7 @@ pub async fn download_file(
     let status = res.status().as_u16();
     if !(200..300).contains(&status) {
         let mut body = res.text().await.unwrap_or_default();
-        body.truncate(ERROR_BODY_MAX);
+        truncate_at_char_boundary(&mut body, ERROR_BODY_MAX);
         // A 3xx lands here too: see `HTTP`'s redirect policy for why we refuse
         // to follow one rather than leak the bearer to a presigned host.
         return Err(AppError::new(format!("download failed: HTTP {status} {body}")));
@@ -961,6 +998,52 @@ mod tests {
             None,
         ))
         .is_err());
+    }
+
+    /// The client is built lazily on the FIRST transfer, and with
+    /// `rustls-no-provider` that build panics unless a crypto provider was
+    /// installed as the process default — which is exactly what shipped: every
+    /// unit test stopped short of building a client, so a dropped PDF was the
+    /// first thing to find out. Constructing it here is the regression test.
+    #[test]
+    fn http_client_builds_with_a_crypto_provider() {
+        let c = client().expect("shared HTTP client must build");
+        // A second call takes the same `Lazy`, and installing the provider
+        // again must not turn into an error either.
+        let _ = client().expect("shared HTTP client must stay available");
+        // Building a request off it exercises the TLS config the panic came
+        // from, without opening a socket.
+        assert!(c
+            .get("https://example.invalid/never-fetched")
+            .build()
+            .is_ok());
+    }
+
+    /// The error path quotes a failed response back to TS, and a body whose
+    /// 2048th byte lands mid-character used to panic `String::truncate`.
+    #[test]
+    fn error_body_truncation_survives_multibyte_characters() {
+        // 1000 × 3 bytes = 3000 bytes, and NO char boundary at 2048 (2048 is
+        // not a multiple of 3), which is the case that panicked.
+        let mut body = "字".repeat(1000);
+        assert_eq!(body.len(), 3000);
+        truncate_at_char_boundary(&mut body, ERROR_BODY_MAX);
+        assert!(body.len() <= ERROR_BODY_MAX);
+        assert_eq!(body.len(), 2046, "backs up to the nearest char boundary");
+        assert!(body.chars().all(|c| c == '字'));
+
+        // Shorter than the cap, exactly on it, and empty are all no-ops.
+        let mut short = "ok".to_string();
+        truncate_at_char_boundary(&mut short, ERROR_BODY_MAX);
+        assert_eq!(short, "ok");
+        let mut exact = "a".repeat(ERROR_BODY_MAX);
+        truncate_at_char_boundary(&mut exact, ERROR_BODY_MAX);
+        assert_eq!(exact.len(), ERROR_BODY_MAX);
+        // A single char wider than the cap truncates to nothing rather than
+        // splitting it.
+        let mut wide = "😀".to_string();
+        truncate_at_char_boundary(&mut wide, 2);
+        assert_eq!(wide, "");
     }
 
     #[test]
