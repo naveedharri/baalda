@@ -105,6 +105,30 @@ describe.skipIf(!enabled)("S3BlobStore against a real bucket", () => {
     await expect(s.delete(key)).resolves.toBeUndefined();
   });
 
+  it("stores a prefixed key at the prefixed path, and nowhere else", async () => {
+    // The whole point of S3_KEY_PREFIX: a staging deployment writing into the
+    // same bucket as production must not touch production's key space.
+    const s = store({ proxyDownloads: true });
+    const sha = randomUUID().replace(/-/g, "").repeat(2);
+    const key = objectKey("vault-test", sha, "prefix-test");
+    expect(key).toBe(`prefix-test/${objectKey("vault-test", sha, "")}`);
+
+    await s.put({
+      key,
+      blobId: "b-prefix",
+      vaultId: "vault-test",
+      body: Readable.from(BYTES),
+      size: BYTES.byteLength,
+      mime: "application/octet-stream",
+      sha256: SHA,
+      filename: null,
+    });
+    expect(await s.head(key)).toEqual({ size: BYTES.byteLength });
+    // Same vault, same bytes, no prefix — a different object entirely.
+    expect(await s.head(objectKey("vault-test", sha, ""))).toBeNull();
+    await s.delete(key);
+  });
+
   it("serves a byte range with the totals a 206 needs", async () => {
     const s = store({ proxyDownloads: true });
     const key = objectKey("vault-test", randomUUID().replace(/-/g, "").repeat(2));
