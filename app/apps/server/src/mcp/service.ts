@@ -2,8 +2,13 @@ import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole } from "../permissions/lookup.js";
 import { effectivePermission, type Permission } from "../permissions/resolver.js";
-import { listReadableDocsInVault } from "../permissions/vault-docs.js";
-import { canEditFolder, vaultRootWritable } from "../permissions/http-gates.js";
+import { listReadableDocsInVault, vaultAccess } from "../permissions/vault-docs.js";
+import {
+  canEditFolder,
+  canReadAttachment,
+  filterReadableBlobs,
+  vaultRootWritable,
+} from "../permissions/http-gates.js";
 import {
   TreeOpError,
   deleteFolderCascade,
@@ -870,6 +875,7 @@ export async function searchNotes(
   vaultId: string,
   query: string,
   k = 10,
+  includeFiles = true,
 ) {
   await requireVaultInScope(ctx.auth, vaultId);
   const limit = Number.isFinite(k) && k > 0 ? Math.min(Math.trunc(k), 50) : 10;
@@ -886,6 +892,149 @@ export async function searchNotes(
   //    batches and never pulls note bodies onto the heap. The old version
   //    selected `ni.content` + `ni.vector` for every row in the vault with no
   //    LIMIT and then pinned that whole array across the permission loop.
+  //  - files are ranked alongside notes out of `blob_text` and tagged
+  //    `kind: "file"`, gated by the SAME readable set; the vault-wide flag only
+  //    decides whether the doc-less `attachments/` blobs are candidates, which
+  //    mirrors what the download gate would answer for them.
   const readable = await listReadableDocsInVault(ctx.auth.userId, vaultId);
-  return searchNoteIndex({ vaultId, query, k: limit, readableDocIds: readable });
+  const access = await vaultAccess(pool, ctx.auth.userId, vaultId);
+  return searchNoteIndex({
+    vaultId,
+    query,
+    k: limit,
+    readableDocIds: readable,
+    includeFiles,
+    vaultWideReader: access?.vaultWide === true,
+  });
+}
+
+// ── attachments / files ───────────────────────────────────────────────────
+
+/** Biggest `blob_text` body one `read_attachment_text` call may return, and the
+ *  default when the caller names no bound. A whole spreadsheet's text in one
+ *  tool result is rarely what an assistant wants and always what it pays for. */
+const ATTACHMENT_TEXT_DEFAULT_CHARS = 20_000;
+const ATTACHMENT_TEXT_MAX_CHARS = 200_000;
+
+/** Most blobs one `list_attachments` call may consider before ACL filtering.
+ *  Bounds the listing of a vault with thousands of attachments. */
+const ATTACHMENT_LIST_SCAN = 2000;
+
+/**
+ * The files stored in a vault that the caller may read.
+ *
+ * Filtered by `filterReadableBlobs` — the same gate the HTTP list route uses —
+ * so a registered tree file follows its folder's ACL and a hash-named
+ * `attachments/` drop follows the notes that embed it. `hasText` says whether
+ * `read_attachment_text` has anything to give back for it.
+ */
+export async function listAttachments(
+  ctx: McpContext,
+  vaultId: string,
+  opts: { folder?: string; limit?: number } = {},
+) {
+  await requireVaultInScope(ctx.auth, vaultId);
+  const limit = Number.isFinite(opts.limit) && (opts.limit as number) > 0
+    ? Math.min(Math.trunc(opts.limit as number), 200)
+    : 50;
+  // A folder prefix, matched case-insensitively like every other path
+  // comparison here. `%`/`_` are escaped so a folder called `50%` is a folder
+  // and not a wildcard.
+  const prefix = opts.folder
+    ? `${opts.folder.replace(/\/+$/, "").toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`)}/%`
+    : null;
+
+  const { rows } = await pool.query<{
+    id: string;
+    doc_id: string | null;
+    rel_path: string | null;
+    filename: string | null;
+    mime: string | null;
+    size: string | number;
+    has_text: boolean;
+  }>(
+    `SELECT b.id, b.doc_id, b.rel_path, b.filename, b.mime, b.size,
+            (bt.blob_id IS NOT NULL) AS has_text
+       FROM blobs b
+       LEFT JOIN blob_text bt ON bt.blob_id = b.id
+      WHERE b.vault_id = $1 AND b.status = 'ready'
+        AND ($2::text IS NULL OR lower(b.rel_path) LIKE $2 ESCAPE '\\')
+      ORDER BY b.rel_path
+      LIMIT $3`,
+    [vaultId, prefix, ATTACHMENT_LIST_SCAN],
+  );
+
+  const visible = await filterReadableBlobs(ctx.auth.userId, vaultId, rows);
+  return visible.slice(0, limit).map((r) => ({
+    docId: r.doc_id,
+    blobId: r.id,
+    relPath: r.rel_path,
+    filename: r.filename ?? (r.rel_path ? (r.rel_path.split("/").pop() ?? null) : null),
+    mime: r.mime,
+    size: Number(r.size),
+    hasText: r.has_text,
+  }));
+}
+
+/**
+ * The plain text extracted from a file — NOT the file.
+ *
+ * The bytes are never served here: an assistant asking for a 20 MB workbook
+ * over JSON-RPC wants its words, and the words are what the vault indexed. A
+ * file nobody has extracted yet answers with an empty string rather than an
+ * error, because "not indexed yet" is a normal state (extraction happens on the
+ * device that holds the file) and not a mistake the caller made.
+ *
+ * Gated by `canReadAttachment`, which for a registered tree file is the
+ * resolver itself — so a folder share, a revoke, a sealed vault and a `locked`
+ * cap all reach this tool without it knowing they exist.
+ */
+export async function readAttachmentText(
+  ctx: McpContext,
+  vaultId: string,
+  ref: { relPath?: string; blobId?: string },
+  maxChars?: number,
+) {
+  await requireVaultInScope(ctx.auth, vaultId);
+  if (!ref.relPath && !ref.blobId) {
+    throw new McpToolError("read_attachment_text needs either relPath or blobId");
+  }
+  const cap = Number.isFinite(maxChars) && (maxChars as number) > 0
+    ? Math.min(Math.trunc(maxChars as number), ATTACHMENT_TEXT_MAX_CHARS)
+    : ATTACHMENT_TEXT_DEFAULT_CHARS;
+
+  const { rows } = await pool.query<{
+    id: string;
+    doc_id: string | null;
+    rel_path: string | null;
+    sha256: string;
+    chars: number | null;
+    content: string | null;
+  }>(
+    `SELECT b.id, b.doc_id, b.rel_path, b.sha256, bt.chars, bt.content
+       FROM blobs b
+       LEFT JOIN blob_text bt ON bt.blob_id = b.id
+      WHERE b.vault_id = $1 AND b.status = 'ready'
+        AND ($2::text IS NULL OR b.id = $2)
+        AND ($3::text IS NULL OR lower(b.rel_path) = lower($3))
+      LIMIT 1`,
+    [vaultId, ref.blobId ?? null, ref.relPath ?? null],
+  );
+  const row = rows[0];
+  if (!row) throw new McpToolError("No such file in this vault");
+  if (!(await canReadAttachment(ctx.auth.userId, vaultId, row.rel_path, row.doc_id))) {
+    throw new McpToolError("You do not have access to this file");
+  }
+
+  const full = row.content ?? "";
+  const text = full.length > cap ? full.slice(0, cap) : full;
+  return {
+    blobId: row.id,
+    docId: row.doc_id,
+    relPath: row.rel_path,
+    text,
+    chars: row.chars ?? full.length,
+    truncated: full.length > text.length,
+    sha256: row.sha256,
+  };
 }

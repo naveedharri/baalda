@@ -107,27 +107,69 @@ export async function canEditFolder(
   return resolved.permission === "edit";
 }
 
+/** A blob row as the ACL gates need to see it: where it lives, and whether it
+ *  is a tree file with a doc of its own. */
+export interface BlobAclRow {
+  vault_id?: string | null;
+  rel_path: string | null;
+  doc_id?: string | null;
+}
+
+/**
+ * The `files` row a blob's `doc_id` names, if it is really there.
+ *
+ * `blobs.doc_id` is client-supplied (the desktop registers the file first and
+ * then uploads its bytes with the same id), so it can name a row that does not
+ * exist yet or one that has since been deleted. Every gate below asks THIS
+ * rather than trusting the column: an unresolvable doc_id falls back to the
+ * path heuristic, so a half-finished registration degrades to the old
+ * behaviour instead of making the bytes unreachable for everyone.
+ */
+async function fileDoc(
+  db: Queryable,
+  vaultId: string,
+  docId: string,
+): Promise<{ folder_id: string | null } | null> {
+  const { rows } = await db.query<{ folder_id: string | null }>(
+    "SELECT folder_id FROM files WHERE id = $1 AND vault_id = $2",
+    [docId, vaultId],
+  );
+  return rows[0] ?? null;
+}
+
 /**
  * May `userId` read attachment blob `relPath` in vault `vaultId`?
  *
- * Attachments have no per-blob ACL row, so their access derives from the notes
- * that embed them: a caller with vault-wide read (owner/admin, or an
- * Open/Read-only grant) sees every blob — including orphaned ones — while a
- * scoped member may fetch a blob only if some note they can READ references it.
- * This closes the IDOR where any member could download every attachment
- * (including those in private notes) while keeping attachment sync working for
- * legitimately-shared notes.
+ * TWO BRANCHES, and which one applies is decided by the blob's `doc_id`:
  *
- * Best-effort by design: the reference check reads `note_index.content`, so a
- * just-embedded attachment becomes fetchable to other readers once its note is
- * indexed (attachment sync is already eventually-consistent).
+ *   · **a tree file** (`doc_id` names a `files` row) — the answer is
+ *     `effectivePermission`, the same resolver every note goes through. A
+ *     `.xlsx` in a shared folder is readable by exactly the people who can read
+ *     a `.md` beside it, and the folder walk, org grants, the sealed posture,
+ *     per-user denies and `locked` caps all come along for free. This is what
+ *     PR3 exists for: before it, a member shared one folder could open its
+ *     notes and not its files.
+ *   · **an `attachments/` drop** (no `doc_id`: the hash-named blobs the editor
+ *     writes, and everything that predates this) — unchanged. Those have no ACL
+ *     row of their own, so access derives from the notes that embed them: a
+ *     caller with vault-wide read (an Open/Read-only grant) sees every blob,
+ *     including orphaned ones, while a scoped member may fetch one only if some
+ *     note they can READ references it. That closes the IDOR where any member
+ *     could download every attachment, and it stays best-effort by design — the
+ *     reference check reads `note_index.content`, so a just-embedded attachment
+ *     becomes fetchable to other readers once its note is indexed (attachment
+ *     sync is already eventually-consistent).
  */
 export async function canReadAttachment(
   userId: string,
   vaultId: string,
   relPath: string | null,
+  docId: string | null = null,
   db: Queryable = defaultPool,
 ): Promise<boolean> {
+  if (docId && (await fileDoc(db, vaultId, docId))) {
+    return (await effectivePermission(userId, docId, db)) !== "none";
+  }
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return false; // unknown vault or not a member
   if (access.vaultWide) return true; // owner/admin or vault-wide grant
@@ -147,16 +189,24 @@ export async function canReadAttachment(
 
 /**
  * Filter a vault's blob list to the ones `userId` may read (see
- * {@link canReadAttachment}). Vault-wide readers get everything; a scoped
- * member gets only blobs referenced by a note they can read.
+ * {@link canReadAttachment}). The same two branches, applied to a batch.
  *
- * The reference test runs in Postgres, one `LIKE` per (path, readable note),
- * the same shape {@link canReadAttachment} already uses. It used to `SELECT
- * content` for every readable doc and concatenate the lot into one JS string —
- * i.e. pull an entire vault's markdown into the heap of a list request, on a
- * path a scoped member hits on every attachment sync.
+ * Tree files are settled by intersecting their `doc_id`s with
+ * `listReadableDocsInVault` — ONE query for the whole list, and the set-based
+ * dual of the `effectivePermission` the single-blob gate runs. It is asked even
+ * for a vault-wide reader, because that set already accounts for the grant and
+ * still subtracts a per-user deny, so a file someone was explicitly refused
+ * does not reappear in a listing.
+ *
+ * Everything else — no `doc_id`, or one that names no `files` row — goes
+ * through the path heuristic unchanged: vault-wide readers get all of it, a
+ * scoped member only what a readable note references. That test runs in
+ * Postgres, one `LIKE` per (path, readable note). It used to `SELECT content`
+ * for every readable doc and concatenate the lot into one JS string — i.e. pull
+ * an entire vault's markdown into the heap of a list request, on a path a
+ * scoped member hits on every attachment sync.
  */
-export async function filterReadableBlobs<T extends { rel_path: string | null }>(
+export async function filterReadableBlobs<T extends BlobAclRow>(
   userId: string,
   vaultId: string,
   blobs: T[],
@@ -164,8 +214,46 @@ export async function filterReadableBlobs<T extends { rel_path: string | null }>
 ): Promise<T[]> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return [];
-  if (access.vaultWide) return blobs;
 
+  // Which of the claimed doc_ids are really `files` rows in this vault. A
+  // claim that resolves to nothing is not a tree file, so its blob falls into
+  // the path branch below rather than being judged on a doc that isn't there.
+  const claimed = [...new Set(blobs.map((b) => b.doc_id).filter((d): d is string => !!d))];
+  let readableDocs = new Set<string>();
+  let realDocs = new Set<string>();
+  if (claimed.length > 0) {
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM files WHERE vault_id = $1 AND id = ANY($2::text[])",
+      [vaultId, claimed],
+    );
+    realDocs = new Set(rows.map((r) => r.id));
+    if (realDocs.size > 0) readableDocs = await listReadableDocsInVault(userId, vaultId, db);
+  }
+  const isTreeFile = (b: T): boolean => !!b.doc_id && realDocs.has(b.doc_id);
+  const rest = blobs.filter((b) => !isTreeFile(b));
+  // The caller's order is the caller's (the list route sorts by rel_path in
+  // SQL), so the two branches decide membership and the original array decides
+  // sequence — never `[...files, ...rest]`.
+  const keep = new Set<T>(
+    blobs.filter((b) => isTreeFile(b) && readableDocs.has(b.doc_id as string)),
+  );
+  if (rest.length > 0) {
+    const visibleRest = access.vaultWide
+      ? rest
+      : await filterByNoteReference(userId, vaultId, rest, db);
+    for (const b of visibleRest) keep.add(b);
+  }
+  return blobs.filter((b) => keep.has(b));
+}
+
+/** The `attachments/` half of {@link filterReadableBlobs}: blobs a scoped
+ *  member may see only because a note they can read points at them. */
+async function filterByNoteReference<T extends BlobAclRow>(
+  userId: string,
+  vaultId: string,
+  blobs: T[],
+  db: Queryable,
+): Promise<T[]> {
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   if (readable.size === 0) return [];
   // A falsy rel_path can never match (it has no needle to search for), so it is
@@ -280,11 +368,13 @@ export async function vaultRootWritable(
  * exactly as `vaultBaseline` caps every other write. A per-user vault-scoped
  * `edit` grant lifts one person out, as everywhere else.
  *
- * Known limit, deliberately not papered over: a member who is read-only only
- * because of a folder lock or a folder `view` grant can still upload a blob.
- * The blob is inert on its own — it becomes visible to anyone else only when a
- * note they can read references it, and writing that reference is gated by the
- * note's own permission.
+ * Known limit, now confined to the blobs it was always really about: a member
+ * who is read-only only because of a folder lock or a folder `view` grant can
+ * still upload a hash-named `attachments/` blob. It is inert on its own — it
+ * becomes visible to anyone else only when a note they can read references it,
+ * and writing that reference is gated by the note's own permission. A blob that
+ * belongs to a tree file goes through {@link canWriteBlob} instead, which HAS a
+ * folder to resolve those two overlays against.
  */
 export async function canWriteAttachment(
   userId: string,
@@ -294,4 +384,37 @@ export async function canWriteAttachment(
   const access = await vaultAccess(db, userId, vaultId);
   if (!access || access.role === null) return false; // unknown vault or not a member
   return vaultRootWritable(userId, access.organizationId, db);
+}
+
+/**
+ * May `userId` WRITE (publish, replace the text of, or delete) this blob?
+ *
+ * The single gate every blob mutation now asks, and the place the folder-lock
+ * hole in {@link canWriteAttachment} finally closes — for the blobs that can
+ * close it. A blob with a `doc_id` IS a file at a known place in the tree, so
+ * there is a folder to resolve a lock or a `view` grant against, and the answer
+ * is {@link canCreateIn} on that folder: exactly the gate the `files` row's own
+ * registration went through, so bytes and row cannot end up with different
+ * locks. At the vault root that is `vaultRootWritable` — the same test
+ * `canWriteAttachment` applies — so nothing changes for a file sitting at the
+ * top of a vault.
+ *
+ * Without a resolvable `doc_id` there is still no folder to ask about, and the
+ * vault-wide posture remains the whole answer. That is the documented limit
+ * {@link canWriteAttachment} describes, now scoped to the blobs it was always
+ * really about: the hash-named `attachments/` drops, which are inert until a
+ * note someone can edit points at them.
+ */
+export async function canWriteBlob(
+  userId: string,
+  blob: BlobAclRow,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
+  const vaultId = blob.vault_id;
+  if (!vaultId) return false; // a legacy row with no collection has no folder and no posture
+  if (blob.doc_id) {
+    const file = await fileDoc(db, vaultId, blob.doc_id);
+    if (file) return canCreateIn(userId, vaultId, file.folder_id, db);
+  }
+  return canWriteAttachment(userId, vaultId, db);
 }

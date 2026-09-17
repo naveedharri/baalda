@@ -33,6 +33,9 @@ const TABLES = [
   // so a suite starts with an empty queue whatever the last one left.
   "blob_refs",
   "blob_deletions",
+  // Cascades from `blobs`, but named anyway so the reset is explicit about
+  // every derived cache it clears — the same reason `blob_refs` is here.
+  "blob_text",
   "blobs",
   "invitation",
   "member",
