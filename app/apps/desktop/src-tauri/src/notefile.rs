@@ -379,6 +379,23 @@ pub fn delete_file(vault: &Path, rel: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Hex-encoded SHA-256 of a FILE, read in chunks.
+///
+/// `std::io::copy` into the hasher, deliberately: the tier-2 file index hashes
+/// every binary it surfaces, and `fs::read` on a 500 MB video would allocate the
+/// whole thing to produce 64 characters. Nothing here holds the index mutex.
+pub fn sha256_file(abs: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(abs)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let digest = hasher.finalize();
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    Ok(s)
+}
+
 /// Hex-encoded SHA-256 of a note's content (echo-suppression aid for the index).
 pub fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();

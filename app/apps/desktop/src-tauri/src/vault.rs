@@ -62,6 +62,41 @@ pub fn is_note_file(name: &str) -> bool {
     has_ext_in(name, NOTE_EXTS)
 }
 
+/// Does the vault-root `attachments/` store feed the FILE index (`files` /
+/// `files_fts`)?
+///
+/// **No, deliberately.** Those files are content-addressed
+/// (`attachments/<16 hex>.png`), hidden from the sidebar, and reachable only
+/// through the note that embeds them — so a search hit on one would name a file
+/// the user cannot see, cannot locate and cannot open from the result. The note
+/// that embeds it is the hit they actually want, and that one is indexed. Flip
+/// this to `true` only alongside a way to show "used by <note>" on the hit.
+pub const INDEX_ATTACHMENTS: bool = false;
+
+/// The vault-root directory holding content-addressed attachments. Mirrors
+/// `attachments.rs ensure_attachment_rel` and `stats.rs ATTACHMENTS_DIR`.
+const ATTACHMENTS_PREFIX: &str = "attachments/";
+
+/// True if a vault-relative path is a tree-visible binary the FILE index covers:
+/// surfaced by `ALLOWED_EXTS`, outside the note family, and not somewhere the
+/// walk ignores. The single authority for "does this get a `files` row",
+/// shared by `Index::rebuild` and the watcher's `plan_batch` so the open-time
+/// reconcile and the live path can never disagree about the set.
+///
+/// Note what this does NOT ask: whether the file exists. Callers that need that
+/// (both of them) already have the answer from the walk or the existence check
+/// that decides modified-vs-removed.
+pub fn is_indexable_file(rel: &str) -> bool {
+    if rel.is_empty() || rel_path_is_ignored(rel) {
+        return false;
+    }
+    if !INDEX_ATTACHMENTS && rel.starts_with(ATTACHMENTS_PREFIX) {
+        return false;
+    }
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    is_allowed_file(name) && !is_note_file(name)
+}
+
 /// Shared extension test: split at the LAST dot and require both halves, so a
 /// dotfile (`.gitignore`) has no extension and never matches.
 fn has_ext_in(name: &str, exts: &[&str]) -> bool {

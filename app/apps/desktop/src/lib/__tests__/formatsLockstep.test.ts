@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { NOTE_EXTS, SURFACED_EXTS } from "../formats";
+import { FORMATS, NOTE_EXTS, SURFACED_EXTS } from "../formats";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(here, "../../..");
@@ -64,5 +64,37 @@ describe("format lockstep", () => {
 
   it("keeps the note family inside the surfaced set", () => {
     for (const ext of NOTE_EXTS) expect(SURFACED_EXTS, ext).toContain(ext);
+  });
+
+  // `extract.rs` decides what TEXT a binary contributes to search, keyed on the
+  // same extension `textExtract` is keyed on here. Its match ends in a wildcard
+  // that means "index the name only", which is a safe default for a format
+  // nobody taught it about — and a LIE for the three the registry says have
+  // real text inside. Those three are pinned; the rest are free to default.
+  it("agrees with Rust's extractor on the formats that carry text", () => {
+    const extractRs = read("src-tauri/src/extract.rs");
+    const body = extractRs.match(
+      /pub fn extractor_for\(ext: &str\) -> Extractor \{([\s\S]*?)\n\}/,
+    )?.[1];
+    if (body === undefined) throw new Error("could not find extractor_for");
+    const arms = new Map<string, string>();
+    for (const [, pattern, arm] of body.matchAll(
+      /((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*Extractor::(\w+)/g,
+    )) {
+      for (const [, ext] of pattern.matchAll(/"([^"]+)"/g)) arms.set(ext, arm);
+    }
+
+    const expected: Record<string, string> = {
+      docx: "Docx",
+      xlsx: "Xlsx",
+      // PDF is the one format Rust declines on purpose, so a TS-side extractor
+      // can fill those rows in later. `unsupported` is that hand-off.
+      pdf: "Unsupported",
+    };
+    for (const format of FORMATS) {
+      const want = expected[format.textExtract];
+      if (!want) continue;
+      for (const ext of format.exts) expect(arms.get(ext), ext).toBe(want);
+    }
   });
 });
