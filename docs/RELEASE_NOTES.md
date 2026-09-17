@@ -20,6 +20,7 @@
 
 ## 0.1.62
 
+- Search now looks inside Word, Excel, PowerPoint, CSV, code and zip files in your vault, not just notes. Hits show a file badge and open the right viewer, and the Health page reports how much extracted text the index holds.
 - More kinds of files open inside Baalda: Word documents, spreadsheets, CSV, audio, video, code and JSON files, with PowerPoint and zip files showing a card with "Open externally". Plain-text and Markdown-variant notes that used to do nothing when clicked now open in the editor and appear in search.
 - Dropping or pasting a file into a note embeds it: video and audio play inline, CSV shows as a table, other files become a chip you can click. Files too large to sync are refused with a message instead of silently never reaching teammates.
 - Fixed PDFs, HTML previews and embedded videos not loading in installed builds; on Windows, images inside notes were blocked entirely.

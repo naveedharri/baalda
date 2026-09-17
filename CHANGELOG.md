@@ -8,6 +8,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Search over files.** `index.rs` gains a tier-2 `files`/`files_fts`/`file_text`
+  schema for every surfaced non-note file; `extract.rs` pulls text from txt/csv/json/
+  code, html (tag-stripped), docx/xlsx/pptx (`zip` + `quick-xml`) and zip entry names,
+  with size caps, an unzip guard, `catch_unwind` around parsers and control-char
+  stripping so binary-derived text can never forge a `<mark>`. Extraction runs on one
+  per-vault worker thread (`extract_worker.rs`) outside the index mutex, cached by
+  sha in `file_text`. `search_all` merges both FTS tables (notes win ties); results
+  carry `kind`/`ext`, and `SearchPanel` badges file hits. `get_file_text` IPC and a
+  coalesced `files-indexed` event are the hooks for the server-side `blob_text` pass.
 - **Format registry + viewers.** `src/lib/formats.ts` is the single authority for
   what a file is (surface/open/embed/mime/syncAs/maxBytes), kept in lockstep with
   Rust `vault.rs ALLOWED_EXTS`/`NOTE_EXTS` by `formatsLockstep.test.ts`. `FilePreview`

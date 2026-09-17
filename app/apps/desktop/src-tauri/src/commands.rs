@@ -6,8 +6,8 @@ use crate::attachments::{self, AttachmentMeta, FileStat};
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
-    Backlink, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsPruneReport,
-    YjsState, YjsStateVector,
+    Backlink, FileText, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult,
+    YjsPruneReport, YjsState, YjsStateVector,
 };
 use crate::notefile;
 use crate::state::AppState;
@@ -401,6 +401,11 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
         // index reader is unchanged; only who waits for the rebuild is.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let (bg_index, bg_path, bg_app) = (index.clone(), path.clone(), app.clone());
+        // The rebuild reconciles the `files` table but extracts nothing — vault
+        // open must not pay for parsing every document in the vault — so it
+        // hands the stale paths to the extraction worker, which does that off
+        // this thread and outside the index mutex.
+        let bg_queue = watcher.extract_queue();
         std::thread::spawn(move || {
             let guard = bg_index.lock().unwrap();
             let _ = ready_tx.send(());
@@ -422,7 +427,7 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
             let mut result = guard.rebuild(&bg_path);
             for attempt in 1..=REBUILD_BUSY_RETRIES {
                 let busy = match &result {
-                    Ok(()) => false,
+                    Ok(_) => false,
                     Err(e) => {
                         let m = e.to_string().to_ascii_lowercase();
                         m.contains("locked") || m.contains("busy")
@@ -442,7 +447,10 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
             }
             drop(guard);
             let ok = match result {
-                Ok(()) => true,
+                Ok(pending) => {
+                    bg_queue.enqueue(pending);
+                    true
+                }
                 Err(e) => {
                     eprintln!("[index] rebuild failed for {}: {e}", bg_path.display());
                     false
@@ -1457,6 +1465,10 @@ pub async fn delete_path(
 
 // ---- query commands -------------------------------------------------------
 
+/// Search the vault: notes AND the tree binaries whose text was extracted, as
+/// one ranked list. The command keeps its name (it is the front-end's
+/// `ipc.searchNotes`) but the answer has covered both tiers since PR3 — see
+/// `Index::search_all` for the merge rule.
 #[tauri::command]
 pub async fn search_notes(
     state: State<'_, AppState>,
@@ -1464,7 +1476,24 @@ pub async fn search_notes(
 ) -> AppResult<Vec<SearchResult>> {
     let (_, index) = require_vault(&state)?;
     let guard = index.lock().unwrap();
-    guard.search_notes(&query)
+    guard.search_all(&query)
+}
+
+/// The extracted plain text of one tree binary, by vault-relative path.
+///
+/// `None` when the path has no `files` row (a note, an attachment, something the
+/// walk ignores, or a file the index has not reached yet). The text is a DERIVED
+/// cache — never the file, never authoritative — which is exactly what makes it
+/// safe for the sync layer to upload as `blob_text` instead of re-extracting the
+/// bytes in Node.
+#[tauri::command]
+pub async fn get_file_text(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<Option<FileText>> {
+    let (_, index) = require_vault(&state)?;
+    let guard = index.lock().unwrap();
+    guard.file_text(&path)
 }
 
 #[tauri::command]
@@ -1943,13 +1972,24 @@ pub async fn rebuild_index(
     expected_epoch: Option<u64>,
 ) -> AppResult<()> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
-    let epoch = state.inner.lock().unwrap().vault_epoch;
+    let (epoch, queue) = {
+        let inner = state.inner.lock().unwrap();
+        (
+            inner.vault_epoch,
+            inner.watcher.as_ref().map(|w| w.extract_queue()),
+        )
+    };
     let started = std::time::Instant::now();
     let result = {
         let guard = index.lock().unwrap();
         guard.rebuild(&vault)
     };
     let ok = result.is_ok();
+    // Same hand-off as vault open: the rows are reconciled here, the text is
+    // extracted on the worker thread.
+    if let (Ok(pending), Some(queue)) = (&result, queue) {
+        queue.enqueue(pending.clone());
+    }
     let _ = app.emit(
         "index-ready",
         IndexReady {
@@ -1959,7 +1999,7 @@ pub async fn rebuild_index(
             ms: started.elapsed().as_millis() as u64,
         },
     );
-    result
+    result.map(|_| ())
 }
 
 /// Read an arbitrary host file the user just dropped/picked (absolute path).

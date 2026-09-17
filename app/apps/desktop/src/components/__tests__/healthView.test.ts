@@ -125,7 +125,7 @@ const stats: VaultStats = {
   tags: 5,
   links: 9,
   brokenLinks: 2,
-  index: { bytes: 65_536 },
+  index: { bytes: 65_536, files: 0, extractedTextBytes: 0 },
   history: { docs: 3, updates: 40, bytes: 2048, orphanDocs: 2, orphanBytes: 1024 },
   largestNotes: [{ path: "a/b/big.md", bytes: 12 * 1024 * 1024, mtime: 1_699_000_000_000 }],
   largestFiles: [],

@@ -6,6 +6,8 @@ pub mod attachments;
 pub mod checks;
 mod commands;
 mod error;
+pub mod extract;
+pub mod extract_worker;
 pub mod import_export;
 pub mod index;
 pub mod keychain;
@@ -203,6 +205,7 @@ pub fn run() {
             commands::delete_folder_if_empty,
             commands::trash_note,
             commands::search_notes,
+            commands::get_file_text,
             commands::get_backlinks,
             commands::graph_edges,
             commands::graph_edges_for,
