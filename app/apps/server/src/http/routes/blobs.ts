@@ -445,10 +445,28 @@ async function findBlob(vaultId: string, sha256: string): Promise<BlobRow | unde
  * as an attachment: the content is here, the registry now knows it as a tree
  * file, and without this the row would keep the weaker path-based ACL forever
  * because nobody ever sends those bytes again.
+ *
+ * One more case, and only one: the row already names a doc that NO LONGER
+ * EXISTS. First-writer-wins is about two live files sharing bytes; a `files`
+ * row that has been deleted is not a claimant, and leaving the binding there
+ * strands the bytes on an id the resolver cannot answer for (`canReadAttachment`
+ * then falls back to the path heuristic). A doc that is merely unreadable to
+ * this caller is NOT gone — the check is existence, never permission, so a
+ * Private file's blob keeps its owner's row.
  */
 async function claimDoc(row: BlobRow, docId: string | null): Promise<BlobRow> {
-  if (!docId || row.doc_id) return row;
-  await adoptDocId(row.id, docId);
+  if (!docId || docId === row.doc_id) return row;
+  if (!row.doc_id) {
+    await adoptDocId(row.id, docId);
+    return { ...row, doc_id: docId };
+  }
+  const { rows } = await pool.query("SELECT 1 FROM files WHERE id = $1", [row.doc_id]);
+  if (rows.length > 0) return row;
+  await pool.query(
+    "UPDATE blobs SET doc_id = $2, updated_at = now() WHERE id = $1 AND doc_id = $3",
+    [row.id, docId, row.doc_id],
+  );
+  console.info(`[blobs] ${row.id} was bound to the deleted file ${row.doc_id} — rebound to ${docId}`);
   return { ...row, doc_id: docId };
 }
 
@@ -1565,6 +1583,28 @@ blobRoutes.delete("/blobs/:id", async (c) => {
 
   return c.body(null, 204);
 });
+
+/**
+ * Every blob that IS the tree file `docId`, gone.
+ *
+ * The file half of the delete above, exported because `DELETE /api/files/:id`
+ * owns the row and this file owns the bytes — a registry route reaching into
+ * `blobs` itself would be the second place that has to remember migration
+ * 027's disposal queue and 028's text cache.
+ *
+ * No `blob_refs` check here, unlike the route: a doc-backed blob is the FILE,
+ * and a note embed points at `attachments/…` (which never carries a `doc_id`),
+ * so there is nothing for a reference to protect. Deleting the file IS the
+ * decision. Answers how many rows went, for the caller's log line.
+ */
+export async function deleteDocBlobs(docId: string, vaultId: string): Promise<number> {
+  const { rows } = await pool.query<{ id: string }>(
+    "DELETE FROM blobs WHERE doc_id = $1 AND vault_id = $2 RETURNING id",
+    [docId, vaultId],
+  );
+  for (const row of rows) await purgeBlobText(row.id);
+  return rows.length;
+}
 
 /**
  * Drop the extracted-text cache for a blob.

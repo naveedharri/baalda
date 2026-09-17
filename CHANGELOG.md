@@ -8,6 +8,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Files in the Access panel.** `GET /vaults/:id/access-tree` now returns the
+  vault's `files` rows beside its notes, and the panel lists them with the
+  sidebar's own glyph. They were already enforceable — one
+  `shares.resource_type = 'file'` namespace, one `effectivePermission`,
+  `locateDoc` reading `notes` and `files` in one union — so a `.pdf` obeyed its
+  folder's grant while being the one thing in the vault whose access could not
+  be seen or set. `AccessEntry.kind` splits `note` from `file` for the glyph
+  and the noun; `accessResourceType` maps both back to the server's one `file`
+  type, so nothing about the wire changed. The local-tree fallback emits a file
+  row only for a path this device has registered (no `files` id, no share to
+  name), and a hidden root `attachments/` blob has no row at all.
 - **`S3_KEY_PREFIX` (server, operator-only).** Optional prefix on every NEW blob object
   key (`<prefix>/vaults/<vaultId>/<sha256>`), so staging and production can share one
   bucket. Slashes are stripped, `..` is refused at startup, and rows keep storing the
@@ -54,6 +65,78 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Fixed
+- **Dev only: the app stopped reporting its sync status after a hot reload.** `useStore`
+  and `syncManager` are module singletons, and every listener that connects them (badge
+  status, progress, per-doc and per-file dots, registry map, presence) is registered once
+  per page load, in `initAuth`. A Vite HMR round that re-executed `store.ts` or the sync
+  layer therefore produced a fresh, listener-less pair that nothing re-initialised: the
+  vault opened and the channel connected, but the header read "not connected" until the
+  webview was reloaded by hand. Both modules now reload the page on a hot update instead
+  of running half-wired. No effect on packaged builds, where a module is evaluated once.
+- **Renaming a synced file could fork it into two `files` rows (desktop +
+  server).** When the rename's grace window closed against an unreachable
+  server, the delete queue dropped the candidate ("listing failed — leave the
+  server alone"), so the new path looked brand new and the upload pass
+  registered a SECOND row for it — while the blob, a dedupe hit, stayed bound to
+  the first (`doc_id` adoption is NULL→set only). One file, two doc_ids, and
+  Private set on whichever row the panel happened to show did nothing on disk.
+  A failed listing (or a refused move) now KEEPS the candidate for up to three
+  windows instead of falling through, and `ensureFileRow` mints no new id while
+  one is unsettled; a dedupe hit whose blob names another row whose path is gone
+  from this disk is treated as that file renamed — the duplicate row is dropped
+  and the original adopted onto the new path, which also heals a fork an earlier
+  session already wrote to `.context/config.json`. Two files that merely hold
+  identical bytes are untouched (still one blob, two rows). Server-side, a
+  dedupe hit rebinds a blob whose `files` row has been DELETED, so bytes are
+  never stranded on an id the resolver cannot answer for.
+- **A file set to Private stayed on the disk of everyone who lost access
+  (desktop + server).** A note leaves via `ready.revoked` → the inbound plan;
+  a `files` row had no route at all, so a `.pdf` set to Private stopped syncing,
+  left every teammate's sidebar, and remained fully readable in any viewer on
+  their disk forever. Three gaps, all closed. `hello` now carries a `files`
+  array of tree-binary doc ids beside the state-vector `manifest` (a binary has
+  no CRDT, so it has no state vector to advertise), and
+  `revokedFromManifest` names them under the same `REVOKED_CAP`.
+  `POST /vaults/:id/access-check` unions `files` with `notes`, so a revoked
+  binary is ANSWERED rather than left out — an unanswered id reads as "no second
+  opinion", which kept the whole group on disk. And `planInbound` gained a
+  binary pass: a named binary is removed via Rust `delete_file`, or moved to
+  `.context/trash/<stamp>/` when this user uploaded it, then `forgetFileId`s its
+  mapping. (`files` has no `created_by` and the doc is absent from every listing
+  by the time the answer is needed, so authorship is learned where the row is
+  created — the blob mirror's upload path — and persisted beside the notes' in
+  `.context/config.json`; a DOWNLOADED binary is explicitly not claimed.) Deliberately narrower than a note's route — a binary has no listing to
+  be absent from, so it is never removed on absence and always owes the
+  access-check round trip, whatever the cap says; the note cap still counts notes
+  only, so binaries can never loosen it. The removal claims its own watcher echo
+  (`BinaryDeleteQueue.suppressNext`), or the delete queue would have read it as a
+  user delete and answered with `DELETE /api/files/:id`, destroying the owner's
+  copy. `GET /vaults/:id/blobs` already filtered the bytes out, so nothing
+  downloads back (pinned). The blob listing's `docId` is now recorded on
+  download too, which is what gives a teammate's binary a doc id on this device
+  and so lets a later revocation of it be named at all. The Access panel's
+  Private copy says what actually happens.
+- **Deleting a synced file brought it back (desktop + server).** Binary identity
+  was the sha256 and nothing else, so a file removed from the vault — in the
+  sidebar or in Finder — was, to `diffAttachments`, content the server had and
+  this device did not: the next pass downloaded it again. Deletes now propagate.
+  New `DELETE /api/files/:id` (member + the `canWriteBlob` gate that let the
+  bytes be uploaded; idempotent 204) removes the `files` row AND the blobs whose
+  `doc_id` it is, so the file leaves `GET /vaults/:id/blobs`, the readable set
+  and the access tree at once — a hard delete, because `files` has no tombstone
+  and no client removes a local binary on the strength of a missing row. On the
+  desktop, `lib/sync/binaryDeletes.ts` mirrors the note queue's rails
+  (`drainDiskDeletes`, #93): a 2.5s window, the DISK — not the watcher event,
+  which is a bare `tree` for every binary — decides at the end of it, a rename
+  is paired by content and MOVES the `files` row (`POST /api/files` with the
+  same id) instead of forking its identity, the server must already hold the
+  bytes, and more than `max(5, ceil(binaries × 0.2))` vanishing at once abandons
+  the batch with a toast. An `attachments/` drop goes through
+  `DELETE /api/blobs/:id` unforced, so a 409 `blob_referenced` leaves an image
+  a note still embeds alone. `AttachmentSync` skips a download while a delete is
+  pending, which is what stops the 400ms pass resurrecting the file mid-window.
+  No trash copy, deliberately: a binary's bytes live only in the file that was
+  deleted, so the only copy left to keep is the one we were asked to remove.
 - **Packaged-build CSP.** `frame-src 'none'` blocked the PDF embed, the file preview
   and `HtmlView` in installed builds, there was no `media-src`, and Windows serves the
   asset protocol at `http://asset.localhost`, which `img-src` never allowed. Pinned by

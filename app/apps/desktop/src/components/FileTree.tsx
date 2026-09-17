@@ -228,6 +228,9 @@ export function FileTree() {
   const itemOrder = useStore((s) => s.itemOrder);
   const treeSort = useStore((s) => s.treeSort);
   const docSyncState = useStore((s) => s.docSyncState);
+  // The same fact for files that sync as blobs (`.pdf`, `.docx`, `.mp4`): the
+  // attachment mirror's own map, keyed by path rather than docId.
+  const fileSyncState = useStore((s) => s.fileSyncState);
   const docIdByPath = useStore((s) => s.docIdByPath);
   const titles = useStore((s) => s.titles);
   const [containerRef, dim] = useDimensions();
@@ -322,10 +325,19 @@ export function FileTree() {
       docIdByPath,
       docSyncState,
       localNotePaths,
+      fileSyncState,
     });
     wavesRef.current.apply(index);
     return index;
-  }, [syncEnabled, syncStatus, docIdByPath, docSyncState, localNotePaths, vaultPath]);
+  }, [
+    syncEnabled,
+    syncStatus,
+    docIdByPath,
+    docSyncState,
+    fileSyncState,
+    localNotePaths,
+    vaultPath,
+  ]);
 
   // ---- Row-order stability while something is syncing ------------------
   //
@@ -2185,8 +2197,9 @@ const TREE_ICONS: Record<TreeIconKey, React.ReactNode> = {
   code: ICON_CODE,
 };
 
-/** The glyph for a file row. */
-function iconForPath(path: string): React.ReactNode {
+/** The glyph for a file row. Exported for the Access panel's file rows, so the
+ *  two lists cannot draw the same `.pdf` differently. */
+export function iconForPath(path: string): React.ReactNode {
   return TREE_ICONS[iconKeyForPath(path)];
 }
 
@@ -2261,7 +2274,10 @@ function peersForNode(
  * Sized and positioned like `.tree-lock` (its neighbour) and built from the same
  * `.sync-dot` element and semantic tone tokens the vault-level `.sync-badge`
  * uses, so "synced" looks the same everywhere in the app. One span, no layout
- * shift while settled, nothing at all when there is nothing to say.
+ * shift while settled. Notes and files (which sync as blobs, not as CRDTs) both
+ * get one; a row with nothing to say — sync off, or a file the mirror has never
+ * seen — still gets the empty slot, so every label ends at the same edge and its
+ * overflow fade lands before the dot column, not on top of it.
  */
 function TreeSyncMark({
   node,
@@ -2271,7 +2287,7 @@ function TreeSyncMark({
   index: TreeSyncIndex;
 }) {
   const mark = rowSyncMark(node.data, index);
-  if (!mark) return null;
+  if (!mark) return <span className="tree-sync" aria-hidden="true" />;
   return (
     <span
       className={`tree-sync ${mark.state}`}

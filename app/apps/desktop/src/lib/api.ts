@@ -189,6 +189,15 @@ export interface NoteLastEdited {
 export interface AccessTreeResponse {
   folders: Array<{ id: string; path: string; color: string | null }>;
   notes: Array<{ id: string; relPath: string }>;
+  /**
+   * The vault's `files` rows — the tree binaries (pdf/docx/xlsx/mp4/…).
+   *
+   * A separate array rather than a `kind` on `notes`, because they are separate
+   * tables with different path columns; they become one leaf class in the
+   * panel's list, not in the wire shape. Empty from a server too old to send
+   * them, which simply lists no file rows.
+   */
+  files: Array<{ id: string; path: string }>;
 }
 
 export interface RegisteredFolder {
@@ -346,6 +355,10 @@ export interface BlobMeta {
   /** Which store holds the bytes — `postgres` or `s3`. Informational: every
    *  read path asks the SERVER, never this field, which store to talk to. */
   storageProvider?: string | null;
+  /** The `files` row these bytes are, or null for an `attachments/` drop. The
+   *  server has always sent it; the desktop records it on download so a
+   *  teammate's binary gets a doc id here too (`attachments.ts ServerBlob`). */
+  docId?: string | null;
 }
 
 /**
@@ -1536,7 +1549,7 @@ export class ApiClient {
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/access-tree`,
     );
-    return { folders: data.folders ?? [], notes: data.notes ?? [] };
+    return { folders: data.folders ?? [], notes: data.notes ?? [], files: data.files ?? [] };
   }
 
   async listFolders(vaultId: string): Promise<RegisteredFolder[]> {
@@ -1709,6 +1722,37 @@ export class ApiClient {
       body: { vaultId: input.vaultId, path: input.path, docId: input.id },
     });
     return data;
+  }
+
+  /**
+   * Delete a tree file — the `files` row and the blob that IS its bytes.
+   *
+   * Not the note's soft delete: a file owns no CRDT and `files` has no
+   * tombstone, so the server removes it outright (`DELETE /api/files/:id`).
+   * That is what takes it out of `GET /vaults/:id/blobs`, and therefore what
+   * stops the next attachment pass downloading it straight back onto the disk
+   * it was just deleted from.
+   *
+   * Idempotent by design at the other end: an id with no row answers 204, so a
+   * queue draining twice is not an error.
+   */
+  async deleteFile(id: string): Promise<void> {
+    await this.request<unknown>("DELETE", `/api/files/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Delete one blob by id — the hidden `attachments/` store's half of the same
+   * job, where there is no `files` row to delete.
+   *
+   * `force` is deliberately NOT exposed as a default: without it the server
+   * answers 409 `blob_referenced` when a note still embeds those bytes, and
+   * that refusal is the point — an image a teammate's note shows must not
+   * vanish because one device tidied its `attachments/` folder.
+   */
+  async deleteBlob(id: string, opts: { force?: boolean } = {}): Promise<void> {
+    await this.request<unknown>("DELETE", `/api/blobs/${encodeURIComponent(id)}`, {
+      query: opts.force ? { force: "1" } : undefined,
+    });
   }
 
   // ---- Versioning ---------------------------------------------------------

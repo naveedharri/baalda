@@ -125,6 +125,56 @@ describe("VaultSyncEngine", () => {
     expect(hello.priority).toEqual(["A"]);
     // base64 of [1,2] == "AQI="
     expect((hello.manifest as Record<string, string>).A).toBe("AQI=");
+    // No tree binaries here, and the field is omitted rather than sent empty so
+    // the common frame stays byte-identical to what shipped servers parse.
+    expect("files" in hello).toBe(false);
+  });
+
+  it("announces the tree binaries' doc ids in `hello.files`, never in the manifest", async () => {
+    // A binary has no CRDT and so no state vector — nothing to diff, nothing to
+    // backfill. It is announced anyway because `ready.revoked` can only name
+    // what we say we hold, and a `.pdf` set to Private has to leave this disk
+    // exactly as a note does. Before this it could not be named at all.
+    const sink = new MemSink({ A: new Uint8Array([1, 2]) }, ["A"]);
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      fileDocIds: () => ["file-1", "file-2"],
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await tick();
+
+    const hello = ws!.helloText()!;
+    expect(hello.files).toEqual(["file-1", "file-2"]);
+    expect(Object.keys(hello.manifest as Record<string, string>)).toEqual(["A"]);
+  });
+
+  it("still sends a hello when the files map throws", async () => {
+    // The map is read fresh on every connect (it moves with every upload and
+    // removal). A throw there must cost the binaries their announcement, never
+    // the whole connection.
+    const sink = new MemSink({ A: new Uint8Array([1, 2]) }, ["A"]);
+    let ws: FakeWs | null = null;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      fileDocIds: () => {
+        throw new Error("vault switched");
+      },
+      wsFactory: () => (ws = new FakeWs()),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await tick();
+
+    const hello = ws!.helloText()!;
+    expect(hello.t).toBe("hello");
+    expect("files" in hello).toBe(false);
   });
 
   it("announces presence right behind hello — before ready, so the sidebar dots don't wait out the backfill", async () => {

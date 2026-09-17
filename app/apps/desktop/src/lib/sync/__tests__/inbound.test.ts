@@ -30,6 +30,13 @@ const empty = {
   // The docs the server NAMED on `ready.revoked`, when it named any. Undefined
   // by default, which is the live `reauth` path: authority with no list.
   authoritativeRevoked: undefined as ReadonlySet<string> | undefined,
+  // Tree binaries: doc_id → path, the registry's `files` map inverted. Empty by
+  // default — a vault of pure notes plans exactly as it always did.
+  localFiles: new Map<string, string>(),
+  // Docs THIS user wrote — the author exemption on a revoked removal. Empty by
+  // default, so "removed outright" stays the case under test unless a case says
+  // otherwise.
+  authoredByMe: new Set<string>() as ReadonlySet<string>,
 };
 
 function plan(over: Partial<typeof empty>) {
@@ -782,5 +789,92 @@ describe("planInbound — a case-variant spelling is the same file", () => {
       baseline: new Map([["doc-1", "Projects/community/a.md"]]),
     });
     expect(p.renames).toEqual([]);
+  });
+});
+
+describe("planInbound — tree binaries", () => {
+  const authoritative = { authoritative: true };
+  const files = () => new Map([["file-1", "Team/report.pdf"]]);
+
+  it("plans a revoked binary the server NAMED", () => {
+    const p = plan({
+      ...authoritative,
+      localFiles: files(),
+      authoritativeRevoked: new Set(["file-1"]),
+    });
+    expect(p.trash).toEqual([
+      { docId: "file-1", path: "Team/report.pdf", reason: "revoked", recoverable: false, binary: true },
+    ]);
+  });
+
+  it("plans nothing for a binary the server did not name", () => {
+    // A binary has no listing to be absent from — `fileByPath` is this device's
+    // own map, and the blob listing legitimately omits a `files` row whose bytes
+    // never uploaded. Absence proves nothing, so only a name acts.
+    expect(plan({ ...authoritative, localFiles: files() }).trash).toEqual([]);
+    expect(
+      plan({ ...authoritative, localFiles: files(), authoritativeRevoked: new Set(["other"]) }).trash,
+    ).toEqual([]);
+  });
+
+  it("plans nothing without revocation authority", () => {
+    expect(
+      plan({ localFiles: files(), authoritativeRevoked: new Set(["file-1"]) }).trash,
+    ).toEqual([]);
+  });
+
+  it("gives the uploader a recoverable copy", () => {
+    const p = plan({
+      ...authoritative,
+      localFiles: files(),
+      authoritativeRevoked: new Set(["file-1"]),
+      authoredByMe: new Set(["file-1"]),
+    });
+    expect(p.trash[0].recoverable).toBe(true);
+  });
+
+  it("refuses an unsafe binary path, and a note that reached the files map", () => {
+    const p = plan({
+      ...authoritative,
+      localFiles: new Map([
+        ["file-1", ".context/config.json"],
+        ["file-2", "../escape.pdf"],
+        // A `.md` here would be removed by the half of the pipeline that skips
+        // releasing its doc — so the binary guard refuses a note extension too.
+        ["file-3", "Team/notes.md"],
+      ]),
+      authoritativeRevoked: new Set(["file-1", "file-2", "file-3"]),
+    });
+    expect(p.trash).toEqual([]);
+    expect(p.rejected.map((r) => r.docId).sort()).toEqual(["file-1", "file-2", "file-3"]);
+  });
+
+  it("never enters the capped group, and always owes the access check", () => {
+    // `mapped` stays the NOTE baseline: counting binaries into it would only
+    // loosen the note cap, which is the one thing that budget exists to hold. A
+    // binary rides no cap at all — it is named or it is not planned — so the
+    // round trip is what stands in for one. A lone note revocation still costs
+    // no round trip at all.
+    const localFiles = new Map<string, string>();
+    const named = new Set<string>();
+    for (let i = 0; i < 50; i++) {
+      localFiles.set(`file-${i}`, `Team/f${i}.pdf`);
+      named.add(`file-${i}`);
+    }
+    const p = plan({ ...authoritative, localFiles, authoritativeRevoked: named });
+    expect(p.trash).toHaveLength(50);
+    expect(p.rejected).toEqual([]);
+    expect(p.needsAccessCheck.sort()).toEqual([...named].sort());
+  });
+
+  it("leaves a small note revocation free of the round trip beside it", () => {
+    const p = plan({
+      ...authoritative,
+      baseline: new Map([["d1", "a.md"]]),
+      local: new Map([["d1", "a.md"]]),
+      authoritativeRevoked: new Set(["d1", "file-1"]),
+      localFiles: files(),
+    });
+    expect(p.needsAccessCheck).toEqual(["file-1"]);
   });
 });

@@ -310,6 +310,18 @@ interface AppStore {
    */
   docSyncState: Record<string, DocSyncState>;
   /**
+   * Per-FILE sync state for the sidebar badge, keyed by **vault-relative path**.
+   *
+   * The counterpart of `docSyncState` for everything that syncs as a blob
+   * rather than as a CRDT note — a `.pdf`, a `.docx`, an `.mp4`. Keyed by path
+   * and not by docId on purpose: a blob's identity is its bytes, and its
+   * server `files` row can be refused outright, so a path is the only key both
+   * sides always have. Published whole by the attachment mirror
+   * (`AttachmentSync.onFileStates`), so a deleted file simply stops appearing.
+   * Dropped on every vault switch alongside `docSyncState`.
+   */
+  fileSyncState: Record<string, DocSyncState>;
+  /**
    * Vault-relative note path → that note's **server docId**, mirroring the
    * registry's map for the open vault (empty when sync is off).
    *
@@ -719,6 +731,8 @@ interface AppStore {
   setSyncProgress: (progress: SyncProgress | null) => void;
   /** Merge per-doc sync states in. Keys are docIds; `null` drops an entry. */
   patchDocSyncState: (patch: Record<string, DocSyncState | null>) => void;
+  /** Replace the per-file sync map (keys are paths; `{}` = nothing to draw). */
+  setFileSyncState: (states: Record<string, DocSyncState>) => void;
   /** Replace the path→docId index (the registry mirror; `{}` = nothing synced). */
   setDocIdByPath: (map: Record<string, string>) => void;
   /**
@@ -1367,6 +1381,7 @@ function vaultScopedSyncReset() {
     syncProgress: null,
     failedRunToken: 0,
     docSyncState: {} as Record<string, DocSyncState>,
+    fileSyncState: {} as Record<string, DocSyncState>,
     docIdByPath: {} as Record<string, string>,
     locks: [] as Share[],
     denies: [] as Share[],
@@ -2234,6 +2249,9 @@ export const useStore = create<AppStore>((set, get) => ({
     // run costs ~10 store writes per second rather than one per note.
     syncManager.setSyncProgressListener((progress) => get().setSyncProgress(progress));
     syncManager.setDocStateListener((patch) => get().patchDocSyncState(patch));
+    // The same signal for files: the attachment mirror speaks once per pass and
+    // once per upload, which is orders of magnitude quieter than the note run.
+    syncManager.setFileStateListener((states) => get().setFileSyncState(states));
     // The path→docId index the sidebar needs to attach a docId-keyed sync state
     // to a path-keyed row. Coalesced by SyncManager on the same ~10/second budget.
     syncManager.setRegistryMapListener((map) => get().setDocIdByPath(map));
@@ -3744,6 +3762,11 @@ export const useStore = create<AppStore>((set, get) => ({
       return { docSyncState: next };
     }),
 
+  // Replaced, not merged, for the same reason `setDocIdByPath` is: the mirror
+  // publishes the whole local binary set each pass, so a merge would keep dots
+  // for files that have since been deleted, renamed, or left with the vault.
+  setFileSyncState: (states) => set({ fileSyncState: states }),
+
   // Replaced, not merged: the registry publishes the whole index for the open
   // vault, so a merge would keep rows for notes it has stopped mapping (deleted,
   // renamed, or belonging to the vault we just left).
@@ -3892,4 +3915,17 @@ function errMsg(e: unknown): string {
   if (e instanceof ApiError) return e.message;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+// ---- dev only: never hot-swap this module in half ---------------------------
+//
+// The same reason `lib/sync/docSession.ts` ends this way: `useStore` is a module
+// singleton and the manager→store wiring happens once per page load inside
+// `initAuth`. An HMR round that re-executes this file hands the app a brand-new
+// store (no vault, no session) that nothing re-initialises. Reload instead;
+// stripped from production builds.
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
 }

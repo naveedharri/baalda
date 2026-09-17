@@ -39,7 +39,7 @@ import type { TreeNode } from "../ipc";
 import * as perf from "../perf";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
-import { planInbound, samePath, type InboundPlan } from "./inbound";
+import { planInbound, samePath, type InboundPlan, type InboundTrash } from "./inbound";
 import { REGISTRY_CONCURRENCY, runPool, withRetry } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { toast } from "../toast";
@@ -253,6 +253,29 @@ export interface InboundHost {
    * `.context/trash` copy instead of being removed outright.
    */
   localUserId?(): string | null;
+  /**
+   * A revoked TREE BINARY is about to be removed from disk by US.
+   *
+   * The binary delete queue (`binaryDeletes.ts`) watches every non-note file in
+   * the vault and reads "gone from disk, present on the server" as the user
+   * deleting it — which is exactly what this removal looks like. Left unclaimed,
+   * a revocation would come back 2.5 s later as `DELETE /api/files/:id` and
+   * destroy the OWNER's copy of a file they had merely stopped sharing.
+   *
+   * One echo per path, the same contract `registry.markMaterialized` makes for a
+   * note placeholder. Called BEFORE the removal, so the claim is in place before
+   * the watcher can possibly fire.
+   */
+  suppressBinaryDelete?(relPath: string): void;
+  /**
+   * A tree binary left this disk: drop its sidebar dot and any cached state.
+   *
+   * The binary equivalent of {@link noteRemoved}, and deliberately a separate
+   * hook — there is no doc to release, no CRDT to clear and no editor to close.
+   * `trashedTo` is the `.context/trash` destination when this user uploaded the
+   * file, `null` when it was removed outright.
+   */
+  fileRemoved?(docId: string, path: string, trashedTo: string | null): void;
 }
 
 export interface ReconcileInput {
@@ -798,12 +821,74 @@ export class VaultRegistry {
     return this.fileByPath.get(relPath) ?? null;
   }
 
-  /** Remember a registered tree binary and queue the config write. */
-  setFileId(relPath: string, id: string): void {
+  /**
+   * Remember a registered tree binary and queue the config write.
+   *
+   * `authored` means THIS device put the bytes there — the blob mirror's upload
+   * path, which is the only place a `files` row is created. It is the binary's
+   * only authorship signal: `files` has no `created_by` column, and by the time
+   * the answer is needed (a revocation) the doc is absent from every listing
+   * that could carry one. Without it a person's own upload would be deleted
+   * outright by a permission change, where their own note gets a recoverable
+   * copy. A DOWNLOAD calls this too, with `authored` off — those bytes are
+   * somebody else's.
+   */
+  setFileId(relPath: string, id: string, opts: { authored?: boolean } = {}): void {
     if (this.stale()) return;
+    if (opts.authored) this.claimAuthorship(id);
     if (this.fileByPath.get(relPath) === id) return;
     this.fileByPath.set(relPath, id);
     this.persist();
+  }
+
+  /** Add one doc to the persisted authorship list, claiming the list for this
+   *  user first — the same guard `learnAuthorship` makes, and for the same
+   *  reason: a list learned under one account says nothing about another. */
+  private claimAuthorship(docId: string): void {
+    const me = this.host?.localUserId?.() ?? null;
+    if (me === null) return;
+    if (this.authoredBy !== me) {
+      this.authoredBy = me;
+      this.authoredDocs.clear();
+    }
+    if (this.authoredDocs.has(docId)) return;
+    this.authoredDocs.add(docId);
+    this.persist();
+  }
+
+  /** Forget a tree binary whose file is gone (the delete queue drained it), so
+   *  a path re-used later registers afresh instead of adopting a dead id. */
+  forgetFileId(relPath: string): void {
+    if (this.stale()) return;
+    if (!this.fileByPath.delete(relPath)) return;
+    this.persist();
+  }
+
+  /** Move a registration with its file — a rename done outside the app, where
+   *  the server row moved rather than died (`binaryDeletes.applyRename`). */
+  moveFileId(from: string, to: string): void {
+    if (this.stale()) return;
+    const id = this.fileByPath.get(from);
+    if (!id) return;
+    this.fileByPath.delete(from);
+    this.fileByPath.set(to, id);
+    this.persist();
+  }
+
+  /**
+   * Every tree binary's server `files` id — what the vault channel's `hello`
+   * announces so `ready.revoked` can name a revoked binary.
+   */
+  fileDocIds(): string[] {
+    return [...this.fileByPath.values()];
+  }
+
+  /** The same map inverted, doc_id → path, for the inbound plan's binary pass.
+   *  Last one wins on the (impossible-by-construction) duplicate id. */
+  localFiles(): Map<string, string> {
+    const byDocId = new Map<string, string>();
+    for (const [rp, id] of this.fileByPath) byDocId.set(id, rp);
+    return byDocId;
   }
 
   /** Adopt a `files` map read from `.context/config.json`. */
@@ -1054,6 +1139,83 @@ export class VaultRegistry {
     for (const d of rec.docIds ?? []) if (typeof d === "string" && d) this.authoredDocs.add(d);
   }
 
+  /**
+   * Take one revoked TREE BINARY off this disk.
+   *
+   * The same decision as a revoked note's, reached by the same plan — and a
+   * completely different execution, because a binary has no doc:
+   *
+   *  - nothing to `releaseDoc`: no bridge, no provider, no editor session;
+   *  - nothing to `clearYjsDoc`: the bytes never entered the CRDT pipeline;
+   *  - no `pushed` checkpoint to consult. Its stand-in is the `files` row
+   *    itself: a path is only in this map because this device (or a `files` id
+   *    the blob listing handed back) registered it, which is the binary way of
+   *    saying the server holds the bytes. A binary with no row is not in
+   *    `localFiles` and so was never planned;
+   *  - and one thing a note does NOT need: the binary delete queue has to be
+   *    told this removal was ours, or it propagates it back as a user delete and
+   *    the owner loses their copy of a file they only meant to stop sharing.
+   *
+   * `trashNote` and `deleteFile` both work on any bytes — the first renames into
+   * `.context/trash/<stamp>/`, the second refuses a directory and an ignored
+   * path — so neither needed a binary twin in Rust.
+   */
+  private async removeRevokedBinary(gone: InboundTrash, stamp: string): Promise<boolean> {
+    // BEFORE the removal, so the claim beats the watcher to the queue.
+    this.host?.suppressBinaryDelete?.(gone.path);
+    try {
+      // `recoverable` means this user put the file here (see
+      // `InboundTrash.recoverable`): losing read access to your own upload must
+      // not destroy your only local copy of it. Everyone else's goes outright —
+      // a copy in `.context/trash` would leave the ex-reader exactly the
+      // readable file the revocation exists to take away.
+      // `deleteFile` is idempotent on a path that is already gone; `trashNote`
+      // is not (it renames, and refuses a missing source). A file the user
+      // removed themselves in the same window would otherwise fail this pass,
+      // and every pass after it, forever — the mapping is what keeps re-planning
+      // it. So a missing source ends the same way: forget it and move on.
+      const dest = gone.recoverable
+        ? await ipc.trashNote(gone.path, stamp, this.epoch()).catch(async (e) => {
+            if (ipc.isVaultMismatch(e)) throw e;
+            if (await this.existsOnDisk(gone.path)) throw e;
+            return null;
+          })
+        : null;
+      if (!dest) await ipc.deleteFile(gone.path, this.epoch());
+      // The row is gone for us, so the mapping goes with it — otherwise the next
+      // `hello` re-announces an id whose file is not here, the server names it
+      // revoked again, and the ACL-authority clock is re-stamped on every
+      // reconnect for a removal that already happened.
+      this.forgetFileId(gone.path);
+      this.authoredDocs.delete(gone.docId);
+      this.host?.fileRemoved?.(gone.docId, gone.path, dest);
+      return true;
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return false;
+      this.recordFailure({
+        kind: "inbound",
+        path: gone.path,
+        docId: gone.docId,
+        reason: reasonOf(e),
+        code: null,
+      });
+      return false;
+    }
+  }
+
+  /** Is anything at this vault path right now? A disk question — `false` when
+   *  the stat refuses for any reason other than a vault switch, which the
+   *  caller re-raises. */
+  private async existsOnDisk(relPath: string): Promise<boolean> {
+    try {
+      await ipc.fileStat(relPath, this.epoch());
+      return true;
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) throw e;
+      return false;
+    }
+  }
+
   private async confirmRevocations(vaultId: string, plan: InboundPlan): Promise<void> {
     const asked = new Set(plan.needsAccessCheck);
     let confirmed: Set<string>;
@@ -1218,6 +1380,9 @@ export class VaultRegistry {
       // Accumulated and persisted, not read from this listing: a revoked doc is
       // ABSENT from the listing, which is exactly when the answer is needed.
       authoredByMe: this.authoredDocs,
+      // Tree binaries: doc_id → path, the `files` map inverted. Only ever acted
+      // on when the server NAMED the id — see the binary pass in `planInbound`.
+      localFiles: this.localFiles(),
     });
 
     // Anything the cap lift saved has to survive a SECOND, differently-computed
@@ -1297,6 +1462,10 @@ export class VaultRegistry {
     const stamp = trashStamp();
     for (const gone of plan.trash) {
       if (this.stopRun()) break;
+      if (gone.binary) {
+        if (await this.removeRevokedBinary(gone, stamp)) changedDisk = true;
+        continue;
+      }
       // A note whose content this device never confirmed upstream may hold local
       // edits that exist NOWHERE else, so removing it could lose the only copy.
       // Read `pushed` before the prune below has a chance to drop it. This
@@ -2643,6 +2812,11 @@ export class VaultRegistry {
 
   /**
    * Propagate a delete of a folder subtree or a note to the server.
+   *
+   * BINARIES are not its business: a tree file has no `notes` row and no folder
+   * row, so this is a no-op for one — deliberately, because the delete that
+   * matters for a binary is its blob's, and that runs off the watcher event the
+   * disk delete produces (`binaryDeletes.ts`). One path, not two.
    *
    * THROWS when the server refused (offline, 403): callers run server-first —
    * `deletePaths` only removes the local files once the server rows are gone —

@@ -22,6 +22,7 @@ import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
+import { BinaryDeleteQueue } from "./binaryDeletes";
 import { ContentUploader, type UploadFailure } from "./contentUpload";
 import { collectCrdtGarbage } from "./crdtGc";
 import { runPool } from "./pool";
@@ -347,6 +348,9 @@ export class SyncManager implements InboundHost {
    *  {@link REGISTRY_PULL_MAX_WAIT_MS}); 0 when no pull is armed. */
   private registryPullBurstAt = 0;
   private attachments: AttachmentSync | null = null;
+  /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
+   *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
+  private binaryDeletes: BinaryDeleteQueue | null = null;
   /** The vault generation everything below belongs to; null while disabled. */
   private scope: VaultScope | null = null;
 
@@ -414,6 +418,9 @@ export class SyncManager implements InboundHost {
   private progress: SyncProgressReporter | null = null;
   private onSyncProgress?: (progress: SyncProgress | null) => void;
   private onDocState?: (patch: Record<string, DocSyncState | null>) => void;
+  /** Whole-map mirror of the attachment mirror's per-file state
+   *  (`store.fileSyncState`), keyed by path. */
+  private onFileState?: (states: Record<string, DocSyncState>) => void;
   /** The content upload for the current scope, while one is running. */
   private uploader: ContentUploader | null = null;
   /** Locally-changed MAPPED notes awaiting a content push (docId → relPath):
@@ -791,6 +798,19 @@ export class SyncManager implements InboundHost {
     cb: ((patch: Record<string, DocSyncState | null>) => void) | undefined,
   ): void {
     this.onDocState = cb;
+  }
+
+  /**
+   * UI subscribes here for the sync state of the vault's FILES — the binaries
+   * that ride the attachment mirror instead of the CRDT (`store.fileSyncState`).
+   *
+   * The whole map each time, keyed by vault-relative path — never by docId: a
+   * blob's identity is its bytes, and its `files` row may have been refused.
+   */
+  setFileStateListener(
+    cb: ((states: Record<string, DocSyncState>) => void) | undefined,
+  ): void {
+    this.onFileState = cb;
   }
 
   /** Map the vault channel's status onto the app-wide SyncStatus vocabulary.
@@ -1201,6 +1221,41 @@ export class SyncManager implements InboundHost {
     for (const docId of docIds) this.serverRevoked.delete(docId);
   }
 
+  /**
+   * The inbound plan is about to remove a revoked TREE BINARY from disk.
+   *
+   * Claims the watcher echo for the delete queue, which otherwise reads "gone
+   * from disk, present on the server" as the user deleting the file and answers
+   * with `DELETE /api/files/:id` — destroying the owner's copy of something they
+   * only stopped sharing. See `BinaryDeleteQueue.suppressNext`.
+   */
+  suppressBinaryDelete(relPath: string): void {
+    this.binaryDeletes?.suppressNext(relPath);
+  }
+
+  /**
+   * A revoked tree binary has left this disk.
+   *
+   * The binary half of {@link noteRemoved}: no doc to drop, no CRDT rows to
+   * clear (a binary never entered the pipeline that would hold any), so all that
+   * is owed is the sidebar — the row's dot goes now, and the mirror re-reads
+   * both listings so nothing tries to download the file back. `registry`
+   * already forgot the `files` id, which is what takes it out of the next
+   * `hello` and stops the server naming it revoked forever.
+   */
+  fileRemoved(docId: string, path: string, trashedTo: string | null): void {
+    this.attachments?.forgetFile(path);
+    this.attachments?.scheduleReconcile();
+    this.note(
+      "warn",
+      "revoked",
+      trashedTo
+        ? `Access to ${path} was removed — a copy is in .context/trash`
+        : `Access to ${path} was removed — it was taken off this device`,
+      { docId, path },
+    );
+  }
+
   /** The signed-in user, for the inbound reconciler's author exemption. */
   localUserId(): string | null {
     return this.presence?.id ?? null;
@@ -1298,7 +1353,9 @@ export class SyncManager implements InboundHost {
     this.note(
       "warn",
       "revoked",
-      `Access to ${docIds.length} ${docIds.length === 1 ? "note" : "notes"} was removed`,
+      // "item", not "note": the list carries tree binaries too now, and a PDF
+      // reported as a note is the kind of small lie that costs a support round.
+      `Access to ${docIds.length} ${docIds.length === 1 ? "item" : "items"} was removed`,
     );
     this.handleRegistryChanged("acl-revoked");
   }
@@ -2983,6 +3040,8 @@ export class SyncManager implements InboundHost {
     this.lastInboundTotal = 0;
     this.attachments?.stop();
     this.attachments = null;
+    this.binaryDeletes?.stop();
+    this.binaryDeletes = null;
     this.clearVaultPresence();
     this.stopVaultEngine();
     this.closeCurrent();
@@ -3327,6 +3386,11 @@ export class SyncManager implements InboundHost {
       // The live half of the same statement: `refreshAcl` names each lost doc
       // with a `drop` just before the `reauth`, so both paths carry a list.
       onServerDrop: (docId) => this.handleServerDrop(docId, scope),
+      // The tree binaries this device holds. Not in the manifest — a binary has
+      // no CRDT and so no state vector — but announced all the same, because
+      // `ready.revoked` can only name what we say we hold, and a `.pdf` set to
+      // Private has to leave this disk exactly as a note does.
+      fileDocIds: () => this.registry.fileDocIds(),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).
@@ -3354,11 +3418,23 @@ export class SyncManager implements InboundHost {
   }
 
   /**
-   * Handle a watcher `file-changed` event under `attachments/`: schedule a
-   * debounced two-way reconcile. Attachments never touch the CRDT pipeline.
+   * Handle a watcher event for a BINARY: schedule a debounced two-way reconcile.
+   * Binaries never touch the CRDT pipeline.
+   *
+   * The PATH is what makes a delete possible. A reconcile alone can only ever
+   * say "the server has bytes this device doesn't" — which is exactly what a
+   * deleted file looks like, and why deleting a synced PDF used to download it
+   * back on the next pass. Handing the path to the delete queue
+   * (`binaryDeletes.ts`) is what lets the disk be asked instead. Called with no
+   * path (a caller that has only "something changed"), the behaviour is exactly
+   * what it always was.
    */
-  handleAttachmentChanged(): void {
+  handleAttachmentChanged(relPath?: string): void {
     if (!this.enabled) return;
+    // Every kind, not just `removed`: Rust reports a non-note file as `tree`
+    // whether it was written or deleted (`watcher.rs plan_batch`), so the queue
+    // records the path and asks the DISK when its window closes.
+    if (relPath) this.binaryDeletes?.noteChanged(relPath);
     this.attachments?.scheduleReconcile();
   }
 
@@ -3381,10 +3457,48 @@ export class SyncManager implements InboundHost {
   private setupAttachments(scope: VaultScope): void {
     const vaultId = this.registry.vaultId;
     if (!vaultId) {
+      this.attachments?.stop();
       this.attachments = null;
+      this.binaryDeletes?.stop();
+      this.binaryDeletes = null;
       return;
     }
     const epoch = scope.vaultEpoch;
+    // Built BEFORE the mirror, because the mirror asks it before every download.
+    this.binaryDeletes?.stop();
+    this.binaryDeletes = new BinaryDeleteQueue({
+      isCurrent: () => scope.isCurrent(),
+      // The same liveness the note queue uses: the vault channel is synced and
+      // one pull has completed, so a missing file is a decision, not a startup.
+      isLive: () => this.isLive(),
+      exists: async (relPath) => {
+        try {
+          await ipc.fileStat(relPath, epoch);
+          return true;
+        } catch (e) {
+          // A vault switch is NOT an answer about this file — rethrow, and the
+          // drain's own catch reads it as "couldn't ask" rather than "gone".
+          if (ipc.isVaultMismatch(e)) throw e;
+          return false;
+        }
+      },
+      listLocal: () => ipc.listBinaries(epoch),
+      listServer: () => api.listVaultBlobs(vaultId),
+      fileId: (relPath) => this.registry.getFileId(relPath),
+      forgetFileId: (relPath) => this.registry.forgetFileId(relPath),
+      moveFileId: (from, to) => this.registry.moveFileId(from, to),
+      deleteFile: (id) => api.deleteFile(id),
+      // Never forced: a 409 means a note still embeds those bytes, and that
+      // refusal is the whole reason the flag exists.
+      deleteBlob: (id) => api.deleteBlob(id),
+      moveFile: async ({ id, relPath }) => {
+        await api.registerFile({ vaultId, id, path: relPath });
+      },
+      notify: (text, tone) => toast(text, tone ?? "error"),
+      // A pass rebuilds the sidebar's file dots from both listings, so this is
+      // also how a removed file's dot goes away.
+      onServerChanged: () => this.attachments?.scheduleReconcile(),
+    });
     this.attachments = new AttachmentSync({
       isCurrent: () => scope.isCurrent(),
       // The WHOLE vault, not just `attachments/`: a `.docx` in `Team/` is a
@@ -3398,6 +3512,10 @@ export class SyncManager implements InboundHost {
       // Our own write, so its watcher echo is not an external edit — the same
       // one-echo-per-path claim the registry makes for a materialized note.
       markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
+      // A file inside an open delete window is not a file this device is
+      // missing — without this the debounced pass downloads it back before the
+      // queue has even decided.
+      isDeletePending: (relPath) => this.binaryDeletes?.isPending(relPath) ?? false,
       listServer: () => api.listVaultBlobs(vaultId),
       // The legacy pair: still the whole flow for a server that predates the
       // intent route, and the fallback the client drops to on its 404.
@@ -3446,7 +3564,17 @@ export class SyncManager implements InboundHost {
         // holds without this side having to guess.
         return row.docId ?? row.id ?? null;
       },
-      rememberFileId: (relPath, id) => this.registry.setFileId(relPath, id),
+      rememberFileId: (relPath, id, opts) => this.registry.setFileId(relPath, id, opts),
+      // The other half of an adoption: the path the row used to be at stops
+      // naming it, so `.context/config.json` never holds two ids for one file.
+      forgetFileId: (relPath) => this.registry.forgetFileId(relPath),
+      // Only ever used to drop a row THIS device minted for bytes the server
+      // already holds under another id (`reconcileDedupedRow`).
+      deleteFile: (id) => api.deleteFile(id),
+      // A rename the delete queue could not settle (the server was unreachable
+      // when its window closed) must not be registered as a new file meanwhile:
+      // that is precisely how one file ends up with two `files` rows.
+      isRenamePending: () => this.binaryDeletes?.hasUnsettled() ?? false,
       // Extracted text: Rust already pulled the words out for local search, so
       // the server gets a copy as ranking fuel rather than re-parsing the file.
       fileText: (relPath) => ipc.getFileText(relPath),
@@ -3463,6 +3591,12 @@ export class SyncManager implements InboundHost {
       // is fetched clean (see `sync/attachments.ts`).
       authHeaders: () => api.authHeaders(),
       notify: (text, tone) => toast(text, tone ?? "error"),
+      // The sidebar's dot on a `.pdf` row. Scope-guarded like every other
+      // emission here: a pass that spans a vault switch must not paint the new
+      // vault's rows with the old vault's paths.
+      onFileStates: (states) => {
+        if (scope.isCurrent()) this.onFileState?.(states);
+      },
     });
   }
 
@@ -3635,3 +3769,28 @@ export class SyncManager implements InboundHost {
 
 /** Process-wide singleton (parallels `bridgeManager`). */
 export const syncManager = new SyncManager();
+
+// ---- dev only: never hot-swap this module in half ---------------------------
+//
+// `syncManager` is a module singleton, and EVERY listener that connects it to
+// the UI (`setStatusListener`, `setSyncProgressListener`, `setDocStateListener`,
+// `setFileStateListener`, the registry/presence/ACL ones) is registered exactly
+// once per page load, from `store.initAuth` — which App.tsx runs behind a
+// `useRef` guard that Fast Refresh preserves.
+//
+// So a Vite HMR round that re-executes this file (every save while working on
+// the sync layer, and every save to a module below it) mints a FRESH manager
+// whose listeners are all `undefined`, while nothing re-runs `initAuth` to wire
+// them up. The vault still opens, the channel still connects and notes still
+// sync — the console says so — but the badge, the progress pill and the sidebar
+// dots never move again until the webview is reloaded by hand. That is exactly
+// the "not connected until I reload" report; it is a dev artifact, never
+// reachable in a packaged build, where a module is evaluated once.
+//
+// Reload the page on the update instead of running half-wired. `import.meta.hot`
+// is undefined in production builds, so this disappears there.
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
+}

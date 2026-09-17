@@ -20,11 +20,26 @@
 //     stays exactly as strict as it was for server-supplied paths.
 //
 // Identity is still sha256 in both directions, which is Stage A's known
-// limit: RENAMING a tree binary does not propagate (the bytes are unchanged, so
-// the diff sees nothing to do and another device keeps the old name), and two
-// paths holding identical bytes collapse to one blob. Stage B replaces the
-// diff with a path-keyed one over `files.id`; the rename no-op is pinned by a
-// test so that change is a visible one.
+// limit: RENAMING a tree binary does not propagate ACROSS DEVICES (the bytes
+// are unchanged, so the diff sees nothing to do and another device keeps the
+// old name), and two paths holding identical bytes collapse to one blob. Stage
+// B replaces the diff with a path-keyed one over `files.id`; the rename no-op
+// is pinned by a test so that change is a visible one.
+//
+// What the hash-keyed diff CANNOT do at all is notice a deletion — a file that
+// left this disk is, to it, content the server has and we don't, i.e. a
+// download. That half is not the diff's to fix and lives in `binaryDeletes.ts`:
+// it watches the disk, propagates the delete (and the local half of a rename,
+// which moves the `files` row) and tells this mirror not to download a path
+// whose window is still open (`deps.isDeletePending`).
+//
+// The rename is also where the two halves can FORK a file: a window the queue
+// could not settle leaves the new path unregistered, and registering a path
+// whose bytes are already a `files` row is how one file gets two doc_ids — with
+// the blob, and so the ACL, bound to whichever came first. Two rails answer it
+// here: nothing unregistered uploads while a window is unsettled
+// (`deps.isRenamePending`), and a dedupe hit naming a row whose path is gone
+// from this disk is adopted rather than duplicated (`reconcileDedupedRow`).
 //
 // The diff is pure and unit-tested in isolation; the `AttachmentSync` class
 // wires it to injected I/O (ApiClient + Tauri ipc) and debounces watcher-driven
@@ -51,6 +66,7 @@
 // upload pays for the probe.
 
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
+import type { DocSyncState } from "./vaultScope";
 import type {
   BlobCompleteBody,
   BlobDownloadTarget,
@@ -72,6 +88,16 @@ export interface ServerBlob {
   relPath: string | null;
   size?: number;
   mime?: string | null;
+  /**
+   * The `files` row these bytes ARE (null for an `attachments/` drop).
+   *
+   * Recorded on download, which is the only way a teammate's binary gets a doc
+   * id on this device: `ensureFileRow` runs on the UPLOAD path, so a file this
+   * device merely received had no mapping at all — and an unmapped file is one
+   * the vault channel's `hello` cannot announce, so the server could never name
+   * it on `ready.revoked` and a revocation never reached it.
+   */
+  docId?: string | null;
 }
 
 export interface AttachmentDiff {
@@ -316,6 +342,17 @@ export interface AttachmentSyncDeps {
   /** Claim the watcher echo for a path THIS device just wrote, exactly as the
    *  registry does for a materialized note (`registry.markMaterialized`). */
   markMaterialized?: (relPath: string) => void;
+  /**
+   * Is this path waiting out the delete queue's grace window
+   * (`binaryDeletes.ts`)?
+   *
+   * Asked before every download, and the reason a delete sticks. A deleted file
+   * is, to this diff, content the server has and we don't — so the debounced
+   * pass (400ms, well inside the 2.5s window) would put it straight back before
+   * the queue had even decided. Downloads only: an upload cannot resurrect a
+   * file that is no longer on disk to read.
+   */
+  isDeletePending?: (relPath: string) => boolean;
   /** List the server's blobs for this vault. */
   listServer: () => Promise<ServerBlob[]>;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
@@ -390,6 +427,23 @@ export interface AttachmentSyncDeps {
   authHeaders?: () => Record<string, string>;
   /** Tell the user something terminal happened (a full vault). */
   notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
+  /**
+   * Publish where every TREE binary stands, so a `.pdf` row in the sidebar can
+   * carry the same dot a note's row does (`store.fileSyncState`).
+   *
+   * The WHOLE map every time, never a patch: a pass is the only thing that
+   * knows the full local set, so replacing it is also how a file that was
+   * deleted or renamed since the last pass loses its dot. Keyed by
+   * vault-relative path, because identity here is the bytes and a `files` row
+   * may have been refused — there is no docId to key by. Paths under the hidden
+   * `attachments/` store are left out: they have no row to badge.
+   *
+   * The vocabulary is the notes' own {@link DocSyncState}, not a second one —
+   * `queued` while a file waits for this pass, `syncing` while its bytes move,
+   * `synced` once the server holds them, `error` only for a refusal retrying
+   * cannot fix. One vocabulary is what makes the two dots mean the same thing.
+   */
+  onFileStates?: (states: Record<string, DocSyncState>) => void;
 
   // ---- Tree binaries: `files` rows + extracted text (PR3 Stage A) ---------
 
@@ -402,7 +456,27 @@ export interface AttachmentSyncDeps {
   /** Create (or adopt) the server `files` row and answer with its id. */
   registerFile?: (input: { relPath: string; id: string }) => Promise<string | null>;
   /** Remember a registered row for the next session. */
-  rememberFileId?: (relPath: string, id: string) => void;
+  rememberFileId?: (relPath: string, id: string, opts?: { authored?: boolean }) => void;
+  /** Forget a mapping whose path is not this file's any more — the other half
+   *  of an adoption, so `.context/config.json` never names two ids for one
+   *  file (`registry.forgetFileId`). */
+  forgetFileId?: (relPath: string) => void;
+  /** `DELETE /api/files/:id` — used for exactly one thing here: dropping a row
+   *  THIS device created for bytes the server already knows under another id.
+   *  It deletes only blobs carrying that id, and a forked row carries none. */
+  deleteFile?: (id: string) => Promise<void>;
+  /**
+   * Is the delete queue sitting on a window it could not settle
+   * (`binaryDeletes.hasUnsettled`)?
+   *
+   * Asked before a NEW `files` row is minted, and it is the upload side of the
+   * anti-fork rail. A rename the queue is still trying to pair looks from here
+   * like a brand-new path: register it and the file exists twice, under two
+   * doc_ids, with the ACL on whichever one the blob happened to bind to. Such a
+   * file waits out the pass entirely (`deferForRename`) rather than uploading
+   * bare, and the pass after the queue settles registers or adopts it.
+   */
+  isRenamePending?: () => boolean;
   /** The extracted text the INDEX holds for a path (`ipc.getFileText`). */
   fileText?: (
     relPath: string,
@@ -450,6 +524,8 @@ export class AttachmentSync {
   private readonly permanentSkips = new Set<string>();
   /** The storage-full toast is raised at most once per sync instance. */
   private storageLimitNotified = false;
+  /** relPath → the state the sidebar draws for it (see `deps.onFileStates`). */
+  private fileStates = new Map<string, DocSyncState>();
 
   // ---- Tree binaries -----------------------------------------------------
 
@@ -468,6 +544,11 @@ export class AttachmentSync {
   /** sha256 → the blob the server holds for it. Rebuilt from each listing and
    *  extended by each upload, so the text pass can name a blob by content. */
   private readonly blobIdBySha = new Map<string, string>();
+  /** Every local binary path this pass saw, lowercased. What the rename
+   *  adoption reads: a `files` row whose own path is NOT in here is a row this
+   *  file left behind, not a second file holding the same bytes. Paths compare
+   *  case-insensitively, exactly as they do everywhere else here. */
+  private localPathKeys = new Set<string>();
   /** Does this server accept extracted text? `false` after one 404 (see
    *  `api.uploadBlobText`) — the whole session then stops offering it. */
   private textSupported: boolean | null = null;
@@ -494,6 +575,43 @@ export class AttachmentSync {
   /** Is the vault this sync belongs to still the open one? */
   private current(): boolean {
     return this.deps.isCurrent?.() ?? true;
+  }
+
+  // ---- The sidebar's file dots (see `deps.onFileStates`) -----------------
+
+  /** Hand the current map to the UI. One emission, whole map. */
+  private publishFileStates(): void {
+    this.deps.onFileStates?.(Object.fromEntries(this.fileStates));
+  }
+
+  /** Move ONE path. A no-op when the state is already what we'd publish, so a
+   *  pass that changes nothing costs the sidebar no re-render. */
+  private setFileState(relPath: string, state: DocSyncState): void {
+    if (!this.deps.onFileStates) return;
+    // The hidden root store has no sidebar row to badge.
+    if (isUnderAttachments(relPath)) return;
+    if (this.fileStates.get(relPath) === state) return;
+    this.fileStates.set(relPath, state);
+    this.publishFileStates();
+  }
+
+  /**
+   * This path is gone for good — forget everything cached about it.
+   *
+   * Called when a revoked tree binary is removed from disk (the inbound plan's
+   * binary pass). The next pass would rebuild most of this from the two listings
+   * anyway, but not all: `fileIds` and `permanentSkips` are session caches keyed
+   * by path, and a path that comes back later — access restored, or a file the
+   * user drops at the same name — must not adopt a `files` id it no longer has
+   * any claim to. The dot goes immediately rather than at the next pass, because
+   * the row it belongs to has just left the sidebar.
+   */
+  forgetFile(relPath: string): void {
+    this.fileIds.delete(relPath);
+    this.registerRefused.delete(relPath);
+    this.permanentSkips.delete(relPath);
+    this.localIds?.delete(relPath);
+    if (this.fileStates.delete(relPath)) this.publishFileStates();
   }
 
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
@@ -539,7 +657,33 @@ export class AttachmentSync {
     // and a file that was uploaded by ANOTHER device (so never passes through
     // `uploadOne` here) is only ever knowable from the listing.
     for (const b of server) if (b.sha256) this.blobIdBySha.set(b.sha256, b.id);
+    // Rebuilt per pass, never accumulated: an adoption decided against a disk
+    // two passes old would move a row onto a path that has since changed again.
+    this.localPathKeys = new Set(local.map((a) => a.relPath.toLowerCase()));
     const { toUpload, toDownload } = diffAttachments(local, server);
+
+    // Where every tree binary stands, rebuilt from the two listings rather than
+    // accumulated across passes: a file deleted or renamed since the last one
+    // must LOSE its dot, and this is the only place that knows the full local
+    // set. A sha the server already holds is synced outright — most of a
+    // vault's files on most passes, and the reason the column settles to quiet
+    // dots without a single byte moving.
+    if (this.deps.onFileStates) {
+      const queued = new Set(toUpload.map((a) => a.relPath));
+      this.fileStates = new Map<string, DocSyncState>();
+      for (const a of local) {
+        if (isUnderAttachments(a.relPath)) continue;
+        this.fileStates.set(
+          a.relPath,
+          this.permanentSkips.has(a.sha256)
+            ? "error"
+            : queued.has(a.relPath)
+              ? "queued"
+              : "synced",
+        );
+      }
+      this.publishFileStates();
+    }
 
     let uploaded = 0;
     let downloaded = 0;
@@ -551,23 +695,59 @@ export class AttachmentSync {
       // A file the server has already refused for good (too large, wrong type)
       // is skipped without a round trip — see `permanentSkips`.
       if (this.permanentSkips.has(a.sha256)) continue;
+      // An unregistered path while the delete queue is still trying to settle a
+      // window is very likely the arrival half of a rename it is about to pair.
+      // The WHOLE file waits, not just its registration: uploading it now would
+      // put its bytes on the server under no doc_id at all, and the next pass —
+      // which subtracts by sha — would never queue it again to fix that.
+      if (this.deferForRename(a)) {
+        this.setFileState(a.relPath, "queued");
+        continue;
+      }
+      this.setFileState(a.relPath, "syncing");
       try {
-        if (await this.uploadOne(a)) uploaded++;
+        if (await this.uploadOne(a)) {
+          uploaded++;
+          this.setFileState(a.relPath, "synced");
+        } else {
+          // The only `false` is a permanent refusal (413 too large, 415 wrong
+          // type), which `uploadOne` has already recorded in `permanentSkips`.
+          this.setFileState(a.relPath, "error");
+        }
       } catch (e) {
         if (e instanceof AbortPass) {
           // Nothing else in this pass can succeed either. Downloads are skipped
           // too: the vault is full, and the next pass will find the same state.
+          // This file is not broken — it is waiting, like every one behind it.
+          this.setFileState(a.relPath, "queued");
           console.warn("[attachments] pass aborted:", e.reason);
           return { uploaded, downloaded };
         }
+        // Transient (offline, a 5xx). It stays `syncing`: the next pass runs it
+        // again, and `error` is reserved for a refusal retrying cannot fix.
         console.error("[attachments] upload failed", a.relPath, e);
       }
     }
     for (const b of toDownload) {
       if (!this.current()) break;
+      // A file this device just deleted is not a file it is missing.
+      if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
+        console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
+        continue;
+      }
       try {
         await this.downloadOne(b);
         downloaded++;
+        // Remember whose `files` row these bytes are. Not an optimisation: it is
+        // what puts a teammate's binary into the map the `hello` announces, and
+        // so what lets a later revocation of it be named and removed.
+        if (b.relPath && b.docId && !isUnderAttachments(b.relPath)) {
+          this.fileIds.set(b.relPath, b.docId);
+          this.deps.rememberFileId?.(b.relPath, b.docId);
+        }
+        // It came FROM the server, so the server has it — and its row appears
+        // in the sidebar on the watcher echo, before the next pass would say so.
+        if (b.relPath) this.setFileState(b.relPath, "synced");
       } catch (e) {
         console.error("[attachments] download failed", b.relPath, e);
       }
@@ -589,7 +769,7 @@ export class AttachmentSync {
     // bytes, because it is what the blob carries as `doc_id` and what the
     // permission resolver answers for. A failure here is not fatal — the bytes
     // still go, with the pre-Stage-A path heuristic deciding who may read them.
-    const docId = await this.ensureFileRow(a.relPath);
+    const docId = await this.ensureFileRow(a);
     // Read lazily and at most once: the deduped path must move NO bytes and
     // must not even open the file, which is what makes a second device's first
     // sync a few JSON round trips instead of re-uploading the whole store.
@@ -648,6 +828,13 @@ export class AttachmentSync {
       // Zero bytes moved — but the server now names the blob these bytes are,
       // which is all the text pass needs.
       if (intent.blob?.id) this.noteBlob(a.sha256, intent.blob.id, a.relPath);
+      // It also names the `files` row those bytes ALREADY belong to, and that
+      // is the one moment this side can learn it: the blob listing is filtered
+      // by what the caller may read (a file set to Private drops out of it
+      // entirely), so a renamed file can reach here looking brand new while the
+      // server has held it all along. Reconciled before anything else believes
+      // our id.
+      await this.reconcileDedupedRow(a, docId, intent.blob);
       return true;
     }
     if (!("upload" in intent)) throw new Error("intent answered with no upload target");
@@ -895,6 +1082,22 @@ export class AttachmentSync {
   // ---- `files` rows ------------------------------------------------------
 
   /**
+   * Should this file sit out the pass because a rename may be in flight?
+   *
+   * Only ever an UNREGISTERED tree binary: a path this device already has an id
+   * for is not the arrival half of anything, and an `attachments/` drop has no
+   * row to fork. See `binaryDeletes.hasUnsettled` for what the queue is waiting
+   * for, and why the answer cannot name a path.
+   */
+  private deferForRename(a: LocalAttachment): boolean {
+    if (isUnderAttachments(a.relPath)) return false;
+    if (!this.deps.isRenamePending?.()) return false;
+    if (this.fileIds.get(a.relPath) ?? this.deps.knownFileId?.(a.relPath)) return false;
+    console.info(`[attachments] ${a.relPath} — a delete window is unsettled; leaving it queued`);
+    return true;
+  }
+
+  /**
    * The server `files` id for a tree binary, registering one if this device has
    * not already.
    *
@@ -905,7 +1108,8 @@ export class AttachmentSync {
    * refusal. In every one of those cases the bytes still upload; only the
    * doc_id is missing.
    */
-  private async ensureFileRow(relPath: string): Promise<string | undefined> {
+  private async ensureFileRow(a: LocalAttachment): Promise<string | undefined> {
+    const relPath = a.relPath;
     if (isUnderAttachments(relPath)) return undefined;
     if (!this.deps.registerFile) return undefined;
     const remembered = this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null;
@@ -914,13 +1118,23 @@ export class AttachmentSync {
       return remembered;
     }
     if (this.registerRefused.has(relPath)) return undefined;
+    // ADOPT BEFORE CREATING is the rule, and the ONLY oracle for it is the
+    // dedupe hit a page further down (`reconcileDedupedRow`). The blob listing
+    // cannot answer here: it is the same listing the diff subtracts, so a path
+    // whose bytes it shows is never queued for upload and never reaches this
+    // method — while the path that DOES reach it is one whose blob the listing
+    // hid (ACL-filtered, another user's row). So the row is adopted after the
+    // intent, which dedupes on vault+sha whatever the caller may read.
     const localId = (await this.localFileId(relPath)) ?? null;
     if (!localId) return undefined;
     try {
       const id = await this.deps.registerFile({ relPath, id: localId });
       if (!id) return undefined;
       this.fileIds.set(relPath, id);
-      this.deps.rememberFileId?.(relPath, id);
+      // `authored`: this is the UPLOAD path, so these bytes are this user's.
+      // It is the only authorship signal a binary has, and it decides whether a
+      // later revocation leaves them a `.context/trash` copy or nothing.
+      this.deps.rememberFileId?.(relPath, id, { authored: true });
       return id;
     } catch (e) {
       const status = errStatus(e);
@@ -943,6 +1157,97 @@ export class AttachmentSync {
         }`,
         e,
       );
+      return undefined;
+    }
+  }
+
+  /**
+   * Adopt the `files` row these exact bytes ALREADY are, instead of leaving a
+   * second one behind.
+   *
+   * The rule is deliberately narrow: the deduped blob carries a `doc_id` that is
+   * not ours, and the path that row remembers is neither ours nor present on
+   * this disk. Gone from disk is what makes it a rename rather than a twin — two
+   * different files holding identical bytes share one blob (the mirror's
+   * long-standing sha identity), and moving the row onto the second one would
+   * take the first file's ACL with it. Both on disk ⇒ leave both alone; that
+   * pair keeps the known limitation it always had.
+   *
+   * By the time we get here `ensureFileRow` may already have created `ours` (or
+   * `.context/config.json` may remember one from a previous session's fork), so
+   * this is the repair as well as the guard: that row is dropped BEFORE the
+   * move, because the server adopts by path first and would otherwise hand our
+   * own fork straight back. Dropping it costs no bytes — `DELETE /api/files/:id`
+   * removes only blobs carrying THAT id, and the bytes carry the other one.
+   *
+   * Only the intent flow reaches this. The legacy route reports nothing about a
+   * dedupe, so a server that predates the intent route keeps the old behaviour.
+   *
+   * Never fatal. The bytes are on the server either way, and a repair that
+   * failed is retried by the next pass.
+   */
+  private async reconcileDedupedRow(
+    a: LocalAttachment,
+    ours: string | undefined,
+    blob: { docId?: string | null; relPath?: string | null } | undefined,
+  ): Promise<void> {
+    if (isUnderAttachments(a.relPath)) return;
+    if (!this.deps.registerFile) return;
+    const theirs = blob?.docId ?? null;
+    if (!theirs || theirs === ours) return;
+    if (!this.isStrandedRow(blob?.relPath ?? null, a.relPath)) return;
+    if (ours) {
+      if (!this.deps.deleteFile) return;
+      try {
+        await this.deps.deleteFile(ours);
+      } catch (e) {
+        console.warn(`[attachments] couldn't drop the duplicate files row for ${a.relPath}`, e);
+        return;
+      }
+      this.fileIds.delete(a.relPath);
+      this.deps.forgetFileId?.(a.relPath);
+      console.info(
+        `[attachments] ${a.relPath} was registered twice — dropped ${ours} for ${theirs}, which owns the bytes`,
+      );
+    }
+    await this.adoptRow(a.relPath, theirs, blob?.relPath ?? null);
+  }
+
+  /** Is `rowPath` a path this file left behind — a row stranded by a rename
+   *  rather than a second file that happens to hold the same bytes? */
+  private isStrandedRow(rowPath: string | null | undefined, relPath: string): boolean {
+    if (!rowPath || isUnderAttachments(rowPath)) return false;
+    // No pass, no disk: never decide a rename against a listing we never made.
+    if (this.localPathKeys.size === 0) return false;
+    const rowKey = rowPath.toLowerCase();
+    if (rowKey === relPath.toLowerCase()) return false;
+    return !this.localPathKeys.has(rowKey);
+  }
+
+  /** Move an existing row onto our path and record it as ours. */
+  private async adoptRow(
+    relPath: string,
+    docId: string,
+    rowPath: string | null,
+  ): Promise<string | undefined> {
+    if (!this.deps.registerFile) return undefined;
+    try {
+      const id = (await this.deps.registerFile({ relPath, id: docId })) ?? docId;
+      this.fileIds.set(relPath, id);
+      // No `authored` claim: adoption says nothing about who put the bytes
+      // there. The claim this device made when it first uploaded them is keyed
+      // by doc_id and survives the rename on its own.
+      this.deps.rememberFileId?.(relPath, id);
+      if (rowPath) this.deps.forgetFileId?.(rowPath);
+      console.info(
+        `[attachments] ${rowPath ?? "?"} → ${relPath} (renamed on disk; adopted file ${id} by content)`,
+      );
+      return id;
+    } catch (e) {
+      // Same reading as a refused registration: an answer is a decision, no
+      // answer is a hiccup. Either way the bytes still go — without a doc_id,
+      // which is what they had a moment ago.
+      console.warn(`[attachments] couldn't adopt ${docId} for ${relPath}`, e);
       return undefined;
     }
   }
@@ -1088,6 +1393,13 @@ export class AttachmentSync {
       this.textTimer = null;
     }
     this.pendingText.clear();
+    // The dots belong to the vault this mirror was built for. A stopped mirror
+    // has nothing to say about them — and the paths it was holding are about to
+    // mean a different vault's files.
+    if (this.fileStates.size > 0) {
+      this.fileStates = new Map();
+      this.publishFileStates();
+    }
   }
 
   /** True while a debounced pass is still armed (teardown assertions/tests). */

@@ -75,6 +75,7 @@ const sync = vi.hoisted(() => ({
   setVoiceListener: vi.fn(),
   setSyncProgressListener: vi.fn(),
   setDocStateListener: vi.fn(),
+  setFileStateListener: vi.fn(),
   setRegistryMapListener: vi.fn(),
   setNoteMetaListener: vi.fn(),
   setColorListener: vi.fn(),

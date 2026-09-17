@@ -15,6 +15,7 @@ vi.mock("../../ipc", () => ({
   deletePath: vi.fn(),
   deleteFile: vi.fn(),
   deleteFolderIfEmpty: vi.fn(),
+  fileStat: vi.fn(),
   isVaultMismatch: vi.fn(() => false),
 }));
 vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
@@ -51,6 +52,10 @@ class FakeDisk {
   trashed: Array<{ from: string; to: string }> = [];
   /** Paths removed outright (revocations) — never in the trash. */
   deleted: string[] = [];
+  /** Tree binaries on disk (a `.pdf`, a `.docx`). NOT notes: they have no index
+   *  row, no CRDT and no `GET /api/notes` entry — their only identity here is
+   *  the registry's `files` map. */
+  binaries = new Set<string>();
 
   tree(): TreeNode {
     const dirs = [...this.folders].map((f) => ({
@@ -128,16 +133,31 @@ function install(disk: FakeDisk) {
   }) as never);
   // The revocation removal's own call: single file, never a directory (Rust
   // refuses one). Same book-keeping so the assertions below read the same.
+  // Matches `notefile.rs delete_file`, which returns Ok for a path that is
+  // already gone. A mock that threw instead would make the reconciler look
+  // broken on the one case Rust deliberately makes idempotent.
   vi.mocked(ipc.deleteFile).mockImplementation((async (p: string) => {
-    if (!disk.notes.has(p)) throw new Error("path does not exist");
+    if (disk.binaries.delete(p)) {
+      disk.deleted.push(p);
+      return;
+    }
+    if (!disk.notes.has(p)) return;
     disk.notes.delete(p);
     disk.bodies.delete(p);
     disk.deleted.push(p);
   }) as never);
+  vi.mocked(ipc.fileStat).mockImplementation((async (p: string) => {
+    if (!disk.notes.has(p) && !disk.binaries.has(p)) throw new Error("no such file");
+    return { size: 1 };
+  }) as never);
   vi.mocked(ipc.trashNote).mockImplementation((async (p: string, stamp: string) => {
-    if (!disk.notes.has(p)) throw new Error("path does not exist");
-    disk.notes.delete(p);
-    disk.bodies.delete(p);
+    // `trash_note` is a rename, so it moves any bytes — a binary needs no twin.
+    const isBinary = disk.binaries.delete(p);
+    if (!isBinary) {
+      if (!disk.notes.has(p)) throw new Error("path does not exist");
+      disk.notes.delete(p);
+      disk.bodies.delete(p);
+    }
     const dest = `.context/trash/${stamp}/${p}`;
     disk.trashed.push({ from: p, to: dest });
     return dest;
@@ -213,6 +233,10 @@ function recordingHost(authority = false, named: ReadonlySet<string> | null = nu
    *  This host has no doc store, so it answers "nothing to fill in" — which is
    *  the fresh-device case, i.e. today's empty placeholder. */
   const hydrated: Array<{ docId: string; path: string }> = [];
+  /** Paths claimed with the binary delete queue before they were removed. An
+   *  unclaimed one would be propagated back as `DELETE /api/files/:id`. */
+  const suppressed: string[] = [];
+  const filesRemoved: Array<{ path: string; trashedTo: string | null }> = [];
   const host: InboundHost = {
     releaseDoc: async (docId) => {
       released.push(docId);
@@ -232,8 +256,10 @@ function recordingHost(authority = false, named: ReadonlySet<string> | null = nu
     authoritativeRevoked: () => named,
     revocationRefused: (ids) => refused.push(...ids),
     localUserId: () => ME,
+    suppressBinaryDelete: (relPath) => suppressed.push(relPath),
+    fileRemoved: (_docId, path, trashedTo) => filesRemoved.push({ path, trashedTo }),
   };
-  return { host, released, renamed, removed, hydrated, refused };
+  return { host, released, renamed, removed, hydrated, refused, suppressed, filesRemoved };
 }
 
 /**
@@ -250,6 +276,14 @@ async function twoPasses(opts: {
    *  `acl-changed` frame just arrived)? Only then may it act on a wholesale
    *  loss of access. */
   authority?: boolean;
+  /** Tree binaries this device holds a `files` row for, spliced into the config
+   *  the relaunch reads — the same route `adoptConfigFiles` takes in production.
+   *  relPath → `files` id. */
+  files?: Record<string, string>;
+  /** Which docs the server NAMED on `ready.revoked` / `drop`. A binary is only
+   *  ever removed when it is on this list; there is no listing absence to read
+   *  for one. */
+  named?: ReadonlySet<string>;
 }) {
   install(opts.disk);
   const reg1 = new VaultRegistry(fakeApi(opts.first));
@@ -257,7 +291,10 @@ async function twoPasses(opts: {
   await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
 
   const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
-  const written = writes[writes.length - 1]?.[0] as string;
+  let written = writes[writes.length - 1]?.[0] as string;
+  if (opts.files) {
+    written = JSON.stringify({ ...JSON.parse(written), files: opts.files });
+  }
   vi.mocked(ipc.getVaultConfig).mockResolvedValue(written as never);
   vi.mocked(ipc.renamePath).mockClear();
   vi.mocked(ipc.trashNote).mockClear();
@@ -265,7 +302,7 @@ async function twoPasses(opts: {
 
   const api = fakeApi(opts.then);
   const reg = new VaultRegistry(api);
-  const host = recordingHost(opts.authority === true);
+  const host = recordingHost(opts.authority === true, opts.named ?? null);
   reg.setInboundHost(host.host);
   await reg.reconcile({ organizationId: ORG, vaultName: "v" });
   return { reg, api, ...host };
@@ -1259,5 +1296,209 @@ describe("whole-vault Private reaches the member's disk", () => {
     // Refused loudly, not silently: the vault cannot read as fully synced.
     expect(r.reg.hasFailures()).toBe(true);
     expect(r.reg.failures().some((f) => f.reason.includes("access removals"))).toBe(true);
+  });
+});
+
+describe("a revoked tree binary leaves the disk like a revoked note", () => {
+  // The gap this closes: a `.pdf` set to Private stopped syncing and vanished
+  // from every teammate's sidebar, but stayed on the ex-reader's disk — fully
+  // readable in any viewer, forever. Notes had left since `ready.revoked`; files
+  // had no route at all, because they are in none of the listings the note plan
+  // reads.
+
+  it("removes a named, access-checked binary outright and forgets its files row", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      authority: true,
+      files: { "Team/report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+    });
+
+    expect(disk.binaries.has("Team/report.pdf")).toBe(false);
+    expect(disk.deleted).toEqual(["Team/report.pdf"]);
+    expect(disk.trashed).toEqual([]);
+    // The note beside it is untouched: the binary pass reads `localFiles` only.
+    expect(disk.notes.has("a.md")).toBe(true);
+    expect(r.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
+    // The mapping goes with the file, or the next `hello` re-announces an id
+    // whose file is not here and the server names it revoked on every connect.
+    expect(r.reg.getFileId("Team/report.pdf")).toBeNull();
+    expect(r.reg.fileDocIds()).toEqual([]);
+  });
+
+  it("claims the watcher echo first, so the delete queue never sees it", async () => {
+    // Without the claim the removal reads to `binaryDeletes.ts` as "gone from
+    // disk, still on the server" — a user delete — and it answers with
+    // `DELETE /api/files/:id`, destroying the OWNER's copy of a file they had
+    // only meant to stop sharing.
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      authority: true,
+      files: { "Team/report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+    });
+    expect(r.suppressed).toEqual(["Team/report.pdf"]);
+  });
+
+  it("always asks the resolver — a binary has no listing absence to corroborate it", async () => {
+    // A small revocation of NOTES skips the round trip: the cap is already what
+    // bounds the damage, and the listing is a second reading. A binary has only
+    // the name, so the second opinion is not optional. One file, cap 20.
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      authority: true,
+      files: { "Team/report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+    });
+    expect(vi.mocked(r.api.accessCheck)).toHaveBeenCalledWith(VAULT, ["file-1"]);
+  });
+
+  it("leaves it alone when the resolver still grants access", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [], accessCheck: "grant" },
+      authority: true,
+      files: { "Team/report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+    });
+    expect(disk.binaries.has("Team/report.pdf")).toBe(true);
+    expect(disk.deleted).toEqual([]);
+    // …and the contradicted id leaves the named set, so no later pass retries it.
+    expect(r.refused).toEqual(["file-1"]);
+    expect(r.reg.getFileId("Team/report.pdf")).toBe("file-1");
+  });
+
+  it("leaves it alone when the access check cannot be reached", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [], accessCheck: "fail" },
+      authority: true,
+      files: { "Team/report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+    });
+    expect(disk.binaries.has("Team/report.pdf")).toBe(true);
+    expect(disk.deleted).toEqual([]);
+  });
+
+  it("removes nothing when the server named nothing — the old-server path", async () => {
+    // `authoritative` alone lifts the NOTE cap wholesale, but a binary has no
+    // absence to act on: no name, no removal, on any server that predates
+    // `ready.revoked`.
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      authority: true,
+      files: { "Team/report.pdf": "file-1" },
+    });
+    expect(disk.binaries.has("Team/report.pdf")).toBe(true);
+    expect(disk.deleted).toEqual([]);
+  });
+
+  it("removes nothing without revocation authority", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      files: { "Team/report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+    });
+    expect(disk.binaries.has("Team/report.pdf")).toBe(true);
+  });
+
+  it("gives the uploader of a revoked binary a recoverable copy", async () => {
+    // The same exemption a note's author gets: an item set to Private beats
+    // authorship server-side, so this file genuinely can be revoked — but taking
+    // someone's own upload off their disk with no undo is a different act from
+    // taking back something they were merely shown.
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    install(disk);
+
+    const reg1 = new VaultRegistry(
+      fakeApi({ notes: [{ id: "d1", rel_path: "mine.md", created_by: ME }] }),
+    );
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const carried = JSON.parse(writes[writes.length - 1]?.[0] as string);
+    // Authorship of the BINARY is carried the same way a note's is: the doc is
+    // absent from every listing by the time the answer is needed.
+    carried.files = { "Team/report.pdf": "file-1" };
+    carried.authored = { userId: ME, docIds: ["d1", "file-1"] };
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(carried) as never);
+
+    const reg = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "mine.md" }], tombstones: [] }));
+    const host = recordingHost(true, new Set(["file-1"]));
+    reg.setInboundHost(host.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.binaries.has("Team/report.pdf")).toBe(false);
+    expect(disk.trashed.map((t) => t.from)).toEqual(["Team/report.pdf"]);
+    expect(disk.deleted).toEqual([]);
+    expect(host.filesRemoved).toEqual([
+      { path: "Team/report.pdf", trashedTo: disk.trashed[0].to },
+    ]);
+  });
+});
+
+describe("a revoked binary that is already off disk", () => {
+  it("forgets the mapping instead of failing this pass and every pass after it", async () => {
+    // The user deleted the file in the same window the revocation landed in.
+    // `trash_note` renames, so it refuses a missing source — and the mapping is
+    // what keeps re-planning the removal, so a recorded failure here would
+    // repeat on every pull forever.
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    install(disk);
+
+    const reg1 = new VaultRegistry(
+      fakeApi({ notes: [{ id: "d1", rel_path: "mine.md", created_by: ME }] }),
+    );
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const carried = JSON.parse(writes[writes.length - 1]?.[0] as string);
+    // Mapped, authored — but never on this fake disk.
+    carried.files = { "Team/gone.pdf": "file-1" };
+    carried.authored = { userId: ME, docIds: ["file-1"] };
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(carried) as never);
+
+    const reg = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "mine.md" }], tombstones: [] }));
+    reg.setInboundHost(recordingHost(true, new Set(["file-1"])).host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(reg.getFileId("Team/gone.pdf")).toBeNull();
+    expect(reg.hasFailures()).toBe(false);
   });
 });

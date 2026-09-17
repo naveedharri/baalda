@@ -3,7 +3,8 @@ import { Hono } from "hono";
 import { config } from "../../config.js";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { canCreateIn, canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
+import { canCreateIn, canEditDoc, canEditFolder, canWriteBlob } from "../../permissions/http-gates.js";
+import { deleteDocBlobs } from "./blobs.js";
 import { effectivePermission } from "../../permissions/resolver.js";
 import {
   listDeletedReadableDocsInVault,
@@ -255,8 +256,8 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
   });
 
   /**
-   * The vault's WHOLE structure, unfiltered — folders and notes, ids and paths,
-   * no content. Owner/admin only.
+   * The vault's WHOLE structure, unfiltered — folders, notes and files, ids and
+   * paths, no content. Owner/admin only.
    *
    * Every other listing here is ACL-filtered, which is right for sync and fatal
    * for administration: the moment an item is set to Private it leaves
@@ -280,7 +281,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
     }
-    const [folders, notes] = await Promise.all([
+    const [folders, notes, files] = await Promise.all([
       pool.query<{ id: string; path: string; color: string | null }>(
         "SELECT id, path, color FROM folders WHERE vault_id = $1 ORDER BY path",
         [vaultId],
@@ -292,10 +293,21 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
         "SELECT id, rel_path FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path",
         [vaultId],
       ),
+      // `files` rows — the tree binaries. They are docs like any note (one
+      // `shares.resource_type = 'file'` namespace, one `effectivePermission`),
+      // so leaving them out made a `.pdf` in a shared folder the one thing in
+      // the vault whose access could be enforced but never seen or set.
+      // A hidden root `attachments/` blob has no `files` row at all — its bytes
+      // carry a null `doc_id` — so nothing here has to filter it out.
+      pool.query<{ id: string; path: string }>(
+        "SELECT id, path FROM files WHERE vault_id = $1 ORDER BY path",
+        [vaultId],
+      ),
     ]);
     return c.json({
       folders: folders.rows.map((f) => ({ id: f.id, path: f.path, color: f.color })),
       notes: notes.rows.map((n) => ({ id: n.id, relPath: n.rel_path })),
+      files: files.rows.map((f) => ({ id: f.id, path: f.path })),
     });
   });
 
@@ -353,8 +365,16 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // doc comment) rather than reported as unreadable. No `deleted_at` filter:
     // a soft-deleted note does have a row, and it should reach the resolver,
     // which answers `none` for it through `locateDoc`.
+    //
+    // `files` as well as `notes`, and for the same reason `locateDoc` unions the
+    // two: a tree binary's id IS a doc id. Leaving it out made a revoked `.pdf`
+    // permanently UNANSWERED, which the desktop reads as "no second opinion" and
+    // so leaves the whole group on disk — the file stayed readable on the disk of
+    // someone who had just been shut out of it.
     const { rows } = await pool.query<{ id: string }>(
-      "SELECT id FROM notes WHERE vault_id = $1 AND id = ANY($2::text[])",
+      `SELECT id FROM notes WHERE vault_id = $1 AND id = ANY($2::text[])
+       UNION
+       SELECT id FROM files WHERE vault_id = $1 AND id = ANY($2::text[])`,
       [vaultId, ids],
     );
     const present = new Set(rows.map((r) => r.id));
@@ -1066,6 +1086,61 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     changed(c, vaultId);
     return c.json({ id, docId: id, vaultId, folderId: resolvedFolder, path: storedPath }, 201);
+  });
+
+  /**
+   * Delete a tree file — the row AND the bytes behind it.
+   *
+   * The binary counterpart of `DELETE /notes/:id`, and deliberately not its
+   * twin. A note is SOFT-deleted because its doc_id, its Yjs history and its
+   * tombstone all have work left to do: the tombstone is how a teammate's
+   * device tells a deletion from a revocation (`vault-docs.ts`). A file has
+   * none of that. It owns no CRDT, `files` has no `deleted_at` column (see
+   * migration 023's note), and no client removes a local binary on the strength
+   * of a missing server row — so a hard delete costs nobody their bytes and
+   * leaves nothing to reconcile. What it DOES do is make the file stop existing
+   * for every listing at once: the readable set, `listDocsInVault`, the folder
+   * tree, and — because the blobs go with it — `GET /vaults/:id/blobs`, which is
+   * the one the desktop's attachment diff reads. Without that last part a file
+   * deleted on one device came straight back down on the next pass, which is
+   * the bug this route exists for.
+   *
+   * Idempotent: an id with no row answers 204, not 404. The goal state is "this
+   * file is gone", a retried delete (an offline queue draining twice) has
+   * reached it, and there is no membership to check on a row that isn't there —
+   * so the answer is the same for an id that never existed, which tells a prober
+   * nothing.
+   */
+  registryRoutes.delete("/files/:id", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const id = c.req.param("id");
+    const { rows } = await pool.query<{ vault_id: string; path: string }>(
+      "SELECT vault_id, path FROM files WHERE id = $1",
+      [id],
+    );
+    const row = rows[0];
+    if (!row) return c.body(null, 204);
+    const org = await vaultOrg(row.vault_id);
+    if (!org || !(await orgRole(org, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    // The SAME gate that let these bytes be uploaded decides who may take them
+    // away (`canWriteBlob` → `canCreateIn` on the file's folder): a Read-only
+    // vault, a locked share or a sealed posture refuses both ends.
+    if (!(await canWriteBlob(session.userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
+      return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    }
+
+    // Bytes first, row second. The other order would leave blobs whose `doc_id`
+    // resolves to nothing if the process died between the two — and that is
+    // exactly the shape `canReadAttachment` falls back to the path heuristic
+    // for, i.e. bytes nobody can see and nothing will collect.
+    const blobs = await deleteDocBlobs(id, row.vault_id);
+    await pool.query("DELETE FROM files WHERE id = $1", [id]);
+    console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
+    changed(c, row.vault_id);
+    return c.body(null, 204);
   });
 
   return registryRoutes;

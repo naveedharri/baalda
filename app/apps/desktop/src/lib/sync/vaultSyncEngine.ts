@@ -193,6 +193,16 @@ export interface VaultSyncEngineOptions {
    * one is about what the session is allowed to remove from disk.
    */
   onServerDrop?: (docId: string) => void;
+  /**
+   * doc ids of the `files` rows (tree binaries) this device holds on disk —
+   * the registry's `files` map.
+   *
+   * Announced in `hello.files`, never in the manifest: a binary has no CRDT, so
+   * there is no state vector and nothing to backfill. It is announced at all
+   * because `ready.revoked` can only name what we say we hold, and a `.pdf` set
+   * to Private must leave this disk exactly as a note does.
+   */
+  fileDocIds?: () => string[];
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
   /** Backoff bounds (ms). */
@@ -287,6 +297,7 @@ export class VaultSyncEngine {
   private readonly onServerBehind?: (docIds: string[]) => void;
   private readonly onServerRevoked?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerDrop?: (docId: string) => void;
+  private readonly fileDocIds?: () => string[];
   private readonly wsFactory: WsFactory;
   private readonly inboundMaxBytes: number;
   private readonly baseMs: number;
@@ -363,6 +374,7 @@ export class VaultSyncEngine {
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
     this.onInboundIdle = opts.onInboundIdle;
+    this.fileDocIds = opts.fileDocIds;
     this.onServerEmpty = opts.onServerEmpty;
     this.onServerBehind = opts.onServerBehind;
     this.onServerRevoked = opts.onServerRevoked;
@@ -603,6 +615,16 @@ export class VaultSyncEngine {
       manifest = {};
     }
     const priority = this.sink.recentDocs();
+    // Tree binaries, alongside the manifest's notes. Read here rather than
+    // cached: the registry's `files` map moves with every upload, rename and
+    // removal, and a stale id would have the server name a revocation for a file
+    // that is no longer on this disk at all.
+    let files: string[] = [];
+    try {
+      files = this.fileDocIds?.() ?? [];
+    } catch {
+      files = [];
+    }
     // The socket may have closed while we were minting/building — guard the send.
     if (!this.ws) return;
     // `origin` is this app instance's id, matching the `x-baalda-origin` header on
@@ -615,6 +637,9 @@ export class VaultSyncEngine {
         token,
         manifest,
         priority,
+        // Omitted when empty, so the common frame stays byte-identical to what
+        // every shipped server already parses.
+        ...(files.length > 0 ? { files } : {}),
         origin: this.api.getClientId(),
         // Opt in to the frame types this build understands. Without it the
         // server withholds them (see `CLIENT_CAPS`).
