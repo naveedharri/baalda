@@ -355,6 +355,10 @@ export interface BlobMeta {
   /** Which store holds the bytes — `postgres` or `s3`. Informational: every
    *  read path asks the SERVER, never this field, which store to talk to. */
   storageProvider?: string | null;
+  /** The `files` row these bytes are, or null for an `attachments/` drop. The
+   *  server has always sent it; the desktop records it on download so a
+   *  teammate's binary gets a doc id here too (`attachments.ts ServerBlob`). */
+  docId?: string | null;
 }
 
 /**

@@ -143,6 +143,17 @@ export interface InboundInput {
    * not a reason to destroy the only local copy of something this person wrote.
    */
   authoredByMe?: ReadonlySet<string>;
+  /**
+   * doc_id → vault-relative path for every TREE BINARY this device has a server
+   * `files` row for (the registry's `files` map, inverted).
+   *
+   * Binaries are not notes and never enter the loop above: they have no CRDT, no
+   * baseline and no `GET /api/notes` row, so none of the "server moved it",
+   * "server deleted it" or "absent from both listings" reasoning applies to
+   * them. The ONE thing that does is revocation, and it reaches them by a
+   * narrower route — see the binary pass in {@link planInbound}.
+   */
+  localFiles?: PathsByDocId;
 }
 
 export interface InboundRename {
@@ -180,6 +191,17 @@ export interface InboundTrash {
    * change. See {@link InboundInput.authoredByMe}.
    */
   recoverable: boolean;
+  /**
+   * This entry is a TREE BINARY (a `files` row), not a note.
+   *
+   * The executor needs to know, because almost nothing about the removal is
+   * shared: there is no doc to release, no CRDT to clear, no `suppress` entry to
+   * make, and the delete queue that watches binaries has to be told this removal
+   * was ours. What IS shared is everything that decides WHETHER to remove —
+   * the caps, the named-revocation lift and the access-check — which is the
+   * whole reason binaries ride this plan instead of a parallel one.
+   */
+  binary?: boolean;
 }
 
 export interface InboundRejection {
@@ -239,6 +261,10 @@ export interface InboundPlan {
    * Empty when the revoked group fitted under its cap on its own — an ordinary
    * revocation of a few notes needs no corroboration, because the cap is already
    * the thing bounding the damage.
+   *
+   * A TREE BINARY entry is always here, cap or no cap: nothing bounds it but the
+   * server having named it, and a name is one reading of one function. See the
+   * binary pass in {@link planInbound}.
    */
   needsAccessCheck: string[];
   rejected: InboundRejection[];
@@ -314,6 +340,24 @@ export function isSafeNotePath(path: string): boolean {
   const i = path.lastIndexOf(".");
   if (i <= 0) return false;
   return NOTE_EXTS.includes(path.slice(i + 1).toLowerCase());
+}
+
+/**
+ * Is this a path we're willing to remove a TREE BINARY from?
+ *
+ * The same segment rules a note gets — no `..`, no dot-segment, no `.context`,
+ * no ignored or denied directory — minus the extension test, because a binary is
+ * by definition NOT a note extension. Deliberately not `isSafeNotePath` with the
+ * check relaxed: the two answers must never become one function that a caller
+ * can ask the wrong question of, since the note one also guards renames.
+ */
+export function isSafeTreeBinaryPath(path: string): boolean {
+  if (!segmentsOk(path)) return false;
+  const i = path.lastIndexOf(".");
+  if (i <= 0) return false;
+  // A note that somehow reached the binary map is refused rather than removed by
+  // the half of the pipeline that skips releasing its doc.
+  return !NOTE_EXTS.includes(path.slice(i + 1).toLowerCase());
 }
 
 /** Is this a path we're willing to create a folder at? */
@@ -618,6 +662,37 @@ export function planInbound(input: InboundInput): InboundPlan {
     }
   }
 
+  // ── tree binaries ─────────────────────────────────────────────────────────
+  //
+  // A `.pdf` set to Private used to be the one thing in the vault whose access
+  // could be enforced everywhere except on the disk of the person who lost it:
+  // the note above leaves, the file stays, readable forever in any viewer. It
+  // leaves now, by a deliberately NARROWER route than a note's.
+  //
+  // A note may be removed on listing-absence alone (inside the cap): `GET
+  // /api/notes` not naming it is a positive statement, taken at a different
+  // moment over a different transport from the announcement. A binary has no
+  // such listing — `fileByPath` is this device's own map and the blob listing
+  // legitimately omits a `files` row whose bytes never uploaded — so absence
+  // here proves nothing at all. The only signal is the server NAMING the id
+  // (`ready.revoked` / a live `drop`), which is one reading, not two. So the
+  // second opinion is not optional for a binary the way it is for a small
+  // revocation of notes: every entry pushed here is added to `needsAccessCheck`
+  // below, whatever the cap said.
+  //
+  // A server that names nothing (one that predates `ready.revoked`) therefore
+  // removes no binaries at all. That is the safe direction, and the same one the
+  // note path takes when `tombstones` is null.
+  if (input.authoritative === true && input.authoritativeRevoked && input.localFiles) {
+    for (const [docId, relPath] of input.localFiles) {
+      if (!input.authoritativeRevoked.has(docId)) continue;
+      // No `suppress` entry, deliberately: that set is read by the OUTBOUND note
+      // half, and a binary re-registers through the blob mirror instead — which
+      // finds nothing to register once the file is off disk.
+      pushTrash(plan, docId, relPath, "revoked", input.authoredByMe?.has(docId) === true, true);
+    }
+  }
+
   // Trash deepest-first, so a folder's contents leave before anything prunes it.
   plan.trash.sort((a, b) => b.path.split("/").length - a.path.split("/").length);
 
@@ -676,12 +751,13 @@ function pushTrash(
   path: string,
   reason: InboundTrash["reason"],
   recoverable: boolean,
+  binary = false,
 ): void {
-  if (!isSafeNotePath(path)) {
+  if (!(binary ? isSafeTreeBinaryPath(path) : isSafeNotePath(path))) {
     plan.rejected.push({ kind: "trash", path, docId, reason: "unsafe local path" });
     return;
   }
-  plan.trash.push({ docId, path, reason, recoverable });
+  plan.trash.push({ docId, path, reason, recoverable, ...(binary ? { binary: true } : {}) });
 }
 
 function applyBreakers(
@@ -751,6 +827,17 @@ function applyBreakers(
       .filter((t) => t.reason === "revoked")
       .map((t) => t.docId);
   }
+  // …and every surviving BINARY removal owes it unconditionally. `mapped` is the
+  // note baseline and stays that way — counting binaries into it would only
+  // LOOSEN the note cap, which is the one thing this budget exists to hold — so
+  // a binary never rides a cap at all: it is named or it is not planned, and
+  // being named is a single reading of a single server function. The round trip
+  // is the second one. A small revocation of notes still costs none.
+  const owed = new Set(plan.needsAccessCheck);
+  for (const t of plan.trash) {
+    if (t.binary && t.reason === "revoked") owed.add(t.docId);
+  }
+  plan.needsAccessCheck = [...owed];
   const rCap = renameCap(mapped);
   if (plan.renames.length > rCap) {
     for (const r of plan.renames) {

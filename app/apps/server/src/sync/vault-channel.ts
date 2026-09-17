@@ -99,10 +99,14 @@ export const BEHIND_CAP = 2000;
 /**
  * Most docs one `ready.revoked` names.
  *
- * The list is already bounded by the CLIENT'S manifest — it can only name docs
- * this client says it holds — so this cap is about frame size, not about the
- * size of the vault. A member of a private-by-default vault with 10,000 docs
- * they never had is named zero of them.
+ * The list is already bounded by what the CLIENT says it holds — the manifest's
+ * notes plus `hello.files`' tree binaries — so this cap is about frame size, not
+ * about the size of the vault. A member of a private-by-default vault with
+ * 10,000 docs they never had is named zero of them.
+ *
+ * Notes and files share the one budget deliberately: they are one namespace to
+ * `effectivePermission` and one list to the client, and giving binaries their
+ * own allowance would let a vault of PDFs push its notes out of the frame.
  */
 export const REVOKED_CAP = 2000;
 
@@ -504,7 +508,7 @@ class VaultConnection {
     // …and the mirror image: docs this client says it HOLDS that it may no
     // longer read. Pure set arithmetic over two things already in hand (the
     // hello manifest and `this.readable`), so it costs no query.
-    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest);
+    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest, hello.files);
     this.send({
       t: "ready",
       // Omitted when nothing is empty, so the common frame is byte-identical to
@@ -537,6 +541,10 @@ class VaultConnection {
    * What the client already holds is both bounded and, by definition, already
    * known to it.
    *
+   * Both kinds of doc: the manifest's notes AND the `files` ids `hello.files`
+   * carries. A binary has no state vector to put in the manifest, but it is the
+   * same doc id to the resolver and the same removal to the client.
+   *
    * A doc the owner DELETED also leaves the readable set and so is named here.
    * The frame's contract is "these are gone for you", not "an admin revoked
    * these". Usually the client then resolves it as a tombstone on the pull that
@@ -547,18 +555,28 @@ class VaultConnection {
    * branch); before it did, a share-only member's deleted notes fell through to
    * the revocation path and were removed with no recoverable copy.
    */
-  private revokedFromManifest(manifest: Record<string, string>): {
+  private revokedFromManifest(
+    manifest: Record<string, string>,
+    files?: string[],
+  ): {
     revoked: string[];
     revokedTruncated: boolean;
   } {
     const revoked: string[] = [];
+    const seen = new Set<string>();
     let revokedTruncated = false;
-    for (const docId of Object.keys(manifest)) {
+    // Notes first, then the tree binaries the client listed separately. Both are
+    // ordinary doc ids to `listReadableDocsInVault` (its `files` UNION is the
+    // whole reason a `.pdf` set to Private leaves the readable set at all), so
+    // this stays pure set arithmetic over two things already in hand.
+    for (const docId of [...Object.keys(manifest), ...(files ?? [])]) {
       if (this.readable.has(docId)) continue;
+      if (seen.has(docId)) continue;
       if (revoked.length >= REVOKED_CAP) {
         revokedTruncated = true;
         break;
       }
+      seen.add(docId);
       revoked.push(docId);
     }
     return { revoked, revokedTruncated };

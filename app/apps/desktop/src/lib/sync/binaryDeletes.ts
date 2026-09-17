@@ -133,6 +133,21 @@ export class BinaryDeleteQueue {
    *  splits it into "gone" (a delete) and "still there" (a save, or the arrival
    *  half of a rename). */
   private readonly pending = new Map<string, Pending>();
+  /**
+   * Paths THIS app removed on purpose, each owed exactly one watcher echo.
+   *
+   * The one removal that needs this is a revocation: the inbound plan takes a
+   * file off disk because the server says this user may no longer read it, and
+   * to the drain below that is indistinguishable from the user deleting it —
+   * gone from disk, still on the server. It would answer with
+   * `DELETE /api/files/:id`, destroying the OWNER's copy of a file they had
+   * merely stopped sharing. The same one-echo-per-path claim the registry makes
+   * for a materialized note (`registry.markMaterialized`).
+   *
+   * A materialized DOWNLOAD needs no claim: that file is present when the window
+   * closes, so the disk check already says "not a delete".
+   */
+  private readonly suppressed = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private draining = false;
 
@@ -162,6 +177,9 @@ export class BinaryDeleteQueue {
    */
   noteChanged(relPath: string): void {
     if (!this.deps.isCurrent()) return;
+    // Our own removal echoing back. Consumed, so the SECOND event for the path
+    // (a file the user later re-creates and deletes for real) is ordinary again.
+    if (this.suppressed.delete(key(relPath))) return;
     // Not live ⇒ startup: a file that isn't there yet is a disk (or a pull)
     // catching up, not a deletion. Refused HERE rather than at drain time so
     // the window never starts and the path stays downloadable meanwhile.
@@ -181,6 +199,24 @@ export class BinaryDeleteQueue {
    */
   isPending(relPath: string): boolean {
     return this.pending.has(key(relPath));
+  }
+
+  /**
+   * Claim the watcher echo for a path this app is ABOUT to remove itself, so the
+   * removal is never propagated back to the server as a user delete.
+   *
+   * Called before the removal, never after: the watcher's debounce is 150 ms and
+   * the claim has to be in place first. Bounded for the same reason
+   * `registry.markMaterialized` is — an echo that never arrives (the vault was
+   * closed, the write fell outside the watcher's window) would otherwise pin the
+   * entry forever.
+   */
+  suppressNext(relPath: string): void {
+    if (this.suppressed.size > 20_000) this.suppressed.clear();
+    this.suppressed.add(key(relPath));
+    // A window already open for this path is ours too: the revocation is the
+    // reason the file is gone, so there is nothing left to decide.
+    this.pending.delete(key(relPath));
   }
 
   private arm(): void {
@@ -386,5 +422,6 @@ export class BinaryDeleteQueue {
       this.timer = null;
     }
     this.pending.clear();
+    this.suppressed.clear();
   }
 }

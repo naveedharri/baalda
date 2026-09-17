@@ -239,3 +239,75 @@ describe("BinaryDeleteQueue", () => {
     expect(h.blobsDeleted).toEqual([]);
   });
 });
+
+describe("suppressNext — the revocation's claim on its own echo", () => {
+  it("ignores the watcher echo of a file the app removed itself", async () => {
+    // The inbound plan removes a revoked binary from disk. To this queue that is
+    // "gone from disk, still on the server" — the exact shape of a user delete —
+    // and answering it would `DELETE /api/files/:id`, destroying the OWNER's copy
+    // of a file they had only stopped sharing.
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Team/guide.pdf")],
+      onDisk: [],
+      fileIds: { "Team/guide.pdf": "file-1" },
+    });
+    h.queue.suppressNext("Team/guide.pdf");
+    h.queue.noteChanged("Team/guide.pdf");
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+    expect(h.forgotten).toEqual([]);
+  });
+
+  it("spends the claim on one echo — a later delete of the same path is real", async () => {
+    // Access restored, the file comes back down, the user deletes it themselves.
+    // The claim was for the removal, not for the path.
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Team/guide.pdf")],
+      onDisk: [],
+      fileIds: { "Team/guide.pdf": "file-1" },
+    });
+    h.queue.suppressNext("Team/guide.pdf");
+    h.queue.noteChanged("Team/guide.pdf");
+    await h.queue.drain();
+    h.queue.noteChanged("Team/guide.pdf");
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual(["file-1"]);
+  });
+
+  it("closes a window already open for the path", async () => {
+    // The watcher can beat the plan: a `tree` event lands, then the revocation
+    // removes the same file. The pending entry is ours now, not the user's.
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Team/guide.pdf")],
+      onDisk: [],
+      fileIds: { "Team/guide.pdf": "file-1" },
+    });
+    h.queue.noteChanged("Team/guide.pdf");
+    expect(h.queue.isPending("Team/guide.pdf")).toBe(true);
+    h.queue.suppressNext("Team/guide.pdf");
+    expect(h.queue.isPending("Team/guide.pdf")).toBe(false);
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual([]);
+  });
+
+  it("matches case-insensitively, like every other path in this queue", async () => {
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Team/Guide.pdf")],
+      onDisk: [],
+      fileIds: { "Team/Guide.pdf": "file-1" },
+    });
+    h.queue.suppressNext("team/guide.pdf");
+    h.queue.noteChanged("Team/Guide.pdf");
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual([]);
+  });
+});

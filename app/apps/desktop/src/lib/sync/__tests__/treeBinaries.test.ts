@@ -33,7 +33,7 @@ interface Log {
   attachmentWrites: string[];
   materialized: string[];
   texts: Array<{ blobId: string; docId: string | null | undefined; chars: number }>;
-  remembered: Array<{ relPath: string; id: string }>;
+  remembered: Array<{ relPath: string; id: string; authored: boolean }>;
 }
 
 /**
@@ -103,8 +103,8 @@ function makeVault(
       log.registered.push({ relPath, id });
       return id; // the server adopts the supplied id, like `createNote` does
     },
-    rememberFileId: (relPath, id) => {
-      log.remembered.push({ relPath, id });
+    rememberFileId: (relPath, id, opts) => {
+      log.remembered.push({ relPath, id, authored: opts?.authored === true });
     },
     fileText: async (relPath) => ({
       sha256: `sha-${relPath}`,
@@ -145,8 +145,13 @@ describe("tree binaries register as `files` rows", () => {
     // server row and the blob.
     expect(log.registered).toEqual([{ relPath: "Team/report.docx", id: "local-id-0" }]);
     expect(log.intents).toEqual([{ relPath: "Team/report.docx", docId: "local-id-0" }]);
-    // And it is remembered, so the next session pays no round trip for it.
-    expect(log.remembered).toEqual([{ relPath: "Team/report.docx", id: "local-id-0" }]);
+    // And it is remembered, so the next session pays no round trip for it —
+    // `authored`, because this is the UPLOAD path: these bytes are this user's,
+    // and that is the only authorship signal a binary has. It decides whether a
+    // later revocation leaves them a `.context/trash` copy or nothing at all.
+    expect(log.remembered).toEqual([
+      { relPath: "Team/report.docx", id: "local-id-0", authored: true },
+    ]);
   });
 
   it("never registers a file in the hidden `attachments/` store", async () => {
@@ -466,5 +471,37 @@ describe("tree binary path guard", () => {
     expect(isUnderAttachments("attachments")).toBe(true);
     expect(isUnderAttachments("Team/attachments/a.png")).toBe(false);
     expect(isUnderAttachments("Team/a.png")).toBe(false);
+  });
+});
+
+describe("a downloaded tree binary", () => {
+  it("records the server's files id, and never claims authorship for it", async () => {
+    // Two things at once. `ensureFileRow` only ever runs on the UPLOAD path, so
+    // a teammate's binary had no `files` id on this device at all — which meant
+    // the vault channel's `hello` could not announce it and a revocation of it
+    // could never be named. And the id it gets must NOT be marked authored:
+    // these are somebody else's bytes, so a revocation removes them outright
+    // rather than filing a readable copy in `.context/trash`.
+    const { sync, log } = makeVault([], {
+      listServer: async () => [
+        { id: "blob-1", sha256: "sha-remote", relPath: "Team/theirs.pdf", docId: "file-theirs" },
+        // The hidden root store keeps the old path heuristic and has no `files`
+        // row, so nothing is remembered for it.
+        { id: "blob-2", sha256: "sha-drop", relPath: "attachments/drop.png", docId: null },
+      ],
+      downloadUrl: async () => ({
+        url: "https://s3.test/get",
+        direct: true,
+        headers: {},
+        expiresAt: Date.now() + 60_000,
+      }),
+      fetchToFile: async () => ({ status: 200, bytes: 3 }),
+    });
+
+    await sync.reconcile();
+
+    expect(log.remembered).toEqual([
+      { relPath: "Team/theirs.pdf", id: "file-theirs", authored: false },
+    ]);
   });
 });

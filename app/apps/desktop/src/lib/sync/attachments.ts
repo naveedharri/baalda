@@ -80,6 +80,16 @@ export interface ServerBlob {
   relPath: string | null;
   size?: number;
   mime?: string | null;
+  /**
+   * The `files` row these bytes ARE (null for an `attachments/` drop).
+   *
+   * Recorded on download, which is the only way a teammate's binary gets a doc
+   * id on this device: `ensureFileRow` runs on the UPLOAD path, so a file this
+   * device merely received had no mapping at all — and an unmapped file is one
+   * the vault channel's `hello` cannot announce, so the server could never name
+   * it on `ready.revoked` and a revocation never reached it.
+   */
+  docId?: string | null;
 }
 
 export interface AttachmentDiff {
@@ -438,7 +448,7 @@ export interface AttachmentSyncDeps {
   /** Create (or adopt) the server `files` row and answer with its id. */
   registerFile?: (input: { relPath: string; id: string }) => Promise<string | null>;
   /** Remember a registered row for the next session. */
-  rememberFileId?: (relPath: string, id: string) => void;
+  rememberFileId?: (relPath: string, id: string, opts?: { authored?: boolean }) => void;
   /** The extracted text the INDEX holds for a path (`ipc.getFileText`). */
   fileText?: (
     relPath: string,
@@ -550,6 +560,25 @@ export class AttachmentSync {
     if (this.fileStates.get(relPath) === state) return;
     this.fileStates.set(relPath, state);
     this.publishFileStates();
+  }
+
+  /**
+   * This path is gone for good — forget everything cached about it.
+   *
+   * Called when a revoked tree binary is removed from disk (the inbound plan's
+   * binary pass). The next pass would rebuild most of this from the two listings
+   * anyway, but not all: `fileIds` and `permanentSkips` are session caches keyed
+   * by path, and a path that comes back later — access restored, or a file the
+   * user drops at the same name — must not adopt a `files` id it no longer has
+   * any claim to. The dot goes immediately rather than at the next pass, because
+   * the row it belongs to has just left the sidebar.
+   */
+  forgetFile(relPath: string): void {
+    this.fileIds.delete(relPath);
+    this.registerRefused.delete(relPath);
+    this.permanentSkips.delete(relPath);
+    this.localIds?.delete(relPath);
+    if (this.fileStates.delete(relPath)) this.publishFileStates();
   }
 
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
@@ -664,6 +693,13 @@ export class AttachmentSync {
       try {
         await this.downloadOne(b);
         downloaded++;
+        // Remember whose `files` row these bytes are. Not an optimisation: it is
+        // what puts a teammate's binary into the map the `hello` announces, and
+        // so what lets a later revocation of it be named and removed.
+        if (b.relPath && b.docId && !isUnderAttachments(b.relPath)) {
+          this.fileIds.set(b.relPath, b.docId);
+          this.deps.rememberFileId?.(b.relPath, b.docId);
+        }
         // It came FROM the server, so the server has it — and its row appears
         // in the sidebar on the watcher echo, before the next pass would say so.
         if (b.relPath) this.setFileState(b.relPath, "synced");
@@ -1019,7 +1055,10 @@ export class AttachmentSync {
       const id = await this.deps.registerFile({ relPath, id: localId });
       if (!id) return undefined;
       this.fileIds.set(relPath, id);
-      this.deps.rememberFileId?.(relPath, id);
+      // `authored`: this is the UPLOAD path, so these bytes are this user's.
+      // It is the only authorship signal a binary has, and it decides whether a
+      // later revocation leaves them a `.context/trash` copy or nothing.
+      this.deps.rememberFileId?.(relPath, id, { authored: true });
       return id;
     } catch (e) {
       const status = errStatus(e);

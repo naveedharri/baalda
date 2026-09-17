@@ -365,8 +365,16 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // doc comment) rather than reported as unreadable. No `deleted_at` filter:
     // a soft-deleted note does have a row, and it should reach the resolver,
     // which answers `none` for it through `locateDoc`.
+    //
+    // `files` as well as `notes`, and for the same reason `locateDoc` unions the
+    // two: a tree binary's id IS a doc id. Leaving it out made a revoked `.pdf`
+    // permanently UNANSWERED, which the desktop reads as "no second opinion" and
+    // so leaves the whole group on disk — the file stayed readable on the disk of
+    // someone who had just been shut out of it.
     const { rows } = await pool.query<{ id: string }>(
-      "SELECT id FROM notes WHERE vault_id = $1 AND id = ANY($2::text[])",
+      `SELECT id FROM notes WHERE vault_id = $1 AND id = ANY($2::text[])
+       UNION
+       SELECT id FROM files WHERE vault_id = $1 AND id = ANY($2::text[])`,
       [vaultId, ids],
     );
     const present = new Set(rows.map((r) => r.id));

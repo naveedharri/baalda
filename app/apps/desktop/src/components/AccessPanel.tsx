@@ -1211,9 +1211,10 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                   )}
                   . Not the team, not vault admins, and not you: add someone below by name to give
                   them access, yourself included.{" "}
-                  <strong>Your local files are untouched</strong> — this stops the{" "}
-                  {nounFor(selected.kind)} syncing and takes it out of every teammate's vault, but
-                  never deletes anything off a disk.
+                  <strong>It leaves every device that can no longer read it</strong> — yours
+                  included — on that device's next sync. Nothing on the server is deleted, and
+                  adding yourself back by name brings the {nounFor(selected.kind)} straight down
+                  again.
                 </div>
               )}
 

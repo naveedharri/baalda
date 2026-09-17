@@ -65,6 +65,33 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Fixed
+- **A file set to Private stayed on the disk of everyone who lost access
+  (desktop + server).** A note leaves via `ready.revoked` → the inbound plan;
+  a `files` row had no route at all, so a `.pdf` set to Private stopped syncing,
+  left every teammate's sidebar, and remained fully readable in any viewer on
+  their disk forever. Three gaps, all closed. `hello` now carries a `files`
+  array of tree-binary doc ids beside the state-vector `manifest` (a binary has
+  no CRDT, so it has no state vector to advertise), and
+  `revokedFromManifest` names them under the same `REVOKED_CAP`.
+  `POST /vaults/:id/access-check` unions `files` with `notes`, so a revoked
+  binary is ANSWERED rather than left out — an unanswered id reads as "no second
+  opinion", which kept the whole group on disk. And `planInbound` gained a
+  binary pass: a named binary is removed via Rust `delete_file`, or moved to
+  `.context/trash/<stamp>/` when this user uploaded it, then `forgetFileId`s its
+  mapping. (`files` has no `created_by` and the doc is absent from every listing
+  by the time the answer is needed, so authorship is learned where the row is
+  created — the blob mirror's upload path — and persisted beside the notes' in
+  `.context/config.json`; a DOWNLOADED binary is explicitly not claimed.) Deliberately narrower than a note's route — a binary has no listing to
+  be absent from, so it is never removed on absence and always owes the
+  access-check round trip, whatever the cap says; the note cap still counts notes
+  only, so binaries can never loosen it. The removal claims its own watcher echo
+  (`BinaryDeleteQueue.suppressNext`), or the delete queue would have read it as a
+  user delete and answered with `DELETE /api/files/:id`, destroying the owner's
+  copy. `GET /vaults/:id/blobs` already filtered the bytes out, so nothing
+  downloads back (pinned). The blob listing's `docId` is now recorded on
+  download too, which is what gives a teammate's binary a doc id on this device
+  and so lets a later revocation of it be named at all. The Access panel's
+  Private copy says what actually happens.
 - **Deleting a synced file brought it back (desktop + server).** Binary identity
   was the sha256 and nothing else, so a file removed from the vault — in the
   sidebar or in Finder — was, to `diffAttachments`, content the server had and

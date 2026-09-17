@@ -14,6 +14,16 @@ export interface HelloFrame {
   /** Recently-touched docIds to backfill first (spec 05 §4). */
   priority?: string[];
   /**
+   * doc ids of the `files` rows (tree binaries) this device holds on disk.
+   *
+   * Not in {@link manifest}, because a binary has no CRDT and so no state vector
+   * — there is nothing to diff and nothing to backfill. The one thing the server
+   * does with them is the `ready.revoked` set arithmetic: a `.pdf` set to Private
+   * has to leave this disk exactly as a note does, and the server can only name
+   * what we tell it we hold. They share the notes' `REVOKED_CAP`.
+   */
+  files?: string[];
+  /**
    * This app instance's id (`ApiClient.getClientId()`), the same value sent as
    * `x-baalda-origin` on registry writes. Lets the server skip telling us to
    * re-pull a structural change we made ourselves.
@@ -73,8 +83,9 @@ export type ServerControl =
       /** More than one frame would name (cap 2000). */
       behindTruncated?: boolean;
       /**
-       * Readable-no-longer docIds: docs OUR OWN manifest told the server we
-       * hold, which are not in our readable set any more. The server STATING a
+       * Readable-no-longer docIds: docs OUR OWN hello told the server we hold
+       * (the manifest's notes AND `files`' tree binaries), which are not in our
+       * readable set any more. The server STATING a
        * revocation instead of us inferring one from a short listing.
        *
        * This is what covers a revocation that happened while the app was shut.

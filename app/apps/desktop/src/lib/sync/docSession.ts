@@ -1221,6 +1221,41 @@ export class SyncManager implements InboundHost {
     for (const docId of docIds) this.serverRevoked.delete(docId);
   }
 
+  /**
+   * The inbound plan is about to remove a revoked TREE BINARY from disk.
+   *
+   * Claims the watcher echo for the delete queue, which otherwise reads "gone
+   * from disk, present on the server" as the user deleting the file and answers
+   * with `DELETE /api/files/:id` — destroying the owner's copy of something they
+   * only stopped sharing. See `BinaryDeleteQueue.suppressNext`.
+   */
+  suppressBinaryDelete(relPath: string): void {
+    this.binaryDeletes?.suppressNext(relPath);
+  }
+
+  /**
+   * A revoked tree binary has left this disk.
+   *
+   * The binary half of {@link noteRemoved}: no doc to drop, no CRDT rows to
+   * clear (a binary never entered the pipeline that would hold any), so all that
+   * is owed is the sidebar — the row's dot goes now, and the mirror re-reads
+   * both listings so nothing tries to download the file back. `registry`
+   * already forgot the `files` id, which is what takes it out of the next
+   * `hello` and stops the server naming it revoked forever.
+   */
+  fileRemoved(docId: string, path: string, trashedTo: string | null): void {
+    this.attachments?.forgetFile(path);
+    this.attachments?.scheduleReconcile();
+    this.note(
+      "warn",
+      "revoked",
+      trashedTo
+        ? `Access to ${path} was removed — a copy is in .context/trash`
+        : `Access to ${path} was removed — it was taken off this device`,
+      { docId, path },
+    );
+  }
+
   /** The signed-in user, for the inbound reconciler's author exemption. */
   localUserId(): string | null {
     return this.presence?.id ?? null;
@@ -1318,7 +1353,9 @@ export class SyncManager implements InboundHost {
     this.note(
       "warn",
       "revoked",
-      `Access to ${docIds.length} ${docIds.length === 1 ? "note" : "notes"} was removed`,
+      // "item", not "note": the list carries tree binaries too now, and a PDF
+      // reported as a note is the kind of small lie that costs a support round.
+      `Access to ${docIds.length} ${docIds.length === 1 ? "item" : "items"} was removed`,
     );
     this.handleRegistryChanged("acl-revoked");
   }
@@ -3349,6 +3386,11 @@ export class SyncManager implements InboundHost {
       // The live half of the same statement: `refreshAcl` names each lost doc
       // with a `drop` just before the `reauth`, so both paths carry a list.
       onServerDrop: (docId) => this.handleServerDrop(docId, scope),
+      // The tree binaries this device holds. Not in the manifest — a binary has
+      // no CRDT and so no state vector — but announced all the same, because
+      // `ready.revoked` can only name what we say we hold, and a `.pdf` set to
+      // Private has to leave this disk exactly as a note does.
+      fileDocIds: () => this.registry.fileDocIds(),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).
@@ -3522,7 +3564,7 @@ export class SyncManager implements InboundHost {
         // holds without this side having to guess.
         return row.docId ?? row.id ?? null;
       },
-      rememberFileId: (relPath, id) => this.registry.setFileId(relPath, id),
+      rememberFileId: (relPath, id, opts) => this.registry.setFileId(relPath, id, opts),
       // Extracted text: Rust already pulled the words out for local search, so
       // the server gets a copy as ranking fuel rather than re-parsing the file.
       fileText: (relPath) => ipc.getFileText(relPath),
