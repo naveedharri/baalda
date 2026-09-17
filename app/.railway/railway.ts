@@ -46,6 +46,10 @@ const SERVER_ENV = [
   "MAX_NOTE_MB",
   "MAX_BLOB_BYTES",
   "MAX_INFLIGHT_UPLOAD_BYTES",
+  // Attachment storage adapter: provider for new blobs, and how strictly the
+  // upload route enforces the MIME allow-list.
+  "BLOB_STORAGE",
+  "BLOB_MIME_ENFORCE",
   "BACKFILL_CONCURRENCY",
   "VERSION_IDLE_MS",
   "VAULT_SYNC_PATH",

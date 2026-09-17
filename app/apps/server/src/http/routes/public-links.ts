@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { pool } from "../../db/pool.js";
@@ -9,6 +10,13 @@ import { effectivePermission } from "../../permissions/resolver.js";
 import { getSession } from "../session.js";
 import { renderNoteHtml } from "../../render/note-html.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
+import {
+  NEVER_INLINE_MIME,
+  SAFE_INLINE_MIME,
+  isAllowedMime,
+  normalizeMime,
+} from "../../blobs/formats.js";
+import { resolveStoreForRow, storageKeyForRow } from "../../blobs/store.js";
 
 /**
  * Public note links — the "anyone with the link can view" sibling of the
@@ -334,14 +342,34 @@ function noteTitle(row: PublicNoteRow): string {
   return stem.replace(/\.md$/i, "");
 }
 
-/** Passive image types only — never SVG (active content). */
-const IMAGE_MIME_ALLOWLIST = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/avif",
-]);
+/**
+ * Headers for an ASSET response (not the HTML page).
+ *
+ * The page's CSP is about what the page may load; this one is about what the
+ * asset may DO if a browser ever treats it as a document: `default-src 'none'`
+ * plus `sandbox` (no origin, no scripts, no forms) means even a file that slips
+ * past the type checks below executes nothing. `nosniff` comes from
+ * PAGE_HEADERS and is what stops the browser second-guessing the Content-Type
+ * we set.
+ */
+const ASSET_HEADERS: Record<string, string> = {
+  ...PAGE_HEADERS,
+  "Content-Security-Policy": "default-src 'none'; sandbox",
+};
+
+/** `bytes=<start>-<end?>`, the only form worth honouring here. Anything else
+ *  (multi-range, suffix ranges) is ignored and the whole object is served. */
+function parseRange(header: string | undefined): { start: number; end?: number } | null {
+  if (!header) return null;
+  const m = /^bytes=(\d+)-(\d+)?$/.exec(header.trim());
+  if (!m) return null;
+  const start = Number(m[1]);
+  const end = m[2] === undefined ? undefined : Number(m[2]);
+  if (!Number.isFinite(start) || (end !== undefined && (!Number.isFinite(end) || end < start))) {
+    return null;
+  }
+  return end === undefined ? { start } : { start, end };
+}
 
 export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
   const app = new Hono();
@@ -402,26 +430,61 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
     const md = await deps.docWriter.peekContent(row.vault_id, row.doc_id);
     if (!md || !md.includes(relPath)) return miss(c);
 
-    const { rows } = await pool.query<{ id: string; mime: string | null }>(
-      "SELECT id, mime FROM blobs WHERE vault_id = $1 AND rel_path = $2",
+    const { rows } = await pool.query<{
+      id: string;
+      mime: string | null;
+      storage_provider: string | null;
+      storage_key: string | null;
+    }>(
+      `SELECT id, mime, storage_provider, storage_key
+         FROM blobs
+        WHERE vault_id = $1 AND rel_path = $2 AND status = 'ready'`,
       [row.vault_id, relPath],
     );
     const blob = rows[0];
-    // The stored mime is uploader-controlled: only passive image types render.
-    if (!blob || !blob.mime || !IMAGE_MIME_ALLOWLIST.has(blob.mime)) return miss(c);
+    if (!blob) return miss(c);
 
-    const { rows: dataRows } = await pool.query<{ data: Buffer | null }>(
-      "SELECT data FROM blobs WHERE id = $1",
-      [blob.id],
-    );
-    const data = dataRows[0]?.data;
-    if (!data) return miss(c);
-    return c.body(data, 200, {
-      ...PAGE_HEADERS,
-      "Content-Type": blob.mime,
-      "Content-Length": String(data.byteLength),
-      "Content-Disposition": "inline",
-    });
+    // The stored mime is uploader-controlled, so it decides only HOW the bytes
+    // are served, never whether they are trusted:
+    //   · SAFE_INLINE_MIME — passive media (images, PDF, audio, video) — renders
+    //     inline with its real type, which is what makes a shared note show its
+    //     screenshots and play its clips.
+    //   · svg / html — ACTIVE documents. Not served at all, inline or otherwise;
+    //     an attachment disposition would still leave a one-click path to
+    //     executing uploader-authored script on this origin.
+    //   · anything else on the allow-list (docx, zip, csv, …) downloads as
+    //     octet-stream, so the browser never picks a handler off our say-so.
+    //   · anything not on the allow-list is a miss, as before.
+    const mime = normalizeMime(blob.mime);
+    if (mime === "" || NEVER_INLINE_MIME.has(mime) || !isAllowedMime(mime)) return miss(c);
+    const inline = SAFE_INLINE_MIME.has(mime);
+
+    try {
+      const store = await resolveStoreForRow(blob);
+      const range = parseRange(c.req.header("range"));
+      const result = await store.get(storageKeyForRow(blob), range ? { range } : {});
+      if (result.kind === "redirect") return c.redirect(result.url, 302);
+      const headers: Record<string, string> = {
+        ...ASSET_HEADERS,
+        "Content-Type": inline ? mime : "application/octet-stream",
+        "Content-Length": String(result.size),
+        "Content-Disposition": inline ? "inline" : "attachment",
+        // Postgres has to materialize the whole value to reach any byte of it,
+        // so it answers `none` and the browser asks for the lot.
+        "Accept-Ranges": result.acceptRanges ? "bytes" : "none",
+      };
+      if (result.range) {
+        headers["Content-Range"] =
+          `bytes ${result.range.start}-${result.range.end}/${result.totalSize}`;
+        return c.body(Readable.toWeb(result.body) as ReadableStream, 206, headers);
+      }
+      return c.body(Readable.toWeb(result.body) as ReadableStream, 200, headers);
+    } catch {
+      // A blob whose bytes are gone, or whose provider this build cannot reach,
+      // is indistinguishable from a link that never existed — same generic miss
+      // the rest of this route uses, so nothing is confirmed either way.
+      return miss(c);
+    }
   });
 
   return app;

@@ -125,6 +125,9 @@ export function createApp(deps: AppDeps): Hono {
         "Authorization",
         "x-file-name",
         "x-rel-path",
+        // Content hash a client declares before an attachment upload, so known
+        // content is deduped without sending a byte.
+        "x-sha256",
         // Opaque per-client instance id on registry writes, so the vault channel
         // doesn't tell a client to re-pull its own structural change.
         ORIGIN_HEADER,
