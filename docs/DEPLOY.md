@@ -354,6 +354,7 @@ confirm `/health` and a real sync round-trip, then promote.
 | `S3_REGION` | no | `us-east-1` | AWS region. Cloudflare R2 wants `auto`. |
 | `S3_ENDPOINT` | no | unset | Unset ⇒ real AWS S3. R2: `https://<account-id>.r2.cloudflarestorage.com`. MinIO: your host. |
 | `S3_FORCE_PATH_STYLE` | no | `false` | `true` for MinIO and anything else without bucket-per-subdomain DNS. |
+| `S3_KEY_PREFIX` | no | unset | Path prefix for NEW object keys (`<prefix>/vaults/<vaultId>/<sha256>`), so two deployments can share one bucket. Leading/trailing slashes are stripped; `..` is a fatal startup error. Rows store the full key, so changing it never strands existing objects. |
 | `S3_PRESIGN_UPLOAD_TTL_SECONDS` | no | `900` | Lifetime of an upload URL. Also the lifetime of the Postgres provider's signed same-origin PUT. |
 | `S3_PRESIGN_DOWNLOAD_TTL_SECONDS` | no | `300` | Lifetime of a download URL. |
 | `S3_PROXY_DOWNLOADS` | no | `false` | `true` streams downloads through this server instead of redirecting to the bucket. Needed when clients cannot reach the bucket (a MinIO on a private subnet); costs egress twice. |
@@ -430,6 +431,11 @@ plus the endpoint bits for your provider:
 | **AWS S3** | Leave `S3_ENDPOINT` unset; set `S3_REGION` to the bucket's real region. |
 | **Cloudflare R2** | `S3_REGION=auto`, `S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com` |
 | **MinIO** | `S3_ENDPOINT=https://your-minio-host`, `S3_FORCE_PATH_STYLE=true` |
+
+Two deployments (staging and production, say) can share one bucket by giving
+each a different `S3_KEY_PREFIX` — set `S3_KEY_PREFIX=staging` on the staging
+server and leave it empty in production, and neither one's keys can land on the
+other's.
 
 The server **fails closed**: `BLOB_STORAGE=s3` with any of the three required
 vars missing is a fatal startup error naming what is absent, not a silent

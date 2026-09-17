@@ -19,6 +19,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   type, so nothing about the wire changed. The local-tree fallback emits a file
   row only for a path this device has registered (no `files` id, no share to
   name), and a hidden root `attachments/` blob has no row at all.
+- **`S3_KEY_PREFIX` (server, operator-only).** Optional prefix on every NEW blob object
+  key (`<prefix>/vaults/<vaultId>/<sha256>`), so staging and production can share one
+  bucket. Slashes are stripped, `..` is refused at startup, and rows keep storing the
+  full key — reads, deletes, GC and `migrate-blobs` still resolve objects written under
+  any earlier prefix.
 - **Tree binaries sync (desktop, Stage A).** `list_binaries` walks the whole vault for
   registry binary formats (not only `attachments/`), sharing the `attachment_hashes`
   cache; each tree binary is registered as a server `files` row via `POST /api/files`

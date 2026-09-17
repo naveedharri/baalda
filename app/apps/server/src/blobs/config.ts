@@ -145,6 +145,33 @@ export interface S3Config {
   multipartPartBytes: number;
 }
 
+/**
+ * `S3_KEY_PREFIX`, normalised: a bare path segment chain with no leading or
+ * trailing slash, no empty segments, and no traversal. Empty (the default, and
+ * what production runs with) ⇒ keys keep their historical `vaults/...` shape.
+ *
+ * `..` is REJECTED rather than resolved because a prefix is configuration, not
+ * input — an operator who typed one means something we cannot guess, and a key
+ * that climbs out of its own namespace is exactly the mistake this setting
+ * exists to prevent. Same fail-closed reflex as {@link readStorage}.
+ *
+ * Read on every call, like {@link s3Config}: it is cheap, and a function is
+ * what lets a test set a prefix without reloading the module graph.
+ */
+export function s3KeyPrefix(): string {
+  const raw = process.env.S3_KEY_PREFIX ?? "";
+  const segments = raw.trim().split("/").filter((segment) => segment !== "");
+  for (const segment of segments) {
+    if (segment === "." || segment === "..") {
+      throw new Error(
+        `S3_KEY_PREFIX must not contain \`${segment}\` (got \`${raw}\`). It is a plain key ` +
+          "prefix such as `staging`, not a relative path.",
+      );
+    }
+  }
+  return segments.join("/");
+}
+
 /** S3 vars that have no sensible default — all of them, or no S3. */
 const S3_REQUIRED = ["S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"] as const;
 
@@ -247,6 +274,9 @@ function readStorage(): BlobProvider {
           "to keep attachments in Postgres. Refusing to start rather than silently storing bytes in the database.",
       );
     }
+    // Fail here rather than on the first upload: a bad prefix is a typo in a
+    // deploy's env, and the place to find out is the deploy.
+    s3KeyPrefix();
     return "s3";
   }
   throw new Error(
