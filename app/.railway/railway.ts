@@ -46,6 +46,28 @@ const SERVER_ENV = [
   "MAX_NOTE_MB",
   "MAX_BLOB_BYTES",
   "MAX_INFLIGHT_UPLOAD_BYTES",
+  // Attachment storage adapter: provider for new blobs, how strictly the upload
+  // route enforces the MIME allow-list, and how long an abandoned upload holds
+  // its dedupe slot.
+  "BLOB_STORAGE",
+  "BLOB_MIME_ENFORCE",
+  "BLOB_PENDING_TTL_MINUTES",
+  // S3/R2/MinIO, read only when BLOB_STORAGE=s3. Every one of these must be
+  // listed: `railway config apply` DELETES a variable the IaC does not name,
+  // so an omission here silently unconfigures the bucket on the next apply.
+  "S3_BUCKET",
+  "S3_REGION",
+  "S3_ENDPOINT",
+  "S3_ACCESS_KEY_ID",
+  "S3_SECRET_ACCESS_KEY",
+  "S3_FORCE_PATH_STYLE",
+  "S3_PRESIGN_UPLOAD_TTL_SECONDS",
+  "S3_PRESIGN_DOWNLOAD_TTL_SECONDS",
+  "S3_PROXY_DOWNLOADS",
+  "S3_CHECKSUM_MODE",
+  "S3_MULTIPART_THRESHOLD_BYTES",
+  "S3_MULTIPART_PART_BYTES",
+  "MAX_BLOB_BYTES_DIRECT",
   "BACKFILL_CONCURRENCY",
   "VERSION_IDLE_MS",
   "VAULT_SYNC_PATH",

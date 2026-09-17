@@ -8,6 +8,7 @@ import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
 import { setMemberJoinedPublisher } from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
+import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
@@ -126,9 +127,16 @@ async function main() {
     .then((n) => n > 0 && console.log(`Indexer: backfilled ${n} note(s).`))
     .catch((err) => console.error("Indexer backfill failed:", err));
 
+  // Abandoned attachment uploads: a `pending` blob row holds its content's
+  // dedupe slot, so leaving them around would make a later upload of the same
+  // bytes adopt an upload that never finished. Always on, `unref`ed, and
+  // serialized across instances by an advisory lock.
+  startBlobGc();
+
   const shutdown = async () => {
     console.log("Shutting down…");
     versionCapture?.stop();
+    stopBlobGc();
     syncWss.close();
     vaultWss.close();
     await pubsub.close();
