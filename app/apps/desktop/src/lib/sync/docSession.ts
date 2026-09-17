@@ -3370,11 +3370,46 @@ export class SyncManager implements InboundHost {
       readLocal: (relPath) => ipc.readBinaryFile(relPath, epoch),
       writeLocal: (relPath, bytes) => ipc.writeBinaryFile(relPath, bytes, epoch),
       listServer: () => api.listVaultBlobs(vaultId),
+      // The legacy pair: still the whole flow for a server that predates the
+      // intent route, and the fallback the client drops to on its 404.
       uploadServer: (relPath, bytes, mime) =>
         api
           .uploadBlob({ vaultId, relPath, bytes, mime, fileName: baseName(relPath) })
           .then(() => undefined),
       downloadServer: (id) => api.downloadBlob(id),
+      // intent → PUT → complete. Bytes go through Rust (epoch-pinned, streamed
+      // from/to disk); the webview `fetch` pair behind it is only reached when
+      // the invoke bridge says the command isn't there.
+      createIntent: (input) =>
+        api.createBlobIntent(vaultId, {
+          sha256: input.sha256,
+          size: input.size,
+          mime: input.mime,
+          relPath: input.relPath,
+          filename: input.filename,
+        }),
+      completeUpload: (completeUrl, body) =>
+        api.completeBlob(completeUrl, body).then(() => undefined),
+      requestParts: (partsUrl, partNumbers) => api.requestBlobParts(partsUrl, partNumbers),
+      putFile: (input) =>
+        ipc.uploadAttachment(
+          {
+            relPath: input.relPath,
+            url: input.url,
+            method: input.method,
+            headers: input.headers,
+            range: input.range,
+          },
+          epoch,
+        ),
+      putBytes: (input) => api.uploadBytesTo(input),
+      downloadUrl: (blobId) => api.blobDownloadUrl(blobId),
+      fetchToFile: (input) => ipc.downloadAttachment(input, epoch),
+      fetchBytes: (url, headers) => api.downloadBytesFrom(url, headers),
+      // Only ever applied to a download URL the SERVER serves; a presigned one
+      // is fetched clean (see `sync/attachments.ts`).
+      authHeaders: () => api.authHeaders(),
+      notify: (text, tone) => toast(text, tone ?? "error"),
     });
   }
 

@@ -4,10 +4,15 @@
 //! pipeline — this module only reads/writes raw bytes and lists metadata.
 
 use crate::error::{AppError, AppResult};
+use crate::notefile::sha256_file;
 use crate::vault::{is_ignored_name, resolve_in_vault};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Metadata for one attachment file (vault-relative), used by the sync diff.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,21 +123,95 @@ pub fn write_binary_file(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()>
     Ok(())
 }
 
-/// List every file under the vault's `attachments/` dir (recursively), skipping
-/// dotfiles/dotfolders. Returns an empty list if the dir is absent.
-pub fn list_attachments(vault: &Path) -> AppResult<Vec<AttachmentMeta>> {
-    let root = vault.join("attachments");
-    let mut out = Vec::new();
-    if !root.is_dir() {
-        return Ok(out);
-    }
-    walk(vault, &root, &mut out)?;
-    // Deterministic order (stable diffs, stable tests).
-    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    Ok(out)
+/// One cached hash: what a file looked like the last time we hashed it.
+///
+/// `(size, mtime_ns)` is the validity key — the same pair the `files` table
+/// uses to decide a note/binary is unchanged. Not a perfect change detector in
+/// theory (a same-size write inside one filesystem timestamp tick), but the
+/// files under `attachments/` are content-addressed and never edited in place,
+/// so in practice a changed file is a NEW path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashEntry {
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub sha256: String,
 }
 
-fn walk(vault: &Path, dir: &Path, out: &mut Vec<AttachmentMeta>) -> AppResult<()> {
+/// What one `attachments/` walk produced.
+pub struct AttachmentListing {
+    /// The listing itself, sorted by path.
+    pub items: Vec<AttachmentMeta>,
+    /// The cache as it should now be persisted: exactly the files that exist,
+    /// so writing it back is also the prune.
+    pub cache: HashMap<String, HashEntry>,
+    /// How many files actually had to be read+hashed this pass (0 = all cached).
+    pub hashed: usize,
+    /// Whether `cache` differs from what was passed in (nothing to write if not).
+    pub changed: bool,
+}
+
+/// List every file under the vault's `attachments/` dir (recursively), skipping
+/// dotfiles/dotfolders. Returns an empty list if the dir is absent.
+///
+/// Uncached: hashes every file. Kept for callers (and tests) that have no index
+/// to cache into — {@link list_attachments_cached} is what the sync path uses.
+pub fn list_attachments(vault: &Path) -> AppResult<Vec<AttachmentMeta>> {
+    Ok(list_attachments_cached(vault, &HashMap::new())?.items)
+}
+
+/// The same walk, but reusing a previously-computed sha256 whenever the file's
+/// `(size, mtime)` is unchanged.
+///
+/// This is the difference between an attachment reconcile that costs a `stat`
+/// per file and one that re-reads every byte in `attachments/` — which the
+/// watcher can fire every few seconds, and which on a vault holding a few
+/// hundred megabytes of images and video is seconds of disk I/O for an answer
+/// that never changes. Files that DO need hashing are streamed
+/// (`notefile::sha256_file`), so a 500 MB video costs a 64 KB buffer rather
+/// than a 500 MB allocation.
+pub fn list_attachments_cached(
+    vault: &Path,
+    cached: &HashMap<String, HashEntry>,
+) -> AppResult<AttachmentListing> {
+    let root = vault.join("attachments");
+    let mut found: Vec<(String, PathBuf, u64, i64)> = Vec::new();
+    if root.is_dir() {
+        walk(vault, &root, &mut found)?;
+    }
+    // Deterministic order (stable diffs, stable tests).
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut items = Vec::with_capacity(found.len());
+    let mut cache: HashMap<String, HashEntry> = HashMap::with_capacity(found.len());
+    let mut hashed = 0usize;
+    for (rel, abs, size, mtime_ns) in found {
+        let hit = cached
+            .get(&rel)
+            .filter(|e| e.size == size && e.mtime_ns == mtime_ns)
+            .map(|e| e.sha256.clone());
+        let sha = match hit {
+            Some(sha) => sha,
+            None => {
+                hashed += 1;
+                sha256_file(&abs)?
+            }
+        };
+        cache.insert(
+            rel.clone(),
+            HashEntry { size, mtime_ns, sha256: sha.clone() },
+        );
+        items.push(AttachmentMeta { rel_path: rel, size, sha256: sha });
+    }
+    // A prune is just "the new map has fewer/other keys", so one comparison
+    // covers both a vanished file and a re-hashed one.
+    let changed = cache != *cached;
+    Ok(AttachmentListing { items, cache, hashed, changed })
+}
+
+/// Collect `(rel_path, abs, size, mtime_ns)` for every non-ignored file under
+/// `dir`. Deliberately reads no contents — hashing is the caller's decision,
+/// because the cache may already know the answer.
+fn walk(vault: &Path, dir: &Path, out: &mut Vec<(String, PathBuf, u64, i64)>) -> AppResult<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
@@ -144,15 +223,23 @@ fn walk(vault: &Path, dir: &Path, out: &mut Vec<AttachmentMeta>) -> AppResult<()
         if file_type.is_dir() {
             walk(vault, &path, out)?;
         } else if file_type.is_file() {
-            let bytes = std::fs::read(&path)?;
-            out.push(AttachmentMeta {
-                rel_path: rel_from(vault, &path),
-                size: bytes.len() as u64,
-                sha256: sha256_bytes(&bytes),
-            });
+            let meta = entry.metadata()?;
+            out.push((rel_from(vault, &path), path, meta.len(), mtime_ns(&meta)));
         }
     }
     Ok(())
+}
+
+/// A file's mtime in nanoseconds since the Unix epoch, or 0 when the OS won't
+/// say. Nanoseconds (not the millis `file_stat` reports) because this is a
+/// change DETECTOR: a rewrite inside the same millisecond is exactly the case
+/// a coarser stamp misses.
+fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
 }
 
 /// Vault-relative forward-slash path of `abs` under `root`.
@@ -165,9 +252,278 @@ fn rel_from(root: &Path, abs: &Path) -> String {
         .join("/")
 }
 
+// ---- Transport: bytes move through Rust, not the webview -------------------
+//
+// The webview can PUT to a presigned URL, but every part of doing so is worse:
+// the bucket then needs CORS for a `tauri://localhost` Origin, the CSP's
+// `connect-src` has to permit whatever plain-http MinIO a self-hoster runs, and
+// a 500 MB video has to exist in the JS heap first. These two commands stream
+// straight from/to disk instead. `lib/api.ts` keeps a webview fallback for the
+// cases where an invoke is not available.
+//
+// AUTH IS THE CALLER'S BUSINESS, deliberately. Upload URLs carry their own
+// credential — an S3 signature, or our own route's `?t=` upload token — and S3
+// REJECTS a request that presents both a presign and an `Authorization` header,
+// so nothing here adds one. The only headers sent are the ones passed in.
+
+/// How long a connection gets to be established before we give up.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling on ONE transfer. Generous because the whole point is large files on
+/// slow links (500 MB over a hotel wifi is not a pathology), but bounded: a
+/// stalled socket must not hold a reconcile open forever.
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Cap on how much of a failed response we quote back to the TS layer.
+const ERROR_BODY_MAX: usize = 2048;
+
+/// One shared client, built once.
+///
+/// `redirect(none)` is a SECURITY setting, not a preference: reqwest forwards
+/// `Authorization` across a redirect, and `GET /api/blobs/:id` answers 302 to a
+/// presigned S3 URL — which rejects a request carrying both a signature and a
+/// bearer. The desktop therefore asks `GET /api/blobs/:id/url` for the target
+/// and fetches THAT; a 3xx arriving here is a bug or a hostile server, and is
+/// surfaced as the status rather than followed.
+static HTTP: Lazy<Result<reqwest::Client, String>> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(TRANSFER_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())
+});
+
+fn client() -> AppResult<reqwest::Client> {
+    match HTTP.as_ref() {
+        Ok(c) => Ok(c.clone()),
+        Err(e) => Err(AppError::new(format!("HTTP client unavailable: {e}"))),
+    }
+}
+
+/// Half-open byte range `[start, end)` of the file to send — one multipart part.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// What an upload PUT answered. The STATUS is returned rather than turned into
+/// an error because the TS flow branches on it (an expired presign is a 403 to
+/// re-mint, a 409 is "retry the PUT", a 5xx is "next pass").
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadOutcome {
+    pub status: u16,
+    /// S3's part receipt; `complete` replays it back. Absent on our own route.
+    pub etag: Option<String>,
+    /// A truncated body, only when the status was not 2xx.
+    pub error: Option<String>,
+}
+
+/// What a download wrote. `bytes` is what landed on disk; `sha256` is what it
+/// hashes to, already checked against the expected value when one was given.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadOutcome {
+    pub status: u16,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// Turn a plain string map into request headers, refusing anything malformed
+/// rather than silently dropping it — a presign that loses its `content-length`
+/// fails in a much more confusing place.
+fn header_map(headers: &HashMap<String, String>) -> AppResult<reqwest::header::HeaderMap> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let mut out = HeaderMap::with_capacity(headers.len());
+    for (k, v) in headers {
+        let name = HeaderName::from_bytes(k.as_bytes())
+            .map_err(|_| AppError::new(format!("invalid header name: {k}")))?;
+        let value = HeaderValue::from_str(v)
+            .map_err(|_| AppError::new(format!("invalid value for header {k}")))?;
+        out.insert(name, value);
+    }
+    Ok(out)
+}
+
+fn method_of(method: &str) -> AppResult<reqwest::Method> {
+    reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| AppError::new(format!("invalid HTTP method: {method}")))
+}
+
+/// Stream a vault file (or one byte range of it) to `url`.
+///
+/// READ scope is the whole vault, like `read_binary_file` — the sync layer only
+/// ever passes `attachments/…`, but an imported binary living in a note folder
+/// is a legitimate upload source. `resolve_in_vault` is still what bounds it.
+///
+/// The body is a `ReaderStream`, so the file is read in chunks as the socket
+/// drains. `content-length` comes from the caller's headers (the presign SIGNS
+/// it), which is also what keeps hyper from falling back to chunked encoding —
+/// S3 rejects a chunked presigned PUT.
+pub async fn upload_file(
+    vault: &Path,
+    rel: &str,
+    url: &str,
+    method: &str,
+    headers: &HashMap<String, String>,
+    range: Option<ByteRange>,
+) -> AppResult<UploadOutcome> {
+    let abs = resolve_in_vault(vault, rel)?;
+    let meta = std::fs::metadata(&abs)?;
+    if !meta.is_file() {
+        return Err(AppError::new("not a file"));
+    }
+    let (start, len) = match range {
+        Some(r) => {
+            if r.end < r.start || r.end > meta.len() {
+                return Err(AppError::new(format!(
+                    "range {}..{} is outside {rel} ({} bytes)",
+                    r.start,
+                    r.end,
+                    meta.len()
+                )));
+            }
+            (r.start, r.end - r.start)
+        }
+        None => (0, meta.len()),
+    };
+
+    let mut file = tokio::fs::File::open(&abs).await?;
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+    }
+    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file.take(len)));
+
+    let mut req = client()?
+        .request(method_of(method)?, url)
+        .headers(header_map(headers)?)
+        .body(body);
+    // Belt and braces: if the server's presign did not name a length, supply
+    // the one we are actually sending so the request never goes out chunked.
+    if !headers.keys().any(|k| k.eq_ignore_ascii_case("content-length")) {
+        req = req.header(reqwest::header::CONTENT_LENGTH, len);
+    }
+
+    let res = req
+        .send()
+        .await
+        .map_err(|e| AppError::new(format!("upload failed: {e}")))?;
+    let status = res.status().as_u16();
+    let etag = res
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let error = if (200..300).contains(&status) {
+        None
+    } else {
+        let mut body = res.text().await.unwrap_or_default();
+        body.truncate(ERROR_BODY_MAX);
+        Some(body)
+    };
+    Ok(UploadOutcome { status, etag, error })
+}
+
+/// Stream `url` into a vault-relative attachment path, atomically.
+///
+/// WRITE scope is `attachments/` only (`ensure_attachment_rel`): the path comes
+/// from the server, so a member who set a blob's `rel_path` to `.context/…` or
+/// to a note must not be able to make every teammate's client overwrite it.
+///
+/// Bytes land in `.<name>.tmp` beside the target and are hashed as they are
+/// written; the rename only happens once the digest matches `expected_sha256`.
+/// A mismatch (or any non-2xx) deletes the temp file and fails — half a file
+/// under the real name would look like a valid attachment to the next diff.
+pub async fn download_file(
+    vault: &Path,
+    rel: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    expected_sha256: Option<&str>,
+) -> AppResult<DownloadOutcome> {
+    ensure_attachment_rel(rel)?;
+    let abs = resolve_in_vault(vault, rel)?;
+    let parent = abs
+        .parent()
+        .ok_or_else(|| AppError::new("attachment has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = abs
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| AppError::new("invalid file name"))?;
+    let tmp = parent.join(format!(".{file_name}.tmp"));
+
+    let mut res = client()?
+        .get(url)
+        .headers(header_map(headers)?)
+        .send()
+        .await
+        .map_err(|e| AppError::new(format!("download failed: {e}")))?;
+    let status = res.status().as_u16();
+    if !(200..300).contains(&status) {
+        let mut body = res.text().await.unwrap_or_default();
+        body.truncate(ERROR_BODY_MAX);
+        // A 3xx lands here too: see `HTTP`'s redirect policy for why we refuse
+        // to follow one rather than leak the bearer to a presigned host.
+        return Err(AppError::new(format!("download failed: HTTP {status} {body}")));
+    }
+
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    let mut hasher = Sha256::new();
+    let mut written: u64 = 0;
+    let outcome: AppResult<()> = async {
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|e| AppError::new(format!("download failed: {e}")))?
+        {
+            hasher.update(&chunk);
+            written += chunk.len() as u64;
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        Ok(())
+    }
+    .await;
+    drop(file);
+    if let Err(e) = outcome {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(64);
+    for b in digest {
+        sha256.push_str(&format!("{b:02x}"));
+    }
+    if let Some(expected) = expected_sha256 {
+        if !expected.is_empty() && !expected.eq_ignore_ascii_case(&sha256) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(AppError::new(format!(
+                "downloaded bytes hash to {sha256}, expected {expected}"
+            )));
+        }
+    }
+    std::fs::rename(&tmp, &abs)?;
+    Ok(DownloadOutcome { status, bytes: written, sha256 })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run one future to completion. A hand-rolled `#[tokio::test]`, so the
+    /// test build does not pull a proc-macro crate for two async cases.
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
 
     #[test]
     fn write_read_roundtrip_is_byte_identical() {
@@ -235,6 +591,142 @@ mod tests {
         assert!(file_stat(tmp.path(), "/etc/passwd").is_err());
         assert!(file_stat(tmp.path(), "attachments").is_err());
         assert!(file_stat(tmp.path(), "attachments/missing.png").is_err());
+    }
+
+    /// Walk once, then walk again with the cache the first walk produced —
+    /// with a DELIBERATELY WRONG sha in it. Getting the wrong sha back proves
+    /// the second walk trusted the cache instead of re-reading the file.
+    #[test]
+    fn cached_hash_is_reused_when_size_and_mtime_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/a.png", &[1, 2, 3]).unwrap();
+
+        let first = list_attachments_cached(tmp.path(), &HashMap::new()).unwrap();
+        assert_eq!(first.hashed, 1);
+        assert!(first.changed);
+
+        let mut poisoned = first.cache.clone();
+        poisoned.get_mut("attachments/a.png").unwrap().sha256 = "cafebabe".into();
+        let second = list_attachments_cached(tmp.path(), &poisoned).unwrap();
+        assert_eq!(second.hashed, 0, "unchanged file must not be re-hashed");
+        assert_eq!(second.items[0].sha256, "cafebabe");
+
+        // A clean second pass agrees with the first and has nothing to write.
+        let third = list_attachments_cached(tmp.path(), &first.cache).unwrap();
+        assert_eq!(third.hashed, 0);
+        assert!(!third.changed);
+        assert_eq!(third.items[0].sha256, first.items[0].sha256);
+    }
+
+    #[test]
+    fn a_changed_file_is_re_hashed() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/a.png", &[1, 2, 3]).unwrap();
+        let first = list_attachments_cached(tmp.path(), &HashMap::new()).unwrap();
+
+        // Same path, different bytes AND a different mtime — the pair is the
+        // validity key, and a rewrite moves both.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_binary_file(tmp.path(), "attachments/a.png", &[9, 9, 9, 9]).unwrap();
+        let second = list_attachments_cached(tmp.path(), &first.cache).unwrap();
+        assert_eq!(second.hashed, 1);
+        assert!(second.changed);
+        assert_eq!(second.items[0].sha256, sha256_bytes(&[9, 9, 9, 9]));
+    }
+
+    #[test]
+    fn cache_prunes_paths_that_vanished() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/a.png", &[1]).unwrap();
+        write_binary_file(tmp.path(), "attachments/b.pdf", &[2]).unwrap();
+        let first = list_attachments_cached(tmp.path(), &HashMap::new()).unwrap();
+        assert_eq!(first.cache.len(), 2);
+
+        std::fs::remove_file(tmp.path().join("attachments/b.pdf")).unwrap();
+        let second = list_attachments_cached(tmp.path(), &first.cache).unwrap();
+        assert!(second.changed);
+        assert_eq!(second.items.len(), 1);
+        // The map handed back IS the new cache, so writing it back is the prune.
+        assert!(!second.cache.contains_key("attachments/b.pdf"));
+        assert!(second.cache.contains_key("attachments/a.png"));
+    }
+
+    /// The hash cache round-trips through the index the way the command uses
+    /// it: read → walk → write back, with the write doubling as the prune.
+    #[test]
+    fn index_round_trips_and_prunes_the_hash_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/a.png", &[1]).unwrap();
+        write_binary_file(tmp.path(), "attachments/b.pdf", &[2]).unwrap();
+        let index = crate::index::Index::open_in_memory().unwrap();
+        assert!(index.attachment_hash_cache().unwrap().is_empty());
+
+        let first = list_attachments_cached(tmp.path(), &HashMap::new()).unwrap();
+        index.save_attachment_hash_cache(&first.cache).unwrap();
+        let stored = index.attachment_hash_cache().unwrap();
+        assert_eq!(stored, first.cache);
+
+        std::fs::remove_file(tmp.path().join("attachments/b.pdf")).unwrap();
+        let second = list_attachments_cached(tmp.path(), &stored).unwrap();
+        assert_eq!(second.hashed, 0, "the surviving file was already cached");
+        index.save_attachment_hash_cache(&second.cache).unwrap();
+        let after = index.attachment_hash_cache().unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(!after.contains_key("attachments/b.pdf"));
+    }
+
+    /// The download side is the one that takes a SERVER-supplied path, so it
+    /// refuses anything outside `attachments/` before it opens a socket.
+    #[test]
+    fn download_refuses_paths_outside_attachments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let headers = HashMap::new();
+        for rel in [
+            ".context/index.sqlite",
+            "Team Plans.md",
+            "attachments/../escape.bin",
+            "attachments/.hidden",
+            "attachments",
+        ] {
+            let err = block_on(download_file(
+                tmp.path(),
+                rel,
+                "http://127.0.0.1:9/never-reached",
+                &headers,
+                None,
+            ));
+            assert!(err.is_err(), "{rel} must be refused");
+        }
+        // Nothing was created on the way to those refusals.
+        assert!(!tmp.path().join("attachments").exists());
+    }
+
+    /// A part upload names a byte range; one outside the file is a bug in the
+    /// caller's arithmetic, not something to send a truncated part for.
+    #[test]
+    fn upload_refuses_a_range_past_the_end_of_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/clip.mp4", &[7u8; 64]).unwrap();
+        let headers = HashMap::new();
+        let err = block_on(upload_file(
+            tmp.path(),
+            "attachments/clip.mp4",
+            "http://127.0.0.1:9/never-reached",
+            "PUT",
+            &headers,
+            Some(ByteRange { start: 0, end: 65 }),
+        ));
+        assert!(err.is_err());
+        // An escaping read path is refused by `resolve_in_vault` just the same.
+        assert!(block_on(upload_file(
+            tmp.path(),
+            "../../etc/passwd",
+            "http://127.0.0.1:9/never-reached",
+            "PUT",
+            &headers,
+            None,
+        ))
+        .is_err());
     }
 
     #[test]

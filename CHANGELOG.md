@@ -8,6 +8,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Attachment transport (desktop).** `AttachmentSync.pass` uses the server's
+  `intent → PUT → complete` flow when offered (404 ⇒ legacy POST, remembered per server
+  URL): a dedupe hit sends zero bytes, 402 aborts the pass with one toast, 413/415 skip
+  the file permanently, `upload_incomplete` retries the PUT, multipart parts carry ETags.
+  Bytes move through Rust (`attachments.rs upload_file`/`download_file`, `reqwest` with
+  `redirect::Policy::none()`, no bearer on presigned URLs, hash-as-you-write into a
+  `.tmp` then rename). `list_attachments` caches `(size, mtime, sha256)` in
+  `attachment_hashes` inside `.context/index.sqlite` and hashes misses with the streamed
+  `sha256_file`, so a vault of videos is no longer re-read on every reconcile.
 - **Search over files.** `index.rs` gains a tier-2 `files`/`files_fts`/`file_text`
   schema for every surfaced non-note file; `extract.rs` pulls text from txt/csv/json/
   code, html (tag-stripped), docx/xlsx/pptx (`zip` + `quick-xml`) and zip entry names,
