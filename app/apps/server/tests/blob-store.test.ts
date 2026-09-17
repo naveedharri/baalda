@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { seedOrg, seedVault } from "./helpers/seed.js";
@@ -8,6 +8,7 @@ import { MemoryBlobStore } from "../src/blobs/memory-store.js";
 import { PostgresBlobStore } from "../src/blobs/postgres-store.js";
 import { BlobStoreError, type BlobStore } from "../src/blobs/store.js";
 import { objectKey } from "../src/blobs/keys.js";
+import { s3KeyPrefix } from "../src/blobs/config.js";
 
 /**
  * ONE conformance suite, run against every provider.
@@ -176,10 +177,47 @@ describe.each(PROVIDERS)("BlobStore conformance — $name", (provider) => {
 });
 
 describe("objectKey", () => {
+  const before = process.env.S3_KEY_PREFIX;
+  afterEach(() => {
+    if (before === undefined) delete process.env.S3_KEY_PREFIX;
+    else process.env.S3_KEY_PREFIX = before;
+  });
+
   it("is vault-scoped and content-addressed, with no extension", () => {
-    expect(objectKey("v1", "abc")).toBe("vaults/v1/abc");
+    expect(objectKey("v1", "abc", "")).toBe("vaults/v1/abc");
     // Same bytes in two vaults are two objects: deleting one vault can never
     // pull a file out from under another.
-    expect(objectKey("v2", "abc")).not.toBe(objectKey("v1", "abc"));
+    expect(objectKey("v2", "abc", "")).not.toBe(objectKey("v1", "abc", ""));
+  });
+
+  it("puts every new key under S3_KEY_PREFIX, so two deployments can share a bucket", () => {
+    process.env.S3_KEY_PREFIX = "staging";
+    expect(objectKey("v1", "abc")).toBe("staging/vaults/v1/abc");
+    // The prefix is the ONLY difference: strip it and you are back at the key a
+    // prefix-less deployment would have written, which is why a stored
+    // `storage_key` from before the setting existed still resolves.
+    expect(objectKey("v1", "abc").endsWith(objectKey("v1", "abc", ""))).toBe(true);
+  });
+
+  it("normalises the prefix: slashes stripped, empty means none, `..` refused", () => {
+    process.env.S3_KEY_PREFIX = "/staging/";
+    expect(s3KeyPrefix()).toBe("staging");
+    expect(objectKey("v1", "abc")).toBe("staging/vaults/v1/abc");
+
+    process.env.S3_KEY_PREFIX = "a/b";
+    expect(s3KeyPrefix()).toBe("a/b");
+    expect(objectKey("v1", "abc")).toBe("a/b/vaults/v1/abc");
+
+    for (const empty of ["", "   ", "//"]) {
+      process.env.S3_KEY_PREFIX = empty;
+      expect(s3KeyPrefix()).toBe("");
+      expect(objectKey("v1", "abc")).toBe("vaults/v1/abc");
+    }
+
+    // Configuration, not input: a traversal is a typo we refuse to guess at.
+    for (const bad of ["..", "staging/../prod", "./staging"]) {
+      process.env.S3_KEY_PREFIX = bad;
+      expect(() => s3KeyPrefix()).toThrow(/S3_KEY_PREFIX/);
+    }
   });
 });
