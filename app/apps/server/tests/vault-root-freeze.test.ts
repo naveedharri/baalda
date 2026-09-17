@@ -223,13 +223,15 @@ describe("frozen vault root", () => {
     });
     expect(nested.status).toBe(201);
 
-    // Second device re-registering the pre-freeze root file still syncs.
+    // Second device re-registering the pre-freeze root file still syncs. 200,
+    // not 201: re-registering the same id at the same path is idempotent now
+    // (PR3), and answers with the row rather than pretending to create it.
     const readopt = await req(owner, "POST", "/api/files", {
       vaultId: vault,
       path: "logo.svg",
       docId,
     });
-    expect(readopt.status).toBe(201);
+    expect(readopt.status).toBe(200);
   });
 });
 

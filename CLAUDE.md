@@ -107,7 +107,17 @@ Build: `pnpm run build:desktop`.
 Commands registered in `lib.rs`; `AppState` (`state.rs`) is one `Mutex` over `{ vault, index, watcher }`.
 Errors: single `AppError(String)` (`error.rs`).
 - `vault.rs` — path safety (`resolve_in_vault` rejects `..`/absolute/escape); ignores `.context/`, `.git`, dotfiles.
-- `tree.rs` — recursive walk to nested `TreeNode`; surfaces `.md`/`.html` only.
+- `tree.rs` — recursive walk to nested `TreeNode`; surfaces exactly `vault.rs ALLOWED_EXTS` (notes,
+  images, pdf, office docs, audio/video, csv/json/code, zip) and hides the root `attachments/` folder.
+  **`ALLOWED_EXTS` and `NOTE_EXTS` are ONE contract with the desktop's format registry**
+  (`src/lib/formats.ts` — `SURFACED_EXTS`/`NOTE_EXTS`, the single authority for what a file is: how it
+  surfaces, opens, embeds, uploads and syncs) and with the `NOTE_EXTS` literals in `sync/registry.ts` /
+  `sync/inbound.ts`; `formatsLockstep.test.ts` reads those source files and fails on any drift. Only
+  `NOTE_EXTS` (md, markdown, mdx, txt, html, htm, canvas) are CRDT notes and index rows; a viewer
+  choice is display-only and never promotes a file into the bridge. The webview CSP in
+  `tauri.conf.json` is pinned by `src/__tests__/csp.test.ts` — Tauri injects it only in packaged
+  builds, `frame-src`/`media-src` must allow `asset:`, `http://asset.localhost` (Windows) and
+  `https://asset.localhost`, and dev never exercises it.
 - `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`.
 - `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter. `derive_title`
   (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title — `index.rs`
@@ -310,7 +320,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   registry pull and `ready.revoked` follow the posture for free. Management stays role-based
   (`shares.ts canManage`), so an owner can always undo what they set; two gates that used to ride on
   the role now ask for content access too — minting a public link, and a whole-vault checkpoint
-  revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). **New
+  revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). A blob that carries a
+  `doc_id` is judged by this same resolver (`canReadAttachment` / `canWriteBlob` in
+  `permissions/http-gates.ts`), so a folder share reaches the FILES in it and not only the notes;
+  a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — vault-wide
+  readers see all, a scoped member only what a readable note references. **New
   vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
   grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
   owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,
@@ -346,7 +360,7 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   member as a REVOCATION (no tombstone) instead of a deletion.
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note`.
+  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text`.
   `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
   optional `expectedRevision` and refuse a stale write (the check runs under the doc writer's per-doc
   lock, so check + apply are atomic). `edit_note` applies exact-anchor replace/insert/delete ops (an
@@ -357,6 +371,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   every open app exactly like a teammate's. `delete_folder` refuses a non-empty folder unless
   `recursive: true`. Move/delete semantics live in `src/registry/tree-ops.ts`, shared with the HTTP
   registry routes so the two surfaces cannot drift.
+  `search_notes` ranks `blob_text` beside `note_index` and tags every hit `kind: "note" | "file"`
+  (opt out with `includeFiles: false`); `list_attachments` / `read_attachment_text` serve the
+  EXTRACTED TEXT of a file, never its bytes, through `filterReadableBlobs` / `canReadAttachment`.
+  There is deliberately no `attach_file` — base64 over JSON-RPC with no idempotency key, against a
+  byte path built to avoid exactly that (see the note in `tools.ts`).
   Token = `mcp_…` minted from desktop Vault Settings → MCP; scoped to one (user, vault), gated by
   the **same** per-file ACL. Only a sha256 hash is stored.
 - `index/` — `embedder.ts` is a dependency-free 256-dim hashed bag-of-words (works air-gapped;
@@ -366,8 +385,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
 **Postgres tables** — Better Auth (`user`, `session`, `account`, `organization`, `member`, `invitation`;
 camelCase quoted, migration 001), app tables (all ids `TEXT`, migration 002+): `vaults`, `folders`, `notes`
 (id==doc_id, soft-delete via `deleted_at`), `files` (id==doc_id), `shares`, `doc_updates`, `doc_snapshots`,
-`blobs`, `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one plaintext
-token per note; revoke = DELETE).
+`blobs` (`doc_id` = the `files` row these bytes are, or NULL for an `attachments/` drop — m028),
+`blob_text` (a file's extracted text + vector; derived, purgeable, cascades with the blob and the
+vault — m028), `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one
+plaintext token per note; revoke = DELETE).
 
 ## Server env vars (`app/apps/server/.env`)
 `DATABASE_URL` (Docker host port **5439**→5432) · `JWT_SECRET` (Better Auth crypto **and** sync JWTs —

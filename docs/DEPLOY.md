@@ -337,6 +337,29 @@ confirm `/health` and a real sync round-trip, then promote.
 | `POLAR_SERVER` | no | `sandbox` | `sandbox` or `production` Polar environment. |
 | `FREE_MAX_VAULTS` | no | `3` | Free-tier cap on unsubscribed vaults per user (only enforced when billing is enabled). |
 | `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). Gates new invitations and join-code redemptions only; lowering it never removes existing members. |
+| `BLOB_STORAGE` | no | `postgres` | Where attachment BYTES live: `postgres` (zero config) or `s3`. See [Attachments storage](#attachments-storage). An unrecognised value, or `s3` with an incomplete bucket config, is a fatal startup error. |
+| `MAX_BLOB_BYTES` | no | `26214400` | Hard ceiling for one attachment on the Postgres provider, in bytes (25 MB). A heap bound, not a taste one — that provider buffers the whole value, ~3.7x, in a 512 MB heap. Raise it only alongside the container's memory. |
+| `MAX_INFLIGHT_UPLOAD_BYTES` | no | `2 × MAX_BLOB_BYTES` | Total upload-body bytes admitted at once. Beyond it uploads queue, then shed with 503. Never lower than `MAX_BLOB_BYTES`. |
+| `MAX_BLOB_BYTES_DIRECT` | no | `524288000` | Ceiling for one attachment on S3 (500 MB). A product decision, not a heap bound: the bytes never enter this process. Per-category caps still apply. |
+| `BLOB_MIME_ENFORCE` | no | `reject` | `reject` answers 415 for a Content-Type Baalda does not know; `warn` logs and stores it. Use `warn` first on an existing server to see what enforcement would refuse. |
+| `BLOB_PENDING_TTL_MINUTES` | no | `60` | How long an abandoned upload holds its content's dedupe slot before the sweep removes it. Always on, every 15 minutes, serialized across instances by an advisory lock. |
+| `FREE_MAX_STORAGE_MB` | no | `1024` | Free-tier attachment storage per unsubscribed vault (only enforced when billing is enabled; a vault with an active subscription is unlimited). Over it, `intent` answers 402 `storage_limit_reached`. Lowering it never deletes anything. |
+| `BLOB_GC_ENABLED` | no | `false` | Delete stored attachments no note references any more. **Off by default** — see [Attachment garbage collection](#attachment-garbage-collection). The deletion *queue* (objects whose row a vault or org delete already removed) is always on and is not affected by this. |
+| `BLOB_GC_ORPHAN_DAYS` | no | `30` | How long an unreferenced attachment must have existed before it is collectable. An attachment is uploaded before the note embedding it is written, and that note may arrive days later from a device that was offline. |
+| `BLOB_GC_INTERVAL_MS` | no | `21600000` | Minimum gap between orphan sweeps (6 h). The GC ticks every 15 minutes for the always-on sweeps; this rate-limits the orphan pass on top of that. |
+| `BLOB_GC_MAX_DELETES_PER_RUN` | no | `200` | Hard ceiling on deletions in one orphan sweep — the blast radius if the reference table is wrong. |
+| `S3_BUCKET` | with `s3` | unset | Bucket name. Create it first — the server never does. |
+| `S3_ACCESS_KEY_ID` | with `s3` | unset | Access key. |
+| `S3_SECRET_ACCESS_KEY` | with `s3` | unset | Secret key. Set via env only, never committed. |
+| `S3_REGION` | no | `us-east-1` | AWS region. Cloudflare R2 wants `auto`. |
+| `S3_ENDPOINT` | no | unset | Unset ⇒ real AWS S3. R2: `https://<account-id>.r2.cloudflarestorage.com`. MinIO: your host. |
+| `S3_FORCE_PATH_STYLE` | no | `false` | `true` for MinIO and anything else without bucket-per-subdomain DNS. |
+| `S3_PRESIGN_UPLOAD_TTL_SECONDS` | no | `900` | Lifetime of an upload URL. Also the lifetime of the Postgres provider's signed same-origin PUT. |
+| `S3_PRESIGN_DOWNLOAD_TTL_SECONDS` | no | `300` | Lifetime of a download URL. |
+| `S3_PROXY_DOWNLOADS` | no | `false` | `true` streams downloads through this server instead of redirecting to the bucket. Needed when clients cannot reach the bucket (a MinIO on a private subnet); costs egress twice. |
+| `S3_CHECKSUM_MODE` | no | `auto` | `auto` \| `sha256` \| `md5` \| `none`. `auto` = sha256 on real AWS, md5 against any custom endpoint (R2 implements only `Content-MD5`). |
+| `S3_MULTIPART_THRESHOLD_BYTES` | no | `104857600` | Where a single PUT becomes a presigned multipart upload (100 MB, AWS's own threshold). |
+| `S3_MULTIPART_PART_BYTES` | no | `16777216` | Bytes per multipart part (16 MB). Raised automatically if an object would need more than 10 000 parts. |
 | `DEEP_LINK_SCHEME` | no | `baalda` | URL scheme of the desktop app the server's pages bounce into. Set `baalda-staging` on the server behind the Staging app so production and staging links open the right app on a machine that has both. |
 | `EMAIL_FROM` | for email | unset | **Outbound email (optional).** Sender address, e.g. `Baalda <no-reply@example.com>`. With this and ONE transport below, password reset ("Forgot password?"), sign-up verification and invitation emails switch on. Unset ⇒ email off and none of those is offered (invitations are shared as a link instead). |
 | `SMTP_URL` | one transport | unset | Any SMTP server: `smtp://user:pass@host:587` (STARTTLS) or `smtps://user:pass@host:465` (TLS). |
@@ -362,6 +385,187 @@ active rows from the provider, so our Postgres and the provider converge on thei
 own — never edit `subscriptions` by hand to fix a mismatch.
 
 See `app/apps/server/.env.example` for the same list with inline comments.
+
+## Attachments storage
+
+Images, PDFs and every other file dropped into a note are **attachments**. Their
+bytes have to live somewhere, and there are two answers.
+
+**Postgres (the default, and nothing to configure).** The bytes are a column of
+the `blobs` table: one database, one backup, no bucket, no credentials. This is
+the right choice for most self-hosts. Its ceiling is `MAX_BLOB_BYTES` (25 MB per
+file) and that number is a **heap bound**, not a policy — `node-postgres` has no
+binary parameter protocol, so an N-byte attachment costs roughly 3.7N of this
+process's memory at peak. Raising it without raising the container's memory is
+how you get an OOM under two concurrent uploads.
+
+**S3-compatible object storage (`BLOB_STORAGE=s3`).** AWS S3, Cloudflare R2,
+MinIO, or anything else that speaks the same API. Clients upload and download
+**straight to the bucket** through short-lived presigned URLs, so a 500 MB video
+never passes through this server: the request it handles is a few hundred bytes
+of JSON. Files over `S3_MULTIPART_THRESHOLD_BYTES` (100 MB) upload as presigned
+multipart, so a failure costs one part rather than the whole transfer.
+
+The provider is recorded on **every blob row at upload time**, never read from
+the environment at download time. Switching `BLOB_STORAGE` back to `postgres`
+therefore leaves everything written while S3 was on fully readable; it only
+changes where the NEXT attachment goes. (Moving existing bytes between the two
+is a separate migration script, and is not part of this release.)
+
+### Turning S3 on
+
+Create the bucket first — the server never creates one — then set:
+
+```bash
+BLOB_STORAGE=s3
+S3_BUCKET=your-bucket
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+```
+
+plus the endpoint bits for your provider:
+
+| Provider | Settings |
+|---|---|
+| **AWS S3** | Leave `S3_ENDPOINT` unset; set `S3_REGION` to the bucket's real region. |
+| **Cloudflare R2** | `S3_REGION=auto`, `S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com` |
+| **MinIO** | `S3_ENDPOINT=https://your-minio-host`, `S3_FORCE_PATH_STYLE=true` |
+
+The server **fails closed**: `BLOB_STORAGE=s3` with any of the three required
+vars missing is a fatal startup error naming what is absent, not a silent
+fallback to storing bytes in the database.
+
+The Compose bundle ships a MinIO service behind a profile, so nothing about
+`docker compose up -d` changes unless you ask for it:
+
+```bash
+docker compose --profile minio up -d minio
+docker compose exec minio mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+docker compose exec minio mc mb local/baalda
+```
+
+Then uncomment the `S3_*` block in `x-server-env` and restart the server. Read
+the comments above the `minio` service before you do — the endpoint you sign
+has to be one your CLIENTS can reach, which is not the same as one the server
+can reach.
+
+### Bucket CORS
+
+Only needed if a **browser context** uploads directly — a webview fallback, or a
+future web client. The desktop app's own transport is a native HTTP client and
+sends no `Origin`, so a bucket with no CORS config works fine for it.
+
+```json
+[
+  {
+    "AllowedOrigins": ["tauri://localhost", "http://tauri.localhost", "https://your-app-origin"],
+    "AllowedMethods": ["GET", "PUT", "HEAD"],
+    "AllowedHeaders": ["content-type", "content-length", "content-md5"],
+    "ExposeHeaders": ["etag"],
+    "MaxAgeSeconds": 3000
+  }
+]
+```
+
+`ExposeHeaders: ["etag"]` is not optional for multipart: the client has to read
+each part's `ETag` to complete the upload, and a browser hides it otherwise.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `getaddrinfo ENOTFOUND your-bucket.your-host` | Path-style addressing is off. Set `S3_FORCE_PATH_STYLE=true` (MinIO and most self-hosted gateways). |
+| Every upload 403s with `SignatureDoesNotMatch`, immediately | Clock skew. Presigned URLs are signed against **this server's** clock; more than ~15 minutes from the bucket's and every signature is rejected. Run NTP. |
+| Every upload 403s, and the URL contains `x-amz-checksum-sha256` | You set `S3_CHECKSUM_MODE=sha256` against a non-AWS endpoint. R2 implements only `Content-MD5`. Use `auto` (the default) or `md5`. |
+| Uploads fail with `InvalidRequest` / an XML checksum error on an older MinIO | Update MinIO, or check you have not overridden the client's checksum settings — the server already sets `WHEN_REQUIRED` on both sides, which is what older gateways need. |
+| Downloads 404 in a browser but work in the app | The signed `S3_ENDPOINT` is an address only the server can reach (e.g. `http://minio:9000`). Use a client-reachable address, or set `S3_PROXY_DOWNLOADS=1`. |
+| A blob answers **503 `storage_unavailable`** | The row says `s3` and this build has no bucket configured. Never a 404 on purpose: a 404 tells the desktop the file is gone and it re-uploads every byte. |
+| Attachments upload but never appear for teammates | The upload finished but `complete` never ran, leaving the row `pending`. Pending rows are invisible by design and are swept after `BLOB_PENDING_TTL_MINUTES`. |
+
+### Attachment garbage collection
+
+Three sweeps run inside the server on one timer, each serialized across
+instances by a Postgres advisory lock. Two are always on and need no
+configuration:
+
+- **Abandoned uploads.** A `blobs` row is created at `intent`, before any byte
+  moves, and holds its content's dedupe slot. A client that quits mid-upload
+  leaves it `pending`; after `BLOB_PENDING_TTL_MINUTES` the row and its object
+  go.
+- **The deletion queue.** Deleting a vault, deleting an organization, or calling
+  `DELETE /api/blobs/:id` removes `blobs` rows — two of those through a database
+  cascade that runs no application code at all. A trigger records the
+  provider and key of every non-Postgres row as it goes, and the sweep removes
+  the objects. Nothing is lost if the bucket is briefly unreachable: the queue
+  retries with exponential backoff and keeps a `last_error` for anything it
+  eventually gives up on.
+
+The third, **orphan collection**, is off unless you set `BLOB_GC_ENABLED=true`.
+It deletes an attachment that no note references any more — the only sweep that
+removes something a user made. It decides from a table derived from note text,
+so it is wrapped in guards: a vault with no indexed notes is skipped entirely, a
+vault whose references have never been built is rebuilt and re-asked rather than
+swept, nothing younger than `BLOB_GC_ORPHAN_DAYS` is eligible, and no run
+deletes more than `BLOB_GC_MAX_DELETES_PER_RUN`. Every deletion is logged:
+
+```
+[blob-gc] orphan removed: blob=<id> vault=<id> path=attachments/… size=…
+```
+
+Turn it on after a full re-index has run, and read those lines before the next
+sweep six hours later.
+
+### Moving existing attachments to S3
+
+Flipping `BLOB_STORAGE=s3` only changes where NEW attachments go. Everything
+already uploaded keeps `storage_provider = 'postgres'` and keeps being served
+from the database — correct (a blob is always read through the provider recorded
+on its row) and also why the database stays large.
+
+`pnpm run blobs:migrate` moves them. It is **never automatic** and is not part
+of a deploy: two phases, with you in between. Run it with the server's own
+environment (it needs `DATABASE_URL` and the same `BLOB_STORAGE=s3` bucket
+configuration; inside the container it is `node dist/scripts/migrate-blobs.js`).
+
+```bash
+# 1. See what would move. Changes nothing.
+pnpm run blobs:migrate -- --copy --dry-run
+
+# 2. Write the objects. Re-hashes every blob's bytes and refuses to move any row
+#    whose content disagrees with its recorded sha256; verifies each object with
+#    a HEAD; records `storage_key` ONLY — the provider stays `postgres`, so this
+#    phase does not change how a single byte is read and is undone by clearing
+#    the column.
+pnpm run blobs:migrate -- --copy
+
+# 3. Confirm downloads still work (they are still coming from the database).
+
+# 4. Flip the verified rows and release their bytes. Re-checks that each object
+#    is still there at the right size first, because after this the database
+#    copy is gone.
+pnpm run blobs:migrate -- --cutover
+```
+
+Flags: `--dry-run`, `--vault <id>` (one note collection), `--batch <n>` (rows
+per page, default 50), `--limit <n>`, `--sleep-ms <n>` (pause between rows, to
+keep a live database responsive). Both phases are idempotent and re-runnable;
+the process exits non-zero if any row failed or any hash mismatched, so you can
+script them and stop on the first phase that did not go cleanly.
+
+**Reclaiming the disk.** Nulling a `BYTEA` column does not shrink the database
+file. Postgres marks the old row versions dead and reuses the space for future
+inserts; to give it back to the filesystem you need either `VACUUM (FULL)
+blobs` — which takes an `ACCESS EXCLUSIVE` lock, i.e. downtime proportional to
+the table — or [`pg_repack`](https://reorg.github.io/pg_repack/), which does the
+same online at the cost of an extension and roughly double the table's disk
+while it runs. Neither is run for you.
+
+### Rolling it out
+
+Staging first, always. The check that matters is a real round trip: upload a
+video larger than `MAX_BLOB_BYTES` (so it can only have gone direct to the
+bucket) from a packaged app, confirm a second device downloads it, and watch the
+server's RSS stay flat while it transfers.
 
 ## Outbound email (password reset, invitations)
 

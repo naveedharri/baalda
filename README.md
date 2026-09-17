@@ -214,6 +214,8 @@ self-hosted server, use your server URL plus `/api/mcp`.)
 
 The AI can now `read_note`, `search_notes`, `create_note`, `edit_note` (targeted replace/insert/delete at exact anchors), `update_note`, and more. `read_note` returns a `revision`; pass it back as `expectedRevision` and a write against a note that changed in between is refused instead of merged. Its writes flow through the same sync engine, so if the note is open you'll watch the AI type in real time.
 
+Files are in scope too: `search_notes` ranks the text extracted from your documents and spreadsheets alongside your notes (each hit says whether it is a `note` or a `file`), `list_attachments` lists the files it can reach, and `read_attachment_text` reads the words inside one. All three follow the same per-folder permissions as everything else.
+
 ---
 
 ## Project structure

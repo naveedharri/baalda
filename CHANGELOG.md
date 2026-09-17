@@ -604,6 +604,47 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Files are first-class docs (server).** Migration 028 gives `blobs.doc_id` a
+  meaning — the `files` row whose bytes a blob is — and adds `blob_text`, a derived,
+  purgeable cache of the plain text a desktop extracted from a file (with the same
+  256-dim `embed()` vector `note_index` stores), written through
+  `PUT /api/vaults/:vaultId/blobs/:blobId/text` (204; 409 `sha_mismatch`, 413
+  `text_too_large` past 1 MB) and cascading away with its blob and its vault. A blob
+  with a `doc_id` is now authorised by `effectivePermission` rather than by
+  `note_index.content LIKE '%path%'`, so a folder share, an org grant, a sealed vault,
+  a per-user deny and a `locked` cap all reach a `.xlsx` exactly as they reach a `.md`
+  — and `canWriteBlob` closes the folder-lock gap for it, because a registered file
+  finally HAS a folder to resolve against. Hash-named `attachments/` drops keep the
+  path heuristic unchanged. Search (`GET /vaults/:id/search` and MCP `search_notes`)
+  ranks `blob_text` beside `note_index` and tags each hit `kind: "note" | "file"`, with
+  the visibility rule inside the query so an unreadable file can never influence a
+  readable one's score. `POST /api/files` accepts a client-supplied `docId`, adopts the row
+  already at a path before anything else (so re-registration is idempotent, a second
+  device converges on the first's id instead of tripping `files_vault_path_ci_uq`, and
+  neither needs this server to know the folder yet — the `POST /notes` rule, applied one
+  layer down) and otherwise treats the same id at a new path as a MOVE. MCP
+  gains `list_attachments` and `read_attachment_text` (the extracted text, never the
+  bytes) and `search_notes` gains `includeFiles`; `attach_file` is deliberately absent.
+- **Blob lifecycle (server).** Migration 027 adds `blob_refs` (which notes reference
+  which attachment path, derived by `index/indexer.ts` beside `note_index`, lowercased)
+  and `blob_deletions`, a queue filled by an `AFTER DELETE` trigger on `blobs` so org
+  delete, vault cascade, the new `DELETE /api/blobs/:id` (409 `blob_referenced` unless
+  `force`) and GC all free S3 objects without knowing S3 exists. `gc.ts` drains the queue
+  with backoff and runs an opt-in orphan sweep (`BLOB_GC_ENABLED`, guarded by note_index
+  presence, a refs rebuild, and a per-run cap). Intent enforces `FREE_MAX_STORAGE_MB` for
+  unsubscribed orgs when billing is on (402 `storage_limit_reached`); `GET
+  /api/vaults/:id/storage` reports usage. `pnpm run blobs:migrate -- --copy|--cutover`
+  moves BYTEA rows to S3 in two verified, idempotent phases.
+- **S3 blob provider + presigned upload flow (server).** `src/blobs/s3-store.ts`
+  (AWS SDK v3, `WHEN_REQUIRED` checksums, path-style for MinIO, `content-length`
+  signed into every presign, never `x-amz-checksum-sha256` against a custom endpoint,
+  presigned multipart above 100 MB). New `intent → PUT → complete` endpoints serve BOTH
+  providers — Postgres via a same-origin PUT authorised by an HS256 upload token — so a
+  dedupe hit costs zero bytes and every gate (ACL, rel_path, MIME, cap) runs before a
+  byte moves. `GET /api/blobs/:id/url` hands the desktop a presigned or same-origin URL
+  instead of a 302. Pending rows are swept by an advisory-locked 15-minute timer.
+  `BLOB_STORAGE=s3` fails closed at boot when config is incomplete. Compose gains a
+  `minio` profile; DEPLOY.md gains an "Attachments storage" section.
 - **Updates install themselves, with the wall as the fallback.** The app no
   longer waits for a click to install an update it has already downloaded: it
   checks, downloads, installs and relaunches at a quiet moment. The blocking
