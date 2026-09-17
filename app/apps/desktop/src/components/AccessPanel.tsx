@@ -9,12 +9,14 @@ import {
 import type { AccessTreeResponse, TeamAccess } from "../lib/api";
 import type { TreeNode } from "../lib/ipc";
 import {
+  accessResourceType,
   ancestorPaths,
   entriesFromServer,
   entriesFromTree,
   folderChildrenLoaded,
   rowsFromEntries,
   type AccessEntry,
+  type AccessKind,
   type AccessRow,
 } from "../lib/accessTree";
 import {
@@ -33,6 +35,7 @@ import { itemLockRows, lockScopesByPath, resourceIdsByPath } from "../lib/locks"
 import { syncManager } from "../lib/sync/docSession";
 import { useStore } from "../store";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { iconForPath } from "./FileTree";
 import { Avatar } from "./Avatar";
 import { MenuSelect, type MenuSelectOption } from "./MenuSelect";
 import { Spinner } from "./Spinner";
@@ -69,6 +72,17 @@ type MemberChoice = "default" | "none" | "view" | "edit";
 
 /** One row in the item list (see `lib/accessTree`). */
 type Resource = AccessRow;
+
+/**
+ * What to CALL the selected item in prose.
+ *
+ * Notes and files are one resource type on the wire (`accessResourceType`) and
+ * two different words on screen: telling someone their `.pdf` is a "note" is
+ * the kind of small lie that makes people distrust the sentence it sits in.
+ */
+function nounFor(kind: AccessKind): string {
+  return kind === "folder" ? "folder" : kind === "file" ? "file" : "note";
+}
 
 const ICON = {
   folder: (
@@ -360,6 +374,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         : entriesFromTree(tree, {
             folderId: (path) => syncManager.registry.getFolderId(path),
             docId: (path) => syncManager.registry.getMapping(path)?.docId ?? null,
+            fileId: (path) => syncManager.registry.getFileId(path),
           }),
     [serverTree, tree],
   );
@@ -522,8 +537,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     setError(null);
     try {
       const [sh, ac] = await Promise.all([
-        authManager.api.listShares(res.kind, res.id),
-        authManager.api.resolveAccess(res.kind, res.id),
+        authManager.api.listShares(accessResourceType(res.kind), res.id),
+        authManager.api.resolveAccess(accessResourceType(res.kind), res.id),
       ]);
       setShares(sh);
       setAccess(ac.members);
@@ -640,7 +655,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     if (!selected || !teamAccess || mode === generalMode || inheritedOrgLock || privateSource)
       return;
     if (mode === "private") {
-      const what = selected.kind === "folder" ? "folder" : "note";
+      const what = nounFor(selected.kind);
       setConfirm({
         title: `Make “${selected.name}” private?`,
         label: "Make private",
@@ -679,14 +694,14 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         // `isDenied` above both shortcuts, because a restriction its author is
         // exempt from cannot be checked by its author.
         await authManager.api.createShare({
-          resourceType: selected.kind,
+          resourceType: accessResourceType(selected.kind),
           resourceId: selected.id,
           principalType: "org",
           permission: "denied",
         });
       } else if (mode === "open") {
         await authManager.api.createShare({
-          resourceType: selected.kind,
+          resourceType: accessResourceType(selected.kind),
           resourceId: selected.id,
           principalType: "org",
           permission: "edit",
@@ -694,13 +709,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       } else if (mode === "readonly") {
         if (teamAccess?.mode === "private") {
           await authManager.api.createShare({
-            resourceType: selected.kind,
+            resourceType: accessResourceType(selected.kind),
             resourceId: selected.id,
             principalType: "org",
             permission: "view",
           });
         } else {
-          await useStore.getState().createLock(selected.kind, selected.id, null);
+          await useStore
+            .getState()
+            .createLock(accessResourceType(selected.kind), selected.id, null);
         }
       }
     });
@@ -824,7 +841,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const setMember = (userId: string, choice: MemberChoice, who = "this person") => {
     if (!selected) return;
     if (choice === "none") {
-      const what = selected.kind === "folder" ? "folder" : "note";
+      const what = nounFor(selected.kind);
       setConfirm({
         title: `Hide “${selected.name}” from ${who}?`,
         label: "Hide from them",
@@ -864,14 +881,14 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         // blanket edit, and even "you created this note" — which is the point:
         // "not for Sam" has to mean it on the notes Sam wrote too.
         await authManager.api.createShare({
-          resourceType: selected.kind,
+          resourceType: accessResourceType(selected.kind),
           resourceId: selected.id,
           principalId: userId,
           permission: "denied",
         });
       } else if (choice === "edit") {
         await authManager.api.createShare({
-          resourceType: selected.kind,
+          resourceType: accessResourceType(selected.kind),
           resourceId: selected.id,
           principalId: userId,
           permission: "edit",
@@ -879,7 +896,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       } else if (choice === "view") {
         // Read-only for this member = a per-user lock (caps at view). A view
         // grant would NOT lower an Open member, so we lock instead.
-        await useStore.getState().createLock(selected.kind, selected.id, userId);
+        await useStore
+          .getState()
+          .createLock(accessResourceType(selected.kind), selected.id, userId);
       }
     });
   };
@@ -894,8 +913,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     <div className="access-panel">
       <p className="access-intro">
         Choose what the team can reach. Set the <strong>entire vault</strong> at once, or pick a
-        folder or note below to set just that one. Folder settings flow down to everything inside.
-        Each is <strong>Shared</strong> (read &amp; write), <strong>Read-only</strong>, or{" "}
+        folder, note or file below to set just that one. Folder settings flow down to everything
+        inside. Each is <strong>Shared</strong> (read &amp; write), <strong>Read-only</strong>, or{" "}
         <strong>Private</strong> (nobody until you name them — you included, and that
         applies to the notes you wrote).
       </p>
@@ -1022,7 +1041,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                       // separate button and doesn't select, so it never scrolls.
                       onClick={() => selectRow(r)}
                     >
-                      <span className="access-glyph">{r.kind === "folder" ? ICON.folder : ICON.note}</span>
+                      <span className="access-glyph">{rowGlyph(r)}</span>
                       <span className="access-rname">{r.name}</span>
                       <span className="access-rright">
                         {mode !== "private" && !!lk && affected.length > 0 && (
@@ -1074,7 +1093,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
           {!selected ? (
             <div className="access-empty">
               <span className="access-empty-glyph">{ICON.lock}</span>
-              <p>Select a folder or note to see who can reach it — and change it.</p>
+              <p>Select a folder, note or file to see who can reach it — and change it.</p>
             </div>
           ) : (
             <>
@@ -1084,7 +1103,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                 )}
               </div>
               <div className="access-dtitle">
-                <span className="access-tglyph">{selected.kind === "folder" ? ICON.folder : ICON.note}</span>
+                <span className="access-tglyph">{rowGlyph(selected)}</span>
                 <h3>{selected.name}</h3>
               </div>
 
@@ -1093,7 +1112,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                   <span className="access-bico">{ICON.lock}</span>
                   <span>
                     Access is managed by <strong>{inheritSourceRes?.name ?? inheritSource}</strong> — this{" "}
-                    {selected.kind === "folder" ? "folder" : "note"} is read-only.{" "}
+                    {nounFor(selected.kind)} is read-only.{" "}
                     {inheritSourceRes && (
                       <button
                         className="access-jump"
@@ -1113,8 +1132,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                   <span className="access-bico">{ICON.shield}</span>
                   <span>
                     <strong>{privateSourceRes.name}</strong> is private, so this{" "}
-                    {selected.kind === "folder" ? "folder" : "note"} is too — the team can't
-                    reach it.{" "}
+                    {nounFor(selected.kind)} is too — the team can't reach it.{" "}
                     <button
                       className="access-jump"
                       onClick={() => {
@@ -1187,15 +1205,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
               </div>
               {generalMode === "private" && !privateSource && (
                 <div className="access-hint">
-                  Nobody reaches this {selected.kind === "folder" ? "folder" : "note"}
+                  Nobody reaches this {nounFor(selected.kind)}
                   {vaultMode && vaultMode !== "private" && (
                     <> — the vault being <strong>{MODE_LABEL[vaultMode]}</strong> doesn't override it</>
                   )}
                   . Not the team, not vault admins, and not you: add someone below by name to give
                   them access, yourself included.{" "}
                   <strong>Your local files are untouched</strong> — this stops the{" "}
-                  {selected.kind === "folder" ? "folder" : "note"} syncing and takes it out of every
-                  teammate's vault, but never deletes anything off a disk.
+                  {nounFor(selected.kind)} syncing and takes it out of every teammate's vault, but
+                  never deletes anything off a disk.
                 </div>
               )}
 
@@ -1267,8 +1285,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                       You're the only member. Invite teammates in <strong>Members</strong>, then
                       each one gets a per-person control here — <strong>Can edit</strong>,{" "}
                       <strong>Can view</strong>, or <strong>Private</strong> — so you can lock this{" "}
-                      {selected.kind === "folder" ? "folder" : "note"} for some people while others
-                      keep editing.
+                      {nounFor(selected.kind)} for some people while others keep editing.
                     </p>
                   )}
                 </div>
@@ -1283,6 +1300,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
 // --- small pure helpers ------------------------------------------------------
 
+/**
+ * The glyph for one row. Files borrow the SIDEBAR's mapping rather than a
+ * second list of extensions, so a `.xlsx` cannot be a sheet in one list and a
+ * blank page in the other.
+ */
+function rowGlyph(r: Resource): React.ReactNode {
+  if (r.kind === "folder") return ICON.folder;
+  return r.kind === "file" ? iconForPath(r.path) : ICON.note;
+}
 
 function levelLabel(p: "edit" | "view" | "none"): string {
   return p === "edit" ? "Full access" : p === "view" ? "Can view" : "No access";

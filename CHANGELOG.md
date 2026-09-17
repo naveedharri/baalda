@@ -8,6 +8,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Files in the Access panel.** `GET /vaults/:id/access-tree` now returns the
+  vault's `files` rows beside its notes, and the panel lists them with the
+  sidebar's own glyph. They were already enforceable — one
+  `shares.resource_type = 'file'` namespace, one `effectivePermission`,
+  `locateDoc` reading `notes` and `files` in one union — so a `.pdf` obeyed its
+  folder's grant while being the one thing in the vault whose access could not
+  be seen or set. `AccessEntry.kind` splits `note` from `file` for the glyph
+  and the noun; `accessResourceType` maps both back to the server's one `file`
+  type, so nothing about the wire changed. The local-tree fallback emits a file
+  row only for a path this device has registered (no `files` id, no share to
+  name), and a hidden root `attachments/` blob has no row at all.
 - **Tree binaries sync (desktop, Stage A).** `list_binaries` walks the whole vault for
   registry binary formats (not only `attachments/`), sharing the `attachment_hashes`
   cache; each tree binary is registered as a server `files` row via `POST /api/files`

@@ -255,8 +255,8 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
   });
 
   /**
-   * The vault's WHOLE structure, unfiltered — folders and notes, ids and paths,
-   * no content. Owner/admin only.
+   * The vault's WHOLE structure, unfiltered — folders, notes and files, ids and
+   * paths, no content. Owner/admin only.
    *
    * Every other listing here is ACL-filtered, which is right for sync and fatal
    * for administration: the moment an item is set to Private it leaves
@@ -280,7 +280,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
     }
-    const [folders, notes] = await Promise.all([
+    const [folders, notes, files] = await Promise.all([
       pool.query<{ id: string; path: string; color: string | null }>(
         "SELECT id, path, color FROM folders WHERE vault_id = $1 ORDER BY path",
         [vaultId],
@@ -292,10 +292,21 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
         "SELECT id, rel_path FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path",
         [vaultId],
       ),
+      // `files` rows — the tree binaries. They are docs like any note (one
+      // `shares.resource_type = 'file'` namespace, one `effectivePermission`),
+      // so leaving them out made a `.pdf` in a shared folder the one thing in
+      // the vault whose access could be enforced but never seen or set.
+      // A hidden root `attachments/` blob has no `files` row at all — its bytes
+      // carry a null `doc_id` — so nothing here has to filter it out.
+      pool.query<{ id: string; path: string }>(
+        "SELECT id, path FROM files WHERE vault_id = $1 ORDER BY path",
+        [vaultId],
+      ),
     ]);
     return c.json({
       folders: folders.rows.map((f) => ({ id: f.id, path: f.path, color: f.color })),
       notes: notes.rows.map((n) => ({ id: n.id, relPath: n.rel_path })),
+      files: files.rows.map((f) => ({ id: f.id, path: f.path })),
     });
   });
 
