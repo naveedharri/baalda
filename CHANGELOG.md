@@ -594,6 +594,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Blob lifecycle (server).** Migration 027 adds `blob_refs` (which notes reference
+  which attachment path, derived by `index/indexer.ts` beside `note_index`, lowercased)
+  and `blob_deletions`, a queue filled by an `AFTER DELETE` trigger on `blobs` so org
+  delete, vault cascade, the new `DELETE /api/blobs/:id` (409 `blob_referenced` unless
+  `force`) and GC all free S3 objects without knowing S3 exists. `gc.ts` drains the queue
+  with backoff and runs an opt-in orphan sweep (`BLOB_GC_ENABLED`, guarded by note_index
+  presence, a refs rebuild, and a per-run cap). Intent enforces `FREE_MAX_STORAGE_MB` for
+  unsubscribed orgs when billing is on (402 `storage_limit_reached`); `GET
+  /api/vaults/:id/storage` reports usage. `pnpm run blobs:migrate -- --copy|--cutover`
+  moves BYTEA rows to S3 in two verified, idempotent phases.
 - **S3 blob provider + presigned upload flow (server).** `src/blobs/s3-store.ts`
   (AWS SDK v3, `WHEN_REQUIRED` checksums, path-style for MinIO, `content-length`
   signed into every presign, never `x-amz-checksum-sha256` against a custom endpoint,

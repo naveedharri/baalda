@@ -76,6 +76,53 @@ export const MAX_BLOB_BYTES_DIRECT = positiveEnvInt("MAX_BLOB_BYTES_DIRECT", 500
  */
 export const BLOB_PENDING_TTL_MINUTES = positiveEnvInt("BLOB_PENDING_TTL_MINUTES", 60);
 
+/**
+ * Orphan sweeping — deleting a stored attachment that no note references any
+ * more — is OFF unless an operator turns it on.
+ *
+ * Everything else `gc.ts` does is bookkeeping the server itself created: a
+ * pending row it wrote, an object whose row it already deleted. This one
+ * deletes a file a user uploaded, on the strength of a DERIVED table, and the
+ * ways that table can be wrong (a vault that has never been indexed by a build
+ * that knows about `blob_refs`, a note whose text has not been re-indexed
+ * since the attachment was embedded, a reference style the extractor does not
+ * recognise) all point the same way: towards calling a live attachment an
+ * orphan. Default-off means the guards in `gc.ts` are a second line of defence
+ * rather than the only one.
+ */
+export const BLOB_GC_ENABLED = envFlag("BLOB_GC_ENABLED", false);
+
+/**
+ * How long an unreferenced blob must have existed before it is collectable.
+ *
+ * Not a tidiness knob — a correctness one. An attachment is uploaded BEFORE the
+ * note that embeds it is written, and that note reaches this server, gets
+ * indexed and produces its `blob_refs` rows some time later (the desktop
+ * uploads attachments and note content on independent paths, and a device that
+ * is offline may take days). Anything shorter than "longer than a client can
+ * plausibly be away" deletes files that are about to be referenced.
+ */
+export const BLOB_GC_ORPHAN_DAYS = positiveEnvInt("BLOB_GC_ORPHAN_DAYS", 30);
+
+/**
+ * Minimum gap between orphan sweeps. The GC ticks far more often than this (the
+ * pending sweep and the deletion queue want minutes, not hours); the orphan
+ * pass is rate-limited to this interval on top of the tick, so there is still
+ * exactly ONE timer in the process.
+ */
+export const BLOB_GC_INTERVAL_MS = positiveEnvInt("BLOB_GC_INTERVAL_MS", 6 * 60 * 60_000);
+
+/**
+ * Hard ceiling on deletions in one orphan sweep.
+ *
+ * The blast radius of a wrong answer. If the reference table is somehow empty
+ * or stale for a big vault, this is what turns "every attachment you ever
+ * uploaded" into "200 of them, and a log full of exactly which" before the next
+ * sweep gives an operator six hours to notice. Same reasoning as the desktop's
+ * disk-delete cap.
+ */
+export const BLOB_GC_MAX_DELETES_PER_RUN = positiveEnvInt("BLOB_GC_MAX_DELETES_PER_RUN", 200);
+
 /** How the client is asked to prove the bytes it PUTs directly to the bucket. */
 export type S3ChecksumMode = "auto" | "sha256" | "md5" | "none";
 

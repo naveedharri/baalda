@@ -192,6 +192,12 @@ export const config = {
    *  Pro; nobody is removed or locked out by lowering this number. */
   freeMaxVaults: int("FREE_MAX_VAULTS", 3),
   freeMaxMembers: int("FREE_MAX_MEMBERS", 3),
+  /** Free-tier attachment storage per unsubscribed vault, in MB. Enforced on
+   *  the same terms as the two caps above — only when billing is enabled, and
+   *  never against a vault with an active subscription (`storageLimitBytes`).
+   *  Like them it gates only NEW uploads: lowering it never deletes a byte, it
+   *  just stops the next one. */
+  freeMaxStorageMb: int("FREE_MAX_STORAGE_MB", 1024),
   /** Hard ceiling on a single note-sync message / note body, in MB. Real notes
    *  are tiny (production p99 ≈ 600 kB; the largest legitimate page ≈ 7 MB), so
    *  anything past this is a runaway — most likely a forked-note feedback loop

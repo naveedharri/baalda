@@ -325,12 +325,31 @@ export function createBlobStore(): Promise<BlobStore> {
 }
 
 /**
+ * Test seam: serve a provider's rows from this store instead of the configured
+ * one.
+ *
+ * The alternative is worse. Half of what PR 2c does — the deletion queue, the
+ * migration script — is only interesting for a provider with a real object
+ * namespace, and the only such provider is S3; testing it by pointing the real
+ * S3 client at a live bucket would make `pnpm test` need a network and a
+ * credential. This lets the memory store stand in for one. Cleared by
+ * {@link resetBlobStores}; never called from `src/`.
+ */
+const overrides = new Map<string, BlobStore>();
+export function setBlobStoreOverride(provider: string, store: BlobStore | null): void {
+  if (store) overrides.set(provider.toLowerCase(), store);
+  else overrides.delete(provider.toLowerCase());
+}
+
+/**
  * The store that can serve THIS row, from the provider recorded on it. An
  * unknown or unconfigured provider raises `storage_unavailable` — see rule 1 in
  * the module docblock for why that must not become a 404.
  */
 export function resolveStoreForRow(row: StorageRow): Promise<BlobStore> {
   const provider = (row.storage_provider ?? "postgres").toLowerCase();
+  const override = overrides.get(provider);
+  if (override) return Promise.resolve(override);
   if (provider === "postgres") return getPostgresStore();
   if (provider === "s3") {
     // Deliberately NOT gated on `BLOB_STORAGE`: an operator who flipped new
@@ -346,8 +365,9 @@ export function resolveStoreForRow(row: StorageRow): Promise<BlobStore> {
   );
 }
 
-/** Test seam: drop the memoised provider instances. */
+/** Test seam: drop the memoised provider instances and any override. */
 export function resetBlobStores(): void {
   postgresStore = undefined;
   s3Store = undefined;
+  overrides.clear();
 }

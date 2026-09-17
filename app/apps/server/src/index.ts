@@ -127,10 +127,14 @@ async function main() {
     .then((n) => n > 0 && console.log(`Indexer: backfilled ${n} note(s).`))
     .catch((err) => console.error("Indexer backfill failed:", err));
 
-  // Abandoned attachment uploads: a `pending` blob row holds its content's
-  // dedupe slot, so leaving them around would make a later upload of the same
-  // bytes adopt an upload that never finished. Always on, `unref`ed, and
-  // serialized across instances by an advisory lock.
+  // Attachment lifecycle. Three sweeps on one `unref`ed timer, each serialized
+  // across instances by its own advisory lock:
+  //   · abandoned uploads — a `pending` blob row holds its content's dedupe
+  //     slot, so leaving them would make a later upload of the same bytes adopt
+  //     an upload that never finished;
+  //   · the deletion queue — objects whose row a vault cascade or an org delete
+  //     already removed without knowing an object store exists;
+  //   · unreferenced attachments, only when BLOB_GC_ENABLED says so.
   startBlobGc();
 
   const shutdown = async () => {

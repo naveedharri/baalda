@@ -28,6 +28,11 @@ const TABLES = [
   "doc_state_vectors",
   "doc_updates",
   "doc_snapshots",
+  // `blob_refs` cascades from `vaults`, but TRUNCATE fires no row triggers, so
+  // `blob_deletions` is never filled by the reset — both are named explicitly
+  // so a suite starts with an empty queue whatever the last one left.
+  "blob_refs",
+  "blob_deletions",
   "blobs",
   "invitation",
   "member",
