@@ -29,6 +29,40 @@ export const MAX_STEM = 100;
 /** The extensions a note-shaped file hides in the UI. */
 const NOTE_EXT = /\.(md|html?)$/i;
 
+/**
+ * Does this path open in the CodeMirror note editor — i.e. does it ride the
+ * md↔CRDT bridge?
+ *
+ * The CRDT note family (`formats.ts NOTE_EXTS`, mirrored in Rust `vault.rs`) is
+ * md/markdown/mdx + txt/html/htm/canvas: all seven sync as server `notes`. Two
+ * of them do NOT open in the editor:
+ *   • `.html`/`.htm` render in `HtmlView` (plain read/write, no bridge);
+ *   • `.canvas` renders in the read-only code viewer until there is a canvas
+ *     editor.
+ * Promoting either into the bridge is its own change; until then this is the
+ * ONE test for "the editor owns this buffer", so the open-time registration,
+ * the editor mount and the sync layer cannot disagree about it. Every other
+ * caller wants `isNoteExt` (the sync family) or `isOpenable` (the click gate).
+ */
+export function isEditorNote(path: string): boolean {
+  return /\.(md|markdown|mdx|txt)$/i.test(path);
+}
+
+/**
+ * Is this note's text actually MARKDOWN?
+ *
+ * The narrower half of {@link isEditorNote}: `.txt` opens in the same editor
+ * and rides the same bridge, but its bytes are prose. Giving it the markdown
+ * grammar would make a shopping list's `# eggs` render as a heading and a
+ * `*star*` disappear into italics — in a file the user chose precisely because
+ * it has no syntax. So the grammar (and with it every syntax-tree-driven
+ * decoration: live preview, blocks, folds, callouts) is markdown-only, and
+ * `lib/editor/index.ts baseExtensions` is the one place that asks.
+ */
+export function isMarkdownNote(path: string): boolean {
+  return /\.(md|markdown|mdx)$/i.test(path);
+}
+
 /** `Notes/Untitled.md` → `Untitled`. Strips ANY extension (used for renames). */
 export function stemOf(path: string): string {
   const base = path.slice(path.lastIndexOf("/") + 1);

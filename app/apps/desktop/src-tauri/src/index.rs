@@ -8,9 +8,11 @@
 //! inbound links (which store `dst_note_id`) never break.
 
 use crate::error::{io_ctx, AppError, AppResult};
+use crate::extract::kind_for;
 use crate::notefile::sha256_hex;
-use crate::parse::parse_note;
-use crate::vault::{is_ignored_name, rel_from_abs};
+use crate::parse::{parse_html, parse_note, parse_plain, ParsedNote};
+use crate::stats::now_ms;
+use crate::vault::{is_ignored_name, is_indexable_file, is_note_file, rel_from_abs};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -18,6 +20,27 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use uuid::Uuid;
 use walkdir::WalkDir;
+
+/// Which derivation a note-family file gets.
+///
+/// Only markdown runs the markdown parser. `parse.rs` owns the `#tag` ↔ editor
+/// contract and the `[[wikilink]]` rules, and both are meaningless outside
+/// markdown — so `.txt`/`.canvas` are indexed as plain text under their stem and
+/// `.html` as its stripped text. All of them still get a `notes` row, an FTS
+/// row and a stable `doc_id`, which is what makes them searchable and
+/// rename-safe like every other note.
+fn parse_for(abs: &Path, content: &str, stem: &str) -> ParsedNote {
+    let ext = abs
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "md" | "markdown" | "mdx" => parse_note(content, stem),
+        "html" | "htm" => parse_html(content, stem),
+        _ => parse_plain(content, stem),
+    }
+}
 
 /// Only log a batch's timing past this many files: a single-note save goes
 /// through the same code and must stay silent.
@@ -79,6 +102,8 @@ pub struct Index {
     folder_writes: std::cell::Cell<usize>,
 }
 
+/// One search hit, from EITHER tier. `kind` is what tells the panel whether
+/// `id` is a note doc_id or a `files.id`, and whether to badge the row.
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
@@ -86,7 +111,32 @@ pub struct SearchResult {
     pub path: String,
     pub title: String,
     pub snippet: String,
+    /// "note" | "file".
+    pub kind: String,
+    /// Lowercase extension, no dot — `None` only for a path without one.
+    pub ext: Option<String>,
 }
+
+/// A hit plus its raw bm25 score, before the two tiers are merged. SQLite's
+/// bm25() is NEGATIVE and sorts ascending (more negative = better match), which
+/// is why the file penalty below is added rather than subtracted.
+#[derive(Debug, Clone)]
+struct RankedHit {
+    score: f64,
+    result: SearchResult,
+}
+
+/// How much worse a file hit has to be before it outranks a note.
+///
+/// The vault is a note-taking app: when a phrase appears in a note AND in a
+/// spreadsheet someone dropped next to it, the note is the answer. bm25 gaps
+/// between genuinely different matches run to whole units, so a tenth breaks a
+/// tie (and a near-tie) without ever burying a strong file match under a weak
+/// note.
+const FILE_RANK_PENALTY: f64 = 0.1;
+
+/// Ceiling on a merged result set — the same 100 each tier was capped at.
+const SEARCH_LIMIT: usize = 100;
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +358,54 @@ impl Index {
                 state      TEXT,
                 updated_at INTEGER
             );
+
+            -- Tier 2: the tree-visible files that are NOT notes (a .docx, a
+            -- .mp4, a .csv). Deliberately a separate table from `notes`:
+            -- `notes.id` IS the CRDT doc_id and `list_note_titles` feeds the
+            -- sync layer's `registerNote`, so a binary in there would be
+            -- registered as a note and pushed into the bridge. Same identity
+            -- rule though — `files.id` is stable across a rename, preserved by
+            -- path on every rebuild, which is what lets the server half of PR3
+            -- register these as `files` rows later.
+            --
+            -- `text_status` is `extract.rs TextStatus`: pending | ok |
+            -- skipped_size | unsupported | error. `text_sha` is the sha256 of
+            -- the bytes the stored text came from, which is also the
+            -- `file_text` cache key.
+            CREATE TABLE IF NOT EXISTS files (
+                id          TEXT PRIMARY KEY,
+                path        TEXT UNIQUE NOT NULL,
+                ext         TEXT,
+                kind        TEXT,
+                size        INTEGER,
+                mtime       INTEGER,
+                sha256      TEXT,
+                text_sha    TEXT,
+                text_status TEXT,
+                indexed_at  INTEGER
+            );
+
+            -- Self-contained like `notes_fts` and for the same reason:
+            -- snippet() needs the content. `name` is the file name, so an
+            -- image or a video — which have no body at all — is still findable
+            -- by what it is called. rowid mirrors files.rowid.
+            CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                name, body,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+
+            -- Extracted text, keyed by CONTENT. A rename, a copy or a file that
+            -- came back after a delete costs a sha256 instead of a re-parse, and
+            -- two copies of the same attachment store their text once. Swept by
+            -- `prune_file_text` once the extraction queue drains.
+            CREATE TABLE IF NOT EXISTS file_text (
+                sha256     TEXT PRIMARY KEY,
+                chars      INTEGER,
+                body       TEXT,
+                created_at INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_files_sha ON files(sha256);
             "#,
         )?;
         Ok(())
@@ -328,7 +426,15 @@ impl Index {
     /// same wall-clock second as the last index could slip past this check — but
     /// live edits are indexed by the file watcher through `index_note`, so this
     /// only governs changes made while the app was closed, where mtimes differ.
-    pub fn rebuild(&self, vault: &Path) -> AppResult<()> {
+    ///
+    /// Tier 2 (`files`) is reconciled in the SAME walk, on the same terms: ids
+    /// preserved by path, rows for vanished paths dropped. What it deliberately
+    /// does NOT do is extract any text — opening a vault must not pay for
+    /// parsing every `.docx` in it — so it RETURNS the paths whose text is
+    /// stale and the caller hands them to the extraction worker
+    /// (`watcher::ExtractQueue`), which does that work off this thread and
+    /// outside the index mutex.
+    pub fn rebuild(&self, vault: &Path) -> AppResult<Vec<PathBuf>> {
         let started = Instant::now();
         let mut touched = 0usize;
         let tx = self.conn.unchecked_transaction()?;
@@ -374,7 +480,32 @@ impl Index {
             }
         }
 
+        // Snapshot the tier-2 rows the same way, so a vault whose binaries did
+        // not move costs one hash lookup per file rather than a SELECT.
+        let mut indexed_files: HashMap<String, FileState> = HashMap::new();
+        {
+            let mut stmt =
+                tx.prepare("SELECT path, id, size, mtime, text_status FROM files")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    FileState {
+                        id: r.get::<_, String>(1)?,
+                        size: r.get::<_, Option<i64>>(2)?.unwrap_or(-1),
+                        mtime: r.get::<_, Option<i64>>(3)?.unwrap_or(-1),
+                        status: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (path, state) = row?;
+                indexed_files.insert(path, state);
+            }
+        }
+
         let mut seen_notes: HashSet<String> = HashSet::new();
+        let mut seen_files: HashSet<String> = HashSet::new();
+        let mut pending_files: Vec<PathBuf> = Vec::new();
         let mut seen_folders: HashSet<String> = HashSet::new();
         // Two flags, not one. Links resolve against note basenames and titles
         // only (see `resolve_links`), so a `folders` row appearing or going
@@ -426,7 +557,18 @@ impl Index {
                 continue;
             }
             let name = entry.file_name().to_string_lossy();
-            if !name.to_lowercase().ends_with(".md") {
+            // The whole CRDT note family, not just `.md` — a `.txt` that syncs
+            // as a note but never reaches the index is a note you cannot search,
+            // cannot reach by wikilink and whose title the sidebar has to guess.
+            if !is_note_file(&name) {
+                let rel = rel_from_abs(vault, abs)?;
+                if is_indexable_file(&rel) {
+                    let prior = indexed_files.get(&rel);
+                    if self.upsert_file(&tx, &rel, abs, prior)? {
+                        pending_files.push(abs.to_path_buf());
+                    }
+                    seen_files.insert(rel);
+                }
                 continue;
             }
             let rel = rel_from_abs(vault, abs)?;
@@ -466,6 +608,17 @@ impl Index {
             }
         }
 
+        // Drop file rows whose files are gone. Their `file_text` stays for now:
+        // a rename arrives here as "gone + new", and the new path is about to
+        // claim that text back by sha. `prune_file_text` sweeps what is still
+        // unreferenced once the extraction queue has drained.
+        for (path, state) in &indexed_files {
+            if !seen_files.contains(path) {
+                Self::delete_file_rows(&tx, &state.id)?;
+                stale += 1;
+            }
+        }
+
         // Drop folders that no longer exist.
         let stale_folders: Vec<String> = {
             let mut stmt = tx.prepare("SELECT path FROM folders")?;
@@ -491,11 +644,12 @@ impl Index {
         // `BATCH_LOG_MIN` — a clean reopen (0 touched notes) is exactly the case
         // worth seeing, because it is what every launch pays. One line per open.
         log::info!(
-            "[index] rebuild: {touched} notes, {folders_written} folder writes, {stale} stale{}, {} ms",
+            "[index] rebuild: {touched} notes, {} files to extract, {folders_written} folder writes, {stale} stale{}, {} ms",
+            pending_files.len(),
             if folders_changed { " (folders)" } else { "" },
             started.elapsed().as_millis()
         );
-        Ok(())
+        Ok(pending_files)
     }
 
     /// (Re)index a BATCH of notes: ONE transaction, ONE link-resolution pass.
@@ -635,6 +789,315 @@ impl Index {
         tx.execute("DELETE FROM links WHERE src_note_id = ?1", params![id])?;
         tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    // ---- Tier 2: files (binaries) ----------------------------------------
+    //
+    // Everything here is the CHEAP half — identity, size, mtime, the name FTS
+    // row — and runs under the index mutex like the note path. The expensive
+    // half (hashing and parsing a container) never does: it happens on the
+    // extraction worker thread, which comes back through `store_file_text` for
+    // one short write. See `watcher::ExtractQueue`.
+
+    /// Write the cheap half of a `files` row and say whether its TEXT is stale.
+    ///
+    /// Returns `true` when the caller must queue an extraction: the file is new,
+    /// its size/mtime moved, or a previous pass left it `pending`. A row whose
+    /// bytes did not move is left alone even when its status is `error` or
+    /// `unsupported` — retrying a file that has already refused to parse, on
+    /// every watcher event, is exactly the storm the note-side hash gate exists
+    /// to prevent.
+    ///
+    /// Marking a changed row `pending` also clears `text_sha` and the FTS body:
+    /// the text we hold describes bytes that are gone, and leaving it referenced
+    /// would both answer searches wrongly and pin a `file_text` row forever.
+    fn upsert_file(
+        &self,
+        tx: &Connection,
+        rel: &str,
+        abs: &Path,
+        prior: Option<&FileState>,
+    ) -> AppResult<bool> {
+        let size = std::fs::metadata(abs).map(|m| m.len() as i64).unwrap_or(-1);
+        let mtime = file_mtime(abs);
+        if let Some(p) = prior {
+            if p.size == size && p.mtime == mtime && p.status != "pending" {
+                return Ok(false);
+            }
+        }
+        let name = abs
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let ext = ext_of(rel);
+        let id = prior
+            .map(|p| p.id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        tx.execute(
+            "INSERT INTO files (id, path, ext, kind, size, mtime, sha256, text_sha, text_status, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, 'pending', NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                path=excluded.path, ext=excluded.ext, kind=excluded.kind,
+                size=excluded.size, mtime=excluded.mtime,
+                sha256=NULL, text_sha=NULL, text_status='pending', indexed_at=NULL",
+            params![id, rel, ext, kind_for(ext.as_deref().unwrap_or("")), size, mtime],
+        )?;
+        let rowid: i64 =
+            tx.query_row("SELECT rowid FROM files WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })?;
+        // The name goes in NOW, before any extraction: a 500 MB video dropped
+        // into the vault is findable by what it is called the moment the
+        // watcher sees it, and stays findable if its text never arrives.
+        tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![rowid])?;
+        tx.execute(
+            "INSERT INTO files_fts (rowid, name, body) VALUES (?1, ?2, '')",
+            params![rowid, name],
+        )?;
+        Ok(true)
+    }
+
+    fn delete_file_rows(tx: &Connection, id: &str) -> AppResult<()> {
+        let rowid: Option<i64> = tx
+            .query_row("SELECT rowid FROM files WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if let Some(rowid) = rowid {
+            tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![rowid])?;
+        }
+        tx.execute("DELETE FROM files WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    fn file_state(&self, tx: &Connection, rel: &str) -> AppResult<Option<FileState>> {
+        Ok(tx
+            .query_row(
+                "SELECT id, size, mtime, text_status FROM files WHERE path = ?1",
+                params![rel],
+                |r| {
+                    Ok(FileState {
+                        id: r.get::<_, String>(0)?,
+                        size: r.get::<_, Option<i64>>(1)?.unwrap_or(-1),
+                        mtime: r.get::<_, Option<i64>>(2)?.unwrap_or(-1),
+                        status: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// (Re)register a BATCH of tree binaries — the tier-2 twin of
+    /// [`Index::index_notes`], and like it, ONE transaction for the batch.
+    ///
+    /// Returns the paths whose text must be extracted. Nothing is read or
+    /// parsed here; see the section comment above.
+    pub fn index_files(&self, vault: &Path, abs_paths: &[PathBuf]) -> AppResult<Vec<PathBuf>> {
+        if abs_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut pending: Vec<PathBuf> = Vec::new();
+        for abs in abs_paths {
+            let Ok(rel) = rel_from_abs(vault, abs) else {
+                continue;
+            };
+            if !is_indexable_file(&rel) {
+                continue;
+            }
+            let prior = self.file_state(&tx, &rel)?;
+            // One bad file must not cost the rest of the batch its rows — same
+            // rule as `index_notes`, and the only failure here is a stat.
+            match self.upsert_file(&tx, &rel, abs, prior.as_ref()) {
+                Ok(true) => pending.push(abs.clone()),
+                Ok(false) => {}
+                Err(e) => eprintln!("[index] file row failed for {rel}: {e}"),
+            }
+        }
+        tx.commit()?;
+        Ok(pending)
+    }
+
+    /// Drop file rows for a BATCH of paths — an exact path and, because a
+    /// vanished path may have been a folder, everything beneath it.
+    pub fn remove_files(&self, vault: &Path, abs_paths: &[PathBuf]) -> AppResult<()> {
+        if abs_paths.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for abs in abs_paths {
+            let Ok(rel) = rel_from_abs(vault, abs) else {
+                continue;
+            };
+            let prefix = format!("{rel}/");
+            let victims: Vec<String> = {
+                let mut stmt =
+                    tx.prepare("SELECT id FROM files WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+                let rows = stmt.query_map(params![rel, prefix], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for id in victims {
+                Self::delete_file_rows(&tx, &id)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The cached text for a content hash, if we have already extracted these
+    /// exact bytes — a rename, a copy, or the same attachment in two vault
+    /// folders. This is what makes `renamed_file_reuses_cached_text` free.
+    pub fn cached_file_text(&self, sha256: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT body FROM file_text WHERE sha256 = ?1",
+                params![sha256],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Record one extraction: the FTS body, the row's status, and (when the text
+    /// was derived from the file's CONTENT) the `file_text` cache entry.
+    ///
+    /// `cache` is false for the name-only kinds, whose "text" is a function of
+    /// the file NAME: caching that by content hash would hand a copy saved under
+    /// a different name the wrong answer.
+    ///
+    /// Returns false when the row is gone (the file was deleted, or the vault
+    /// switched, while the worker was parsing) — the write is then dropped
+    /// rather than resurrecting a row nothing points at.
+    pub fn store_file_text(
+        &self,
+        rel: &str,
+        sha256: &str,
+        text: &str,
+        status: &str,
+        cache: bool,
+    ) -> AppResult<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let row: Option<(String, i64, String)> = tx
+            .query_row(
+                "SELECT id, rowid, path FROM files WHERE path = ?1",
+                params![rel],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((id, rowid, _)) = row else {
+            return Ok(false);
+        };
+        let chars = text.chars().count() as i64;
+        if cache {
+            tx.execute(
+                "INSERT INTO file_text (sha256, chars, body, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(sha256) DO UPDATE SET chars=excluded.chars, body=excluded.body",
+                params![sha256, chars, text, now_ms()],
+            )?;
+        }
+        tx.execute(
+            "UPDATE files SET sha256 = ?1, text_sha = ?2, text_status = ?3, indexed_at = ?4
+             WHERE id = ?5",
+            params![
+                sha256,
+                if cache { Some(sha256) } else { None },
+                status,
+                now_ms(),
+                id
+            ],
+        )?;
+        let name: String = rel.rsplit('/').next().unwrap_or(rel).to_string();
+        tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![rowid])?;
+        tx.execute(
+            "INSERT INTO files_fts (rowid, name, body) VALUES (?1, ?2, ?3)",
+            params![rowid, name, text],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Drop cached text no `files` row claims any more. Called when the
+    /// extraction queue drains, NOT from `rebuild`: a rename reaches rebuild as
+    /// "old path gone, new path pending", and sweeping there would delete the
+    /// text the new path is seconds away from claiming.
+    pub fn prune_file_text(&self) -> AppResult<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM file_text
+              WHERE sha256 NOT IN (SELECT text_sha FROM files WHERE text_sha IS NOT NULL)",
+            [],
+        )?)
+    }
+
+    /// The extracted text for one vault-relative path. The sync layer's hook:
+    /// the server half of PR3 uploads this as `blob_text` rather than
+    /// re-extracting in Node (see `get_file_text` in `commands.rs`).
+    pub fn file_text(&self, rel: &str) -> AppResult<Option<FileText>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT f.sha256, f.text_status, COALESCE(t.chars, 0), COALESCE(t.body, '')
+                   FROM files f
+                   LEFT JOIN file_text t ON t.sha256 = f.text_sha
+                  WHERE f.path = ?1",
+                params![rel],
+                |r| {
+                    Ok(FileText {
+                        path: rel.to_string(),
+                        sha256: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        status: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        chars: r.get(2)?,
+                        text: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Every `files` row, path order. Tests and the Health census.
+    pub fn file_rows(&self) -> AppResult<Vec<FileRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, ext, kind, COALESCE(size, 0), COALESCE(text_status, '')
+               FROM files ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(FileRow {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                ext: r.get(2)?,
+                kind: r.get(3)?,
+                size: r.get(4)?,
+                text_status: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// What tier 2 costs inside `index.sqlite`: how many files carry a row, and
+    /// the bytes of text behind them (the `file_text` bodies plus what
+    /// `files_fts` stores verbatim). Feeds Vault Settings → Health, whose Index
+    /// tile otherwise reports a number that grew for no visible reason.
+    pub fn file_text_footprint(&self) -> AppResult<FileTextFootprint> {
+        let files: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+        // `length(CAST(x AS BLOB))` is bytes, where bare `length()` would be
+        // characters — a 500k-char body of CJK is 1.5 MB, not 500 KB.
+        let cached: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0) FROM file_text",
+            [],
+            |r| r.get(0),
+        )?;
+        let fts: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(length(CAST(name AS BLOB)) + length(CAST(body AS BLOB))), 0)
+               FROM files_fts",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(FileTextFootprint {
+            files,
+            bytes: cached + fts,
+        })
     }
 
     /// Update paths by `doc_id` on a rename/move — for a single file OR a whole
@@ -858,7 +1321,7 @@ impl Index {
             }
         }
 
-        let parsed = parse_note(&content, stem);
+        let parsed = parse_for(abs, &content, stem);
 
         let id = reuse_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -1120,20 +1583,50 @@ impl Index {
 
     // ---- Read path (query commands) --------------------------------------
 
-    /// FTS5 MATCH search with a highlighted snippet of the body.
+    /// Search BOTH tiers — notes and the tree binaries — as one ranked list.
+    ///
+    /// This is what the `search_notes` command calls. The two tables are queried
+    /// separately (they are different FTS5 tables with different columns) and
+    /// merged by score, which is the only way to rank a `.docx` paragraph
+    /// against a note body at all.
+    pub fn search_all(&self, query: &str) -> AppResult<Vec<SearchResult>> {
+        let match_query = build_fts_query(query);
+        if match_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut hits = self.search_notes_ranked(&match_query)?;
+        hits.extend(self.search_files_ranked(&match_query)?);
+        Ok(merge_ranked(hits, SEARCH_LIMIT))
+    }
+
+    /// FTS5 MATCH search over NOTES only, with a highlighted snippet of the
+    /// body. Kept as its own entry point because most callers (and every test
+    /// that predates tier 2) mean exactly this.
     pub fn search_notes(&self, query: &str) -> AppResult<Vec<SearchResult>> {
         let match_query = build_fts_query(query);
         if match_query.is_empty() {
             return Ok(Vec::new());
         }
-        // Delimit the highlight with control-char sentinels (U+0001/U+0002) that
-        // can't occur in note text, so we can HTML-escape the whole snippet and
-        // then swap the sentinels for real <mark> tags — see html_escape. This
-        // makes the snippet safe to render as HTML (only <mark> survives) even
-        // though the body is raw markdown.
+        let mut hits = self.search_notes_ranked(&match_query)?;
+        hits.sort_by(rank_order);
+        hits.truncate(SEARCH_LIMIT);
+        Ok(hits.into_iter().map(|h| h.result).collect())
+    }
+
+    /// The notes half, scored. `match_query` is already built and escaped.
+    ///
+    /// Delimit the highlight with control-char sentinels (U+0001/U+0002) that
+    /// can't occur in note text, so we can HTML-escape the whole snippet and
+    /// then swap the sentinels for real <mark> tags — see html_escape. This
+    /// makes the snippet safe to render as HTML (only <mark> survives) even
+    /// though the body is raw markdown. Tier 2 goes through the SAME path, and
+    /// `extract.rs` strips those two characters out of every extracted body so
+    /// text pulled from a binary cannot forge a `<mark>`.
+    fn search_notes_ranked(&self, match_query: &str) -> AppResult<Vec<RankedHit>> {
         let mut stmt = self.conn.prepare(
             "SELECT n.id, n.path, n.title,
-                    snippet(notes_fts, 1, char(1), char(2), '…', 12) AS snip
+                    snippet(notes_fts, 1, char(1), char(2), '…', 12) AS snip,
+                    bm25(notes_fts) AS score
              FROM notes_fts
              JOIN notes n ON n.rowid = notes_fts.rowid
              WHERE notes_fts MATCH ?1
@@ -1141,15 +1634,56 @@ impl Index {
              LIMIT 100",
         )?;
         let rows = stmt.query_map(params![match_query], |r| {
-            let raw: String = r.get(3)?;
-            let snippet = html_escape(&raw)
-                .replace('\u{1}', "<mark>")
-                .replace('\u{2}', "</mark>");
-            Ok(SearchResult {
-                id: r.get(0)?,
-                path: r.get(1)?,
-                title: r.get(2)?,
-                snippet,
+            let path: String = r.get(1)?;
+            Ok(RankedHit {
+                score: r.get::<_, f64>(4)?,
+                result: SearchResult {
+                    id: r.get(0)?,
+                    ext: ext_of(&path),
+                    path,
+                    title: r.get(2)?,
+                    snippet: mark_snippet(r.get::<_, String>(3)?),
+                    kind: "note".to_string(),
+                },
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The files half, scored and penalised. The snippet comes from column 1
+    /// (`body`), so a hit that matched only the file NAME has an empty one —
+    /// which is right: there is nothing to quote but the name the row already
+    /// carries.
+    fn search_files_ranked(&self, match_query: &str) -> AppResult<Vec<RankedHit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.path, f.ext,
+                    snippet(files_fts, 1, char(1), char(2), '…', 12) AS snip,
+                    bm25(files_fts) AS score
+             FROM files_fts
+             JOIN files f ON f.rowid = files_fts.rowid
+             WHERE files_fts MATCH ?1
+             ORDER BY bm25(files_fts)
+             LIMIT 100",
+        )?;
+        let rows = stmt.query_map(params![match_query], |r| {
+            let path: String = r.get(1)?;
+            let title = path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&path)
+                .rsplit_once('.')
+                .map(|(stem, _)| stem.to_string())
+                .unwrap_or_else(|| path.clone());
+            Ok(RankedHit {
+                score: r.get::<_, f64>(4)? + FILE_RANK_PENALTY,
+                result: SearchResult {
+                    id: r.get(0)?,
+                    ext: r.get::<_, Option<String>>(2)?,
+                    path,
+                    title,
+                    snippet: mark_snippet(r.get::<_, String>(3)?),
+                    kind: "file".to_string(),
+                },
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1326,11 +1860,38 @@ impl Index {
         }
 
         // 3. Title.
-        Ok(self
+        if let Some(hit) = self
             .conn
             .query_row(
                 "SELECT id, path FROM notes WHERE lower(title) = lower(?1) LIMIT 1",
                 params![target],
+                map,
+            )
+            .optional()?
+        {
+            return Ok(Some(hit));
+        }
+
+        // 4. A tree binary, by full path or basename — `[[Q3 report.xlsx]]`
+        // should open the spreadsheet rather than dangle. The target keeps its
+        // extension here (only a trailing `.md` was trimmed above), because a
+        // file's extension is part of what names it.
+        //
+        // NOTE the `id` this returns is a `files.id`, NOT a note doc_id: the
+        // caller opens by PATH (`store.openNoteByPath`, which routes through the
+        // format registry to the right viewer) and never treats it as a note.
+        // `links`/the graph are untouched — a link to a binary is not an edge in
+        // the note graph.
+        let base = target.rsplit('/').next().unwrap_or(&target).to_string();
+        let base_like = format!("%/{base}");
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, path FROM files
+                  WHERE lower(path) = lower(?1) OR lower(path) = lower(?2)
+                     OR lower(path) LIKE lower(?3)
+                  ORDER BY length(path) LIMIT 1",
+                params![target, base, base_like],
                 map,
             )
             .optional()?)
@@ -1840,6 +2401,49 @@ impl Index {
     }
 }
 
+/// The three columns `upsert_file` compares a file on disk against, plus its id.
+/// Private: nothing outside the write path has a use for it.
+struct FileState {
+    id: String,
+    size: i64,
+    mtime: i64,
+    status: String,
+}
+
+/// One tier-2 row, as the Health census and the tests read it.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRow {
+    pub id: String,
+    pub path: String,
+    pub ext: Option<String>,
+    pub kind: Option<String>,
+    pub size: i64,
+    pub text_status: String,
+}
+
+/// The extracted text of one file, for whoever needs the words rather than the
+/// bytes — the search panel has its snippet, the sync layer wants this.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileText {
+    pub path: String,
+    /// sha256 of the FILE (empty until the worker has hashed it).
+    pub sha256: String,
+    /// `extract.rs TextStatus`.
+    pub status: String,
+    pub chars: i64,
+    pub text: String,
+}
+
+/// What tier 2 costs inside the index file. See [`Index::file_text_footprint`].
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTextFootprint {
+    pub files: i64,
+    pub bytes: i64,
+}
+
 /// One `notes` row as the Health census reads it — see [`Index::note_rows`].
 #[derive(Debug, Clone)]
 pub struct NoteRow {
@@ -1905,6 +2509,18 @@ pub struct YjsStateVector {
 /// unavailable). This is the cache key `rebuild` compares to skip unchanged
 /// notes, so `index_one` stamps `notes.mtime` with the identical value — hence
 /// the shared helper, so the two can never drift apart.
+/// The lowercase extension of a vault-relative path, without the dot. `None`
+/// for a file with no extension (which tier 2 never surfaces anyway).
+fn ext_of(rel: &str) -> Option<String> {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+            Some(ext.to_ascii_lowercase())
+        }
+        _ => None,
+    }
+}
+
 fn file_mtime(abs: &Path) -> i64 {
     std::fs::metadata(abs)
         .and_then(|m| m.modified())
@@ -1949,6 +2565,33 @@ fn build_fts_query(input: &str) -> String {
         .map(|t| format!("\"{t}\"*"))
         .collect();
     terms.join(" AND ")
+}
+
+/// Escape an FTS snippet and turn the sentinels back into `<mark>` tags. The
+/// ONE place `<mark>` is emitted in the whole app — both tiers come through it.
+fn mark_snippet(raw: String) -> String {
+    html_escape(&raw)
+        .replace('\u{1}', "<mark>")
+        .replace('\u{2}', "</mark>")
+}
+
+/// Merge the two tiers into one ranked list.
+///
+/// Pure, so the rule is testable without a database: sort ascending by score
+/// (SQLite's bm25 is negative — more negative is a better match), break ties by
+/// path so two identical queries answer identically, and cap. The file penalty
+/// is already baked into the scores by `search_files_ranked`.
+fn merge_ranked(mut hits: Vec<RankedHit>, limit: usize) -> Vec<SearchResult> {
+    hits.sort_by(rank_order);
+    hits.truncate(limit);
+    hits.into_iter().map(|h| h.result).collect()
+}
+
+fn rank_order(a: &RankedHit, b: &RankedHit) -> std::cmp::Ordering {
+    a.score
+        .partial_cmp(&b.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.result.path.cmp(&b.result.path))
 }
 
 /// HTML-escape text so a note body can never inject markup when a snippet is
@@ -2001,6 +2644,80 @@ mod tests {
         .unwrap();
         write_note(&v, "Gamma.md", "# Gamma\n\nDangling [[Nonexistent]] link.").unwrap();
         (tmp, v)
+    }
+
+    /// The CRDT note family is md/markdown/mdx + txt/html/htm/canvas, and all of
+    /// it indexes. Before this, `.txt` synced as a note yet had no `notes` row —
+    /// unsearchable, unreachable by wikilink, and with no doc_id for the sidebar
+    /// to key on.
+    #[test]
+    fn indexes_the_whole_note_family_with_ids_stable_across_rebuild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Note.md", "# Note\n\nmarkdown body").unwrap();
+        write_note(&v, "Plain.txt", "a plain text jellyfish note").unwrap();
+        write_note(&v, "Page.html", "<p class=\"zzmarkup\">an html <b>jellyfish</b> page</p>").unwrap();
+        write_note(&v, "Board.canvas", "{\"nodes\":[]}").unwrap();
+        // Not a note: surfaced in the tree, but it rides the blob store.
+        std::fs::write(v.join("Sheet.csv"), b"a,b\n1,2\n").unwrap();
+
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let mut paths: Vec<String> = idx
+            .list_note_titles()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["Board.canvas", "Note.md", "Page.html", "Plain.txt"]);
+
+        // Non-markdown members take their filename stem as the title.
+        let txt = idx.get_note_meta("Plain.txt").unwrap().unwrap();
+        assert_eq!(txt.title, "Plain");
+        let html = idx.get_note_meta("Page.html").unwrap().unwrap();
+        assert_eq!(html.title, "Page");
+
+        // FTS reaches both — and the html row holds its TEXT, not its markup.
+        let hits = idx.search_notes("jellyfish").unwrap();
+        let mut hit_paths: Vec<String> = hits.into_iter().map(|h| h.path).collect();
+        hit_paths.sort();
+        assert_eq!(hit_paths, ["Page.html", "Plain.txt"]);
+        assert!(
+            idx.search_notes("zzmarkup").unwrap().is_empty(),
+            "markup is stripped before it reaches FTS"
+        );
+
+        // Identity survives a rebuild, exactly like `.md` (renames/backlinks).
+        let ids_before: Vec<(String, String)> = ["Plain.txt", "Page.html", "Board.canvas"]
+            .iter()
+            .map(|p| (p.to_string(), idx.get_note_meta(p).unwrap().unwrap().id))
+            .collect();
+        idx.rebuild(&v).unwrap();
+        for (path, id) in ids_before {
+            assert_eq!(idx.get_note_meta(&path).unwrap().unwrap().id, id, "{path}");
+        }
+    }
+
+    /// `#tag` and `[[wikilink]]` are MARKDOWN rules (see `parse.rs`). A `.txt`
+    /// shopping list full of `#` bullets must not stuff the tag cloud with words
+    /// the editor never draws as pills.
+    #[test]
+    fn a_txt_notes_hashes_and_brackets_are_not_tags_or_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "List.txt", "#groceries\nmilk\n[[Alpha]]\n").unwrap();
+        write_note(&v, "Alpha.md", "# Alpha\n\n#real").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let names: Vec<String> = idx.list_tags(50).unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["real"], "only the markdown note contributed a tag");
+
+        // …and no backlink either: the `.txt`'s `[[Alpha]]` is just text.
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();
+        assert!(idx.get_backlinks(&alpha.id).unwrap().is_empty());
     }
 
     /// The editor's `#` completion: every tag, most-used first. Ties break by
@@ -3253,5 +3970,301 @@ mod tests {
         idx.rebuild(&v).unwrap();
         let a = idx.load_yjs_state("doc-a").unwrap();
         assert_eq!(a.updates, vec![vec![5, 6, 7]]);
+    }
+
+    // ---- Tier 2: files ----------------------------------------------------
+
+    /// Seed a vault with one of each: a note, two tree binaries, and an
+    /// attachment (which must NEVER be indexed — see `vault::INDEX_ATTACHMENTS`).
+    fn seed_files_vault() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        crate::notefile::write_note(&v, "Note.md", "# Note\n\nplain prose").unwrap();
+        std::fs::write(v.join("data.csv"), "region,total\nnorth,42\n").unwrap();
+        std::fs::write(v.join("clip.mp4"), b"\x00\x00\x00 ftypmp42").unwrap();
+        std::fs::create_dir_all(v.join("attachments")).unwrap();
+        std::fs::write(v.join("attachments/a1b2c3.png"), b"\x89PNG").unwrap();
+        (tmp, v)
+    }
+
+    fn file_paths(idx: &Index) -> Vec<String> {
+        idx.file_rows()
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect()
+    }
+
+    #[test]
+    fn rebuild_indexes_notes_and_files_and_prunes_both() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        let pending = idx.rebuild(&v).unwrap();
+
+        assert_eq!(
+            idx.list_note_titles()
+                .unwrap()
+                .into_iter()
+                .map(|n| n.path)
+                .collect::<Vec<_>>(),
+            vec!["Note.md".to_string()],
+            "only the note family gets `notes` rows — a binary in there would be \
+             registered as a CRDT note"
+        );
+        assert_eq!(
+            file_paths(&idx),
+            vec!["clip.mp4".to_string(), "data.csv".to_string()],
+            "the attachments store is deliberately absent"
+        );
+        // Both are handed to the worker; nothing was parsed here.
+        assert_eq!(pending.len(), 2);
+        assert!(idx
+            .file_rows()
+            .unwrap()
+            .iter()
+            .all(|f| f.text_status == "pending"));
+
+        // Both tiers prune on the next pass.
+        std::fs::remove_file(v.join("data.csv")).unwrap();
+        std::fs::remove_file(v.join("Note.md")).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert!(idx.list_note_titles().unwrap().is_empty());
+        assert_eq!(file_paths(&idx), vec!["clip.mp4".to_string()]);
+    }
+
+    /// `files.id` is identity, exactly like `notes.id`: the server half of PR3
+    /// registers these ids, so a reopen that re-minted them would fork every
+    /// binary in the vault.
+    #[test]
+    fn file_ids_survive_rebuild() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let before: Vec<(String, String)> = idx
+            .file_rows()
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.path, f.id))
+            .collect();
+
+        // A content change must not re-mint the id either.
+        std::fs::write(v.join("data.csv"), "region,total\nsouth,7\n").unwrap();
+        idx.rebuild(&v).unwrap();
+        let after: Vec<(String, String)> = idx
+            .file_rows()
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.path, f.id))
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    /// A rebuild that changes nothing must not re-queue every binary — that is
+    /// the `pending` gate, and without it every launch would re-hash the vault.
+    #[test]
+    fn an_unchanged_file_is_not_requeued() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        // Pretend the worker finished with both.
+        for path in file_paths(&idx) {
+            idx.store_file_text(&path, "sha-for-tests", "body", "ok", false)
+                .unwrap();
+        }
+        assert!(
+            idx.rebuild(&v).unwrap().is_empty(),
+            "nothing moved on disk, so nothing needs extracting"
+        );
+
+        std::fs::write(v.join("data.csv"), "region,total\nwest,9\n").unwrap();
+        assert_eq!(
+            idx.rebuild(&v).unwrap(),
+            vec![v.join("data.csv")],
+            "changed bytes DO re-queue"
+        );
+    }
+
+    #[test]
+    fn search_merges_both_tables_and_tags_kind() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        idx.store_file_text("data.csv", "sha-csv", "sardonic marmalade totals", "ok", true)
+            .unwrap();
+        crate::notefile::write_note(&v, "Note.md", "# Note\n\nsardonic marmalade").unwrap();
+        idx.index_note(&v, &v.join("Note.md")).unwrap();
+
+        let hits = idx.search_all("marmalade").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            (hits[0].kind.as_str(), hits[0].path.as_str()),
+            ("note", "Note.md"),
+            "a note outranks a file on an equally good match"
+        );
+        assert_eq!(hits[1].kind, "file");
+        assert_eq!(hits[1].path, "data.csv");
+        assert_eq!(hits[1].ext.as_deref(), Some("csv"));
+        assert!(hits[1].snippet.contains("<mark>marmalade</mark>"));
+
+        // A file with no body at all is still findable by its name.
+        let by_name = idx.search_all("clip").unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].kind, "file");
+        assert_eq!(by_name[0].ext.as_deref(), Some("mp4"));
+
+        // `search_notes` stays the notes-only entry point.
+        let notes_only = idx.search_notes("marmalade").unwrap();
+        assert_eq!(notes_only.len(), 1);
+        assert_eq!(notes_only[0].kind, "note");
+    }
+
+    /// The companion to `fts_snippet_html_escapes_body_to_prevent_xss`, for
+    /// bodies that did not come from a text file. `index.rs` marks its snippets
+    /// with U+0001/U+0002 sentinels; a binary-derived body can contain those
+    /// bytes literally, and one of them would open a `<mark>` nothing closes in
+    /// the panel's `dangerouslySetInnerHTML`. `extract.rs` strips them, and this
+    /// pins the whole path end to end.
+    #[test]
+    fn files_fts_snippet_has_no_stray_mark_from_control_chars() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        // The sentinels sit BETWEEN words, as a real one would: stripping them
+        // must not glue two tokens into one that no search would match.
+        let hostile = "totals \u{1}marmalade\u{2} <script>alert(1)</script>\u{7}";
+        let extracted = crate::extract::extract_text(
+            &v.join("data.csv"),
+            "csv",
+            hostile.as_bytes(),
+        );
+        idx.store_file_text("data.csv", "sha-csv", &extracted.text, "ok", true)
+            .unwrap();
+
+        let hits = idx.search_all("marmalade").unwrap();
+        assert_eq!(hits.len(), 1);
+        let snippet = &hits[0].snippet;
+        assert_eq!(
+            snippet.matches("<mark>").count(),
+            snippet.matches("</mark>").count(),
+            "every highlight is balanced: {snippet}"
+        );
+        assert!(!snippet.contains("<script"), "the body is escaped: {snippet}");
+        assert!(!snippet.contains('\u{1}') && !snippet.contains('\u{2}'));
+    }
+
+    /// The merge rule on its own: scores order the list, the file penalty breaks
+    /// a tie, and the cap is honoured.
+    #[test]
+    fn merge_ranked_orders_by_score_and_prefers_notes_on_a_tie() {
+        let hit = |kind: &str, path: &str, score: f64| RankedHit {
+            score,
+            result: SearchResult {
+                id: path.to_string(),
+                path: path.to_string(),
+                title: path.to_string(),
+                snippet: String::new(),
+                kind: kind.to_string(),
+                ext: None,
+            },
+        };
+        // The file's raw score is identical; `search_files_ranked` adds the
+        // penalty, which is what the caller here models.
+        let merged = merge_ranked(
+            vec![
+                hit("file", "b.csv", -2.0 + FILE_RANK_PENALTY),
+                hit("note", "a.md", -2.0),
+                hit("file", "c.csv", -9.0 + FILE_RANK_PENALTY),
+            ],
+            10,
+        );
+        assert_eq!(
+            merged.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+            vec!["c.csv", "a.md", "b.csv"],
+            "a much better file hit still wins; an equal one does not"
+        );
+        assert_eq!(merge_ranked(vec![hit("note", "a.md", -1.0)], 0).len(), 0);
+    }
+
+    /// Cached text is keyed by content, so a copy costs nothing — and the sweep
+    /// only takes what no row claims.
+    #[test]
+    fn file_text_is_shared_by_content_and_pruned_when_unclaimed() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        idx.store_file_text("data.csv", "sha-shared", "same bytes", "ok", true)
+            .unwrap();
+        assert_eq!(
+            idx.cached_file_text("sha-shared").unwrap().as_deref(),
+            Some("same bytes")
+        );
+        assert_eq!(idx.prune_file_text().unwrap(), 0, "still claimed");
+
+        // The row moves to different bytes: its old text is now unreferenced.
+        idx.store_file_text("data.csv", "sha-new", "new bytes", "ok", true)
+            .unwrap();
+        assert_eq!(idx.prune_file_text().unwrap(), 1);
+        assert!(idx.cached_file_text("sha-shared").unwrap().is_none());
+        assert!(idx.cached_file_text("sha-new").unwrap().is_some());
+    }
+
+    /// A write for a path with no row (deleted while the worker was parsing) is
+    /// dropped rather than resurrecting it.
+    #[test]
+    fn store_file_text_refuses_a_path_with_no_row() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert!(!idx
+            .store_file_text("gone.csv", "sha", "text", "ok", true)
+            .unwrap());
+    }
+
+    /// `[[data.csv]]` should open the file, not dangle. The id it answers with
+    /// is a `files.id` — the caller opens by PATH.
+    #[test]
+    fn resolve_wikilink_falls_back_to_a_file() {
+        let (_tmp, v) = seed_files_vault();
+        std::fs::create_dir_all(v.join("Reports")).unwrap();
+        std::fs::write(v.join("Reports/q3.xlsx"), b"PK").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        assert_eq!(
+            idx.resolve_wikilink("q3.xlsx").unwrap().unwrap().path,
+            "Reports/q3.xlsx"
+        );
+        assert_eq!(
+            idx.resolve_wikilink("Reports/q3.xlsx").unwrap().unwrap().path,
+            "Reports/q3.xlsx"
+        );
+        // A note still wins: the fallback is the LAST rule.
+        assert_eq!(
+            idx.resolve_wikilink("Note").unwrap().unwrap().path,
+            "Note.md"
+        );
+        assert!(idx.resolve_wikilink("nothing.zip").unwrap().is_none());
+    }
+
+    /// The Health page's Index tile: the numbers exist and move with the text.
+    #[test]
+    fn file_text_footprint_counts_rows_and_bytes() {
+        let (_tmp, v) = seed_files_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let before = idx.file_text_footprint().unwrap();
+        assert_eq!(before.files, 2);
+
+        idx.store_file_text("data.csv", "sha-csv", &"x".repeat(1000), "ok", true)
+            .unwrap();
+        let after = idx.file_text_footprint().unwrap();
+        assert!(
+            after.bytes >= before.bytes + 2000,
+            "the body is stored twice — the cache and the FTS table: {} → {}",
+            before.bytes,
+            after.bytes
+        );
     }
 }

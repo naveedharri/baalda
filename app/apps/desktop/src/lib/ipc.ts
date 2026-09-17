@@ -146,6 +146,24 @@ export interface SearchResult {
   path: string;
   title: string;
   snippet: string;
+  /** `"note"` — `id` is the CRDT doc_id — or `"file"`, where it is the local
+   *  `files.id` of a tree binary and the path is what opens it. */
+  kind: "note" | "file";
+  /** Lowercase extension, no dot. Badged on file hits. */
+  ext: string | null;
+}
+
+/** The extracted plain text of one tree binary (`get_file_text`). A DERIVED
+ *  cache — never the file itself — which is what makes it safe to upload as
+ *  ranking fuel rather than content. */
+export interface FileText {
+  path: string;
+  /** sha256 of the FILE; empty until the extraction worker has hashed it. */
+  sha256: string;
+  /** pending | ok | skipped_size | unsupported | error (Rust `TextStatus`). */
+  status: string;
+  chars: number;
+  text: string;
 }
 
 export interface Backlink {
@@ -202,6 +220,13 @@ export interface AttachmentMeta {
   relPath: string;
   size: number;
   sha256: string;
+}
+
+/** One file's size + mtime (mirrors the Rust `FileStat`). */
+export interface FileStat {
+  size: number;
+  /** Milliseconds since the Unix epoch, or null when the OS won't say. */
+  modified: number | null;
 }
 
 /** Outcome of an import (mirrors the Rust `ImportSummary`). */
@@ -421,6 +446,10 @@ export const exportPath = (rel: string, dest: string, expectedEpoch?: VaultEpoch
 
 export const searchNotes = (query: string) =>
   invoke<SearchResult[]>("search_notes", { query });
+/** The extracted text of a tree binary, or null when it has no `files` row
+ *  (a note, an attachment, or something the walk ignores). */
+export const getFileText = (path: string) =>
+  invoke<FileText | null>("get_file_text", { path });
 export const getBacklinks = (noteId: string) =>
   invoke<Backlink[]>("get_backlinks", { noteId });
 /** Every resolved graph edge (source id -> target id) in one call — backs the
@@ -549,6 +578,17 @@ export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
     relPath,
     expectedEpoch: expectedEpoch ?? null,
   }).then((b) => new Uint8Array(b));
+
+/**
+ * Size + mtime of a vault file, without reading it.
+ *
+ * Epoch-pinned like every other vault-scoped read: the file card asks about a
+ * path, and a stat that crossed a vault switch would describe another vault's
+ * disk. Read scope is the whole vault (not just `attachments/`) — the same
+ * asymmetry as {@link readBinaryFile}, because tree files get a card too.
+ */
+export const fileStat = (relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<FileStat>("file_stat", { relPath, expectedEpoch: expectedEpoch ?? null });
 
 export const writeBinaryFile = (
   relPath: string,
@@ -772,3 +812,15 @@ export interface IndexReady {
 }
 export const onIndexReady = (cb: (e: IndexReady) => void): Promise<UnlistenFn> =>
   listen<IndexReady>("index-ready", (event) => cb(event.payload));
+
+/** Extracted text for these tree binaries just landed in the index — a search
+ *  that ran before them can now answer differently. Coalesced in Rust (the
+ *  extraction worker batches ~20 files / 400 ms), so this is not a per-file
+ *  firehose even during a 200-document drop. */
+export interface FilesIndexed {
+  paths: string[];
+}
+export const onFilesIndexed = (
+  cb: (paths: string[]) => void,
+): Promise<UnlistenFn> =>
+  listen<FilesIndexed>("files-indexed", (event) => cb(event.payload?.paths ?? []));

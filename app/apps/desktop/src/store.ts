@@ -70,6 +70,8 @@ import { planOpen } from "./lib/sync/openGate";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
+import { isEditorNote } from "./lib/notePath";
+import { isNoteExt } from "./lib/formats";
 import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
 import type { AccountLinkKind } from "./lib/accountLink";
@@ -1663,7 +1665,11 @@ export const useStore = create<AppStore>((set, get) => ({
 
   patchTitles: async (changes) => {
     const epoch = get().vault?.epoch;
-    const md = changes.filter((c) => c.path.toLowerCase().endsWith(".md"));
+    // The whole note family, not just `.md`: `index.rs` indexes all seven
+    // extensions, so a renamed `.txt` whose title never reached this patch
+    // would leave a stale row in the sidebar's title map until the next full
+    // refresh.
+    const md = changes.filter((c) => isNoteExt(c.path));
     if (md.length === 0) return;
     const removed: string[] = [];
     const updates: ipc.NoteTitle[] = [];
@@ -1755,8 +1761,12 @@ export const useStore = create<AppStore>((set, get) => ({
       const title = meta?.title ?? path.split("/").pop() ?? path;
       // Ensure the note is registered server-side BEFORE the editor opens it, so
       // its doc_id is known and the sync provider connects on first open.
-      // Only markdown notes sync — HTML pages are local files rendered in-app.
-      if (get().syncEnabled && path.toLowerCase().endsWith(".md")) {
+      // The editor family only (md/markdown/mdx/txt). `.html` and `.canvas` are
+      // note-family too and `flattenTree` already registers them on the server;
+      // they just do not open through the bridge (see `isEditorNote`), so this
+      // open-time registration — whose whole job is to have a doc_id before the
+      // provider connects — has nothing to do for them.
+      if (get().syncEnabled && isEditorNote(path)) {
         try {
           // Pass the local index doc_id so the server adopts the SAME id — the
           // editor's bridge and the sync provider must key the note identically.
