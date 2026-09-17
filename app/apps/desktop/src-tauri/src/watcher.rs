@@ -10,10 +10,16 @@
 //!
 //! `.context/` and dotfolders are ignored so the app's own state dir never
 //! feeds the note pipeline (spec 02 §2 hard rule).
+//!
+//! Read-only events are dropped at the source ([`should_forward`]): on Linux
+//! `notify`'s inotify backend reports every open/read/close-after-read, and
+//! indexing a note is itself a read, so forwarding those made the watcher feed
+//! itself forever.
 
 use crate::index::Index;
 use crate::vault::{rel_from_abs, rel_path_is_ignored};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -109,6 +115,40 @@ impl Drop for VaultWatcher {
     }
 }
 
+/// Should this raw `notify` event reach the drain thread at all?
+///
+/// Everything is forwarded EXCEPT a pure read: `Access(_)` in every shape
+/// (open, read, close-after-read) other than `Access(Close(Write))`.
+///
+/// Why. Linux is the only platform that reports reads. `notify`'s inotify
+/// backend subscribes with `WatchMask::OPEN` alongside CREATE/MODIFY/DELETE, so
+/// merely *reading* a file — or a directory — produces `EventKind::Access`
+/// events. Indexing a batch reads every note in it, which produced a fresh
+/// round of Access events, which `plan_batch` classified as `modified` (it only
+/// asks whether the path exists), which re-indexed them: a vault that nobody
+/// touched re-indexed itself 264–335 times a minute and wrote ~32 MB/s into
+/// `.context/index.sqlite` (#155). macOS/FSEvents and Windows
+/// `ReadDirectoryChangesW` never emit Access, so their behaviour is unchanged.
+///
+/// Two deliberate exceptions:
+/// - `Access(Close(Write))` is KEPT. On inotify that is `IN_CLOSE_WRITE`, the
+///   reliable "the writer is done" signal for editors that write a file in
+///   place (no temp+rename, so no Create/Rename to lean on). It follows a write,
+///   never a read, so it cannot feed the loop.
+/// - An event carrying the Rescan flag is KEPT whatever its kind: that flag
+///   means the backend's queue overflowed and state may have been missed, so it
+///   must still reach the drain thread and re-index the batch.
+pub(crate) fn should_forward(event: &notify::Event) -> bool {
+    if event.need_rescan() {
+        return true;
+    }
+    match event.kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
 /// Start watching `vault`. Returns a handle that must be kept alive.
 pub fn start(
     vault: PathBuf,
@@ -119,6 +159,9 @@ pub fn start(
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
+            if !should_forward(&event) {
+                return;
+            }
             // Forward the event's paths; the drain thread decides what to do.
             let _ = tx.send(event.paths);
         }
@@ -478,5 +521,73 @@ mod tests {
             .map(|t| t.path)
             .collect();
         assert_eq!(paths, vec!["Alpha.md".to_string()]);
+    }
+
+    /// Linux-only feedback loop (#155). Every read-shaped inotify event must die
+    /// in the callback, or indexing (which reads the notes) re-dirties them.
+    #[test]
+    fn read_only_access_events_are_dropped() {
+        use notify::event::{AccessKind, AccessMode};
+        use notify::{Event, EventKind};
+
+        let read_kinds = [
+            EventKind::Access(AccessKind::Any),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Other),
+        ];
+        for kind in read_kinds {
+            let event = Event::new(kind).add_path(PathBuf::from("/vault/Note.md"));
+            assert!(
+                !should_forward(&event),
+                "{kind:?} is a read and must not reach the drain thread"
+            );
+        }
+    }
+
+    /// Everything that can mean "the bytes on disk changed" still gets through —
+    /// including `Close(Write)`, the in-place editor's end-of-write signal.
+    #[test]
+    fn writes_renames_and_deletes_are_forwarded() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+            RenameMode,
+        };
+        use notify::{Event, EventKind};
+
+        let write_kinds = [
+            EventKind::Create(CreateKind::Any),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            EventKind::Remove(RemoveKind::Any),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Any,
+            EventKind::Other,
+        ];
+        for kind in write_kinds {
+            let event = Event::new(kind).add_path(PathBuf::from("/vault/Note.md"));
+            assert!(
+                should_forward(&event),
+                "{kind:?} may have changed the file and must be forwarded"
+            );
+        }
+    }
+
+    /// The Rescan flag means the backend's queue overflowed, so its kind is not
+    /// to be trusted — forward it even though it claims to be a read.
+    #[test]
+    fn a_rescan_flagged_access_event_is_forwarded() {
+        use notify::event::{AccessKind, Flag};
+        use notify::{Event, EventKind};
+
+        let event = Event::new(EventKind::Access(AccessKind::Read))
+            .add_path(PathBuf::from("/vault/Note.md"))
+            .set_flag(Flag::Rescan);
+        assert!(event.need_rescan());
+        assert!(should_forward(&event));
     }
 }

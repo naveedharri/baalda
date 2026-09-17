@@ -53,6 +53,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **Linux re-indexed an idle vault forever (#155, reported and diagnosed by
+  @cjpatten).** `notify`'s inotify backend subscribes with `WatchMask::OPEN`
+  next to CREATE/MODIFY/DELETE, so every *read* of a file or directory produces
+  an `EventKind::Access` event. `watcher.rs` forwarded every event's paths to
+  the drain thread and `plan_batch` classifies any existing `.md` as `modified`
+  (it only asks whether the path exists) — and indexing a batch reads the notes
+  in it, which emitted a fresh round of Access events, which re-indexed them. An
+  untouched 503-note vault ran `index_notes` 264–335 times a minute and wrote
+  ~32 MB/s into `.context/index.sqlite`. The watcher callback now drops an event
+  iff it is `EventKind::Access(_)`, is not `Access(Close(AccessMode::Write))` and
+  carries no Rescan flag (`watcher.rs should_forward`). `Close(Write)` is kept
+  because on inotify it is the reliable end-of-write signal for editors that
+  write in place; a Rescan-flagged event is kept because it means the backend's
+  queue overflowed and the batch must still be re-indexed. macOS/FSEvents and
+  Windows never emit Access, so their behaviour is unchanged. Three unit tests
+  in `watcher.rs` pin the three groups.
 - **"Syncing" on note open, third cause — the provider handshake.** Hocuspocus
   reports `onUnsyncedChanges` for the sync-step/awareness messages it queues
   while the socket comes up, and `DocSync` turned any count > 0 into

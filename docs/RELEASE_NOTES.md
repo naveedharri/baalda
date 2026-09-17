@@ -18,6 +18,10 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.62
+
+- Linux: Baalda no longer re-indexes your vault non-stop while it sits idle, which was keeping a core busy and writing to disk constantly.
+
 ## 0.1.61
 
 - Baalda now updates itself: it checks, downloads, installs and restarts at a quiet moment, and only shows the "Update required" screen if that fails. After a restart, What's New lists just the handful of things that changed in the version you got.
