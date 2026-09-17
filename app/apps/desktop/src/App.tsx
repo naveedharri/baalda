@@ -25,6 +25,7 @@ import * as ipc from "./lib/ipc";
 import * as perf from "./lib/perf";
 import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
 import { syncManager } from "./lib/sync/docSession";
+import { routesToAttachmentSync } from "./lib/sync/attachments";
 import {
   backgroundUpdateCheck,
   checkForUpdate,
@@ -861,6 +862,7 @@ export default function App() {
     let unlistenFile: (() => void) | undefined;
     let unlistenVault: (() => void) | undefined;
     let unlistenIndex: (() => void) | undefined;
+    let unlistenIndexed: (() => void) | undefined;
     // Coalesce sidebar refreshes: a bulk change (e.g. importing a folder) emits
     // many `file-changed` batches in quick succession; refreshing the tree on
     // each one re-renders the whole sidebar repeatedly and flickers hover state.
@@ -909,9 +911,15 @@ export default function App() {
         const open = useStore.getState().openNote;
         const forSync: ipc.FileChanged[] = [];
         for (const e of changes) {
-          // Attachments are content-synced, not indexed/CRDT-bridged. A change
-          // under `attachments/` triggers a debounced two-way blob reconcile.
-          if (e.path === "attachments" || e.path.startsWith("attachments/")) {
+          // Binaries are content-synced, not CRDT-bridged: a change to one
+          // triggers a debounced two-way blob reconcile and nothing else.
+          //
+          // The test is the FORMAT, not the folder. It used to be "does this
+          // path start with `attachments/`", which was the same question back
+          // when the hidden store was the only home a binary had — a `.docx`
+          // dropped into a folder fell through to the note path below, where an
+          // unmapped file means "register it as a note" (`routesToAttachmentSync`).
+          if (routesToAttachmentSync(e.path)) {
             syncManager.handleAttachmentChanged();
             continue;
           }
@@ -959,6 +967,12 @@ export default function App() {
       unlistenVault = await ipc.onVaultOpened((v) => {
         useStore.getState().setVault(v);
       });
+      // Rust finished pulling the words out of these binaries. The sync layer
+      // offers them to the server as search fuel (never as content) — already
+      // coalesced in Rust, and debounced again there.
+      unlistenIndexed = await ipc.onFilesIndexed((paths) => {
+        syncManager.handleFilesIndexed(paths);
+      });
       // The background index rebuild committed: everything derived from the
       // index catches up. Stale epochs (a vault switched during a long rebuild)
       // are dropped — the open that replaced it gets its own event.
@@ -975,6 +989,7 @@ export default function App() {
       unlistenFile?.();
       unlistenVault?.();
       unlistenIndex?.();
+      unlistenIndexed?.();
       if (refreshTimer) clearTimeout(refreshTimer);
     };
   }, []);

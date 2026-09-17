@@ -5,7 +5,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::notefile::sha256_file;
-use crate::vault::{is_ignored_name, resolve_in_vault};
+use crate::vault::{is_allowed_file, is_ignored_name, is_note_file, rel_path_is_ignored, resolve_in_vault};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -102,10 +102,48 @@ fn ensure_attachment_rel(rel: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// The write guard for a binary that lives in the TREE rather than in
+/// `attachments/` — a `.docx` a teammate dropped into `Team/`, which another
+/// device has to materialise at that same path.
+///
+/// Deliberately a SECOND guard rather than a relaxation of
+/// {@link ensure_attachment_rel}: that one still bounds every
+/// `attachments/`-targeted write, and widening it would hand a member who sets
+/// a blob's `rel_path` the whole vault. What this one accepts is exactly the set
+/// the binary walk produces — a surfaced, non-note extension outside `.context`,
+/// `.git`, dotfiles and `DENIED_DIRS` — so a server-supplied path can name a
+/// file the user could have dropped there themselves and nothing else. Notes
+/// are refused because they belong to the CRDT pipeline; a blob must never be
+/// able to overwrite one.
+fn ensure_tree_binary_rel(rel: &str) -> AppResult<()> {
+    if rel.is_empty() || rel_path_is_ignored(rel) {
+        return Err(AppError::new("invalid tree binary path"));
+    }
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if !is_allowed_file(name) || is_note_file(name) {
+        return Err(AppError::new("not a syncable binary file type"));
+    }
+    Ok(())
+}
+
+/// Atomic write of raw bytes to a TREE binary path (see
+/// {@link ensure_tree_binary_rel}). Same temp+rename as `write_binary_file`,
+/// different accepted set.
+pub fn write_tree_binary(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
+    ensure_tree_binary_rel(rel)?;
+    write_bytes_atomic(vault, rel, bytes)
+}
+
 /// Atomic write of raw bytes: temp file in the same dir, then rename over the
 /// target so readers never observe a half-written file. Creates parent dirs.
 pub fn write_binary_file(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
     ensure_attachment_rel(rel)?;
+    write_bytes_atomic(vault, rel, bytes)
+}
+
+/// The write itself, once a caller's guard has accepted the path. Private, so
+/// nothing can reach it without passing one of the two guards above.
+fn write_bytes_atomic(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
     let abs = resolve_in_vault(vault, rel)?;
     let parent = abs
         .parent()
@@ -173,11 +211,73 @@ pub fn list_attachments_cached(
     vault: &Path,
     cached: &HashMap<String, HashEntry>,
 ) -> AppResult<AttachmentListing> {
-    let root = vault.join("attachments");
+    let root = vault.join(ATTACHMENTS_DIR);
     let mut found: Vec<(String, PathBuf, u64, i64)> = Vec::new();
     if root.is_dir() {
-        walk(vault, &root, &mut found)?;
+        walk(vault, &root, &|_| true, &mut found)?;
     }
+    hash_listing(found, cached)
+}
+
+/// The vault-root store for content-addressed attachments (editor drops).
+/// Mirrors `vault.rs`'s own constant and `stats.rs ATTACHMENTS_DIR`.
+pub const ATTACHMENTS_DIR: &str = "attachments";
+/// The same, as a path prefix — compared per file, so it is a constant rather
+/// than a `format!` per candidate.
+const ATTACHMENTS_PREFIX: &str = "attachments/";
+
+/// Does the binary sync mirror this vault-relative path?
+///
+/// Two sets, deliberately: everything under the root `attachments/` store (its
+/// files are content-addressed and hidden, and the names are ours, so the
+/// extension is not a question anyone asked), plus every TREE binary — a
+/// surfaced, non-note extension anywhere else in the vault. `.context/`,
+/// `.git`, dotfiles and `DENIED_DIRS` are out of both, and notes are out of the
+/// second: they ride the CRDT bridge, not the blob store.
+pub fn is_syncable_binary(rel: &str) -> bool {
+    if rel.is_empty() || rel_path_is_ignored(rel) {
+        return false;
+    }
+    if rel.starts_with(ATTACHMENTS_PREFIX) {
+        return true;
+    }
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    is_allowed_file(name) && !is_note_file(name)
+}
+
+/// The same listing over the WHOLE vault: `attachments/` plus every tree binary
+/// (see {@link is_syncable_binary}).
+///
+/// A strict superset of {@link list_attachments_cached}, which is why the two
+/// share one hash cache: the binary walk re-states every attachment entry, so
+/// writing its cache back prunes nothing the attachment walk still wants. (The
+/// reverse is not true — an `attachments/`-only walk would prune the tree
+/// entries — which is why `list_attachments` has no caller left in the sync
+/// path.)
+pub fn list_binaries_cached(
+    vault: &Path,
+    cached: &HashMap<String, HashEntry>,
+) -> AppResult<AttachmentListing> {
+    let mut found: Vec<(String, PathBuf, u64, i64)> = Vec::new();
+    if vault.is_dir() {
+        walk(vault, vault, &is_syncable_binary, &mut found)?;
+    }
+    hash_listing(found, cached)
+}
+
+/// Every syncable binary in the vault, hashed. The uncached twin of
+/// {@link list_binaries_cached}, for callers and tests with no index.
+pub fn list_binaries(vault: &Path) -> AppResult<Vec<AttachmentMeta>> {
+    Ok(list_binaries_cached(vault, &HashMap::new())?.items)
+}
+
+/// Hash what a walk found, reusing a cached sha wherever `(size, mtime)` says
+/// the bytes cannot have moved. Shared by both walks — the only difference
+/// between them is which files reach here.
+fn hash_listing(
+    mut found: Vec<(String, PathBuf, u64, i64)>,
+    cached: &HashMap<String, HashEntry>,
+) -> AppResult<AttachmentListing> {
     // Deterministic order (stable diffs, stable tests).
     found.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -209,22 +309,35 @@ pub fn list_attachments_cached(
 }
 
 /// Collect `(rel_path, abs, size, mtime_ns)` for every non-ignored file under
-/// `dir`. Deliberately reads no contents — hashing is the caller's decision,
-/// because the cache may already know the answer.
-fn walk(vault: &Path, dir: &Path, out: &mut Vec<(String, PathBuf, u64, i64)>) -> AppResult<()> {
+/// `dir` that `keep` accepts. Deliberately reads no contents — hashing is the
+/// caller's decision, because the cache may already know the answer.
+///
+/// `keep` is asked about the vault-relative PATH, not the name: "is this under
+/// `attachments/`" is the one question the whole-vault walk cannot answer from
+/// a file name alone.
+fn walk(
+    vault: &Path,
+    dir: &Path,
+    keep: &dyn Fn(&str) -> bool,
+    out: &mut Vec<(String, PathBuf, u64, i64)>,
+) -> AppResult<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         if is_ignored_name(&name) {
-            continue; // skip dotfiles / .context / .git and our .*.tmp writes
+            continue; // skip dotfiles / .context / .git / node_modules and our .*.tmp writes
         }
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            walk(vault, &path, out)?;
+            walk(vault, &path, keep, out)?;
         } else if file_type.is_file() {
+            let rel = rel_from(vault, &path);
+            if !keep(&rel) {
+                continue;
+            }
             let meta = entry.metadata()?;
-            out.push((rel_from(vault, &path), path, meta.len(), mtime_ns(&meta)));
+            out.push((rel, path, meta.len(), mtime_ns(&meta)));
         }
     }
     Ok(())
@@ -427,11 +540,15 @@ pub async fn upload_file(
     Ok(UploadOutcome { status, etag, error })
 }
 
-/// Stream `url` into a vault-relative attachment path, atomically.
+/// Stream `url` into a vault-relative binary path, atomically.
 ///
-/// WRITE scope is `attachments/` only (`ensure_attachment_rel`): the path comes
-/// from the server, so a member who set a blob's `rel_path` to `.context/…` or
-/// to a note must not be able to make every teammate's client overwrite it.
+/// WRITE scope is one of the two guards, never `resolve_in_vault` alone: the
+/// path comes from the SERVER, so a member who set a blob's `rel_path` to
+/// `.context/…` or to a note must not be able to make every teammate's client
+/// overwrite it. `tree: false` is the `attachments/` store
+/// (`ensure_attachment_rel`); `tree: true` is a binary that lives in the tree
+/// (`ensure_tree_binary_rel`) — a surfaced non-note extension outside the
+/// ignored dirs, and nothing else.
 ///
 /// Bytes land in `.<name>.tmp` beside the target and are hashed as they are
 /// written; the rename only happens once the digest matches `expected_sha256`.
@@ -443,8 +560,13 @@ pub async fn download_file(
     url: &str,
     headers: &HashMap<String, String>,
     expected_sha256: Option<&str>,
+    tree: bool,
 ) -> AppResult<DownloadOutcome> {
-    ensure_attachment_rel(rel)?;
+    if tree {
+        ensure_tree_binary_rel(rel)?;
+    } else {
+        ensure_attachment_rel(rel)?;
+    }
     let abs = resolve_in_vault(vault, rel)?;
     let parent = abs
         .parent()
@@ -694,11 +816,123 @@ mod tests {
                 "http://127.0.0.1:9/never-reached",
                 &headers,
                 None,
+                false,
             ));
             assert!(err.is_err(), "{rel} must be refused");
         }
         // Nothing was created on the way to those refusals.
         assert!(!tmp.path().join("attachments").exists());
+    }
+
+    /// The tree-scoped download takes a server path too, and its accepted set
+    /// is exactly `write_tree_binary`'s — notes and the hidden store included in
+    /// what it refuses.
+    #[test]
+    fn tree_download_refuses_everything_write_tree_binary_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let headers = HashMap::new();
+        for rel in [
+            ".context/index.sqlite",
+            "Team/Plans.md",
+            "Team/../../escape.png",
+            "Team/.hidden/x.png",
+            "node_modules/pkg/logo.png",
+            "Team/Makefile",
+        ] {
+            let err = block_on(download_file(
+                tmp.path(),
+                rel,
+                "http://127.0.0.1:9/never-reached",
+                &headers,
+                None,
+                true,
+            ));
+            assert!(err.is_err(), "{rel} must be refused");
+        }
+    }
+
+    /// `write_tree_binary` is the materialize guard: a surfaced non-note
+    /// extension anywhere the walk would have found it, and nothing else.
+    #[test]
+    fn write_tree_binary_accepts_only_tree_binaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        for rel in ["Team/report.docx", "Media/clip.mp4", "attachments/x.png", "top.csv"] {
+            write_tree_binary(tmp.path(), rel, &[1, 2, 3]).unwrap_or_else(|e| panic!("{rel}: {e:?}"));
+            assert!(tmp.path().join(rel).is_file());
+        }
+        for rel in [
+            "Notes/Plan.md",          // a note: the CRDT pipeline owns it
+            "Notes/page.html",        // ditto (NOTE_EXTS is wider than markdown)
+            ".context/config.json",   // the hidden store, never writable
+            "../escape.png",          // traversal
+            "/etc/evil.png",          // absolute
+            "Team/.hidden/x.png",     // dotfile segment
+            "node_modules/a/logo.png",// a denied dir
+            "Notes/script.js",        // not a surfaced extension
+            "Notes/x.txt",            // a note extension, despite looking inert
+        ] {
+            assert!(
+                write_tree_binary(tmp.path(), rel, &[1]).is_err(),
+                "{rel} must be refused"
+            );
+        }
+    }
+
+    /// The whole-vault walk: every tree binary plus the `attachments/` store,
+    /// and nothing the tree walk itself ignores.
+    #[test]
+    fn binary_walk_covers_the_tree_and_skips_notes_and_ignored_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |rel: &str| {
+            let abs = tmp.path().join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, rel.as_bytes()).unwrap();
+        };
+        write("Team/report.docx");
+        write("Team/Notes.md");
+        write("Media/clip.mp4");
+        write("attachments/abc123.png");
+        write("attachments/no-extension");
+        write(".context/index.sqlite");
+        write(".hidden/secret.png");
+        write("node_modules/pkg/logo.png");
+        write("Team/script.js");
+        write("Team/notes.txt");
+
+        let items = list_binaries(tmp.path()).unwrap();
+        let paths: Vec<_> = items.iter().map(|i| i.rel_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "Media/clip.mp4",
+                "Team/report.docx",
+                // The store is listed whatever the file is called — its names
+                // are ours, and an extension-less blob still has to sync.
+                "attachments/abc123.png",
+                "attachments/no-extension",
+            ]
+        );
+        // Every entry carries a real hash (the diff is keyed by it).
+        assert!(items.iter().all(|i| i.sha256.len() == 64));
+    }
+
+    /// The binary walk is a superset of the attachment walk, which is what lets
+    /// the two share one hash cache.
+    #[test]
+    fn binary_walk_is_a_superset_of_the_attachment_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/a.png", &[1, 2, 3]).unwrap();
+        write_tree_binary(tmp.path(), "Team/report.docx", &[4, 5]).unwrap();
+        let attachments = list_attachments(tmp.path()).unwrap();
+        let binaries = list_binaries(tmp.path()).unwrap();
+        for a in &attachments {
+            assert!(
+                binaries.iter().any(|b| b.rel_path == a.rel_path && b.sha256 == a.sha256),
+                "{} missing from the binary walk",
+                a.rel_path
+            );
+        }
+        assert_eq!(binaries.len(), attachments.len() + 1);
     }
 
     /// A part upload names a byte range; one outside the file is a bug in the

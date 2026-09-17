@@ -1,8 +1,30 @@
-// Attachment sync (Phase 3 blob store, spec 02 §2/§5A). Diffs the vault's local
-// `attachments/` files against the server's blob list BY CONTENT HASH (sha256)
-// and moves the delta both ways: upload local-only files, download server-only
-// files into `attachments/`. Attachments never enter the note/CRDT pipeline —
-// this is a plain content-addressed file mirror.
+// Binary sync (Phase 3 blob store, spec 02 §2/§5A). Diffs the vault's local
+// binaries against the server's blob list BY CONTENT HASH (sha256) and moves
+// the delta both ways: upload local-only files, download server-only files onto
+// disk. Binaries never enter the note/CRDT pipeline — this is a plain
+// content-addressed file mirror.
+//
+// ── Two homes, one mirror (PR3 Stage A) ────────────────────────────────────
+// `attachments/` is the hidden, content-addressed store an editor drop writes
+// to. A TREE binary is anything else the vault surfaces and the CRDT does not
+// own — `Team/report.docx`, `Media/clip.mp4`. Both ride this mirror, and the
+// difference is what happens either side of the bytes:
+//
+//   • a tree binary is REGISTERED as a server `files` row first, under the
+//     local index's `files.id`, and its blob carries that id as `doc_id` — so
+//     the permission resolver answers for the FILE (folder shares, org grants,
+//     the sealed posture) instead of falling back to the blob store's path
+//     heuristic. That ACL fix is the whole point of Stage A;
+//   • a tree binary materializes through the TREE write guard
+//     (`ipc.writeTreeBinary`), never through the `attachments/` one, which
+//     stays exactly as strict as it was for server-supplied paths.
+//
+// Identity is still sha256 in both directions, which is Stage A's known
+// limit: RENAMING a tree binary does not propagate (the bytes are unchanged, so
+// the diff sees nothing to do and another device keeps the old name), and two
+// paths holding identical bytes collapse to one blob. Stage B replaces the
+// diff with a path-keyed one over `files.id`; the rename no-op is pinned by a
+// test so that change is a visible one.
 //
 // The diff is pure and unit-tested in isolation; the `AttachmentSync` class
 // wires it to injected I/O (ApiClient + Tauri ipc) and debounces watcher-driven
@@ -28,7 +50,7 @@
 // back to the legacy `POST /api/vaults/:id/blobs` and remembers, so exactly one
 // upload pays for the probe.
 
-import { mimeForPath as mimeForFormat } from "../formats";
+import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
 import type {
   BlobCompleteBody,
   BlobDownloadTarget,
@@ -77,11 +99,71 @@ export function isSafeAttachmentRelPath(relPath: string): boolean {
   );
 }
 
+/** Does this vault-relative path live in the hidden `attachments/` store? */
+export function isUnderAttachments(relPath: string): boolean {
+  return relPath === "attachments" || relPath.startsWith("attachments/");
+}
+
+/**
+ * Whether a server-supplied `relPath` is a safe TREE binary target — the
+ * mirror of {@link isSafeAttachmentRelPath} for files that live in the tree.
+ *
+ * Same threat: the server stores the uploader's path verbatim, so this is what
+ * a member could aim at every teammate's disk. Accepted is exactly what a user
+ * could have dropped there themselves — no traversal, no dotfile or hidden
+ * segment, and an extension the format registry surfaces as a non-note (so a
+ * blob can never overwrite a `.md`, and never lands inside `.context/`).
+ *
+ * Rust re-decides all of it (`attachments.rs ensure_tree_binary_rel`) and is
+ * the authority, including the denied build dirs this side does not enumerate;
+ * this filter is what keeps the pass from queueing work Rust will refuse.
+ */
+export function isSafeTreeBinaryRelPath(relPath: string): boolean {
+  if (!relPath) return false;
+  const parts = relPath.split(/[\\/]/);
+  if (parts.length === 0) return false;
+  if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith(".")))
+    return false;
+  if (isNoteExt(relPath)) return false;
+  const format = formatFor(relPath);
+  return !!format && format.surface && format.syncAs === "attachment";
+}
+
+/**
+ * Can this server blob be placed on disk at the path the server names?
+ *
+ * Two guards, one per home, and never a relaxation of either: a path under
+ * `attachments/` must satisfy {@link isSafeAttachmentRelPath}, anything else
+ * must satisfy {@link isSafeTreeBinaryRelPath}.
+ */
+export function isSafeBlobRelPath(relPath: string): boolean {
+  return isUnderAttachments(relPath)
+    ? isSafeAttachmentRelPath(relPath)
+    : isSafeTreeBinaryRelPath(relPath);
+}
+
+/**
+ * Is a watcher event for this path the BINARY sync's business rather than the
+ * note pipeline's?
+ *
+ * The routing rule `App.tsx` applies to every watcher batch. It used to be
+ * "does the path start with `attachments/`", which was true of every binary
+ * back when the only binaries lived there — a `.docx` dropped into a folder
+ * fell through to the note path, where an unmapped file means "register it as a
+ * note". The format registry answers it properly: the CRDT family is `syncAs:
+ * "note"`, everything else the vault surfaces is a blob.
+ */
+export function routesToAttachmentSync(path: string): boolean {
+  if (isUnderAttachments(path)) return true;
+  return formatFor(path)?.syncAs === "attachment";
+}
+
 /**
  * Pure content-hash diff. A file is "the same" iff its sha256 matches; rel_path
  * is not part of identity (dedupe is by content), so a rename with unchanged
- * bytes is a no-op. Server blobs without a sha or a rel_path — or with a
- * relPath outside `attachments/` (see {@link isSafeAttachmentRelPath}) — can't
+ * bytes is a no-op — see the module header for why that is Stage A's known
+ * limit rather than a decision. Server blobs without a sha or a rel_path — or
+ * with a relPath neither guard accepts (see {@link isSafeBlobRelPath}) — can't
  * be placed on disk, so they're skipped from the download set.
  */
 export function diffAttachments(
@@ -93,11 +175,7 @@ export function diffAttachments(
 
   const toUpload = local.filter((a) => !serverShas.has(a.sha256));
   const toDownload = server.filter(
-    (b) =>
-      !!b.sha256 &&
-      !!b.relPath &&
-      isSafeAttachmentRelPath(b.relPath) &&
-      !localShas.has(b.sha256),
+    (b) => !!b.sha256 && !!b.relPath && isSafeBlobRelPath(b.relPath) && !localShas.has(b.sha256),
   );
   return { toUpload, toDownload };
 }
@@ -188,6 +266,26 @@ function isMissingCommand(e: unknown): boolean {
  */
 const EXPIRED_PRESIGN: readonly number[] = [401, 403];
 
+/** How long a `files-indexed` burst collects before the text pass runs. */
+const TEXT_DEBOUNCE_MS = 800;
+
+/**
+ * The server rejects extracted text over 1 MB (413). Characters are not bytes,
+ * so this cap is the cheap half: slice at a million characters — never inside a
+ * surrogate pair, which would send a lone half and land as U+FFFD — and let the
+ * server's own 413 handle text that is still over the byte cap after it (marked
+ * permanent for that blob, never retried).
+ */
+const MAX_TEXT_CHARS = 1_000_000;
+
+function capText(text: string): string {
+  if (text.length <= MAX_TEXT_CHARS) return text;
+  let end = MAX_TEXT_CHARS;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // don't split a surrogate pair
+  return text.slice(0, end);
+}
+
 /** `attachments/a/b.png` → `b.png`. */
 function baseName(relPath: string): string {
   const parts = relPath.split("/");
@@ -204,17 +302,31 @@ export interface AttachmentSyncDeps {
    * to always-current when omitted (unit tests).
    */
   isCurrent?: () => boolean;
-  /** List local attachment files under `attachments/`. */
+  /** List the vault's local binaries — `attachments/` AND the tree binaries
+   *  (`ipc.listBinaries`). */
   listLocal: () => Promise<LocalAttachment[]>;
   /** Read a local attachment's bytes (vault-relative path). */
   readLocal: (relPath: string) => Promise<Uint8Array>;
-  /** Atomically write bytes to a vault-relative path (creates dirs). */
+  /** Atomically write bytes to a path under `attachments/` (creates dirs). */
   writeLocal: (relPath: string, bytes: Uint8Array) => Promise<void>;
+  /** The same for a TREE binary, through the tree write guard. Absent means
+   *  this host cannot materialize outside `attachments/` (unit tests), and
+   *  those downloads are skipped rather than forced through the wrong guard. */
+  writeTreeLocal?: (relPath: string, bytes: Uint8Array) => Promise<void>;
+  /** Claim the watcher echo for a path THIS device just wrote, exactly as the
+   *  registry does for a materialized note (`registry.markMaterialized`). */
+  markMaterialized?: (relPath: string) => void;
   /** List the server's blobs for this vault. */
   listServer: () => Promise<ServerBlob[]>;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
-   *  with no intent route, and the reason that route stays forever. */
-  uploadServer: (relPath: string, bytes: Uint8Array, mime: string) => Promise<void>;
+   *  with no intent route, and the reason that route stays forever. `docId` is
+   *  the `files` row a tree binary belongs to — sent as `x-doc-id`. */
+  uploadServer: (
+    relPath: string,
+    bytes: Uint8Array,
+    mime: string,
+    docId?: string | null,
+  ) => Promise<void>;
   /** LEGACY download: GET `/api/blobs/:id` and hand back the bytes. */
   downloadServer: (id: string) => Promise<Uint8Array>;
 
@@ -230,6 +342,8 @@ export interface AttachmentSyncDeps {
     size: number;
     mime: string;
     filename: string;
+    /** The `files` row these bytes belong to (tree binaries only). */
+    docId?: string | null;
   }) => Promise<BlobIntent>;
   /** POST the intent's `completeUrl` once every byte is in. Idempotent. */
   completeUpload?: (completeUrl: string, body: BlobCompleteBody) => Promise<void>;
@@ -255,12 +369,14 @@ export interface AttachmentSyncDeps {
   }) => Promise<PutResult>;
   /** Ask where a blob's bytes are right now (presign or our own route). */
   downloadUrl?: (blobId: string) => Promise<BlobDownloadTarget>;
-  /** Stream a URL to disk from Rust, hash-verified and atomic. */
+  /** Stream a URL to disk from Rust, hash-verified and atomic. `tree` picks
+   *  the write guard Rust applies — never inferred there, always stated here. */
   fetchToFile?: (input: {
     url: string;
     relPath: string;
     headers: Record<string, string>;
     expectedSha256?: string | null;
+    tree: boolean;
   }) => Promise<{ status: number; bytes: number }>;
   /** GET bytes from a (possibly presigned) URL in the webview — fallback. */
   fetchBytes?: (url: string, headers: Record<string, string>) => Promise<Uint8Array>;
@@ -274,6 +390,31 @@ export interface AttachmentSyncDeps {
   authHeaders?: () => Record<string, string>;
   /** Tell the user something terminal happened (a full vault). */
   notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
+
+  // ---- Tree binaries: `files` rows + extracted text (PR3 Stage A) ---------
+
+  /** Local `files.id` per vault-relative path (`ipc.listFileRows`). The id the
+   *  server row is created under, so both sides name one identity. */
+  localFileIds?: () => Promise<Map<string, string>>;
+  /** The `files` id this vault already registered for a path, from
+   *  `.context/config.json` — so a reconnect costs no round trip per binary. */
+  knownFileId?: (relPath: string) => string | null;
+  /** Create (or adopt) the server `files` row and answer with its id. */
+  registerFile?: (input: { relPath: string; id: string }) => Promise<string | null>;
+  /** Remember a registered row for the next session. */
+  rememberFileId?: (relPath: string, id: string) => void;
+  /** The extracted text the INDEX holds for a path (`ipc.getFileText`). */
+  fileText?: (
+    relPath: string,
+  ) => Promise<{ sha256: string; status: string; chars: number; text: string } | null>;
+  /** Hand that text to the server as ranking fuel for team search. */
+  uploadText?: (input: {
+    blobId: string;
+    docId?: string | null;
+    sha256: string;
+    chars: number;
+    content: string;
+  }) => Promise<void>;
 }
 
 export interface ReconcileResult {
@@ -309,6 +450,34 @@ export class AttachmentSync {
   private readonly permanentSkips = new Set<string>();
   /** The storage-full toast is raised at most once per sync instance. */
   private storageLimitNotified = false;
+
+  // ---- Tree binaries -----------------------------------------------------
+
+  /** relPath → server `files` id, for the paths registered this session. */
+  private readonly fileIds = new Map<string, string>();
+  /** The local index's path → `files.id` map, read once per pass. */
+  private localIds: Map<string, string> | null = null;
+  /**
+   * Tree binaries the server has REFUSED a `files` row for in a way retrying
+   * cannot fix — no write access, the frozen root, or a path another identity
+   * already holds. Their bytes still upload (without a `doc_id`, i.e. with the
+   * blob store's old path heuristic for ACL); what stops is asking again every
+   * pass.
+   */
+  private readonly registerRefused = new Set<string>();
+  /** sha256 → the blob the server holds for it. Rebuilt from each listing and
+   *  extended by each upload, so the text pass can name a blob by content. */
+  private readonly blobIdBySha = new Map<string, string>();
+  /** Does this server accept extracted text? `false` after one 404 (see
+   *  `api.uploadBlobText`) — the whole session then stops offering it. */
+  private textSupported: boolean | null = null;
+  /** Blobs whose text this session has already sent (or permanently failed to
+   *  send). Keyed by blob id: text describes BYTES, so one send per blob. */
+  private readonly textDone = new Set<string>();
+  /** Paths waiting for a text pass, and its own debounce — deliberately
+   *  separate from the byte mirror's, so extraction never delays an upload. */
+  private pendingText = new Set<string>();
+  private textTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly deps: AttachmentSyncDeps,
@@ -358,6 +527,13 @@ export class AttachmentSync {
       return { uploaded: 0, downloaded: 0 };
     }
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
+    // Re-read per pass: a file dropped a second ago has no `files` row yet, and
+    // the next pass is when it does.
+    this.localIds = null;
+    // What the server holds, by content — the text pass names a blob this way,
+    // and a file that was uploaded by ANOTHER device (so never passes through
+    // `uploadOne` here) is only ever knowable from the listing.
+    for (const b of server) if (b.sha256) this.blobIdBySha.set(b.sha256, b.id);
     const { toUpload, toDownload } = diffAttachments(local, server);
 
     let uploaded = 0;
@@ -404,6 +580,11 @@ export class AttachmentSync {
    */
   private async uploadOne(a: LocalAttachment): Promise<boolean> {
     const mime = mimeForPath(a.relPath);
+    // A tree binary is a `files` row FIRST: the id has to exist before the
+    // bytes, because it is what the blob carries as `doc_id` and what the
+    // permission resolver answers for. A failure here is not fatal — the bytes
+    // still go, with the pre-Stage-A path heuristic deciding who may read them.
+    const docId = await this.ensureFileRow(a.relPath);
     // Read lazily and at most once: the deduped path must move NO bytes and
     // must not even open the file, which is what makes a second device's first
     // sync a few JSON round trips instead of re-uploading the whole store.
@@ -414,7 +595,10 @@ export class AttachmentSync {
     };
 
     if (!this.deps.createIntent || this.intentSupported === false) {
-      await this.deps.uploadServer(a.relPath, await loadBytes(), mime);
+      await this.deps.uploadServer(a.relPath, await loadBytes(), mime, docId);
+      // The legacy route answers with the blob, but through a dep that reports
+      // nothing — so the text for this path waits for the next listing to name
+      // its blob, which is exactly what the pass already does.
       return true;
     }
 
@@ -426,6 +610,7 @@ export class AttachmentSync {
         size: a.size ?? (await loadBytes()).byteLength,
         mime,
         filename: baseName(a.relPath),
+        docId,
       });
       this.intentSupported = true;
     } catch (e) {
@@ -434,7 +619,7 @@ export class AttachmentSync {
         // A server from before this flow. Remembered, so the NEXT file skips
         // the probe entirely rather than paying a 404 each time.
         this.intentSupported = false;
-        await this.deps.uploadServer(a.relPath, await loadBytes(), mime);
+        await this.deps.uploadServer(a.relPath, await loadBytes(), mime, docId);
         return true;
       }
       if (status === 402) {
@@ -454,9 +639,15 @@ export class AttachmentSync {
       throw e;
     }
 
-    if ("deduped" in intent && intent.deduped) return true; // zero bytes moved
+    if ("deduped" in intent && intent.deduped) {
+      // Zero bytes moved — but the server now names the blob these bytes are,
+      // which is all the text pass needs.
+      if (intent.blob?.id) this.noteBlob(a.sha256, intent.blob.id, a.relPath);
+      return true;
+    }
     if (!("upload" in intent)) throw new Error("intent answered with no upload target");
     const { upload, completeUrl } = intent;
+    this.noteBlob(a.sha256, intent.blobId, a.relPath);
 
     if (upload.kind === "single") {
       const put = () =>
@@ -633,6 +824,18 @@ export class AttachmentSync {
    */
   private async downloadOne(b: ServerBlob): Promise<void> {
     const relPath = b.relPath as string;
+    const tree = !isUnderAttachments(relPath);
+    // A tree binary needs a host that can write outside `attachments/`. Without
+    // one (a unit test, an older host) it is left alone rather than pushed
+    // through the attachment guard, which would refuse it anyway.
+    if (tree && !this.deps.writeTreeLocal && !this.deps.fetchToFile) {
+      throw new Error(`no tree-binary write transport for ${relPath}`);
+    }
+    // Claim the watcher echo BEFORE the write, the way the registry does for a
+    // materialized note: the file lands ~150ms before the event, and an echo
+    // read as an external edit is how our own placeholder came to be treated as
+    // somebody's change (#93).
+    this.deps.markMaterialized?.(relPath);
     let target: BlobDownloadTarget | null = null;
     if (this.deps.downloadUrl && this.downloadUrlSupported !== false) {
       try {
@@ -654,6 +857,7 @@ export class AttachmentSync {
             relPath,
             headers,
             expectedSha256: b.sha256,
+            tree,
           });
           return;
         } catch (e) {
@@ -663,13 +867,191 @@ export class AttachmentSync {
         }
       }
       if (this.deps.fetchBytes) {
-        await this.deps.writeLocal(relPath, await this.deps.fetchBytes(target.url, headers));
+        await this.writeOne(relPath, await this.deps.fetchBytes(target.url, headers), tree);
         return;
       }
     }
 
     // Legacy: the server proxies the bytes on `/api/blobs/:id`.
-    await this.deps.writeLocal(relPath, await this.deps.downloadServer(b.id));
+    await this.writeOne(relPath, await this.deps.downloadServer(b.id), tree);
+  }
+
+  /** Write downloaded bytes through the guard that matches their home. */
+  private async writeOne(relPath: string, bytes: Uint8Array, tree: boolean): Promise<void> {
+    if (!tree) {
+      await this.deps.writeLocal(relPath, bytes);
+      return;
+    }
+    const write = this.deps.writeTreeLocal;
+    if (!write) throw new Error(`no tree-binary write transport for ${relPath}`);
+    await write(relPath, bytes);
+  }
+
+  // ---- `files` rows ------------------------------------------------------
+
+  /**
+   * The server `files` id for a tree binary, registering one if this device has
+   * not already.
+   *
+   * `undefined` for anything under `attachments/` (those blobs stay
+   * path-addressed and keep the old ACL heuristic), for a host with no registry
+   * dep, for a path the local index has no `files` row for yet (the extraction
+   * worker is seconds behind a drop — the next pass registers it), and for a
+   * refusal. In every one of those cases the bytes still upload; only the
+   * doc_id is missing.
+   */
+  private async ensureFileRow(relPath: string): Promise<string | undefined> {
+    if (isUnderAttachments(relPath)) return undefined;
+    if (!this.deps.registerFile) return undefined;
+    const remembered = this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null;
+    if (remembered) {
+      this.fileIds.set(relPath, remembered);
+      return remembered;
+    }
+    if (this.registerRefused.has(relPath)) return undefined;
+    const localId = (await this.localFileId(relPath)) ?? null;
+    if (!localId) return undefined;
+    try {
+      const id = await this.deps.registerFile({ relPath, id: localId });
+      if (!id) return undefined;
+      this.fileIds.set(relPath, id);
+      this.deps.rememberFileId?.(relPath, id);
+      return id;
+    } catch (e) {
+      const status = errStatus(e);
+      const code = errCode(e);
+      // Three outcomes, and which one this is decides whether we ever ask again:
+      //  • 400 `path_folder_mismatch` — the server resolved a different parent
+      //    than our path implies, because its folder rows are mid-reconcile.
+      //    Per file, never fatal, retried next pass: the registry pull that
+      //    fixes it is already queued;
+      //  • any other ANSWER (403 no write access, the frozen root, a path
+      //    another identity already holds) is a decision, not a hiccup —
+      //    asking again every pass is a guaranteed refusal every pass;
+      //  • no status, or a 5xx — we never reached a decision. Offline, a
+      //    restarting server. Those must not cost the file its doc_id forever.
+      const permanent = status != null && status >= 400 && status < 500 && status !== 400;
+      if (permanent) this.registerRefused.add(relPath);
+      console.warn(
+        `[attachments] ${relPath} — no files row (${status ?? "?"} ${code ?? "?"})${
+          permanent ? "; uploading without a doc_id" : "; retrying next pass"
+        }`,
+        e,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * The LOCAL index's `files.id` for a path.
+   *
+   * One listing per PASS, not per file: a vault where 300 binaries need
+   * registering would otherwise cross the IPC bridge 300 times for a map that
+   * does not change while the pass runs.
+   */
+  private async localFileId(relPath: string): Promise<string | undefined> {
+    if (!this.deps.localFileIds) return undefined;
+    if (!this.localIds) {
+      try {
+        this.localIds = await this.deps.localFileIds();
+      } catch (e) {
+        console.warn("[attachments] local file ids unavailable", e);
+        this.localIds = new Map();
+      }
+    }
+    return this.localIds.get(relPath);
+  }
+
+  // ---- Extracted text ----------------------------------------------------
+
+  /** Remember which blob holds these bytes, and offer its text. */
+  private noteBlob(sha256: string, blobId: string, relPath: string): void {
+    if (sha256 && blobId) this.blobIdBySha.set(sha256, blobId);
+    // A file the index extracted BEFORE it was ever uploaded gets no second
+    // `files-indexed` event, so the upload is the other trigger.
+    this.scheduleText([relPath]);
+  }
+
+  /**
+   * `files-indexed` arrived: these paths now have extracted text in the index,
+   * and the server can have it as search fuel.
+   *
+   * Debounced and entirely off the byte mirror's path — a 200-file drop emits
+   * a handful of coalesced batches from Rust, and none of them may delay an
+   * upload.
+   */
+  handleFilesIndexed(paths: string[]): void {
+    this.scheduleText(paths);
+  }
+
+  private scheduleText(paths: string[]): void {
+    if (!this.deps.uploadText || !this.deps.fileText) return;
+    if (this.textSupported === false) return;
+    if (!this.current()) return;
+    for (const p of paths) this.pendingText.add(p);
+    if (this.pendingText.size === 0) return;
+    if (this.textTimer) this.clearTimeoutImpl(this.textTimer);
+    this.textTimer = this.setTimeoutImpl(() => {
+      this.textTimer = null;
+      void this.drainText().catch((e) => console.warn("[attachments] text pass failed", e));
+    }, TEXT_DEBOUNCE_MS);
+  }
+
+  /** Send the extracted text for every queued path whose blob we can name. */
+  private async drainText(): Promise<void> {
+    const paths = [...this.pendingText];
+    this.pendingText = new Set();
+    const upload = this.deps.uploadText;
+    const read = this.deps.fileText;
+    if (!upload || !read) return;
+    for (const relPath of paths) {
+      if (!this.current()) return;
+      if (this.textSupported === false) return;
+      let text: Awaited<ReturnType<typeof read>>;
+      try {
+        text = await read(relPath);
+      } catch (e) {
+        console.warn("[attachments] extracted text unavailable", relPath, e);
+        continue;
+      }
+      // `pending` is the worker still working; anything else with no words is
+      // a file whose text is legitimately empty (a video, an unsupported type).
+      if (!text || text.status !== "ok" || text.chars <= 0 || !text.sha256) continue;
+      const blobId = this.blobIdBySha.get(text.sha256);
+      // Not uploaded yet — the byte mirror will name the blob, and its own
+      // completion re-queues this path.
+      if (!blobId) continue;
+      if (this.textDone.has(blobId)) continue;
+      const content = capText(text.text);
+      try {
+        await upload({
+          blobId,
+          docId: this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null,
+          sha256: text.sha256,
+          chars: content.length,
+          content,
+        });
+        this.textDone.add(blobId);
+      } catch (e) {
+        const status = errStatus(e);
+        if (status === 404) {
+          // The route is absent, or the blob is. Neither is worth another file.
+          this.textSupported = false;
+          this.pendingText.clear();
+          console.warn("[attachments] server takes no extracted text — stopping for this session");
+          return;
+        }
+        if (status === 413 || status === 409) {
+          // 413: our char cap still overflowed the server's byte cap (multibyte
+          // text). 409: the blob's bytes moved under us, and the new bytes get
+          // their own extraction. Both are permanent for THIS blob.
+          this.textDone.add(blobId);
+          console.warn(`[attachments] ${relPath} text refused (${status}) — not retrying`);
+          continue;
+        }
+        console.warn("[attachments] text upload failed", relPath, e);
+      }
+    }
   }
 
   /** Debounced reconcile — collapses a burst of watcher events into one pass. */
@@ -695,6 +1077,12 @@ export class AttachmentSync {
       this.clearTimeoutImpl(this.timer);
       this.timer = null;
     }
+    // The text pass holds the same captured vaultId and must die with it.
+    if (this.textTimer) {
+      this.clearTimeoutImpl(this.textTimer);
+      this.textTimer = null;
+    }
+    this.pendingText.clear();
   }
 
   /** True while a debounced pass is still armed (teardown assertions/tests). */

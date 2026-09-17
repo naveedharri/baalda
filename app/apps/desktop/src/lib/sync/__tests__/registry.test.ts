@@ -563,6 +563,54 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
     expect(reg.consumeMaterialized("Echo.md")).toBe(false);
     expect(reg.consumeMaterialized("Never-written.md")).toBe(false);
   });
+
+  it("claims an echo for a binary the blob mirror materialized too", async () => {
+    // A tree binary lands on disk the same way and owes the same one echo —
+    // the sync layer marks it (`AttachmentSync.downloadOne`) through this.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    reg.markMaterialized("Team/report.docx");
+    expect(reg.consumeMaterialized("Team/report.docx")).toBe(true);
+    expect(reg.consumeMaterialized("Team/report.docx")).toBe(false);
+  });
+});
+
+describe("VaultRegistry tree-binary `files` map", () => {
+  it("persists registered binaries under their own config key, never into `docs`", async () => {
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Welcome.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    expect(reg.getFileId("Team/report.docx")).toBeNull();
+    reg.setFileId("Team/report.docx", "file-1");
+    expect(reg.getFileId("Team/report.docx")).toBe("file-1");
+
+    // The write is checkpointed, never a synchronous read-modify-write — the
+    // next pass's flush is what puts it on disk.
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const written = writes[writes.length - 1][0] as string;
+    const cfg = JSON.parse(written) as { files?: Record<string, string>; docs?: Record<string, string> };
+    expect(cfg.files).toEqual({ "Team/report.docx": "file-1" });
+    // The note map is the CRDT join and a binary must never appear in it: it
+    // feeds `registerNote`, the bridge and the content uploader.
+    expect(Object.keys(cfg.docs ?? {})).not.toContain("Team/report.docx");
+  });
+
+  it("forgets binary ids on a vault switch — an id from vault A names nothing in B", async () => {
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    reg.setFileId("Team/report.docx", "file-1");
+
+    reg.reset();
+    expect(reg.getFileId("Team/report.docx")).toBeNull();
+  });
 });
 
 describe("VaultRegistry.registerNote", () => {

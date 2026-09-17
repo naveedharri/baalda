@@ -20,6 +20,7 @@
 
 ## 0.1.62
 
+- Files you keep in folders, not just images pasted into notes, now sync between your devices and to teammates with their real names and locations, so a PDF in Team/ shows up in Team/ everywhere. Renaming a synced file does not yet propagate; that is next.
 - Attachments now upload and download through a streaming path that keeps large files out of memory, skips files the server already holds without sending a byte, and sends very large files in parts so a dropped connection does not start over.
 - Search now looks inside Word, Excel, PowerPoint, CSV, code and zip files in your vault, not just notes. Hits show a file badge and open the right viewer, and the Health page reports how much extracted text the index holds.
 - More kinds of files open inside Baalda: Word documents, spreadsheets, CSV, audio, video, code and JSON files, with PowerPoint and zip files showing a card with "Open externally". Plain-text and Markdown-variant notes that used to do nothing when clicked now open in the editor and appear in search.

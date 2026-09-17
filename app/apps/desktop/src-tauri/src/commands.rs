@@ -6,7 +6,7 @@ use crate::attachments::{self, AttachmentMeta, FileStat};
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
-    Backlink, FileText, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult,
+    Backlink, FileRow, FileText, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult,
     YjsPruneReport, YjsState, YjsStateVector,
 };
 use crate::notefile;
@@ -1497,6 +1497,19 @@ pub async fn get_file_text(
     guard.file_text(&path)
 }
 
+/// Every tier-2 `files` row: id, path, ext, kind, size, text status.
+///
+/// The sync layer's half of the ACL fix — a tree binary is registered on the
+/// server under THIS id, so the two sides name one identity and the blob's
+/// `doc_id` resolves through `shares` like a note's. One call rather than a
+/// `get_file_text` per path: the binary walk asks about every file it found.
+#[tauri::command]
+pub async fn list_file_rows(state: State<'_, AppState>) -> AppResult<Vec<FileRow>> {
+    let (_, index) = require_vault(&state)?;
+    let guard = index.lock().unwrap();
+    guard.file_rows()
+}
+
 #[tauri::command]
 pub async fn get_backlinks(
     state: State<'_, AppState>,
@@ -1892,6 +1905,24 @@ pub fn write_binary_file(
     attachments::write_binary_file(&vault, &meta.rel_path, &bytes)
 }
 
+/// Materialize a binary that lives in the TREE — a `.docx` a teammate dropped
+/// into `Team/`, arriving on this device as a blob with that rel_path.
+///
+/// A second command rather than a looser `write_binary_file`: the
+/// `attachments/` guard still bounds every write aimed at the hidden store, and
+/// this one accepts exactly what the binary walk produces (see
+/// `attachments.rs ensure_tree_binary_rel`). Notes are refused here as firmly
+/// as `.context/` is — a blob must never be able to overwrite a CRDT note.
+#[tauri::command(async)]
+pub fn write_tree_binary(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> AppResult<()> {
+    let (meta, bytes) = raw_frame::<WriteBinaryMeta>(request.body())?;
+    let (vault, _) = require_vault_at(&state, meta.expected_epoch)?;
+    attachments::write_tree_binary(&vault, &meta.rel_path, &bytes)
+}
+
 /// The attachment listing the sync diff runs on — path, size and sha256 for
 /// every file under `attachments/`.
 ///
@@ -1914,13 +1945,46 @@ pub async fn list_attachments(
         guard.attachment_hash_cache().unwrap_or_default()
     };
     let listing = attachments::list_attachments_cached(&vault, &cached)?;
-    if listing.changed {
-        let guard = index.lock().unwrap();
-        if let Err(e) = guard.save_attachment_hash_cache(&listing.cache) {
-            log::warn!("[attachments] hash cache write failed: {e}");
-        }
-    }
+    save_hash_cache(&index, &listing);
     Ok(listing.items)
+}
+
+/// The same listing over the WHOLE vault: `attachments/` plus every tree binary
+/// (a `.docx` in `Team/`, a `.mp4` in `Media/`). This is what the sync diff
+/// runs on since tree binaries became `files` rows — `list_attachments` stays
+/// for callers that want only the hidden store.
+///
+/// Same two brief lock takes as `list_attachments`, and the same cache: the
+/// binary walk is a superset of the attachment walk, so writing its cache back
+/// prunes nothing the other one wants.
+#[tauri::command]
+pub async fn list_binaries(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<AttachmentMeta>> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let cached = {
+        let guard = index.lock().unwrap();
+        guard.attachment_hash_cache().unwrap_or_default()
+    };
+    let listing = attachments::list_binaries_cached(&vault, &cached)?;
+    save_hash_cache(&index, &listing);
+    Ok(listing.items)
+}
+
+/// Persist a walk's hash cache, if it moved. A failure here costs a re-hash
+/// next pass and nothing else, so it is logged rather than returned.
+fn save_hash_cache(
+    index: &std::sync::Mutex<crate::index::Index>,
+    listing: &attachments::AttachmentListing,
+) {
+    if !listing.changed {
+        return;
+    }
+    let guard = index.lock().unwrap();
+    if let Err(e) = guard.save_attachment_hash_cache(&listing.cache) {
+        log::warn!("[attachments] hash cache write failed: {e}");
+    }
 }
 
 /// Stream one attachment (or one multipart part of it) to a presigned URL.
@@ -1961,6 +2025,7 @@ pub async fn download_attachment(
     rel_path: String,
     headers: Option<HashMap<String, String>>,
     expected_sha256: Option<String>,
+    tree: Option<bool>,
     expected_epoch: Option<u64>,
 ) -> AppResult<attachments::DownloadOutcome> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
@@ -1970,6 +2035,9 @@ pub async fn download_attachment(
         &url,
         &headers.unwrap_or_default(),
         expected_sha256.as_deref(),
+        // Absent means the hidden store, which is what every caller meant
+        // before tree binaries existed.
+        tree.unwrap_or(false),
     )
     .await
 }

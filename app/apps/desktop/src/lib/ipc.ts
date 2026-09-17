@@ -166,6 +166,19 @@ export interface FileText {
   text: string;
 }
 
+/** One tier-2 `files` row (mirrors the Rust `FileRow`). `id` is the identity a
+ *  tree binary is registered under on the server — stable per path across
+ *  index rebuilds, which is what makes it safe to supply. */
+export interface FileRow {
+  id: string;
+  path: string;
+  ext: string | null;
+  kind: string | null;
+  size: number;
+  /** pending | ok | skipped_size | unsupported | error (Rust `TextStatus`). */
+  textStatus: string;
+}
+
 export interface Backlink {
   id: string;
   path: string;
@@ -473,6 +486,9 @@ export const searchNotes = (query: string) =>
  *  (a note, an attachment, or something the walk ignores). */
 export const getFileText = (path: string) =>
   invoke<FileText | null>("get_file_text", { path });
+/** Every `files` row (id + path + text status) — the sync layer's source of
+ *  stable ids for registering tree binaries. One call for the whole walk. */
+export const listFileRows = () => invoke<FileRow[]>("list_file_rows");
 export const getBacklinks = (noteId: string) =>
   invoke<Backlink[]>("get_backlinks", { noteId });
 /** Every resolved graph edge (source id -> target id) in one call — backs the
@@ -623,8 +639,40 @@ export const writeBinaryFile = (
     frame({ relPath, expectedEpoch: expectedEpoch ?? null }, bytes),
   );
 
+/**
+ * Materialize a binary that lives in the TREE (not under `attachments/`) — a
+ * file a teammate dropped into a folder, arriving here as a blob.
+ *
+ * A separate command because it is a separate WRITE GUARD: `writeBinaryFile`
+ * still refuses everything outside `attachments/`, and this one accepts exactly
+ * the set the binary walk produces — a surfaced, non-note extension outside
+ * `.context/`, `.git`, dotfiles and the denied dirs. A server-supplied path can
+ * therefore name a file the user could have dropped there themselves, and
+ * nothing else; notes are refused as firmly as `.context/` is.
+ */
+export const writeTreeBinary = (
+  relPath: string,
+  bytes: Uint8Array,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<void>(
+    "write_tree_binary",
+    frame({ relPath, expectedEpoch: expectedEpoch ?? null }, bytes),
+  );
+
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Every syncable binary in the vault: the `attachments/` store PLUS the tree
+ * binaries (a `.docx` in `Team/`, a `.mp4` in `Media/`) — what the blob diff
+ * runs on now that a tree binary gets its own `files` row and ACL.
+ *
+ * A superset of {@link listAttachments}, sharing its hash cache, so the widened
+ * walk still costs a `stat` per file rather than a re-read.
+ */
+export const listBinaries = (expectedEpoch?: VaultEpoch) =>
+  invoke<AttachmentMeta[]>("list_binaries", { expectedEpoch: expectedEpoch ?? null });
 
 /**
  * Stream an attachment (or one byte range of it) to a presigned URL from RUST.
@@ -669,6 +717,9 @@ export const downloadAttachment = (
     relPath: string;
     headers?: Record<string, string>;
     expectedSha256?: string | null;
+    /** True when `relPath` is a TREE binary, so Rust applies the tree guard
+     *  ({@link writeTreeBinary}) instead of the `attachments/` one. */
+    tree?: boolean;
   },
   expectedEpoch?: VaultEpoch,
 ) =>
@@ -677,6 +728,7 @@ export const downloadAttachment = (
     relPath: input.relPath,
     headers: input.headers ?? {},
     expectedSha256: input.expectedSha256 ?? null,
+    tree: input.tree ?? false,
     expectedEpoch: expectedEpoch ?? null,
   });
 

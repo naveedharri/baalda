@@ -21,7 +21,7 @@ import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
-import { AttachmentSync } from "./attachments";
+import { AttachmentSync, routesToAttachmentSync } from "./attachments";
 import { ContentUploader, type UploadFailure } from "./contentUpload";
 import { collectCrdtGarbage } from "./crdtGc";
 import { runPool } from "./pool";
@@ -1341,6 +1341,14 @@ export class SyncManager implements InboundHost {
   ): void {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
+    // Binaries are the blob mirror's business and nothing of this path's.
+    // `App.tsx` already routes them to `handleAttachmentChanged`; this is the
+    // same rule stated where the damage would be done, because everything below
+    // reads an unmapped file as "a note nobody registered yet" — which is how a
+    // `.docx` in a folder used to earn a registry pull per watcher event, and
+    // would earn a `notes` row the moment anything downstream stopped checking.
+    changes = changes.filter((c) => !routesToAttachmentSync(c.path));
+    if (changes.length === 0) return;
     // ONE registry pull for the whole batch, however many items ask for it. The
     // watcher already debounces into batches, and an AI writing 200 new files
     // used to re-enter `handleRegistryChanged` 200 times per batch — 200 timer
@@ -3354,6 +3362,19 @@ export class SyncManager implements InboundHost {
     this.attachments?.scheduleReconcile();
   }
 
+  /**
+   * The index finished extracting text for these tree binaries (`files-indexed`).
+   *
+   * Public like `handleAttachmentChanged`: it is an external signal for this
+   * vault, and the sync layer decides what it is worth. All it does is offer
+   * the words to the server for team search — it never moves bytes and never
+   * blocks the blob mirror.
+   */
+  handleFilesIndexed(paths: string[]): void {
+    if (!this.enabled || paths.length === 0) return;
+    this.attachments?.handleFilesIndexed(paths);
+  }
+
   /** Build the AttachmentSync from the reconciled server vault id + ipc/api.
    *  Bound to `scope`: the captured `vaultId` is only valid while that vault is
    *  open, so both the pass guard and the pinned IPC epoch reference it. */
@@ -3366,15 +3387,23 @@ export class SyncManager implements InboundHost {
     const epoch = scope.vaultEpoch;
     this.attachments = new AttachmentSync({
       isCurrent: () => scope.isCurrent(),
-      listLocal: () => ipc.listAttachments(epoch),
+      // The WHOLE vault, not just `attachments/`: a `.docx` in `Team/` is a
+      // blob like any other since it got its own `files` row (PR3 Stage A).
+      listLocal: () => ipc.listBinaries(epoch),
       readLocal: (relPath) => ipc.readBinaryFile(relPath, epoch),
       writeLocal: (relPath, bytes) => ipc.writeBinaryFile(relPath, bytes, epoch),
+      // A tree binary materializes through its OWN guard; the `attachments/`
+      // one stays exactly as strict as it was for server-supplied paths.
+      writeTreeLocal: (relPath, bytes) => ipc.writeTreeBinary(relPath, bytes, epoch),
+      // Our own write, so its watcher echo is not an external edit — the same
+      // one-echo-per-path claim the registry makes for a materialized note.
+      markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
       listServer: () => api.listVaultBlobs(vaultId),
       // The legacy pair: still the whole flow for a server that predates the
       // intent route, and the fallback the client drops to on its 404.
-      uploadServer: (relPath, bytes, mime) =>
+      uploadServer: (relPath, bytes, mime, docId) =>
         api
-          .uploadBlob({ vaultId, relPath, bytes, mime, fileName: baseName(relPath) })
+          .uploadBlob({ vaultId, relPath, bytes, mime, fileName: baseName(relPath), docId })
           .then(() => undefined),
       downloadServer: (id) => api.downloadBlob(id),
       // intent → PUT → complete. Bytes go through Rust (epoch-pinned, streamed
@@ -3387,6 +3416,7 @@ export class SyncManager implements InboundHost {
           mime: input.mime,
           relPath: input.relPath,
           filename: input.filename,
+          docId: input.docId,
         }),
       completeUpload: (completeUrl, body) =>
         api.completeBlob(completeUrl, body).then(() => undefined),
@@ -3405,6 +3435,29 @@ export class SyncManager implements InboundHost {
       putBytes: (input) => api.uploadBytesTo(input),
       downloadUrl: (blobId) => api.blobDownloadUrl(blobId),
       fetchToFile: (input) => ipc.downloadAttachment(input, epoch),
+      // ---- Tree binaries: the `files` row that carries their ACL ----------
+      localFileIds: async () =>
+        new Map((await ipc.listFileRows()).map((r) => [r.path, r.id])),
+      knownFileId: (relPath) => this.registry.getFileId(relPath),
+      registerFile: async ({ relPath, id }) => {
+        const row = await api.registerFile({ vaultId, id, path: relPath });
+        // The server echoes the row's own id — which is ours today, and is what
+        // lets a future path-adopting server hand back the identity it already
+        // holds without this side having to guess.
+        return row.docId ?? row.id ?? null;
+      },
+      rememberFileId: (relPath, id) => this.registry.setFileId(relPath, id),
+      // Extracted text: Rust already pulled the words out for local search, so
+      // the server gets a copy as ranking fuel rather than re-parsing the file.
+      fileText: (relPath) => ipc.getFileText(relPath),
+      uploadText: (input) =>
+        api.uploadBlobText(vaultId, input.blobId, {
+          chars: input.chars,
+          content: input.content,
+          source: "client",
+          docId: input.docId,
+          sha256: input.sha256,
+        }),
       fetchBytes: (url, headers) => api.downloadBytesFrom(url, headers),
       // Only ever applied to a download URL the SERVER serves; a presigned one
       // is fetched clean (see `sync/attachments.ts`).

@@ -65,6 +65,21 @@ interface VaultSyncConfig {
   /** folder relPath → server folder id. */
   folders?: Record<string, string>;
   /**
+   * TREE BINARY relPath → server `files` row id (PR3 Stage A).
+   *
+   * A separate key from `docs`, and it must stay separate: `docs` is the CRDT
+   * note map that every sync path keys off, and a binary must never appear in
+   * it (nothing about a `.docx` may reach `NoteBridge`, `ContentUploader` or
+   * `registerNote`). All this remembers is "the server already has a `files`
+   * row for this path under this id", so a reconnect skips the re-registration
+   * round trip per binary.
+   *
+   * Like `docs` it is an optimization, never proof: re-registering is an
+   * idempotent create with a client-supplied id, so a wiped `.context/` costs
+   * one POST per binary and nothing else.
+   */
+  files?: Record<string, string>;
+  /**
    * docIds whose CONTENT this device has confirmed on the server (the bulk
    * upload's resume point — see `ContentUploader`).
    *
@@ -376,6 +391,10 @@ export class VaultRegistry {
    *  Null = not built / invalidated; see `canonicalNotePath`. */
   private byPathCi: Map<string, string> | null = null;
   private folderByPath = new Map<string, string>();
+  /** Tree-binary relPath → server `files` id (see `VaultSyncConfig.files`).
+   *  Deliberately NOT part of `byPath`/`byDocId`: those two are the CRDT note
+   *  join, and a binary has no Y.Doc, no bridge and no content upload. */
+  private fileByPath = new Map<string, string>();
   /** docIds whose content this device has confirmed on the server. See
    *  `VaultSyncConfig.pushed` for why this is an optimization, not a guarantee. */
   private pushed = new Set<string>();
@@ -665,6 +684,8 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving.
     this.aliasPaths.clear();
     this.folderByPath.clear();
+    // Server ids for vault A's binaries name nothing in vault B.
+    this.fileByPath.clear();
     this.pushed.clear();
     // A surviving baseline is exactly the cross-vault confusion this method
     // exists to prevent — it would tell vault B that vault A's notes moved.
@@ -747,14 +768,49 @@ export class VaultRegistry {
     return this.materialized.delete(relPath);
   }
 
-  /** Record a placeholder this pass created (see {@link materialized}). */
-  private markMaterialized(relPath: string): void {
+  /**
+   * Record a path THIS device just wrote, so its watcher echo is recognised as
+   * ours (see {@link materialized}).
+   *
+   * Public because the binary sync materializes too: a tree binary a teammate
+   * dropped lands here as a blob written straight to disk, and its echo must
+   * not be mistaken for an external edit any more than a note placeholder's is.
+   */
+  markMaterialized(relPath: string): void {
     // Bounded: an echo that never arrives (the write was outside the watcher's
     // window, the vault was closed) would otherwise pin the entry forever. A
     // vault's worth of placeholders is the natural high-water mark, so a set an
     // order of magnitude past that is stale by definition.
     if (this.materialized.size > 20_000) this.materialized.clear();
     this.materialized.add(relPath);
+  }
+
+  // ---- Tree binaries (PR3 Stage A) ---------------------------------------
+  //
+  // A `files` row is NOT a note: no Y.Doc, no bridge, no content upload. The
+  // only thing this map buys is the doc_id the blob store stamps on the bytes,
+  // which is what makes a binary obey its folder's share instead of the path
+  // heuristic. Kept beside the note map only because both belong to the vault
+  // and both travel in `.context/config.json`.
+
+  /** The server `files` id this device registered for a tree binary, if any. */
+  getFileId(relPath: string): string | null {
+    return this.fileByPath.get(relPath) ?? null;
+  }
+
+  /** Remember a registered tree binary and queue the config write. */
+  setFileId(relPath: string, id: string): void {
+    if (this.stale()) return;
+    if (this.fileByPath.get(relPath) === id) return;
+    this.fileByPath.set(relPath, id);
+    this.persist();
+  }
+
+  /** Adopt a `files` map read from `.context/config.json`. */
+  private adoptConfigFiles(files: Record<string, string>): void {
+    for (const [rp, id] of Object.entries(files)) {
+      if (typeof id === "string" && id) this.fileByPath.set(rp, id);
+    }
   }
 
   /** All mapped doc ids (for the vault sync engine's initial doc set). */
@@ -905,6 +961,8 @@ export class VaultRegistry {
     for (const [rp, m] of this.byPath) docs[rp] = m.docId;
     const folders: Record<string, string> = {};
     for (const [rp, id] of this.folderByPath) folders[rp] = id;
+    const files: Record<string, string> = {};
+    for (const [rp, id] of this.fileByPath) files[rp] = id;
     const baseline: Record<string, string> = {};
     for (const [docId, rp] of this.baselineDocs) baseline[docId] = rp;
     return {
@@ -912,6 +970,7 @@ export class VaultRegistry {
       serverVaultId: this.serverVaultId ?? undefined,
       docs,
       folders,
+      files,
       pushed: [...this.pushed],
       baseline,
       // Written only when we know whose it is; an unattributed list is worse
@@ -1586,6 +1645,7 @@ export class VaultRegistry {
     for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
       if (typeof id === "string" && id) this.folderByPath.set(rp, id);
     }
+    this.adoptConfigFiles(cfg.files ?? {});
     this.pushed = new Set(cfg.pushed ?? []);
     // Same collection guard as `reconcile`'s: the baseline describes the
     // collection the config names, which is the one we just adopted.
@@ -1731,6 +1791,9 @@ export class VaultRegistry {
         if (typeof id === "string" && id) this.folderByPath.set(rp, id);
       }
     }
+    // Same guard for the tree-binary map: an id minted against another
+    // collection names nothing here.
+    if (cfg.serverVaultId === vaultId && cfg.files) this.adoptConfigFiles(cfg.files);
 
     // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —
     //     with nothing on the server AND an empty local folder — gets
