@@ -49,8 +49,13 @@ export function resourceIdsByPath(tree: TreeNode | null): Map<string, string> {
       const id = syncManager.registry.getFolderId(n.path);
       if (id) idToPath.set(id, n.path);
     } else {
+      // A note answers through the doc map, a tree binary through the `files`
+      // map. Both are doc_ids a lock can name, and a file that resolved to no
+      // path would silently lose its "Restricted" badge.
       const m = syncManager.registry.getMapping(n.path);
       if (m) idToPath.set(m.docId, n.path);
+      const fileId = syncManager.registry.getFileId(n.path);
+      if (fileId) idToPath.set(fileId, n.path);
     }
     n.children?.forEach(walk);
   };

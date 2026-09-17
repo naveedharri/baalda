@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // here, so the whole module is a stub.
 const folderIds = new Map<string, string>();
 const noteIds = new Map<string, string>();
+const fileIds = new Map<string, string>();
 vi.mock("../sync/docSession", () => ({
   syncManager: {
     registry: {
@@ -13,6 +14,7 @@ vi.mock("../sync/docSession", () => ({
         const docId = noteIds.get(path);
         return docId ? { docId } : null;
       },
+      getFileId: (path: string) => fileIds.get(path) ?? null,
     },
   },
 }));

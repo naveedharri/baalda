@@ -2185,8 +2185,9 @@ const TREE_ICONS: Record<TreeIconKey, React.ReactNode> = {
   code: ICON_CODE,
 };
 
-/** The glyph for a file row. */
-function iconForPath(path: string): React.ReactNode {
+/** The glyph for a file row. Exported for the Access panel's file rows, so the
+ *  two lists cannot draw the same `.pdf` differently. */
+export function iconForPath(path: string): React.ReactNode {
   return TREE_ICONS[iconKeyForPath(path)];
 }
 

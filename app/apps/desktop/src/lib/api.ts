@@ -189,6 +189,15 @@ export interface NoteLastEdited {
 export interface AccessTreeResponse {
   folders: Array<{ id: string; path: string; color: string | null }>;
   notes: Array<{ id: string; relPath: string }>;
+  /**
+   * The vault's `files` rows — the tree binaries (pdf/docx/xlsx/mp4/…).
+   *
+   * A separate array rather than a `kind` on `notes`, because they are separate
+   * tables with different path columns; they become one leaf class in the
+   * panel's list, not in the wire shape. Empty from a server too old to send
+   * them, which simply lists no file rows.
+   */
+  files: Array<{ id: string; path: string }>;
 }
 
 export interface RegisteredFolder {
@@ -1536,7 +1545,7 @@ export class ApiClient {
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/access-tree`,
     );
-    return { folders: data.folders ?? [], notes: data.notes ?? [] };
+    return { folders: data.folders ?? [], notes: data.notes ?? [], files: data.files ?? [] };
   }
 
   async listFolders(vaultId: string): Promise<RegisteredFolder[]> {
