@@ -3,6 +3,7 @@ import { pgText } from "../db/text.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { loadDocState } from "../yjs/persistence.js";
+import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
 import { cosineSimilarity, embed, tokenize } from "./embedder.js";
 
 /**
@@ -115,6 +116,12 @@ export async function indexDoc(
     [docId, note.vault_id, title, content, JSON.stringify(vector)],
   );
 
+  // Which attachments this note points at (migration 027). Derived from the
+  // SAME text `note_index.content` was just written from, so the two can never
+  // disagree about what the note says, and written here because this is the one
+  // place that sees a note's markdown after every edit.
+  await replaceBlobRefs(docId, note.vault_id, content, db);
+
   // Replace this doc's link edges wholesale (cheap; a doc has few links).
   await db.query("DELETE FROM note_links WHERE from_doc = $1", [docId]);
   for (const toTitle of links) {
@@ -186,6 +193,10 @@ export async function purgeNoteIndex(
   if (docIds.length === 0) return;
   await db.query("DELETE FROM note_index WHERE doc_id = ANY($1::text[])", [docIds]);
   await db.query("DELETE FROM note_links WHERE from_doc = ANY($1::text[])", [docIds]);
+  // A deleted note references nothing. Leaving its rows would keep every
+  // attachment it ever embedded permanently uncollectable — the exact shape of
+  // leak `blob_refs` exists to close.
+  await purgeBlobRefs(docIds, db);
 }
 
 // ── search ──────────────────────────────────────────────────────────────────

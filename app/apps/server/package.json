@@ -19,6 +19,7 @@
     "demo:activity": "tsx scripts/demo/simulate-activity.ts",
     "demo": "tsx scripts/demo/seed-demo-org.ts --reset && tsx scripts/demo/simulate-activity.ts",
     "set-password": "tsx src/scripts/set-password.ts",
+    "blobs:migrate": "tsx src/scripts/migrate-blobs.ts",
     "test": "vitest run"
   },
   "dependencies": {

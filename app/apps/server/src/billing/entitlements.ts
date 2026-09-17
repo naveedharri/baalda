@@ -167,6 +167,26 @@ export async function seatCount(
 }
 
 /**
+ * Attachment-storage ceiling for one vault's org, in bytes — or `null` for "no
+ * limit", which is what self-host and every paid vault get.
+ *
+ * Returns a number rather than an allow/deny the way `canCreateOrganization` /
+ * `canAddMember` do, because the caller needs the figure twice over: once to
+ * decide, and once to put in the 402 body so a client can say how much room is
+ * left. Summing the vault's bytes is the CALLER's job and happens only after
+ * this returns non-null — a query nobody with an unlimited vault should pay
+ * for.
+ */
+export async function storageLimitBytes(
+  orgId: string,
+  db: Queryable = defaultPool,
+): Promise<number | null> {
+  if (!billingEnabled()) return null;
+  if (await orgHasActiveSubscription(orgId, db)) return null;
+  return config.freeMaxStorageMb * 1024 * 1024;
+}
+
+/**
  * Can this user create another vault? Allowed when billing is off, or when
  * they own fewer than the cap in UNSUBSCRIBED vaults.
  */

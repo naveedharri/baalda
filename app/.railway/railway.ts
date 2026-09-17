@@ -52,6 +52,13 @@ const SERVER_ENV = [
   "BLOB_STORAGE",
   "BLOB_MIME_ENFORCE",
   "BLOB_PENDING_TTL_MINUTES",
+  // Attachment lifecycle: the free-tier storage cap, and the orphan sweep
+  // (default OFF — the deletion queue is always on and has no switch).
+  "FREE_MAX_STORAGE_MB",
+  "BLOB_GC_ENABLED",
+  "BLOB_GC_ORPHAN_DAYS",
+  "BLOB_GC_INTERVAL_MS",
+  "BLOB_GC_MAX_DELETES_PER_RUN",
   // S3/R2/MinIO, read only when BLOB_STORAGE=s3. Every one of these must be
   // listed: `railway config apply` DELETES a variable the IaC does not name,
   // so an omission here silently unconfigures the bucket on the next apply.

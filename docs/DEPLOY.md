@@ -343,6 +343,11 @@ confirm `/health` and a real sync round-trip, then promote.
 | `MAX_BLOB_BYTES_DIRECT` | no | `524288000` | Ceiling for one attachment on S3 (500 MB). A product decision, not a heap bound: the bytes never enter this process. Per-category caps still apply. |
 | `BLOB_MIME_ENFORCE` | no | `reject` | `reject` answers 415 for a Content-Type Baalda does not know; `warn` logs and stores it. Use `warn` first on an existing server to see what enforcement would refuse. |
 | `BLOB_PENDING_TTL_MINUTES` | no | `60` | How long an abandoned upload holds its content's dedupe slot before the sweep removes it. Always on, every 15 minutes, serialized across instances by an advisory lock. |
+| `FREE_MAX_STORAGE_MB` | no | `1024` | Free-tier attachment storage per unsubscribed vault (only enforced when billing is enabled; a vault with an active subscription is unlimited). Over it, `intent` answers 402 `storage_limit_reached`. Lowering it never deletes anything. |
+| `BLOB_GC_ENABLED` | no | `false` | Delete stored attachments no note references any more. **Off by default** — see [Attachment garbage collection](#attachment-garbage-collection). The deletion *queue* (objects whose row a vault or org delete already removed) is always on and is not affected by this. |
+| `BLOB_GC_ORPHAN_DAYS` | no | `30` | How long an unreferenced attachment must have existed before it is collectable. An attachment is uploaded before the note embedding it is written, and that note may arrive days later from a device that was offline. |
+| `BLOB_GC_INTERVAL_MS` | no | `21600000` | Minimum gap between orphan sweeps (6 h). The GC ticks every 15 minutes for the always-on sweeps; this rate-limits the orphan pass on top of that. |
+| `BLOB_GC_MAX_DELETES_PER_RUN` | no | `200` | Hard ceiling on deletions in one orphan sweep — the blast radius if the reference table is wrong. |
 | `S3_BUCKET` | with `s3` | unset | Bucket name. Create it first — the server never does. |
 | `S3_ACCESS_KEY_ID` | with `s3` | unset | Access key. |
 | `S3_SECRET_ACCESS_KEY` | with `s3` | unset | Secret key. Set via env only, never committed. |
@@ -476,6 +481,84 @@ each part's `ETag` to complete the upload, and a browser hides it otherwise.
 | Downloads 404 in a browser but work in the app | The signed `S3_ENDPOINT` is an address only the server can reach (e.g. `http://minio:9000`). Use a client-reachable address, or set `S3_PROXY_DOWNLOADS=1`. |
 | A blob answers **503 `storage_unavailable`** | The row says `s3` and this build has no bucket configured. Never a 404 on purpose: a 404 tells the desktop the file is gone and it re-uploads every byte. |
 | Attachments upload but never appear for teammates | The upload finished but `complete` never ran, leaving the row `pending`. Pending rows are invisible by design and are swept after `BLOB_PENDING_TTL_MINUTES`. |
+
+### Attachment garbage collection
+
+Three sweeps run inside the server on one timer, each serialized across
+instances by a Postgres advisory lock. Two are always on and need no
+configuration:
+
+- **Abandoned uploads.** A `blobs` row is created at `intent`, before any byte
+  moves, and holds its content's dedupe slot. A client that quits mid-upload
+  leaves it `pending`; after `BLOB_PENDING_TTL_MINUTES` the row and its object
+  go.
+- **The deletion queue.** Deleting a vault, deleting an organization, or calling
+  `DELETE /api/blobs/:id` removes `blobs` rows — two of those through a database
+  cascade that runs no application code at all. A trigger records the
+  provider and key of every non-Postgres row as it goes, and the sweep removes
+  the objects. Nothing is lost if the bucket is briefly unreachable: the queue
+  retries with exponential backoff and keeps a `last_error` for anything it
+  eventually gives up on.
+
+The third, **orphan collection**, is off unless you set `BLOB_GC_ENABLED=true`.
+It deletes an attachment that no note references any more — the only sweep that
+removes something a user made. It decides from a table derived from note text,
+so it is wrapped in guards: a vault with no indexed notes is skipped entirely, a
+vault whose references have never been built is rebuilt and re-asked rather than
+swept, nothing younger than `BLOB_GC_ORPHAN_DAYS` is eligible, and no run
+deletes more than `BLOB_GC_MAX_DELETES_PER_RUN`. Every deletion is logged:
+
+```
+[blob-gc] orphan removed: blob=<id> vault=<id> path=attachments/… size=…
+```
+
+Turn it on after a full re-index has run, and read those lines before the next
+sweep six hours later.
+
+### Moving existing attachments to S3
+
+Flipping `BLOB_STORAGE=s3` only changes where NEW attachments go. Everything
+already uploaded keeps `storage_provider = 'postgres'` and keeps being served
+from the database — correct (a blob is always read through the provider recorded
+on its row) and also why the database stays large.
+
+`pnpm run blobs:migrate` moves them. It is **never automatic** and is not part
+of a deploy: two phases, with you in between. Run it with the server's own
+environment (it needs `DATABASE_URL` and the same `BLOB_STORAGE=s3` bucket
+configuration; inside the container it is `node dist/scripts/migrate-blobs.js`).
+
+```bash
+# 1. See what would move. Changes nothing.
+pnpm run blobs:migrate -- --copy --dry-run
+
+# 2. Write the objects. Re-hashes every blob's bytes and refuses to move any row
+#    whose content disagrees with its recorded sha256; verifies each object with
+#    a HEAD; records `storage_key` ONLY — the provider stays `postgres`, so this
+#    phase does not change how a single byte is read and is undone by clearing
+#    the column.
+pnpm run blobs:migrate -- --copy
+
+# 3. Confirm downloads still work (they are still coming from the database).
+
+# 4. Flip the verified rows and release their bytes. Re-checks that each object
+#    is still there at the right size first, because after this the database
+#    copy is gone.
+pnpm run blobs:migrate -- --cutover
+```
+
+Flags: `--dry-run`, `--vault <id>` (one note collection), `--batch <n>` (rows
+per page, default 50), `--limit <n>`, `--sleep-ms <n>` (pause between rows, to
+keep a live database responsive). Both phases are idempotent and re-runnable;
+the process exits non-zero if any row failed or any hash mismatched, so you can
+script them and stop on the first phase that did not go cleanly.
+
+**Reclaiming the disk.** Nulling a `BYTEA` column does not shrink the database
+file. Postgres marks the old row versions dead and reuses the space for future
+inserts; to give it back to the filesystem you need either `VACUUM (FULL)
+blobs` — which takes an `ACCESS EXCLUSIVE` lock, i.e. downtime proportional to
+the table — or [`pg_repack`](https://reorg.github.io/pg_repack/), which does the
+same online at the cost of an extension and roughly double the table's disk
+while it runs. Neither is run for you.
 
 ### Rolling it out
 

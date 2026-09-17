@@ -20,6 +20,8 @@ import {
   MAX_INFLIGHT_UPLOAD_BYTES,
 } from "../../blobs/config.js";
 import { objectKey } from "../../blobs/keys.js";
+import { docsReferencing } from "../../blobs/refs.js";
+import { storageLimitBytes } from "../../billing/entitlements.js";
 import { verifyUploadToken } from "../../blobs/upload-token.js";
 import {
   categoryForMime,
@@ -58,6 +60,8 @@ import {
  *   GET  /api/blobs/:id                      download bytes with the stored mime
  *   GET  /api/blobs/:id/url                  a URL to fetch the bytes from
  *   HEAD /api/blobs/:id                      the same headers, no body
+ *   DELETE /api/blobs/:id                    remove an attachment (409 if referenced)
+ *   GET  /api/vaults/:vaultId/storage        how much of the quota this vault uses
  *
  * THE INTENT FLOW, and why it is the same three steps for both providers:
  *
@@ -399,21 +403,70 @@ function apiOrigin(c: Context): string {
   }
 }
 
+/** What a vault is currently using, and what it is allowed. */
+interface StorageUsage {
+  usedBytes: number;
+  pendingBytes: number;
+  blobCount: number;
+}
+
 /**
- * Storage quota check. A deliberate no-op in this PR: PR 2c adds
- * `sum(size) WHERE vault_id AND status IN ('pending','ready')` against the
- * plan's `FREE_MAX_STORAGE_MB` and answers 402 `storage_limit_reached`.
+ * Bytes this vault's blobs occupy.
  *
- * It exists now, called from the one place it will ever be called from, because
- * the ORDER of the gates is the part that is easy to get wrong later: quota is
- * the LAST gate, after ACL and after the per-file caps, so a request that would
- * be refused anyway never costs a `sum()` over the vault's blobs.
+ * `pending` rows COUNT. They are an upload in flight or an abandoned one, and
+ * both hold real bytes (the object is written before `complete` runs) — so
+ * excluding them would let a client stay permanently over the limit by never
+ * finishing. The pending sweep is what eventually frees an abandoned one.
+ */
+async function storageUsage(
+  vaultId: string,
+  excludeBlobId: string | null = null,
+): Promise<StorageUsage> {
+  const { rows } = await pool.query<{ used: string; pending: string; count: string }>(
+    `SELECT coalesce(sum(size), 0)::bigint AS used,
+            coalesce(sum(size) FILTER (WHERE status = 'pending'), 0)::bigint AS pending,
+            count(*)::int AS count
+       FROM blobs
+      WHERE vault_id = $1
+        AND status IN ('pending', 'ready')
+        AND ($2::text IS NULL OR id <> $2)`,
+    [vaultId, excludeBlobId],
+  );
+  return {
+    usedBytes: Number(rows[0]?.used ?? 0),
+    pendingBytes: Number(rows[0]?.pending ?? 0),
+    blobCount: Number(rows[0]?.count ?? 0),
+  };
+}
+
+/**
+ * Storage quota. Answers the 402 body, or null when the upload fits.
+ *
+ * The ORDER this is called in is the load-bearing part: quota is the LAST gate,
+ * after ACL and after the per-file caps, so a request that would be refused
+ * anyway never costs a `sum()` over the vault's blobs. The limit lookup comes
+ * before the sum for the same reason — an unlimited vault (self-host, or any
+ * paid one) never runs the aggregate at all.
+ *
+ * `excludeBlobId` is for the defensive check at `complete`, where the blob's own
+ * pending row is already inside the sum and would otherwise be counted twice.
  */
 async function checkStorageQuota(
-  _vaultId: string,
-  _addedBytes: number,
-): Promise<{ error: string; code: string } | null> {
-  return null;
+  vaultId: string,
+  orgId: string,
+  addedBytes: number,
+  excludeBlobId: string | null = null,
+): Promise<{ error: string; code: string; limitBytes: number; usedBytes: number } | null> {
+  const limitBytes = await storageLimitBytes(orgId);
+  if (limitBytes === null) return null;
+  const { usedBytes } = await storageUsage(vaultId, excludeBlobId);
+  if (usedBytes + addedBytes <= limitBytes) return null;
+  return {
+    error: `This vault has used its ${Math.round(limitBytes / (1024 * 1024))} MB of attachment storage`,
+    code: "storage_limit_reached",
+    limitBytes,
+    usedBytes,
+  };
 }
 
 /** A positive, integral byte count, or null. */
@@ -504,8 +557,8 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   const hit = await findBlob(vaultId, sha256);
   if (hit) return c.json({ deduped: true, blob: toMeta(hit) }, 200);
 
-  const quota = await checkStorageQuota(vaultId, size);
-  if (quota) return c.json({ ...quota }, 402);
+  const quota = await checkStorageQuota(vaultId, org, size);
+  if (quota) return c.json(quota, 402);
 
   // An existing PENDING row for the same content is re-used rather than
   // conflicting: `blobs_vault_sha_idx` would refuse a second insert anyway, and
@@ -950,6 +1003,23 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
       }
     }
 
+    // Quota again, defensively. `intent` already checked it, but the object
+    // has been sitting in the store since then and OTHER uploads may have
+    // landed in between; this is the last moment the bytes can be refused
+    // before they become a listed attachment. The blob's own pending row is
+    // excluded from the sum — it is already in there, and counting the same
+    // bytes twice would refuse an upload that fits.
+    if (row.vault_id) {
+      const quota = await checkStorageQuota(row.vault_id, org, head.size, row.id);
+      if (quota) {
+        // Same disposal as a failed verification: the object goes, and the
+        // pending row goes with it so it stops holding the dedupe slot.
+        await store.delete(key).catch(() => {});
+        await pool.query("DELETE FROM blobs WHERE id = $1 AND status = 'pending'", [row.id]);
+        return c.json(quota, 402);
+      }
+    }
+
     const { rows } = await pool.query<BlobRow>(
       `UPDATE blobs SET status = 'ready', size = $2, updated_at = now()
         WHERE id = $1
@@ -1189,6 +1259,117 @@ blobRoutes.on("HEAD", "/blobs/:id", async (c) => {
   } catch (e) {
     return storeError(c, e);
   }
+});
+
+// ── delete ────────────────────────────────────────────────────────────────
+
+/**
+ * Remove an attachment.
+ *
+ * There was no way to do this at all before: a blob could be uploaded and
+ * never unmade, so a mistaken 25 MB drop stayed in the vault (and in every
+ * teammate's sync) forever.
+ *
+ * A HARD delete, not a soft one. `blobs` has no tombstone and needs none — the
+ * desktop's attachment diff is by content hash, so a row that is gone is simply
+ * content the server does not have, and the object behind it is disposed of by
+ * migration 027's `AFTER DELETE` trigger through the deletion queue. Nothing
+ * here knows or cares whether the bytes were in Postgres or a bucket.
+ *
+ * The 409 is the interesting part. An attachment a note still embeds is not
+ * garbage, and deleting it would leave a broken image in someone's document, so
+ * the default answer is a refusal that NAMES the notes (`referencedBy`) — the
+ * caller can then open them, or say `?force=1` and mean it.
+ */
+blobRoutes.delete("/blobs/:id", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+
+  const row = await uploadRow(c.req.param("id"));
+  if (!row) return c.json({ error: "Blob not found" }, 404);
+
+  const org = row.vault_id ? await vaultOrg(row.vault_id) : row.org_id;
+  if (!org || !(await orgRole(org, session.userId))) {
+    return c.json({ error: "Not a member of this vault" }, 403);
+  }
+  // Deleting is a write, and the same gate that decides who may ADD an
+  // attachment decides who may take one away — a Read-only vault refuses both.
+  if (row.vault_id && !(await canWriteAttachment(session.userId, row.vault_id))) {
+    return c.json({ error: "This vault is read-only for you" }, 403);
+  }
+
+  const force = ["1", "true", "yes"].includes((c.req.query("force") ?? "").toLowerCase());
+  if (!force && row.vault_id) {
+    const referencedBy = await docsReferencing(row.vault_id, row.rel_path);
+    if (referencedBy.length > 0) {
+      return c.json(
+        {
+          error: "This attachment is still used by a note",
+          code: "blob_referenced",
+          referencedBy,
+        },
+        409,
+      );
+    }
+  }
+
+  await pool.query("DELETE FROM blobs WHERE id = $1", [row.id]);
+  await purgeBlobText(row.id);
+
+  return c.body(null, 204);
+});
+
+/**
+ * Drop PR3's extracted-text cache for a blob, if this schema has one yet.
+ *
+ * `blob_text` arrives with PR3 and the table does not exist today, so the
+ * existence check is `to_regclass` rather than a migration ordering somebody
+ * has to remember: a no-op on this schema, a purge on the next one. Kept here,
+ * beside the delete, because a derived cache has to die with the row it
+ * describes — the same rule `purgeNoteIndex` follows for a note.
+ */
+async function purgeBlobText(blobId: string): Promise<void> {
+  try {
+    const { rows } = await pool.query<{ present: boolean }>(
+      "SELECT to_regclass('public.blob_text') IS NOT NULL AS present",
+    );
+    if (!rows[0]?.present) return;
+    await pool.query("DELETE FROM blob_text WHERE blob_id = $1", [blobId]);
+  } catch (err) {
+    // Never fatal: the blob row is already gone, and a stale cache row is a
+    // bug to fix, not a reason to answer 500 for a delete that succeeded.
+    console.warn(`[blobs] could not purge blob_text for ${blobId}:`, err);
+  }
+}
+
+// ── quota ─────────────────────────────────────────────────────────────────
+
+/**
+ * How much attachment storage this vault uses, and how much it is allowed.
+ *
+ * Member-gated rather than write-gated: this is the number a client shows
+ * BEFORE offering an upload, and someone who can only read the vault still
+ * needs to understand why a teammate's upload was refused. It names no
+ * individual blob, so it tells a scoped member nothing the per-blob ACL hides.
+ *
+ * `limitBytes: null` means unlimited — self-host with billing off, or any vault
+ * with an active subscription — and is deliberately not `Infinity` or a huge
+ * number, so a client renders "unlimited" instead of a meaningless bar.
+ */
+blobRoutes.get("/vaults/:vaultId/storage", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+
+  const vaultId = c.req.param("vaultId");
+  const org = await vaultOrg(vaultId);
+  if (!org) return c.json({ error: "Unknown vault" }, 404);
+  if (!(await orgRole(org, session.userId))) {
+    return c.json({ error: "Not a member of this vault" }, 403);
+  }
+
+  const usage = await storageUsage(vaultId);
+  const limitBytes = await storageLimitBytes(org);
+  return c.json({ ...usage, limitBytes });
 });
 
 /**
