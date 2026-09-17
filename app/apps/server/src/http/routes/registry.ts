@@ -22,6 +22,7 @@ import {
   planNoteMove,
   resolveFolderParent,
   resolveParentFolder,
+  samePath,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 
@@ -953,7 +954,50 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
-    const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
+    // Client-supplied stable id, under either spelling: notes call it `docId`,
+    // and the desktop's local `files.id` is sometimes sent as `id`. Both mean
+    // the same thing — this doc's identity was minted on the device.
+    const id =
+      (typeof body.docId === "string" && body.docId) ||
+      (typeof body.id === "string" && body.id) ||
+      randomUUID();
+
+    // A file already at this path IS this file. First, before anything else, for
+    // the same reasons `POST /notes` puts its twin first:
+    //
+    //  · it makes re-registration IDEMPOTENT, and re-registration is the normal
+    //    case — every device registers every binary it holds on every reconcile
+    //    pass, and a second pass must not be a 4xx;
+    //  · it lets a second device that minted its own id ADOPT the incumbent's
+    //    instead of inserting a twin. `files_vault_path_ci_uq` (m023) would
+    //    refuse that insert with a bare 23505; forking one file across two
+    //    doc_ids is the shape of the 2026-09-04 note runaway, one layer down;
+    //  · it runs before `resolveParentFolder`, which THROWS for a folder this
+    //    server does not know yet — a device whose folder map is a pass behind
+    //    would otherwise get `path_folder_mismatch` for a file that is already
+    //    registered — and before the write gate, because a file that exists is
+    //    one the caller could already read.
+    //
+    // Matched case-insensitively: a case-variant of a live path is the SAME FILE
+    // on macOS and Windows. The response echoes the row's CANONICAL path so a
+    // device that spells it differently adopts ours and stops re-registering its
+    // own spelling on every pass.
+    const { rows: byPath } = await pool.query<{
+      id: string;
+      folder_id: string | null;
+      path: string;
+    }>(
+      "SELECT id, folder_id, path FROM files WHERE vault_id = $1 AND lower(path) = lower($2) LIMIT 1",
+      [vaultId, path],
+    );
+    if (byPath[0]) {
+      const row = byPath[0];
+      return c.json(
+        { id: row.id, docId: row.id, vaultId, folderId: row.folder_id, path: row.path },
+        200,
+      );
+    }
+
     let resolvedFolder: string | null;
     let storedPath: string;
     try {
@@ -964,22 +1008,58 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
       throw err;
     }
+
+    // Resolution can normalise the path (a `folderId` whose folder is spelled
+    // differently), so ask once more for the canonical form before deciding
+    // this is a new file. Same adoption, same reason.
+    if (!samePath(storedPath, path)) {
+      const { rows } = await pool.query<{ id: string; folder_id: string | null; path: string }>(
+        "SELECT id, folder_id, path FROM files WHERE vault_id = $1 AND lower(path) = lower($2) LIMIT 1",
+        [vaultId, storedPath],
+      );
+      if (rows[0]) {
+        return c.json(
+          { id: rows[0].id, docId: rows[0].id, vaultId, folderId: rows[0].folder_id, path: rows[0].path },
+          200,
+        );
+      }
+    }
+
+    // This id exists but not at this path: the file was renamed or moved on
+    // disk. It is a MOVE, never a second row — `doc_id` is identity.
+    const { rows: byId } = await pool.query<{ path: string }>(
+      "SELECT path FROM files WHERE id = $1 AND vault_id = $2",
+      [id, vaultId],
+    );
+
     // Same create gate as notes and folders. A `files` row is a syncable doc
-    // like any other, so a read-only user must not be able to add one.
-    // Re-registering an existing file is an `ON CONFLICT DO NOTHING` below, but
-    // it still has to get past this; a file that already exists is one the
-    // caller could read, so the check is on the folder, not the row.
+    // like any other, so a read-only user must not be able to add one. The
+    // check is on the DESTINATION folder either way; a move additionally needs
+    // edit on the file itself, since moving it is a write to that doc.
     if (!(await canCreateIn(session.userId, vaultId, resolvedFolder))) {
       return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
     }
 
+    if (byId[0]) {
+      if (!(await canEditDoc(session.userId, id))) {
+        return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+      }
+      await pool.query("UPDATE files SET folder_id = $2, path = $3 WHERE id = $1", [
+        id,
+        resolvedFolder,
+        storedPath,
+      ]);
+      changed(c, vaultId);
+      return c.json({ id, docId: id, vaultId, folderId: resolvedFolder, path: storedPath }, 200);
+    }
+
     // Frozen root: same rule as notes — refuse only files that do not exist
     // yet, so a device re-registering a root file that predates the latch
-    // still syncs.
+    // still syncs (that one is answered by the adoption branch above).
     if (resolvedFolder === null && (await isRootFrozen(vaultId))) {
-      const { rowCount } = await pool.query("SELECT 1 FROM files WHERE id = $1", [id]);
-      if (!rowCount) return c.json(ROOT_FROZEN_ERROR, 403);
+      return c.json(ROOT_FROZEN_ERROR, 403);
     }
+
     await pool.query(
       "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
       [id, vaultId, resolvedFolder, storedPath],

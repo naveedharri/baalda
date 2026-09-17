@@ -6,11 +6,13 @@ import {
   deleteFolder,
   deleteNote,
   editNote,
+  listAttachments,
   listFolders,
   listNotes,
   listVaults,
   moveFolderTool,
   moveNoteTool,
+  readAttachmentText,
   readNote,
   searchNotes,
   updateNote,
@@ -23,6 +25,14 @@ import {
  * clients via tools/list) and a handler that validates its args and calls the
  * gated service. Keep names snake_case and descriptions action-first — that's
  * what the calling model reads to pick a tool.
+ *
+ * NO `attach_file`, deliberately. Uploading through here would mean base64 over
+ * JSON-RPC — the whole file in the request, in the response envelope's memory,
+ * and through a transport with no resume — while the HTTP side spent PR 2b
+ * building the opposite (intent → presigned PUT → complete, bytes never
+ * touching this process). There is also no idempotency story for it: `create_note`
+ * can adopt a path, but a retried upload of 40 MB has no key to recognise
+ * itself by. Files come in through the desktop; the AI reads them.
  */
 
 type Args = Record<string, unknown>;
@@ -173,20 +183,78 @@ export const TOOLS: McpTool[] = [
   {
     name: "search_notes",
     description:
-      "Semantic + keyword search over the notes you can access in a vault. Returns ranked docIds.",
+      "Semantic + keyword search over everything you can access in a vault: notes, and the text extracted from files (docx, xlsx, pdf, csv, code…). Each hit carries kind: 'note' or 'file' — read a note with read_note and a file's text with read_attachment_text.",
     inputSchema: {
       type: "object",
       properties: {
         vaultId: S("Vault id from list_vaults"),
         query: S("What to search for"),
         k: { type: "number", description: "Max results (default 10, max 50)" },
+        includeFiles: {
+          type: "boolean",
+          description: "Also search the text of files, not just notes. Default true.",
+        },
       },
       required: ["vaultId", "query"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true },
     handler: (ctx, a) =>
-      searchNotes(ctx, reqStr(a, "vaultId"), reqStr(a, "query"), optNum(a, "k")),
+      searchNotes(
+        ctx,
+        reqStr(a, "vaultId"),
+        reqStr(a, "query"),
+        optNum(a, "k"),
+        optBool(a, "includeFiles"),
+      ),
+  },
+  {
+    name: "list_attachments",
+    description:
+      "List the files (not notes) stored in a vault that you can access — spreadsheets, documents, PDFs, images, attachments. hasText tells you whether read_attachment_text has anything for one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vaultId: S("Vault id from list_vaults"),
+        folder: S("Optional vault-relative folder to list within, e.g. 'Team/Reports'"),
+        limit: { type: "number", description: "Max files to return (default 50, max 200)" },
+      },
+      required: ["vaultId"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    handler: (ctx, a) =>
+      listAttachments(ctx, reqStr(a, "vaultId"), {
+        folder: optStr(a, "folder"),
+        limit: optNum(a, "limit"),
+      }),
+  },
+  {
+    name: "read_attachment_text",
+    description:
+      "Read the extracted plain text of a file — NOT the file itself. Identify it by relPath or blobId (both from list_attachments or a search_notes hit with kind 'file'). Returns an empty text if the file has not been indexed yet.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vaultId: S("Vault id from list_vaults"),
+        relPath: S("Vault-relative path of the file, e.g. 'Team/q3.xlsx'"),
+        blobId: S("Blob id from list_attachments or a file search hit (instead of relPath)"),
+        maxChars: {
+          type: "number",
+          description: "Max characters to return (default 20000, max 200000). `truncated` says whether there was more.",
+        },
+      },
+      required: ["vaultId"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    handler: (ctx, a) =>
+      readAttachmentText(
+        ctx,
+        reqStr(a, "vaultId"),
+        { relPath: optStr(a, "relPath"), blobId: optStr(a, "blobId") },
+        optNum(a, "maxChars"),
+      ),
   },
   {
     name: "create_note",

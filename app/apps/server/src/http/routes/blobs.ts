@@ -6,13 +6,16 @@ import { bodyLimit } from "hono/body-limit";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import {
+  canEditDoc,
   canReadAttachment,
-  canWriteAttachment,
+  canWriteBlob,
   filterReadableBlobs,
 } from "../../permissions/http-gates.js";
 import { getSession } from "../session.js";
 import { relAssetPath } from "../../render/note-html.js";
 import { config } from "../../config.js";
+import { pgText } from "../../db/text.js";
+import { embed } from "../../index/embedder.js";
 import { ByteBudget } from "../../blobs/admission.js";
 import {
   BLOB_MIME_ENFORCE,
@@ -60,6 +63,7 @@ import {
  *   GET  /api/blobs/:id                      download bytes with the stored mime
  *   GET  /api/blobs/:id/url                  a URL to fetch the bytes from
  *   HEAD /api/blobs/:id                      the same headers, no body
+ *   PUT  /api/vaults/:vaultId/blobs/:blobId/text   the file's extracted plain text
  *   DELETE /api/blobs/:id                    remove an attachment (409 if referenced)
  *   GET  /api/vaults/:vaultId/storage        how much of the quota this vault uses
  *
@@ -93,7 +97,11 @@ interface BlobRow {
   mime: string | null;
   rel_path: string | null;
   filename: string | null;
+  /** The `files` doc these bytes are, or null for an `attachments/` drop. */
+  doc_id?: string | null;
 }
+
+const BLOB_ROW_COLUMNS = "id, sha256, size, mime, rel_path, filename, doc_id";
 
 function toMeta(row: BlobRow) {
   return {
@@ -103,6 +111,7 @@ function toMeta(row: BlobRow) {
     mime: row.mime,
     relPath: row.rel_path,
     filename: row.filename,
+    docId: row.doc_id ?? null,
   };
 }
 
@@ -124,6 +133,66 @@ function safeAttachmentRelPath(raw: string | null): string | null {
   const segments = rel.split("/");
   if (segments.length < 2 || segments[0] !== "attachments") return null;
   return rel;
+}
+
+/**
+ * Where a blob's bytes belong, given what the client claimed.
+ *
+ * Two kinds of blob, and only one of them may name its own path. A TREE FILE
+ * (`docId` naming a `files` row in this vault) takes the path the registry
+ * already stores for that row — the server's own value, validated when the file
+ * was registered (`resolveParentFolder`, so `rel_path` and `folder_id` agree)
+ * and therefore not something a client can talk us into. An `attachments/` drop
+ * has no registry row to ask, so its path is the caller's and goes through
+ * {@link safeAttachmentRelPath}, which is what keeps a server-supplied path
+ * something the desktop's `ensure_attachment_rel` will accept.
+ *
+ * That split is the whole reason binaries may now live anywhere in the tree
+ * without loosening the anti-IDOR rule: `Team/q3.xlsx` is only ever accepted
+ * because THIS server already knows a file by that path and that id.
+ */
+async function resolveBlobRelPath(
+  vaultId: string,
+  docId: string | null,
+  claimed: string | null,
+): Promise<{ relPath: string; docId: string | null } | null> {
+  if (docId) {
+    const { rows } = await pool.query<{ path: string }>(
+      "SELECT path FROM files WHERE id = $1 AND vault_id = $2",
+      [docId, vaultId],
+    );
+    if (rows[0]) return { relPath: rows[0].path, docId };
+  }
+  const rel = safeAttachmentRelPath(claimed);
+  // An unresolvable docId is dropped rather than stored: a doc_id that names no
+  // file would send every ACL check down a branch with nothing behind it.
+  return rel === null ? null : { relPath: rel, docId: null };
+}
+
+/** A doc id, if it looks like one at all. Ids are TEXT server-side (Better Auth
+ *  emits TEXT and clients supply their own), so the only real rule is a bound. */
+function normalizeDocId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  return s.length > 0 && s.length <= 255 ? s : null;
+}
+
+/**
+ * Adopt a doc_id onto a blob that has none.
+ *
+ * Only ever NULL → set. A blob is content-addressed per vault, so two tree
+ * files with byte-identical contents share one row and only the first can own
+ * it; letting the second overwrite `doc_id` would move the ACL of a file
+ * someone can read onto whichever copy was uploaded last. First writer wins,
+ * and the loser keeps the (weaker, path-based) attachment branch — the same
+ * identical-bytes limitation the desktop's sha-keyed attachment diff already
+ * has.
+ */
+async function adoptDocId(blobId: string, docId: string): Promise<void> {
+  await pool.query(
+    "UPDATE blobs SET doc_id = $2, updated_at = now() WHERE id = $1 AND doc_id IS NULL",
+    [blobId, docId],
+  );
 }
 
 /** 64 lowercase hex characters, or null. */
@@ -162,18 +231,18 @@ blobRoutes.post(
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
-    // Uploading is a write. A Read-only vault has to refuse it too, or
-    // "read-only" would let anyone keep adding bytes to the vault's blob store.
-    if (!(await canWriteAttachment(session.userId, vaultId))) {
-      return c.json({ error: "This vault is read-only for you" }, 403);
-    }
-
     // ── validation, all of it before a single byte of body is read ──────────
     const filename = c.req.header("x-file-name") ?? c.req.query("filename") ?? null;
-    const relPath = safeAttachmentRelPath(
+    // `x-doc-id`: these bytes are a registered tree file, not an anonymous
+    // drop. It decides both the path (the registry's, not the caller's) and
+    // which ACL the write is judged against, so it is read before the gate.
+    const claimedDoc = normalizeDocId(c.req.header("x-doc-id") ?? c.req.query("docId"));
+    const located = await resolveBlobRelPath(
+      vaultId,
+      claimedDoc,
       c.req.header("x-rel-path") ?? c.req.query("relPath") ?? filename,
     );
-    if (!relPath) {
+    if (!located) {
       return c.json(
         {
           error: "Attachment path must be a vault-relative path under attachments/",
@@ -181,6 +250,14 @@ blobRoutes.post(
         },
         400,
       );
+    }
+    const { relPath, docId } = located;
+
+    // Uploading is a write. A Read-only vault has to refuse it too, or
+    // "read-only" would let anyone keep adding bytes to the vault's blob store;
+    // for a tree file the gate is its own folder's (see `canWriteBlob`).
+    if (!(await canWriteBlob(session.userId, { vault_id: vaultId, rel_path: relPath, doc_id: docId }))) {
+      return c.json({ error: "This vault is read-only for you" }, 403);
     }
 
     const mime = normalizeMime(c.req.header("content-type")) || "application/octet-stream";
@@ -212,7 +289,7 @@ blobRoutes.post(
     const claimedSha = normalizeSha(c.req.header("x-sha256"));
     if (claimedSha) {
       const hit = await findBlob(vaultId, claimedSha);
-      if (hit) return c.json({ ...toMeta(hit), deduped: true }, 200);
+      if (hit) return c.json({ ...toMeta(await claimDoc(hit, docId)), deduped: true }, 200);
     }
 
     // Admission control, after auth (so anonymous callers can never occupy the
@@ -282,7 +359,7 @@ blobRoutes.post(
       // known content never pays the encode/serialize cost at all.
       const existing = await findBlob(vaultId, sha256);
       if (existing) {
-        return c.json({ ...toMeta(existing), deduped: true }, 200);
+        return c.json({ ...toMeta(await claimDoc(existing, docId)), deduped: true }, 200);
       }
 
       const id = randomUUID();
@@ -295,10 +372,10 @@ blobRoutes.post(
         await client.query("BEGIN");
         const inserted = await client.query<BlobRow>(
           `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
-                              storage_provider, storage_key, status, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, 'pending', $10)
+                              storage_provider, storage_key, status, created_by, doc_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, 'pending', $10, $11)
            ON CONFLICT (vault_id, sha256) DO NOTHING
-           RETURNING id, sha256, size, mime, rel_path, filename`,
+           RETURNING ${BLOB_ROW_COLUMNS}`,
           [
             id,
             vaultId,
@@ -310,6 +387,7 @@ blobRoutes.post(
             filename,
             store.provider,
             session.userId,
+            docId,
           ],
         );
         if (!inserted.rows[0]) {
@@ -318,7 +396,7 @@ blobRoutes.post(
           // returns the winner's row rather than a 500.
           await client.query("ROLLBACK");
           const winner = await findBlob(vaultId, sha256);
-          if (winner) return c.json({ ...toMeta(winner), deduped: true }, 200);
+          if (winner) return c.json({ ...toMeta(await claimDoc(winner, docId)), deduped: true }, 200);
           return c.json({ error: "Upload conflicted — retry" }, 409);
         }
         await store.put(
@@ -353,11 +431,25 @@ blobRoutes.post(
 
 async function findBlob(vaultId: string, sha256: string): Promise<BlobRow | undefined> {
   const { rows } = await pool.query<BlobRow>(
-    `SELECT id, sha256, size, mime, rel_path, filename
+    `SELECT ${BLOB_ROW_COLUMNS}
        FROM blobs WHERE vault_id = $1 AND sha256 = $2 AND status = 'ready'`,
     [vaultId, sha256],
   );
   return rows[0];
+}
+
+/**
+ * A dedupe hit that arrives WITH a doc_id, onto a row that has none, adopts it.
+ *
+ * This is the ordinary path for a file whose bytes a teammate already uploaded
+ * as an attachment: the content is here, the registry now knows it as a tree
+ * file, and without this the row would keep the weaker path-based ACL forever
+ * because nobody ever sends those bytes again.
+ */
+async function claimDoc(row: BlobRow, docId: string | null): Promise<BlobRow> {
+  if (!docId || row.doc_id) return row;
+  await adoptDocId(row.id, docId);
+  return { ...row, doc_id: docId };
 }
 
 // ── intent → PUT → complete ───────────────────────────────────────────────
@@ -375,10 +467,11 @@ interface UploadRow {
   status: string;
   storage_provider: string | null;
   storage_key: string | null;
+  doc_id: string | null;
 }
 
 const UPLOAD_ROW_COLUMNS =
-  "id, vault_id, org_id, sha256, size, mime, rel_path, filename, status, storage_provider, storage_key";
+  "id, vault_id, org_id, sha256, size, mime, rel_path, filename, status, storage_provider, storage_key, doc_id";
 
 /**
  * Absolute origin for URLs this server hands a client.
@@ -480,9 +573,11 @@ function normalizeSize(raw: unknown): number | null {
  * Declare a file and get back either "already here" or somewhere to put it.
  *
  * Gate order is load-bearing and matches the legacy POST's: membership, then
- * write access, then the shape of what is being claimed (rel_path, MIME), then
- * the size cap for that MIME on THIS provider, then quota. Every one of them is
- * cheaper than the one after it, and all of them run before a byte moves.
+ * WHERE this is going (the `docId`/rel_path resolution — which decides which
+ * ACL applies, so it has to come first now that a tree file answers to its own
+ * folder), then write access, then the rest of the shape (MIME), then the size
+ * cap for that MIME on THIS provider, then quota. Each is cheaper than the one
+ * after it, and all of them run before a byte moves.
  */
 blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   const session = await getSession(c);
@@ -493,9 +588,6 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   if (!org) return c.json({ error: "Unknown vault" }, 404);
   if (!(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
-  }
-  if (!(await canWriteAttachment(session.userId, vaultId))) {
-    return c.json({ error: "This vault is read-only for you" }, 403);
   }
 
   let body: Record<string, unknown>;
@@ -514,10 +606,16 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     return c.json({ error: "size must be a positive integer", code: "invalid_size" }, 400);
   }
   const filename = typeof body.filename === "string" ? body.filename : null;
-  const relPath = safeAttachmentRelPath(
+  // `docId`: these bytes are a registered tree file. Same meaning as the legacy
+  // POST's `x-doc-id` header — the path comes from the registry rather than the
+  // request, and the write is gated on that file's folder.
+  const claimedDoc = normalizeDocId(body.docId);
+  const located = await resolveBlobRelPath(
+    vaultId,
+    claimedDoc,
     typeof body.relPath === "string" ? body.relPath : filename,
   );
-  if (!relPath) {
+  if (!located) {
     return c.json(
       {
         error: "Attachment path must be a vault-relative path under attachments/",
@@ -525,6 +623,13 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
       },
       400,
     );
+  }
+  const { relPath, docId } = located;
+
+  // Write access, now that we know WHAT is being written: a tree file answers
+  // to its folder, an attachment to the vault posture (see `canWriteBlob`).
+  if (!(await canWriteBlob(session.userId, { vault_id: vaultId, rel_path: relPath, doc_id: docId }))) {
+    return c.json({ error: "This vault is read-only for you" }, 403);
   }
 
   const mime = normalizeMime(typeof body.mime === "string" ? body.mime : null) ||
@@ -555,7 +660,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   // is the case the whole flow exists for: a fresh device with a vault full of
   // attachments settles them all with one round trip each.
   const hit = await findBlob(vaultId, sha256);
-  if (hit) return c.json({ deduped: true, blob: toMeta(hit) }, 200);
+  if (hit) return c.json({ deduped: true, blob: toMeta(await claimDoc(hit, docId)) }, 200);
 
   const quota = await checkStorageQuota(vaultId, org, size);
   if (quota) return c.json(quota, 402);
@@ -570,10 +675,11 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
         SET updated_at = now(),
             mime = $3,
             rel_path = $4,
-            filename = $5
+            filename = $5,
+            doc_id = coalesce(blobs.doc_id, $6)
       WHERE vault_id = $1 AND sha256 = $2 AND status = 'pending'
       RETURNING ${UPLOAD_ROW_COLUMNS}`,
-    [vaultId, sha256, mime, relPath, filename],
+    [vaultId, sha256, mime, relPath, filename, docId],
   );
   let row = existing.rows[0];
 
@@ -585,19 +691,19 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     const storageKey = store.provider === "postgres" ? null : objectKey(vaultId, sha256);
     const inserted = await pool.query<UploadRow>(
       `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
-                          storage_provider, storage_key, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11)
+                          storage_provider, storage_key, status, created_by, doc_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
        ON CONFLICT (vault_id, sha256) DO NOTHING
        RETURNING ${UPLOAD_ROW_COLUMNS}`,
       [id, vaultId, org, sha256, size, mime, relPath, filename, store.provider, storageKey,
-        session.userId],
+        session.userId, docId],
     );
     row = inserted.rows[0];
     if (!row) {
       // Someone finished uploading this content between the dedupe read and the
       // insert. The winner's row is the answer, not a 409.
       const winner = await findBlob(vaultId, sha256);
-      if (winner) return c.json({ deduped: true, blob: toMeta(winner) }, 200);
+      if (winner) return c.json({ deduped: true, blob: toMeta(await claimDoc(winner, docId)) }, 200);
       return c.json({ error: "Upload conflicted — retry" }, 409);
     }
   }
@@ -913,7 +1019,7 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
   if (!org || !(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
-  if (row.vault_id && !(await canWriteAttachment(session.userId, row.vault_id))) {
+  if (row.vault_id && !(await canWriteBlob(session.userId, row))) {
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
 
@@ -1023,13 +1129,150 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
     const { rows } = await pool.query<BlobRow>(
       `UPDATE blobs SET status = 'ready', size = $2, updated_at = now()
         WHERE id = $1
-        RETURNING id, sha256, size, mime, rel_path, filename`,
+        RETURNING ${BLOB_ROW_COLUMNS}`,
       [row.id, head.size],
     );
     return c.json(toMeta(rows[0]), 200);
   } catch (e) {
     return storeError(c, e);
   }
+});
+
+// ── extracted text ────────────────────────────────────────────────────────
+
+/** Biggest extracted body we store per blob. A 200-page docx is ~300 KB of
+ *  text; past a megabyte the marginal ranking value is nil and the cost is a
+ *  TOASTed row every search has to scan. The desktop truncates to match. */
+const MAX_BLOB_TEXT_BYTES = 1024 * 1024;
+
+/**
+ * The plain text inside a file, as its own client extracted it.
+ *
+ * WHY THE CLIENT AND NOT THE SERVER. With a presigned direct upload the bytes
+ * never touch this process at all, and the ones that do arrive in a container
+ * sized for JSON and Yjs updates, not for running mammoth or a spreadsheet
+ * parser over a 25 MB workbook. The desktop already has the file on disk, has
+ * Rust and the parsers, and does the same work to render it — so it sends the
+ * words and the server stores them.
+ *
+ * WHAT THIS TEXT IS FOR, and the trust that follows: ranking and nothing else.
+ * It is never served back as the file's content (the bytes are), it is never an
+ * authorization input, and a member who can upload could already write any
+ * words they liked into a note. So a wrong or mischievous extraction buys
+ * exactly one thing — bad search results for a file the caller could write
+ * anyway. What IS checked is that the caller may write this blob, and that they
+ * are describing the content the row addresses (`sha256`).
+ *
+ *   204 stored · 401 no session · 403 no write access · 404 unknown/not ready
+ *   409 `sha_mismatch` · 413 `text_too_large`
+ *
+ * Idempotent: the same call twice is one row, rewritten.
+ */
+blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+
+  const vaultId = c.req.param("vaultId");
+  const org = await vaultOrg(vaultId);
+  if (!org) return c.json({ error: "Unknown vault" }, 404);
+  if (!(await orgRole(org, session.userId))) {
+    return c.json({ error: "Not a member of this vault" }, 403);
+  }
+
+  const row = await uploadRow(c.req.param("blobId"));
+  // One 404 for "no such blob", "not this vault's blob" and "not ready": all
+  // three mean the same thing to a client, and telling them apart would let a
+  // member of one vault probe another's blob ids.
+  if (!row || row.vault_id !== vaultId || row.status !== "ready") {
+    return c.json({ error: "Blob not found" }, 404);
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Expected a JSON body", code: "invalid_body" }, 400);
+  }
+
+  const content = typeof body.content === "string" ? body.content : null;
+  if (content === null) {
+    return c.json({ error: "content must be a string", code: "invalid_content" }, 400);
+  }
+  const sha256 = normalizeSha(typeof body.sha256 === "string" ? body.sha256 : null);
+  if (!sha256) {
+    return c.json({ error: "sha256 must be 64 hex characters", code: "invalid_sha256" }, 400);
+  }
+
+  // A `docId` here does the same job it does at intent: a file whose bytes were
+  // already in the vault (a dedupe hit, a teammate's earlier upload) gets its
+  // doc identity — and with it its real ACL — from whichever call learns it
+  // first. The gate below then judges the ADOPTED id, never the claimed one.
+  const claimedDoc = normalizeDocId(body.docId);
+  if (claimedDoc && !row.doc_id) {
+    const located = await resolveBlobRelPath(vaultId, claimedDoc, row.rel_path);
+    if (located?.docId) {
+      await adoptDocId(row.id, located.docId);
+      row.doc_id = located.docId;
+    }
+  }
+
+  // Write access, and for a tree file `edit` on the file itself: this text is
+  // what the vault's search says the file contains, so writing it is a write to
+  // that doc, not merely to the vault's blob store.
+  if (!(await canWriteBlob(session.userId, row))) {
+    return c.json({ error: "This vault is read-only for you" }, 403);
+  }
+  if (row.doc_id && !(await canEditDoc(session.userId, row.doc_id))) {
+    return c.json({ error: "This file is read-only for you" }, 403);
+  }
+
+  // The hash is what ties the text to the bytes. Disagreeing means the client
+  // extracted a DIFFERENT version of this file (an edit that has not been
+  // uploaded yet, or a stale queue entry), and storing it would make search
+  // describe content the vault does not hold.
+  if (!shaEquals(sha256, row.sha256)) {
+    return c.json(
+      { error: "sha256 does not match the bytes this blob holds", code: "sha_mismatch" },
+      409,
+    );
+  }
+
+  // Measured in BYTES, not characters: the cap protects a Postgres row and a
+  // request body, and one emoji is four of the former per one of the latter.
+  if (Buffer.byteLength(content, "utf8") > MAX_BLOB_TEXT_BYTES) {
+    return c.json(
+      {
+        error: `Extracted text must be at most ${MAX_BLOB_TEXT_BYTES} bytes`,
+        code: "text_too_large",
+      },
+      413,
+    );
+  }
+
+  // `pgText` for the same reason every other derived copy uses it: Postgres
+  // `text` cannot hold U+0000, and text pulled out of a binary container is
+  // exactly where a stray NUL comes from.
+  const stored = pgText(content);
+  const chars = Number.isInteger(body.chars) && (body.chars as number) >= 0
+    ? (body.chars as number)
+    : stored.length;
+  const source = typeof body.source === "string" && body.source ? body.source : "client";
+
+  await pool.query(
+    `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, vector, source, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
+     ON CONFLICT (blob_id) DO UPDATE
+       SET vault_id = EXCLUDED.vault_id,
+           doc_id = EXCLUDED.doc_id,
+           chars = EXCLUDED.chars,
+           content = EXCLUDED.content,
+           vector = EXCLUDED.vector,
+           source = EXCLUDED.source,
+           updated_at = now()`,
+    [row.id, vaultId, row.doc_id, chars, stored, JSON.stringify(embed(stored)), source],
+  );
+
+  return c.body(null, 204);
 });
 
 // ── list ──────────────────────────────────────────────────────────────────
@@ -1047,8 +1290,8 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
   // `status = 'ready'` only: a pending row is an upload in flight (or an
   // abandoned one), and listing it would tell the desktop's attachment diff a
   // file it cannot download already exists.
-  const { rows } = await pool.query<BlobRow>(
-    `SELECT id, sha256, size, mime, rel_path, filename
+  const { rows } = await pool.query<BlobRow & { rel_path: string | null }>(
+    `SELECT ${BLOB_ROW_COLUMNS}
        FROM blobs WHERE vault_id = $1 AND status = 'ready' ORDER BY rel_path`,
     [vaultId],
   );
@@ -1070,6 +1313,7 @@ interface DownloadRow {
   status: string;
   storage_provider: string | null;
   storage_key: string | null;
+  doc_id: string | null;
 }
 
 /** `bytes=<start>-<end?>`. Multi-range and suffix ranges are ignored (the whole
@@ -1104,7 +1348,7 @@ async function authorizeDownload(
   const id = c.req.param("id");
   const { rows } = await pool.query<DownloadRow>(
     `SELECT id, vault_id, org_id, mime, rel_path, filename, size, status,
-            storage_provider, storage_key
+            storage_provider, storage_key, doc_id
        FROM blobs WHERE id = $1`,
     [id],
   );
@@ -1124,7 +1368,10 @@ async function authorizeDownload(
   // Per-attachment ACL: a scoped member may only download a blob referenced by
   // a note they can read (owner/admin + Open vaults are allowed everything).
   // Legacy rows without a vault_id keep membership-only access (no note to gate on).
-  if (blob.vault_id && !(await canReadAttachment(session.userId, blob.vault_id, blob.rel_path))) {
+  if (
+    blob.vault_id &&
+    !(await canReadAttachment(session.userId, blob.vault_id, blob.rel_path, blob.doc_id))
+  ) {
     return { deny: c.json({ error: "You do not have access to this attachment" }, 403) };
   }
   return { row: blob };
@@ -1294,7 +1541,7 @@ blobRoutes.delete("/blobs/:id", async (c) => {
   }
   // Deleting is a write, and the same gate that decides who may ADD an
   // attachment decides who may take one away — a Read-only vault refuses both.
-  if (row.vault_id && !(await canWriteAttachment(session.userId, row.vault_id))) {
+  if (row.vault_id && !(await canWriteBlob(session.userId, row))) {
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
 
@@ -1320,13 +1567,15 @@ blobRoutes.delete("/blobs/:id", async (c) => {
 });
 
 /**
- * Drop PR3's extracted-text cache for a blob, if this schema has one yet.
+ * Drop the extracted-text cache for a blob.
  *
- * `blob_text` arrives with PR3 and the table does not exist today, so the
- * existence check is `to_regclass` rather than a migration ordering somebody
- * has to remember: a no-op on this schema, a purge on the next one. Kept here,
- * beside the delete, because a derived cache has to die with the row it
- * describes — the same rule `purgeNoteIndex` follows for a note.
+ * Migration 028's FK does this on its own (`blob_id REFERENCES blobs ON DELETE
+ * CASCADE`, and `vault_id` cascades from `vaults`), so this is belt and braces
+ * rather than the mechanism — it is here because a derived cache has to die
+ * with the row it describes, and the one place that is easy to get wrong is a
+ * delete path somebody adds later that writes around the FK. The `to_regclass`
+ * guard stays for the same reason it went in: this runs on a deployment that
+ * may not have applied 028 yet (the routes ship before the migration lands).
  */
 async function purgeBlobText(blobId: string): Promise<void> {
   try {

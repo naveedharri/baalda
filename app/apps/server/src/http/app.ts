@@ -128,6 +128,9 @@ export function createApp(deps: AppDeps): Hono {
         // Content hash a client declares before an attachment upload, so known
         // content is deduped without sending a byte.
         "x-sha256",
+        // The `files` doc a legacy-POST upload's bytes belong to, so a tree
+        // binary's blob carries the doc identity its ACL is resolved from.
+        "x-doc-id",
         // Opaque per-client instance id on registry writes, so the vault channel
         // doesn't tell a client to re-pull its own structural change.
         ORIGIN_HEADER,

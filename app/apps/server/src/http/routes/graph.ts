@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { listReadableDocsInVault } from "../../permissions/vault-docs.js";
+import { listReadableDocsInVault, vaultAccess } from "../../permissions/vault-docs.js";
 import { getSession } from "../session.js";
 import { searchNoteIndex } from "../../index/indexer.js";
 
@@ -9,7 +9,9 @@ import { searchNoteIndex } from "../../index/indexer.js";
  * Read-only views over the note index (spec: links + vectors).
  *
  *  - GET /api/vaults/:vaultId/graph  → nodes + wikilink edges for a graph view.
- *  - GET /api/vaults/:vaultId/search → semantic + keyword search over notes.
+ *  - GET /api/vaults/:vaultId/search → semantic + keyword search over notes
+ *    AND over the text extracted from the vault's files (`kind` tells them
+ *    apart).
  *
  * Both are gated like GET /vaults/:vaultId/locks: any member of the vault
  * may read.
@@ -120,6 +122,10 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
   // note content, so scoring unreadable notes would be a content oracle.
   // Mirrors the MCP search tool. Owner/admin + Open vaults see everything.
   const readable = await listReadableDocsInVault(session.userId, vaultId);
+  // Vault-wide read is what decides whether the hash-named `attachments/`
+  // blobs (which have no doc of their own) are searchable for this caller —
+  // the same answer `canReadAttachment` gives when one is downloaded.
+  const access = await vaultAccess(pool, session.userId, vaultId);
 
   // Scoring lives in index/indexer.ts, which walks the vault in keyset batches
   // and keeps only {docId, score} per note — note bodies and embedding vectors
@@ -130,6 +136,7 @@ graphRoutes.get("/vaults/:vaultId/search", async (c) => {
     query: q,
     k,
     readableDocIds: readable,
+    vaultWideReader: access?.vaultWide === true,
   });
 
   return c.json({ results });
