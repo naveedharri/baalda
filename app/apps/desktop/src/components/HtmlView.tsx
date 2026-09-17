@@ -33,10 +33,15 @@ export function HtmlView({ path }: { path: string }) {
     };
     void load();
 
-    // Follow external edits, but never clobber an unsaved source draft.
+    // Follow external edits, but never clobber an unsaved source draft. An
+    // `unchanged` event (#155) is by definition not an edit — same sha256 as the
+    // index already held — so re-reading the file would only re-render what is
+    // already on screen.
     let unlisten: (() => void) | undefined;
     void ipc.onFileChanged((e) => {
-      if (e.path === path && e.kind === "modified" && !dirtyRef.current) void load();
+      if (e.path === path && e.kind === "modified" && !e.unchanged && !dirtyRef.current) {
+        void load();
+      }
     }).then((fn) => {
       unlisten = fn;
     });

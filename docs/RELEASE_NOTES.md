@@ -21,6 +21,7 @@
 ## 0.1.62
 
 - Linux: Baalda no longer re-indexes your vault non-stop while it sits idle, which was keeping a core busy and writing to disk constantly.
+- Baalda now checks whether a file's contents actually changed before doing anything with it, so backup, git and cloud-sync tools touching your vault no longer cause re-indexing or re-syncing.
 
 ## 0.1.61
 

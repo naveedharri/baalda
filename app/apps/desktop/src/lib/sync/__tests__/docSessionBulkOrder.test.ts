@@ -176,6 +176,11 @@ const storeHooks = vi.hoisted(() => ({
   opts: null as VaultDocStoreOptions | null,
   open: null as string | null,
   promoted: [] as string[],
+  /** Docs the hot tier is holding a LIVE bridge for, by docId. A watcher event
+   *  for one of these is supposed to be merged into the doc immediately. */
+  residents: new Set<string>(),
+  /** Every `peekResident(...)?.ingestNow()` the sync layer actually made. */
+  residentIngests: [] as string[],
 }));
 
 vi.mock("../vaultDocStore", () => ({
@@ -196,8 +201,14 @@ vi.mock("../vaultDocStore", () => ({
     }
     async demote() {}
     async release() {}
-    peekResident() {
-      return null;
+    peekResident(docId: string) {
+      if (!storeHooks.residents.has(docId)) return null;
+      return {
+        ingestNow: async () => {
+          storeHooks.residentIngests.push(docId);
+          return false;
+        },
+      };
     }
     suppressedDoc() {
       return storeHooks.open;
@@ -290,6 +301,8 @@ beforeEach(() => {
   storeHooks.opts = null;
   storeHooks.open = null;
   storeHooks.promoted = [];
+  storeHooks.residents = new Set();
+  storeHooks.residentIngests = [];
   connects.order = [];
   connects.destroyed = [];
 });
@@ -703,6 +716,153 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
+
+  // ---- `unchanged` entries (#155) ------------------------------------------
+  //
+  // Rust now says, per `modified` entry, whether the file's sha256 still equals
+  // the one the index already held. Our own egest echo, a materialized
+  // placeholder echoing back, `git checkout` restoring identical bytes, a backup
+  // tool touching files, and — the trigger — Linux's spurious inotify READ
+  // events all arrive that way. An idle vault can emit hundreds of them, so they
+  // have to cost the sync layer exactly its bookkeeping and nothing else.
+
+  it("an unchanged entry for a mapped doc queues no push and never re-ingests a resident doc", async () => {
+    vi.useFakeTimers();
+    fakeRegistry.getMapping.mockImplementation((relPath: string) =>
+      relPath === "Idle.md" ? { vaultId: "collection-1", docId: "i1" } : null,
+    );
+    fakeRegistry.pushed.add("i1");
+    storeHooks.residents.add("i1"); // a live bridge in the hot tier
+    const sm = new SyncManager();
+    await enable(sm);
+    fakeRegistry.pull.mockClear();
+
+    sm.handleLocalFilesChanged([{ path: "Idle.md", kind: "modified", unchanged: true }]);
+    expect(sm.inspectDoc("i1").queued).toBe(false);
+    expect(storeHooks.residentIngests).toEqual([]);
+    expect(sm.hasPendingRegistryPull()).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fakeRegistry.pull).not.toHaveBeenCalled();
+    expect(storeHooks.promoted).toEqual([]);
+    expect(connects.order).toEqual([]);
+
+    // The same path with NEW bytes is the ordinary path, untouched: queued,
+    // merged into the resident doc, and pushed.
+    sm.handleLocalFilesChanged([{ path: "Idle.md", kind: "modified" }]);
+    expect(sm.inspectDoc("i1").queued).toBe(true);
+    expect(storeHooks.residentIngests).toEqual(["i1"]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(storeHooks.promoted).toContain("i1");
+    fakeRegistry.getMapping.mockReturnValue(null);
+    vi.useRealTimers();
+  });
+
+  it("an unchanged entry still spends the registry's materialized echo", async () => {
+    // A materialized placeholder IS an unchanged `modified`: Rust wrote the
+    // 0-byte file and re-indexed it, so the watcher's read finds the sha it just
+    // stored. The claim has to be spent by the EVENT, not by what the event
+    // turned out to contain — otherwise the note's first real edit, whenever it
+    // comes, is the one that gets mistaken for the echo and dropped.
+    vi.useFakeTimers();
+    fakeRegistry.getMapping.mockImplementation((relPath: string) =>
+      relPath === "Fresh.md" ? { vaultId: "collection-1", docId: "f1" } : null,
+    );
+    fakeRegistry.materialized = new Set(["Fresh.md"]);
+    const sm = new SyncManager();
+    await enable(sm);
+
+    sm.handleLocalFilesChanged([{ path: "Fresh.md", kind: "modified", unchanged: true }]);
+    expect(fakeRegistry.materialized.size).toBe(0); // consumed, exactly once
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(connects.order).toEqual([]);
+    fakeRegistry.getMapping.mockReturnValue(null);
+    vi.useRealTimers();
+  });
+
+  it("an unchanged entry for an UNMAPPED path still asks for a registry pull", async () => {
+    // "Unchanged" is a statement about the index, not about the server. A file
+    // the registry does not map has never been registered, however old its bytes
+    // are — dropping it here is how a note stays invisible to the team forever.
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    await enable(sm);
+    fakeRegistry.pull.mockClear();
+
+    sm.handleLocalFilesChanged([{ path: "Unregistered.md", kind: "modified", unchanged: true }]);
+    expect(sm.hasPendingRegistryPull()).toBe(true);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("an unchanged entry does not reopen a permanent failure", async () => {
+    // The other verdict about the file's bytes. A note over `MAX_NOTE_BYTES`
+    // fails ONCE, permanently, without a socket; only bytes that actually moved
+    // can make it worth trying again. A read event re-queueing it would put the
+    // 10 MB read back on every watcher tick, forever.
+    vi.useFakeTimers();
+    fakeDisk.files.set("Huge.md", "x".repeat(11 * 1024 * 1024));
+    fakeRegistry.getMapping.mockImplementation((relPath: string) =>
+      relPath === "Huge.md" ? { vaultId: "collection-1", docId: "h1" } : null,
+    );
+    fakeRegistry.pathForDocId.mockImplementation((d: string) => (d === "h1" ? "Huge.md" : null));
+    const sm = new SyncManager();
+    await enable(sm);
+
+    sm.handleLocalFilesChanged([{ path: "Huge.md", kind: "modified" }]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flush();
+    expect(sm.inspectDoc("h1").permanentFailure).toMatch(/too large/);
+
+    sm.handleLocalFilesChanged([{ path: "Huge.md", kind: "modified", unchanged: true }]);
+    expect(sm.inspectDoc("h1").permanentFailure).toMatch(/too large/);
+    expect(sm.inspectDoc("h1").queued).toBe(false);
+
+    // Trimmed under the ceiling — real new bytes, so the verdict is void.
+    sm.handleLocalFilesChanged([{ path: "Huge.md", kind: "modified" }]);
+    expect(sm.inspectDoc("h1").permanentFailure).toBeNull();
+    expect(sm.inspectDoc("h1").queued).toBe(true);
+
+    fakeRegistry.getMapping.mockReturnValue(null);
+    fakeRegistry.pathForDocId.mockReturnValue(null);
+    vi.useRealTimers();
+  });
+
+  it("an unchanged entry does not clear the `empty everywhere` verdict the file earned", async () => {
+    // `emptyEverywhere` and `permanentFailures` are cleared by the SAME skipped
+    // line, and both are verdicts about the file's BYTES — which an unchanged
+    // event says have not moved. Re-opening them would put the doc back in the
+    // work list on every read event, which is the "re-syncing 307 notes" bug
+    // wearing a different hat.
+    fakeRegistry.mappedNotes.mockReturnValue([{ docId: "e1", relPath: "Empty.md" }]);
+    fakeRegistry.getMapping.mockImplementation((relPath: string) =>
+      relPath === "Empty.md" ? { vaultId: "collection-1", docId: "e1" } : null,
+    );
+    fakeRegistry.pathForDocId.mockImplementation((d: string) => (d === "e1" ? "Empty.md" : null));
+    fakeRegistry.emptyOnDisk = new Set(["Empty.md"]);
+    fakeDisk.files.set("Empty.md", "");
+    const sm = new SyncManager();
+    await enable(sm);
+    engineHooks.settled = true;
+    engineHooks.opts!.onServerEmpty?.(["e1"], false);
+    await sm.whenBulkSyncSettled();
+    await flush();
+    expect(sm.inspectDoc("e1").emptyEverywhere).toBe(true);
+
+    sm.handleLocalFilesChanged([{ path: "Empty.md", kind: "modified", unchanged: true }]);
+    expect(sm.inspectDoc("e1").emptyEverywhere).toBe(true);
+    expect(sm.inspectDoc("e1").queued).toBe(false);
+
+    // New bytes void it: the placeholder may hold text now.
+    sm.handleLocalFilesChanged([{ path: "Empty.md", kind: "modified" }]);
+    expect(sm.inspectDoc("e1").emptyEverywhere).toBe(false);
+    expect(sm.inspectDoc("e1").queued).toBe(true);
+
+    sm.disable();
+    await sm.whenBulkSyncSettled();
+    fakeRegistry.getMapping.mockReturnValue(null);
+    fakeRegistry.pathForDocId.mockReturnValue(null);
+  });
 });
 
 /**
@@ -807,6 +967,24 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
 
     sm.handleLocalFilesChanged([{ path: "Saved.md", kind: "removed" }]);
     sm.handleLocalFilesChanged([{ path: "Saved.md", kind: "modified" }]);
+    await drain();
+
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeDisk.trashed).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it("an UNCHANGED `modified` inside the window cancels the delete just the same", async () => {
+    // An editor that saves by unlinking and rewriting, a `git checkout` back to
+    // HEAD, a rename-there-and-back: the rewritten bytes are identical, so the
+    // watcher reports `unchanged`. The delete is still off — the point of the
+    // `modified` half is that the file EXISTS, not that it differs (#155).
+    const sm = new SyncManager();
+    mapOne("Reverted.md");
+    await live(sm);
+
+    sm.handleLocalFilesChanged([{ path: "Reverted.md", kind: "removed" }]);
+    sm.handleLocalFilesChanged([{ path: "Reverted.md", kind: "modified", unchanged: true }]);
     await drain();
 
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();

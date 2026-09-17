@@ -23,7 +23,7 @@ import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import * as perf from "./lib/perf";
-import { implicatedFolders } from "./lib/tree/lazyTree";
+import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
 import { syncManager } from "./lib/sync/docSession";
 import {
   backgroundUpdateCheck,
@@ -862,7 +862,13 @@ export default function App() {
     let pendingFolders: Set<string> | null = new Set();
     // The file changes themselves (last kind per path), for the titles patch.
     let pendingChanges = new Map<string, "modified" | "removed">();
-    const scheduleRefresh = (changes: ipc.FileChanged[]) => {
+    const scheduleRefresh = (batch: ipc.FileChanged[]) => {
+      // Entries whose bytes did not move (#155) change nothing the sidebar, the
+      // titles or the backlinks render, so they neither implicate a folder nor
+      // arm the timer. An all-unchanged batch — an idle vault under a cloud-sync
+      // agent, or Linux's read events — must cost exactly one `filter`.
+      const changes = refreshWorthy(batch);
+      if (changes.length === 0) return;
       if (pendingFolders) {
         const dirs = implicatedFolders(changes);
         if (dirs) for (const d of dirs) pendingFolders.add(d);
@@ -907,6 +913,15 @@ export default function App() {
             } else {
               // Route the edit into the bridge; it debounces, drops our own echo,
               // and merges genuine external edits live into the open Y.Text.
+              //
+              // `unchanged` entries go in too, deliberately. This is the one
+              // consumer that reconciles the open doc against the FILE rather
+              // than against the index, and those two can disagree while the
+              // bytes sit still (a cold-applied update, a hydrate that lost a
+              // race). It is 150ms-debounced, echo-guarded by `lastWrittenHash`
+              // and scoped to the single open note, so the worst an idle vault's
+              // read-event storm costs here is one `readNote` — nothing like the
+              // tree re-list, title re-read and graph rebuild below.
               bridgeManager.handleFileChanged(e.path);
             }
             // …and the sync layer sees it either way. Deleting the note you have

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "../ipc";
-import { loadedFolderPaths, setChildrenAt, implicatedFolders, mergeChildren, nodeAt } from "./lazyTree";
+import {
+  loadedFolderPaths,
+  setChildrenAt,
+  implicatedFolders,
+  mergeChildren,
+  nodeAt,
+  refreshWorthy,
+} from "./lazyTree";
 
 // The sidebar folds itself up if a refresh forgets which folders were expanded.
 // `refreshTree` runs on every `file-changed` burst and every sync registry pull
@@ -173,6 +180,48 @@ describe("targeted refresh helpers (#82)", () => {
         { path: "Archive", kind: "tree" },
       ]),
     ).toBeNull();
+  });
+
+  it("implicatedFolders ignores entries whose bytes did not move", () => {
+    // `unchanged` (#155) means the indexer found the file's sha256 equal to the
+    // one it already held — our own egest echo, `git checkout` restoring the
+    // same bytes, or Linux's spurious inotify read events. The folder's listing
+    // cannot have changed, so the folder is not implicated…
+    expect(
+      implicatedFolders([
+        { path: "Daily/quiet.md", kind: "modified", unchanged: true },
+        { path: "Notes/real.md", kind: "modified" },
+      ]),
+    ).toEqual(new Set(["Notes"]));
+    // …and an all-unchanged batch implicates nothing at all, rather than
+    // re-listing the folders it names.
+    expect(
+      implicatedFolders([
+        { path: "Daily/a.md", kind: "modified", unchanged: true },
+        { path: "b.md", kind: "modified", unchanged: true },
+      ]),
+    ).toEqual(new Set());
+  });
+
+  it("refreshWorthy drops unchanged entries and keeps everything else", () => {
+    const batch = [
+      { path: "Echo.md", kind: "modified" as const, unchanged: true },
+      { path: "Edited.md", kind: "modified" as const, unchanged: false },
+      { path: "Gone.md", kind: "removed" as const },
+      { path: "Archive", kind: "tree" as const },
+      { path: "Legacy.md", kind: "modified" as const }, // older Rust: no field
+    ];
+    expect(refreshWorthy(batch).map((c) => c.path)).toEqual([
+      "Edited.md",
+      "Gone.md",
+      "Archive",
+      "Legacy.md",
+    ]);
+    // A batch of nothing but echoes is empty — App.tsx's cue not to arm the
+    // 120ms tree/titles/backlinks refresh at all.
+    expect(refreshWorthy([{ path: "Echo.md", kind: "modified" as const, unchanged: true }])).toEqual(
+      [],
+    );
   });
 
   it("mergeChildren keeps an expanded sub-folder loaded across a fresh listing", () => {

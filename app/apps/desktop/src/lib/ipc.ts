@@ -179,6 +179,22 @@ export interface ResolvedLink {
 export interface FileChanged {
   path: string;
   kind: "modified" | "removed" | "tree";
+  /**
+   * The bytes on disk did NOT change: the indexer read the file and its sha256
+   * equalled the one the SQLite index already held for this same path (#155).
+   *
+   * Only ever set on `modified` — `removed` and `tree` always report `false`.
+   * Optional so an older Rust build (whose payload has no such field) still
+   * decodes; a missing value means `false`, i.e. "assume the bytes moved".
+   *
+   * Sources: our own egest echo, a materialized placeholder echoing back, a
+   * `git checkout` / cloud-sync / backup tool rewriting identical bytes, and the
+   * spurious inotify read events that made an idle Linux vault re-index itself.
+   * Rust never drops these entries — the bookkeeping they carry (a materialized
+   * echo to consume, a pending disk delete to cancel) is real; what they must
+   * not do is re-index, re-render or re-upload anything.
+   */
+  unchanged?: boolean;
 }
 
 /** One attachment file's metadata (mirrors the Rust `AttachmentMeta`). */

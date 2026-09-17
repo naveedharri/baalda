@@ -1330,7 +1330,14 @@ export class SyncManager implements InboundHost {
    *    volume — is filtered inside that window instead.
    */
   handleLocalFilesChanged(
-    changes: ReadonlyArray<{ path: string; kind: "modified" | "removed" | "tree" }>,
+    changes: ReadonlyArray<{
+      path: string;
+      kind: "modified" | "removed" | "tree";
+      /** The indexer found the file's sha256 equal to the index's — the bytes did
+       *  not move (`ipc.FileChanged.unchanged`). Bookkeeping still runs; the push
+       *  does not. Never set on `removed`/`tree`. */
+      unchanged?: boolean;
+    }>,
   ): void {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
@@ -1350,7 +1357,7 @@ export class SyncManager implements InboundHost {
       if (kind !== "removed") continue;
       if (this.queueDiskDelete(scope, relPath)) queuedDelete = true;
     }
-    for (const { path: relPath, kind } of changes) {
+    for (const { path: relPath, kind, unchanged } of changes) {
       if (kind === "removed") continue; // handled above
       if (kind === "tree") {
         // Folders are NOT handled here, deliberately.
@@ -1399,6 +1406,24 @@ export class SyncManager implements InboundHost {
       // Belt and braces with the uploader's own `skip`: the open note's editor
       // session owns its provider, and its bridge already ingests watcher events.
       if (this.docStore?.suppressedDoc() === mapping.docId) continue;
+      // Same bytes as the index already held, so there is nothing new to send
+      // (#155). Everything ABOVE this line still ran, and each of those lines is
+      // kept deliberately:
+      //  - `consumeMaterialized`: the one-echo-per-materialized-path contract is
+      //    spent by the event, not by what the event turned out to contain — a
+      //    placeholder's echo IS an unchanged `modified`, and leaving the claim
+      //    unspent would make the note's FIRST real edit look like an echo;
+      //  - `cancelDiskDelete`: an editor that saves by unlinking and rewriting
+      //    identical bytes (a revert, a `git checkout` back to HEAD) still owes
+      //    its pending delete a cancellation — the delete is real, the rewrite
+      //    is what proves the file is still there;
+      //  - the unmapped branch: a file nobody maps still has to be REGISTERED,
+      //    however old its bytes are. "Unchanged" says the index knew them, not
+      //    that the server does.
+      // What an unchanged entry must never do is queue an upload: no verdict to
+      // clear, no drain to arm, no resident doc to re-ingest, and no log line —
+      // an idle vault emitting these by the hundred used to read as work.
+      if (unchanged) continue;
       // The file has new bytes, so two verdicts about its OLD bytes are void: an
       // empty placeholder may now hold text, and an oversized file may have been
       // trimmed under the ceiling. Both get a fresh push.
@@ -1781,8 +1806,12 @@ export class SyncManager implements InboundHost {
 
   /** Single-event form of {@link handleLocalFilesChanged}, for call sites that
    *  see one change at a time. */
-  handleLocalFileChanged(relPath: string, kind: "modified" | "removed" | "tree"): void {
-    this.handleLocalFilesChanged([{ path: relPath, kind }]);
+  handleLocalFileChanged(
+    relPath: string,
+    kind: "modified" | "removed" | "tree",
+    unchanged = false,
+  ): void {
+    this.handleLocalFilesChanged([{ path: relPath, kind, unchanged }]);
   }
 
   private armLocalChangeDrain(scope: VaultScope, delayMs: number): void {
