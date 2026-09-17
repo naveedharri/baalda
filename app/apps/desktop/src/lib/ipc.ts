@@ -222,6 +222,29 @@ export interface AttachmentMeta {
   sha256: string;
 }
 
+/** Half-open byte range `[start, end)` — one multipart part of a file. */
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
+/** What a streamed upload PUT answered (mirrors the Rust `UploadOutcome`). */
+export interface AttachmentUploadResult {
+  status: number;
+  /** S3's part receipt, replayed back at `complete`. Null on our own route. */
+  etag: string | null;
+  /** A truncated response body, present only when the status was not 2xx. */
+  error: string | null;
+}
+
+/** What a streamed download wrote (mirrors the Rust `DownloadOutcome`). */
+export interface AttachmentDownloadResult {
+  status: number;
+  bytes: number;
+  /** sha256 of what landed — already checked against `expectedSha256`. */
+  sha256: string;
+}
+
 /** One file's size + mtime (mirrors the Rust `FileStat`). */
 export interface FileStat {
   size: number;
@@ -602,6 +625,60 @@ export const writeBinaryFile = (
 
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Stream an attachment (or one byte range of it) to a presigned URL from RUST.
+ *
+ * Not a webview `fetch` on purpose: the bucket would need CORS for a
+ * `tauri://localhost` Origin, the CSP would have to permit whatever plain-http
+ * MinIO a self-hoster runs, and a 500 MB video would have to exist in the JS
+ * heap first. `headers` goes out verbatim and is the ONLY auth — an upload URL
+ * carries its own credential (an S3 signature, or our route's `?t=` token), and
+ * S3 rejects a request that also presents a bearer.
+ */
+export const uploadAttachment = (
+  input: {
+    relPath: string;
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    range?: ByteRange;
+  },
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<AttachmentUploadResult>("upload_attachment", {
+    relPath: input.relPath,
+    url: input.url,
+    method: input.method ?? "PUT",
+    headers: input.headers ?? {},
+    range: input.range ?? null,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
+/**
+ * Stream a URL into `attachments/<…>`, atomically and hash-verified.
+ *
+ * Rust writes to `.<name>.tmp`, hashes as it writes, and renames only when the
+ * digest matches `expectedSha256` — so a truncated transfer never appears under
+ * the real name for the next diff to accept. Redirects are NOT followed (see
+ * `attachments.rs`): the bearer must never reach a presigned host.
+ */
+export const downloadAttachment = (
+  input: {
+    url: string;
+    relPath: string;
+    headers?: Record<string, string>;
+    expectedSha256?: string | null;
+  },
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<AttachmentDownloadResult>("download_attachment", {
+    url: input.url,
+    relPath: input.relPath,
+    headers: input.headers ?? {},
+    expectedSha256: input.expectedSha256 ?? null,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
 /**
  * A one-shot census of the open vault for Vault Settings → Health: counts and

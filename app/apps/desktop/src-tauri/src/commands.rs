@@ -16,6 +16,7 @@ use crate::stats::{self, VaultStats};
 use crate::tree::{self, TreeNode};
 use crate::{vault, watcher};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -1891,13 +1892,86 @@ pub fn write_binary_file(
     attachments::write_binary_file(&vault, &meta.rel_path, &bytes)
 }
 
+/// The attachment listing the sync diff runs on — path, size and sha256 for
+/// every file under `attachments/`.
+///
+/// Hashes come from the index's `attachment_hashes` cache whenever the file's
+/// `(size, mtime)` is unchanged, so a reconcile triggered by an unrelated
+/// watcher event costs a `stat` per file instead of re-reading every byte in
+/// the store. The lock is taken twice and briefly — read the cache, walk and
+/// hash outside it, write back only when something moved — because hashing a
+/// large video while holding the index lock would stall every other query.
 #[tauri::command]
 pub async fn list_attachments(
     state: State<'_, AppState>,
     expected_epoch: Option<u64>,
 ) -> AppResult<Vec<AttachmentMeta>> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let cached = {
+        let guard = index.lock().unwrap();
+        // A cache read that fails is not a reason to fail the listing: the
+        // worst case is that we hash everything, which is what we did before.
+        guard.attachment_hash_cache().unwrap_or_default()
+    };
+    let listing = attachments::list_attachments_cached(&vault, &cached)?;
+    if listing.changed {
+        let guard = index.lock().unwrap();
+        if let Err(e) = guard.save_attachment_hash_cache(&listing.cache) {
+            log::warn!("[attachments] hash cache write failed: {e}");
+        }
+    }
+    Ok(listing.items)
+}
+
+/// Stream one attachment (or one multipart part of it) to a presigned URL.
+///
+/// See `attachments.rs` for why the bytes go through Rust instead of the
+/// webview, and why NOTHING here adds an `Authorization` header: the URL
+/// carries its own credential, and S3 rejects a request that has both.
+#[tauri::command]
+pub async fn upload_attachment(
+    state: State<'_, AppState>,
+    rel_path: String,
+    url: String,
+    method: Option<String>,
+    headers: Option<HashMap<String, String>>,
+    range: Option<attachments::ByteRange>,
+    expected_epoch: Option<u64>,
+) -> AppResult<attachments::UploadOutcome> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    attachments::list_attachments(&vault)
+    attachments::upload_file(
+        &vault,
+        &rel_path,
+        &url,
+        method.as_deref().unwrap_or("PUT"),
+        &headers.unwrap_or_default(),
+        range,
+    )
+    .await
+}
+
+/// Stream a URL into `attachments/<…>`, verifying the sha256 before the rename.
+///
+/// Epoch-pinned like every other vault-relative write: a download that started
+/// before a vault switch must not land in the vault the user moved to.
+#[tauri::command]
+pub async fn download_attachment(
+    state: State<'_, AppState>,
+    url: String,
+    rel_path: String,
+    headers: Option<HashMap<String, String>>,
+    expected_sha256: Option<String>,
+    expected_epoch: Option<u64>,
+) -> AppResult<attachments::DownloadOutcome> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    attachments::download_file(
+        &vault,
+        &rel_path,
+        &url,
+        &headers.unwrap_or_default(),
+        expected_sha256.as_deref(),
+    )
+    .await
 }
 
 /// A one-shot census of the open vault for Vault Settings → Health: what is in

@@ -95,7 +95,11 @@ function makeDeps(
 
   const deps: AttachmentSyncDeps = {
     listLocal: async () =>
-      [...local.entries()].map(([relPath, bytes]) => ({ relPath, sha256: sha(bytes) })),
+      [...local.entries()].map(([relPath, bytes]) => ({
+        relPath,
+        sha256: sha(bytes),
+        size: bytes.byteLength,
+      })),
     readLocal: async (relPath) => local.get(relPath)!,
     writeLocal: async (relPath, bytes) => {
       local.set(relPath, bytes);
@@ -245,5 +249,435 @@ describe("AttachmentSync vault scoping", () => {
       },
     });
     await expect(offline.reconcile()).resolves.toEqual({ uploaded: 0, downloaded: 0 });
+  });
+});
+
+// ---- intent → PUT → complete -----------------------------------------------
+//
+// The transport the desktop actually uses against a current server. Everything
+// is injected, so these exercise the real decision-making — which step runs,
+// what headers go out, what is retried and what is given up on — without Tauri,
+// a webview or a live server.
+
+/** An error shaped like the api client's `BlobTransportError`. */
+function serverError(status: number, code?: string) {
+  return Object.assign(new Error(code ?? `HTTP ${status}`), { status, code });
+}
+
+interface TransportLog {
+  intents: Array<{ relPath: string; sha256: string; size: number }>;
+  puts: Array<{
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    range?: { start: number; end: number };
+    bytes: number;
+    via: "rust" | "webview";
+  }>;
+  completes: Array<{ url: string; body: unknown }>;
+  partRequests: Array<{ url: string; partNumbers: number[] }>;
+  downloadUrls: string[];
+  fetches: Array<{ url: string; headers: Record<string, string> }>;
+  legacyUploads: string[];
+  legacyDownloads: string[];
+  reads: string[];
+  toasts: string[];
+}
+
+/**
+ * Deps wired to a fake server that speaks the intent flow. `respond` decides
+ * what the intent answers (or throws) per file, which is how each case below
+ * picks its scenario.
+ */
+function makeTransport(
+  files: Array<{ relPath: string; bytes: Uint8Array }>,
+  respond: (input: { relPath: string; sha256: string; size: number }) => unknown,
+  extra: Partial<AttachmentSyncDeps> = {},
+) {
+  const log: TransportLog = {
+    intents: [],
+    puts: [],
+    completes: [],
+    partRequests: [],
+    downloadUrls: [],
+    fetches: [],
+    legacyUploads: [],
+    legacyDownloads: [],
+    reads: [],
+    toasts: [],
+  };
+  const local = new Map(files.map((f) => [f.relPath, f.bytes]));
+  const deps: AttachmentSyncDeps = {
+    listLocal: async () =>
+      [...local.entries()].map(([relPath, bytes]) => ({
+        relPath,
+        sha256: `sha-${relPath}`,
+        size: bytes.byteLength,
+      })),
+    readLocal: async (relPath) => {
+      log.reads.push(relPath);
+      return local.get(relPath)!;
+    },
+    writeLocal: async (relPath, bytes) => {
+      local.set(relPath, bytes);
+    },
+    listServer: async () => [],
+    uploadServer: async (relPath) => {
+      log.legacyUploads.push(relPath);
+    },
+    downloadServer: async (id) => {
+      log.legacyDownloads.push(id);
+      return new Uint8Array([0]);
+    },
+    createIntent: async (input) => {
+      log.intents.push({ relPath: input.relPath, sha256: input.sha256, size: input.size });
+      const answer = respond(input);
+      if (answer instanceof Error) throw answer;
+      return answer as never;
+    },
+    completeUpload: async (url, body) => {
+      log.completes.push({ url, body });
+    },
+    requestParts: async (url, partNumbers) => {
+      log.partRequests.push({ url, partNumbers });
+      return { parts: partNumbers.map((n) => ({ partNumber: n, url: `https://s3/fresh/${n}` })) };
+    },
+    // The Rust path: it is handed a PATH, never bytes — that is the point.
+    putFile: async (input) => {
+      const whole = local.get(input.relPath)!;
+      const len = input.range ? input.range.end - input.range.start : whole.byteLength;
+      log.puts.push({
+        url: input.url,
+        method: input.method,
+        headers: input.headers,
+        range: input.range,
+        bytes: len,
+        via: "rust",
+      });
+      return { status: 204, etag: `"etag-${log.puts.length}"` };
+    },
+    putBytes: async (input) => {
+      log.puts.push({
+        url: input.url,
+        method: input.method,
+        headers: input.headers,
+        bytes: input.bytes.byteLength,
+        via: "webview",
+      });
+      return { status: 204, etag: null };
+    },
+    authHeaders: () => ({ Authorization: "Bearer session-token" }),
+    notify: (text) => {
+      log.toasts.push(text);
+    },
+    ...extra,
+  };
+  return { deps, log, local };
+}
+
+const SINGLE_INTENT = {
+  blobId: "blob-1",
+  completeUrl: "https://api.test/api/blobs/blob-1/complete",
+  upload: {
+    kind: "single" as const,
+    method: "PUT",
+    url: "https://s3.test/bucket/key?X-Amz-Signature=abc",
+    headers: { "content-type": "image/png", "content-length": "3" },
+    expiresAt: Date.now() + 60_000,
+    direct: true,
+  },
+};
+
+describe("AttachmentSync upload transport (intent → PUT → complete)", () => {
+  it("PUTs to the intent's URL with exactly its headers, then completes", async () => {
+    const { deps, log } = makeTransport(
+      [{ relPath: "attachments/a.png", bytes: new Uint8Array([1, 2, 3]) }],
+      () => SINGLE_INTENT,
+    );
+    const res = await new AttachmentSync(deps).reconcile();
+
+    expect(res.uploaded).toBe(1);
+    expect(log.intents).toEqual([
+      { relPath: "attachments/a.png", sha256: "sha-attachments/a.png", size: 3 },
+    ]);
+    expect(log.puts).toHaveLength(1);
+    expect(log.puts[0].url).toBe(SINGLE_INTENT.upload.url);
+    expect(log.puts[0].via).toBe("rust");
+    // Exactly the presigned headers — a bearer here is what S3 rejects.
+    expect(log.puts[0].headers).toEqual(SINGLE_INTENT.upload.headers);
+    expect(Object.keys(log.puts[0].headers)).not.toContain("Authorization");
+    expect(log.completes).toEqual([{ url: SINGLE_INTENT.completeUrl, body: {} }]);
+    // Streaming from Rust means the bytes never passed through JS.
+    expect(log.reads).toEqual([]);
+    expect(log.legacyUploads).toEqual([]);
+  });
+
+  it("a deduped intent moves zero bytes and never opens the file", async () => {
+    const { deps, log } = makeTransport(
+      [{ relPath: "attachments/dupe.png", bytes: new Uint8Array([7, 7]) }],
+      () => ({ deduped: true, blob: { id: "b", sha256: "s", size: 2, mime: null, relPath: null } }),
+    );
+    const res = await new AttachmentSync(deps).reconcile();
+
+    expect(res.uploaded).toBe(1); // the server has it, which is what counts
+    expect(log.reads).toEqual([]); // no readLocal
+    expect(log.puts).toEqual([]); // no bytes
+    expect(log.completes).toEqual([]);
+  });
+
+  it("splits a multipart upload at partBytes and completes with the ETags", async () => {
+    const bytes = new Uint8Array(25).fill(9);
+    const { deps, log } = makeTransport(
+      [{ relPath: "attachments/clip.mp4", bytes }],
+      () => ({
+        blobId: "blob-mp",
+        completeUrl: "https://api.test/api/blobs/blob-mp/complete",
+        upload: {
+          kind: "multipart" as const,
+          method: "PUT",
+          uploadId: "upload-9",
+          partBytes: 10,
+          parts: [
+            { partNumber: 1, url: "https://s3/p1" },
+            { partNumber: 2, url: "https://s3/p2" },
+            { partNumber: 3, url: "https://s3/p3" },
+          ],
+          headers: {},
+          expiresAt: Date.now() + 60_000,
+          direct: true,
+          partsUrl: "https://api.test/api/blobs/blob-mp/parts?t=tok",
+        },
+      }),
+    );
+    await new AttachmentSync(deps).reconcile();
+
+    expect(log.puts.map((p) => p.range)).toEqual([
+      { start: 0, end: 10 },
+      { start: 10, end: 20 },
+      { start: 20, end: 25 }, // the tail is short, not padded
+    ]);
+    expect(log.puts.map((p) => p.url)).toEqual([
+      "https://s3/p1",
+      "https://s3/p2",
+      "https://s3/p3",
+    ]);
+    expect(log.completes[0].body).toEqual({
+      uploadId: "upload-9",
+      parts: [
+        { partNumber: 1, etag: '"etag-1"' },
+        { partNumber: 2, etag: '"etag-2"' },
+        { partNumber: 3, etag: '"etag-3"' },
+      ],
+    });
+  });
+
+  it("re-mints a part URL whose presign expired, and uses the fresh one", async () => {
+    const bytes = new Uint8Array(15).fill(1);
+    let putCount = 0;
+    const { deps, log } = makeTransport(
+      [{ relPath: "attachments/big.mp4", bytes }],
+      () => ({
+        blobId: "blob-mp",
+        completeUrl: "https://api.test/complete",
+        upload: {
+          kind: "multipart" as const,
+          method: "PUT",
+          uploadId: "u1",
+          partBytes: 10,
+          parts: [{ partNumber: 1, url: "https://s3/stale-1" }], // part 2 missing
+          headers: {},
+          expiresAt: Date.now(),
+          direct: true,
+          partsUrl: "https://api.test/parts?t=tok",
+        },
+      }),
+      {
+        putFile: async (input) => {
+          putCount++;
+          // The first part's presign has died since the intent was minted.
+          const expired = input.url === "https://s3/stale-1";
+          return { status: expired ? 403 : 204, etag: expired ? null : `"e${putCount}"` };
+        },
+      },
+    );
+    await new AttachmentSync(deps).reconcile();
+
+    // Part 1 re-minted after the 403; part 2 re-minted because it was never given.
+    expect(log.partRequests).toEqual([
+      { url: "https://api.test/parts?t=tok", partNumbers: [1] },
+      { url: "https://api.test/parts?t=tok", partNumbers: [2] },
+    ]);
+    expect(log.completes[0].body).toMatchObject({ uploadId: "u1" });
+  });
+
+  it("retries the PUT (not the complete) on upload_incomplete", async () => {
+    let completes = 0;
+    const { deps, log } = makeTransport(
+      [{ relPath: "attachments/a.png", bytes: new Uint8Array([1, 2, 3]) }],
+      () => SINGLE_INTENT,
+      {
+        completeUpload: async () => {
+          completes++;
+          if (completes === 1) throw serverError(409, "upload_incomplete");
+        },
+      },
+    );
+    const res = await new AttachmentSync(deps).reconcile();
+
+    expect(res.uploaded).toBe(1);
+    expect(completes).toBe(2);
+    expect(log.puts).toHaveLength(2); // the bytes were re-sent, then completed
+  });
+
+  it("falls back to the legacy route on 404 and stops probing intent", async () => {
+    const { deps, log } = makeTransport(
+      [
+        { relPath: "attachments/a.png", bytes: new Uint8Array([1]) },
+        { relPath: "attachments/b.png", bytes: new Uint8Array([2]) },
+      ],
+      () => serverError(404, "not_found"),
+    );
+    const sync = new AttachmentSync(deps);
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(2);
+    expect(log.legacyUploads).toEqual(["attachments/a.png", "attachments/b.png"]);
+    // One probe for the whole server, not one per file — and none on a re-run.
+    expect(log.intents).toHaveLength(1);
+    await sync.reconcile();
+    expect(log.intents).toHaveLength(1);
+  });
+
+  it("aborts the whole pass on 402 and toasts exactly once", async () => {
+    const { deps, log } = makeTransport(
+      [
+        { relPath: "attachments/a.png", bytes: new Uint8Array([1]) },
+        { relPath: "attachments/b.png", bytes: new Uint8Array([2]) },
+      ],
+      () => serverError(402, "storage_limit_reached"),
+    );
+    const sync = new AttachmentSync(deps);
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+
+    // The second file is never even announced: the vault is full, not the file.
+    expect(log.intents).toHaveLength(1);
+    expect(log.toasts).toHaveLength(1);
+    expect(log.toasts[0]).toMatch(/storage/i);
+    // A later pass re-tries (the user may have freed space) but never re-toasts.
+    await sync.reconcile();
+    expect(log.intents).toHaveLength(2);
+    expect(log.toasts).toHaveLength(1);
+  });
+
+  it("skips a 413/415 file permanently instead of retrying it every pass", async () => {
+    const { deps, log } = makeTransport(
+      [
+        { relPath: "attachments/huge.mp4", bytes: new Uint8Array([1]) },
+        { relPath: "attachments/ok.png", bytes: new Uint8Array([2]) },
+      ],
+      ({ relPath }) =>
+        relPath === "attachments/huge.mp4"
+          ? serverError(413, "attachment_too_large")
+          : SINGLE_INTENT,
+    );
+    const sync = new AttachmentSync(deps);
+
+    const first = await sync.reconcile();
+    expect(first.uploaded).toBe(1); // only the good one
+    expect(log.intents).toHaveLength(2);
+
+    // Second pass: the refused file is not announced again; the other still is.
+    const second = await sync.reconcile();
+    expect(second.uploaded).toBe(1);
+    expect(log.intents.map((i) => i.relPath)).toEqual([
+      "attachments/huge.mp4",
+      "attachments/ok.png",
+      "attachments/ok.png",
+    ]);
+  });
+});
+
+describe("AttachmentSync download transport (presigned URL)", () => {
+  /** Deps whose server holds one blob and speaks `GET /api/blobs/:id/url`. */
+  function makeDownload(
+    target: unknown,
+    extra: Partial<AttachmentSyncDeps> = {},
+  ): { deps: AttachmentSyncDeps; log: TransportLog } {
+    const { deps, log } = makeTransport([], () => SINGLE_INTENT, {
+      listServer: async () => [
+        { id: "blob-1", relPath: "attachments/remote.png", sha256: "deadbeef" },
+      ],
+      downloadUrl: async (id) => {
+        log.downloadUrls.push(id);
+        if (target instanceof Error) throw target;
+        return target as never;
+      },
+      fetchToFile: async (input) => {
+        log.fetches.push({ url: input.url, headers: input.headers });
+        return { status: 200, bytes: 4 };
+      },
+      ...extra,
+    });
+    return { deps, log };
+  }
+
+  it("fetches a direct (presigned) URL with NO Authorization header", async () => {
+    const { deps, log } = makeDownload({
+      url: "https://s3.test/bucket/key?X-Amz-Signature=abc",
+      expiresAt: Date.now() + 60_000,
+      direct: true,
+    });
+    const res = await new AttachmentSync(deps).reconcile();
+
+    expect(res.downloaded).toBe(1);
+    expect(log.fetches).toHaveLength(1);
+    // The whole point: a presign plus a bearer is rejected by S3, and the
+    // bearer must not leak to a third-party host either way.
+    expect(log.fetches[0].headers).toEqual({});
+    expect(log.legacyDownloads).toEqual([]);
+  });
+
+  it("sends the bearer when the URL is our own route (direct: false)", async () => {
+    const { deps, log } = makeDownload({
+      url: "https://api.test/api/blobs/blob-1",
+      expiresAt: null,
+      direct: false,
+    });
+    await new AttachmentSync(deps).reconcile();
+    expect(log.fetches[0].headers).toEqual({ Authorization: "Bearer session-token" });
+  });
+
+  it("falls back to the legacy download when /url answers 404", async () => {
+    const { deps, log } = makeDownload(serverError(404, "not_found"));
+    const sync = new AttachmentSync(deps);
+    const res = await sync.reconcile();
+
+    expect(res.downloaded).toBe(1);
+    expect(log.fetches).toEqual([]);
+    expect(log.legacyDownloads).toEqual(["blob-1"]);
+    // Remembered per server, like the upload probe.
+    await sync.reconcile();
+    expect(log.downloadUrls).toEqual(["blob-1"]);
+  });
+
+  it("uses the webview fetch when the Rust command is missing, and only then", async () => {
+    const seen: Array<Record<string, string>> = [];
+    const { deps, log } = makeDownload(
+      { url: "https://s3.test/key?sig", expiresAt: null, direct: true },
+      {
+        fetchToFile: async () => {
+          throw new Error("Command download_attachment not found");
+        },
+        fetchBytes: async (url, headers) => {
+          seen.push(headers);
+          expect(url).toBe("https://s3.test/key?sig");
+          return new Uint8Array([4, 4]);
+        },
+      },
+    );
+    const res = await new AttachmentSync(deps).reconcile();
+    expect(res.downloaded).toBe(1);
+    expect(seen).toEqual([{}]); // still no bearer on a presign
+    expect(log.legacyDownloads).toEqual([]);
   });
 });
