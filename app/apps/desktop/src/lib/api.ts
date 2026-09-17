@@ -323,6 +323,88 @@ export interface BlobMeta {
   filename?: string | null;
   /** True when the upload deduped to an existing row (server-set). */
   deduped?: boolean;
+  /** `pending` until the bytes land (intent → PUT → complete); `ready` after.
+   *  Absent on servers that predate the transport. */
+  status?: "pending" | "ready";
+  /** Which store holds the bytes — `postgres` or `s3`. Informational: every
+   *  read path asks the SERVER, never this field, which store to talk to. */
+  storageProvider?: string | null;
+}
+
+/**
+ * The upload an intent hands back — the one shape both storage providers speak.
+ *
+ * `direct` is the whole security story: `true` means the URL is a third-party
+ * presign (S3/R2/MinIO) and MUST NOT carry our bearer; `false` means it is our
+ * own server and the `?t=` query IS the auth, so it must not carry the bearer
+ * either. Nothing in this flow ever sends `Authorization` to an upload URL —
+ * see {@link ApiClient.uploadBytesTo}.
+ */
+export interface BlobUploadSingle {
+  kind: "single";
+  method: string;
+  url: string;
+  /** Sent VERBATIM (content-type + content-length); the presign signs them. */
+  headers: Record<string, string>;
+  /** Epoch millis after which the URL is dead. */
+  expiresAt: number;
+  direct: boolean;
+}
+
+/** One presigned `UploadPart` URL. `partNumber` is 1-based, like S3's. */
+export interface BlobUploadPart {
+  partNumber: number;
+  url: string;
+}
+
+export interface BlobUploadMultipart {
+  kind: "multipart";
+  method: string;
+  uploadId: string;
+  /** Slice size: part n covers `[(n-1)*partBytes, n*partBytes)`. */
+  partBytes: number;
+  parts: BlobUploadPart[];
+  headers: Record<string, string>;
+  expiresAt: number;
+  direct: boolean;
+  /** Carried inside `partsUrl` too; kept for callers that rebuild the URL. */
+  token?: string;
+  /** Absolute; POST `{partNumbers}` here for fresh URLs when one expires. */
+  partsUrl: string;
+}
+
+export type BlobUpload = BlobUploadSingle | BlobUploadMultipart;
+
+/** The server already holds these bytes — send nothing. */
+export interface BlobIntentDeduped {
+  deduped: true;
+  blob: BlobMeta;
+}
+
+/** The server wants the bytes, and this is where to PUT them. */
+export interface BlobIntentUpload {
+  deduped?: false;
+  blobId: string;
+  upload: BlobUpload;
+  /** Absolute URL to POST once every byte is in (bearer REQUIRED — ours). */
+  completeUrl: string;
+}
+
+export type BlobIntent = BlobIntentDeduped | BlobIntentUpload;
+
+/** Body of `POST {completeUrl}`: `{}` for single, parts + id for multipart. */
+export interface BlobCompleteBody {
+  uploadId?: string;
+  parts?: Array<{ partNumber: number; etag: string }>;
+}
+
+/** Where to GET an attachment's bytes right now. */
+export interface BlobDownloadTarget {
+  url: string;
+  /** Epoch millis, or null when the URL does not expire (our own route). */
+  expiresAt: number | null;
+  /** `true` = a third-party presign: fetch it with NO `Authorization` at all. */
+  direct: boolean;
 }
 
 // ---- Versioning (per-note history + vault checkpoints) --------------------
@@ -505,6 +587,47 @@ export class ApiError extends Error {
 }
 
 /**
+ * A blob-transport call the server refused, carrying the machine-readable
+ * `code` the flow branches on (`storage_limit_reached`, `attachment_too_large`,
+ * `upload_incomplete`, …) next to the status.
+ *
+ * An `ApiError` subclass so every existing `catch (e) { if (e instanceof
+ * ApiError) }` keeps working — the code is the only thing added, and it is read
+ * through {@link blobErrorCode} so a plain `ApiError` from an older path still
+ * answers.
+ */
+export class BlobTransportError extends ApiError {
+  constructor(
+    status: number,
+    public code: string | null,
+    message: string,
+    body?: unknown,
+  ) {
+    super(status, message, body);
+    this.name = "BlobTransportError";
+  }
+}
+
+/**
+ * The server's error code for a failed blob call, or null when it named none.
+ * Reads `code` first and `error` second, which is how the server's JSON bodies
+ * spell it in the two generations of these routes.
+ */
+export function blobErrorCode(e: unknown): string | null {
+  if (e instanceof BlobTransportError) return e.code;
+  if (e instanceof ApiError) return errorCodeOf(e.body);
+  return null;
+}
+
+function errorCodeOf(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as { code?: unknown; error?: unknown };
+  if (typeof b.code === "string") return b.code;
+  if (typeof b.error === "string") return b.error;
+  return null;
+}
+
+/**
  * A server address didn't check out. Thrown by {@link ApiClient.health}, which
  * is the one probe in this file that must NOT fail closed.
  *
@@ -587,6 +710,19 @@ export class ApiClient {
   private token: string | null;
   private readonly fetchImpl: FetchLike;
   private readonly clientId: string;
+  /**
+   * Does THIS server speak the intent → PUT → complete upload flow?
+   *
+   * Tri-state on purpose: `null` = not asked yet (try it), `true` = yes,
+   * `false` = it answered 404, so every later upload goes straight to the
+   * legacy `POST /api/vaults/:id/blobs` without paying for a 404 first. The
+   * answer belongs to ONE server, so {@link setBaseUrl} clears it — a user who
+   * switches from the managed instance to a self-host they run from last
+   * spring must not inherit the managed instance's capabilities.
+   */
+  private blobIntentSupported: boolean | null = null;
+  /** Same tri-state for `GET /api/blobs/:id/url` (presigned download). */
+  private blobUrlSupported: boolean | null = null;
 
   constructor(opts: ApiClientOptions = {}) {
     this.baseUrl = stripTrailingSlash(opts.baseUrl ?? DEFAULT_SERVER_URL);
@@ -613,7 +749,13 @@ export class ApiClient {
     return this.baseUrl;
   }
   setBaseUrl(url: string): void {
-    this.baseUrl = stripTrailingSlash(url);
+    const next = stripTrailingSlash(url);
+    if (next !== this.baseUrl) {
+      // Capabilities are per server (see `blobIntentSupported`).
+      this.blobIntentSupported = null;
+      this.blobUrlSupported = null;
+    }
+    this.baseUrl = next;
   }
   getToken(): string | null {
     return this.token;
@@ -1809,6 +1951,203 @@ export class ApiClient {
     return parsed as unknown as BlobMeta;
   }
 
+  /**
+   * Headers that prove who we are on a blob route we host ourselves.
+   *
+   * Public because the attachment sync has to decide, per download, whether the
+   * URL it was handed is ours (bearer REQUIRED) or a third-party presign
+   * (bearer FORBIDDEN — S3 rejects a request that carries both a signature and
+   * an `Authorization` header). The decision lives in `sync/attachments.ts`
+   * where it is tested; this just supplies the header when the answer is "ours".
+   */
+  authHeaders(): Record<string, string> {
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
+  }
+
+  /** Whether this server is known to speak the intent flow (null = unasked). */
+  supportsBlobIntent(): boolean | null {
+    return this.blobIntentSupported;
+  }
+
+  /**
+   * Announce an upload: what the bytes are, where they belong, how big.
+   *
+   * The server answers either "already have them" (`deduped`, zero bytes move —
+   * which is the whole reason this exists: the legacy route learned that only
+   * AFTER a new device re-uploaded every attachment in full) or a URL to PUT
+   * them to, for BOTH storage providers. A 404 means this server predates the
+   * flow: remembered per server URL so exactly one upload pays for the probe.
+   */
+  async createBlobIntent(
+    vaultId: string,
+    meta: {
+      sha256: string;
+      size: number;
+      mime: string;
+      relPath: string;
+      filename?: string | null;
+    },
+  ): Promise<BlobIntent> {
+    if (this.blobIntentSupported === false) {
+      // Known-legacy server: answer the way it would, without the round trip.
+      throw new BlobTransportError(404, "not_found", "server has no blob intent route");
+    }
+    try {
+      const { data } = await this.request<BlobIntent>(
+        "POST",
+        `/api/vaults/${encodeURIComponent(vaultId)}/blobs/intent`,
+        { body: meta },
+      );
+      this.blobIntentSupported = true;
+      return data;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) this.blobIntentSupported = false;
+      throw asBlobError(e);
+    }
+  }
+
+  /**
+   * Finish an upload: the server checks what landed and promotes the row to
+   * `ready`. Idempotent, so a retry after a dropped response is safe.
+   *
+   * `completeUrl` comes from the intent and is absolute — the server owns the
+   * path, and a multipart flow may point it elsewhere entirely.
+   */
+  async completeBlob(completeUrl: string, body: BlobCompleteBody = {}): Promise<BlobMeta> {
+    return (await this.requestAbsolute<BlobMeta>("POST", completeUrl, body)) ?? ({} as BlobMeta);
+  }
+
+  /** Fresh presigned URLs for parts whose own presign expired mid-upload. */
+  async requestBlobParts(
+    partsUrl: string,
+    partNumbers: number[],
+  ): Promise<{ parts: BlobUploadPart[]; expiresAt?: number }> {
+    const data = await this.requestAbsolute<{ parts: BlobUploadPart[]; expiresAt?: number }>(
+      "POST",
+      partsUrl,
+      { partNumbers },
+    );
+    return { parts: data?.parts ?? [], expiresAt: data?.expiresAt };
+  }
+
+  /**
+   * Where to GET this blob's bytes right now.
+   *
+   * A JSON URL rather than following `GET /api/blobs/:id`'s 302: reqwest
+   * forwards `Authorization` across a redirect and S3 rejects a presign that
+   * arrives with one, so the desktop asks first and then fetches with a client
+   * that carries exactly the headers `direct` calls for. 404 = a server that
+   * predates this; the caller falls back to {@link downloadBlob}.
+   */
+  async blobDownloadUrl(blobId: string): Promise<BlobDownloadTarget> {
+    if (this.blobUrlSupported === false) {
+      throw new BlobTransportError(404, "not_found", "server has no blob url route");
+    }
+    try {
+      const { data } = await this.request<BlobDownloadTarget>(
+        "GET",
+        `/api/blobs/${encodeURIComponent(blobId)}/url`,
+      );
+      this.blobUrlSupported = true;
+      return data;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) this.blobUrlSupported = false;
+      throw asBlobError(e);
+    }
+  }
+
+  /**
+   * PUT raw bytes at a presigned URL from the WEBVIEW — the fallback for when
+   * the Rust streaming command is unavailable (tests, or a build without it).
+   *
+   * Sends `headers` and nothing else. No bearer, ever: `direct: true` is a
+   * third-party presign that rejects one, and `direct: false` is our own route
+   * whose `?t=` query IS the credential. Note the webview's own limits — the
+   * body lives in the JS heap and the bucket needs CORS — which is exactly why
+   * Rust is the primary path.
+   */
+  async uploadBytesTo(input: {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    bytes: Uint8Array;
+  }): Promise<{ status: number; etag: string | null }> {
+    const res = await this.fetchImpl(input.url, {
+      method: input.method ?? "PUT",
+      headers: { ...(input.headers ?? {}) },
+      body: input.bytes.slice().buffer,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new BlobTransportError(res.status, null, text || `HTTP ${res.status}`);
+    }
+    return { status: res.status, etag: res.headers.get("etag") };
+  }
+
+  /** GET bytes from an arbitrary (possibly presigned) URL — webview fallback. */
+  async downloadBytesFrom(
+    url: string,
+    headers: Record<string, string> = {},
+  ): Promise<Uint8Array> {
+    const res = await this.fetchImpl(url, { method: "GET", headers: { ...headers } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new BlobTransportError(res.status, null, text || `HTTP ${res.status}`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  /**
+   * JSON round trip to an ABSOLUTE url the server handed us (complete, parts).
+   *
+   * The bearer goes only to our own origin; a `completeUrl` pointing anywhere
+   * else gets the body and nothing to replay. Same-origin is the test because
+   * these URLs are minted by the server we are already authenticated to.
+   */
+  private async requestAbsolute<T>(
+    method: string,
+    url: string,
+    body: unknown,
+  ): Promise<T | null> {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      [ORIGIN_HEADER]: this.clientId,
+    };
+    if (this.isOwnOrigin(url)) {
+      try {
+        headers.Origin = new URL(this.baseUrl).origin;
+      } catch {
+        /* leave unset */
+      }
+      if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    }
+    const res = await this.fetchImpl(url, { method, headers, body: JSON.stringify(body) });
+    const text = await res.text();
+    let parsed: unknown = undefined;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
+    }
+    if (!res.ok) {
+      const code = errorCodeOf(parsed);
+      throw new BlobTransportError(res.status, code, code ?? `HTTP ${res.status}`, parsed);
+    }
+    return (parsed ?? null) as T | null;
+  }
+
+  /** Is this absolute URL served by the server we hold a session for? */
+  private isOwnOrigin(url: string): boolean {
+    try {
+      return new URL(url).origin === new URL(this.baseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
   /** Download an attachment's bytes by blob id. */
   async downloadBlob(id: string): Promise<Uint8Array> {
     const res = await this.fetchImpl(`${this.baseUrl}/api/blobs/${encodeURIComponent(id)}`, {
@@ -1821,6 +2160,15 @@ export class ApiClient {
     }
     return new Uint8Array(await res.arrayBuffer());
   }
+}
+
+/** Re-type a failed blob call so callers can branch on the server's `code`. */
+function asBlobError(e: unknown): unknown {
+  if (e instanceof BlobTransportError) return e;
+  if (e instanceof ApiError) {
+    return new BlobTransportError(e.status, errorCodeOf(e.body), e.message, e.body);
+  }
+  return e;
 }
 
 function stripTrailingSlash(url: string): string {

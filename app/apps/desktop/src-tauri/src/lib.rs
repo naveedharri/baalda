@@ -223,6 +223,8 @@ pub fn run() {
             commands::file_stat,
             commands::write_binary_file,
             commands::list_attachments,
+            commands::upload_attachment,
+            commands::download_attachment,
             commands::vault_stats,
             commands::vault_checks,
             commands::empty_trash,

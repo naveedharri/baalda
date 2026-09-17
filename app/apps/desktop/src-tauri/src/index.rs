@@ -7,6 +7,7 @@
 //! forks a note's identity. On rename we update the path column by id, so
 //! inbound links (which store `dst_note_id`) never break.
 
+use crate::attachments::HashEntry;
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::extract::kind_for;
 use crate::notefile::sha256_hex;
@@ -406,8 +407,84 @@ impl Index {
             );
 
             CREATE INDEX IF NOT EXISTS idx_files_sha ON files(sha256);
+
+            -- sha256 cache for the vault-root `attachments/` store.
+            --
+            -- A separate table from `files` and not a bug: attachments are
+            -- deliberately OUTSIDE the file index (`vault::INDEX_ATTACHMENTS`
+            -- is false, because a search hit on `attachments/<16hex>.png`
+            -- names something the user cannot see or open), so there are no
+            -- `files` rows to hang these hashes off. What this feeds is the
+            -- attachment SYNC diff, which is by content hash: without it every
+            -- watcher-driven reconcile re-reads every byte under
+            -- `attachments/` to recompute hashes that did not change.
+            --
+            -- Fully derived from disk — safe to drop, and `rebuild()` does not
+            -- touch it either way. `mtime_ns` pairs with `size` as the validity
+            -- key (see `attachments.rs HashEntry`).
+            CREATE TABLE IF NOT EXISTS attachment_hashes (
+                path     TEXT PRIMARY KEY,
+                size     INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                sha256   TEXT NOT NULL
+            );
             "#,
         )?;
+        Ok(())
+    }
+
+    // ---- Attachment hash cache -------------------------------------------
+
+    /// Every cached attachment hash, keyed by vault-relative path.
+    ///
+    /// Read in one go rather than queried per file: the whole point is to avoid
+    /// per-file work, and the table has one row per attachment (hundreds, not
+    /// millions). The caller holds it for the duration of ONE walk and hands
+    /// back the map to persist, so the index lock is never held while a 500 MB
+    /// file is being hashed.
+    pub fn attachment_hash_cache(&self) -> AppResult<HashMap<String, HashEntry>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, size, mtime_ns, sha256 FROM attachment_hashes")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                HashEntry {
+                    size: r.get::<_, i64>(1)? as u64,
+                    mtime_ns: r.get::<_, i64>(2)?,
+                    sha256: r.get::<_, String>(3)?,
+                },
+            ))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (path, entry) = row?;
+            out.insert(path, entry);
+        }
+        Ok(out)
+    }
+
+    /// Replace the cache with exactly what the last walk saw.
+    ///
+    /// Replace, not merge: the walk's map IS the set of files that exist, so
+    /// wiping first is also how a deleted attachment's row is pruned — one
+    /// transaction, no separate sweep to forget.
+    pub fn save_attachment_hash_cache(
+        &self,
+        cache: &HashMap<String, HashEntry>,
+    ) -> AppResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM attachment_hashes", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO attachment_hashes (path, size, mtime_ns, sha256)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (path, e) in cache {
+                stmt.execute(params![path, e.size as i64, e.mtime_ns, e.sha256])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
