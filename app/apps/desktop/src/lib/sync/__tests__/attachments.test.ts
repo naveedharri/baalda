@@ -134,6 +134,27 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(Array.from(uploaded!.bytes)).toEqual(Array.from(upBytes));
   });
 
+  it("does not download a file whose delete is still in its grace window", async () => {
+    const bytes = new Uint8Array([4, 4, 4]);
+    const { deps, local } = makeDeps([], [{ id: "srv1", relPath: "Team/guide.pdf", bytes }]);
+    // The file was just deleted on disk, so the diff reads it as "server-only".
+    // The delete queue is what tells the mirror the difference (`binaryDeletes`).
+    deps.isDeletePending = (relPath) => relPath === "Team/guide.pdf";
+    deps.writeTreeLocal = async (relPath, b) => {
+      local.set(relPath, b);
+    };
+    const sync = new AttachmentSync(deps);
+
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(local.has("Team/guide.pdf")).toBe(false);
+
+    // Window closed without a delete (the file came back, the server refused):
+    // the mirror resumes exactly as before.
+    deps.isDeletePending = () => false;
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+    expect(local.has("Team/guide.pdf")).toBe(true);
+  });
+
   it("is a no-op when both sides already match", async () => {
     const bytes = new Uint8Array([5, 5, 5]);
     const { deps } = makeDeps(

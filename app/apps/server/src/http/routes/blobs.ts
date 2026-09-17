@@ -1567,6 +1567,28 @@ blobRoutes.delete("/blobs/:id", async (c) => {
 });
 
 /**
+ * Every blob that IS the tree file `docId`, gone.
+ *
+ * The file half of the delete above, exported because `DELETE /api/files/:id`
+ * owns the row and this file owns the bytes — a registry route reaching into
+ * `blobs` itself would be the second place that has to remember migration
+ * 027's disposal queue and 028's text cache.
+ *
+ * No `blob_refs` check here, unlike the route: a doc-backed blob is the FILE,
+ * and a note embed points at `attachments/…` (which never carries a `doc_id`),
+ * so there is nothing for a reference to protect. Deleting the file IS the
+ * decision. Answers how many rows went, for the caller's log line.
+ */
+export async function deleteDocBlobs(docId: string, vaultId: string): Promise<number> {
+  const { rows } = await pool.query<{ id: string }>(
+    "DELETE FROM blobs WHERE doc_id = $1 AND vault_id = $2 RETURNING id",
+    [docId, vaultId],
+  );
+  for (const row of rows) await purgeBlobText(row.id);
+  return rows.length;
+}
+
+/**
  * Drop the extracted-text cache for a blob.
  *
  * Migration 028's FK does this on its own (`blob_id REFERENCES blobs ON DELETE

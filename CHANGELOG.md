@@ -60,6 +60,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Fixed
+- **Deleting a synced file brought it back (desktop + server).** Binary identity
+  was the sha256 and nothing else, so a file removed from the vault — in the
+  sidebar or in Finder — was, to `diffAttachments`, content the server had and
+  this device did not: the next pass downloaded it again. Deletes now propagate.
+  New `DELETE /api/files/:id` (member + the `canWriteBlob` gate that let the
+  bytes be uploaded; idempotent 204) removes the `files` row AND the blobs whose
+  `doc_id` it is, so the file leaves `GET /vaults/:id/blobs`, the readable set
+  and the access tree at once — a hard delete, because `files` has no tombstone
+  and no client removes a local binary on the strength of a missing row. On the
+  desktop, `lib/sync/binaryDeletes.ts` mirrors the note queue's rails
+  (`drainDiskDeletes`, #93): a 2.5s window, the DISK — not the watcher event,
+  which is a bare `tree` for every binary — decides at the end of it, a rename
+  is paired by content and MOVES the `files` row (`POST /api/files` with the
+  same id) instead of forking its identity, the server must already hold the
+  bytes, and more than `max(5, ceil(binaries × 0.2))` vanishing at once abandons
+  the batch with a toast. An `attachments/` drop goes through
+  `DELETE /api/blobs/:id` unforced, so a 409 `blob_referenced` leaves an image
+  a note still embeds alone. `AttachmentSync` skips a download while a delete is
+  pending, which is what stops the 400ms pass resurrecting the file mid-window.
+  No trash copy, deliberately: a binary's bytes live only in the file that was
+  deleted, so the only copy left to keep is the one we were asked to remove.
 - **Packaged-build CSP.** `frame-src 'none'` blocked the PDF embed, the file preview
   and `HtmlView` in installed builds, there was no `media-src`, and Windows serves the
   asset protocol at `http://asset.localhost`, which `img-src` never allowed. Pinned by

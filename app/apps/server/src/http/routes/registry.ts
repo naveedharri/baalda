@@ -3,7 +3,8 @@ import { Hono } from "hono";
 import { config } from "../../config.js";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { canCreateIn, canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
+import { canCreateIn, canEditDoc, canEditFolder, canWriteBlob } from "../../permissions/http-gates.js";
+import { deleteDocBlobs } from "./blobs.js";
 import { effectivePermission } from "../../permissions/resolver.js";
 import {
   listDeletedReadableDocsInVault,
@@ -1077,6 +1078,61 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     );
     changed(c, vaultId);
     return c.json({ id, docId: id, vaultId, folderId: resolvedFolder, path: storedPath }, 201);
+  });
+
+  /**
+   * Delete a tree file — the row AND the bytes behind it.
+   *
+   * The binary counterpart of `DELETE /notes/:id`, and deliberately not its
+   * twin. A note is SOFT-deleted because its doc_id, its Yjs history and its
+   * tombstone all have work left to do: the tombstone is how a teammate's
+   * device tells a deletion from a revocation (`vault-docs.ts`). A file has
+   * none of that. It owns no CRDT, `files` has no `deleted_at` column (see
+   * migration 023's note), and no client removes a local binary on the strength
+   * of a missing server row — so a hard delete costs nobody their bytes and
+   * leaves nothing to reconcile. What it DOES do is make the file stop existing
+   * for every listing at once: the readable set, `listDocsInVault`, the folder
+   * tree, and — because the blobs go with it — `GET /vaults/:id/blobs`, which is
+   * the one the desktop's attachment diff reads. Without that last part a file
+   * deleted on one device came straight back down on the next pass, which is
+   * the bug this route exists for.
+   *
+   * Idempotent: an id with no row answers 204, not 404. The goal state is "this
+   * file is gone", a retried delete (an offline queue draining twice) has
+   * reached it, and there is no membership to check on a row that isn't there —
+   * so the answer is the same for an id that never existed, which tells a prober
+   * nothing.
+   */
+  registryRoutes.delete("/files/:id", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const id = c.req.param("id");
+    const { rows } = await pool.query<{ vault_id: string; path: string }>(
+      "SELECT vault_id, path FROM files WHERE id = $1",
+      [id],
+    );
+    const row = rows[0];
+    if (!row) return c.body(null, 204);
+    const org = await vaultOrg(row.vault_id);
+    if (!org || !(await orgRole(org, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    // The SAME gate that let these bytes be uploaded decides who may take them
+    // away (`canWriteBlob` → `canCreateIn` on the file's folder): a Read-only
+    // vault, a locked share or a sealed posture refuses both ends.
+    if (!(await canWriteBlob(session.userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
+      return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    }
+
+    // Bytes first, row second. The other order would leave blobs whose `doc_id`
+    // resolves to nothing if the process died between the two — and that is
+    // exactly the shape `canReadAttachment` falls back to the path heuristic
+    // for, i.e. bytes nobody can see and nothing will collect.
+    const blobs = await deleteDocBlobs(id, row.vault_id);
+    await pool.query("DELETE FROM files WHERE id = $1", [id]);
+    console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
+    changed(c, row.vault_id);
+    return c.body(null, 204);
   });
 
   return registryRoutes;

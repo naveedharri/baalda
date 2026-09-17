@@ -806,6 +806,25 @@ export class VaultRegistry {
     this.persist();
   }
 
+  /** Forget a tree binary whose file is gone (the delete queue drained it), so
+   *  a path re-used later registers afresh instead of adopting a dead id. */
+  forgetFileId(relPath: string): void {
+    if (this.stale()) return;
+    if (!this.fileByPath.delete(relPath)) return;
+    this.persist();
+  }
+
+  /** Move a registration with its file — a rename done outside the app, where
+   *  the server row moved rather than died (`binaryDeletes.applyRename`). */
+  moveFileId(from: string, to: string): void {
+    if (this.stale()) return;
+    const id = this.fileByPath.get(from);
+    if (!id) return;
+    this.fileByPath.delete(from);
+    this.fileByPath.set(to, id);
+    this.persist();
+  }
+
   /** Adopt a `files` map read from `.context/config.json`. */
   private adoptConfigFiles(files: Record<string, string>): void {
     for (const [rp, id] of Object.entries(files)) {
@@ -2643,6 +2662,11 @@ export class VaultRegistry {
 
   /**
    * Propagate a delete of a folder subtree or a note to the server.
+   *
+   * BINARIES are not its business: a tree file has no `notes` row and no folder
+   * row, so this is a no-op for one — deliberately, because the delete that
+   * matters for a binary is its blob's, and that runs off the watcher event the
+   * disk delete produces (`binaryDeletes.ts`). One path, not two.
    *
    * THROWS when the server refused (offline, 403): callers run server-first —
    * `deletePaths` only removes the local files once the server rows are gone —

@@ -919,8 +919,15 @@ export default function App() {
           // when the hidden store was the only home a binary had — a `.docx`
           // dropped into a folder fell through to the note path below, where an
           // unmapped file means "register it as a note" (`routesToAttachmentSync`).
+          //
+          // The PATH goes with it now: a binary that disappears is reported as
+          // a `tree` change like any other non-note file, and the blob mirror's
+          // diff reads a missing local file as "content the server has and we
+          // don't" — i.e. as a download. Deleting a synced PDF therefore
+          // brought it straight back. The sync layer's delete queue takes the
+          // path, waits out its grace window and asks the disk.
           if (routesToAttachmentSync(e.path)) {
-            syncManager.handleAttachmentChanged();
+            syncManager.handleAttachmentChanged(e.path);
             continue;
           }
           // Open-note reconciliation runs immediately (per event); the sidebar

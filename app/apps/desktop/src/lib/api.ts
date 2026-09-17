@@ -1720,6 +1720,37 @@ export class ApiClient {
     return data;
   }
 
+  /**
+   * Delete a tree file — the `files` row and the blob that IS its bytes.
+   *
+   * Not the note's soft delete: a file owns no CRDT and `files` has no
+   * tombstone, so the server removes it outright (`DELETE /api/files/:id`).
+   * That is what takes it out of `GET /vaults/:id/blobs`, and therefore what
+   * stops the next attachment pass downloading it straight back onto the disk
+   * it was just deleted from.
+   *
+   * Idempotent by design at the other end: an id with no row answers 204, so a
+   * queue draining twice is not an error.
+   */
+  async deleteFile(id: string): Promise<void> {
+    await this.request<unknown>("DELETE", `/api/files/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Delete one blob by id — the hidden `attachments/` store's half of the same
+   * job, where there is no `files` row to delete.
+   *
+   * `force` is deliberately NOT exposed as a default: without it the server
+   * answers 409 `blob_referenced` when a note still embeds those bytes, and
+   * that refusal is the point — an image a teammate's note shows must not
+   * vanish because one device tidied its `attachments/` folder.
+   */
+  async deleteBlob(id: string, opts: { force?: boolean } = {}): Promise<void> {
+    await this.request<unknown>("DELETE", `/api/blobs/${encodeURIComponent(id)}`, {
+      query: opts.force ? { force: "1" } : undefined,
+    });
+  }
+
   // ---- Versioning ---------------------------------------------------------
 
   /** A note's stored versions, newest first (no content). Needs `view`. */

@@ -1,0 +1,390 @@
+// Disk deletes for BINARIES — the blob mirror's half of `#93`.
+//
+// A note that vanishes from disk reaches the server through
+// `SyncManager.drainDiskDeletes`. A binary had no such path at all: attachment
+// identity is the sha256 and nothing else, so a file deleted here was simply
+// content the server had and this device did not — which is precisely the
+// shape of `toDownload`. Deleting a synced PDF in Finder (or from the sidebar)
+// therefore DOWNLOADED IT BACK on the next pass, forever. This queue is what
+// makes the delete mean what it says.
+//
+// It mirrors the note queue's rails one for one, because every one of them is a
+// way to destroy something that must not be destroyed:
+//
+//   · a {@link BINARY_DELETE_GRACE_MS} window before anything is believed, and
+//     the DISK — not the event — decides at the end of it. A file that is back
+//     by then was never deleted: an editor that saves by unlinking and
+//     rewriting, a `git checkout`, a rename-back. (The notes spell this rail as
+//     "a `modified` cancels a pending delete" because Rust tells them which is
+//     which; for a binary every event is a `tree` event, so the disk check IS
+//     the cancel.);
+//   · a RENAME is paired by content: a pending delete whose bytes turn up at an
+//     unmapped path in the same window is that file moving, so the `files` row
+//     (and with it the ACL every share on it) MOVES instead of dying and being
+//     re-created under a new identity;
+//   · the server must already hold the bytes. "Not pushed" is the note queue's
+//     refusal for the same reason — the only copy may be the local one — and
+//     here it is literal: no blob, nothing to delete, nothing to resurrect;
+//   · a blast-radius cap, because an unmounted volume looks exactly like a bulk
+//     delete and the honest response to "everything vanished at once" is to do
+//     nothing at all;
+//   · not live ⇒ startup, where a missing file means the disk isn't ready.
+//
+// The one rail deliberately NOT mirrored is the trash copy. A note's text
+// survives its file (the CRDT holds it), so `drainDiskDeletes` can keep a copy
+// before it tells the server. A binary's bytes exist only in the file that was
+// just deleted — the sole remaining copy is the server's, and downloading it
+// back in order to file it in `.context/trash/` would undo the delete we were
+// asked to make. So there is none, and the refusals above are what stand in for
+// it.
+
+/** How long a vanished binary waits before it is believed. Same window the
+ *  notes use (`docSession.DISK_DELETE_GRACE_MS`) — the events it filters are
+ *  the same events. */
+export const BINARY_DELETE_GRACE_MS = 2_500;
+
+/**
+ * How many binaries may disappear in one window before the whole batch is
+ * abandoned. Same shape as the notes' `diskDeleteCap`: a floor of 5 so tidying
+ * a handful of files still works, and a fifth of the vault past that.
+ */
+export function binaryDeleteCap(binaryCount: number): number {
+  return Math.max(5, Math.ceil(binaryCount * 0.2));
+}
+
+/** One local binary, as `ipc.listBinaries` reports it. */
+export interface LocalBinary {
+  relPath: string;
+  sha256: string;
+}
+
+/** One server blob, as `api.listVaultBlobs` reports it. */
+export interface RemoteBlob {
+  id: string;
+  sha256: string;
+  relPath: string | null;
+}
+
+/** Injected I/O, so the queue runs under vitest without Tauri or a server. */
+export interface BinaryDeleteDeps {
+  /** Is the vault this queue belongs to still the open one? */
+  isCurrent(): boolean;
+  /**
+   * Is the session live enough to believe a missing file? The same gate the
+   * note queue's `liveSince` is: at startup a file that isn't there yet means
+   * the disk (or the pull) hasn't caught up, not that anyone deleted it.
+   */
+  isLive(): boolean;
+  /** Is the file at this path on disk right now (`ipc.fileStat`)? */
+  exists(relPath: string): Promise<boolean>;
+  /** Every local binary — the rename hunt and the blast-radius cap read it. */
+  listLocal(): Promise<LocalBinary[]>;
+  /** Every blob the server holds for this vault. */
+  listServer(): Promise<RemoteBlob[]>;
+  /** The server `files` id this device registered for a path, if any. */
+  fileId(relPath: string): string | null;
+  /** Forget a registration whose file is gone. */
+  forgetFileId(relPath: string): void;
+  /** Move one to the path its bytes turned up at. */
+  moveFileId(from: string, to: string): void;
+  /** `DELETE /api/files/:id` — the row and its bytes. */
+  deleteFile(id: string): Promise<void>;
+  /** `DELETE /api/blobs/:id`, never forced: a 409 is an answer, not a failure. */
+  deleteBlob(id: string): Promise<void>;
+  /** Re-register the SAME files id at a new path; the server treats it as a
+   *  move (`POST /api/files`, the by-id branch). */
+  moveFile(input: { id: string; relPath: string }): Promise<void>;
+  /** Tell the user about the one thing they can act on: a refused bulk batch. */
+  notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
+  /**
+   * Something actually moved on the server (a delete, a rename). Wired to the
+   * mirror's debounced reconcile, which is also what re-publishes the sidebar's
+   * file dots: that map is rebuilt from the two listings on every pass, so a
+   * path that is gone from both loses its dot there rather than through a
+   * second, partial emission from here.
+   */
+  onServerChanged?: () => void;
+  setTimeoutImpl?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimeoutImpl?: (t: ReturnType<typeof setTimeout>) => void;
+}
+
+interface Pending {
+  relPath: string;
+  seenAt: number;
+}
+
+/** The HTTP status an api/transport error carries, when it carries one. */
+function errStatus(e: unknown): number | null {
+  if (!e || typeof e !== "object") return null;
+  const s = (e as { status?: unknown }).status;
+  return typeof s === "number" ? s : null;
+}
+
+/** Paths compare case-insensitively everywhere here, exactly as they do in the
+ *  registry and on the server (`lower(path)` unique indexes): a disk that says
+ *  `Team/Report.pdf` and a blob that says `team/report.pdf` are one file. */
+function key(relPath: string): string {
+  return relPath.toLowerCase();
+}
+
+export class BinaryDeleteQueue {
+  /** Every binary path this window has heard about, by lowercased path — the
+   *  same case-insensitive identity the registry and the server use. The drain
+   *  splits it into "gone" (a delete) and "still there" (a save, or the arrival
+   *  half of a rename). */
+  private readonly pending = new Map<string, Pending>();
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private draining = false;
+
+  constructor(
+    private readonly deps: BinaryDeleteDeps,
+    private readonly graceMs = BINARY_DELETE_GRACE_MS,
+  ) {}
+
+  private get setTimeoutImpl() {
+    return this.deps.setTimeoutImpl ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  }
+  private get clearTimeoutImpl() {
+    return this.deps.clearTimeoutImpl ?? ((t: ReturnType<typeof setTimeout>) => clearTimeout(t));
+  }
+
+  /**
+   * The watcher reported something about a binary at this path.
+   *
+   * ONE entry point for every kind, deliberately. Rust classifies every
+   * non-note file as `tree` whether it was written or removed
+   * (`watcher.rs plan_batch`), so "was it a delete?" is not a question the
+   * event can answer — only the disk can, and only once the grace window has
+   * run. So each touched path is recorded and the drain asks: gone ⇒ a delete,
+   * still there ⇒ it was a save (or the arrival half of a rename), and the
+   * "cancel" rail the notes spell out as a line of code is here the same disk
+   * check that finds it present.
+   */
+  noteChanged(relPath: string): void {
+    if (!this.deps.isCurrent()) return;
+    // Not live ⇒ startup: a file that isn't there yet is a disk (or a pull)
+    // catching up, not a deletion. Refused HERE rather than at drain time so
+    // the window never starts and the path stays downloadable meanwhile.
+    if (!this.deps.isLive()) return;
+    this.pending.set(key(relPath), { relPath, seenAt: Date.now() });
+    this.arm();
+  }
+
+  /**
+   * Is this path inside an open delete window?
+   *
+   * `AttachmentSync` asks before every download, and this is the reason a
+   * delete sticks. A deleted file is, to that diff, content the server has and
+   * we don't — so the debounced pass (400ms, well inside the 2.5s window) would
+   * put it straight back before the queue had even decided. Downloads only: an
+   * upload cannot resurrect a file that is no longer on disk to read.
+   */
+  isPending(relPath: string): boolean {
+    return this.pending.has(key(relPath));
+  }
+
+  private arm(): void {
+    if (this.timer) this.clearTimeoutImpl(this.timer);
+    this.timer = this.setTimeoutImpl(() => {
+      this.timer = null;
+      void this.drain().catch((e) => console.warn("[attachments] delete drain failed", e));
+    }, this.graceMs);
+  }
+
+  /**
+   * Propagate the deletes that survived their window.
+   *
+   * Public because the timer is not the only caller that matters: the tests
+   * drive it directly, and nothing about it assumes the timer fired.
+   */
+  async drain(): Promise<void> {
+    if (this.draining) return;
+    if (!this.deps.isCurrent()) return;
+    const batch = [...this.pending.values()];
+    if (batch.length === 0) return;
+    this.draining = true;
+    try {
+      if (!this.deps.isLive()) {
+        console.info(
+          `[attachments] ${batch.length} binaries vanished before this session was live — left on the server`,
+        );
+        return;
+      }
+
+      // 1. Ask the DISK, which is the only thing that knows. Gone ⇒ a delete;
+      //    still there ⇒ it was a save, a rewrite, a checkout — or the arrival
+      //    half of a rename, which step 2 pairs by content.
+      const gone: Pending[] = [];
+      const present: string[] = [];
+      for (const item of batch) {
+        let missing = false;
+        try {
+          missing = !(await this.deps.exists(item.relPath));
+        } catch {
+          missing = false; // couldn't ask ⇒ never assume a delete
+        }
+        if (!this.deps.isCurrent()) return;
+        if (missing) gone.push(item);
+        else present.push(item.relPath);
+      }
+      if (gone.length === 0) return;
+
+      let local: LocalBinary[];
+      let server: RemoteBlob[];
+      try {
+        [local, server] = await Promise.all([this.deps.listLocal(), this.deps.listServer()]);
+      } catch (e) {
+        // Offline, or an epoch-pinned read refused across a vault switch. The
+        // delete simply did not happen, which is the honest outcome and the same
+        // one a note gets when the server refuses its delete: the server still
+        // holds the bytes, so a later pass brings the file back and deleting it
+        // again (online this time) is what makes it stick.
+        console.warn("[attachments] delete drain: listing failed — leaving the server alone", e);
+        return;
+      }
+      if (!this.deps.isCurrent()) return;
+
+      const blobByPath = new Map<string, RemoteBlob>();
+      for (const b of server) if (b.relPath) blobByPath.set(key(b.relPath), b);
+      const localBySha = new Map<string, LocalBinary[]>();
+      for (const a of local) {
+        const list = localBySha.get(a.sha256);
+        if (list) list.push(a);
+        else localBySha.set(a.sha256, [a]);
+      }
+      const unpaired = new Set(present.map(key));
+
+      // 2. Renames, by content. A pending delete whose bytes are sitting at a
+      //    path that appeared in the same window is that file moving.
+      const deletes: Array<{ relPath: string; blob: RemoteBlob }> = [];
+      for (const item of gone) {
+        const blob = blobByPath.get(key(item.relPath));
+        if (!blob) {
+          // The server never held these bytes: nothing to delete, and nothing
+          // that could ever come back down. The note queue's `isPushed` refusal,
+          // stated in the only terms a binary has.
+          console.info(
+            `[attachments] ${item.relPath} was deleted on disk but the server holds no copy — nothing to propagate`,
+          );
+          this.deps.forgetFileId(item.relPath);
+          continue;
+        }
+        const renamedTo = this.matchRename(blob.sha256, localBySha, unpaired);
+        if (renamedTo) {
+          unpaired.delete(key(renamedTo));
+          await this.applyRename(item.relPath, renamedTo);
+          if (!this.deps.isCurrent()) return;
+          continue;
+        }
+        deletes.push({ relPath: item.relPath, blob });
+      }
+      if (deletes.length === 0) return;
+
+      // 3. Blast radius, against the vault as it stands: the survivors are gone
+      //    from `local` already, so they are added back to the count.
+      const cap = binaryDeleteCap(local.length + deletes.length);
+      if (deletes.length > cap) {
+        console.warn(
+          `[attachments] ${deletes.length} files disappeared from disk at once (cap ${cap}) — not removed from the server`,
+          deletes.slice(0, 10).map((d) => d.relPath),
+        );
+        this.deps.notify?.(
+          `${deletes.length} files disappeared from disk at once — they were NOT removed from the server. ` +
+            `If the folder was unmounted or checked out, reopening the vault restores them.`,
+          "error",
+        );
+        return;
+      }
+
+      // 4. Tell the server. A tree file goes through its `files` row, which
+      //    takes the blob with it; an `attachments/` drop (and a tree file this
+      //    device never registered) has only its blob to remove.
+      let changed = false;
+      for (const d of deletes) {
+        if (!this.deps.isCurrent()) return;
+        const id = this.deps.fileId(d.relPath);
+        try {
+          if (id) await this.deps.deleteFile(id);
+          else await this.deps.deleteBlob(d.blob.id);
+        } catch (e) {
+          if (errStatus(e) === 409) {
+            // `blob_referenced`: a note still embeds these bytes. The file is
+            // gone from THIS disk, but the server's copy is somebody's image —
+            // leave it, and let it come back down here on the next pass.
+            console.info(
+              `[attachments] ${d.relPath} is still embedded in a note — keeping the server copy`,
+            );
+            continue;
+          }
+          console.warn(`[attachments] couldn't remove ${d.relPath} from the server`, e);
+          continue;
+        }
+        this.deps.forgetFileId(d.relPath);
+        changed = true;
+        console.info(`[attachments] ${d.relPath} was deleted on this device — removed from the server`);
+      }
+      if (changed) this.deps.onServerChanged?.();
+    } finally {
+      this.draining = false;
+      // Whatever happened, this window is spent: everything in the batch has
+      // been decided, refused or reported. A path that vanished AGAIN while we
+      // were working has its own entry and its own window.
+      for (const item of batch) {
+        if (this.pending.get(key(item.relPath)) === item) this.pending.delete(key(item.relPath));
+      }
+    }
+  }
+
+  /** Which candidate path (if any) now holds exactly these bytes? */
+  private matchRename(
+    sha256: string,
+    localBySha: Map<string, LocalBinary[]>,
+    candidates: Set<string>,
+  ): string | null {
+    if (candidates.size === 0 || !sha256) return null;
+    for (const a of localBySha.get(sha256) ?? []) {
+      if (candidates.has(key(a.relPath))) return a.relPath;
+    }
+    return null;
+  }
+
+  /**
+   * A rename done outside the app: move the `files` row instead of deleting it.
+   *
+   * `POST /api/files` with the SAME id and the new path is the server's move
+   * (its by-id branch updates `path`/`folder_id`), so the doc_id — and every
+   * share hanging off it — survives being renamed in Finder. A path this device
+   * never registered has no row to move: its identity is the hash, which did not
+   * change, so the rename is already a no-op everywhere.
+   */
+  private async applyRename(from: string, to: string): Promise<void> {
+    const id = this.deps.fileId(from);
+    if (!id) {
+      console.info(`[attachments] ${from} → ${to} (renamed on disk; no files row to move)`);
+      return;
+    }
+    try {
+      await this.deps.moveFile({ id, relPath: to });
+    } catch (e) {
+      // The row stayed where it was. Nothing was deleted, which is the safe
+      // half — the next pass re-registers the new path (under a fresh id) and
+      // the stale row is the cost of a failed move, not of a lost file.
+      console.warn(`[attachments] couldn't move the files row ${from} → ${to}`, e);
+      return;
+    }
+    if (!this.deps.isCurrent()) return;
+    this.deps.moveFileId(from, to);
+    this.deps.onServerChanged?.();
+    console.info(`[attachments] ${from} → ${to} (renamed on disk; keeping file ${id})`);
+  }
+
+  /** Drop the armed window. MUST be called when the vault stops being current —
+   *  a live timer keeps this queue (and its captured vault) alive. */
+  stop(): void {
+    if (this.timer) {
+      this.clearTimeoutImpl(this.timer);
+      this.timer = null;
+    }
+    this.pending.clear();
+  }
+}

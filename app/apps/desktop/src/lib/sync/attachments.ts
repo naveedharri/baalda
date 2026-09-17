@@ -20,11 +20,18 @@
 //     stays exactly as strict as it was for server-supplied paths.
 //
 // Identity is still sha256 in both directions, which is Stage A's known
-// limit: RENAMING a tree binary does not propagate (the bytes are unchanged, so
-// the diff sees nothing to do and another device keeps the old name), and two
-// paths holding identical bytes collapse to one blob. Stage B replaces the
-// diff with a path-keyed one over `files.id`; the rename no-op is pinned by a
-// test so that change is a visible one.
+// limit: RENAMING a tree binary does not propagate ACROSS DEVICES (the bytes
+// are unchanged, so the diff sees nothing to do and another device keeps the
+// old name), and two paths holding identical bytes collapse to one blob. Stage
+// B replaces the diff with a path-keyed one over `files.id`; the rename no-op
+// is pinned by a test so that change is a visible one.
+//
+// What the hash-keyed diff CANNOT do at all is notice a deletion — a file that
+// left this disk is, to it, content the server has and we don't, i.e. a
+// download. That half is not the diff's to fix and lives in `binaryDeletes.ts`:
+// it watches the disk, propagates the delete (and the local half of a rename,
+// which moves the `files` row) and tells this mirror not to download a path
+// whose window is still open (`deps.isDeletePending`).
 //
 // The diff is pure and unit-tested in isolation; the `AttachmentSync` class
 // wires it to injected I/O (ApiClient + Tauri ipc) and debounces watcher-driven
@@ -317,6 +324,17 @@ export interface AttachmentSyncDeps {
   /** Claim the watcher echo for a path THIS device just wrote, exactly as the
    *  registry does for a materialized note (`registry.markMaterialized`). */
   markMaterialized?: (relPath: string) => void;
+  /**
+   * Is this path waiting out the delete queue's grace window
+   * (`binaryDeletes.ts`)?
+   *
+   * Asked before every download, and the reason a delete sticks. A deleted file
+   * is, to this diff, content the server has and we don't — so the debounced
+   * pass (400ms, well inside the 2.5s window) would put it straight back before
+   * the queue had even decided. Downloads only: an upload cannot resurrect a
+   * file that is no longer on disk to read.
+   */
+  isDeletePending?: (relPath: string) => boolean;
   /** List the server's blobs for this vault. */
   listServer: () => Promise<ServerBlob[]>;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
@@ -638,6 +656,11 @@ export class AttachmentSync {
     }
     for (const b of toDownload) {
       if (!this.current()) break;
+      // A file this device just deleted is not a file it is missing.
+      if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
+        console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
+        continue;
+      }
       try {
         await this.downloadOne(b);
         downloaded++;
