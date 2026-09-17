@@ -1096,7 +1096,7 @@ body:has(.sidebar-resizer.dragging) {
 }
 /* react-arborist otherwise widens its scroll area to the longest row so long
    names scroll horizontally. Clip that and pin the inner list + rows to the
-   visible width so each row's `.tree-label` truncates with an ellipsis instead
+   visible width so each row's `.tree-label` fades out at its right edge instead
    of forcing a horizontal scrollbar. */
 .filetree-scroll {
   overflow-x: hidden !important;
@@ -1112,6 +1112,12 @@ body:has(.sidebar-resizer.dragging) {
 }
 .tree-rowwrap {
   width: 100% !important;
+  /* Arborist also sets `min-width: max-content` inline on every row wrapper
+     (its #10: keep a row's highlight spanning a horizontally scrolled list).
+     We never scroll sideways, so here it only let a long name widen the row
+     past the sidebar — the label never truncated, and the row's sync dot and
+     presence faces slid out of their column (or off-screen). Pin it. */
+  min-width: 0 !important;
 }
 /* OS files dragged over the tree: a dashed accent frame + soft wash invite the
    drop. Purely a hint — the actual routing happens on the Tauri drop event.
@@ -1571,12 +1577,18 @@ body:has(.sidebar-resizer.dragging) {
   fill-opacity: 0.85;
 }
 
+/* The label takes whatever width the badges leave, so its right edge always
+   sits just before the sync dot / presence column. A name that reaches that
+   edge fades out over the last 24px instead of ending in an ellipsis — the
+   badges stay in their column and the name reappears as the sidebar widens.
+   Short names never touch the fade region, so they are unaffected. */
 .tree-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
   transition: transform var(--t-fast) var(--ease);
 }
 .tree-row:hover .tree-label {

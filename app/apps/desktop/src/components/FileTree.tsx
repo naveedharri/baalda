@@ -2261,7 +2261,9 @@ function peersForNode(
  * Sized and positioned like `.tree-lock` (its neighbour) and built from the same
  * `.sync-dot` element and semantic tone tokens the vault-level `.sync-badge`
  * uses, so "synced" looks the same everywhere in the app. One span, no layout
- * shift while settled, nothing at all when there is nothing to say.
+ * shift while settled. A row with nothing to say (a PDF or other file that is
+ * not a note) still gets the empty slot, so every label ends at the same edge
+ * and its overflow fade lands before the dot column — not on top of it.
  */
 function TreeSyncMark({
   node,
@@ -2271,7 +2273,7 @@ function TreeSyncMark({
   index: TreeSyncIndex;
 }) {
   const mark = rowSyncMark(node.data, index);
-  if (!mark) return null;
+  if (!mark) return <span className="tree-sync" aria-hidden="true" />;
   return (
     <span
       className={`tree-sync ${mark.state}`}
