@@ -324,6 +324,69 @@ describe("ApiClient against a mocked fetch", () => {
 });
 
 /**
+ * The two calls a tree binary adds (PR3 Stage A). Both are wire contracts with
+ * the server half, so the bodies are asserted literally rather than by shape.
+ */
+describe("ApiClient tree-binary routes", () => {
+  it("registers a `files` row at /api/files with the local id as `docId`", async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 201,
+      json: { id: "local-1", docId: "local-1", vaultId: "v1", folderId: "f1", path: "Team/report.docx" },
+    }));
+    const api = new ApiClient({ baseUrl: "https://api.test", token: "t", fetchImpl: impl });
+
+    const row = await api.registerFile({ vaultId: "v1", id: "local-1", path: "Team/report.docx" });
+
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("https://api.test/api/files");
+    // No `folderId`: the server resolves the parent FROM the path, which is
+    // what keeps `rel_path` and `folder_id` in agreement.
+    expect(calls[0].body).toEqual({ vaultId: "v1", path: "Team/report.docx", docId: "local-1" });
+    expect(row.docId).toBe("local-1");
+  });
+
+  it("PUTs extracted text, and stops offering it after a 404", async () => {
+    let status = 204;
+    const { impl, calls } = fakeFetch(() => ({ status, json: {} }));
+    const api = new ApiClient({ baseUrl: "https://api.test", token: "t", fetchImpl: impl });
+
+    await api.uploadBlobText("v1", "blob-1", {
+      chars: 5,
+      content: "hello",
+      source: "client",
+      docId: "local-1",
+      sha256: "abc",
+    });
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toBe("https://api.test/api/vaults/v1/blobs/blob-1/text");
+    expect(calls[0].body).toEqual({
+      chars: 5,
+      content: "hello",
+      source: "client",
+      docId: "local-1",
+      sha256: "abc",
+    });
+    expect(api.supportsBlobText()).toBe(true);
+
+    status = 404;
+    await expect(
+      api.uploadBlobText("v1", "blob-2", { chars: 1, content: "x", source: "client", sha256: "d" }),
+    ).rejects.toThrow();
+    expect(api.supportsBlobText()).toBe(false);
+    // Known-negative now: the next call answers locally, with no round trip.
+    const before = calls.length;
+    await expect(
+      api.uploadBlobText("v1", "blob-3", { chars: 1, content: "x", source: "client", sha256: "e" }),
+    ).rejects.toThrow();
+    expect(calls.length).toBe(before);
+
+    // Capabilities belong to ONE server: pointing at another re-asks.
+    api.setBaseUrl("https://other.test");
+    expect(api.supportsBlobText()).toBeNull();
+  });
+});
+
+/**
  * `health()` — the one probe in api.ts that must NOT fail closed (#91).
  *
  * The onboarding step validates a server URL before adopting it, and adopting

@@ -203,6 +203,23 @@ export interface RegisteredFolder {
   color?: string | null;
 }
 
+/**
+ * A `files` row — the server's generic "this vault path is a doc" record, the
+ * binary twin of {@link RegisteredNote}.
+ *
+ * It exists so a tree binary has a doc_id the ACL can resolve: `shares`,
+ * `effectivePermission` and `listReadableDocsInVault` all already walk these
+ * rows, so registering one is what makes a `.docx` in a shared folder obey the
+ * folder's grant instead of the blob store's path heuristic.
+ */
+export interface RegisteredFile {
+  id: string;
+  docId?: string;
+  vaultId?: string;
+  folderId?: string | null;
+  path: string;
+}
+
 export interface Share {
   id: string;
   // `vault` appears on exactly one row: the whole-vault Read-only posture that
@@ -723,6 +740,10 @@ export class ApiClient {
   private blobIntentSupported: boolean | null = null;
   /** Same tri-state for `GET /api/blobs/:id/url` (presigned download). */
   private blobUrlSupported: boolean | null = null;
+  /** Same tri-state for `PUT /api/vaults/:id/blobs/:id/text` (extracted text).
+   *  A 404 here means the server predates the route OR has forgotten the blob;
+   *  either way there is nothing to retry, so the whole session stops asking. */
+  private blobTextSupported: boolean | null = null;
 
   constructor(opts: ApiClientOptions = {}) {
     this.baseUrl = stripTrailingSlash(opts.baseUrl ?? DEFAULT_SERVER_URL);
@@ -754,6 +775,7 @@ export class ApiClient {
       // Capabilities are per server (see `blobIntentSupported`).
       this.blobIntentSupported = null;
       this.blobUrlSupported = null;
+      this.blobTextSupported = null;
     }
     this.baseUrl = next;
   }
@@ -1663,6 +1685,32 @@ export class ApiClient {
     await this.request<unknown>("DELETE", `/api/notes/${encodeURIComponent(id)}`);
   }
 
+  /**
+   * Register a tree binary as a `files` row, so its blob has a doc_id the
+   * permission resolver understands.
+   *
+   * `id` is the LOCAL `files.id` (a uuid the SQLite index keeps stable per path
+   * across rebuilds), supplied the way `createNote` supplies a note's docId, so
+   * this device's index and the server name the same identity. `folderId` is
+   * deliberately not sent: the server resolves the parent from the path
+   * (`resolveParentFolder`), which is the rule that keeps `rel_path` and
+   * `folder_id` in agreement — a mismatch comes back as 400
+   * `path_folder_mismatch`.
+   */
+  async registerFile(input: {
+    vaultId: string;
+    id: string;
+    path: string;
+  }): Promise<RegisteredFile> {
+    // `/api/files`, not `/api/registry/files`: the registry router is mounted at
+    // `/api` (see the server's `http/app.ts`), exactly like `/api/notes` and
+    // `/api/folders` beside it.
+    const { data } = await this.request<RegisteredFile>("POST", "/api/files", {
+      body: { vaultId: input.vaultId, path: input.path, docId: input.id },
+    });
+    return data;
+  }
+
   // ---- Versioning ---------------------------------------------------------
 
   /** A note's stored versions, newest first (no content). Needs `view`. */
@@ -1930,11 +1978,17 @@ export class ApiClient {
     bytes: Uint8Array;
     mime?: string;
     fileName?: string;
+    /** The `files` row this blob's bytes belong to (tree binaries only) —
+     *  stored as `blobs.doc_id` so the ACL resolves the file, not its path. */
+    docId?: string | null;
   }): Promise<BlobMeta> {
     const headers = this.baseHeaders();
     headers["Content-Type"] = input.mime ?? "application/octet-stream";
     headers["x-rel-path"] = input.relPath;
     if (input.fileName) headers["x-file-name"] = input.fileName;
+    // A header rather than a body field, because the body IS the file here. An
+    // older server ignores it and falls back to the path heuristic.
+    if (input.docId) headers["x-doc-id"] = input.docId;
 
     // Copy into a fresh ArrayBuffer so the fetch body is a clean BodyInit.
     const buf = input.bytes.slice().buffer;
@@ -1986,6 +2040,9 @@ export class ApiClient {
       mime: string;
       relPath: string;
       filename?: string | null;
+      /** The `files` row these bytes belong to — see {@link registerFile}. The
+       *  server stores it as `blobs.doc_id`; an older one ignores it. */
+      docId?: string | null;
     },
   ): Promise<BlobIntent> {
     if (this.blobIntentSupported === false) {
@@ -2052,6 +2109,55 @@ export class ApiClient {
       return data;
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) this.blobUrlSupported = false;
+      throw asBlobError(e);
+    }
+  }
+
+  /** Whether this server is known to accept extracted text (null = unasked). */
+  supportsBlobText(): boolean | null {
+    return this.blobTextSupported;
+  }
+
+  /**
+   * Hand the server the plain text Rust already extracted from a blob, so the
+   * team's search can find a `.docx` by what is inside it.
+   *
+   * Ranking fuel and snippets only — never served as content, never an
+   * authorization input, and re-derivable from the bytes, which is what makes a
+   * CLIENT-supplied extraction acceptable: a member who can upload the file can
+   * already write any words they like into a note. The server caps the body at
+   * 1 MB (413) and answers 409 when the blob's own sha does not match the one
+   * this text describes, so a racing re-upload cannot attach stale words to new
+   * bytes.
+   *
+   * 404 disables it for the whole session (remembered per server URL like
+   * {@link createBlobIntent}'s probe): it means either a server that predates
+   * the route or a blob it has forgotten, and neither is worth a retry per
+   * file.
+   */
+  async uploadBlobText(
+    vaultId: string,
+    blobId: string,
+    body: {
+      chars: number;
+      content: string;
+      source: "client";
+      docId?: string | null;
+      sha256: string;
+    },
+  ): Promise<void> {
+    if (this.blobTextSupported === false) {
+      throw new BlobTransportError(404, "not_found", "server has no blob text route");
+    }
+    try {
+      await this.request<unknown>(
+        "PUT",
+        `/api/vaults/${encodeURIComponent(vaultId)}/blobs/${encodeURIComponent(blobId)}/text`,
+        { body },
+      );
+      this.blobTextSupported = true;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) this.blobTextSupported = false;
       throw asBlobError(e);
     }
   }

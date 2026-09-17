@@ -8,6 +8,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Tree binaries sync (desktop, Stage A).** `list_binaries` walks the whole vault for
+  registry binary formats (not only `attachments/`), sharing the `attachment_hashes`
+  cache; each tree binary is registered as a server `files` row via `POST /api/files`
+  with the local `files.id` (persisted under `files` in `.context/config.json`) and
+  uploaded with `docId` so the server's resolver ACL applies. Downloads of tree paths go
+  through `write_tree_binary` (its own guard; `ensure_attachment_rel` untouched for
+  server-supplied `attachments/` paths) and are remembered for one watcher echo. Any
+  `syncAs: attachment` change now routes to attachment sync instead of the note path.
+  Extracted text is pushed to `PUT /api/vaults/:id/blobs/:blobId/text` after
+  `files-indexed`. Rename of a tree binary still does not propagate (pinned test; Stage B).
 - **Attachment transport (desktop).** `AttachmentSync.pass` uses the server's
   `intent → PUT → complete` flow when offered (404 ⇒ legacy POST, remembered per server
   URL): a dedupe hit sends zero bytes, 402 aborts the pass with one toast, 413/415 skip

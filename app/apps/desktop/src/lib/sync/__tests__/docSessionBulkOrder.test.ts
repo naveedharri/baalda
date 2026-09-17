@@ -706,6 +706,36 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     vi.useRealTimers();
   });
 
+  it("never lets a binary reach the note path — no pull, no push, no `notes` row", async () => {
+    // A `.docx` dropped into a folder is the blob mirror's, and everything in
+    // this method reads an unmapped file as a note nobody has registered yet.
+    // `App.tsx` short-circuits it; this is the same rule where the damage would
+    // be done (`routesToAttachmentSync`).
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    await enable(sm);
+    fakeRegistry.pull.mockClear();
+
+    sm.handleLocalFilesChanged([
+      { path: "Team/report.docx", kind: "tree" },
+      { path: "Media/clip.mp4", kind: "modified" },
+      { path: "attachments/abc.png", kind: "tree" },
+      { path: "Team/gone.xlsx", kind: "removed" },
+    ]);
+    expect(sm.hasPendingRegistryPull()).toBe(false);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fakeRegistry.pull).not.toHaveBeenCalled();
+    expect(connects.order).toEqual([]);
+
+    // A note in the same batch still routes normally.
+    sm.handleLocalFilesChanged([
+      { path: "Team/report.docx", kind: "tree" },
+      { path: "Team/Plan.md", kind: "modified" },
+    ]);
+    expect(sm.hasPendingRegistryPull()).toBe(true);
+    vi.useRealTimers();
+  });
+
   it("the single-event form still routes exactly like one batch of one", async () => {
     vi.useFakeTimers();
     const sm = new SyncManager();
