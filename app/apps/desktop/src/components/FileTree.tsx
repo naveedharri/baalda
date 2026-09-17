@@ -34,7 +34,6 @@ import {
 import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
-import { previewKind } from "../lib/preview";
 import { ancestorPaths } from "../lib/accessTree";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { displayName } from "../lib/notePath";
@@ -46,6 +45,8 @@ import {
   type TreeSyncIndex,
 } from "../lib/syncRollup";
 import { embedDroppedFile } from "../lib/attachments";
+import { isNoteExt, isOpenable } from "../lib/formats";
+import { iconKeyForPath, type TreeIconKey } from "../lib/treeIcons";
 import { toast } from "../lib/toast";
 import { deletePaths } from "../lib/vault/mutatePaths";
 import { AsyncButton } from "./AsyncButton";
@@ -105,11 +106,6 @@ function parentDir(path: string): string {
 
 function basename(path: string): string {
   return path.split("/").pop() ?? path;
-}
-
-/** Files the in-app editor can render: markdown notes and HTML pages. */
-function isOpenablePath(path: string): boolean {
-  return /\.(md|html?)$/i.test(path);
 }
 
 /** Resolve a client (CSS px) point to the vault-relative dir under it, using the
@@ -627,7 +623,7 @@ export function FileTree() {
   }
 
   /**
-   * After an import, register the new markdown notes on the server under their
+   * After an import, register the new notes on the server under their
    * LOCAL index doc_ids (via the same id the editor's bridge uses), so sync
    * doesn't fork a second identity for them. Without this an imported note lives
    * only on disk until the seed race, which the background feed could lose.
@@ -639,7 +635,10 @@ export function FileTree() {
     const under = (p: string) =>
       roots.some((r) => p === r || p.startsWith(`${r}/`));
     for (const t of useStore.getState().titles) {
-      if (!t.path.toLowerCase().endsWith(".md") || !under(t.path)) continue;
+      // The whole CRDT note family (`formats.ts NOTE_EXTS`), not just `.md`:
+      // `flattenTree` registers all seven, so an imported `.txt` left out here
+      // would wait for the seed race to give it a server identity.
+      if (!isNoteExt(t.path) || !under(t.path)) continue;
       try {
         await syncManager.registry.registerNote(t.path, t.title, t.id);
       } catch (e) {
@@ -735,14 +734,26 @@ export function FileTree() {
           // live) → attach the files INTO that note's content rather than
           // importing them as sidebar entries.
           if (!pt && activeNoteEditable()) {
-            try {
-              const embeds: string[] = [];
-              for (const path of p.paths)
+            // Per file, not per drop: one refusal (an oversize video — see
+            // `attachments.ts saveAttachment`, which raises its own toast) must
+            // not throw away the four files dropped alongside it.
+            const embeds: string[] = [];
+            let failed = 0;
+            for (const path of p.paths) {
+              try {
                 embeds.push(await embedDroppedFile(path));
+              } catch (e) {
+                failed++;
+                console.error("attach (drop) failed", path, e);
+              }
+            }
+            if (embeds.length > 0) {
               insertIntoActiveNote(embeds.join("\n"));
               await refreshAll();
-            } catch (e) {
-              console.error("attach (drop) failed", e);
+            }
+            // The size gate speaks for itself; only say something when the
+            // failure had no voice of its own.
+            if (failed > 0 && embeds.length === 0) {
               flashStatus("Couldn't attach file", "error");
             }
             return;
@@ -760,11 +771,11 @@ export function FileTree() {
             await refreshAll();
             await registerImported(summary);
             announceImport(summary);
-            // A single image/PDF dropped on the empty main area → preview it.
+            // A single openable file dropped on the empty main area → open it.
             if (
               !pt &&
               summary.imported.length === 1 &&
-              previewKind(summary.imported[0]) != null
+              isOpenable(summary.imported[0])
             ) {
               await useStore.getState().openNoteByPath(summary.imported[0]);
             }
@@ -894,12 +905,11 @@ export function FileTree() {
       return;
     }
     if (!node.data.isDir) {
-      // Notes/pages render in the editor; images/PDFs open in the file preview.
-      // Any other binary is listed but not opened (nothing can render it).
-      if (
-        isOpenablePath(node.data.path) ||
-        previewKind(node.data.path) != null
-      ) {
+      // One gate, the registry's: notes/pages render in the editor, everything
+      // else opens the viewer its format names — at worst the file card. A type
+      // the sidebar surfaces but nothing opened used to be a DEAD CLICK, which
+      // is exactly how `.txt`, `.markdown`, `.mdx` and `.canvas` behaved.
+      if (isOpenable(node.data.path)) {
         void useStore.getState().openNoteByPath(node.data.path);
       }
     }
@@ -2105,6 +2115,80 @@ const ICON_HTML = (
     <path d="m10 12-2 2.5 2 2.5M14 12l2 2.5-2 2.5" />
   </TreeSvg>
 );
+/* One glyph per format family (see `lib/treeIcons.ts` for the mapping). A
+   vault that holds videos, spreadsheets and archives alongside notes is
+   unreadable when every row is the same page icon — the glyph is how you find
+   the PDF in a folder of thirty files without reading thirty names. */
+const ICON_IMAGE = (
+  <TreeSvg>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <circle cx="9" cy="9" r="1.6" />
+    <path d="m21 15-4.5-4.5L7 20" />
+  </TreeSvg>
+);
+const ICON_PDF = (
+  <TreeSvg>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M15 2v5h5" />
+    <path d="M8.5 17v-4h1.3a1.3 1.3 0 0 1 0 2.6H8.5M13.5 17v-4h1.2a1.4 1.4 0 0 1 1.4 1.4v1.2a1.4 1.4 0 0 1-1.4 1.4Z" />
+  </TreeSvg>
+);
+const ICON_SHEET = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M3 9h18M3 14.5h18M9 4v16M15 4v16" />
+  </TreeSvg>
+);
+const ICON_DOC = (
+  <TreeSvg>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M15 2v5h5" />
+    <path d="M8 12h8M8 15.5h8M8 19h5" />
+  </TreeSvg>
+);
+const ICON_SLIDES = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M12 16v4M8.5 20h7" />
+  </TreeSvg>
+);
+const ICON_MEDIA = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="m10.5 9 4.5 3-4.5 3Z" />
+  </TreeSvg>
+);
+const ICON_ARCHIVE = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M3 9h18" />
+    <path d="M11 4v5M13 9v3M11 12v2.5h2V12" />
+  </TreeSvg>
+);
+const ICON_CODE = (
+  <TreeSvg>
+    <path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" />
+  </TreeSvg>
+);
+
+/** `TreeIconKey` → the glyph. The mapping FROM a path lives in `treeIcons.ts`. */
+const TREE_ICONS: Record<TreeIconKey, React.ReactNode> = {
+  file: ICON_FILE,
+  html: ICON_HTML,
+  image: ICON_IMAGE,
+  pdf: ICON_PDF,
+  sheet: ICON_SHEET,
+  doc: ICON_DOC,
+  slides: ICON_SLIDES,
+  media: ICON_MEDIA,
+  archive: ICON_ARCHIVE,
+  code: ICON_CODE,
+};
+
+/** The glyph for a file row. */
+function iconForPath(path: string): React.ReactNode {
+  return TREE_ICONS[iconKeyForPath(path)];
+}
 
 /** Is `path` (file or folder) in the store's tree yet? `nodeAt` only walks
  *  folders, so look the parent up and then check its listing for the entry. */
@@ -2113,10 +2197,6 @@ function treeHasPath(root: TreeNode | null, path: string): boolean {
   const slash = path.lastIndexOf("/");
   const dir = slash === -1 ? root : nodeAt(root, path.slice(0, slash));
   return dir?.children?.some((c) => c.path === path) ?? false;
-}
-
-function isHtmlPath(path: string): boolean {
-  return /\.html?$/i.test(path);
 }
 
 const ICON_LOCK = (
@@ -2390,10 +2470,8 @@ function Node({
           ) : (
             ICON_FOLDER
           )
-        ) : isHtmlPath(node.data.path) ? (
-          ICON_HTML
         ) : (
-          ICON_FILE
+          iconForPath(node.data.path)
         )}
       </span>
       {node.isEditing ? (

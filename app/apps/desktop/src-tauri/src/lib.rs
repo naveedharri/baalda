@@ -217,6 +217,7 @@ pub fn run() {
             commands::prune_yjs_docs,
             commands::clear_yjs_doc,
             commands::read_binary_file,
+            commands::file_stat,
             commands::write_binary_file,
             commands::list_attachments,
             commands::vault_stats,

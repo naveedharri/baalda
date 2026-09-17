@@ -23,9 +23,8 @@ import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../l
 import type { ActivityStatus } from "../lib/prefs";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
-import { HtmlView } from "./HtmlView";
 import { FilePreview } from "./FilePreview";
-import { previewKind } from "../lib/preview";
+import { viewerFor } from "../lib/formats";
 import { relativeAgo } from "./Identity";
 import { EditorEmpty, EditorSkeleton } from "./EditorPlaceholders";
 import { characterSvg } from "./Avatar";
@@ -391,9 +390,10 @@ export function Editor() {
   const awarenessRef = useRef<Awareness | null>(null);
   // Pings already played, keyed by sender clientId + timestamp.
   const seenPingsRef = useRef<Set<string>>(new Set());
-  const isHtml = notePath != null && /\.html?$/i.test(notePath);
-  // Images/PDFs aren't notes: no CRDT doc, no sync — just a streamed preview.
-  const preview = notePath != null ? previewKind(notePath) : null;
+  // The registry decides what opens this path. `editor` is the CRDT note
+  // family (md/markdown/mdx/txt); everything else — an HTML page, an image, a
+  // PDF, a spreadsheet, an unknown type — is `FilePreview`'s business.
+  const isNoteEditor = notePath != null && viewerFor(notePath) === "editor";
 
   // The roster opens on hover/focus of the presence stack (below); these keep it
   // honest for the pointer/keyboard paths too — a press outside closes it, as
@@ -454,8 +454,9 @@ export function Editor() {
   const itemLock = lockScope === "vault" ? null : lockScope;
 
   useEffect(() => {
-    if (!hostRef.current || notePath == null || /\.html?$/i.test(notePath)) return;
-    if (previewKind(notePath) != null) return; // image/PDF preview, not a CRDT note
+    // Same test as the render branch below: only the `editor` family has a
+    // CRDT doc behind it, so nothing else opens a bridge or a provider.
+    if (!hostRef.current || notePath == null || viewerFor(notePath) !== "editor") return;
     const docId = useStore.getState().openNote?.id ?? null;
     if (docId == null) return; // wait until the note's doc_id (meta) is known
     const myUserId = useStore.getState().session?.user.id ?? null;
@@ -789,13 +790,9 @@ export function Editor() {
     return <EditorEmpty />;
   }
 
-  // HTML pages render live in a sandboxed frame instead of the CRDT editor.
-  if (isHtml) {
-    return <HtmlView path={notePath} />;
-  }
-
-  // Images and PDFs stream from disk into a lightweight viewer.
-  if (preview) {
+  // Everything that is not a CRDT note — an HTML page, an image, a PDF, a
+  // CSV, a docx, an unknown type — routes through the viewer registry.
+  if (!isNoteEditor) {
     return <FilePreview path={notePath} />;
   }
 
