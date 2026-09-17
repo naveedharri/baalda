@@ -112,7 +112,15 @@ export function HealthStats({
       icon: "database",
       label: "Index",
       value: formatBytes(stats.index.bytes),
-      sub: `${stats.notes.count.toLocaleString()} notes indexed`,
+      // Files are named alongside notes because they are why this number can
+      // jump: dropping a folder of documents adds their extracted text to the
+      // index, and "the index grew 40 MB" deserves an answer on the same tile.
+      sub:
+        stats.index.files > 0
+          ? `${stats.notes.count.toLocaleString()} notes · ${stats.index.files.toLocaleString()} files · ${formatBytes(
+              stats.index.extractedTextBytes,
+            )} extracted text`
+          : `${stats.notes.count.toLocaleString()} notes indexed`,
     },
     {
       icon: "history",

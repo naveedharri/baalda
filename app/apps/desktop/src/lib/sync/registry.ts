@@ -269,7 +269,12 @@ export interface RegistryFailure {
 const frozenRootNotified = new Set<string>();
 
 /** Extensions treated as editable notes (reconciled to the server `notes` set).
- *  Images/PDFs surface in the tree but sync as embedded attachments, not notes. */
+ *  Images/PDFs surface in the tree but sync as embedded attachments, not notes.
+ *
+ *  Deliberately a LITERAL, not an import of `lib/formats.ts NOTE_EXTS`: this
+ *  list and the ones in `inbound.ts` and Rust `vault.rs` are what
+ *  `__tests__/formatsLockstep.test.ts` compares against the registry, and a
+ *  list that imports its own answer cannot drift — nor can it detect drift. */
 const NOTE_EXTS = ["md", "markdown", "mdx", "txt", "html", "htm", "canvas"];
 function isNoteFile(path: string): boolean {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
@@ -1107,8 +1112,10 @@ export class VaultRegistry {
       }
     }
     // Only notes that are BOTH in the tree and in the index have a docId we can
-    // match on. (The index covers `.md`; a `.txt`/`.canvas` note therefore never
-    // gets inbound-renamed or trashed, only materialized — the safe direction.)
+    // match on. The index now covers the WHOLE note family (`index.rs` asks
+    // `vault::is_note_file`), so a `.txt`/`.canvas` note is inbound-renameable
+    // like any other; before that it could only ever be materialized, never
+    // renamed or trashed — the safe direction, but a half-synced one.
     //
     // Asked for only when some on-disk note is NOT claimed above: on a
     // steady-state relaunch the registry's own map covers every one of them, so

@@ -20,6 +20,33 @@ pub struct AttachmentMeta {
     pub sha256: String,
 }
 
+/// Size + mtime of one vault file, for the file card's header. Deliberately
+/// cheap: the card wants "4.2 MB, yesterday", and reading 25 MB of video
+/// through the IPC bridge to learn that would be absurd.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    pub size: u64,
+    /// Milliseconds since the Unix epoch, or `None` when the OS won't say.
+    pub modified: Option<i64>,
+}
+
+/// Stat a vault-relative file. Read-scoped like `read_binary_file` (the whole
+/// vault, not just `attachments/`) — the card opens for tree files too.
+pub fn file_stat(vault: &Path, rel: &str) -> AppResult<FileStat> {
+    let abs = resolve_in_vault(vault, rel)?;
+    let meta = std::fs::metadata(&abs)?;
+    if !meta.is_file() {
+        return Err(AppError::new("not a file"));
+    }
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+    Ok(FileStat { size: meta.len(), modified })
+}
+
 /// Hex SHA-256 over raw bytes.
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -32,7 +59,15 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     s
 }
 
-/// Read a binary file at a vault-relative path.
+/// Read a binary file at ANY vault-relative path.
+///
+/// The read/write asymmetry here is deliberate, not an oversight: writes are
+/// confined to `attachments/` (`ensure_attachment_rel`, so nothing can drop
+/// bytes next to a user's notes), while reads answer for the whole vault. Every
+/// viewer needs that — a PDF, a CSV, a `.docx` or a video imported into
+/// `Projects/` is a tree file, not an attachment, and refusing to read it would
+/// make the sidebar list files nothing can open. `resolve_in_vault` is still
+/// what bounds the path, so `..`/absolute escapes are rejected either way.
 pub fn read_binary_file(vault: &Path, rel: &str) -> AppResult<Vec<u8>> {
     let abs = resolve_in_vault(vault, rel)?;
     Ok(std::fs::read(&abs)?)
@@ -184,6 +219,22 @@ mod tests {
     fn rejects_absolute_paths() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(read_binary_file(tmp.path(), "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn file_stat_reports_size_and_refuses_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/clip.mp4", &[7u8; 2048]).unwrap();
+        let stat = file_stat(tmp.path(), "attachments/clip.mp4").unwrap();
+        assert_eq!(stat.size, 2048);
+        assert!(stat.modified.unwrap_or(0) > 0);
+
+        // Same path rules as every other disk read: no traversal, no absolute
+        // path, and a directory is not a file.
+        assert!(file_stat(tmp.path(), "../../etc/passwd").is_err());
+        assert!(file_stat(tmp.path(), "/etc/passwd").is_err());
+        assert!(file_stat(tmp.path(), "attachments").is_err());
+        assert!(file_stat(tmp.path(), "attachments/missing.png").is_err());
     }
 
     #[test]

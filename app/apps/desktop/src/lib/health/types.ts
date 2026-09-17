@@ -58,8 +58,16 @@ export interface VaultStats {
   links: number;
   /** Wikilinks that point at no note. */
   brokenLinks: number;
-  /** `index.sqlite` (+ its WAL) on disk. */
-  index: { bytes: number };
+  /** `index.sqlite` (+ its WAL) on disk, and what the FILE index costs inside
+   *  it. The two are not additive: `bytes` is the whole file,
+   *  `extractedTextBytes` the part of it the binaries account for. */
+  index: {
+    bytes: number;
+    /** Tree binaries with a `files` row (a .docx, a .mp4, a .csv). */
+    files: number;
+    /** Extracted text: the `file_text` cache plus the `files_fts` bodies. */
+    extractedTextBytes: number;
+  };
   /** The local CRDT store, in aggregate. */
   history: {
     /** Distinct doc ids with any update or snapshot. */
