@@ -20,6 +20,7 @@
 
 ## 0.1.62
 
+- Servers can now keep attachments in S3-compatible object storage (Amazon S3, Cloudflare R2 or a self-hosted MinIO) instead of the database, which lifts the per-file limit to 500 MB for video and large documents. Postgres stays the default with no setup, and files you already have on another device are never uploaded twice.
 - Linux: Baalda no longer re-indexes your vault non-stop while it sits idle, which was keeping a core busy and writing to disk constantly.
 - Baalda now checks whether a file's contents actually changed before doing anything with it, so backup, git and cloud-sync tools touching your vault no longer cause re-indexing or re-syncing.
 

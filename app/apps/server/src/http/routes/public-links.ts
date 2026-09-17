@@ -433,10 +433,11 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
     const { rows } = await pool.query<{
       id: string;
       mime: string | null;
+      filename: string | null;
       storage_provider: string | null;
       storage_key: string | null;
     }>(
-      `SELECT id, mime, storage_provider, storage_key
+      `SELECT id, mime, filename, storage_provider, storage_key
          FROM blobs
         WHERE vault_id = $1 AND rel_path = $2 AND status = 'ready'`,
       [row.vault_id, relPath],
@@ -462,7 +463,19 @@ export function createPublicPageRoutes(deps: PublicPageDeps): Hono {
     try {
       const store = await resolveStoreForRow(blob);
       const range = parseRange(c.req.header("range"));
-      const result = await store.get(storageKeyForRow(blob), range ? { range } : {});
+      // The type and disposition decided above are PINNED onto the response by
+      // the provider — for S3 that means they are part of the presigned URL's
+      // signature, so the redirect below cannot serve an uploader-chosen
+      // `text/html` inline just because the object's own metadata says so.
+      const result = await store.get(storageKeyForRow(blob), {
+        mime: inline ? mime : "application/octet-stream",
+        filename: blob.filename,
+        disposition: inline ? "inline" : "attachment",
+        ...(range ? { range } : {}),
+      });
+      // s3: a 302 to a short-lived presigned GET. The browser follows it with
+      // no credentials of ours attached, and the bucket serves the bytes —
+      // which is what keeps a shared page's video off this server's egress.
       if (result.kind === "redirect") return c.redirect(result.url, 302);
       const headers: Record<string, string> = {
         ...ASSET_HEADERS,
