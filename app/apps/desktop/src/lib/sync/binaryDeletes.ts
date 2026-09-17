@@ -44,6 +44,21 @@
 export const BINARY_DELETE_GRACE_MS = 2_500;
 
 /**
+ * How many windows a candidate may spend waiting for a listing it cannot get
+ * before the queue gives up on it.
+ *
+ * A transport failure is not an answer about a file — and the dangerous half is
+ * not the delete it postpones, it is the RENAME it cannot see: a candidate
+ * dropped here leaves its bytes sitting at an unregistered path, which the blob
+ * mirror then registers as a SECOND `files` row (one file, two doc_ids, the ACL
+ * on the wrong one). So a failed listing keeps the candidate and re-arms rather
+ * than falling through, and only a window that keeps failing is abandoned — the
+ * same "a later pass brings the file back and deleting it again makes it stick"
+ * outcome as before, just three tries later.
+ */
+export const MAX_LISTING_RETRIES = 3;
+
+/**
  * How many binaries may disappear in one window before the whole batch is
  * abandoned. Same shape as the notes' `diskDeleteCap`: a floor of 5 so tidying
  * a handful of files still works, and a fifth of the vault past that.
@@ -111,6 +126,8 @@ export interface BinaryDeleteDeps {
 interface Pending {
   relPath: string;
   seenAt: number;
+  /** How many windows this candidate has spent on a listing that failed. */
+  attempts: number;
 }
 
 /** The HTTP status an api/transport error carries, when it carries one. */
@@ -150,6 +167,9 @@ export class BinaryDeleteQueue {
   private readonly suppressed = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private draining = false;
+  /** Candidates this drain is KEEPING for another window (see
+   *  {@link MAX_LISTING_RETRIES}), so the `finally` sweep leaves them alone. */
+  private readonly retained = new Set<string>();
 
   constructor(
     private readonly deps: BinaryDeleteDeps,
@@ -184,7 +204,14 @@ export class BinaryDeleteQueue {
     // catching up, not a deletion. Refused HERE rather than at drain time so
     // the window never starts and the path stays downloadable meanwhile.
     if (!this.deps.isLive()) return;
-    this.pending.set(key(relPath), { relPath, seenAt: Date.now() });
+    const prior = this.pending.get(key(relPath));
+    this.pending.set(key(relPath), {
+      relPath,
+      seenAt: Date.now(),
+      // A path we are already retrying keeps its count: a watcher event is not
+      // evidence that the server is reachable again.
+      attempts: prior?.attempts ?? 0,
+    });
     this.arm();
   }
 
@@ -199,6 +226,28 @@ export class BinaryDeleteQueue {
    */
   isPending(relPath: string): boolean {
     return this.pending.has(key(relPath));
+  }
+
+  /**
+   * Is a delete window still UNDECIDED — a candidate the queue could not settle
+   * because the listing it needs is unreachable?
+   *
+   * `AttachmentSync.ensureFileRow` asks before it mints a NEW `files` row, and
+   * this is the other half of the anti-fork rail. While a vanished binary is
+   * waiting for a listing, the bytes it holds may be sitting at a path this
+   * device has not registered yet — exactly the rename this queue is about to
+   * pair. Registering that path meanwhile creates the second row the pairing
+   * was there to prevent, and no later pass can merge two live ids.
+   *
+   * Deliberately path-agnostic: the sha that would name the file is on the
+   * server listing that just failed, so the honest answer is "a rename may be in
+   * flight", not "this one is". The cost of being coarse is a pass or two
+   * without a doc_id for a genuinely new file, which `ensureFileRow` already
+   * treats as ordinary (the bytes go either way).
+   */
+  hasUnsettled(): boolean {
+    for (const item of this.pending.values()) if (item.attempts > 0) return true;
+    return false;
   }
 
   /**
@@ -270,12 +319,30 @@ export class BinaryDeleteQueue {
       try {
         [local, server] = await Promise.all([this.deps.listLocal(), this.deps.listServer()]);
       } catch (e) {
-        // Offline, or an epoch-pinned read refused across a vault switch. The
-        // delete simply did not happen, which is the honest outcome and the same
-        // one a note gets when the server refuses its delete: the server still
-        // holds the bytes, so a later pass brings the file back and deleting it
-        // again (online this time) is what makes it stick.
-        console.warn("[attachments] delete drain: listing failed — leaving the server alone", e);
+        // Offline, a restarting server, or an epoch-pinned read refused across a
+        // vault switch. Nothing is decided here — and dropping the candidates
+        // would decide the WORST of it: a rename this window was about to pair
+        // by content becomes an unregistered path, and the blob mirror gives it
+        // a second `files` row. So they wait for another window, and only a
+        // candidate that keeps failing falls through to the old outcome (the
+        // server still holds the bytes, so a later pass brings the file back and
+        // deleting it again, online this time, is what makes it stick).
+        // The WHOLE batch, not just the vanished half: the arrival half of a
+        // rename is what pairs it, and a partner swept from `pending` here
+        // would leave the next window looking at an unexplained delete.
+        const kept: string[] = [];
+        for (const item of batch) {
+          if (item.attempts + 1 >= MAX_LISTING_RETRIES) continue;
+          item.attempts += 1;
+          this.retained.add(key(item.relPath));
+          kept.push(item.relPath);
+        }
+        console.warn(
+          `[attachments] delete drain: listing failed — leaving the server alone` +
+            (kept.length > 0 ? `; retrying ${kept.length} in another window` : ""),
+          e,
+        );
+        if (kept.length > 0) this.arm();
         return;
       }
       if (!this.deps.isCurrent()) return;
@@ -308,8 +375,18 @@ export class BinaryDeleteQueue {
         const renamedTo = this.matchRename(blob.sha256, localBySha, unpaired);
         if (renamedTo) {
           unpaired.delete(key(renamedTo));
-          await this.applyRename(item.relPath, renamedTo);
+          const moved = await this.applyRename(item.relPath, renamedTo);
           if (!this.deps.isCurrent()) return;
+          // A move the server refused is the fork case again: the new path is
+          // unregistered and the mirror would give it its own row. Keep the
+          // candidate so the next window tries the move again.
+          if (!moved && item.attempts + 1 < MAX_LISTING_RETRIES) {
+            item.attempts += 1;
+            this.retained.add(key(item.relPath));
+            // …with the path its bytes are at now, or the next window has a
+            // delete with nothing to pair it to.
+            if (this.pending.has(key(renamedTo))) this.retained.add(key(renamedTo));
+          }
           continue;
         }
         deletes.push({ relPath: item.relPath, blob });
@@ -366,6 +443,7 @@ export class BinaryDeleteQueue {
       // been decided, refused or reported. A path that vanished AGAIN while we
       // were working has its own entry and its own window.
       for (const item of batch) {
+        if (this.retained.delete(key(item.relPath))) continue;
         if (this.pending.get(key(item.relPath)) === item) this.pending.delete(key(item.relPath));
       }
     }
@@ -393,25 +471,27 @@ export class BinaryDeleteQueue {
    * never registered has no row to move: its identity is the hash, which did not
    * change, so the rename is already a no-op everywhere.
    */
-  private async applyRename(from: string, to: string): Promise<void> {
+  private async applyRename(from: string, to: string): Promise<boolean> {
     const id = this.deps.fileId(from);
     if (!id) {
       console.info(`[attachments] ${from} → ${to} (renamed on disk; no files row to move)`);
-      return;
+      return true;
     }
     try {
       await this.deps.moveFile({ id, relPath: to });
     } catch (e) {
       // The row stayed where it was. Nothing was deleted, which is the safe
-      // half — the next pass re-registers the new path (under a fresh id) and
-      // the stale row is the cost of a failed move, not of a lost file.
+      // half — but the new path is now an unregistered one, and the mirror
+      // registering it would fork the file across two doc_ids. Answering
+      // `false` is what keeps the candidate for another window instead.
       console.warn(`[attachments] couldn't move the files row ${from} → ${to}`, e);
-      return;
+      return false;
     }
-    if (!this.deps.isCurrent()) return;
+    if (!this.deps.isCurrent()) return true;
     this.deps.moveFileId(from, to);
     this.deps.onServerChanged?.();
     console.info(`[attachments] ${from} → ${to} (renamed on disk; keeping file ${id})`);
+    return true;
   }
 
   /** Drop the armed window. MUST be called when the vault stops being current —
@@ -423,5 +503,6 @@ export class BinaryDeleteQueue {
     }
     this.pending.clear();
     this.suppressed.clear();
+    this.retained.clear();
   }
 }

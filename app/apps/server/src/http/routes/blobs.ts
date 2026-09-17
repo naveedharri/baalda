@@ -445,10 +445,28 @@ async function findBlob(vaultId: string, sha256: string): Promise<BlobRow | unde
  * as an attachment: the content is here, the registry now knows it as a tree
  * file, and without this the row would keep the weaker path-based ACL forever
  * because nobody ever sends those bytes again.
+ *
+ * One more case, and only one: the row already names a doc that NO LONGER
+ * EXISTS. First-writer-wins is about two live files sharing bytes; a `files`
+ * row that has been deleted is not a claimant, and leaving the binding there
+ * strands the bytes on an id the resolver cannot answer for (`canReadAttachment`
+ * then falls back to the path heuristic). A doc that is merely unreadable to
+ * this caller is NOT gone — the check is existence, never permission, so a
+ * Private file's blob keeps its owner's row.
  */
 async function claimDoc(row: BlobRow, docId: string | null): Promise<BlobRow> {
-  if (!docId || row.doc_id) return row;
-  await adoptDocId(row.id, docId);
+  if (!docId || docId === row.doc_id) return row;
+  if (!row.doc_id) {
+    await adoptDocId(row.id, docId);
+    return { ...row, doc_id: docId };
+  }
+  const { rows } = await pool.query("SELECT 1 FROM files WHERE id = $1", [row.doc_id]);
+  if (rows.length > 0) return row;
+  await pool.query(
+    "UPDATE blobs SET doc_id = $2, updated_at = now() WHERE id = $1 AND doc_id = $3",
+    [row.id, docId, row.doc_id],
+  );
+  console.info(`[blobs] ${row.id} was bound to the deleted file ${row.doc_id} — rebound to ${docId}`);
   return { ...row, doc_id: docId };
 }
 

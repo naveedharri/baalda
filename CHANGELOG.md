@@ -65,6 +65,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Fixed
+- **Renaming a synced file could fork it into two `files` rows (desktop +
+  server).** When the rename's grace window closed against an unreachable
+  server, the delete queue dropped the candidate ("listing failed — leave the
+  server alone"), so the new path looked brand new and the upload pass
+  registered a SECOND row for it — while the blob, a dedupe hit, stayed bound to
+  the first (`doc_id` adoption is NULL→set only). One file, two doc_ids, and
+  Private set on whichever row the panel happened to show did nothing on disk.
+  A failed listing (or a refused move) now KEEPS the candidate for up to three
+  windows instead of falling through, and `ensureFileRow` mints no new id while
+  one is unsettled; a dedupe hit whose blob names another row whose path is gone
+  from this disk is treated as that file renamed — the duplicate row is dropped
+  and the original adopted onto the new path, which also heals a fork an earlier
+  session already wrote to `.context/config.json`. Two files that merely hold
+  identical bytes are untouched (still one blob, two rows). Server-side, a
+  dedupe hit rebinds a blob whose `files` row has been DELETED, so bytes are
+  never stranded on an id the resolver cannot answer for.
 - **A file set to Private stayed on the disk of everyone who lost access
   (desktop + server).** A note leaves via `ready.revoked` → the inbound plan;
   a `files` row had no route at all, so a `.pdf` set to Private stopped syncing,

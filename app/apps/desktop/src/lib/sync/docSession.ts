@@ -3565,6 +3565,16 @@ export class SyncManager implements InboundHost {
         return row.docId ?? row.id ?? null;
       },
       rememberFileId: (relPath, id, opts) => this.registry.setFileId(relPath, id, opts),
+      // The other half of an adoption: the path the row used to be at stops
+      // naming it, so `.context/config.json` never holds two ids for one file.
+      forgetFileId: (relPath) => this.registry.forgetFileId(relPath),
+      // Only ever used to drop a row THIS device minted for bytes the server
+      // already holds under another id (`reconcileDedupedRow`).
+      deleteFile: (id) => api.deleteFile(id),
+      // A rename the delete queue could not settle (the server was unreachable
+      // when its window closed) must not be registered as a new file meanwhile:
+      // that is precisely how one file ends up with two `files` rows.
+      isRenamePending: () => this.binaryDeletes?.hasUnsettled() ?? false,
       // Extracted text: Rust already pulled the words out for local search, so
       // the server gets a copy as ranking fuel rather than re-parsing the file.
       fileText: (relPath) => ipc.getFileText(relPath),

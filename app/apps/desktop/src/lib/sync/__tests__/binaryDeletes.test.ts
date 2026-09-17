@@ -238,6 +238,73 @@ describe("BinaryDeleteQueue", () => {
     expect(h.deleted).toEqual([]);
     expect(h.blobsDeleted).toEqual([]);
   });
+
+  it("keeps a candidate whose listing failed, and pairs the rename on the next window", async () => {
+    // The fork this rail exists for: the server was restarting when the window
+    // closed, so the rename could not be paired. Dropping the candidate leaves
+    // the new path unregistered, and the blob mirror gives it a SECOND `files`
+    // row — one file, two doc_ids, the ACL on whichever the blob bound to.
+    const h = harness({
+      local: [{ relPath: "Team/guide-v2.pdf", sha256: "sha-b1" }],
+      server: [blob("b1", "Team/guide.pdf")],
+      onDisk: ["Team/guide-v2.pdf"],
+      fileIds: { "Team/guide.pdf": "file-1" },
+    });
+    const listing = vi
+      .spyOn(h.deps, "listServer")
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    h.queue.noteChanged("Team/guide.pdf");
+    h.queue.noteChanged("Team/guide-v2.pdf");
+    await h.queue.drain();
+
+    expect(listing).toHaveBeenCalled();
+    expect(h.moved).toEqual([]);
+    // Still undecided — and the upload side must not register the new path
+    // while it is.
+    expect(h.queue.isPending("Team/guide.pdf")).toBe(true);
+    expect(h.queue.hasUnsettled()).toBe(true);
+
+    await h.queue.drain();
+    expect(h.moved).toEqual([{ id: "file-1", relPath: "Team/guide-v2.pdf" }]);
+    expect(h.deleted).toEqual([]);
+    expect(h.queue.hasUnsettled()).toBe(false);
+  });
+
+  it("gives up after three failed windows rather than pinning the path forever", async () => {
+    const h = harness({ server: [blob("b1", "Team/guide.pdf")], onDisk: [] });
+    vi.spyOn(h.deps, "listServer").mockRejectedValue(new Error("offline"));
+    h.queue.noteChanged("Team/guide.pdf");
+    await h.queue.drain();
+    await h.queue.drain();
+    expect(h.queue.isPending("Team/guide.pdf")).toBe(true);
+    await h.queue.drain();
+
+    expect(h.queue.isPending("Team/guide.pdf")).toBe(false);
+    expect(h.queue.hasUnsettled()).toBe(false);
+    expect(h.deleted).toEqual([]);
+  });
+
+  it("keeps the candidate when the server refuses the rename's move", async () => {
+    // Same fork, one step later: the pairing was right and the move failed. The
+    // new path is unregistered either way, so the candidate waits.
+    const h = harness({
+      local: [{ relPath: "Team/guide-v2.pdf", sha256: "sha-b1" }],
+      server: [blob("b1", "Team/guide.pdf")],
+      onDisk: ["Team/guide-v2.pdf"],
+      fileIds: { "Team/guide.pdf": "file-1" },
+    });
+    const move = vi.spyOn(h.deps, "moveFile").mockRejectedValueOnce(new Error("503"));
+    h.queue.noteChanged("Team/guide.pdf");
+    h.queue.noteChanged("Team/guide-v2.pdf");
+    await h.queue.drain();
+
+    expect(move).toHaveBeenCalled();
+    expect(h.movedIds).toEqual([]);
+    expect(h.queue.hasUnsettled()).toBe(true);
+
+    await h.queue.drain();
+    expect(h.movedIds).toEqual([["Team/guide.pdf", "Team/guide-v2.pdf"]]);
+  });
 });
 
 describe("suppressNext — the revocation's claim on its own echo", () => {

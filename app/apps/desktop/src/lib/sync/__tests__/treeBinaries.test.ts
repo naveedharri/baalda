@@ -245,6 +245,144 @@ describe("tree binaries register as `files` rows", () => {
   });
 });
 
+describe("one file, one `files` row", () => {
+  /** A vault whose server has these bytes already, under somebody else's row. */
+  function dedupedTo(
+    blob: { docId: string | null; relPath: string | null },
+    extra: Partial<AttachmentSyncDeps> = {},
+    files: Array<{ relPath: string; sha256?: string }> = [{ relPath: "Team/guide.pdf" }],
+  ) {
+    const deletedRows: string[] = [];
+    const forgotten: string[] = [];
+    const v = makeVault(files, {
+      createIntent: async (input) => ({
+        deduped: true as const,
+        blob: {
+          id: "blob-1",
+          sha256: input.sha256,
+          size: 3,
+          mime: input.mime,
+          relPath: blob.relPath,
+          docId: blob.docId,
+        },
+      }),
+      deleteFile: async (id) => {
+        deletedRows.push(id);
+      },
+      forgetFileId: (relPath) => {
+        forgotten.push(relPath);
+      },
+      ...extra,
+    });
+    return { ...v, deletedRows, forgotten };
+  }
+
+  it("adopts the row the bytes already belong to instead of forking the file", async () => {
+    // The 2026-09-17 bug. A tree binary renamed on disk while the server was
+    // restarting: the delete queue could not pair it, so the upload path saw a
+    // brand-new path and registered a SECOND row — while the blob, a dedupe
+    // hit, stayed bound to the FIRST (doc_id adoption is NULL→set only). One
+    // file, two doc_ids, and a share set on either one reaching neither disk.
+    const { sync, log, deletedRows, forgotten } = dedupedTo({
+      docId: "file-original",
+      // The row's own path is gone from this disk — that is what makes it a
+      // rename rather than a second file with identical bytes.
+      relPath: "Team/guide (1).pdf",
+    });
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(1);
+    // The fork it minted is dropped BEFORE the move: the server adopts by path
+    // first and would otherwise hand our own row straight back.
+    expect(deletedRows).toEqual(["local-id-0"]);
+    expect(log.registered).toEqual([
+      { relPath: "Team/guide.pdf", id: "local-id-0" },
+      { relPath: "Team/guide.pdf", id: "file-original" },
+    ]);
+    // Both stale mappings go, so `.context/config.json` names ONE id for it.
+    expect(forgotten).toEqual(["Team/guide.pdf", "Team/guide (1).pdf"]);
+    expect(log.remembered[log.remembered.length - 1]).toEqual({
+      relPath: "Team/guide.pdf",
+      id: "file-original",
+      // Adoption says nothing about who put the bytes there; the claim this
+      // device made when it uploaded them is keyed by doc_id and survives.
+      authored: false,
+    });
+  });
+
+  it("heals a fork a previous session already wrote to config", async () => {
+    // Nothing is minted this pass — the duplicate id is the one the vault
+    // remembers — and the repair is the same one.
+    const { sync, log, deletedRows } = dedupedTo(
+      { docId: "file-original", relPath: "Team/guide (1).pdf" },
+      { knownFileId: () => "file-fork" },
+    );
+    await sync.reconcile();
+
+    expect(deletedRows).toEqual(["file-fork"]);
+    expect(log.registered).toEqual([{ relPath: "Team/guide.pdf", id: "file-original" }]);
+  });
+
+  it("leaves two files that merely hold identical bytes alone", async () => {
+    // The row's path is on disk, so this is the mirror's oldest limitation (one
+    // blob, two files) and NOT a rename. Moving the row would take the first
+    // file's ACL onto the second.
+    const { sync, log, deletedRows } = dedupedTo(
+      { docId: "file-a", relPath: "Team/a.pdf" },
+      {},
+      [
+        { relPath: "Team/a.pdf", sha256: "twins" },
+        { relPath: "Team/b.pdf", sha256: "twins" },
+      ],
+    );
+    await sync.reconcile();
+
+    expect(deletedRows).toEqual([]);
+    expect(log.registered).toEqual([
+      { relPath: "Team/a.pdf", id: "local-id-0" },
+      { relPath: "Team/b.pdf", id: "local-id-1" },
+    ]);
+  });
+
+  it("leaves an unregistered path queued while the delete queue has an unsettled window", async () => {
+    // A rename it is still trying to pair looks exactly like a new path from
+    // here, and registering it creates the row the pairing was there to avoid.
+    // The whole file waits: uploading it without a doc_id would put the bytes on
+    // the server anyway, and the next pass — which subtracts by sha — would
+    // never queue it again to fix that.
+    const states: Array<Record<string, string>> = [];
+    const { sync, log } = makeVault([{ relPath: "Team/guide.pdf" }], {
+      isRenamePending: () => true,
+      onFileStates: (s) => states.push({ ...s }),
+    });
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(0);
+    expect(log.registered).toEqual([]);
+    expect(log.intents).toEqual([]);
+    expect(states[states.length - 1]).toEqual({ "Team/guide.pdf": "queued" });
+  });
+
+  it("uploads a path it already owns even while a window is unsettled", async () => {
+    const { sync, log } = makeVault([{ relPath: "Team/guide.pdf" }], {
+      isRenamePending: () => true,
+      knownFileId: () => "file-known",
+    });
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(1);
+    expect(log.intents).toEqual([{ relPath: "Team/guide.pdf", docId: "file-known" }]);
+  });
+
+  it("still mints an id when the deduped blob names no row at all", async () => {
+    const { sync, log, deletedRows } = dedupedTo({ docId: null, relPath: null });
+    await sync.reconcile();
+
+    expect(deletedRows).toEqual([]);
+    expect(log.registered).toEqual([{ relPath: "Team/guide.pdf", id: "local-id-0" }]);
+  });
+});
+
 describe("tree binary rename (Stage A's known limit)", () => {
   it("does NOT propagate a rename — identity is still sha256", async () => {
     // The server holds the bytes under the OLD path; the disk has them under a

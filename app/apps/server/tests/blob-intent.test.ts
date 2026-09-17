@@ -183,6 +183,71 @@ describe("blob intent → PUT → complete", () => {
     expect(hit.upload).toBeUndefined();
   });
 
+  it("rebinds a deduped blob whose `files` row is gone, and only then", async () => {
+    // First-writer-wins is about two LIVE files sharing bytes. A row that has
+    // been deleted is not a claimant: leaving the binding there strands the
+    // bytes on an id the resolver cannot answer for, and the desktop's rename
+    // repair (which drops its own duplicate row and adopts the other) would
+    // find the blob pointing at nothing.
+    const { owner, vault } = await setup("intent-rebind");
+    const sha = shaOf(PNG);
+    const register = (id: string, path: string) =>
+      app.fetch(
+        new Request("http://local/api/files", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${owner.token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ vaultId: vault, docId: id, path }),
+        }),
+      );
+    const docIdOf = async (blobId: string) =>
+      (await pool.query<{ doc_id: string | null }>("SELECT doc_id FROM blobs WHERE id = $1", [
+        blobId,
+      ])).rows[0]?.doc_id ?? null;
+
+    await register("file-old", "guide (1).pdf");
+    const first = await intent(owner, vault, {
+      sha256: sha,
+      size: PNG.byteLength,
+      mime: "image/png",
+      relPath: "guide (1).pdf",
+      docId: "file-old",
+    });
+    const plan = (await first.json()) as Intent;
+    await putData(plan.upload!.url, PNG, plan.upload!.headers);
+    await complete(owner, plan.blobId!);
+    expect(await docIdOf(plan.blobId!)).toBe("file-old");
+
+    // A LIVE row asking for the same bytes changes nothing: that is the
+    // identical-bytes limitation, not a rename.
+    await register("file-twin", "twin.pdf");
+    const twin = await intent(owner, vault, {
+      sha256: sha,
+      size: PNG.byteLength,
+      mime: "image/png",
+      relPath: "twin.pdf",
+      docId: "file-twin",
+    });
+    expect(((await twin.json()) as Intent).deduped).toBe(true);
+    expect(await docIdOf(plan.blobId!)).toBe("file-old");
+
+    // Now the row itself is gone (the desktop dropped its duplicate, or a
+    // teammate deleted the file). The next dedupe hit adopts the live id.
+    await pool.query("DELETE FROM files WHERE id = $1", ["file-old"]);
+    await register("file-new", "guide.pdf");
+    const again = await intent(owner, vault, {
+      sha256: sha,
+      size: PNG.byteLength,
+      mime: "image/png",
+      relPath: "guide.pdf",
+      docId: "file-new",
+    });
+    expect(((await again.json()) as Intent).deduped).toBe(true);
+    expect(await docIdOf(plan.blobId!)).toBe("file-new");
+  });
+
   it("re-issues the SAME blob id for a pending upload, with a fresh presign", async () => {
     const { owner, vault } = await setup("intent-retry");
     const sha = shaOf(PNG);
