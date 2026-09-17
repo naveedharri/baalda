@@ -114,25 +114,55 @@ describe.each(PROVIDERS)("BlobStore conformance — $name", (provider) => {
     await expect(store.delete(key)).resolves.toBeUndefined();
   });
 
-  it("presignUpload is honest about what the provider cannot do", async () => {
+  it("presignUpload returns a usable PUT for every provider", async () => {
     const store = provider.store();
+    const blobId = randomUUID();
     const input = {
       key: objectKey(vaultId, "a".repeat(64)),
-      blobId: randomUUID(),
+      blobId,
       vaultId,
       size: 10,
       mime: "image/png",
       sha256: "a".repeat(64),
+      origin: "https://example.test",
     };
+    const presigned = await store.presignUpload(input);
+    expect(presigned.method).toBe("PUT");
     if (provider.name === "postgres") {
-      // No object store to presign against — PR 2b gives it a signed same-origin
-      // PUT instead. It must SAY so, not return something unusable.
-      const err = await store.presignUpload(input).catch((e) => e);
-      expect(err).toBeInstanceOf(BlobStoreError);
-      expect((err as BlobStoreError).code).toBe("not_supported");
-    } else {
-      expect((await store.presignUpload(input)).method).toBe("PUT");
+      // No object store to presign against, so this server IS the object store:
+      // a same-origin signed PUT, in the SAME envelope S3 returns, which is what
+      // lets the desktop's upload path never branch on the provider.
+      expect(presigned.url.startsWith(`https://example.test/api/blobs/${blobId}/data?t=`)).toBe(
+        true,
+      );
+      expect(presigned.direct).toBe(false);
+      expect(presigned.headers["content-length"]).toBe("10");
+      expect(presigned.expiresAt).toBeGreaterThan(Date.now());
     }
+  });
+
+  it("has no multipart, and says so rather than returning something unusable", async () => {
+    // Both of these providers are single-shot. The routes only reach the
+    // multipart methods when `multipartThresholdBytes` is non-null, so the
+    // throw is a bug-catcher — but it has to BE a typed throw, not a hang or a
+    // half-made upload.
+    const store = provider.store();
+    expect(store.multipartThresholdBytes).toBeNull();
+    const err = await store
+      .presignMultipart({
+        key: objectKey(vaultId, "b".repeat(64)),
+        blobId: randomUUID(),
+        vaultId,
+        size: 200 * 1024 * 1024,
+        mime: "video/mp4",
+        sha256: "b".repeat(64),
+      })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(BlobStoreError);
+    expect((err as BlobStoreError).code).toBe("not_supported");
+    // The pending sweep calls this on EVERY row, provider regardless, so it
+    // must be a no-op rather than a throw.
+    await expect(store.abortMultipartsForKey("vaults/x/y")).resolves.toBeUndefined();
   });
 
   it("clamps every category ceiling to what the provider can hold", async () => {

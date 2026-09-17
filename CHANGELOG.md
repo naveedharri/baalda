@@ -585,6 +585,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **S3 blob provider + presigned upload flow (server).** `src/blobs/s3-store.ts`
+  (AWS SDK v3, `WHEN_REQUIRED` checksums, path-style for MinIO, `content-length`
+  signed into every presign, never `x-amz-checksum-sha256` against a custom endpoint,
+  presigned multipart above 100 MB). New `intent → PUT → complete` endpoints serve BOTH
+  providers — Postgres via a same-origin PUT authorised by an HS256 upload token — so a
+  dedupe hit costs zero bytes and every gate (ACL, rel_path, MIME, cap) runs before a
+  byte moves. `GET /api/blobs/:id/url` hands the desktop a presigned or same-origin URL
+  instead of a 302. Pending rows are swept by an advisory-locked 15-minute timer.
+  `BLOB_STORAGE=s3` fails closed at boot when config is incomplete. Compose gains a
+  `minio` profile; DEPLOY.md gains an "Attachments storage" section.
 - **Updates install themselves, with the wall as the fallback.** The app no
   longer waits for a click to install an update it has already downloaded: it
   checks, downloads, installs and relaunches at a quiet moment. The blocking

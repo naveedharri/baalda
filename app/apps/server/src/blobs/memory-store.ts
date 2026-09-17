@@ -14,10 +14,14 @@ import { CATEGORY_MAX_BYTES, type FormatCategory } from "./formats.js";
 import {
   BlobStoreError,
   type BlobStore,
+  type CompletedPart,
   type GetOptions,
   type GetResult,
   type HeadResult,
+  type PresignMultipartInput,
   type PresignUploadInput,
+  type PresignedMultipart,
+  type PresignedPart,
   type PresignedUpload,
   type PutInput,
   type PutResult,
@@ -28,6 +32,9 @@ export class MemoryBlobStore implements BlobStore {
   // constraint in the database, and a store that claimed a value the schema
   // refuses could not stand in for a real one in a route test.
   readonly provider: BlobProvider = "postgres";
+
+  /** No multipart — a Map has no parts to assemble. */
+  readonly multipartThresholdBytes = null;
 
   readonly objects = new Map<string, Buffer>();
 
@@ -89,6 +96,32 @@ export class MemoryBlobStore implements BlobStore {
     const data = this.objects.get(key);
     return data ? data.subarray(0, Math.max(1, Math.trunc(bytes))) : null;
   }
+
+  async presignMultipart(_input: PresignMultipartInput): Promise<PresignedMultipart> {
+    throw new BlobStoreError("not_supported", "the memory store has no multipart upload");
+  }
+
+  async presignParts(
+    _key: string,
+    _uploadId: string,
+    _partNumbers: number[],
+  ): Promise<{ parts: PresignedPart[]; expiresAt: number }> {
+    throw new BlobStoreError("not_supported", "the memory store has no multipart upload");
+  }
+
+  async completeMultipart(
+    _key: string,
+    _uploadId: string,
+    _parts: CompletedPart[],
+  ): Promise<PutResult> {
+    throw new BlobStoreError("not_supported", "the memory store has no multipart upload");
+  }
+
+  async abortMultipart(_key: string, _uploadId: string): Promise<void> {
+    throw new BlobStoreError("not_supported", "the memory store has no multipart upload");
+  }
+
+  async abortMultipartsForKey(_key: string): Promise<void> {}
 
   maxBytes(category: FormatCategory): number {
     return CATEGORY_MAX_BYTES[category];

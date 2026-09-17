@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -12,12 +12,15 @@ import {
 } from "../../permissions/http-gates.js";
 import { getSession } from "../session.js";
 import { relAssetPath } from "../../render/note-html.js";
+import { config } from "../../config.js";
 import { ByteBudget } from "../../blobs/admission.js";
 import {
   BLOB_MIME_ENFORCE,
   MAX_BLOB_BYTES,
   MAX_INFLIGHT_UPLOAD_BYTES,
 } from "../../blobs/config.js";
+import { objectKey } from "../../blobs/keys.js";
+import { verifyUploadToken } from "../../blobs/upload-token.js";
 import {
   categoryForMime,
   hasMagicSignature,
@@ -32,6 +35,8 @@ import {
   createBlobStore,
   resolveStoreForRow,
   storageKeyForRow,
+  type BlobStore,
+  type CompletedPart,
 } from "../../blobs/store.js";
 
 /**
@@ -44,10 +49,29 @@ import {
  * (owner/admin/member). Downloads require the same membership (view is enough —
  * membership *is* the view grant at the vault level).
  *
- *   POST /api/vaults/:vaultId/blobs   raw binary body → store (dedupe by sha256)
- *   GET  /api/vaults/:vaultId/blobs   list metadata
- *   GET  /api/blobs/:id               download bytes with the stored mime
- *   HEAD /api/blobs/:id               the same headers, no body
+ *   POST /api/vaults/:vaultId/blobs          raw binary body → store (legacy, dedupe by sha256)
+ *   POST /api/vaults/:vaultId/blobs/intent   declare a file → dedupe answer or an upload URL
+ *   PUT  /api/blobs/:id/data?t=              the bytes, for a provider with no object store
+ *   POST /api/blobs/:id/parts                more presigned part URLs (multipart)
+ *   POST /api/blobs/:id/complete             verify what landed and publish the blob
+ *   GET  /api/vaults/:vaultId/blobs          list metadata
+ *   GET  /api/blobs/:id                      download bytes with the stored mime
+ *   GET  /api/blobs/:id/url                  a URL to fetch the bytes from
+ *   HEAD /api/blobs/:id                      the same headers, no body
+ *
+ * THE INTENT FLOW, and why it is the same three steps for both providers:
+ *
+ *   intent → (deduped? done) → PUT the bytes → complete
+ *
+ * The legacy POST answers "do you already have this?" by sending the whole file
+ * and reading `deduped: true` off the response, so every new device re-uploads
+ * every attachment in full to learn that nothing was needed. `intent` answers it
+ * with a JSON round trip and ZERO bytes, and checks ACL, rel_path, MIME, the
+ * size cap and (PR 2c) quota BEFORE anything moves. The S3 provider returns a
+ * presigned bucket URL and the Postgres provider returns a signed same-origin
+ * `PUT /api/blobs/:id/data?t=`, in the same envelope, so the client has one code
+ * path. The legacy POST keeps working unchanged, forever — shipped desktops use
+ * it, and they feature-detect the new flow by a 404 on intent.
  */
 export const blobRoutes = new Hono();
 
@@ -332,6 +356,612 @@ async function findBlob(vaultId: string, sha256: string): Promise<BlobRow | unde
   return rows[0];
 }
 
+// ── intent → PUT → complete ───────────────────────────────────────────────
+
+/** A pending or ready row, as the upload flow needs to see it. */
+interface UploadRow {
+  id: string;
+  vault_id: string | null;
+  org_id: string | null;
+  sha256: string;
+  size: string | number;
+  mime: string | null;
+  rel_path: string | null;
+  filename: string | null;
+  status: string;
+  storage_provider: string | null;
+  storage_key: string | null;
+}
+
+const UPLOAD_ROW_COLUMNS =
+  "id, vault_id, org_id, sha256, size, mime, rel_path, filename, status, storage_provider, storage_key";
+
+/**
+ * Absolute origin for URLs this server hands a client.
+ *
+ * `BETTER_AUTH_URL` first, because that is what every other absolute URL here
+ * is built from (`public-links.ts`, invitations, password reset) and it is the
+ * address clients were told to use — the request's own `Host` may be an
+ * internal load-balancer name. The request URL is the fallback for a
+ * misconfigured `BETTER_AUTH_URL`, so a self-host that never set it still gets
+ * a working upload URL instead of a relative one.
+ */
+function apiOrigin(c: Context): string {
+  try {
+    return new URL(config.betterAuthUrl).origin;
+  } catch {
+    /* fall through */
+  }
+  try {
+    return new URL(c.req.url).origin;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Storage quota check. A deliberate no-op in this PR: PR 2c adds
+ * `sum(size) WHERE vault_id AND status IN ('pending','ready')` against the
+ * plan's `FREE_MAX_STORAGE_MB` and answers 402 `storage_limit_reached`.
+ *
+ * It exists now, called from the one place it will ever be called from, because
+ * the ORDER of the gates is the part that is easy to get wrong later: quota is
+ * the LAST gate, after ACL and after the per-file caps, so a request that would
+ * be refused anyway never costs a `sum()` over the vault's blobs.
+ */
+async function checkStorageQuota(
+  _vaultId: string,
+  _addedBytes: number,
+): Promise<{ error: string; code: string } | null> {
+  return null;
+}
+
+/** A positive, integral byte count, or null. */
+function normalizeSize(raw: unknown): number | null {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) return null;
+  return n;
+}
+
+/**
+ * Declare a file and get back either "already here" or somewhere to put it.
+ *
+ * Gate order is load-bearing and matches the legacy POST's: membership, then
+ * write access, then the shape of what is being claimed (rel_path, MIME), then
+ * the size cap for that MIME on THIS provider, then quota. Every one of them is
+ * cheaper than the one after it, and all of them run before a byte moves.
+ */
+blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+
+  const vaultId = c.req.param("vaultId");
+  const org = await vaultOrg(vaultId);
+  if (!org) return c.json({ error: "Unknown vault" }, 404);
+  if (!(await orgRole(org, session.userId))) {
+    return c.json({ error: "Not a member of this vault" }, 403);
+  }
+  if (!(await canWriteAttachment(session.userId, vaultId))) {
+    return c.json({ error: "This vault is read-only for you" }, 403);
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Expected a JSON body", code: "invalid_body" }, 400);
+  }
+
+  const sha256 = normalizeSha(typeof body.sha256 === "string" ? body.sha256 : null);
+  if (!sha256) {
+    return c.json({ error: "sha256 must be 64 hex characters", code: "invalid_sha256" }, 400);
+  }
+  const size = normalizeSize(body.size);
+  if (size === null) {
+    return c.json({ error: "size must be a positive integer", code: "invalid_size" }, 400);
+  }
+  const filename = typeof body.filename === "string" ? body.filename : null;
+  const relPath = safeAttachmentRelPath(
+    typeof body.relPath === "string" ? body.relPath : filename,
+  );
+  if (!relPath) {
+    return c.json(
+      {
+        error: "Attachment path must be a vault-relative path under attachments/",
+        code: "invalid_rel_path",
+      },
+      400,
+    );
+  }
+
+  const mime = normalizeMime(typeof body.mime === "string" ? body.mime : null) ||
+    "application/octet-stream";
+  if (!isAllowedMime(mime)) {
+    if (BLOB_MIME_ENFORCE === "reject") {
+      return c.json(
+        { error: `Unsupported attachment type: ${mime}`, code: "unsupported_media_type" },
+        415,
+      );
+    }
+    console.warn(`[blobs] BLOB_MIME_ENFORCE=warn: intent for ${relPath} with unlisted mime ${mime}`);
+  }
+
+  const store = await createBlobStore();
+  const sizeCap = Math.min(maxBytesForMime(mime), store.maxBytes(categoryForMime(mime)));
+  if (size > sizeCap) {
+    return c.json(
+      {
+        error: `Attachment too large for ${categoryForMime(mime)} (max ${sizeCap} bytes)`,
+        code: "attachment_too_large",
+      },
+      413,
+    );
+  }
+
+  // Already here → the answer is a blob id and NOT ONE BYTE of the file. This
+  // is the case the whole flow exists for: a fresh device with a vault full of
+  // attachments settles them all with one round trip each.
+  const hit = await findBlob(vaultId, sha256);
+  if (hit) return c.json({ deduped: true, blob: toMeta(hit) }, 200);
+
+  const quota = await checkStorageQuota(vaultId, size);
+  if (quota) return c.json({ ...quota }, 402);
+
+  // An existing PENDING row for the same content is re-used rather than
+  // conflicting: `blobs_vault_sha_idx` would refuse a second insert anyway, and
+  // re-issuing the same blob id with a fresh presign is exactly what a client
+  // retrying an interrupted upload needs. `updated_at` is bumped so the pending
+  // sweep does not collect a row a client is actively working on.
+  const existing = await pool.query<UploadRow>(
+    `UPDATE blobs
+        SET updated_at = now(),
+            mime = $3,
+            rel_path = $4,
+            filename = $5
+      WHERE vault_id = $1 AND sha256 = $2 AND status = 'pending'
+      RETURNING ${UPLOAD_ROW_COLUMNS}`,
+    [vaultId, sha256, mime, relPath, filename],
+  );
+  let row = existing.rows[0];
+
+  if (!row) {
+    const id = randomUUID();
+    // Postgres has no object namespace (the bytes are the row's own column), so
+    // its key IS the row id and `storage_key` stays NULL — which is what
+    // migration 026's `blobs_external_key_chk` encodes.
+    const storageKey = store.provider === "postgres" ? null : objectKey(vaultId, sha256);
+    const inserted = await pool.query<UploadRow>(
+      `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
+                          storage_provider, storage_key, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11)
+       ON CONFLICT (vault_id, sha256) DO NOTHING
+       RETURNING ${UPLOAD_ROW_COLUMNS}`,
+      [id, vaultId, org, sha256, size, mime, relPath, filename, store.provider, storageKey,
+        session.userId],
+    );
+    row = inserted.rows[0];
+    if (!row) {
+      // Someone finished uploading this content between the dedupe read and the
+      // insert. The winner's row is the answer, not a 409.
+      const winner = await findBlob(vaultId, sha256);
+      if (winner) return c.json({ deduped: true, blob: toMeta(winner) }, 200);
+      return c.json({ error: "Upload conflicted — retry" }, 409);
+    }
+  }
+
+  const origin = apiOrigin(c);
+  const key = storageKeyForRow(row);
+  const completeUrl = `${origin}/api/blobs/${encodeURIComponent(row.id)}/complete`;
+  const presignInput = {
+    key,
+    blobId: row.id,
+    vaultId,
+    size,
+    mime,
+    sha256,
+    origin,
+    ...(typeof body.md5 === "string" ? { md5Base64: body.md5 } : {}),
+  };
+
+  try {
+    // Over the provider's multipart threshold, a single PUT is a bad deal: no
+    // resume, no parallelism, and one blip costs the whole transfer. AWS draws
+    // the line at 100 MB and so do we.
+    const threshold = store.multipartThresholdBytes;
+    if (threshold !== null && size >= threshold) {
+      const multi = await store.presignMultipart(presignInput);
+      const { mintUploadToken } = await import("../../blobs/upload-token.js");
+      const { UPLOAD_TOKEN_TTL_SECONDS } = await import("../../blobs/config.js");
+      // The token is what `POST /api/blobs/:id/parts` authenticates: presigned
+      // part URLs expire with everything else, and a long upload needs to ask
+      // for more without re-running the whole intent gate.
+      const token = await mintUploadToken(
+        { blobId: row.id, vaultId, sha256, size, uploadId: multi.uploadId },
+        UPLOAD_TOKEN_TTL_SECONDS,
+      );
+      return c.json(
+        {
+          blobId: row.id,
+          upload: {
+            kind: "multipart" as const,
+            method: "PUT" as const,
+            uploadId: multi.uploadId,
+            partBytes: multi.partBytes,
+            parts: multi.parts,
+            headers: {},
+            expiresAt: multi.expiresAt,
+            direct: multi.direct,
+            token,
+            // Token already in the URL, the same way the single-PUT case works
+            // — one fewer thing for a client to assemble by hand.
+            partsUrl: `${origin}/api/blobs/${encodeURIComponent(row.id)}/parts?t=${encodeURIComponent(token)}`,
+          },
+          completeUrl,
+        },
+        200,
+      );
+    }
+
+    const single = await store.presignUpload(presignInput);
+    return c.json(
+      {
+        blobId: row.id,
+        upload: {
+          kind: "single" as const,
+          method: single.method,
+          url: single.url,
+          headers: single.headers,
+          expiresAt: single.expiresAt,
+          direct: single.direct,
+        },
+        completeUrl,
+      },
+      200,
+    );
+  } catch (e) {
+    return storeError(c, e);
+  }
+});
+
+/** Read a blob row for the upload flow, by id. */
+async function uploadRow(id: string): Promise<UploadRow | undefined> {
+  const { rows } = await pool.query<UploadRow>(
+    `SELECT ${UPLOAD_ROW_COLUMNS} FROM blobs WHERE id = $1`,
+    [id],
+  );
+  return rows[0];
+}
+
+/**
+ * The bytes, for a provider whose upload URL points back here.
+ *
+ * NO SESSION: the `?t=` upload token IS the authorization, and it was minted by
+ * an `intent` that ran every gate. See `blobs/upload-token.ts` for why that is
+ * the right trade — in short, the token binds blob id, vault, sha256 and size,
+ * so it can only write the exact content it was issued for, and the transport
+ * is then free to be a raw stream from another process with no cookie jar.
+ */
+blobRoutes.put(
+  "/blobs/:id/data",
+  // Same reasoning as the legacy POST: the cap has to be enforced before the
+  // body is read. This route only ever serves a provider that buffers (Postgres
+  // today), so MAX_BLOB_BYTES — not MAX_BLOB_BYTES_DIRECT — is the right bound;
+  // anything bigger is on a provider whose intent handed out a direct URL.
+  bodyLimit({
+    maxSize: MAX_BLOB_BYTES,
+    onError: (c) => c.json({ error: "Attachment too large", code: "attachment_too_large" }, 413),
+  }),
+  async (c) => {
+    const unauthorized = () =>
+      c.json({ error: "Invalid or expired upload token", code: "invalid_upload_token" }, 401);
+
+    const raw = c.req.query("t");
+    if (!raw) return unauthorized();
+    let claims;
+    try {
+      claims = await verifyUploadToken(raw);
+    } catch {
+      return unauthorized();
+    }
+    // A token for another blob is not a token for this one, whatever it says.
+    if (claims.blobId !== c.req.param("id")) return unauthorized();
+
+    const row = await uploadRow(claims.blobId);
+    if (!row) return c.json({ error: "Blob not found" }, 404);
+    if (row.vault_id !== claims.vaultId || !shaEquals(row.sha256, claims.sha256)) {
+      return unauthorized();
+    }
+    if (row.status === "ready") {
+      return c.json({ error: "This blob already has its bytes", code: "already_uploaded" }, 409);
+    }
+
+    const declared = claims.size;
+    if (declared > MAX_BLOB_BYTES) {
+      return c.json({ error: "Attachment too large", code: "attachment_too_large" }, 413);
+    }
+    if (!(await uploadBudget.acquire(declared))) {
+      return c.json({ error: "Too many uploads in flight — retry shortly" }, 503, {
+        "Retry-After": "5",
+      });
+    }
+    try {
+      const webBody = c.req.raw.body;
+      if (!webBody) return c.json({ error: "empty body" }, 400);
+
+      // Hash, count and sniff AS THE BYTES GO PAST, rather than buffering the
+      // request and then walking it again. The store still decides what it does
+      // with the stream (the Postgres provider collects it, because pg cannot
+      // stream a parameter in), but nothing on this side holds a second copy.
+      const hash = createHash("sha256");
+      const head: Buffer[] = [];
+      let headBytes = 0;
+      let received = 0;
+      const meter = new Transform({
+        transform(chunk, _enc, cb) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+          received += buf.byteLength;
+          if (received > declared) {
+            cb(new Error("size_mismatch"));
+            return;
+          }
+          hash.update(buf);
+          if (headBytes < SNIFF_BYTES) {
+            const take = buf.subarray(0, SNIFF_BYTES - headBytes);
+            head.push(take);
+            headBytes += take.byteLength;
+          }
+          cb(null, buf);
+        },
+      });
+
+      const store = await resolveStoreForRow(row);
+      const key = storageKeyForRow(row);
+      try {
+        await store.put({
+          key,
+          blobId: row.id,
+          vaultId: row.vault_id ?? "",
+          body: Readable.fromWeb(webBody as never).pipe(meter),
+          size: declared,
+          mime: row.mime ?? "application/octet-stream",
+          sha256: row.sha256,
+          filename: row.filename,
+          relPath: row.rel_path,
+        });
+      } catch (e) {
+        if ((e as Error)?.message === "size_mismatch") {
+          await store.delete(key).catch(() => {});
+          return c.json(
+            { error: "More bytes arrived than the upload declared", code: "size_mismatch" },
+            400,
+          );
+        }
+        return storeError(c, e);
+      }
+
+      // Verification. The row stays `pending` on a failure and only the bytes
+      // are dropped, so the client may retry with the SAME token and blob id
+      // rather than re-running intent; the sweep collects it if it never does.
+      if (received !== declared) {
+        await store.delete(key).catch(() => {});
+        return c.json(
+          { error: `Expected ${declared} bytes, received ${received}`, code: "size_mismatch" },
+          400,
+        );
+      }
+      const actual = hash.digest("hex");
+      if (!shaEquals(actual, row.sha256)) {
+        await store.delete(key).catch(() => {});
+        return c.json(
+          { error: "The bytes do not hash to the declared sha256", code: "sha_mismatch" },
+          400,
+        );
+      }
+      const mime = row.mime ?? "application/octet-stream";
+      if (hasMagicSignature(mime)) {
+        const sniffed = await sniffMime(Buffer.concat(head));
+        if (!mimeMatchesBytes(mime, sniffed)) {
+          await store.delete(key).catch(() => {});
+          return c.json(
+            {
+              error: `Content-Type ${mime} does not match the uploaded bytes (${sniffed})`,
+              code: "content_type_mismatch",
+            },
+            400,
+          );
+        }
+      }
+      // 204 and not the metadata: `complete` is what publishes the blob, and a
+      // client that treated a 2xx here as "done" would have a blob nobody can
+      // list. One meaning per step.
+      return c.body(null, 204);
+    } finally {
+      uploadBudget.release(declared);
+    }
+  },
+);
+
+/**
+ * More presigned part URLs for an upload already in flight.
+ *
+ * Authorized by the same upload token as the data PUT — a long multipart
+ * transfer outlives its first batch of presigns, and re-running `intent` would
+ * start a second multipart upload rather than continuing this one.
+ */
+blobRoutes.post("/blobs/:id/parts", async (c) => {
+  const unauthorized = () =>
+    c.json({ error: "Invalid or expired upload token", code: "invalid_upload_token" }, 401);
+
+  const raw = c.req.query("t");
+  if (!raw) return unauthorized();
+  let claims;
+  try {
+    claims = await verifyUploadToken(raw);
+  } catch {
+    return unauthorized();
+  }
+  if (claims.blobId !== c.req.param("id") || !claims.uploadId) return unauthorized();
+
+  const row = await uploadRow(claims.blobId);
+  if (!row) return c.json({ error: "Blob not found" }, 404);
+  if (row.status === "ready") {
+    return c.json({ error: "This blob already has its bytes", code: "already_uploaded" }, 409);
+  }
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    /* an empty body is legal — see the default below */
+  }
+  const requested = Array.isArray(body.partNumbers) ? body.partNumbers : [];
+  const partNumbers = requested
+    .map((n) => Number(n))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 10_000);
+  if (partNumbers.length === 0) {
+    return c.json({ error: "partNumbers must be a non-empty array", code: "invalid_parts" }, 400);
+  }
+
+  try {
+    const store = await resolveStoreForRow(row);
+    const presigned = await store.presignParts(
+      storageKeyForRow(row),
+      claims.uploadId,
+      partNumbers,
+    );
+    return c.json(presigned, 200);
+  } catch (e) {
+    return storeError(c, e);
+  }
+});
+
+/**
+ * Verify what landed and publish the blob.
+ *
+ * Session-gated again (the token's job ended with the bytes), because this is
+ * the step that makes the blob visible to every other member of the vault.
+ * Everything it checks is something the server can see WITHOUT the bytes having
+ * passed through it: the object's real size, and the first 64 KB of it.
+ *
+ * What it does NOT do is re-hash the object. On a direct upload that would mean
+ * streaming the whole file back out of the bucket to check a number the
+ * authenticated uploader supplied about bytes only they ever held — see the
+ * integrity note in `blobs/s3-store.ts`. Size and magic bytes are what actually
+ * protect the store; the sha is the content ADDRESS.
+ */
+blobRoutes.post("/blobs/:id/complete", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+
+  const row = await uploadRow(c.req.param("id"));
+  if (!row) return c.json({ error: "Blob not found" }, 404);
+
+  const org = row.vault_id ? await vaultOrg(row.vault_id) : row.org_id;
+  if (!org || !(await orgRole(org, session.userId))) {
+    return c.json({ error: "Not a member of this vault" }, 403);
+  }
+  if (row.vault_id && !(await canWriteAttachment(session.userId, row.vault_id))) {
+    return c.json({ error: "This vault is read-only for you" }, 403);
+  }
+
+  // Idempotent: a client that retries `complete` (or two devices that finished
+  // the same content) get the same metadata, not an error.
+  if (row.status === "ready") return c.json(toMeta(row), 200);
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    /* no body is the single-PUT case */
+  }
+
+  const expected = Number(row.size);
+  let store: BlobStore;
+  let key: string;
+  try {
+    store = await resolveStoreForRow(row);
+    key = storageKeyForRow(row);
+  } catch (e) {
+    return storeError(c, e);
+  }
+
+  /** Mismatch ⇒ the bytes are wrong, so neither they nor the row may survive:
+   *  a pending row holds the dedupe slot, and leaving it would make the NEXT
+   *  upload of this content adopt a blob that failed verification. */
+  const reject = async (error: string, code: string) => {
+    await store.delete(key).catch(() => {});
+    await pool.query("DELETE FROM blobs WHERE id = $1 AND status = 'pending'", [row.id]);
+    return c.json({ error, code }, 400);
+  };
+
+  // A client MAY restate the hash it uploaded. Disagreeing with the row means
+  // the two sides are talking about different content — the bytes at this key
+  // are not the bytes this blob id addresses — so it is rejected exactly like a
+  // size or type mismatch, object and row together.
+  const claimedSha = normalizeSha(typeof body.sha256 === "string" ? body.sha256 : null);
+  if (claimedSha && !shaEquals(claimedSha, row.sha256)) {
+    return reject(
+      "sha256 does not match the blob this upload was opened for",
+      "checksum_mismatch",
+    );
+  }
+
+  try {
+    const uploadId = typeof body.uploadId === "string" ? body.uploadId : null;
+    if (uploadId) {
+      const parts: CompletedPart[] = (Array.isArray(body.parts) ? body.parts : [])
+        .map((p) => p as { partNumber?: unknown; etag?: unknown })
+        .filter((p) => Number.isInteger(Number(p.partNumber)) && typeof p.etag === "string")
+        .map((p) => ({ partNumber: Number(p.partNumber), etag: p.etag as string }));
+      if (parts.length === 0) {
+        return c.json(
+          { error: "A multipart complete needs its parts", code: "invalid_parts" },
+          400,
+        );
+      }
+      await store.completeMultipart(key, uploadId, parts);
+    }
+
+    const head = await store.head(key);
+    // No object at all: the bytes never arrived (or a multipart was never
+    // completed). 409, not 404 — the BLOB exists, the upload is unfinished, and
+    // the client's move is to send the bytes, not to start over.
+    if (!head) {
+      return c.json(
+        { error: "No bytes have been uploaded for this blob yet", code: "upload_incomplete" },
+        409,
+      );
+    }
+    if (head.size !== expected) {
+      return reject(`Expected ${expected} bytes, the object holds ${head.size}`, "size_mismatch");
+    }
+
+    const mime = row.mime ?? "application/octet-stream";
+    if (hasMagicSignature(mime)) {
+      // 64 KB, not 4: the zip family (docx/xlsx/pptx/zip) is told apart by an
+      // entry name inside the archive rather than by its first four bytes.
+      const peeked = await store.peek(key, SNIFF_BYTES);
+      const sniffed = peeked ? await sniffMime(peeked) : null;
+      if (!mimeMatchesBytes(mime, sniffed)) {
+        return reject(
+          `Content-Type ${mime} does not match the uploaded bytes (${sniffed})`,
+          "content_type_mismatch",
+        );
+      }
+    }
+
+    const { rows } = await pool.query<BlobRow>(
+      `UPDATE blobs SET status = 'ready', size = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING id, sha256, size, mime, rel_path, filename`,
+      [row.id, head.size],
+    );
+    return c.json(toMeta(rows[0]), 200);
+  } catch (e) {
+    return storeError(c, e);
+  }
+});
+
 // ── list ──────────────────────────────────────────────────────────────────
 blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
   const session = await getSession(c);
@@ -365,9 +995,25 @@ interface DownloadRow {
   org_id: string | null;
   mime: string | null;
   rel_path: string | null;
+  filename: string | null;
   size: string | number | null;
+  status: string;
   storage_provider: string | null;
   storage_key: string | null;
+}
+
+/** `bytes=<start>-<end?>`. Multi-range and suffix ranges are ignored (the whole
+ *  object is served), which is what every store here can actually honour. */
+function parseRange(header: string | undefined): { start: number; end?: number } | null {
+  if (!header) return null;
+  const m = /^bytes=(\d+)-(\d+)?$/.exec(header.trim());
+  if (!m) return null;
+  const start = Number(m[1]);
+  const end = m[2] === undefined ? undefined : Number(m[2]);
+  if (!Number.isFinite(start) || (end !== undefined && (!Number.isFinite(end) || end < start))) {
+    return null;
+  }
+  return end === undefined ? { start } : { start, end };
 }
 
 /**
@@ -387,12 +1033,17 @@ async function authorizeDownload(
 
   const id = c.req.param("id");
   const { rows } = await pool.query<DownloadRow>(
-    `SELECT id, vault_id, org_id, mime, rel_path, size, storage_provider, storage_key
+    `SELECT id, vault_id, org_id, mime, rel_path, filename, size, status,
+            storage_provider, storage_key
        FROM blobs WHERE id = $1`,
     [id],
   );
   const blob = rows[0];
   if (!blob) return { deny: c.json({ error: "Blob not found" }, 404) };
+  // A `pending` row is an upload in flight or an abandoned one: it has a
+  // (vault, sha256) slot but no publishable bytes. The list route already hides
+  // them, and a download has to agree or a client could fetch half a file.
+  if (blob.status !== "ready") return { deny: c.json({ error: "Blob not found" }, 404) };
 
   // Membership is necessary but not sufficient (via the blob's note collection,
   // or its org_id fallback for legacy rows without vault_id).
@@ -427,6 +1078,20 @@ function downloadHeaders(row: DownloadRow, size: number, acceptRanges: boolean) 
   };
 }
 
+/**
+ * What the provider must pin onto the response — for S3 that means baking
+ * `response-content-type` / `response-content-disposition` into the SIGNATURE,
+ * so an object whose uploader set its metadata to `text/html` still comes back
+ * as a download of the type the ROW says it is.
+ */
+function getOptionsFor(row: DownloadRow) {
+  return {
+    mime: row.mime || "application/octet-stream",
+    filename: row.filename,
+    disposition: "attachment" as const,
+  };
+}
+
 blobRoutes.get("/blobs/:id", async (c) => {
   const gate = await authorizeDownload(c);
   if ("deny" in gate) return gate.deny;
@@ -438,15 +1103,71 @@ blobRoutes.get("/blobs/:id", async (c) => {
   // `data` column on an S3 row is normal, not a 404.
   try {
     const store = await resolveStoreForRow(blob);
-    const result = await store.get(storageKeyForRow(blob));
+    const range = parseRange(c.req.header("range"));
+    const result = await store.get(storageKeyForRow(blob), {
+      ...getOptionsFor(blob),
+      ...(range ? { range } : {}),
+    });
+    // s3 without `S3_PROXY_DOWNLOADS`: 302 to a short-lived presigned GET. This
+    // is the BROWSER-context path (a public link, a webview `<img>`); the
+    // desktop asks `GET /api/blobs/:id/url` instead, because reqwest forwards
+    // `Authorization` across a redirect and S3 refuses a presign that arrives
+    // with one.
     if (result.kind === "redirect") {
       return c.redirect(result.url, 302);
     }
-    return c.body(
-      Readable.toWeb(result.body) as ReadableStream,
-      200,
-      downloadHeaders(blob, result.size, result.acceptRanges),
-    );
+    const headers = downloadHeaders(blob, result.size, result.acceptRanges);
+    if (result.range) {
+      return c.body(Readable.toWeb(result.body) as ReadableStream, 206, {
+        ...headers,
+        "Content-Range": `bytes ${result.range.start}-${result.range.end}/${result.totalSize}`,
+      });
+    }
+    return c.body(Readable.toWeb(result.body) as ReadableStream, 200, headers);
+  } catch (e) {
+    return storeError(c, e);
+  }
+});
+
+/**
+ * Where to fetch the bytes from, as JSON.
+ *
+ * The desktop's transport uses this rather than following `GET /api/blobs/:id`'s
+ * 302, for one concrete reason: reqwest does not strip `Authorization` when it
+ * follows a redirect, and S3 rejects a request that carries both a presigned
+ * signature and an `Authorization` header. A URL in a JSON body is fetched with
+ * a clean client and no such collision.
+ *
+ * Same ACL as the download it replaces. The Postgres provider answers with a
+ * same-origin URL to that very route and no expiry — there is nothing to
+ * presign, and the client's bearer is what authorizes it.
+ */
+blobRoutes.get("/blobs/:id/url", async (c) => {
+  const gate = await authorizeDownload(c);
+  if ("deny" in gate) return gate.deny;
+  const blob = gate.row;
+
+  try {
+    const store = await resolveStoreForRow(blob);
+    if (store.provider === "postgres") {
+      return c.json({
+        url: `${apiOrigin(c)}/api/blobs/${encodeURIComponent(blob.id)}`,
+        expiresAt: null,
+        direct: false,
+      });
+    }
+    const result = await store.get(storageKeyForRow(blob), getOptionsFor(blob));
+    if (result.kind !== "redirect") {
+      // `S3_PROXY_DOWNLOADS=1` — the bucket is deliberately not reachable by
+      // clients, so the only URL worth handing out is this server's own.
+      result.body.destroy();
+      return c.json({
+        url: `${apiOrigin(c)}/api/blobs/${encodeURIComponent(blob.id)}`,
+        expiresAt: null,
+        direct: false,
+      });
+    }
+    return c.json({ url: result.url, expiresAt: result.expiresAt, direct: true });
   } catch (e) {
     return storeError(c, e);
   }

@@ -21,21 +21,37 @@
  */
 import { Readable } from "node:stream";
 import { pool } from "../db/pool.js";
-import { MAX_BLOB_BYTES } from "./config.js";
+import { config } from "../config.js";
+import { MAX_BLOB_BYTES, UPLOAD_TOKEN_TTL_SECONDS } from "./config.js";
 import type { BlobProvider } from "./config.js";
 import { CATEGORY_MAX_BYTES, type FormatCategory } from "./formats.js";
+import { mintUploadToken } from "./upload-token.js";
 import {
   BlobStoreError,
   type BlobStore,
+  type CompletedPart,
   type GetOptions,
   type GetResult,
   type HeadResult,
+  type PresignMultipartInput,
   type PresignUploadInput,
+  type PresignedMultipart,
+  type PresignedPart,
   type PresignedUpload,
   type PutInput,
   type PutResult,
   type Queryable,
 } from "./store.js";
+
+/** Absolute origin for the same-origin upload URL, the way every other
+ *  absolute URL this server hands out is built. */
+function publicOrigin(): string {
+  try {
+    return new URL(config.betterAuthUrl).origin;
+  } catch {
+    return "";
+  }
+}
 
 /** Collect a stream into one Buffer, without a needless copy of a single chunk. */
 async function collect(body: Readable): Promise<Buffer> {
@@ -49,6 +65,10 @@ async function collect(body: Readable): Promise<Buffer> {
 
 export class PostgresBlobStore implements BlobStore {
   readonly provider: BlobProvider = "postgres";
+
+  /** No multipart: there is no object store to assemble parts in, and the
+   *  25 MB transport bound is far below any threshold worth splitting. */
+  readonly multipartThresholdBytes = null;
 
   async put(input: PutInput, db: Queryable = pool): Promise<PutResult> {
     const buf = await collect(input.body);
@@ -110,12 +130,73 @@ export class PostgresBlobStore implements BlobStore {
     await pool.query("UPDATE blobs SET data = NULL, updated_at = now() WHERE id = $1", [key]);
   }
 
-  async presignUpload(_input: PresignUploadInput): Promise<PresignedUpload> {
+  /**
+   * The Postgres half of a presigned URL: a same-origin
+   * `PUT /api/blobs/:id/data?t=<HS256 upload token>`.
+   *
+   * There is no object store to presign against, so this server IS the object
+   * store and the token is the signature. The point is that the CLIENT cannot
+   * tell the difference — `intent` returns the same `{method, url, headers,
+   * expiresAt}` shape for both providers, so `AttachmentSync` has one code path
+   * and a self-hoster who never configures a bucket gets the same dedupe-first,
+   * zero-byte-for-known-content flow as a managed instance.
+   *
+   * `direct: false` is the one honest difference, and it is advisory: it tells
+   * a client the bytes will pass through the API (so the server's own size cap
+   * applies, and a progress bar should expect one hop, not two).
+   */
+  async presignUpload(input: PresignUploadInput): Promise<PresignedUpload> {
+    const token = await mintUploadToken(
+      {
+        blobId: input.blobId,
+        vaultId: input.vaultId,
+        sha256: input.sha256,
+        size: input.size,
+      },
+      UPLOAD_TOKEN_TTL_SECONDS,
+    );
+    const origin = input.origin ?? publicOrigin();
+    return {
+      method: "PUT",
+      url: `${origin}/api/blobs/${encodeURIComponent(input.blobId)}/data?t=${encodeURIComponent(token)}`,
+      headers: {
+        "content-type": input.mime,
+        "content-length": String(input.size),
+      },
+      expiresAt: Date.now() + UPLOAD_TOKEN_TTL_SECONDS * 1000,
+      direct: false,
+    };
+  }
+
+  async presignMultipart(_input: PresignMultipartInput): Promise<PresignedMultipart> {
     throw new BlobStoreError(
       "not_supported",
-      "the postgres provider has no object store to presign against — PR 2b gives it a same-origin signed PUT instead",
+      "the postgres provider has no multipart upload — its whole ceiling is one MAX_BLOB_BYTES body",
     );
   }
+
+  async presignParts(
+    _key: string,
+    _uploadId: string,
+    _partNumbers: number[],
+  ): Promise<{ parts: PresignedPart[]; expiresAt: number }> {
+    throw new BlobStoreError("not_supported", "the postgres provider has no multipart upload");
+  }
+
+  async completeMultipart(
+    _key: string,
+    _uploadId: string,
+    _parts: CompletedPart[],
+  ): Promise<PutResult> {
+    throw new BlobStoreError("not_supported", "the postgres provider has no multipart upload");
+  }
+
+  async abortMultipart(_key: string, _uploadId: string): Promise<void> {
+    throw new BlobStoreError("not_supported", "the postgres provider has no multipart upload");
+  }
+
+  /** No-op: nothing to abandon. The sweep calls this on every pending row. */
+  async abortMultipartsForKey(_key: string): Promise<void> {}
 
   async peek(key: string, bytes: number): Promise<Buffer | null> {
     const { rows } = await pool.query<{ head: Buffer | null }>(

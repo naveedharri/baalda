@@ -24,6 +24,7 @@
 - More kinds of files open inside Baalda: Word documents, spreadsheets, CSV, audio, video, code and JSON files, with PowerPoint and zip files showing a card with "Open externally". Plain-text and Markdown-variant notes that used to do nothing when clicked now open in the editor and appear in search.
 - Dropping or pasting a file into a note embeds it: video and audio play inline, CSV shows as a table, other files become a chip you can click. Files too large to sync are refused with a message instead of silently never reaching teammates.
 - Fixed PDFs, HTML previews and embedded videos not loading in installed builds; on Windows, images inside notes were blocked entirely.
+- Servers can now keep attachments in S3-compatible object storage (Amazon S3, Cloudflare R2 or a self-hosted MinIO) instead of the database, which lifts the per-file limit to 500 MB for video and large documents. Postgres stays the default with no setup, and files you already have on another device are never uploaded twice.
 - Linux: Baalda no longer re-indexes your vault non-stop while it sits idle, which was keeping a core busy and writing to disk constantly.
 - Baalda now checks whether a file's contents actually changed before doing anything with it, so backup, git and cloud-sync tools touching your vault no longer cause re-indexing or re-syncing.
 

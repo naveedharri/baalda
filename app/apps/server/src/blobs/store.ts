@@ -21,7 +21,7 @@
  */
 import type { Readable } from "node:stream";
 import type { BlobProvider } from "./config.js";
-import { BLOB_STORAGE } from "./config.js";
+import { BLOB_STORAGE, s3Config } from "./config.js";
 import type { FormatCategory } from "./formats.js";
 
 /** Typed failures every provider raises, so routes can map them to statuses. */
@@ -65,6 +65,8 @@ export interface PutInput {
   mime: string;
   sha256: string;
   filename: string | null;
+  /** Vault-relative path, for a provider that can carry it as object metadata. */
+  relPath?: string | null;
 }
 
 export interface PutResult {
@@ -75,6 +77,22 @@ export interface PutResult {
 export interface GetOptions {
   /** Byte range the caller asked for. Providers that cannot serve one ignore it. */
   range?: { start: number; end?: number };
+  /**
+   * `Content-Type` the response must carry.
+   *
+   * Passed in from the ROW, never read off the stored object. An uploader
+   * controls what it PUTs to a presigned URL, including the object's own
+   * `Content-Type` metadata, so letting the bucket choose the download's type
+   * would hand an attacker `text/html` on a URL a browser will happily open.
+   * The route decides it from `blobs.mime` (and its own inline/attachment
+   * policy) and the provider pins it — for S3 via `response-content-type`,
+   * which overrides the object's metadata in the presigned GET itself.
+   */
+  mime?: string;
+  /** Filename for `Content-Disposition`. Same rule: from the row, not the object. */
+  filename?: string | null;
+  /** Defaults to `attachment`; only passive, allow-listed media is ever `inline`. */
+  disposition?: "inline" | "attachment";
 }
 
 export type GetResult =
@@ -103,6 +121,18 @@ export interface PresignUploadInput {
   size: number;
   mime: string;
   sha256: string;
+  /**
+   * Absolute origin for a provider whose upload URL points back at THIS server
+   * (the Postgres one). Absent ⇒ the provider falls back to `BETTER_AUTH_URL`,
+   * which is what every other absolute URL this server hands out is built from.
+   */
+  origin?: string;
+  /**
+   * Base64 `Content-MD5` the client will send, when it has one. Only used when
+   * `S3_CHECKSUM_MODE` resolves to `md5`; absent ⇒ no checksum header is signed
+   * and integrity rests on the size check and the sniff at `complete`.
+   */
+  md5Base64?: string;
 }
 
 export interface PresignedUpload {
@@ -115,8 +145,41 @@ export interface PresignedUpload {
   direct: boolean;
 }
 
+export interface PresignMultipartInput extends PresignUploadInput {
+  /** Bytes per part. The provider clamps it to its own legal range. */
+  partBytes?: number;
+}
+
+export interface PresignedPart {
+  partNumber: number;
+  url: string;
+}
+
+export interface PresignedMultipart {
+  /** Opaque id the client echoes back on `complete` and on further part presigns. */
+  uploadId: string;
+  partBytes: number;
+  parts: PresignedPart[];
+  /** Epoch ms. */
+  expiresAt: number;
+  direct: boolean;
+}
+
+/** One finished part, as the client reports it. */
+export interface CompletedPart {
+  partNumber: number;
+  /** The `ETag` header the part's PUT returned. Quoting is normalised by the provider. */
+  etag: string;
+}
+
 export interface BlobStore {
   readonly provider: BlobProvider;
+
+  /**
+   * Size at which this provider wants a multipart upload, or null when it has
+   * no multipart at all (then the routes always presign a single PUT).
+   */
+  readonly multipartThresholdBytes: number | null;
 
   /**
    * Write an object for an existing `blobs` row. `db` lets a database-backed
@@ -148,6 +211,41 @@ export interface BlobStore {
    * upload the server never saw. Null when the object does not exist.
    */
   peek(key: string, bytes: number): Promise<Buffer | null>;
+
+  /**
+   * Begin a multipart upload and presign its first parts.
+   *
+   * Providers without multipart throw `not_supported`; the routes only reach
+   * this when {@link multipartThresholdBytes} is non-null, so the throw is a
+   * bug-catcher rather than a path a client can drive into.
+   */
+  presignMultipart(input: PresignMultipartInput): Promise<PresignedMultipart>;
+
+  /** Presign more parts of an upload already in progress. */
+  presignParts(
+    key: string,
+    uploadId: string,
+    partNumbers: number[],
+  ): Promise<{ parts: PresignedPart[]; expiresAt: number }>;
+
+  /** Assemble the parts into the final object. Returns its size. */
+  completeMultipart(key: string, uploadId: string, parts: CompletedPart[]): Promise<PutResult>;
+
+  /**
+   * Abandon an upload and discard its parts. Must be safe to call on an upload
+   * that is already gone — the sweep calls it speculatively.
+   */
+  abortMultipart(key: string, uploadId: string): Promise<void>;
+
+  /**
+   * Abandon EVERY multipart upload outstanding for this key.
+   *
+   * The pending sweep has a row and a key but no upload id (there is no column
+   * for one — an upload id lives in the client's hands for the life of the
+   * upload and nowhere else), so this is how abandoned parts stop being billed.
+   * A provider without multipart makes it a no-op.
+   */
+  abortMultipartsForKey(key: string): Promise<void>;
 
   /** This provider's ceiling for a category — the category cap clamped to what it can hold. */
   maxBytes(category: FormatCategory): number;
@@ -189,6 +287,22 @@ async function getPostgresStore(): Promise<BlobStore> {
   return postgresStore;
 }
 
+let s3Store: BlobStore | undefined;
+/**
+ * The S3 provider, or `storage_unavailable` when this build has no bucket
+ * configured. Imported lazily so a Postgres-only deployment never loads the AWS
+ * SDK (it is several MB of JS, and the module graph is walked at startup).
+ */
+async function getS3Store(reason: string): Promise<BlobStore> {
+  if (!s3Store) {
+    const cfg = s3Config();
+    if (!cfg) throw new BlobStoreError("storage_unavailable", reason);
+    const { S3BlobStore } = await import("./s3-store.js");
+    s3Store = new S3BlobStore(cfg);
+  }
+  return s3Store;
+}
+
 /** The store NEW blobs are written to, per {@link BLOB_STORAGE}. */
 export function createBlobStore(): Promise<BlobStore> {
   // `config.ts` already failed the process closed on anything but `postgres`;
@@ -197,6 +311,11 @@ export function createBlobStore(): Promise<BlobStore> {
   switch (BLOB_STORAGE) {
     case "postgres":
       return getPostgresStore();
+    case "s3":
+      // `config.ts` already refused to start without a complete bucket config,
+      // so this can only fail if the environment changed under a running
+      // process.
+      return getS3Store("BLOB_STORAGE=s3 but no S3 bucket is configured");
     default:
       throw new BlobStoreError(
         "storage_unavailable",
@@ -213,6 +332,14 @@ export function createBlobStore(): Promise<BlobStore> {
 export function resolveStoreForRow(row: StorageRow): Promise<BlobStore> {
   const provider = (row.storage_provider ?? "postgres").toLowerCase();
   if (provider === "postgres") return getPostgresStore();
+  if (provider === "s3") {
+    // Deliberately NOT gated on `BLOB_STORAGE`: an operator who flipped new
+    // writes back to Postgres must still be able to READ everything written
+    // while S3 was on, so the bucket config alone decides this.
+    return getS3Store(
+      `blob ${row.id} is stored on S3, which this server has no bucket configuration for`,
+    );
+  }
   throw new BlobStoreError(
     "storage_unavailable",
     `blob ${row.id} is stored on \`${provider}\`, which this server has no configuration for`,
@@ -222,4 +349,5 @@ export function resolveStoreForRow(row: StorageRow): Promise<BlobStore> {
 /** Test seam: drop the memoised provider instances. */
 export function resetBlobStores(): void {
   postgresStore = undefined;
+  s3Store = undefined;
 }
