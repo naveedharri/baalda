@@ -152,7 +152,10 @@ export function useGraphData(): GraphDataState {
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
     onFilesChanged((changes) => {
-      if (changes.length > 0) collect(changes);
+      // Same bytes as the index already held (#155): no link, tag or title a
+      // node or edge is built from can have moved, so the graph is not dirty.
+      const real = changes.filter((c) => !c.unchanged);
+      if (real.length > 0) collect(real);
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;

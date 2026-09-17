@@ -53,6 +53,45 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **Linux re-indexed an idle vault forever (#155, reported and diagnosed by
+  @cjpatten).** `notify`'s inotify backend subscribes with `WatchMask::OPEN`
+  next to CREATE/MODIFY/DELETE, so every *read* of a file or directory produces
+  an `EventKind::Access` event. `watcher.rs` forwarded every event's paths to
+  the drain thread and `plan_batch` classifies any existing `.md` as `modified`
+  (it only asks whether the path exists) — and indexing a batch reads the notes
+  in it, which emitted a fresh round of Access events, which re-indexed them. An
+  untouched 503-note vault ran `index_notes` 264–335 times a minute and wrote
+  ~32 MB/s into `.context/index.sqlite`. The watcher callback now drops an event
+  iff it is `EventKind::Access(_)`, is not `Access(Close(AccessMode::Write))` and
+  carries no Rescan flag (`watcher.rs should_forward`). `Close(Write)` is kept
+  because on inotify it is the reliable end-of-write signal for editors that
+  write in place; a Rescan-flagged event is kept because it means the backend's
+  queue overflowed and the batch must still be re-indexed. macOS/FSEvents and
+  Windows never emit Access, so their behaviour is unchanged. Three unit tests
+  in `watcher.rs` pin the three groups.
+- **An unchanged file is no longer re-indexed or re-synced (#155, defence in
+  depth).** The incremental index path had no content check: every path handed
+  to `Index::index_notes` was read, parsed and rewritten across `notes`,
+  `notes_fts`, `note_tags` and `links`, then included in the scoped
+  `resolve_links` pass — even when the bytes were byte-for-byte what was already
+  indexed. `rebuild` has always skipped unchanged files (by mtime); only the
+  incremental path paid. `index_one` now hashes the file it just read and
+  compares it against the `sha256` the row already holds for that same path: a
+  match writes nothing at all, refreshing only `notes.mtime` (single-column
+  UPDATE, so `rebuild`'s mtime skip still fires) and returning
+  `IndexedNote::Unchanged`, which keeps the doc out of `touched` — a batch of
+  untouched files runs no link pass. A NULL `sha256`, a row at a different path
+  and a file with no row are all treated as changed. `index_notes` returns an
+  `IndexOutcome { failures, unchanged }`, the watcher forwards the unchanged
+  paths as `unchanged: true` on the matching `modified` entries of
+  `files-changed` (entries are never dropped: the TS side needs exactly one echo
+  per materialised path, and a `modified` is what cancels a pending disk
+  delete), and the `index_notes` log line now reports the unchanged count. The
+  event source behind #155 is fixed at the watcher; this makes any other
+  spurious source — a backup, git or cloud-sync tool rewriting identical bytes,
+  or Windows reporting an attribute change as `Modify(Metadata)` — cost one read
+  and one hash instead of the whole index. Six tests in `index.rs` and two in
+  `watcher.rs`.
 - **"Syncing" on note open, third cause — the provider handshake.** Hocuspocus
   reports `onUnsyncedChanges` for the sync-step/awareness messages it queues
   while the socket comes up, and `DocSync` turned any count > 0 into

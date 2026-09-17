@@ -10,10 +10,25 @@
 //!
 //! `.context/` and dotfolders are ignored so the app's own state dir never
 //! feeds the note pipeline (spec 02 §2 hard rule).
+//!
+//! Read-only events are dropped at the source ([`should_forward`]): on Linux
+//! `notify`'s inotify backend reports every open/read/close-after-read, and
+//! indexing a note is itself a read, so forwarding those made the watcher feed
+//! itself forever.
+//!
+//! Whatever still gets through is priced by content, not by the event: the index
+//! compares each file's sha256 against the row it already holds, and a path whose
+//! bytes did not change is reported back as `unchanged` and forwarded to the UI
+//! as `unchanged: true` on its [`FileChanged`] entry. The entry is NOT dropped —
+//! the TS side counts on exactly one watcher echo per path it materialises
+//! (`registry.consumeMaterialized`) and on a `modified` cancelling a pending disk
+//! delete — it just lets the UI and the sync layer skip the expensive half
+//! (re-reading the note, diffing it into the CRDT, re-uploading it).
 
 use crate::index::Index;
 use crate::vault::{rel_from_abs, rel_path_is_ignored};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -37,6 +52,19 @@ pub struct FileChanged {
     pub path: String,
     /// "modified" | "removed" | "tree" (folder/structure change).
     pub kind: String,
+    /// The index re-read this file and its bytes were identical to what it had
+    /// already indexed, so nothing was rewritten — the event fired for something
+    /// that is not a content change (a metadata/attribute touch, a backup or
+    /// cloud-sync tool rewriting the same bytes, our own echo).
+    ///
+    /// Always `false` for `removed` and `tree`, which have no content to compare.
+    ///
+    /// The entry is still emitted rather than filtered out, because the TS side
+    /// treats the echo itself as meaningful: `registry.consumeMaterialized`
+    /// expects exactly one per path it wrote, and a `modified` inside the
+    /// `DISK_DELETE_GRACE_MS` window is what cancels a pending disk delete. The
+    /// flag only tells it to skip the work that would have no effect.
+    pub unchanged: bool,
 }
 
 /// Payload of the single `files-changed` event emitted per batch.
@@ -109,6 +137,40 @@ impl Drop for VaultWatcher {
     }
 }
 
+/// Should this raw `notify` event reach the drain thread at all?
+///
+/// Everything is forwarded EXCEPT a pure read: `Access(_)` in every shape
+/// (open, read, close-after-read) other than `Access(Close(Write))`.
+///
+/// Why. Linux is the only platform that reports reads. `notify`'s inotify
+/// backend subscribes with `WatchMask::OPEN` alongside CREATE/MODIFY/DELETE, so
+/// merely *reading* a file — or a directory — produces `EventKind::Access`
+/// events. Indexing a batch reads every note in it, which produced a fresh
+/// round of Access events, which `plan_batch` classified as `modified` (it only
+/// asks whether the path exists), which re-indexed them: a vault that nobody
+/// touched re-indexed itself 264–335 times a minute and wrote ~32 MB/s into
+/// `.context/index.sqlite` (#155). macOS/FSEvents and Windows
+/// `ReadDirectoryChangesW` never emit Access, so their behaviour is unchanged.
+///
+/// Two deliberate exceptions:
+/// - `Access(Close(Write))` is KEPT. On inotify that is `IN_CLOSE_WRITE`, the
+///   reliable "the writer is done" signal for editors that write a file in
+///   place (no temp+rename, so no Create/Rename to lean on). It follows a write,
+///   never a read, so it cannot feed the loop.
+/// - An event carrying the Rescan flag is KEPT whatever its kind: that flag
+///   means the backend's queue overflowed and state may have been missed, so it
+///   must still reach the drain thread and re-index the batch.
+pub(crate) fn should_forward(event: &notify::Event) -> bool {
+    if event.need_rescan() {
+        return true;
+    }
+    match event.kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
 /// Start watching `vault`. Returns a handle that must be kept alive.
 pub fn start(
     vault: PathBuf,
@@ -119,6 +181,9 @@ pub fn start(
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
+            if !should_forward(&event) {
+                return;
+            }
             // Forward the event's paths; the drain thread decides what to do.
             let _ = tx.send(event.paths);
         }
@@ -267,6 +332,7 @@ fn process_batch(
     // held for the whole batch. A UI command only ever waits for the chunk in
     // flight. See `CHUNK`.
     let mut chunks = 0usize;
+    let mut unchanged: HashSet<PathBuf> = HashSet::new();
     for slice in plan.modified.chunks(CHUNK) {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -277,10 +343,11 @@ fn process_batch(
         chunks += 1;
         {
             let guard = index.lock().unwrap();
-            if let Ok(failures) = guard.index_notes(vault, slice) {
-                for (path, err) in failures {
+            if let Ok(outcome) = guard.index_notes(vault, slice) {
+                for (path, err) in outcome.failures {
                     eprintln!("[watcher] index failed for {}: {err}", path.display());
                 }
+                unchanged.extend(outcome.unchanged);
             }
         }
     }
@@ -307,16 +374,30 @@ fn process_batch(
     let _ = app.emit(
         "files-changed",
         FilesChanged {
-            changes: plan
-                .changes
-                .into_iter()
-                .map(|c| FileChanged {
-                    path: c.rel,
-                    kind: c.kind.to_string(),
-                })
-                .collect(),
+            changes: mark_unchanged(plan.changes, &unchanged),
         },
     );
+}
+
+/// Turn the plan into the emitted payload, flagging the `modified` entries the
+/// index reported as byte-identical.
+///
+/// Split out so the flag can be tested without an `AppHandle`. Matching is by
+/// absolute path, which is exactly what `index_notes` was handed and hands back.
+/// `removed` and `tree` entries are always `unchanged: false` — there is no
+/// content comparison behind them.
+pub(crate) fn mark_unchanged(
+    changes: Vec<PlannedChange>,
+    unchanged: &HashSet<PathBuf>,
+) -> Vec<FileChanged> {
+    changes
+        .into_iter()
+        .map(|c| FileChanged {
+            unchanged: c.kind == "modified" && unchanged.contains(&c.abs),
+            path: c.rel,
+            kind: c.kind.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -468,7 +549,11 @@ mod tests {
             .into_iter()
             .collect();
         let plan = plan_batch(&v, batch);
-        assert!(idx.index_notes(&v, &plan.modified).unwrap().is_empty());
+        assert!(idx
+            .index_notes(&v, &plan.modified)
+            .unwrap()
+            .failures
+            .is_empty());
         assert!(idx.remove_notes(&v, &plan.removed).unwrap().is_empty());
 
         let paths: Vec<String> = idx
@@ -478,5 +563,158 @@ mod tests {
             .map(|t| t.path)
             .collect();
         assert_eq!(paths, vec!["Alpha.md".to_string()]);
+    }
+
+    /// The flag the UI reads: only `modified` entries the index reported as
+    /// byte-identical carry it, and nothing is ever dropped from the event.
+    #[test]
+    fn mark_unchanged_flags_only_the_matching_modified_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Same.md", "# Same").unwrap();
+        write_note(&v, "Edited.md", "# Edited").unwrap();
+        std::fs::create_dir_all(v.join("folder")).unwrap();
+
+        let batch: HashSet<PathBuf> = [
+            v.join("Same.md"),
+            v.join("Edited.md"),
+            v.join("Gone.md"),
+            v.join("folder"),
+        ]
+        .into_iter()
+        .collect();
+        let plan = plan_batch(&v, batch);
+
+        // The index saw Same.md as byte-identical. `Gone.md` is named too, to
+        // pin that a non-`modified` entry can never pick the flag up.
+        let unchanged: HashSet<PathBuf> =
+            [v.join("Same.md"), v.join("Gone.md")].into_iter().collect();
+        let changes = mark_unchanged(plan.changes, &unchanged);
+
+        assert_eq!(
+            changes,
+            vec![
+                FileChanged {
+                    path: "Edited.md".into(),
+                    kind: "modified".into(),
+                    unchanged: false,
+                },
+                FileChanged {
+                    path: "Gone.md".into(),
+                    kind: "removed".into(),
+                    unchanged: false,
+                },
+                FileChanged {
+                    path: "Same.md".into(),
+                    kind: "modified".into(),
+                    unchanged: true,
+                },
+                FileChanged {
+                    path: "folder".into(),
+                    kind: "tree".into(),
+                    unchanged: false,
+                },
+            ],
+            "every path is still reported; only the modified match is flagged"
+        );
+    }
+
+    /// The flag is derived from what the index actually did, not from the event:
+    /// re-indexing the same bytes must produce `unchanged: true` end to end.
+    #[test]
+    fn a_no_op_rewrite_reaches_the_event_as_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Alpha.md", "# Alpha\n\nbody").unwrap();
+        let idx = Index::open(&v).unwrap();
+        let plan = plan_batch(&v, [v.join("Alpha.md")]);
+        assert!(
+            idx.index_notes(&v, &plan.modified)
+                .unwrap()
+                .unchanged
+                .is_empty(),
+            "first pass indexes it"
+        );
+
+        // A second watcher event for a file nobody edited.
+        let plan = plan_batch(&v, [v.join("Alpha.md")]);
+        let out = idx.index_notes(&v, &plan.modified).unwrap();
+        let changes = mark_unchanged(plan.changes, &out.unchanged.into_iter().collect());
+        assert_eq!(
+            changes,
+            vec![FileChanged {
+                path: "Alpha.md".into(),
+                kind: "modified".into(),
+                unchanged: true,
+            }]
+        );
+    }
+
+    /// Linux-only feedback loop (#155). Every read-shaped inotify event must die
+    /// in the callback, or indexing (which reads the notes) re-dirties them.
+    #[test]
+    fn read_only_access_events_are_dropped() {
+        use notify::event::{AccessKind, AccessMode};
+        use notify::{Event, EventKind};
+
+        let read_kinds = [
+            EventKind::Access(AccessKind::Any),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Other),
+        ];
+        for kind in read_kinds {
+            let event = Event::new(kind).add_path(PathBuf::from("/vault/Note.md"));
+            assert!(
+                !should_forward(&event),
+                "{kind:?} is a read and must not reach the drain thread"
+            );
+        }
+    }
+
+    /// Everything that can mean "the bytes on disk changed" still gets through —
+    /// including `Close(Write)`, the in-place editor's end-of-write signal.
+    #[test]
+    fn writes_renames_and_deletes_are_forwarded() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+            RenameMode,
+        };
+        use notify::{Event, EventKind};
+
+        let write_kinds = [
+            EventKind::Create(CreateKind::Any),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            EventKind::Remove(RemoveKind::Any),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Any,
+            EventKind::Other,
+        ];
+        for kind in write_kinds {
+            let event = Event::new(kind).add_path(PathBuf::from("/vault/Note.md"));
+            assert!(
+                should_forward(&event),
+                "{kind:?} may have changed the file and must be forwarded"
+            );
+        }
+    }
+
+    /// The Rescan flag means the backend's queue overflowed, so its kind is not
+    /// to be trusted — forward it even though it claims to be a read.
+    #[test]
+    fn a_rescan_flagged_access_event_is_forwarded() {
+        use notify::event::{AccessKind, Flag};
+        use notify::{Event, EventKind};
+
+        let event = Event::new(EventKind::Access(AccessKind::Read))
+            .add_path(PathBuf::from("/vault/Note.md"))
+            .set_flag(Flag::Rescan);
+        assert!(event.need_rescan());
+        assert!(should_forward(&event));
     }
 }

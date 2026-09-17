@@ -54,18 +54,44 @@ export function nodeAt(node: TreeNode, path: string): TreeNode | null {
   return null;
 }
 
+/** The shape of one watcher entry the refresh planning below reads. */
+type WatcherChange = {
+  path: string;
+  kind: "modified" | "removed" | "tree";
+  /** The bytes did not move (`ipc.FileChanged.unchanged`, #155). */
+  unchanged?: boolean;
+};
+
+/**
+ * The entries in a watcher batch that can have changed what the UI shows.
+ *
+ * An `unchanged` entry is a file whose sha256 still equals the index's — our own
+ * egest echo, a `git checkout` back to the same bytes, or (the reason this exists)
+ * a spurious inotify read event. Nothing the sidebar, the titles, the backlinks or
+ * the graph derive from a note can differ, so re-listing folders and re-reading
+ * titles for it is pure work. A batch made ENTIRELY of them is empty here, which
+ * is the caller's cue not to arm a refresh at all.
+ */
+export function refreshWorthy<T extends WatcherChange>(changes: ReadonlyArray<T>): T[] {
+  return changes.filter((c) => !c.unchanged);
+}
+
 /**
  * The folders a watcher batch can have changed the LISTING of, for a targeted
  * sidebar refresh (#82): a modified or removed file changes only its parent
  * folder's listing. Returns null when the batch has a structural change (`tree`:
  * a folder created/removed/renamed, a non-note file) — those can move whole
  * subtrees, and only a full re-list is honest there.
+ *
+ * `unchanged` entries are ignored outright (not even their parent is implicated),
+ * and cannot make the answer `null` either — same bytes, same listing.
  */
 export function implicatedFolders(
-  changes: ReadonlyArray<{ path: string; kind: "modified" | "removed" | "tree" }>,
+  changes: ReadonlyArray<WatcherChange>,
 ): Set<string> | null {
   const dirs = new Set<string>();
   for (const c of changes) {
+    if (c.unchanged) continue;
     if (c.kind === "tree") return null;
     const i = c.path.lastIndexOf("/");
     dirs.add(i === -1 ? "" : c.path.slice(0, i));

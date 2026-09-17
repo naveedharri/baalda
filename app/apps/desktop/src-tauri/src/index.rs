@@ -39,6 +39,32 @@ pub enum LinkScope<'a> {
     Touched(&'a [String]),
 }
 
+/// What one `index_one` call did with a file.
+///
+/// The distinction is the point of the hash gate: an `Unchanged` file cost one
+/// read and one sha256 and wrote nothing, so it must not join the link pass and
+/// the UI must not be told to act on it.
+enum IndexedNote {
+    /// The note's rows were (re)written. Carries the doc_id.
+    Indexed(String),
+    /// The bytes on disk already hash to the `notes.sha256` stored for this
+    /// path: nothing was rewritten (at most `mtime` was refreshed). No id,
+    /// because the only thing a caller can do with this file is leave it alone —
+    /// it is out of the link pass by construction.
+    Unchanged,
+}
+
+/// What a batch [`Index::index_notes`] did, per path.
+///
+/// `failures` are per-path and non-fatal (one unreadable file must not cost the
+/// rest of the batch); `unchanged` are the paths the hash gate skipped, which
+/// the watcher forwards to the UI as `unchanged: true`.
+#[derive(Debug, Default)]
+pub struct IndexOutcome {
+    pub failures: Vec<(PathBuf, AppError)>,
+    pub unchanged: Vec<PathBuf>,
+}
+
 pub struct Index {
     conn: Connection,
     /// Test-only: how many times `resolve_links` has run. The entire point of
@@ -410,11 +436,17 @@ impl Index {
             match indexed.get(&rel) {
                 // Unchanged since the last index — skip the read + parse.
                 Some((_, mtime, _)) if *mtime == disk_mtime => {}
-                // Changed — re-index in place, preserving the doc_id.
+                // Changed — re-index in place, preserving the doc_id. A file
+                // whose mtime moved but whose bytes did not comes back
+                // `Unchanged` from the hash gate, and then it has touched no
+                // link answer either.
                 Some((id, _, _)) => {
-                    self.index_one(&tx, vault, abs, Some(id.clone()))?;
-                    touched += 1;
-                    notes_changed = true;
+                    if let IndexedNote::Indexed(_) =
+                        self.index_one(&tx, vault, abs, Some(id.clone()))?
+                    {
+                        touched += 1;
+                        notes_changed = true;
+                    }
                 }
                 // New file.
                 None => {
@@ -481,25 +513,30 @@ impl Index {
     /// 1000-file drop must not cost the other 999 their index rows. A file whose
     /// read fails has written nothing to the transaction yet (`index_one` reads
     /// and parses before it touches SQL), so skipping it leaves no partial row.
-    pub fn index_notes(
-        &self,
-        vault: &Path,
-        abs_paths: &[PathBuf],
-    ) -> AppResult<Vec<(PathBuf, AppError)>> {
+    ///
+    /// Paths whose bytes are already indexed come back in
+    /// [`IndexOutcome::unchanged`]: they wrote nothing and are excluded from the
+    /// link pass (see `index_one`'s hash gate). The caller passes that on to the
+    /// UI so it can skip its own work.
+    pub fn index_notes(&self, vault: &Path, abs_paths: &[PathBuf]) -> AppResult<IndexOutcome> {
         if abs_paths.is_empty() {
-            return Ok(Vec::new());
+            return Ok(IndexOutcome::default());
         }
         let started = Instant::now();
         let tx = self.conn.unchecked_transaction()?;
-        let mut failures: Vec<(PathBuf, AppError)> = Vec::new();
+        let mut out = IndexOutcome::default();
         let mut touched: Vec<String> = Vec::with_capacity(abs_paths.len());
         for abs in abs_paths {
             let outcome = rel_from_abs(vault, abs)
                 .and_then(|rel| self.id_for_path(&tx, &rel))
                 .and_then(|reuse_id| self.index_one(&tx, vault, abs, reuse_id));
             match outcome {
-                Ok(id) => touched.push(id),
-                Err(e) => failures.push((abs.clone(), e)),
+                Ok(IndexedNote::Indexed(id)) => touched.push(id),
+                // Nothing was rewritten, so no link answer can have changed:
+                // keeping it out of `touched` is what makes a batch of untouched
+                // files cost no link pass at all.
+                Ok(IndexedNote::Unchanged) => out.unchanged.push(abs.clone()),
+                Err(e) => out.failures.push((abs.clone(), e)),
             }
         }
         // The single pass the whole batch shares, narrowed to the notes it wrote.
@@ -507,15 +544,15 @@ impl Index {
             self.resolve_links(&tx, LinkScope::Touched(&touched))?;
         }
         tx.commit()?;
-        log_batch("index_notes", abs_paths.len(), started);
-        Ok(failures)
+        log_batch("index_notes", abs_paths.len(), out.unchanged.len(), started);
+        Ok(out)
     }
 
     /// Incrementally (re)index a single note by absolute path — a one-element
     /// [`Index::index_notes`], so the two paths can never drift.
     pub fn index_note(&self, vault: &Path, abs: &Path) -> AppResult<()> {
-        let mut failures = self.index_notes(vault, &[abs.to_path_buf()])?;
-        match failures.pop() {
+        let mut out = self.index_notes(vault, &[abs.to_path_buf()])?;
+        match out.failures.pop() {
             Some((_, e)) => Err(e),
             None => Ok(()),
         }
@@ -709,7 +746,7 @@ impl Index {
         stem: &str,
         mtime: i64,
         reuse_id: Option<String>,
-    ) -> AppResult<String> {
+    ) -> AppResult<IndexedNote> {
         let id = reuse_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         tx.execute(
             "INSERT INTO notes (id, path, title, mtime, sha256, frontmatter)
@@ -730,18 +767,47 @@ impl Index {
         )?;
         tx.execute("DELETE FROM note_tags WHERE note_id = ?1", params![id])?;
         tx.execute("DELETE FROM links WHERE src_note_id = ?1", params![id])?;
-        Ok(id)
+        // Deliberately never `Unchanged`: the oversized path has no sha to gate
+        // on (it stores NULL), so it keeps rewriting its cheap title-only rows.
+        Ok(IndexedNote::Indexed(id))
     }
 
-    /// Returns the note id it wrote, so a batch can tell `resolve_links` exactly
-    /// which notes it touched (see `LinkScope`).
+    /// Returns the note id it wrote and whether it wrote anything, so a batch can
+    /// tell `resolve_links` exactly which notes it touched (see `LinkScope`) and
+    /// the UI which paths it can ignore.
+    ///
+    /// ## The hash gate
+    ///
+    /// A path whose bytes already hash to the `sha256` stored for it is
+    /// UNCHANGED: the parse, the `notes`/`notes_fts`/`note_tags`/`links` rewrite
+    /// and the link pass are all skipped, and the file costs exactly one read and
+    /// one sha256. `rebuild` has always had a cheaper version of this (it skips
+    /// by mtime, without even reading); the incremental path was the odd one out,
+    /// so any source of spurious watcher events wrote the whole index again per
+    /// event — ~32 MB/s into `.context/index.sqlite` on an idle vault (#155,
+    /// Linux inotify read events). That source is fixed at the watcher; this is
+    /// the defence in depth, because a backup/git/cloud-sync tool rewriting
+    /// identical bytes, or a platform that reports an attribute change as a
+    /// modification, produces the same storm.
+    ///
+    /// Three things deliberately do NOT qualify as unchanged:
+    /// - a row whose `path` differs from this file's (`reuse_id` comes from
+    ///   `id_for_path`, so this only bites if a row moved mid-transaction);
+    /// - a row with `sha256 IS NULL` (an oversized note, or a pre-hash row) —
+    ///   there is nothing to compare, so re-index;
+    /// - a new file with no row at all (`reuse_id` is `None`), even when some
+    ///   OTHER note has the same bytes: identity is per path here, and a copy
+    ///   needs its own row.
+    ///
+    /// Only `mtime` is refreshed when it drifted, as a single-column UPDATE, so
+    /// the next `rebuild`'s mtime skip still fires instead of re-reading the file.
     fn index_one(
         &self,
         tx: &Connection,
         vault: &Path,
         abs: &Path,
         reuse_id: Option<String>,
-    ) -> AppResult<String> {
+    ) -> AppResult<IndexedNote> {
         let rel = rel_from_abs(vault, abs)?;
         let stem = abs
             .file_stem()
@@ -774,8 +840,25 @@ impl Index {
         }
 
         let content = std::fs::read_to_string(abs)?;
-        let parsed = parse_note(&content, stem);
         let sha = sha256_hex(&content);
+
+        // The hash gate (see the doc comment). Before the parse, so an unchanged
+        // file costs the read and the hash and nothing more.
+        if let Some(id) = reuse_id.as_deref() {
+            if let Some((row_path, row_sha, row_mtime)) = self.row_state(tx, id)? {
+                if row_path == rel && row_sha.as_deref() == Some(sha.as_str()) {
+                    if row_mtime != mtime {
+                        tx.execute(
+                            "UPDATE notes SET mtime = ?1 WHERE id = ?2",
+                            params![mtime, id],
+                        )?;
+                    }
+                    return Ok(IndexedNote::Unchanged);
+                }
+            }
+        }
+
+        let parsed = parse_note(&content, stem);
 
         let id = reuse_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -828,7 +911,29 @@ impl Index {
             )?;
         }
 
-        Ok(id)
+        Ok(IndexedNote::Indexed(id))
+    }
+
+    /// The `(path, sha256, mtime)` the index currently holds for a doc_id — the
+    /// three columns the hash gate compares against the file on disk.
+    fn row_state(
+        &self,
+        tx: &Connection,
+        id: &str,
+    ) -> AppResult<Option<(String, Option<String>, i64)>> {
+        Ok(tx
+            .query_row(
+                "SELECT path, sha256, mtime FROM notes WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?)
     }
 
     fn upsert_folder(&self, tx: &Connection, vault: &Path, abs: &Path) -> AppResult<()> {
@@ -1813,13 +1918,16 @@ fn file_mtime(abs: &Path) -> i64 {
 /// single-note save logs nothing; a cold `rebuild` or a bulk file drop — the two
 /// places where the old one-link-pass-per-file behaviour showed up as seconds of
 /// stall — reports how long it took.
-fn log_batch(label: &str, files: usize, started: Instant) {
+fn log_batch(label: &str, files: usize, unchanged: usize, started: Instant) {
     if files < BATCH_LOG_MIN {
         return;
     }
     let ms = started.elapsed().as_millis();
+    // `unchanged` is the number that makes a suspicious line readable: this is
+    // the log the #155 reporter counted, and "128 files (128 unchanged)" says
+    // "something is generating events" rather than "the index is thrashing".
     log::info!(
-        "[index] {label}: {files} files in {ms} ms ({:.2} ms/file)",
+        "[index] {label}: {files} files ({unchanged} unchanged) in {ms} ms ({:.2} ms/file)",
         ms as f64 / files as f64
     );
 }
@@ -2281,7 +2389,7 @@ mod tests {
 
         let (_tmp_b, vb, abs_b) = seed_batch_vault();
         let idx_b = Index::open(&vb).unwrap();
-        assert!(idx_b.index_notes(&vb, &abs_b).unwrap().is_empty());
+        assert!(idx_b.index_notes(&vb, &abs_b).unwrap().failures.is_empty());
 
         assert_eq!(file_derived_snapshot(&idx_a), file_derived_snapshot(&idx_b));
 
@@ -2435,8 +2543,20 @@ mod tests {
             "5 files must cost ONE whole-vault link pass"
         );
 
-        // The old shape, for contrast: one pass per file.
+        // Re-offering the identical files costs NOTHING: the hash gate takes all
+        // five, so the batch has nothing to resolve.
+        idx.index_notes(&v, &abs).unwrap();
+        assert_eq!(
+            idx.resolve_call_count(),
+            1,
+            "a batch of unchanged files must not run a link pass"
+        );
+
+        // The old shape, for contrast: one pass per file — with real edits, so
+        // the gate lets each one through.
         for one in &abs {
+            let edited = format!("{}\n\nedited", std::fs::read_to_string(one).unwrap());
+            std::fs::write(one, edited).unwrap();
             idx.index_note(&v, one).unwrap();
         }
         assert_eq!(idx.resolve_call_count(), 1 + abs.len());
@@ -2447,7 +2567,7 @@ mod tests {
 
         // An empty batch does no work at all (no transaction, no pass).
         let before = idx.resolve_call_count();
-        assert!(idx.index_notes(&v, &[]).unwrap().is_empty());
+        assert!(idx.index_notes(&v, &[]).unwrap().failures.is_empty());
         assert!(idx.remove_notes(&v, &[]).unwrap().is_empty());
         assert_eq!(idx.resolve_call_count(), before);
     }
@@ -2466,7 +2586,7 @@ mod tests {
         abs.insert(2, missing.clone());
         abs.push(outside.clone());
 
-        let failures = idx.index_notes(&v, &abs).unwrap();
+        let failures = idx.index_notes(&v, &abs).unwrap().failures;
         let failed: Vec<&PathBuf> = failures.iter().map(|(p, _)| p).collect();
         assert_eq!(failures.len(), 2, "reported: {failed:?}");
         assert!(failed.contains(&&missing));
@@ -2478,6 +2598,221 @@ mod tests {
         assert!(!idx.get_backlinks(&alpha.id).unwrap().is_empty());
         // Still exactly one link pass despite the failures.
         assert_eq!(idx.resolve_call_count(), 1);
+    }
+
+    // ---- the hash gate (#155) --------------------------------------------
+    //
+    // An event for a file whose bytes did not change must cost one read and one
+    // sha256 and nothing else. These pin that by asserting on the rows directly:
+    // a rewrite is invisible to any public getter (same values go back in), so
+    // only the tables can tell "skipped" from "rewritten identically".
+
+    /// Row counts + the columns `index_one` would rewrite, for one path.
+    fn row_fingerprint(idx: &Index, rel: &str) -> (String, Option<String>, i64, i64, i64, i64) {
+        let (id, rowid, title, sha, mtime): (String, i64, String, Option<String>, i64) = idx
+            .conn
+            .query_row(
+                "SELECT id, rowid, title, sha256, mtime FROM notes WHERE path = ?1",
+                params![rel],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let count = |sql: &str, p: &dyn rusqlite::ToSql| -> i64 {
+            idx.conn.query_row(sql, params![p], |r| r.get(0)).unwrap()
+        };
+        (
+            title,
+            sha,
+            mtime,
+            count("SELECT COUNT(*) FROM notes_fts WHERE rowid = ?1", &rowid),
+            count("SELECT COUNT(*) FROM note_tags WHERE note_id = ?1", &id),
+            count("SELECT COUNT(*) FROM links WHERE src_note_id = ?1", &id),
+        )
+    }
+
+    #[test]
+    fn reindexing_identical_bytes_changes_nothing_and_runs_no_link_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Alpha.md", "# Alpha\n\n#tag see [[Beta]]").unwrap();
+        write_note(&v, "Beta.md", "# Beta").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(&v, &[v.join("Alpha.md"), v.join("Beta.md")])
+            .unwrap();
+        let before = row_fingerprint(&idx, "Alpha.md");
+        assert_eq!((before.3, before.4, before.5), (1, 1, 1), "precondition");
+        let passes = idx.resolve_call_count();
+
+        // The whole batch is byte-identical to what is indexed.
+        let out = idx
+            .index_notes(&v, &[v.join("Alpha.md"), v.join("Beta.md")])
+            .unwrap();
+
+        assert!(out.failures.is_empty());
+        assert_eq!(
+            out.unchanged,
+            vec![v.join("Alpha.md"), v.join("Beta.md")],
+            "both paths must come back as unchanged"
+        );
+        assert_eq!(row_fingerprint(&idx, "Alpha.md"), before);
+        assert_eq!(
+            idx.resolve_call_count(),
+            passes,
+            "nothing was touched, so the batch must run NO link pass"
+        );
+    }
+
+    #[test]
+    fn identical_bytes_with_a_moved_mtime_refresh_only_the_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Alpha.md", "# Alpha\n\n#tag see [[Beta]]").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+        // Pretend the row's mtime drifted from the file's (a touch, a restore).
+        idx.conn
+            .execute("UPDATE notes SET mtime = 0 WHERE path = 'Alpha.md'", [])
+            .unwrap();
+        let before = row_fingerprint(&idx, "Alpha.md");
+        assert_eq!(before.2, 0);
+
+        let out = idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+
+        assert_eq!(out.unchanged, vec![v.join("Alpha.md")]);
+        let after = row_fingerprint(&idx, "Alpha.md");
+        assert_eq!(
+            after.2,
+            file_mtime(&v.join("Alpha.md")),
+            "mtime must be refreshed, or `rebuild`'s mtime skip re-reads this file forever"
+        );
+        assert_ne!(after.2, before.2);
+        // Everything else is untouched.
+        assert_eq!(
+            (after.0, after.1, after.3, after.4, after.5),
+            (before.0, before.1, before.3, before.4, before.5)
+        );
+    }
+
+    #[test]
+    fn changed_bytes_are_reindexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Alpha.md", "# Alpha\n\nold body").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+        let before = row_fingerprint(&idx, "Alpha.md");
+
+        write_note(&v, "Alpha.md", "# Renamed\n\n#fresh new body [[Beta]]").unwrap();
+        let out = idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+
+        assert!(out.unchanged.is_empty(), "the bytes changed");
+        let after = row_fingerprint(&idx, "Alpha.md");
+        assert_eq!(after.0, "Renamed", "title re-derived");
+        assert_ne!(after.1, before.1, "sha256 rewritten");
+        assert_eq!((after.4, after.5), (1, 1), "the new tag and link landed");
+        let body: String = idx
+            .conn
+            .query_row(
+                "SELECT body FROM notes_fts WHERE rowid =
+                   (SELECT rowid FROM notes WHERE path = 'Alpha.md')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(body.contains("new body"), "FTS rewritten: {body:?}");
+    }
+
+    /// A NULL sha is "we don't know what is in this file" — an oversized note, or
+    /// a row written before hashing existed. It must never gate anything out.
+    #[test]
+    fn a_row_with_a_null_sha_is_treated_as_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Alpha.md", "# Alpha\n\nbody").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+        idx.conn
+            .execute("UPDATE notes SET sha256 = NULL WHERE path = 'Alpha.md'", [])
+            .unwrap();
+
+        let out = idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+
+        assert!(out.unchanged.is_empty(), "a NULL sha counts as changed");
+        assert!(
+            row_fingerprint(&idx, "Alpha.md").1.is_some(),
+            "and the re-index restores it"
+        );
+    }
+
+    /// The gate is per PATH, not per content: a copy (or an external rename into
+    /// a new name) has no row of its own, so it is indexed even though some other
+    /// note holds exactly the same bytes.
+    #[test]
+    fn identical_bytes_at_a_new_path_are_indexed_not_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        let body = "# Alpha\n\nidentical bytes";
+        write_note(&v, "Alpha.md", body).unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.index_notes(&v, &[v.join("Alpha.md")]).unwrap();
+
+        write_note(&v, "Copy.md", body).unwrap();
+        let out = idx.index_notes(&v, &[v.join("Copy.md")]).unwrap();
+
+        assert!(
+            out.unchanged.is_empty(),
+            "a path with no row is never gated"
+        );
+        let ids: Vec<String> = idx
+            .conn
+            .prepare("SELECT id FROM notes ORDER BY path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "the copy gets its own doc_id");
+    }
+
+    #[test]
+    fn a_mixed_batch_reports_exactly_the_unchanged_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        for rel in ["Same.md", "Edited.md", "Touched.md"] {
+            write_note(&v, rel, &format!("# {rel}\n\nbody")).unwrap();
+        }
+        let idx = Index::open(&v).unwrap();
+        let known: Vec<PathBuf> = ["Same.md", "Edited.md", "Touched.md"]
+            .iter()
+            .map(|r| v.join(r))
+            .collect();
+        idx.index_notes(&v, &known).unwrap();
+
+        // Same: nothing. Edited: new bytes. Touched: same bytes, stale mtime.
+        // New: never seen before.
+        write_note(&v, "Edited.md", "# Edited.md\n\ndifferent body").unwrap();
+        idx.conn
+            .execute("UPDATE notes SET mtime = 0 WHERE path = 'Touched.md'", [])
+            .unwrap();
+        write_note(&v, "New.md", "# New\n\nbody").unwrap();
+
+        let batch: Vec<PathBuf> = ["Same.md", "Edited.md", "Touched.md", "New.md"]
+            .iter()
+            .map(|r| v.join(r))
+            .collect();
+        let out = idx.index_notes(&v, &batch).unwrap();
+
+        assert!(out.failures.is_empty());
+        assert_eq!(out.unchanged, vec![v.join("Same.md"), v.join("Touched.md")]);
     }
 
     /// A folder delete arrives as several watcher paths; batching removals must

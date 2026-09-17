@@ -845,7 +845,7 @@ pub async fn import_paths(
         }
     }
     let guard = index.lock().unwrap();
-    for (path, err) in guard.index_notes(&vault, &md_paths)? {
+    for (path, err) in guard.index_notes(&vault, &md_paths)?.failures {
         eprintln!("[import] index failed for {}: {err}", path.display());
     }
     Ok(summary)
