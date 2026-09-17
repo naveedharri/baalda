@@ -2,12 +2,12 @@
 //! the React UI. All disk I/O happens here (or in the modules these call);
 //! the UI never touches the filesystem directly.
 
-use crate::attachments::{self, AttachmentMeta};
+use crate::attachments::{self, AttachmentMeta, FileStat};
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
-    Backlink, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsPruneReport,
-    YjsState, YjsStateVector,
+    Backlink, FileText, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult,
+    YjsPruneReport, YjsState, YjsStateVector,
 };
 use crate::notefile;
 use crate::state::AppState;
@@ -16,6 +16,7 @@ use crate::stats::{self, VaultStats};
 use crate::tree::{self, TreeNode};
 use crate::{vault, watcher};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -401,6 +402,11 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
         // index reader is unchanged; only who waits for the rebuild is.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let (bg_index, bg_path, bg_app) = (index.clone(), path.clone(), app.clone());
+        // The rebuild reconciles the `files` table but extracts nothing — vault
+        // open must not pay for parsing every document in the vault — so it
+        // hands the stale paths to the extraction worker, which does that off
+        // this thread and outside the index mutex.
+        let bg_queue = watcher.extract_queue();
         std::thread::spawn(move || {
             let guard = bg_index.lock().unwrap();
             let _ = ready_tx.send(());
@@ -422,7 +428,7 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
             let mut result = guard.rebuild(&bg_path);
             for attempt in 1..=REBUILD_BUSY_RETRIES {
                 let busy = match &result {
-                    Ok(()) => false,
+                    Ok(_) => false,
                     Err(e) => {
                         let m = e.to_string().to_ascii_lowercase();
                         m.contains("locked") || m.contains("busy")
@@ -442,7 +448,10 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
             }
             drop(guard);
             let ok = match result {
-                Ok(()) => true,
+                Ok(pending) => {
+                    bg_queue.enqueue(pending);
+                    true
+                }
                 Err(e) => {
                     eprintln!("[index] rebuild failed for {}: {e}", bg_path.display());
                     false
@@ -1457,6 +1466,10 @@ pub async fn delete_path(
 
 // ---- query commands -------------------------------------------------------
 
+/// Search the vault: notes AND the tree binaries whose text was extracted, as
+/// one ranked list. The command keeps its name (it is the front-end's
+/// `ipc.searchNotes`) but the answer has covered both tiers since PR3 — see
+/// `Index::search_all` for the merge rule.
 #[tauri::command]
 pub async fn search_notes(
     state: State<'_, AppState>,
@@ -1464,7 +1477,24 @@ pub async fn search_notes(
 ) -> AppResult<Vec<SearchResult>> {
     let (_, index) = require_vault(&state)?;
     let guard = index.lock().unwrap();
-    guard.search_notes(&query)
+    guard.search_all(&query)
+}
+
+/// The extracted plain text of one tree binary, by vault-relative path.
+///
+/// `None` when the path has no `files` row (a note, an attachment, something the
+/// walk ignores, or a file the index has not reached yet). The text is a DERIVED
+/// cache — never the file, never authoritative — which is exactly what makes it
+/// safe for the sync layer to upload as `blob_text` instead of re-extracting the
+/// bytes in Node.
+#[tauri::command]
+pub async fn get_file_text(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<Option<FileText>> {
+    let (_, index) = require_vault(&state)?;
+    let guard = index.lock().unwrap();
+    guard.file_text(&path)
 }
 
 #[tauri::command]
@@ -1839,6 +1869,19 @@ pub async fn read_binary_file(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Size + mtime of one vault file, without reading it. The file card prints a
+/// size for every non-note format, and a 25 MB video is not worth a round trip
+/// through the IPC bridge to learn how big it is.
+#[tauri::command]
+pub async fn file_stat(
+    state: State<'_, AppState>,
+    rel_path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<FileStat> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    attachments::file_stat(&vault, &rel_path)
+}
+
 #[tauri::command(async)]
 pub fn write_binary_file(
     state: State<'_, AppState>,
@@ -1849,13 +1892,86 @@ pub fn write_binary_file(
     attachments::write_binary_file(&vault, &meta.rel_path, &bytes)
 }
 
+/// The attachment listing the sync diff runs on — path, size and sha256 for
+/// every file under `attachments/`.
+///
+/// Hashes come from the index's `attachment_hashes` cache whenever the file's
+/// `(size, mtime)` is unchanged, so a reconcile triggered by an unrelated
+/// watcher event costs a `stat` per file instead of re-reading every byte in
+/// the store. The lock is taken twice and briefly — read the cache, walk and
+/// hash outside it, write back only when something moved — because hashing a
+/// large video while holding the index lock would stall every other query.
 #[tauri::command]
 pub async fn list_attachments(
     state: State<'_, AppState>,
     expected_epoch: Option<u64>,
 ) -> AppResult<Vec<AttachmentMeta>> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let cached = {
+        let guard = index.lock().unwrap();
+        // A cache read that fails is not a reason to fail the listing: the
+        // worst case is that we hash everything, which is what we did before.
+        guard.attachment_hash_cache().unwrap_or_default()
+    };
+    let listing = attachments::list_attachments_cached(&vault, &cached)?;
+    if listing.changed {
+        let guard = index.lock().unwrap();
+        if let Err(e) = guard.save_attachment_hash_cache(&listing.cache) {
+            log::warn!("[attachments] hash cache write failed: {e}");
+        }
+    }
+    Ok(listing.items)
+}
+
+/// Stream one attachment (or one multipart part of it) to a presigned URL.
+///
+/// See `attachments.rs` for why the bytes go through Rust instead of the
+/// webview, and why NOTHING here adds an `Authorization` header: the URL
+/// carries its own credential, and S3 rejects a request that has both.
+#[tauri::command]
+pub async fn upload_attachment(
+    state: State<'_, AppState>,
+    rel_path: String,
+    url: String,
+    method: Option<String>,
+    headers: Option<HashMap<String, String>>,
+    range: Option<attachments::ByteRange>,
+    expected_epoch: Option<u64>,
+) -> AppResult<attachments::UploadOutcome> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    attachments::list_attachments(&vault)
+    attachments::upload_file(
+        &vault,
+        &rel_path,
+        &url,
+        method.as_deref().unwrap_or("PUT"),
+        &headers.unwrap_or_default(),
+        range,
+    )
+    .await
+}
+
+/// Stream a URL into `attachments/<…>`, verifying the sha256 before the rename.
+///
+/// Epoch-pinned like every other vault-relative write: a download that started
+/// before a vault switch must not land in the vault the user moved to.
+#[tauri::command]
+pub async fn download_attachment(
+    state: State<'_, AppState>,
+    url: String,
+    rel_path: String,
+    headers: Option<HashMap<String, String>>,
+    expected_sha256: Option<String>,
+    expected_epoch: Option<u64>,
+) -> AppResult<attachments::DownloadOutcome> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    attachments::download_file(
+        &vault,
+        &rel_path,
+        &url,
+        &headers.unwrap_or_default(),
+        expected_sha256.as_deref(),
+    )
+    .await
 }
 
 /// A one-shot census of the open vault for Vault Settings → Health: what is in
@@ -1930,13 +2046,24 @@ pub async fn rebuild_index(
     expected_epoch: Option<u64>,
 ) -> AppResult<()> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
-    let epoch = state.inner.lock().unwrap().vault_epoch;
+    let (epoch, queue) = {
+        let inner = state.inner.lock().unwrap();
+        (
+            inner.vault_epoch,
+            inner.watcher.as_ref().map(|w| w.extract_queue()),
+        )
+    };
     let started = std::time::Instant::now();
     let result = {
         let guard = index.lock().unwrap();
         guard.rebuild(&vault)
     };
     let ok = result.is_ok();
+    // Same hand-off as vault open: the rows are reconciled here, the text is
+    // extracted on the worker thread.
+    if let (Ok(pending), Some(queue)) = (&result, queue) {
+        queue.enqueue(pending.clone());
+    }
     let _ = app.emit(
         "index-ready",
         IndexReady {
@@ -1946,7 +2073,7 @@ pub async fn rebuild_index(
             ms: started.elapsed().as_millis() as u64,
         },
     );
-    result
+    result.map(|_| ())
 }
 
 /// Read an arbitrary host file the user just dropped/picked (absolute path).

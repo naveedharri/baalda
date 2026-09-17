@@ -16,6 +16,8 @@ import { useStore } from "../store";
 export function SearchPanel({ onClose }: { onClose?: () => void }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
+  // Bumped when the index extracts more file text, to re-run the live query.
+  const [indexTick, setIndexTick] = useState(0);
   // Which result the arrow keys are on. Reset whenever the result set changes,
   // so Enter can never open whatever happened to be highlighted for an older query.
   const [active, setActive] = useState(0);
@@ -46,7 +48,17 @@ export function SearchPanel({ onClose }: { onClose?: () => void }) {
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
     };
-  }, [query]);
+  }, [query, indexTick]);
+
+  // A search typed while a folder of documents is still being extracted answers
+  // from whatever text had landed; this re-asks as the rest arrives. The event
+  // is coalesced in Rust, so a 200-file drop is a handful of re-runs, not 200.
+  useEffect(() => {
+    const unlisten = ipc.onFilesIndexed(() => setIndexTick((n) => n + 1));
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
 
   // Keep the keyboard selection in view when it walks past the visible rows.
   useEffect(() => {
@@ -122,24 +134,49 @@ export function SearchPanel({ onClose }: { onClose?: () => void }) {
                 onMouseEnter={() => setActive(i)}
                 onClick={() => open(r.path)}
               >
-                {/* The file name, like the tab and the sidebar. `r.title` stays
-                    match fuel (Rust indexes it in `notes_fts`) but is never the
-                    label: for a note with an H1 it names the same note
-                    differently from its own tab. */}
-                <div className="search-title">{noteLabel(r.path)}</div>
-                <div
-                  className="search-snippet"
-                  // The snippet is HTML-escaped in Rust (see index.rs::html_escape)
-                  // so the ONLY markup it can contain is our own <mark> highlight
-                  // tags — note bodies can't inject anything. A CSP (tauri.conf.json)
-                  // backstops this by blocking inline script even if that changed.
-                  dangerouslySetInnerHTML={{ __html: r.snippet }}
-                />
+                <SearchHit result={r} />
               </li>
             ))}
           </ul>
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * One result's contents. Pure and exported so a test can render it without the
+ * store, the Tauri host or an effect (see `__tests__/searchPanel.test.ts`).
+ *
+ * A `file` hit is the only one that gets a badge: a note is the default thing in
+ * a vault and labelling every row "note" would be noise, while a `.docx` that
+ * looks like a note until you click it is exactly the surprise the badge exists
+ * to remove. The row still opens through `store.openNoteByPath`, so the format
+ * registry picks the viewer — search does not need to know what a `.xlsx` is.
+ */
+export function SearchHit({ result }: { result: SearchResult }) {
+  return (
+    <>
+      {/* The file name, like the tab and the sidebar. `result.title` stays
+          match fuel (Rust indexes it in `notes_fts`/`files_fts`) but is never
+          the label: for a note with an H1 it names the same note differently
+          from its own tab. */}
+      <div className="search-title">
+        <span className="search-label">{noteLabel(result.path)}</span>
+        {result.kind === "file" && (
+          <span className="ws-badge local search-ext">{result.ext ?? "file"}</span>
+        )}
+      </div>
+      <div
+        className="search-snippet"
+        // The snippet is HTML-escaped in Rust (see index.rs::html_escape) so the
+        // ONLY markup it can contain is our own <mark> highlight tags — note
+        // bodies can't inject anything, and text extracted from a BINARY can't
+        // either: `extract.rs` strips the U+0001/U+0002 sentinels that become
+        // those tags. A CSP (tauri.conf.json) backstops this by blocking inline
+        // script even if that changed.
+        dangerouslySetInnerHTML={{ __html: result.snippet }}
+      />
+    </>
   );
 }

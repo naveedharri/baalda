@@ -146,6 +146,24 @@ export interface SearchResult {
   path: string;
   title: string;
   snippet: string;
+  /** `"note"` — `id` is the CRDT doc_id — or `"file"`, where it is the local
+   *  `files.id` of a tree binary and the path is what opens it. */
+  kind: "note" | "file";
+  /** Lowercase extension, no dot. Badged on file hits. */
+  ext: string | null;
+}
+
+/** The extracted plain text of one tree binary (`get_file_text`). A DERIVED
+ *  cache — never the file itself — which is what makes it safe to upload as
+ *  ranking fuel rather than content. */
+export interface FileText {
+  path: string;
+  /** sha256 of the FILE; empty until the extraction worker has hashed it. */
+  sha256: string;
+  /** pending | ok | skipped_size | unsupported | error (Rust `TextStatus`). */
+  status: string;
+  chars: number;
+  text: string;
 }
 
 export interface Backlink {
@@ -202,6 +220,36 @@ export interface AttachmentMeta {
   relPath: string;
   size: number;
   sha256: string;
+}
+
+/** Half-open byte range `[start, end)` — one multipart part of a file. */
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
+/** What a streamed upload PUT answered (mirrors the Rust `UploadOutcome`). */
+export interface AttachmentUploadResult {
+  status: number;
+  /** S3's part receipt, replayed back at `complete`. Null on our own route. */
+  etag: string | null;
+  /** A truncated response body, present only when the status was not 2xx. */
+  error: string | null;
+}
+
+/** What a streamed download wrote (mirrors the Rust `DownloadOutcome`). */
+export interface AttachmentDownloadResult {
+  status: number;
+  bytes: number;
+  /** sha256 of what landed — already checked against `expectedSha256`. */
+  sha256: string;
+}
+
+/** One file's size + mtime (mirrors the Rust `FileStat`). */
+export interface FileStat {
+  size: number;
+  /** Milliseconds since the Unix epoch, or null when the OS won't say. */
+  modified: number | null;
 }
 
 /** Outcome of an import (mirrors the Rust `ImportSummary`). */
@@ -421,6 +469,10 @@ export const exportPath = (rel: string, dest: string, expectedEpoch?: VaultEpoch
 
 export const searchNotes = (query: string) =>
   invoke<SearchResult[]>("search_notes", { query });
+/** The extracted text of a tree binary, or null when it has no `files` row
+ *  (a note, an attachment, or something the walk ignores). */
+export const getFileText = (path: string) =>
+  invoke<FileText | null>("get_file_text", { path });
 export const getBacklinks = (noteId: string) =>
   invoke<Backlink[]>("get_backlinks", { noteId });
 /** Every resolved graph edge (source id -> target id) in one call — backs the
@@ -550,6 +602,17 @@ export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
     expectedEpoch: expectedEpoch ?? null,
   }).then((b) => new Uint8Array(b));
 
+/**
+ * Size + mtime of a vault file, without reading it.
+ *
+ * Epoch-pinned like every other vault-scoped read: the file card asks about a
+ * path, and a stat that crossed a vault switch would describe another vault's
+ * disk. Read scope is the whole vault (not just `attachments/`) — the same
+ * asymmetry as {@link readBinaryFile}, because tree files get a card too.
+ */
+export const fileStat = (relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<FileStat>("file_stat", { relPath, expectedEpoch: expectedEpoch ?? null });
+
 export const writeBinaryFile = (
   relPath: string,
   bytes: Uint8Array,
@@ -562,6 +625,60 @@ export const writeBinaryFile = (
 
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Stream an attachment (or one byte range of it) to a presigned URL from RUST.
+ *
+ * Not a webview `fetch` on purpose: the bucket would need CORS for a
+ * `tauri://localhost` Origin, the CSP would have to permit whatever plain-http
+ * MinIO a self-hoster runs, and a 500 MB video would have to exist in the JS
+ * heap first. `headers` goes out verbatim and is the ONLY auth — an upload URL
+ * carries its own credential (an S3 signature, or our route's `?t=` token), and
+ * S3 rejects a request that also presents a bearer.
+ */
+export const uploadAttachment = (
+  input: {
+    relPath: string;
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    range?: ByteRange;
+  },
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<AttachmentUploadResult>("upload_attachment", {
+    relPath: input.relPath,
+    url: input.url,
+    method: input.method ?? "PUT",
+    headers: input.headers ?? {},
+    range: input.range ?? null,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
+/**
+ * Stream a URL into `attachments/<…>`, atomically and hash-verified.
+ *
+ * Rust writes to `.<name>.tmp`, hashes as it writes, and renames only when the
+ * digest matches `expectedSha256` — so a truncated transfer never appears under
+ * the real name for the next diff to accept. Redirects are NOT followed (see
+ * `attachments.rs`): the bearer must never reach a presigned host.
+ */
+export const downloadAttachment = (
+  input: {
+    url: string;
+    relPath: string;
+    headers?: Record<string, string>;
+    expectedSha256?: string | null;
+  },
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<AttachmentDownloadResult>("download_attachment", {
+    url: input.url,
+    relPath: input.relPath,
+    headers: input.headers ?? {},
+    expectedSha256: input.expectedSha256 ?? null,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
 /**
  * A one-shot census of the open vault for Vault Settings → Health: counts and
@@ -772,3 +889,15 @@ export interface IndexReady {
 }
 export const onIndexReady = (cb: (e: IndexReady) => void): Promise<UnlistenFn> =>
   listen<IndexReady>("index-ready", (event) => cb(event.payload));
+
+/** Extracted text for these tree binaries just landed in the index — a search
+ *  that ran before them can now answer differently. Coalesced in Rust (the
+ *  extraction worker batches ~20 files / 400 ms), so this is not a per-file
+ *  firehose even during a 200-document drop. */
+export interface FilesIndexed {
+  paths: string[];
+}
+export const onFilesIndexed = (
+  cb: (paths: string[]) => void,
+): Promise<UnlistenFn> =>
+  listen<FilesIndexed>("files-indexed", (event) => cb(event.payload?.paths ?? []));

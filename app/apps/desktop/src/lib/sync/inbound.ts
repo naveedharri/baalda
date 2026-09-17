@@ -280,7 +280,9 @@ const DENIED_DIRS = [
   "__pycache__",
   "venv",
 ];
-/** Note extensions the registry reconciles (mirrors `NOTE_EXTS` in registry.ts). */
+/** Note extensions the registry reconciles (mirrors `NOTE_EXTS` in registry.ts,
+ *  `lib/formats.ts` and Rust `vault.rs`; a literal on purpose — see the note on
+ *  registry.ts's copy, and `__tests__/formatsLockstep.test.ts`). */
 const NOTE_EXTS = ["md", "markdown", "mdx", "txt", "html", "htm", "canvas"];
 
 const MAX_SEGMENT_BYTES = 255;

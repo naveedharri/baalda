@@ -60,6 +60,33 @@ keyring = { version = "3", features = [
     "crypto-rust",
 ] }
 tauri-plugin-deep-link = "2.4.9"
+# Text extraction from OOXML containers (`extract.rs`): a `.docx`/`.xlsx`/
+# `.pptx` is a ZIP of XML parts, so these two crates are the whole toolchain.
+# `default-features = false` on purpose: zip's defaults pull bzip2/zstd/lzma
+# (C toolchains on four release targets) and AES, none of which an OOXML part
+# uses — Office writes deflate. Both MIT.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+# Attachment transport (`attachments.rs`): bytes move through Rust, not the
+# webview — no bucket CORS, no `connect-src` to widen for a self-hosted MinIO,
+# and a 500 MB video never enters the JS heap.
+#
+# reqwest is ALREADY in the tree via `tauri-plugin-updater`; these are exactly
+# the features it already turns on (`cargo tree -i reqwest -e features`:
+# json/stream/rustls-no-provider), so this is the same single copy rather than a
+# second one. `default-features = false` is load-bearing — reqwest's defaults
+# pull native-tls/openssl, which nothing here builds today. `rustls-no-provider`
+# leaves the crypto provider to rustls' own crate features (ring), which is what
+# the updater already relies on; `stream` is what lets a request body be a file
+# read incrementally instead of a Vec.
+reqwest = { version = "0.13", default-features = false, features = [
+    "stream",
+    "rustls-no-provider",
+] }
+# Async file I/O for the same streaming path. Both are already in the tree under
+# reqwest/hyper; naming them here only makes the dependency honest.
+tokio = { version = "1", default-features = false, features = ["fs", "io-util"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 
 # The updater is desktop-only — gate it so mobile targets don't try to build it.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
@@ -70,6 +97,11 @@ tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 
 [dev-dependencies]
 tempfile = "3"
+# A current-thread runtime for the async transport tests (`attachments.rs`).
+# Deliberately NOT the `macros` feature: `#[tokio::test]` would pull
+# `tokio-macros` and a second `syn` into the lockfile for two tests that a
+# three-line `block_on` helper covers.
+tokio = { version = "1", features = ["rt"] }
 
 # There is no workspace Cargo.toml above this crate, so this is the only place a
 # release profile can go. Cargo's defaults build the shipped binary with no LTO
