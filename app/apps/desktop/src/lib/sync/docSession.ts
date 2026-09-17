@@ -414,6 +414,9 @@ export class SyncManager implements InboundHost {
   private progress: SyncProgressReporter | null = null;
   private onSyncProgress?: (progress: SyncProgress | null) => void;
   private onDocState?: (patch: Record<string, DocSyncState | null>) => void;
+  /** Whole-map mirror of the attachment mirror's per-file state
+   *  (`store.fileSyncState`), keyed by path. */
+  private onFileState?: (states: Record<string, DocSyncState>) => void;
   /** The content upload for the current scope, while one is running. */
   private uploader: ContentUploader | null = null;
   /** Locally-changed MAPPED notes awaiting a content push (docId → relPath):
@@ -791,6 +794,19 @@ export class SyncManager implements InboundHost {
     cb: ((patch: Record<string, DocSyncState | null>) => void) | undefined,
   ): void {
     this.onDocState = cb;
+  }
+
+  /**
+   * UI subscribes here for the sync state of the vault's FILES — the binaries
+   * that ride the attachment mirror instead of the CRDT (`store.fileSyncState`).
+   *
+   * The whole map each time, keyed by vault-relative path — never by docId: a
+   * blob's identity is its bytes, and its `files` row may have been refused.
+   */
+  setFileStateListener(
+    cb: ((states: Record<string, DocSyncState>) => void) | undefined,
+  ): void {
+    this.onFileState = cb;
   }
 
   /** Map the vault channel's status onto the app-wide SyncStatus vocabulary.
@@ -3463,6 +3479,12 @@ export class SyncManager implements InboundHost {
       // is fetched clean (see `sync/attachments.ts`).
       authHeaders: () => api.authHeaders(),
       notify: (text, tone) => toast(text, tone ?? "error"),
+      // The sidebar's dot on a `.pdf` row. Scope-guarded like every other
+      // emission here: a pass that spans a vault switch must not paint the new
+      // vault's rows with the old vault's paths.
+      onFileStates: (states) => {
+        if (scope.isCurrent()) this.onFileState?.(states);
+      },
     });
   }
 

@@ -37,6 +37,27 @@ function indexOf(
   });
 }
 
+/** The same, plus the attachment mirror's per-path map (`store.fileSyncState`). */
+function withFiles(
+  notes: Record<string, DocSyncState>,
+  files: Record<string, DocSyncState>,
+): TreeSyncIndex {
+  const docIdByPath: Record<string, string> = {};
+  const docSyncState: Record<string, DocSyncState> = {};
+  let n = 0;
+  for (const [relPath, state] of Object.entries(notes)) {
+    const docId = `doc-${++n}`;
+    docIdByPath[relPath] = docId;
+    docSyncState[docId] = state;
+  }
+  return buildTreeSyncIndex({
+    docIdByPath,
+    docSyncState,
+    localNotePaths: Object.keys(notes),
+    fileSyncState: files,
+  });
+}
+
 describe("buildTreeSyncIndex", () => {
   it("keys note state by docId, so a rename can't fork or lose it", () => {
     // The mapping moved the note to a new path; the state still belongs to the id.
@@ -144,6 +165,56 @@ describe("buildTreeSyncIndex", () => {
     expect(nested.folders.get("Notes/attachments")?.total).toBe(1);
   });
 
+  it("rolls files into the SAME folder counts as notes", () => {
+    // The dot answers one question — "is everything under here on the server?" —
+    // and a folder whose only outstanding thing is an uploading PDF must not
+    // read as settled just because its notes are done.
+    const index = withFiles(
+      { "Team/plan.md": "synced" },
+      { "Team/report.docx": "syncing", "Team/logo.png": "synced" },
+    );
+    expect(index.folders.get("Team")).toMatchObject({
+      total: 3,
+      synced: 2,
+      pending: 1,
+      state: "syncing",
+    });
+    expect(index.vault).toMatchObject({ total: 3, synced: 2, state: "syncing" });
+
+    // A failed file is the thing to look at, exactly as a failed note is.
+    const broken = withFiles({ "Team/plan.md": "synced" }, { "Team/huge.mp4": "error" });
+    expect(broken.folders.get("Team")!.state).toBe("error");
+  });
+
+  it("gives a folder of nothing but files a roll-up of its own", () => {
+    // Previously "a folder holding only images has nothing to say"; now it
+    // does, because those images sync.
+    const index = withFiles({}, { "Media/a.png": "synced", "Media/b.mp4": "queued" });
+    expect(index.folders.get("Media")).toMatchObject({ total: 2, synced: 1, pending: 1 });
+    expect(rowSyncMark(dir("Media"), index)).toMatchObject({ state: "syncing" });
+  });
+
+  it("never counts a file twice, or one the registry claims as a note", () => {
+    // Belt and braces for a mirror map that outlived the pass that built it:
+    // the hidden root store has no row, and a path the registry has claimed is
+    // the note's, not the blob's.
+    const index = withFiles(
+      { "Notes/a.md": "synced" },
+      { "Notes/a.md": "error", "attachments/dropped.png": "error" },
+    );
+    expect(index.files.size).toBe(0);
+    expect(index.vault).toMatchObject({ total: 1, failed: 0, state: "synced" });
+  });
+
+  it("does not pin a folder's wave on files (the mirror speaks or it doesn't)", () => {
+    // A file has no `unreported` limbo — the mirror publishes its whole local
+    // set each pass — so its state counts as work the moment it is reported.
+    const waves = new FolderWaveTracker();
+    const index = withFiles({}, { "Media/a.png": "synced", "Media/b.mp4": "queued" });
+    waves.apply(index);
+    expect(rowSyncMark(dir("Media"), index)!.progress).toEqual({ done: 0, total: 1 });
+  });
+
   it("has no notes, no folders and no vault roll-up for an empty vault", () => {
     const index = buildTreeSyncIndex({
       docIdByPath: {},
@@ -177,12 +248,27 @@ describe("rowSyncMark", () => {
     });
   });
 
-  it("draws nothing on a file that isn't a synced note", () => {
-    // Images/PDFs sync as attachments, not notes: an indicator on them would be
-    // a lie in the other direction.
+  it("draws nothing on a file the attachment mirror has never spoken for", () => {
+    // A binary gets its dot from the mirror, not the registry. Before the
+    // mirror's first pass — or with sync off — there is nothing to claim, and
+    // an indicator would be a lie in the other direction.
     const index = indexOf({ "a.md": "synced" });
     expect(rowSyncMark(file("shot.png"), index)).toBeNull();
     expect(rowSyncMark(file("page.html"), index)).toBeNull();
+  });
+
+  it("gives a file the mirror HAS spoken for the same dot, in a file's words", () => {
+    const index = withFiles({ "a.md": "synced" }, { "Team/report.docx": "syncing" });
+    expect(rowSyncMark(file("Team/report.docx"), index)).toEqual({
+      state: "syncing",
+      progress: null,
+      title: "Uploading…",
+    });
+    expect(rowSyncMark(file("Media/clip.mp4"), withFiles({}, { "Media/clip.mp4": "error" }))).
+      toMatchObject({
+        state: "error",
+        title: "Couldn't upload — this file is only on this device",
+      });
   });
 
   it("shows a folder's wave counts (not its population), and a dot once settled", () => {
@@ -272,7 +358,7 @@ describe("FolderWaveTracker", () => {
     });
     waves.apply(busy);
     expect(rowSyncMark(dir("A"), busy)!.progress).toEqual({ done: 0, total: 1 }); // not 3/4
-    expect(folderSyncTitle(busy.folders.get("A")!)).toBe("3 of 4 notes synced");
+    expect(folderSyncTitle(busy.folders.get("A")!)).toBe("3 of 4 files synced");
   });
 
   it("grows the wave when more work arrives mid-flight", () => {
@@ -302,19 +388,21 @@ describe("FolderWaveTracker", () => {
 });
 
 describe("folderSyncTitle", () => {
+  // The unit is "file", not "note": these counts hold the folder's binaries
+  // too, and a folder of three PDFs must not claim "All 3 notes synced".
   it("states the real counts rather than a rounded claim", () => {
     const index = indexOf({ "A/a.md": "synced", "A/b.md": "syncing", "A/c.md": "syncing" });
-    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 of 3 notes synced");
+    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 of 3 files synced");
   });
 
   it("names the failures when there are any", () => {
     const index = indexOf({ "A/a.md": "error", "A/b.md": "synced" });
-    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 note of 2 couldn't sync");
+    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 file of 2 couldn't sync");
   });
 
   it("says so plainly when everything is synced", () => {
     expect(folderSyncTitle(indexOf({ "A/a.md": "synced" }).folders.get("A")!)).toBe(
-      "All 1 note synced",
+      "All 1 file synced",
     );
   });
 });

@@ -51,6 +51,7 @@
 // upload pays for the probe.
 
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
+import type { DocSyncState } from "./vaultScope";
 import type {
   BlobCompleteBody,
   BlobDownloadTarget,
@@ -390,6 +391,23 @@ export interface AttachmentSyncDeps {
   authHeaders?: () => Record<string, string>;
   /** Tell the user something terminal happened (a full vault). */
   notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
+  /**
+   * Publish where every TREE binary stands, so a `.pdf` row in the sidebar can
+   * carry the same dot a note's row does (`store.fileSyncState`).
+   *
+   * The WHOLE map every time, never a patch: a pass is the only thing that
+   * knows the full local set, so replacing it is also how a file that was
+   * deleted or renamed since the last pass loses its dot. Keyed by
+   * vault-relative path, because identity here is the bytes and a `files` row
+   * may have been refused — there is no docId to key by. Paths under the hidden
+   * `attachments/` store are left out: they have no row to badge.
+   *
+   * The vocabulary is the notes' own {@link DocSyncState}, not a second one —
+   * `queued` while a file waits for this pass, `syncing` while its bytes move,
+   * `synced` once the server holds them, `error` only for a refusal retrying
+   * cannot fix. One vocabulary is what makes the two dots mean the same thing.
+   */
+  onFileStates?: (states: Record<string, DocSyncState>) => void;
 
   // ---- Tree binaries: `files` rows + extracted text (PR3 Stage A) ---------
 
@@ -450,6 +468,8 @@ export class AttachmentSync {
   private readonly permanentSkips = new Set<string>();
   /** The storage-full toast is raised at most once per sync instance. */
   private storageLimitNotified = false;
+  /** relPath → the state the sidebar draws for it (see `deps.onFileStates`). */
+  private fileStates = new Map<string, DocSyncState>();
 
   // ---- Tree binaries -----------------------------------------------------
 
@@ -494,6 +514,24 @@ export class AttachmentSync {
   /** Is the vault this sync belongs to still the open one? */
   private current(): boolean {
     return this.deps.isCurrent?.() ?? true;
+  }
+
+  // ---- The sidebar's file dots (see `deps.onFileStates`) -----------------
+
+  /** Hand the current map to the UI. One emission, whole map. */
+  private publishFileStates(): void {
+    this.deps.onFileStates?.(Object.fromEntries(this.fileStates));
+  }
+
+  /** Move ONE path. A no-op when the state is already what we'd publish, so a
+   *  pass that changes nothing costs the sidebar no re-render. */
+  private setFileState(relPath: string, state: DocSyncState): void {
+    if (!this.deps.onFileStates) return;
+    // The hidden root store has no sidebar row to badge.
+    if (isUnderAttachments(relPath)) return;
+    if (this.fileStates.get(relPath) === state) return;
+    this.fileStates.set(relPath, state);
+    this.publishFileStates();
   }
 
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
@@ -541,6 +579,29 @@ export class AttachmentSync {
     for (const b of server) if (b.sha256) this.blobIdBySha.set(b.sha256, b.id);
     const { toUpload, toDownload } = diffAttachments(local, server);
 
+    // Where every tree binary stands, rebuilt from the two listings rather than
+    // accumulated across passes: a file deleted or renamed since the last one
+    // must LOSE its dot, and this is the only place that knows the full local
+    // set. A sha the server already holds is synced outright — most of a
+    // vault's files on most passes, and the reason the column settles to quiet
+    // dots without a single byte moving.
+    if (this.deps.onFileStates) {
+      const queued = new Set(toUpload.map((a) => a.relPath));
+      this.fileStates = new Map<string, DocSyncState>();
+      for (const a of local) {
+        if (isUnderAttachments(a.relPath)) continue;
+        this.fileStates.set(
+          a.relPath,
+          this.permanentSkips.has(a.sha256)
+            ? "error"
+            : queued.has(a.relPath)
+              ? "queued"
+              : "synced",
+        );
+      }
+      this.publishFileStates();
+    }
+
     let uploaded = 0;
     let downloaded = 0;
     for (const a of toUpload) {
@@ -551,15 +612,27 @@ export class AttachmentSync {
       // A file the server has already refused for good (too large, wrong type)
       // is skipped without a round trip — see `permanentSkips`.
       if (this.permanentSkips.has(a.sha256)) continue;
+      this.setFileState(a.relPath, "syncing");
       try {
-        if (await this.uploadOne(a)) uploaded++;
+        if (await this.uploadOne(a)) {
+          uploaded++;
+          this.setFileState(a.relPath, "synced");
+        } else {
+          // The only `false` is a permanent refusal (413 too large, 415 wrong
+          // type), which `uploadOne` has already recorded in `permanentSkips`.
+          this.setFileState(a.relPath, "error");
+        }
       } catch (e) {
         if (e instanceof AbortPass) {
           // Nothing else in this pass can succeed either. Downloads are skipped
           // too: the vault is full, and the next pass will find the same state.
+          // This file is not broken — it is waiting, like every one behind it.
+          this.setFileState(a.relPath, "queued");
           console.warn("[attachments] pass aborted:", e.reason);
           return { uploaded, downloaded };
         }
+        // Transient (offline, a 5xx). It stays `syncing`: the next pass runs it
+        // again, and `error` is reserved for a refusal retrying cannot fix.
         console.error("[attachments] upload failed", a.relPath, e);
       }
     }
@@ -568,6 +641,9 @@ export class AttachmentSync {
       try {
         await this.downloadOne(b);
         downloaded++;
+        // It came FROM the server, so the server has it — and its row appears
+        // in the sidebar on the watcher echo, before the next pass would say so.
+        if (b.relPath) this.setFileState(b.relPath, "synced");
       } catch (e) {
         console.error("[attachments] download failed", b.relPath, e);
       }
@@ -1088,6 +1164,13 @@ export class AttachmentSync {
       this.textTimer = null;
     }
     this.pendingText.clear();
+    // The dots belong to the vault this mirror was built for. A stopped mirror
+    // has nothing to say about them — and the paths it was holding are about to
+    // mean a different vault's files.
+    if (this.fileStates.size > 0) {
+      this.fileStates = new Map();
+      this.publishFileStates();
+    }
   }
 
   /** True while a debounced pass is still armed (teardown assertions/tests). */

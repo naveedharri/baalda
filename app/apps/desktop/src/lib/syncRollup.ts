@@ -9,7 +9,9 @@
 //
 //  1. HONESTY. The user asked for this so that "synced" can be trusted. So a note
 //     with no server mapping counts as NOT synced (because it is), and a folder is
-//     only "synced" when every note under it is.
+//     only "synced" when every note AND every file under it is — the tree
+//     binaries ride the attachment mirror rather than the CRDT, but the question
+//     the dot answers ("is my work on the server?") does not care which.
 //  2. AN HONEST DENOMINATOR. The percentage is computed against the FULL note set
 //     (the local title index ∪ the registry's map), never against the sidebar
 //     tree — that tree is lazily loaded, so a folder nobody has expanded holds an
@@ -19,7 +21,7 @@
 //     note is visited once and credited to each of its ancestor folders, so the
 //     cost is linear in the number of path segments in the vault.
 
-import { isSafeAttachmentRelPath } from "./sync/attachments";
+import { isSafeAttachmentRelPath, isUnderAttachments } from "./sync/attachments";
 import type { SyncStatus } from "./sync/syncManager";
 import type { DocSyncState } from "./sync/vaultScope";
 
@@ -49,7 +51,8 @@ export function sidebarMarksVisible(status: SyncStatus): boolean {
 
 /** Rolled-up sync state of everything under one folder. */
 export interface FolderSyncSummary {
-  /** Notes under this folder, at any depth. Never 0 for a summary that exists. */
+  /** Notes and files under this folder, at any depth. Never 0 for a summary
+   *  that exists. */
   total: number;
   synced: number;
   /** In flight right now (queued or syncing). */
@@ -80,10 +83,22 @@ export interface FolderSyncSummary {
 export interface TreeSyncIndex {
   /** Note relPath → its state. Absent ⇒ not a synced note (e.g. an image). */
   notes: Map<string, DocSyncState>;
-  /** Folder relPath → roll-up. Folders containing no notes are ABSENT, so they
-   *  render no indicator rather than a meaningless "0 of 0". */
+  /**
+   * Tree-binary relPath → its state: the `.pdf`s, `.docx`s and `.mp4`s that
+   * sync as blobs rather than as CRDT notes.
+   *
+   * A second map rather than more entries in `notes` because the two are known
+   * from different places — a note's state is keyed by docId and arrives from
+   * the content run, a file's is keyed by path and arrives from the attachment
+   * mirror — and because the tooltips differ. Their folder counts are shared:
+   * "is everything under this folder on the server?" is one question.
+   */
+  files: Map<string, DocSyncState>;
+  /** Folder relPath → roll-up over its notes AND files. Folders holding neither
+   *  are ABSENT, so they render no indicator rather than a meaningless "0 of 0". */
   folders: Map<string, FolderSyncSummary>;
-  /** The whole vault's roll-up (the root folder), or null when it holds no notes. */
+  /** The whole vault's roll-up (the root folder), or null when it holds nothing
+   *  that syncs. */
   vault: FolderSyncSummary | null;
 }
 
@@ -101,6 +116,16 @@ export interface TreeSyncInput {
    * as unsynced, instead of quietly vanishing from its folder's total.
    */
   localNotePaths: Iterable<string>;
+  /**
+   * relPath → state for every tree binary the attachment mirror has spoken for
+   * (`store.fileSyncState`). Absent — or empty, before the mirror's first pass —
+   * means the same thing the note map's silence does: nothing to draw yet.
+   *
+   * No local-file denominator to keep honest here, unlike the notes: the mirror
+   * publishes the WHOLE local binary set on every pass, so a file missing from
+   * this map is one sync has never seen rather than one it lost.
+   */
+  fileSyncState?: Record<string, DocSyncState>;
 }
 
 function parentDir(path: string): string {
@@ -161,6 +186,18 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
     if (!notes.has(relPath)) notes.set(relPath, "unsynced");
   }
 
+  // Every tree binary the attachment mirror has spoken for. It publishes its
+  // whole local set each pass and already leaves the hidden root store out; the
+  // guards here are for a map that outlived the pass that built it.
+  const files = new Map<string, DocSyncState>();
+  for (const [relPath, state] of Object.entries(input.fileSyncState ?? {})) {
+    if (isUnderAttachments(relPath)) continue;
+    // A path cannot be both. If the registry claims it as a note, that claim is
+    // the one the sidebar draws — and it must not be counted twice.
+    if (notes.has(relPath)) continue;
+    files.set(relPath, state);
+  }
+
   const counts = new Map<string, Counts>();
   const credit = (dir: string, state: DocSyncState, isUnreported: boolean): void => {
     let c = counts.get(dir);
@@ -174,17 +211,24 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
     else if (state === "queued" || state === "syncing") c.pending++;
     if (isUnreported) c.unreported++;
   };
-
-  // Credit each note to every folder above it, up to and including the root ("").
-  for (const [relPath, state] of notes) {
-    const isUnreported = unreported.has(relPath);
+  /** Credit one row to every folder above it, up to and including the root (""). */
+  const creditAncestors = (relPath: string, state: DocSyncState, isUnreported: boolean): void => {
     let dir = parentDir(relPath);
     for (;;) {
       credit(dir, state, isUnreported);
       if (dir === "") break;
       dir = parentDir(dir);
     }
+  };
+
+  for (const [relPath, state] of notes) {
+    creditAncestors(relPath, state, unreported.has(relPath));
   }
+  // Files share the folder counts: a folder whose only outstanding thing is an
+  // uploading PDF must not read as settled. Never `unreported` — the mirror
+  // speaks only about files it has actually placed, so silence is absence, not
+  // a pending verdict, and a wave must not be pinned on one.
+  for (const [relPath, state] of files) creditAncestors(relPath, state, false);
 
   const folders = new Map<string, FolderSyncSummary>();
   let vault: FolderSyncSummary | null = null;
@@ -193,7 +237,7 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
     if (dir === "") vault = summary;
     else folders.set(dir, summary);
   }
-  return { notes, folders, vault };
+  return { notes, files, folders, vault };
 }
 
 /**
@@ -268,6 +312,20 @@ export const DOC_SYNC_TITLES: Record<DocSyncState, string> = {
   error: "Couldn't sync — this note is only on this device",
 };
 
+/**
+ * The same five states in a file's words.
+ *
+ * A `.pdf` is not "a note", and the error copy is the line the user acts on —
+ * so the two tables stay separate rather than one being bent to cover both.
+ */
+export const FILE_SYNC_TITLES: Record<DocSyncState, string> = {
+  unsynced: "Not on the server yet",
+  queued: "Waiting to upload",
+  syncing: "Uploading…",
+  synced: "Synced",
+  error: "Couldn't upload — this file is only on this device",
+};
+
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
@@ -279,15 +337,21 @@ function waveOrNull(
   return wave.total > 0 ? wave : null;
 }
 
-/** Tooltip for a folder row: always the real counts, never a rounded claim. */
+/**
+ * Tooltip for a folder row: always the real counts, never a rounded claim.
+ *
+ * "files", not "notes": the counts hold the folder's binaries too now, and a
+ * folder of three PDFs claiming "All 3 notes synced" would be the small lie
+ * this whole module exists to avoid.
+ */
 export function folderSyncTitle(s: FolderSyncSummary): string {
   if (s.failed > 0) {
-    return `${plural(s.failed, "note")} of ${s.total} couldn't sync`;
+    return `${plural(s.failed, "file")} of ${s.total} couldn't sync`;
   }
   if (s.synced === s.total) {
-    return `All ${plural(s.total, "note")} synced`;
+    return `All ${plural(s.total, "file")} synced`;
   }
-  return `${s.synced} of ${plural(s.total, "note")} synced`;
+  return `${s.synced} of ${plural(s.total, "file")} synced`;
 }
 
 /**
@@ -327,6 +391,13 @@ export function rowSyncMark(
     };
   }
   const state = index.notes.get(row.path);
-  if (!state) return null;
-  return { state, progress: null, title: DOC_SYNC_TITLES[state] };
+  if (state) return { state, progress: null, title: DOC_SYNC_TITLES[state] };
+  // Not a note — but a `.pdf`/`.docx`/`.mp4` the attachment mirror carries gets
+  // the SAME dot, in the same column, in its own words. A file the mirror has
+  // never spoken for (sync off, no pass yet) still gets nothing.
+  const fileState = index.files.get(row.path);
+  if (fileState) {
+    return { state: fileState, progress: null, title: FILE_SYNC_TITLES[fileState] };
+  }
+  return null;
 }

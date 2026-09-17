@@ -597,6 +597,132 @@ describe("AttachmentSync upload transport (intent → PUT → complete)", () => 
   });
 });
 
+// ── The sidebar's file dots ────────────────────────────────────────────────
+// A `.pdf` row gets the same dot a note's row does, and it is the mirror that
+// has to say so. Every case below is a way the dot could have lied: claiming
+// synced for bytes the server never got, staying amber on a file it refused, or
+// outliving the vault it belonged to.
+describe("AttachmentSync per-file state (store.fileSyncState)", () => {
+  /** Deps that publish states, plus the log of every map emitted. */
+  function withStates(
+    files: Array<{ relPath: string; bytes: Uint8Array }>,
+    respond: Parameters<typeof makeTransport>[1],
+    extra: Partial<AttachmentSyncDeps> = {},
+  ) {
+    const emissions: Array<Record<string, string>> = [];
+    const { deps, log } = makeTransport(files, respond, {
+      ...extra,
+      onFileStates: (states) => {
+        emissions.push({ ...states });
+      },
+    });
+    return { deps, log, emissions, last: () => emissions[emissions.length - 1] ?? {} };
+  }
+
+  it("calls a file the server already holds synced, without moving a byte", async () => {
+    const { deps, log, last } = withStates(
+      [{ relPath: "Team/report.docx", bytes: new Uint8Array([1]) }],
+      () => SINGLE_INTENT,
+      {
+        listServer: async () => [
+          { id: "blob-1", relPath: "Team/report.docx", sha256: "sha-Team/report.docx" },
+        ],
+      },
+    );
+    await new AttachmentSync(deps).reconcile();
+
+    expect(last()).toEqual({ "Team/report.docx": "synced" });
+    expect(log.intents).toEqual([]); // nothing was announced, let alone sent
+  });
+
+  it("walks a new file queued → syncing → synced across its upload", async () => {
+    const { deps, emissions } = withStates(
+      [{ relPath: "Team/deck.pptx", bytes: new Uint8Array([1, 2, 3]) }],
+      () => SINGLE_INTENT,
+    );
+    await new AttachmentSync(deps).reconcile();
+
+    // In that order: the diff queues it, the upload claims it, the complete
+    // confirms it. Anything else and the dot would jump straight to green.
+    expect(emissions.map((e) => e["Team/deck.pptx"])).toEqual([
+      "queued",
+      "syncing",
+      "synced",
+    ]);
+  });
+
+  it("fails a file the server refuses for good, and only that file", async () => {
+    const { deps, emissions, last } = withStates(
+      [
+        { relPath: "Media/huge.mp4", bytes: new Uint8Array([1]) },
+        { relPath: "Media/ok.png", bytes: new Uint8Array([2]) },
+      ],
+      ({ relPath }) =>
+        relPath === "Media/huge.mp4" ? serverError(413, "attachment_too_large") : SINGLE_INTENT,
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+
+    expect(last()).toEqual({ "Media/huge.mp4": "error", "Media/ok.png": "synced" });
+
+    // A second pass re-derives the map WITHOUT asking again: the refusal is
+    // remembered by content hash, so the dot stays red rather than flickering
+    // back through amber on every reconcile.
+    emissions.length = 0;
+    await sync.reconcile();
+    expect(emissions[0]["Media/huge.mp4"]).toBe("error");
+    expect(last()["Media/huge.mp4"]).toBe("error");
+  });
+
+  it("leaves the hidden attachments/ store out — it has no row to badge", async () => {
+    const { deps, last } = withStates(
+      [
+        { relPath: "attachments/dropped.png", bytes: new Uint8Array([1]) },
+        { relPath: "Team/report.docx", bytes: new Uint8Array([2]) },
+      ],
+      () => SINGLE_INTENT,
+    );
+    await new AttachmentSync(deps).reconcile();
+
+    expect(Object.keys(last())).toEqual(["Team/report.docx"]);
+  });
+
+  it("forgets a file that left the vault, because the map is rebuilt not merged", async () => {
+    const local = new Map<string, Uint8Array>([
+      ["Team/a.pdf", new Uint8Array([1])],
+      ["Team/b.pdf", new Uint8Array([2])],
+    ]);
+    const { deps, last } = withStates([], () => SINGLE_INTENT, {
+      listLocal: async () =>
+        [...local.entries()].map(([relPath, bytes]) => ({
+          relPath,
+          sha256: `sha-${relPath}`,
+          size: bytes.byteLength,
+        })),
+    });
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    expect(Object.keys(last()).sort()).toEqual(["Team/a.pdf", "Team/b.pdf"]);
+
+    local.delete("Team/b.pdf");
+    await sync.reconcile();
+    expect(Object.keys(last())).toEqual(["Team/a.pdf"]);
+  });
+
+  it("clears the map on stop, so the dots leave with the vault", async () => {
+    const { deps, last } = withStates(
+      [{ relPath: "Team/report.docx", bytes: new Uint8Array([1]) }],
+      () => SINGLE_INTENT,
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    expect(last()).toEqual({ "Team/report.docx": "synced" });
+
+    sync.stop();
+    expect(last()).toEqual({});
+  });
+});
+
 describe("AttachmentSync download transport (presigned URL)", () => {
   /** Deps whose server holds one blob and speaks `GET /api/blobs/:id/url`. */
   function makeDownload(
