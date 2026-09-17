@@ -2772,6 +2772,230 @@ body:has(.sidebar-resizer.dragging) {
   border: 0;
 }
 
+/* ---- Viewer leaves (components/viewers/*) ----
+   Every non-note file opens into one of these. They all sit inside the same
+   `.file-preview` / `.file-preview-body` frame above, so the pane's scrolling
+   and sizing are declared once. */
+
+/* Video / audio: the media is the content, centred on the pane's background. */
+.file-preview-video .file-preview-body,
+.file-preview-audio .file-preview-body {
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+}
+.file-preview-video .file-preview-media {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: var(--radius-md);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  background: #000;
+}
+.file-audio {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  align-items: center;
+  width: min(560px, 100%);
+}
+.file-audio-name {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-preview-audio .file-preview-media {
+  width: 100%;
+}
+
+/* Read-only CodeMirror (CodeView). The host fills the pane; the view's own
+   theme (see CodeView) carries the type and gutter colours. */
+.file-preview-code .file-preview-body {
+  overflow: hidden;
+}
+.file-code-host {
+  height: 100%;
+}
+.file-code-host .cm-editor {
+  height: 100%;
+}
+.file-code-host .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* ---- Tabular viewers (CSV/TSV + XLSX) ----
+   The same borders, `--bg-subtle` header and `--sp-*` padding as a rendered
+   markdown table in the editor (`editor/theme.ts` `.cm-md-table`), restated
+   here because that one is a CodeMirror theme scoped inside `.cm-editor`. */
+.file-preview-csv .file-preview-body,
+.file-preview-xlsx .file-preview-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.file-sheet-tabs {
+  padding: var(--sp-3) var(--sp-4) 0;
+}
+.file-sheet-tabs .segmented {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.file-sheet-tabs .segmented button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.file-table-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-4);
+  gap: var(--sp-2);
+}
+.file-table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.file-table {
+  border-collapse: collapse;
+  /* Natural column widths, like the editor's tables: a wide sheet scrolls
+     inside the wrapper instead of crushing its columns. */
+  width: max-content;
+  font-size: var(--fs-sm);
+}
+.file-table th,
+.file-table td {
+  border: 1px solid var(--border);
+  padding: var(--sp-1) var(--sp-3);
+  text-align: left;
+  vertical-align: top;
+  max-width: 42ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre-wrap;
+}
+.file-table th {
+  background: var(--bg-subtle);
+  font-weight: 700;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.file-table .file-table-gutter {
+  color: var(--text-tertiary);
+  background: var(--bg-subtle);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.file-table-footer {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.file-table-empty {
+  color: var(--text-tertiary);
+  font-size: var(--fs-sm);
+}
+
+/* ---- Document viewer (docx) ---- */
+.file-preview-docx .file-preview-body {
+  padding: var(--sp-6) var(--sp-4);
+}
+.file-doc {
+  max-width: 72ch;
+  margin: 0 auto;
+  color: var(--text-primary);
+  line-height: var(--lh-body);
+}
+.file-doc-body img {
+  max-width: 100%;
+  height: auto;
+}
+.file-doc-body table {
+  border-collapse: collapse;
+}
+.file-doc-body th,
+.file-doc-body td {
+  border: 1px solid var(--border);
+  padding: var(--sp-1) var(--sp-2);
+}
+.file-doc-warnings {
+  margin-bottom: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.file-doc-warnings summary {
+  cursor: pointer;
+}
+
+/* The inline "large file — render anyway?" prompt (docx / xlsx). A button, not
+   a modal: it is a question about this pane, answered in this pane. */
+.file-ask {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--sp-3);
+  height: 100%;
+  padding: var(--sp-6);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* ---- The card (viewers/FileCard) ---- */
+.file-preview-card .file-preview-body {
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+}
+.file-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 420px;
+  padding: var(--sp-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  text-align: center;
+}
+.file-card-icon {
+  width: 40px;
+  height: 40px;
+  color: var(--text-tertiary);
+}
+.file-card-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.file-card-meta {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.file-card-hash {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.file-card-reason {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.file-card-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
 /* ---- Removed-on-disk banner ---- */
 .banner {
   display: flex;

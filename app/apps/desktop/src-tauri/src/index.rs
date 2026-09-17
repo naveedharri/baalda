@@ -9,8 +9,8 @@
 
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::notefile::sha256_hex;
-use crate::parse::parse_note;
-use crate::vault::{is_ignored_name, rel_from_abs};
+use crate::parse::{parse_html, parse_note, parse_plain, ParsedNote};
+use crate::vault::{is_ignored_name, is_note_file, rel_from_abs};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -18,6 +18,27 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use uuid::Uuid;
 use walkdir::WalkDir;
+
+/// Which derivation a note-family file gets.
+///
+/// Only markdown runs the markdown parser. `parse.rs` owns the `#tag` ↔ editor
+/// contract and the `[[wikilink]]` rules, and both are meaningless outside
+/// markdown — so `.txt`/`.canvas` are indexed as plain text under their stem and
+/// `.html` as its stripped text. All of them still get a `notes` row, an FTS
+/// row and a stable `doc_id`, which is what makes them searchable and
+/// rename-safe like every other note.
+fn parse_for(abs: &Path, content: &str, stem: &str) -> ParsedNote {
+    let ext = abs
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "md" | "markdown" | "mdx" => parse_note(content, stem),
+        "html" | "htm" => parse_html(content, stem),
+        _ => parse_plain(content, stem),
+    }
+}
 
 /// Only log a batch's timing past this many files: a single-note save goes
 /// through the same code and must stay silent.
@@ -426,7 +447,10 @@ impl Index {
                 continue;
             }
             let name = entry.file_name().to_string_lossy();
-            if !name.to_lowercase().ends_with(".md") {
+            // The whole CRDT note family, not just `.md` — a `.txt` that syncs
+            // as a note but never reaches the index is a note you cannot search,
+            // cannot reach by wikilink and whose title the sidebar has to guess.
+            if !is_note_file(&name) {
                 continue;
             }
             let rel = rel_from_abs(vault, abs)?;
@@ -858,7 +882,7 @@ impl Index {
             }
         }
 
-        let parsed = parse_note(&content, stem);
+        let parsed = parse_for(abs, &content, stem);
 
         let id = reuse_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -2001,6 +2025,80 @@ mod tests {
         .unwrap();
         write_note(&v, "Gamma.md", "# Gamma\n\nDangling [[Nonexistent]] link.").unwrap();
         (tmp, v)
+    }
+
+    /// The CRDT note family is md/markdown/mdx + txt/html/htm/canvas, and all of
+    /// it indexes. Before this, `.txt` synced as a note yet had no `notes` row —
+    /// unsearchable, unreachable by wikilink, and with no doc_id for the sidebar
+    /// to key on.
+    #[test]
+    fn indexes_the_whole_note_family_with_ids_stable_across_rebuild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Note.md", "# Note\n\nmarkdown body").unwrap();
+        write_note(&v, "Plain.txt", "a plain text jellyfish note").unwrap();
+        write_note(&v, "Page.html", "<p class=\"zzmarkup\">an html <b>jellyfish</b> page</p>").unwrap();
+        write_note(&v, "Board.canvas", "{\"nodes\":[]}").unwrap();
+        // Not a note: surfaced in the tree, but it rides the blob store.
+        std::fs::write(v.join("Sheet.csv"), b"a,b\n1,2\n").unwrap();
+
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let mut paths: Vec<String> = idx
+            .list_note_titles()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["Board.canvas", "Note.md", "Page.html", "Plain.txt"]);
+
+        // Non-markdown members take their filename stem as the title.
+        let txt = idx.get_note_meta("Plain.txt").unwrap().unwrap();
+        assert_eq!(txt.title, "Plain");
+        let html = idx.get_note_meta("Page.html").unwrap().unwrap();
+        assert_eq!(html.title, "Page");
+
+        // FTS reaches both — and the html row holds its TEXT, not its markup.
+        let hits = idx.search_notes("jellyfish").unwrap();
+        let mut hit_paths: Vec<String> = hits.into_iter().map(|h| h.path).collect();
+        hit_paths.sort();
+        assert_eq!(hit_paths, ["Page.html", "Plain.txt"]);
+        assert!(
+            idx.search_notes("zzmarkup").unwrap().is_empty(),
+            "markup is stripped before it reaches FTS"
+        );
+
+        // Identity survives a rebuild, exactly like `.md` (renames/backlinks).
+        let ids_before: Vec<(String, String)> = ["Plain.txt", "Page.html", "Board.canvas"]
+            .iter()
+            .map(|p| (p.to_string(), idx.get_note_meta(p).unwrap().unwrap().id))
+            .collect();
+        idx.rebuild(&v).unwrap();
+        for (path, id) in ids_before {
+            assert_eq!(idx.get_note_meta(&path).unwrap().unwrap().id, id, "{path}");
+        }
+    }
+
+    /// `#tag` and `[[wikilink]]` are MARKDOWN rules (see `parse.rs`). A `.txt`
+    /// shopping list full of `#` bullets must not stuff the tag cloud with words
+    /// the editor never draws as pills.
+    #[test]
+    fn a_txt_notes_hashes_and_brackets_are_not_tags_or_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "List.txt", "#groceries\nmilk\n[[Alpha]]\n").unwrap();
+        write_note(&v, "Alpha.md", "# Alpha\n\n#real").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        let names: Vec<String> = idx.list_tags(50).unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["real"], "only the markdown note contributed a tag");
+
+        // …and no backlink either: the `.txt`'s `[[Alpha]]` is just text.
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();
+        assert!(idx.get_backlinks(&alpha.id).unwrap().is_empty());
     }
 
     /// The editor's `#` completion: every tag, most-used first. Ties break by

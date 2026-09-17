@@ -3,6 +3,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { applyGraphDelta, buildGraph, fetchGraphDelta, type Graph } from "./buildGraph";
 import { onFilesChanged, type FileChanged } from "../ipc";
 import { useStore } from "../../store";
+import { isNoteExt } from "../formats";
 
 /** Delay before rebuilding after a file-changed event, so bursts of edits
  *  (e.g. an AI rewrite touching many notes) collapse into one rebuild. */
@@ -133,10 +134,11 @@ export function useGraphData(): GraphDataState {
       const pending = pendingPathsRef.current;
       if (pending) {
         for (const c of changes) {
-          // Only an in-place edit to a markdown note is a delta. A removal or a
-          // structural change (folder, rename, non-note file) can move or drop
-          // nodes the delta cannot see.
-          if (c.kind !== "modified" || !c.path.toLowerCase().endsWith(".md")) {
+          // Only an in-place edit to a note-family file is a delta (the index
+          // now holds all seven note extensions, not just `.md`). A removal or
+          // a structural change (folder, rename, binary) can move or drop nodes
+          // the delta cannot see.
+          if (c.kind !== "modified" || !isNoteExt(c.path)) {
             pendingPathsRef.current = null;
             break;
           }

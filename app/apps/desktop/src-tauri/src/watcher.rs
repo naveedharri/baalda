@@ -26,7 +26,7 @@
 //! (re-reading the note, diffing it into the CRDT, re-uploading it).
 
 use crate::index::Index;
-use crate::vault::{rel_from_abs, rel_path_is_ignored};
+use crate::vault::{is_note_file, rel_from_abs, rel_path_is_ignored};
 use notify::event::{AccessKind, AccessMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -255,7 +255,7 @@ pub struct PlannedChange {
 /// I/O is the existence check that decides modified-vs-removed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// `.md` files present on disk → `Index::index_notes`.
+    /// Note-family files present on disk → `Index::index_notes`.
     pub modified: Vec<PathBuf>,
     /// Everything to drop from the index → `Index::remove_notes`.
     pub removed: Vec<PathBuf>,
@@ -264,7 +264,7 @@ pub struct Plan {
 }
 
 /// Turn a dirty set into a [`Plan`]: drop ignored paths, sort for determinism,
-/// and split `.md` writes from `.md` deletions from structural changes.
+/// and split note-family writes from note-family deletions from structural changes.
 pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Plan {
     let mut planned: Vec<PlannedChange> = Vec::new();
     for abs in batch {
@@ -274,16 +274,21 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         if rel.is_empty() || rel_path_is_ignored(&rel) {
             continue;
         }
-        let is_md = rel.to_lowercase().ends_with(".md");
+        // The whole note family, not just `.md` — `index.rs` indexes all of it,
+        // so a `.txt` edit that arrived as a "tree" change would refresh the
+        // sidebar and never re-index the file it actually touched. Asked of the
+        // file NAME, so a dot in a directory (`a.b/notes`) cannot answer for it.
+        let name = rel.rsplit('/').next().unwrap_or(rel.as_str());
+        let is_note = is_note_file(name);
         let exists = abs.exists();
-        let (kind, gone) = if is_md {
+        let (kind, gone) = if is_note {
             if exists && abs.is_file() {
                 ("modified", false)
             } else {
                 ("removed", true)
             }
         } else {
-            // Directory or non-markdown file → structural refresh. If it's gone
+            // Directory or non-note file → structural refresh. If it's gone
             // it may have been a folder, so prune its notes from the index too.
             ("tree", !exists)
         };

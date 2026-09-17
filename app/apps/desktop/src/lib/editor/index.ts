@@ -1,4 +1,5 @@
-// Editor factory. Builds the CodeMirror 6 extension set for a markdown note.
+// Editor factory. Builds the CodeMirror 6 extension set for a note — markdown
+// by default, and plain text for a `.txt` (see `noteLanguage`).
 // Designed so Phase 1 can append a Yjs `y-codemirror.next` binding to
 // `extraExtensions` without changing any callsite.
 
@@ -17,6 +18,7 @@ import {
 } from "@codemirror/view";
 import { GFM } from "@lezer/markdown";
 import type { NoteTitle } from "../ipc";
+import { isMarkdownNote } from "../notePath";
 import { blockDecorations } from "./blocks";
 import { codeFenceFlair } from "./codeFence";
 import { codeLanguages } from "./codeLanguages";
@@ -85,8 +87,50 @@ export function lineNumberExtension(on: boolean): Extension {
   return on ? lineNumbers() : [];
 }
 
+/**
+ * The note's grammar — markdown, or none at all.
+ *
+ * The CRDT editor family is md/markdown/mdx **and txt** (`notePath.ts
+ * isEditorNote`), and only the first three are markdown. Handing a `.txt` the
+ * markdown language would turn every syntax-tree-driven extension loose on
+ * prose: `# eggs` in a shopping list becomes a heading, `*star*` folds into
+ * italics, and a line of `---` becomes a rule — in the one file format a person
+ * picks BECAUSE it has no syntax. Dropping the language leaves those extensions
+ * reading an empty tree, which is exactly the plain-text buffer we want; the
+ * keymaps, wrapping, theme, header and paste handling all still apply.
+ *
+ * Keyed off `header.path`, the only place the factory learns which file it is.
+ * With no header — the version-preview view and the tests, which have no note
+ * behind them — the answer stays markdown, exactly as before.
+ */
+function isPlainTextNote(opts: CreateEditorOptions): boolean {
+  return opts.header != null && !isMarkdownNote(opts.header.path);
+}
+
+function noteLanguage(opts: CreateEditorOptions): Extension {
+  if (isPlainTextNote(opts)) return [];
+  // GFM adds tables, task lists, strikethrough, and autolinks; `ofmMarkdown`
+  // adds Obsidian's `==highlight==`, `%%comment%%` and `#tag` on top, so a
+  // vault reads the same here and in Obsidian.
+  // `codeLanguages` are LanguageDescriptions with dynamic imports: nothing
+  // here reaches the startup bundle, and a grammar is fetched only when a
+  // fence in an open note claims that language.
+  return markdown({
+    base: markdownLanguage,
+    extensions: [GFM, ...ofmMarkdown],
+    codeLanguages,
+  });
+}
+
 export function baseExtensions(opts: CreateEditorOptions): Extension[] {
   const collab = opts.collab ?? false;
+  // A `.txt` is plain text: no grammar, and nothing that RENDERS markdown over
+  // its bytes. Almost every decoration follows the grammar for free (an empty
+  // syntax tree yields nothing), so `checkboxes` is the only extra gate — it
+  // matches `- [ ]` with a regex (`tasks.ts TASK_RE`), language or not, and
+  // would otherwise replace those five characters with a widget in a file that
+  // has no task syntax.
+  const plain = isPlainTextNote(opts);
   const keys = [
     ...closeBracketsKeymap,
     ...defaultKeymap,
@@ -129,17 +173,8 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
         ...(opts.getTags ? [tagCompletions({ getTags: opts.getTags })] : []),
       ],
     }),
-    // GFM adds tables, task lists, strikethrough, and autolinks; `ofmMarkdown`
-    // adds Obsidian's `==highlight==`, `%%comment%%` and `#tag` on top, so a
-    // vault reads the same here and in Obsidian.
-    // `codeLanguages` are LanguageDescriptions with dynamic imports: nothing
-    // here reaches the startup bundle, and a grammar is fetched only when a
-    // fence in an open note claims that language.
-    markdown({
-      base: markdownLanguage,
-      extensions: [GFM, ...ofmMarkdown],
-      codeLanguages,
-    }),
+    // Markdown, or nothing for a `.txt` (see `noteLanguage`).
+    noteLanguage(opts),
     markdownHighlight,
     // Frontmatter first: blocks.ts and livePreview.ts both read its range so
     // nothing else decorates inside it (see lib/editor/frontmatter.ts).
@@ -153,8 +188,8 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     livePreview({ resolveAsset: opts.resolveAsset, onNavigate: opts.onNavigate }),
     // A table is always rendered, so the caret must never walk into one.
     tableAtomicRanges,
-    // Clickable `- [ ]` task checkboxes.
-    checkboxes,
+    // Clickable `- [ ]` task checkboxes (markdown only — see `plain`).
+    ...(plain ? [] : [checkboxes]),
     // A copy button on every code fence.
     codeFenceFlair,
     // Paste a URL over a selection → link; paste/drop an image → attachment.

@@ -39,6 +39,14 @@ fn seed(vault: &PathBuf) {
         "# Scratch\n\nDangling [[Nowhere]] plus a #idea tag.\n",
     )
     .unwrap();
+    // A non-markdown member of the note family: it indexes like the rest, but
+    // its `#` and `[[…]]` are plain characters (see `parse.rs parse_plain`).
+    notefile::write_note(
+        vault,
+        "Daily/Errands.txt",
+        "buy #stamps\npost [[Nowhere]]\nsardonic marmalade\n",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -49,9 +57,9 @@ fn full_index_lifecycle_on_disk_vault() {
     let idx = Index::open(&vault).unwrap();
     idx.rebuild(&vault).unwrap();
 
-    // 4 notes discovered across nested folders.
+    // 5 notes discovered across nested folders (4 markdown + 1 plain text).
     let titles = idx.list_note_titles().unwrap();
-    assert_eq!(titles.len(), 4, "expected 4 notes, got {}", titles.len());
+    assert_eq!(titles.len(), 5, "expected 5 notes, got {}", titles.len());
 
     // FTS: "quick brown" only appears in the daily note.
     let hits = idx.search_notes("quick brown").unwrap();
@@ -71,6 +79,15 @@ fn full_index_lifecycle_on_disk_vault() {
     // Tags surfaced on the daily note.
     let daily = idx.get_note_meta("Daily/2026-07-13.md").unwrap().unwrap();
     assert!(daily.tags.contains(&"project".to_string()));
+
+    // The `.txt` is a first-class note: searchable, titled by its stem — and
+    // its `#stamps`/`[[Nowhere]]` are text, not a tag and not a link.
+    let errands = idx.get_note_meta("Daily/Errands.txt").unwrap().unwrap();
+    assert_eq!(errands.title, "Errands");
+    assert!(errands.tags.is_empty());
+    let txt_hits = idx.search_notes("sardonic").unwrap();
+    assert_eq!(txt_hits.len(), 1);
+    assert_eq!(txt_hits[0].path, "Daily/Errands.txt");
 
     // Dangling link ([[Nowhere]]) is recorded but unresolved (no backlink).
     let dangling = idx.resolve_wikilink("Nowhere").unwrap();

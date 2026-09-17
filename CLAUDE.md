@@ -107,7 +107,17 @@ Build: `pnpm run build:desktop`.
 Commands registered in `lib.rs`; `AppState` (`state.rs`) is one `Mutex` over `{ vault, index, watcher }`.
 Errors: single `AppError(String)` (`error.rs`).
 - `vault.rs` — path safety (`resolve_in_vault` rejects `..`/absolute/escape); ignores `.context/`, `.git`, dotfiles.
-- `tree.rs` — recursive walk to nested `TreeNode`; surfaces `.md`/`.html` only.
+- `tree.rs` — recursive walk to nested `TreeNode`; surfaces exactly `vault.rs ALLOWED_EXTS` (notes,
+  images, pdf, office docs, audio/video, csv/json/code, zip) and hides the root `attachments/` folder.
+  **`ALLOWED_EXTS` and `NOTE_EXTS` are ONE contract with the desktop's format registry**
+  (`src/lib/formats.ts` — `SURFACED_EXTS`/`NOTE_EXTS`, the single authority for what a file is: how it
+  surfaces, opens, embeds, uploads and syncs) and with the `NOTE_EXTS` literals in `sync/registry.ts` /
+  `sync/inbound.ts`; `formatsLockstep.test.ts` reads those source files and fails on any drift. Only
+  `NOTE_EXTS` (md, markdown, mdx, txt, html, htm, canvas) are CRDT notes and index rows; a viewer
+  choice is display-only and never promotes a file into the bridge. The webview CSP in
+  `tauri.conf.json` is pinned by `src/__tests__/csp.test.ts` — Tauri injects it only in packaged
+  builds, `frame-src`/`media-src` must allow `asset:`, `http://asset.localhost` (Windows) and
+  `https://asset.localhost`, and dev never exercises it.
 - `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`.
 - `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter. `derive_title`
   (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title — `index.rs`

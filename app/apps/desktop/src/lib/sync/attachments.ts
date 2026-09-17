@@ -8,6 +8,8 @@
 // wires it to injected I/O (ApiClient + Tauri ipc) and debounces watcher-driven
 // reconciles so a burst of file events collapses into one pass.
 
+import { mimeForPath as mimeForFormat } from "../formats";
+
 /** Local attachment metadata (from `ipc.listAttachments`). */
 export interface LocalAttachment {
   relPath: string;
@@ -74,35 +76,17 @@ export function diffAttachments(
   return { toUpload, toDownload };
 }
 
-/** Guess a content-type from a file extension (upload hint; MVP table). */
+/**
+ * The Content-Type an attachment uploads with.
+ *
+ * Delegates to the format registry (`lib/formats.ts`), which is the single
+ * answer to "what IS this file?" — this used to be a second, drifting table
+ * that knew `mov` as nothing and `ico` as the non-canonical
+ * `image/x-icon`. Kept as an exported name because the sync layer and its
+ * tests are written against it.
+ */
 export function mimeForPath(relPath: string): string {
-  const ext = relPath.slice(relPath.lastIndexOf(".") + 1).toLowerCase();
-  const map: Record<string, string> = {
-    png: "image/png",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    gif: "image/gif",
-    webp: "image/webp",
-    svg: "image/svg+xml",
-    bmp: "image/bmp",
-    ico: "image/x-icon",
-    avif: "image/avif",
-    heic: "image/heic",
-    heif: "image/heif",
-    tiff: "image/tiff",
-    tif: "image/tiff",
-    jfif: "image/jpeg",
-    pdf: "application/pdf",
-    txt: "text/plain",
-    csv: "text/csv",
-    json: "application/json",
-    zip: "application/zip",
-    mp3: "audio/mpeg",
-    mp4: "video/mp4",
-    mov: "video/quicktime",
-    wav: "audio/wav",
-  };
-  return map[ext] ?? "application/octet-stream";
+  return mimeForFormat(relPath);
 }
 
 /** Injected I/O so the sync loop is testable without Tauri or a live server. */

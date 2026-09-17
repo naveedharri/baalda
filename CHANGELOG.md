@@ -7,6 +7,25 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Format registry + viewers.** `src/lib/formats.ts` is the single authority for
+  what a file is (surface/open/embed/mime/syncAs/maxBytes), kept in lockstep with
+  Rust `vault.rs ALLOWED_EXTS`/`NOTE_EXTS` by `formatsLockstep.test.ts`. `FilePreview`
+  routes to lazy viewers: video/audio (native), csv (`lib/csv.ts`), code (read-only
+  CM6), docx (mammoth through `editor/sanitizeHtml.ts`), xlsx (`read-excel-file`),
+  and a `FileCard` fallback so nothing surfaced is a dead click. In-note embeds gain
+  media, csv and file-chip widgets. Drop/paste accept any registry format and refuse
+  oversize files with a toast before writing.
+- **Note family indexed and openable.** `index.rs` indexes all seven note extensions
+  (only markdown runs tag/wikilink parsing); `.txt`/`.markdown`/`.mdx` open in the
+  editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
+
+### Fixed
+- **Packaged-build CSP.** `frame-src 'none'` blocked the PDF embed, the file preview
+  and `HtmlView` in installed builds, there was no `media-src`, and Windows serves the
+  asset protocol at `http://asset.localhost`, which `img-src` never allowed. Pinned by
+  `src/__tests__/csp.test.ts`.
+
 ### Performance
 - **Time to connect, on launch and on every vault switch.** The vault channel is
   now opened during the PRIME window, in parallel with `registry.reconcile()`,
