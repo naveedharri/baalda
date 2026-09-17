@@ -20,17 +20,11 @@
 
 ## 0.1.62
 
-- Files you keep in folders, not just images pasted into notes, now sync between your devices and to teammates with their real names and locations, so a PDF in Team/ shows up in Team/ everywhere. Renaming a synced file does not yet propagate; that is next.
-- Attachments now upload and download through a streaming path that keeps large files out of memory, skips files the server already holds without sending a byte, and sends very large files in parts so a dropped connection does not start over.
-- Search now looks inside Word, Excel, PowerPoint, CSV, code and zip files in your vault, not just notes. Hits show a file badge and open the right viewer, and the Health page reports how much extracted text the index holds.
-- More kinds of files open inside Baalda: Word documents, spreadsheets, CSV, audio, video, code and JSON files, with PowerPoint and zip files showing a card with "Open externally". Plain-text and Markdown-variant notes that used to do nothing when clicked now open in the editor and appear in search.
-- Dropping or pasting a file into a note embeds it: video and audio play inline, CSV shows as a table, other files become a chip you can click. Files too large to sync are refused with a message instead of silently never reaching teammates.
-- Fixed PDFs, HTML previews and embedded videos not loading in installed builds; on Windows, images inside notes were blocked entirely.
-- Teammates who are shared a folder can now open the files inside it, not just the notes; the AI assistant can list and read the text of attachments it has access to.
-- Servers now clean up after attachments: abandoned uploads and objects left behind by deleted vaults are removed, an attachment nothing references can be deleted, and free vaults get a storage allowance with a clear message when it is reached.
-- Servers can now keep attachments in S3-compatible object storage (Amazon S3, Cloudflare R2 or a self-hosted MinIO) instead of the database, which lifts the per-file limit to 500 MB for video and large documents. Postgres stays the default with no setup, and files you already have on another device are never uploaded twice.
-- Linux: Baalda no longer re-indexes your vault non-stop while it sits idle, which was keeping a core busy and writing to disk constantly.
-- Baalda now checks whether a file's contents actually changed before doing anything with it, so backup, git and cloud-sync tools touching your vault no longer cause re-indexing or re-syncing.
+- More kinds of files open inside Baalda: Word documents, spreadsheets, CSV, audio, video, code and JSON, with PowerPoint and zip files showing a card and "Open externally". Plain-text and Markdown-variant notes that did nothing when clicked now open in the editor.
+- Files and notes: drop or paste a file into a note to embed it (video and audio play inline, CSV shows as a table, other files become a clickable chip), and search now looks inside Word, Excel, PowerPoint, CSV, code and zip files, with file hits opening the right viewer.
+- Files anywhere in your vault, not just images pasted into notes, now sync between devices and teammates with their real names and folders; a shared folder shares the files in it, and the AI assistant can list and read attachment text it has access to. Renaming a synced file does not yet propagate.
+- Storage: attachments stream up and down without loading whole files into memory, files the server already holds are never re-sent, and very large files upload in parts. Servers can keep attachments in S3-compatible storage (S3, R2, MinIO) for a 500 MB per-file limit, clean up abandoned uploads and deleted vaults, and give free vaults a storage allowance. Postgres stays the default with no setup.
+- Fixes: PDFs, HTML previews and embedded videos load again in installed builds (on Windows, images inside notes were blocked entirely); Linux no longer re-indexes an idle vault non-stop; backup, git and cloud-sync tools touching your vault no longer trigger re-indexing or re-syncing.
 
 ## 0.1.61
 
