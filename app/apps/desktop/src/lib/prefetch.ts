@@ -9,12 +9,18 @@
  *
  *  Fire-and-forget: a failed prefetch just means the real import pays the cost.
  *  Deliberately NOT warmed: the graph (a rare, deliberate action), the welcome
- *  screen (dead weight for anyone who already has a vault), and MERMAID — ~3 MB
- *  of diagram renderer that only a note containing a ```mermaid fence ever
- *  needs. Its single `await import("mermaid")` lives in
- *  `lib/editor/mermaid/renderer.ts` and must stay the only reference to the
- *  package: warming it here would hand back the startup cost the code split
- *  bought, for a feature most vaults never use. */
+ *  screen (dead weight for anyone who already has a vault), and the three
+ *  file-format converters, each behind ONE memoised dynamic import that must
+ *  stay the only reference to its package:
+ *    - MERMAID — ~3 MB of diagram renderer that only a note containing a
+ *      ```mermaid fence ever needs (`lib/editor/mermaid/renderer.ts`);
+ *    - MAMMOTH — the docx → HTML converter, jszip and an XML DOM with it,
+ *      needed only by someone who opens a `.docx` (`components/viewers/DocxView.tsx`);
+ *    - READ-EXCEL-FILE — the same for `.xlsx`/`.xlsm`
+ *      (`components/viewers/XlsxView.tsx`).
+ *  Warming any of them would hand back the startup cost the code split bought,
+ *  for a file type most vaults never hold. The viewer chunks themselves are
+ *  lazy too (`components/FilePreview.tsx`) and equally not warmed. */
 export function prefetchAfterPaint(): void {
   const warm = () => {
     void import("../components/Avatar"); // sidebar/footer faces

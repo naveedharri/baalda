@@ -204,6 +204,13 @@ export interface AttachmentMeta {
   sha256: string;
 }
 
+/** One file's size + mtime (mirrors the Rust `FileStat`). */
+export interface FileStat {
+  size: number;
+  /** Milliseconds since the Unix epoch, or null when the OS won't say. */
+  modified: number | null;
+}
+
 /** Outcome of an import (mirrors the Rust `ImportSummary`). */
 export interface ImportSummary {
   /** Vault-relative paths of the created top-level items. */
@@ -549,6 +556,17 @@ export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
     relPath,
     expectedEpoch: expectedEpoch ?? null,
   }).then((b) => new Uint8Array(b));
+
+/**
+ * Size + mtime of a vault file, without reading it.
+ *
+ * Epoch-pinned like every other vault-scoped read: the file card asks about a
+ * path, and a stat that crossed a vault switch would describe another vault's
+ * disk. Read scope is the whole vault (not just `attachments/`) — the same
+ * asymmetry as {@link readBinaryFile}, because tree files get a card too.
+ */
+export const fileStat = (relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<FileStat>("file_stat", { relPath, expectedEpoch: expectedEpoch ?? null });
 
 export const writeBinaryFile = (
   relPath: string,

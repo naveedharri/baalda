@@ -17,15 +17,34 @@ pub const DENIED_DIRS: &[&str] = &["node_modules", "dist", "build", "target", "v
 
 /// Allowlist of file extensions the vault surfaces + syncs (lowercase, no dot).
 /// Everything else — source code, lockfiles, binaries — is ignored, so importing
-/// a real project directory can't dump junk into the vault.
+/// a real project directory can't dump junk into the vault. That flood guard is
+/// why `js`/`ts`/`css`/`java` are absent even though the app can open them.
+///
+/// ONE CONTRACT with the TS side, like `parse.rs TAG_RE` ↔ the editor's `#tag`
+/// rule: this list and `SURFACED_EXTS` in `src/lib/formats.ts` are the same set.
+/// Change one, change both — `src/lib/__tests__/formatsLockstep.test.ts` reads
+/// this file and fails otherwise.
 pub const ALLOWED_EXTS: &[&str] = &[
     // notes / text
     "md", "markdown", "mdx", "txt", "html", "htm", "canvas",
     // images
-    "png", "jpg", "jpeg", "gif", "webp", "svg", "avif",
+    "png", "jpg", "jpeg", "jfif", "gif", "webp", "svg", "bmp", "ico", "avif", "heic", "heif",
+    "tiff", "tif",
     // documents
-    "pdf",
+    "pdf", "docx", "xlsx", "xlsm", "pptx",
+    // video / audio
+    "mp4", "m4v", "mov", "webm", "mp3", "wav", "m4a", "ogg", "aac", "flac",
+    // tabular / structured data
+    "csv", "tsv", "json", "yaml", "yml", "toml", "xml", "py", "rs", "go", "sh", "sql",
+    // archives
+    "zip",
 ];
+
+/// The CRDT note family: the only extensions that become server `notes` and ride
+/// the md↔CRDT bridge. Everything else in `ALLOWED_EXTS` surfaces in the tree but
+/// syncs as an attachment. Mirrors `NOTE_EXTS` in `src/lib/formats.ts`,
+/// `src/lib/sync/registry.ts` and `src/lib/sync/inbound.ts` (same lockstep test).
+pub const NOTE_EXTS: &[&str] = &["md", "markdown", "mdx", "txt", "html", "htm", "canvas"];
 
 /// True if a directory/file name should be skipped by the tree walk & watcher.
 pub fn is_ignored_name(name: &str) -> bool {
@@ -35,9 +54,20 @@ pub fn is_ignored_name(name: &str) -> bool {
 /// True if a file (by name) is an allowed, surfaceable type per `ALLOWED_EXTS`.
 /// Files with no extension, or an extension not on the list, are not surfaced.
 pub fn is_allowed_file(name: &str) -> bool {
+    has_ext_in(name, ALLOWED_EXTS)
+}
+
+/// True if a file (by name) belongs to the CRDT note family (`NOTE_EXTS`).
+pub fn is_note_file(name: &str) -> bool {
+    has_ext_in(name, NOTE_EXTS)
+}
+
+/// Shared extension test: split at the LAST dot and require both halves, so a
+/// dotfile (`.gitignore`) has no extension and never matches.
+fn has_ext_in(name: &str, exts: &[&str]) -> bool {
     match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
-            ALLOWED_EXTS.contains(&ext.to_ascii_lowercase().as_str())
+            exts.contains(&ext.to_ascii_lowercase().as_str())
         }
         _ => false,
     }
@@ -54,7 +84,9 @@ pub fn is_vault(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
-    const NOTE_EXTS: &[&str] = &["md", "markdown", "mdx"];
+    // Deliberately narrower than `NOTE_EXTS`: a folder of .txt/.html is not by
+    // itself evidence that someone already uses it as a vault.
+    const VAULT_MARKER_EXTS: &[&str] = &["md", "markdown", "mdx"];
     for entry in entries.flatten() {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
@@ -62,7 +94,7 @@ pub fn is_vault(dir: &Path) -> bool {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if let Some((stem, ext)) = name.rsplit_once('.') {
-            if !stem.is_empty() && NOTE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+            if !stem.is_empty() && VAULT_MARKER_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
                 return true;
             }
         }
@@ -181,13 +213,38 @@ mod tests {
         assert!(!is_ignored_name("Projects")); // real folders still walked
     }
 
+    /// The allow-list is one contract with `SURFACED_EXTS` in
+    /// `src/lib/formats.ts` — see `formatsLockstep.test.ts`. Source code stays
+    /// off it on purpose: the app can OPEN a `.js`, it just refuses to flood the
+    /// sidebar with a project's worth of them.
     #[test]
-    fn allowlist_accepts_notes_images_pdf_only() {
-        for ok in ["note.md", "a.markdown", "b.MDX", "readme.txt", "page.html", "img.png", "p.JPG", "doc.pdf"] {
+    fn allowlist_matches_the_format_registry() {
+        for ok in [
+            "note.md", "a.markdown", "b.MDX", "readme.txt", "page.html", "board.canvas",
+            "img.png", "p.JPG", "icon.svg", "shot.HEIC", "scan.tiff",
+            "doc.pdf", "report.docx", "sheet.xlsx", "macro.xlsm", "deck.pptx",
+            "clip.mp4", "cut.mov", "talk.mp3", "take.m4a",
+            "data.csv", "tab.tsv", "map.json", "notes.yaml", "conf.toml", "feed.xml",
+            "run.py", "lib.rs", "main.go", "setup.sh", "q.sql",
+            "bundle.zip",
+        ] {
             assert!(is_allowed_file(ok), "{ok} should be allowed");
         }
-        for no in ["script.js", "types.d.ts", "styles.css", "data.json", "Makefile", "LICENSE", "bundle.min.js"] {
+        for no in ["script.js", "types.d.ts", "styles.css", "Makefile", "LICENSE", "bundle.min.js"] {
             assert!(!is_allowed_file(no), "{no} should be rejected");
+        }
+    }
+
+    /// Only the note family joins the CRDT bridge; everything else surfaced by
+    /// `ALLOWED_EXTS` syncs as an attachment.
+    #[test]
+    fn note_family_is_narrower_than_the_allowlist() {
+        for ok in ["note.md", "a.MARKDOWN", "b.mdx", "readme.txt", "page.html", "p.htm", "board.canvas"] {
+            assert!(is_note_file(ok), "{ok} should be a note");
+            assert!(is_allowed_file(ok), "{ok} should also be surfaced");
+        }
+        for no in ["img.png", "doc.pdf", "clip.mp4", "sheet.xlsx", "data.csv", ".gitignore", "Makefile"] {
+            assert!(!is_note_file(no), "{no} should not be a note");
         }
     }
 

@@ -4,13 +4,19 @@
 //! and every write is atomic (temp file + rename), exactly like `notefile` and
 //! `attachments`.
 //!
-//! Import rules (see the plan / spec deviations):
-//! - all file types are copied, structure preserved;
-//! - `.md`/`.markdown`/`.txt` are normalized to `.md` (notes), `.html`/`.htm`
-//!   kept as-is; any other loose file lands in `attachments/`;
+//! Import rules:
+//! - every file type is copied into the chosen destination folder with its own
+//!   name and extension, structure preserved — nothing is ever rerouted into
+//!   `attachments/` (that directory is only for what the app itself writes
+//!   there: pasted/dropped bytes, see `attachments.rs`);
+//! - `.markdown` is normalized to `.md`, because the two are the same format
+//!   under two names. `.txt` is NOT: it is its own note-family member now
+//!   (`vault::NOTE_EXTS`), it opens in the editor and it indexes, so renaming a
+//!   user's file on the way in would only lose information;
 //! - name clashes are auto-renamed (` 2`, ` 3`, …) so import never overwrites
 //!   or errors on an existing file;
-//! - dotfiles and `.context`/`.git` are always skipped.
+//! - dotfiles and `.context`/`.git` are always skipped. Files whose extension is
+//!   not in `vault::ALLOWED_EXTS` are copied but will not surface in the tree.
 //! Per-item failures are collected into the summary, never fatal.
 
 use crate::error::{AppError, AppResult};
@@ -39,7 +45,9 @@ enum Kind {
 
 fn classify(name: &str) -> Kind {
     match ext_lower(name).as_str() {
-        "md" | "markdown" | "txt" => Kind::Note,
+        // Markdown under its two spellings, and nothing else. `.txt` used to be
+        // here and was rewritten to `.md`; it is a note in its own right now.
+        "md" | "markdown" => Kind::Note,
         "html" | "htm" => Kind::Html,
         _ => Kind::Other,
     }
@@ -53,7 +61,7 @@ fn ext_lower(name: &str) -> String {
         .to_lowercase()
 }
 
-/// File name after note-extension normalization (`.txt`/`.markdown` → `.md`).
+/// File name after note-extension normalization (`.markdown` → `.md`).
 fn normalized_name(name: &str) -> String {
     match classify(name) {
         Kind::Note => {
@@ -136,8 +144,8 @@ fn copy_file_to(
     Ok(rel)
 }
 
-/// Import a single loose file: notes → `dest_rel`, html → `dest_rel`, anything
-/// else → `attachments/`.
+/// Import a single loose file into `dest_rel`, keeping its name and extension
+/// (only `.markdown` is normalized). Nothing is rerouted.
 fn import_one_file(
     vault: &Path,
     dest_rel: &str,
@@ -152,8 +160,8 @@ fn import_one_file(
         return Err(AppError::new("ignored file"));
     }
     // Everything imports into the target dir, keeping its real name/extension;
-    // only note formats (.md/.markdown/.txt) are normalized to `.md`. Nothing is
-    // rerouted, so imported files of any type stay put and show in the sidebar.
+    // only `.markdown` is normalized to `.md`. Nothing is rerouted, so imported
+    // files of any type stay put and show in the sidebar.
     let target = normalized_name(name);
     copy_file_to(vault, dest_rel, src_abs, &target, s)
 }
@@ -298,7 +306,7 @@ mod tests {
     fn imports_single_note_and_normalizes_extension() {
         let vault = tempfile::tempdir().unwrap();
         let ext = tempfile::tempdir().unwrap();
-        let src = ext.path().join("Idea.txt");
+        let src = ext.path().join("Idea.markdown");
         write(&src, b"# hello");
 
         let s = import_paths(
@@ -309,6 +317,24 @@ mod tests {
         assert_eq!(s.files, 1);
         assert_eq!(s.imported, vec!["Idea.md"]);
         assert!(vault.path().join("Idea.md").is_file());
+    }
+
+    /// `.txt` is a note in its own right (`vault::NOTE_EXTS`): it opens in the
+    /// editor and it indexes, so import must leave it alone. Renaming it to
+    /// `.md` used to be the only way it became openable — and it silently
+    /// changed the user's file name to do it.
+    #[test]
+    fn imports_txt_without_renaming_it_to_md() {
+        let vault = tempfile::tempdir().unwrap();
+        let ext = tempfile::tempdir().unwrap();
+        let src = ext.path().join("Idea.txt");
+        write(&src, b"plain text");
+
+        let s = import_paths(vault.path(), "", &[src.to_string_lossy().to_string()]);
+        assert_eq!(s.files, 1);
+        assert_eq!(s.imported, vec!["Idea.txt"]);
+        assert!(vault.path().join("Idea.txt").is_file());
+        assert!(!vault.path().join("Idea.md").exists());
     }
 
     #[test]

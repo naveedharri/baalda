@@ -221,6 +221,8 @@ mod tests {
         fs::write(root.join("Notes/Sub/b.md"), b"# B").unwrap();
         fs::write(root.join("script.js"), b"code").unwrap();
         fs::write(root.join("diagram.png"), b"\x89PNG").unwrap();
+        // A surfaced non-note binary (the format registry's video family).
+        fs::write(root.join("clip.mp4"), b"\x00\x00\x00 ftyp").unwrap();
         // A stray node_modules must never be walked/surfaced.
         fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
         fs::write(root.join("node_modules/pkg/index.js"), b"x").unwrap();
@@ -228,9 +230,10 @@ mod tests {
         let tree = list_tree(root).unwrap();
         let children = tree.children.unwrap();
         // ".context"/".git"/"node_modules" hidden; "script.js" filtered out by the
-        // extension allowlist; "Notes" dir + allowed "diagram.png" surface.
+        // extension allowlist (source code is never surfaced, however openable);
+        // "Notes" dir + allowed "clip.mp4"/"diagram.png" surface.
         let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
-        assert_eq!(names, vec!["Notes", "diagram.png"]);
+        assert_eq!(names, vec!["Notes", "clip.mp4", "diagram.png"]);
 
         let notes = children[0].children.as_ref().unwrap();
         let inner: Vec<&str> = notes.iter().map(|n| n.name.as_str()).collect();

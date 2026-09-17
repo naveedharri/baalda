@@ -2,7 +2,7 @@
 //! the React UI. All disk I/O happens here (or in the modules these call);
 //! the UI never touches the filesystem directly.
 
-use crate::attachments::{self, AttachmentMeta};
+use crate::attachments::{self, AttachmentMeta, FileStat};
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
@@ -1837,6 +1837,19 @@ pub async fn read_binary_file(
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
     let bytes = attachments::read_binary_file(&vault, &rel_path)?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Size + mtime of one vault file, without reading it. The file card prints a
+/// size for every non-note format, and a 25 MB video is not worth a round trip
+/// through the IPC bridge to learn how big it is.
+#[tauri::command]
+pub async fn file_stat(
+    state: State<'_, AppState>,
+    rel_path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<FileStat> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    attachments::file_stat(&vault, &rel_path)
 }
 
 #[tauri::command(async)]

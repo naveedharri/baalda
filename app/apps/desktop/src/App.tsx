@@ -36,7 +36,8 @@ import {
 } from "./lib/updater";
 import { notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
-import { previewKind } from "./lib/preview";
+import { viewerFor } from "./lib/formats";
+import { onOpenFileRequest } from "./lib/openFileRequest";
 import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
@@ -722,8 +723,10 @@ export default function App() {
   });
   const versionPanelOpen = useStore((s) => s.versionPanelDocId != null);
   const editorMeasure = useStore((s) => s.editorMeasure);
-  // An open image/PDF preview isn't a synced note — hide the save/sync chrome.
-  const isPreview = openNote != null && previewKind(openNote.path) != null;
+  // An open preview (image, PDF, video, spreadsheet, code…) isn't a synced
+  // note — hide the save/sync chrome. The registry decides, so this cannot
+  // disagree with what `FilePreview` actually rendered.
+  const isPreview = openNote != null && viewerFor(openNote.path) !== "editor";
   // Covers the LAST VAULT'S OPEN and nothing else. It used to cover the whole
   // session restore + sync reconcile too, which is why launch showed "Loading…"
   // for seconds on a big vault: the sidebar was ready long before auth was.
@@ -845,6 +848,13 @@ export default function App() {
       }
     })();
   }, []);
+
+  // An in-note file chip was clicked (`lib/editor/livePreview.ts` →
+  // `requestOpenFile`). The editor extensions are store-free on purpose, so the
+  // widget asks and the app — which owns the store — opens the pane.
+  useEffect(() => onOpenFileRequest((rel) => {
+    void useStore.getState().openNoteByPath(rel);
+  }), []);
 
   // Subscribe to Rust events: tree refresh + open-note reconciliation.
   useEffect(() => {

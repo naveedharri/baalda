@@ -223,6 +223,83 @@ pub fn parse_note(content: &str, stem: &str) -> ParsedNote {
     }
 }
 
+/// The `ParsedNote` a NON-markdown member of the note family gets.
+///
+/// The note family (`vault::NOTE_EXTS`) is md/markdown/mdx + txt/html/htm/canvas.
+/// Only the first three are markdown, and running {@link parse_note} over the
+/// others would invent structure that is not there: a `#tag` in a `.txt` shopping
+/// list is a bullet, a `[[…]]` in a `.canvas` is JSON, and an `# H1` in neither
+/// is a title. So they are indexed as what they are — plain text under their
+/// filename stem — and contribute to FTS without polluting the tag cloud or the
+/// wikilink graph.
+///
+/// Keeps `parse_note` (and this whole module's markdown rules, including the
+/// `TAG_RE` ↔ editor `#tag` contract) untouched.
+pub fn parse_plain(content: &str, stem: &str) -> ParsedNote {
+    ParsedNote {
+        title: stem.to_string(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        frontmatter_json: None,
+        body: content.to_string(),
+    }
+}
+
+/// Same as {@link parse_plain} for `.html`/`.htm`, whose bytes are markup: the
+/// tags are stripped so FTS matches the words a reader sees, not `<div class=…>`.
+pub fn parse_html(content: &str, stem: &str) -> ParsedNote {
+    ParsedNote {
+        title: stem.to_string(),
+        tags: Vec::new(),
+        links: Vec::new(),
+        frontmatter_json: None,
+        body: strip_html_tags(content),
+    }
+}
+
+/// Drop `<script>`/`<style>` bodies and every remaining tag, collapsing runs of
+/// whitespace. A deliberately small scanner, not a parser: the output is only
+/// ever FTS input (`notes_fts.body`), never rendered — the renderer is
+/// `src/lib/editor/sanitizeHtml.ts`, which has the security-relevant rules.
+pub fn strip_html_tags(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Skip a whole <script>/<style> element, contents included.
+            let mut skipped = false;
+            for (open, close) in [("<script", "</script>"), ("<style", "</style>")] {
+                if lower[i..].starts_with(open) {
+                    i = match lower[i..].find(close) {
+                        Some(off) => i + off + close.len(),
+                        None => bytes.len(),
+                    };
+                    skipped = true;
+                    break;
+                }
+            }
+            if skipped {
+                out.push(' ');
+                continue;
+            }
+            // An ordinary tag (or a comment/doctype): drop up to the next `>`.
+            i = match html[i..].find('>') {
+                Some(off) => i + off + 1,
+                None => bytes.len(),
+            };
+            out.push(' ');
+            continue;
+        }
+        let ch = html[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    // Collapse the whitespace the stripping left behind.
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +417,36 @@ mod tests {
         // Refused: no frontmatter materialized, body still intact.
         assert!(p.frontmatter_json.is_none());
         assert_eq!(p.body.trim(), "body");
+    }
+
+    #[test]
+    fn plain_text_notes_get_the_stem_and_no_derived_structure() {
+        // A `.txt` shopping list is not markdown: `#tag` is a bullet and
+        // `[[x]]` is punctuation. Indexing them as tags/links would put words
+        // in the tag cloud that the editor never draws as pills.
+        let p = parse_plain("- milk\n- #eggs\n- [[bread]]\n", "Groceries");
+        assert_eq!(p.title, "Groceries");
+        assert!(p.tags.is_empty());
+        assert!(p.links.is_empty());
+        assert!(p.frontmatter_json.is_none());
+        assert!(p.body.contains("#eggs"), "body is the file, verbatim");
+    }
+
+    #[test]
+    fn html_notes_index_their_text_not_their_markup() {
+        let p = parse_html(
+            "<html><head><style>p{color:red}</style></head><body><p>Hello <b>world</b></p><script>alert(1)</script></body></html>",
+            "Page",
+        );
+        assert_eq!(p.title, "Page");
+        assert_eq!(p.body, "Hello world");
+        assert!(p.tags.is_empty());
+    }
+
+    #[test]
+    fn strip_html_tags_handles_unterminated_markup() {
+        assert_eq!(strip_html_tags("a <b>b</b> c"), "a b c");
+        assert_eq!(strip_html_tags("text <div unterminated"), "text");
+        assert_eq!(strip_html_tags("<!-- comment -->kept"), "kept");
     }
 }
