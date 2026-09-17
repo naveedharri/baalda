@@ -3916,3 +3916,16 @@ function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
 }
+
+// ---- dev only: never hot-swap this module in half ---------------------------
+//
+// The same reason `lib/sync/docSession.ts` ends this way: `useStore` is a module
+// singleton and the manager→store wiring happens once per page load inside
+// `initAuth`. An HMR round that re-executes this file hands the app a brand-new
+// store (no vault, no session) that nothing re-initialises. Reload instead;
+// stripped from production builds.
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
+}

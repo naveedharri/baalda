@@ -65,6 +65,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Fixed
+- **Dev only: the app stopped reporting its sync status after a hot reload.** `useStore`
+  and `syncManager` are module singletons, and every listener that connects them (badge
+  status, progress, per-doc and per-file dots, registry map, presence) is registered once
+  per page load, in `initAuth`. A Vite HMR round that re-executed `store.ts` or the sync
+  layer therefore produced a fresh, listener-less pair that nothing re-initialised: the
+  vault opened and the channel connected, but the header read "not connected" until the
+  webview was reloaded by hand. Both modules now reload the page on a hot update instead
+  of running half-wired. No effect on packaged builds, where a module is evaluated once.
 - **Renaming a synced file could fork it into two `files` rows (desktop +
   server).** When the rename's grace window closed against an unreachable
   server, the delete queue dropped the candidate ("listing failed — leave the

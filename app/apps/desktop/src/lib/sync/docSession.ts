@@ -3769,3 +3769,28 @@ export class SyncManager implements InboundHost {
 
 /** Process-wide singleton (parallels `bridgeManager`). */
 export const syncManager = new SyncManager();
+
+// ---- dev only: never hot-swap this module in half ---------------------------
+//
+// `syncManager` is a module singleton, and EVERY listener that connects it to
+// the UI (`setStatusListener`, `setSyncProgressListener`, `setDocStateListener`,
+// `setFileStateListener`, the registry/presence/ACL ones) is registered exactly
+// once per page load, from `store.initAuth` — which App.tsx runs behind a
+// `useRef` guard that Fast Refresh preserves.
+//
+// So a Vite HMR round that re-executes this file (every save while working on
+// the sync layer, and every save to a module below it) mints a FRESH manager
+// whose listeners are all `undefined`, while nothing re-runs `initAuth` to wire
+// them up. The vault still opens, the channel still connects and notes still
+// sync — the console says so — but the badge, the progress pill and the sidebar
+// dots never move again until the webview is reloaded by hand. That is exactly
+// the "not connected until I reload" report; it is a dev artifact, never
+// reachable in a packaged build, where a module is evaluated once.
+//
+// Reload the page on the update instead of running half-wired. `import.meta.hot`
+// is undefined in production builds, so this disappears there.
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
+}
