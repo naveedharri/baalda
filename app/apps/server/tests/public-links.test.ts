@@ -202,6 +202,71 @@ describe("public note links", () => {
     expect((await app.request(`/p/${token}/a/../etc/passwd`)).status).toBe(404);
   });
 
+  it("serves each attachment type the way it is safe to serve it", async () => {
+    // Every one of these is referenced by the note, so the containment check
+    // passes and the MIME is the only thing deciding the answer.
+    const cases = [
+      { rel: "attachments/a.png", mime: "image/png", expect: "inline" },
+      { rel: "attachments/a.pdf", mime: "application/pdf", expect: "inline" },
+      { rel: "attachments/a.mp4", mime: "video/mp4", expect: "inline" },
+      { rel: "attachments/a.mp3", mime: "audio/mpeg", expect: "inline" },
+      // Allow-listed, but not safe to RENDER: downloads as opaque bytes.
+      {
+        rel: "attachments/a.docx",
+        mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        expect: "attachment",
+      },
+      { rel: "attachments/a.zip", mime: "application/zip", expect: "attachment" },
+      { rel: "attachments/a.csv", mime: "text/csv", expect: "attachment" },
+      // Active documents — never served at all, inline or otherwise.
+      { rel: "attachments/a.svg", mime: "image/svg+xml", expect: "miss" },
+      { rel: "attachments/a.html", mime: "text/html", expect: "miss" },
+      // Not on the allow-list.
+      { rel: "attachments/a.exe", mime: "application/x-msdownload", expect: "miss" },
+    ] as const;
+
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02]);
+    docWriter.store.set(docId, cases.map((x) => `![f](/${x.rel})`).join("\n"));
+    for (const x of cases) {
+      await pool.query(
+        `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, data, rel_path, filename)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          randomUUID(),
+          vault,
+          orgId,
+          randomUUID(),
+          bytes.length,
+          x.mime,
+          bytes,
+          x.rel,
+          x.rel.split("/")[1],
+        ],
+      );
+    }
+    const { token } = (await (await mint(owner, docId)).json()) as { token: string };
+
+    for (const x of cases) {
+      const res = await app.request(`/p/${token}/a/${x.rel}`);
+      const label = `${x.rel} → ${res.status}`;
+      if (x.expect === "miss") {
+        expect(label).toBe(`${x.rel} → 404`);
+        continue;
+      }
+      expect(label).toBe(`${x.rel} → 200`);
+      expect([x.rel, res.headers.get("content-disposition")]).toEqual([x.rel, x.expect]);
+      expect([x.rel, res.headers.get("content-type")]).toEqual([
+        x.rel,
+        x.expect === "inline" ? x.mime : "application/octet-stream",
+      ]);
+      // Every asset response, whatever its type: no origin, no scripts, no
+      // sniffing, and (on Postgres) an honest "I cannot do ranges".
+      expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("accept-ranges")).toBe("none");
+    }
+  });
+
   it("the page renders the embedded image through the token-scoped route", async () => {
     docWriter.store.set(docId, "![pic](/attachments/ok.png)");
     const { token } = (await (await mint(owner, docId)).json()) as { token: string };

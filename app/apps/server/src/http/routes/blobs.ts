@@ -1,5 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { Readable } from "node:stream";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
@@ -9,10 +11,33 @@ import {
   filterReadableBlobs,
 } from "../../permissions/http-gates.js";
 import { getSession } from "../session.js";
+import { relAssetPath } from "../../render/note-html.js";
+import { ByteBudget } from "../../blobs/admission.js";
+import {
+  BLOB_MIME_ENFORCE,
+  MAX_BLOB_BYTES,
+  MAX_INFLIGHT_UPLOAD_BYTES,
+} from "../../blobs/config.js";
+import {
+  categoryForMime,
+  hasMagicSignature,
+  isAllowedMime,
+  maxBytesForMime,
+  mimeMatchesBytes,
+  normalizeMime,
+  sniffMime,
+} from "../../blobs/formats.js";
+import {
+  BlobStoreError,
+  createBlobStore,
+  resolveStoreForRow,
+  storageKeyForRow,
+} from "../../blobs/store.js";
 
 /**
- * Attachment blob store (spec 02 §2/§5A). BYTEA storage for the MVP; the
- * `storage_url` column is reserved for an S3/R2 upgrade in production.
+ * Attachment blob routes (spec 02 §2/§5A). Routes only: where the bytes live is
+ * `src/blobs/` — the store adapter, its Postgres provider, the format
+ * allow-list and the upload admission budget.
  *
  * Authorization mirrors the registry routes: any member of the vault (the
  * note collection's owning organization) is edit-capable for its attachments
@@ -22,136 +47,16 @@ import { getSession } from "../session.js";
  *   POST /api/vaults/:vaultId/blobs   raw binary body → store (dedupe by sha256)
  *   GET  /api/vaults/:vaultId/blobs   list metadata
  *   GET  /api/blobs/:id               download bytes with the stored mime
+ *   HEAD /api/blobs/:id               the same headers, no body
  */
 export const blobRoutes = new Hono();
 
-/**
- * Max attachment upload size, and the admission budget that bounds how many
- * uploads may be in flight at once.
- *
- * Sizing rationale (this process runs with V8 capped at 512 MB inside a 1 GiB
- * container, see Dockerfile / railway.json): storing an N-byte blob costs
- * several multiples of N on the heap at peak, because node-postgres has no
- * binary parameter protocol — the bytes must be rendered into a text-encodable
- * form and then serialized into the outgoing wire buffer. With the base64
- * encoding used below that is roughly N (body) + 1.33N (base64) + 1.33N (pg's
- * write buffer) ≈ 3.7N. A 100 MB cap therefore put a SINGLE legal upload at
- * ~370 MB of a 512 MB heap, and two concurrent ones over the container.
- *
- * So: a cap that is generous for real attachments (images, PDFs, short clips)
- * but survivable at ~3.7x, plus a global byte budget so concurrency cannot
- * stack peaks. Both are env-overridable for operators who have sized their
- * container differently. Deliberately local to this file rather than added to
- * config.ts.
- */
-const MAX_BLOB_BYTES = positiveEnvInt("MAX_BLOB_BYTES", 25 * 1024 * 1024); // 25 MB
-
-/**
- * Total upload-body bytes admitted concurrently. Must be >= MAX_BLOB_BYTES or a
- * single max-size upload could never be admitted; the budget is what stops N
- * simultaneous uploads from summing past the heap. At the default 50 MB the
- * worst case is ~185 MB of peak heap for uploads.
- */
-const MAX_INFLIGHT_UPLOAD_BYTES = Math.max(
-  MAX_BLOB_BYTES,
-  positiveEnvInt("MAX_INFLIGHT_UPLOAD_BYTES", 2 * MAX_BLOB_BYTES),
-);
-
-/** Requests allowed to WAIT for budget before we start shedding with 503. */
-const MAX_UPLOAD_QUEUE = 16;
-
-/** How long a queued upload waits for budget before giving up with 503. */
-const UPLOAD_WAIT_MS = 30_000;
-
-function positiveEnvInt(name: string, fallback: number): number {
-  const raw = Number(process.env[name]);
-  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : fallback;
-}
-
-/**
- * FIFO admission control over a byte budget.
- *
- * Peak memory on the upload path is proportional to the size of the bodies
- * being handled, and nothing else bounded it: the size cap limited one request
- * while any number of compliant requests could run at once. Callers reserve
- * their (declared, clamped) body size before touching the body and release it
- * when done.
- *
- * Exported so it can be unit-tested without a database or an HTTP server.
- */
-export class ByteBudget {
-  private inflight = 0;
-  private readonly waiters: Array<{
-    bytes: number;
-    resolve: (ok: boolean) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }> = [];
-
-  constructor(
-    private readonly budget: number,
-    private readonly maxQueue: number = MAX_UPLOAD_QUEUE,
-    private readonly waitMs: number = UPLOAD_WAIT_MS,
-  ) {}
-
-  /** Bytes currently reserved. Test/observability helper. */
-  get reserved(): number {
-    return this.inflight;
-  }
-
-  /** Requests currently waiting for budget. Test/observability helper. */
-  get waiting(): number {
-    return this.waiters.length;
-  }
-
-  /**
-   * Reserve `bytes`. Resolves true once admitted, false if the queue is
-   * saturated or the wait timed out (caller should shed the request).
-   *
-   * `inflight === 0` always admits, so a request larger than the whole budget
-   * still makes progress instead of deadlocking. Admission is strictly FIFO —
-   * a newcomer never jumps a queue — so a large upload can't be starved by a
-   * stream of small ones.
-   */
-  acquire(bytes: number): Promise<boolean> {
-    if (this.waiters.length === 0 && this.fits(bytes)) {
-      this.inflight += bytes;
-      return Promise.resolve(true);
-    }
-    if (this.waiters.length >= this.maxQueue) return Promise.resolve(false);
-    return new Promise<boolean>((resolve) => {
-      const waiter = {
-        bytes,
-        resolve,
-        timer: setTimeout(() => {
-          const i = this.waiters.indexOf(waiter);
-          if (i >= 0) this.waiters.splice(i, 1);
-          resolve(false);
-        }, this.waitMs),
-      };
-      // Never hold the process open just for a queued upload.
-      if (typeof waiter.timer.unref === "function") waiter.timer.unref();
-      this.waiters.push(waiter);
-    });
-  }
-
-  /** Give back a previous successful reservation. Always call from a `finally`. */
-  release(bytes: number): void {
-    this.inflight -= bytes;
-    if (this.inflight < 0) this.inflight = 0;
-    while (this.waiters.length > 0 && this.fits(this.waiters[0].bytes)) {
-      const waiter = this.waiters.shift() as (typeof this.waiters)[number];
-      clearTimeout(waiter.timer);
-      this.inflight += waiter.bytes;
-      waiter.resolve(true);
-    }
-  }
-
-  private fits(bytes: number): boolean {
-    return this.inflight === 0 || this.inflight + bytes <= this.budget;
-  }
-}
-
 const uploadBudget = new ByteBudget(MAX_INFLIGHT_UPLOAD_BYTES);
+
+/** Bytes handed to the magic-byte sniff. 64 KB, not 4, because the zip family
+ *  (docx/xlsx/pptx/zip) is told apart by an entry name in the archive's
+ *  directory rather than by its first four bytes. */
+const SNIFF_BYTES = 64 * 1024;
 
 interface BlobRow {
   id: string;
@@ -171,6 +76,38 @@ function toMeta(row: BlobRow) {
     relPath: row.rel_path,
     filename: row.filename,
   };
+}
+
+/**
+ * Is this a rel_path an attachment may be stored under?
+ *
+ * Same rules as `render/note-html.ts relAssetPath` (no scheme, no backslash, no
+ * `..`, no empty segment — a Windows drive letter is caught as a scheme), plus
+ * the requirement that it live under `attachments/`. That last part is what
+ * makes the value safe to hand back to a client: the desktop writes a
+ * server-supplied rel_path to disk through `ensure_attachment_rel`, so a path
+ * outside `attachments/` is at best dead weight and at worst a write the
+ * desktop is right to refuse. Until now `..` was simply stored.
+ */
+function safeAttachmentRelPath(raw: string | null): string | null {
+  if (!raw) return null;
+  const rel = relAssetPath(raw);
+  if (rel === null) return null;
+  const segments = rel.split("/");
+  if (segments.length < 2 || segments[0] !== "attachments") return null;
+  return rel;
+}
+
+/** 64 lowercase hex characters, or null. */
+function normalizeSha(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = raw.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(s) ? s : null;
+}
+
+function shaEquals(a: string, b: string): boolean {
+  // Not a secret, but constant-time costs nothing and keeps the habit.
+  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 // ── upload ────────────────────────────────────────────────────────────────
@@ -203,6 +140,53 @@ blobRoutes.post(
       return c.json({ error: "This vault is read-only for you" }, 403);
     }
 
+    // ── validation, all of it before a single byte of body is read ──────────
+    const filename = c.req.header("x-file-name") ?? c.req.query("filename") ?? null;
+    const relPath = safeAttachmentRelPath(
+      c.req.header("x-rel-path") ?? c.req.query("relPath") ?? filename,
+    );
+    if (!relPath) {
+      return c.json(
+        {
+          error: "Attachment path must be a vault-relative path under attachments/",
+          code: "invalid_rel_path",
+        },
+        400,
+      );
+    }
+
+    const mime = normalizeMime(c.req.header("content-type")) || "application/octet-stream";
+    if (!isAllowedMime(mime)) {
+      if (BLOB_MIME_ENFORCE === "reject") {
+        return c.json(
+          { error: `Unsupported attachment type: ${mime}`, code: "unsupported_media_type" },
+          415,
+        );
+      }
+      console.warn(
+        `[blobs] BLOB_MIME_ENFORCE=warn: storing ${relPath} with unlisted mime ${mime}`,
+      );
+    }
+
+    const store = await createBlobStore();
+    // The category ceiling, clamped to what this provider can actually hold.
+    // On Postgres that clamp is the whole story (everything lands on
+    // MAX_BLOB_BYTES, which bodyLimit has already enforced); the per-category
+    // number starts to matter with a provider that streams.
+    const sizeCap = Math.min(maxBytesForMime(mime), store.maxBytes(categoryForMime(mime)));
+
+    // `x-sha256`: the client telling us what it is about to send. When the
+    // content is already here, the upload is answered from the header alone and
+    // ZERO bytes move — which is the whole point of sending it. (Claiming a
+    // hash you do not have gets you metadata for a blob in a vault you can
+    // already list, so there is nothing to gain by lying.) When it is new, the
+    // header is verified against the real hash below.
+    const claimedSha = normalizeSha(c.req.header("x-sha256"));
+    if (claimedSha) {
+      const hit = await findBlob(vaultId, claimedSha);
+      if (hit) return c.json({ ...toMeta(hit), deduped: true }, 200);
+    }
+
     // Admission control, after auth (so anonymous callers can never occupy the
     // budget) and before the body is materialized. Reserve the declared size,
     // clamped to the hard cap; an absent/garbage Content-Length reserves the
@@ -230,54 +214,123 @@ blobRoutes.post(
       if (ab.byteLength > MAX_BLOB_BYTES) {
         return c.json({ error: "Attachment too large" }, 413);
       }
+      if (ab.byteLength > sizeCap) {
+        return c.json(
+          {
+            error: `Attachment too large for ${categoryForMime(mime)} (max ${sizeCap} bytes)`,
+            code: "attachment_too_large",
+          },
+          413,
+        );
+      }
       const buf = Buffer.from(ab);
-
-      const mime = c.req.header("content-type") || "application/octet-stream";
-      const filename = c.req.header("x-file-name") ?? c.req.query("filename") ?? null;
-      const relPath = c.req.header("x-rel-path") ?? c.req.query("relPath") ?? filename;
       const sha256 = createHash("sha256").update(buf).digest("hex");
+      if (claimedSha && !shaEquals(claimedSha, sha256)) {
+        return c.json(
+          { error: "x-sha256 does not match the uploaded bytes", code: "sha_mismatch" },
+          400,
+        );
+      }
+
+      // Do the bytes agree with the declared type? Only for formats that HAVE a
+      // signature — text has none, and `application/octet-stream` declares
+      // nothing to contradict. An unrecognisable prefix is not evidence of a
+      // lie, so only a positive, contradicting identification is refused.
+      if (hasMagicSignature(mime)) {
+        const sniffed = await sniffMime(buf.subarray(0, SNIFF_BYTES));
+        if (!mimeMatchesBytes(mime, sniffed)) {
+          return c.json(
+            {
+              error: `Content-Type ${mime} does not match the uploaded bytes (${sniffed})`,
+              code: "content_type_mismatch",
+            },
+            400,
+          );
+        }
+      }
 
       // Dedupe per vault by content hash: return the existing row if present.
-      // Doing this before any encoding means a re-upload of known content never
-      // pays the encode/serialize cost at all.
-      const existing = await pool.query<BlobRow>(
-        `SELECT id, sha256, size, mime, rel_path, filename
-           FROM blobs WHERE vault_id = $1 AND sha256 = $2`,
-        [vaultId, sha256],
-      );
-      if (existing.rows[0]) {
-        return c.json({ ...toMeta(existing.rows[0]), deduped: true }, 200);
+      // Doing this before the bytes are handed to the store means a re-upload of
+      // known content never pays the encode/serialize cost at all.
+      const existing = await findBlob(vaultId, sha256);
+      if (existing) {
+        return c.json({ ...toMeta(existing), deduped: true }, 200);
       }
 
       const id = randomUUID();
-      // base64 + server-side `decode`, not a raw Buffer parameter. node-postgres
-      // has no binary parameter protocol: handed a Buffer it renders it as a
-      // `\x…` HEX string, i.e. 2 bytes of JS string per payload byte, and then
-      // serializes that into the outgoing buffer — ~4N on top of the body.
-      // base64 is 1.33 bytes per payload byte, so this cuts the dominant
-      // allocation on the upload path by a third. Bytes stored are identical.
-      const { rows } = await pool.query<BlobRow>(
-        `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, data, rel_path, filename)
-         VALUES ($1, $2, $3, $4, $5, $6, decode($7::text, 'base64'), $8, $9)
-         RETURNING id, sha256, size, mime, rel_path, filename`,
-        [
+      // The row is created `pending` and the bytes are written into it through
+      // the store, then it is flipped to `ready` — the flow PR 2b's
+      // intent → PUT → complete needs, run here inside one transaction so a
+      // half-written blob is never visible to a reader or to dedupe.
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const inserted = await client.query<BlobRow>(
+          `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
+                              storage_provider, storage_key, status, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, 'pending', $10)
+           ON CONFLICT (vault_id, sha256) DO NOTHING
+           RETURNING id, sha256, size, mime, rel_path, filename`,
+          [
+            id,
+            vaultId,
+            org,
+            sha256,
+            buf.byteLength,
+            mime,
+            relPath,
+            filename,
+            store.provider,
+            session.userId,
+          ],
+        );
+        if (!inserted.rows[0]) {
+          // Another request uploaded the same content between the dedupe read
+          // and this insert. `blobs_vault_sha_idx` is what settles it; the loser
+          // returns the winner's row rather than a 500.
+          await client.query("ROLLBACK");
+          const winner = await findBlob(vaultId, sha256);
+          if (winner) return c.json({ ...toMeta(winner), deduped: true }, 200);
+          return c.json({ error: "Upload conflicted — retry" }, 409);
+        }
+        await store.put(
+          {
+            key: id,
+            blobId: id,
+            vaultId,
+            body: Readable.from(buf),
+            size: buf.byteLength,
+            mime,
+            sha256,
+            filename,
+          },
+          client,
+        );
+        await client.query("UPDATE blobs SET status = 'ready', updated_at = now() WHERE id = $1", [
           id,
-          vaultId,
-          org,
-          sha256,
-          buf.byteLength,
-          mime,
-          buf.toString("base64"),
-          relPath,
-          filename,
-        ],
-      );
-      return c.json({ ...toMeta(rows[0]), deduped: false }, 201);
+        ]);
+        await client.query("COMMIT");
+        return c.json({ ...toMeta(inserted.rows[0]), deduped: false }, 201);
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
     } finally {
       uploadBudget.release(reserve);
     }
   },
 );
+
+async function findBlob(vaultId: string, sha256: string): Promise<BlobRow | undefined> {
+  const { rows } = await pool.query<BlobRow>(
+    `SELECT id, sha256, size, mime, rel_path, filename
+       FROM blobs WHERE vault_id = $1 AND sha256 = $2 AND status = 'ready'`,
+    [vaultId, sha256],
+  );
+  return rows[0];
+}
 
 // ── list ──────────────────────────────────────────────────────────────────
 blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
@@ -291,9 +344,12 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
 
+  // `status = 'ready'` only: a pending row is an upload in flight (or an
+  // abandoned one), and listing it would tell the desktop's attachment diff a
+  // file it cannot download already exists.
   const { rows } = await pool.query<BlobRow>(
     `SELECT id, sha256, size, mime, rel_path, filename
-       FROM blobs WHERE vault_id = $1 ORDER BY rel_path`,
+       FROM blobs WHERE vault_id = $1 AND status = 'ready' ORDER BY rel_path`,
     [vaultId],
   );
   // Private-by-default: a scoped member only sees blobs referenced by notes
@@ -303,67 +359,129 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
 });
 
 // ── download ────────────────────────────────────────────────────────────────
-blobRoutes.get("/blobs/:id", async (c) => {
+interface DownloadRow {
+  id: string;
+  vault_id: string | null;
+  org_id: string | null;
+  mime: string | null;
+  rel_path: string | null;
+  size: string | number | null;
+  storage_provider: string | null;
+  storage_key: string | null;
+}
+
+/**
+ * Metadata + both gates, deliberately without the bytes. Selecting the data up
+ * front meant every request — including the ones about to be rejected with 403 —
+ * materialized the whole blob several times over (pg renders BYTEA as a hex
+ * string twice the blob's size before decoding it to a Buffer). Only a caller
+ * who passes both gates makes the process allocate anything large.
+ *
+ * Returns either the row or the response to send instead.
+ */
+async function authorizeDownload(
+  c: Context,
+): Promise<{ row: DownloadRow } | { deny: Response }> {
   const session = await getSession(c);
-  if (!session) return c.json({ error: "Authentication required" }, 401);
+  if (!session) return { deny: c.json({ error: "Authentication required" }, 401) };
 
   const id = c.req.param("id");
-  // Metadata FIRST, deliberately without `data`. Selecting the bytes up front
-  // meant every request — including the ones about to be rejected with 403 —
-  // materialized the whole blob several times over (pg renders BYTEA as a hex
-  // string twice the blob's size before decoding it to a Buffer). Now only a
-  // caller who passes both gates can make the process allocate anything large.
-  const { rows } = await pool.query<{
-    vault_id: string | null;
-    org_id: string | null;
-    mime: string | null;
-    rel_path: string | null;
-  }>("SELECT vault_id, org_id, mime, rel_path FROM blobs WHERE id = $1", [id]);
+  const { rows } = await pool.query<DownloadRow>(
+    `SELECT id, vault_id, org_id, mime, rel_path, size, storage_provider, storage_key
+       FROM blobs WHERE id = $1`,
+    [id],
+  );
   const blob = rows[0];
-  if (!blob) return c.json({ error: "Blob not found" }, 404);
+  if (!blob) return { deny: c.json({ error: "Blob not found" }, 404) };
 
   // Membership is necessary but not sufficient (via the blob's note collection,
   // or its org_id fallback for legacy rows without vault_id).
   const org = blob.vault_id ? await vaultOrg(blob.vault_id) : blob.org_id;
   if (!org || !(await orgRole(org, session.userId))) {
-    return c.json({ error: "Not a member of this vault" }, 403);
+    return { deny: c.json({ error: "Not a member of this vault" }, 403) };
   }
   // Per-attachment ACL: a scoped member may only download a blob referenced by
   // a note they can read (owner/admin + Open vaults are allowed everything).
   // Legacy rows without a vault_id keep membership-only access (no note to gate on).
   if (blob.vault_id && !(await canReadAttachment(session.userId, blob.vault_id, blob.rel_path))) {
-    return c.json({ error: "You do not have access to this attachment" }, 403);
+    return { deny: c.json({ error: "You do not have access to this attachment" }, 403) };
   }
+  return { row: blob };
+}
 
-  // Authorized: now fetch the bytes.
-  //
-  // KNOWN LIMITATION (not fixed here, on purpose): this is still a single
-  // whole-blob read, so peak heap is a few multiples of the blob size and there
-  // is no streaming. node-postgres cannot stream a BYTEA column, so fixing it
-  // properly means either large-object support or chunked reads
-  // (`substring(data from $2 for $3)`), and the chunked route only performs if
-  // the column is also switched to uncompressed storage (`ALTER TABLE blobs
-  // ALTER COLUMN data SET STORAGE EXTERNAL`) — otherwise every chunk detoasts
-  // the entire value. That is a restructuring of the pg access path with its own
-  // correctness surface, so it is written up as a recommendation rather than
-  // attempted. The lowered MAX_BLOB_BYTES bounds the damage meanwhile.
-  const { rows: dataRows } = await pool.query<{ data: Buffer | null }>(
-    "SELECT data FROM blobs WHERE id = $1",
-    [id],
-  );
-  const data = dataRows[0]?.data;
-  if (!data) return c.json({ error: "Blob not found" }, 404);
-
-  // The stored MIME is attacker-controlled (taken verbatim from the uploader's
-  // content-type). Serve every blob as a non-rendering download: `nosniff`
-  // stops the browser MIME-sniffing it into an active document, and
-  // `Content-Disposition: attachment` forces a download rather than inline
-  // rendering — so a stored text/html blob can't execute as script in the API
-  // origin. The desktop reads the raw bytes regardless of these headers.
-  return c.body(data, 200, {
-    "Content-Type": blob.mime || "application/octet-stream",
-    "Content-Length": String(data.byteLength),
+/**
+ * The stored MIME is attacker-controlled (taken verbatim from the uploader's
+ * content-type). Serve every blob as a non-rendering download: `nosniff` stops
+ * the browser MIME-sniffing it into an active document, and
+ * `Content-Disposition: attachment` forces a download rather than inline
+ * rendering — so a stored text/html blob can't execute as script in the API
+ * origin. The desktop reads the raw bytes regardless of these headers.
+ */
+function downloadHeaders(row: DownloadRow, size: number, acceptRanges: boolean) {
+  return {
+    "Content-Type": row.mime || "application/octet-stream",
+    "Content-Length": String(size),
     "X-Content-Type-Options": "nosniff",
     "Content-Disposition": "attachment",
-  });
+    "Accept-Ranges": acceptRanges ? "bytes" : "none",
+  };
+}
+
+blobRoutes.get("/blobs/:id", async (c) => {
+  const gate = await authorizeDownload(c);
+  if ("deny" in gate) return gate.deny;
+  const blob = gate.row;
+
+  // Authorized: now fetch the bytes, through the provider recorded on the ROW.
+  // The "no bytes stored" case is decided here and not before, because until
+  // the provider is known there is no such thing as a missing body — a NULL
+  // `data` column on an S3 row is normal, not a 404.
+  try {
+    const store = await resolveStoreForRow(blob);
+    const result = await store.get(storageKeyForRow(blob));
+    if (result.kind === "redirect") {
+      return c.redirect(result.url, 302);
+    }
+    return c.body(
+      Readable.toWeb(result.body) as ReadableStream,
+      200,
+      downloadHeaders(blob, result.size, result.acceptRanges),
+    );
+  } catch (e) {
+    return storeError(c, e);
+  }
 });
+
+// HEAD is the same gates and the same headers with no body. Nearly free on the
+// Postgres provider (`octet_length` instead of the value) and the natural way
+// for a client to ask "is this still there, and how big".
+blobRoutes.on("HEAD", "/blobs/:id", async (c) => {
+  const gate = await authorizeDownload(c);
+  if ("deny" in gate) return gate.deny;
+  const blob = gate.row;
+
+  try {
+    const store = await resolveStoreForRow(blob);
+    const head = await store.head(storageKeyForRow(blob));
+    if (!head) return c.body(null, 404);
+    return c.body(null, 200, downloadHeaders(blob, head.size, false));
+  } catch (e) {
+    return storeError(c, e);
+  }
+});
+
+/**
+ * Map a store failure to a status. `storage_unavailable` is 503 and never 404:
+ * a 404 tells the desktop's attachment diff the blob is gone, and it answers
+ * that by re-uploading every byte.
+ */
+function storeError(c: Context, e: unknown) {
+  if (e instanceof BlobStoreError) {
+    if (e.code === "not_found") return c.json({ error: "Blob not found" }, 404);
+    return c.json(
+      { error: "Attachment storage is unavailable", code: "storage_unavailable" },
+      503,
+    );
+  }
+  throw e;
+}
