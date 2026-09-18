@@ -68,3 +68,34 @@ export function writeTeamAccessCache(
     /* quota/unavailable — the cache is a convenience only */
   }
 }
+
+/** The slice of `Storage` a forget needs — separate from {@link ModeStore} so
+ *  the existing read/write fakes keep type-checking unchanged. */
+export type ModeEraser = Pick<Storage, "removeItem">;
+
+function ambientEraser(): ModeEraser | null {
+  try {
+    return (globalThis as { localStorage?: ModeEraser }).localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop a vault's remembered mode. Called when the vault stops existing (made
+ * local only): a cached "shared" left behind would seed the Access page's paint
+ * for an id that can never answer again, and vault ids are not reused.
+ * Best effort — never throws.
+ */
+export function forgetTeamAccessCache(
+  serverUrl: string,
+  orgId: string | null,
+  storage: ModeEraser | null = ambientEraser(),
+): void {
+  if (!orgId || !storage) return;
+  try {
+    storage.removeItem(teamAccessCacheKey(serverUrl, orgId));
+  } catch {
+    /* unavailable — the cache is a convenience only */
+  }
+}

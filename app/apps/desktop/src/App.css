@@ -6872,6 +6872,24 @@ button.is-done:disabled {
   color: var(--text-primary);
   font-weight: 600;
 }
+/* The "make local only" confirm lists exactly what the server loses, then makes
+   you type the vault's name. Both reuse the confirm body's own tokens — nothing
+   here is a new control, only the two shapes `.confirm-body` had no rule for. */
+.confirm-body .confirm-list {
+  margin: 0;
+  padding-left: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.confirm-body .confirm-type {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+  text-align: left;
+}
+
 .confirm-actions {
   display: flex;
   justify-content: center;

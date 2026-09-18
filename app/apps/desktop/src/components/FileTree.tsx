@@ -512,6 +512,17 @@ export function FileTree() {
       epoch: store.vault?.epoch,
       deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
       unregister: (p) => syncManager.registry.deletePath(p),
+      // Taken only above the bulk threshold (see `mutatePaths`): 30 selected
+      // notes become ONE request instead of 30, each of which used to re-resolve
+      // the permission algebra and broadcast a `registry-changed` that every
+      // teammate's app re-pulled the whole vault on. Folders stay on their own
+      // single cascading delete, inside `registry.deletePaths`.
+      unregisterMany: async (ps) =>
+        (await syncManager.registry.deletePaths(ps)).map((o) => ({
+          path: o.path,
+          ok: o.status === "deleted",
+          reason: o.reason,
+        })),
       onProgress: (done, total) => setBulkProgress({ done, total }),
     });
     // A refused delete (offline, or no permission on the server) leaves the item

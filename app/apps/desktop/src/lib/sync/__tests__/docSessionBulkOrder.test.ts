@@ -71,6 +71,17 @@ const fakeRegistry = vi.hoisted(() => {
     consumeMaterialized: vi.fn((relPath: string) => reg.materialized.delete(relPath)),
     /** The server delete. THE call a propagated disk delete must make. */
     deletePath: vi.fn(async (_path: string) => {}),
+    /** Its batched twin, used once a window is worth a request of its own.
+     *  Answers `deleted` for everything unless a test says otherwise. */
+    deletePaths: vi.fn(
+      async (paths: readonly string[]) =>
+        paths.map((path) => ({
+          path,
+          status: "deleted" as "deleted" | "denied" | "failed",
+          reason: null as string | null,
+          code: null as string | null,
+        })),
+    ),
     renamePath: vi.fn(async (_from: string, _to: string) => {}),
     recordFailure: vi.fn((_f: unknown) => {}),
   };
@@ -253,6 +264,7 @@ vi.mock("../syncManager", () => ({
 }));
 
 import type { SessionInfo } from "../../api";
+import * as ipc from "../../ipc";
 import { SyncManager } from "../docSession";
 import { vaultScopes, type SyncProgress } from "../vaultScope";
 
@@ -287,6 +299,9 @@ beforeEach(() => {
   fakeRegistry.materialized = new Set();
   fakeRegistry.consumeMaterialized.mockClear();
   fakeRegistry.deletePath.mockClear().mockResolvedValue(undefined);
+  fakeRegistry.deletePaths.mockClear().mockImplementation(async (paths: readonly string[]) =>
+    paths.map((path) => ({ path, status: "deleted" as const, reason: null, code: null })),
+  );
   fakeRegistry.renamePath.mockClear();
   fakeRegistry.recordFailure.mockClear();
   fakeDisk.files.clear();
@@ -294,6 +309,14 @@ beforeEach(() => {
   fakeDisk.crdt.clear();
   fakeDisk.trashed = [];
   fakeDisk.rebinds = [];
+  // A test may swap the recovery-copy writer for a failing one; put the real
+  // fake back, or the failure leaks into every suite that runs after it.
+  vi.mocked(ipc.writeTrashCopy).mockImplementation(
+    async (path: string, stamp: string, content: string) => {
+      fakeDisk.trashed.push({ path, content });
+      return `.context/trash/${stamp}/${path}`;
+    },
+  );
   engineHooks.opts = null;
   engineHooks.started = 0;
   engineHooks.refreshes = 0;
@@ -1095,6 +1118,104 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     vi.useRealTimers();
   });
 
+  it("refuses an over-cap batch BEFORE it hydrates a single doc", async () => {
+    // The shape this ordering exists for: an unmounted volume used to pay N
+    // `note_exists` IPCs AND N CRDT hydrations (a `load_yjs_state`, a full
+    // decode and a demote apiece) and only THEN be refused — maximum cost, zero
+    // result. The existence re-check stays (pooled: it is the "is it really
+    // gone" guard and it is what the cap counts); everything expensive must not
+    // happen at all.
+    const sm = new SyncManager();
+    const notes = Array.from({ length: 50 }, (_, i) => ({
+      docId: `big${i}`,
+      relPath: `B${i}.md`,
+    }));
+    fakeRegistry.mappedNotes.mockReturnValue(notes);
+    fakeRegistry.getMapping.mockImplementation((p: string) => {
+      const hit = notes.find((n) => n.relPath === p);
+      return hit ? { vaultId: "collection-1", docId: hit.docId } : null;
+    });
+    for (const n of notes) fakeRegistry.pushed.add(n.docId);
+    await live(sm);
+    storeHooks.promoted = [];
+
+    // Cap is 10 (50 × 0.2); 30 vanish at once.
+    sm.handleLocalFilesChanged(
+      notes.slice(0, 30).map((n) => ({ path: n.relPath, kind: "removed" as const })),
+    );
+    await drain();
+
+    // Not one doc was opened, not one byte was trashed, nothing was propagated…
+    expect(storeHooks.promoted).toEqual([]);
+    expect(fakeDisk.trashed).toEqual([]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    // …and the whole batch is reported, not a prefix of it.
+    expect(fakeRegistry.recordFailure).toHaveBeenCalledTimes(30);
+    vi.useRealTimers();
+  });
+
+  it("keeps every rename in an over-cap window, and refuses only the deletes", async () => {
+    // The shape the EARLY cap must never decide: a `git checkout` of a branch
+    // where a folder was renamed (150 files) and 150 stale notes were deleted.
+    // The drain has already drained `renameCandidates`, so refusing before the
+    // pairing would throw those 150 away for good — the old paths would
+    // re-materialize as ghosts on the next pull and the new paths would register
+    // as brand-new doc_ids. 300 notes where there were 150: the 2026-08-25 fork.
+    const sm = new SyncManager();
+    const notes = Array.from({ length: 200 }, (_, i) => ({
+      docId: `fk${i}`,
+      relPath: `F${i}.md`,
+    }));
+    const byPath = new Map(notes.map((n) => [n.relPath, n]));
+    fakeRegistry.mappedNotes.mockReturnValue(notes);
+    fakeRegistry.getMapping.mockImplementation((p: string) => {
+      const hit = byPath.get(p);
+      return hit ? { vaultId: "collection-1", docId: hit.docId } : null;
+    });
+    for (const n of notes) fakeRegistry.pushed.add(n.docId);
+    await live(sm);
+
+    // Every promoted doc serializes to "content", so every renamed file's index
+    // row reports that hash — the pairing signal.
+    const sha = createHash("sha256").update("content", "utf8").digest("hex");
+    const renamed = notes.slice(0, 150);
+    const deleted = notes.slice(150); // 50, over the cap of max(5, ceil(200*0.2)) = 40
+    const events: Array<{ path: string; kind: "modified" | "removed" }> = [];
+    renamed.forEach((n, i) => {
+      const to = `Moved/F${i}.md`;
+      fakeDisk.files.set(to, "content");
+      fakeDisk.shas.set(to, sha);
+      events.push({ path: to, kind: "modified" });
+      events.push({ path: n.relPath, kind: "removed" });
+    });
+    for (const n of deleted) events.push({ path: n.relPath, kind: "removed" });
+
+    sm.handleLocalFilesChanged(events);
+    // Step 3 pairs SERIALLY, and each pairing awaits a real `crypto.subtle`
+    // digest — 150 of them need 150 real event-loop turns, not the dozen
+    // `drain()` gives a one-note case.
+    await vi.advanceTimersByTimeAsync(3_000);
+    for (let i = 0; i < 400 && fakeRegistry.renamePath.mock.calls.length < 150; i++) {
+      await vi.advanceTimersByTimeAsync(10);
+      await realTick();
+    }
+    await drain();
+
+    // Every rename kept its doc_id, on the server row AND on the index row.
+    expect(fakeRegistry.renamePath).toHaveBeenCalledTimes(150);
+    expect(fakeDisk.rebinds).toHaveLength(150);
+    // …and the 50 real deletes were abandoned as a whole batch: no trash copy,
+    // no server delete, single or batched.
+    expect(fakeDisk.trashed).toEqual([]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    // The refusal names the 50 DELETES, never the 150 notes that merely moved
+    // (the early check used to report `gone` — 200 — and record an `inbound`
+    // failure against every renamed note).
+    expect(fakeRegistry.recordFailure).toHaveBeenCalledTimes(50);
+    vi.useRealTimers();
+  });
+
   it("pairs a rename by content hash instead of deleting and re-registering", async () => {
     // `notify` gives no rename pairing: an external rename is an unpaired
     // `removed` + `modified` in ONE batch. Matching the vanished doc's text
@@ -1149,6 +1270,120 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Old.md");
+    vi.useRealTimers();
+  });
+
+  /** `n` mapped notes, every one confirmed pushed — a vault big enough that the
+   *  blast-radius cap (a fifth of it) allows the deletes a test then makes. */
+  function mapMany(n: number) {
+    const notes = Array.from({ length: n }, (_, i) => ({ docId: `bd${i}`, relPath: `D${i}.md` }));
+    const byPath = new Map(notes.map((x) => [x.relPath, x]));
+    fakeRegistry.mappedNotes.mockReturnValue(notes);
+    fakeRegistry.getMapping.mockImplementation((p: string) => {
+      const hit = byPath.get(p);
+      return hit ? { vaultId: "collection-1", docId: hit.docId } : null;
+    });
+    for (const x of notes) fakeRegistry.pushed.add(x.docId);
+    return notes;
+  }
+
+  it("sends a big window of disk deletes as ONE batch, not N single deletes", async () => {
+    // A `git clean`, a folder dragged to the Trash in Finder, a sync client
+    // pruning: 30 notes vanish at once. That used to be 30 serial DELETEs, each
+    // re-resolving the permission algebra and each broadcasting a
+    // `registry-changed` every peer re-pulled on.
+    const sm = new SyncManager();
+    const notes = mapMany(200); // cap is 40, so 30 is well inside it
+    await live(sm);
+
+    sm.handleLocalFilesChanged(
+      notes.slice(0, 30).map((n) => ({ path: n.relPath, kind: "removed" as const })),
+    );
+    await drain();
+
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePaths).toHaveBeenCalledTimes(1);
+    expect(fakeRegistry.deletePaths.mock.calls[0][0]).toEqual(
+      notes.slice(0, 30).map((n) => n.relPath),
+    );
+    // The bytes were still kept FIRST, for every one of them.
+    expect(fakeDisk.trashed).toHaveLength(30);
+    vi.useRealTimers();
+  });
+
+  it("keeps the per-note call below the bulk threshold", async () => {
+    // 10 deletes: one request each is already sub-second, and a rarely-exercised
+    // safety path IS the bug — so the small case stays on the path it has
+    // always taken.
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+
+    sm.handleLocalFilesChanged(
+      notes.slice(0, 10).map((n) => ({ path: n.relPath, kind: "removed" as const })),
+    );
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).toHaveBeenCalledTimes(10);
+    vi.useRealTimers();
+  });
+
+  it("never batches a note whose recovery copy failed to write", async () => {
+    // Trash-before-server, per note and absolute: bytes that could not be kept
+    // must not become unrecoverable.
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    vi.mocked(ipc.writeTrashCopy).mockImplementation(
+      async (path: string, stamp: string, content: string) => {
+        if (path === "D7.md") throw new Error("disk full");
+        fakeDisk.trashed.push({ path, content });
+        return `.context/trash/${stamp}/${path}`;
+      },
+    );
+
+    sm.handleLocalFilesChanged(
+      notes.slice(0, 30).map((n) => ({ path: n.relPath, kind: "removed" as const })),
+    );
+    await drain();
+
+    const sent = fakeRegistry.deletePaths.mock.calls[0][0] as string[];
+    expect(sent).toHaveLength(29);
+    expect(sent).not.toContain("D7.md");
+    // …and the note that could not be copied is reported, not silently dropped.
+    expect(
+      fakeRegistry.recordFailure.mock.calls.some(
+        (c) => (c[0] as { path: string }).path === "D7.md",
+      ),
+    ).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("reports a note the server refused, and leaves the rest deleted", async () => {
+    // The batch answers per item. A `denied` note keeps its mapping inside the
+    // registry (pinned by `registryDeleteBatch.test.ts`); here the session must
+    // report it and NOT treat it as propagated.
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    fakeRegistry.deletePaths.mockImplementation(async (paths: readonly string[]) =>
+      paths.map((path) => ({
+        path,
+        status: path === "D3.md" ? ("denied" as const) : ("deleted" as const),
+        reason: path === "D3.md" ? "no edit grant" : null,
+        code: path === "D3.md" ? "no_edit_permission" : null,
+      })),
+    );
+
+    sm.handleLocalFilesChanged(
+      notes.slice(0, 30).map((n) => ({ path: n.relPath, kind: "removed" as const })),
+    );
+    await drain();
+
+    const refusals = fakeRegistry.recordFailure.mock.calls.map((c) => c[0] as { path: string });
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0].path).toBe("D3.md");
     vi.useRealTimers();
   });
 

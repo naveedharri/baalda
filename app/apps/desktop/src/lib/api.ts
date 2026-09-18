@@ -10,6 +10,7 @@ import type {
   FolderBatchResult,
   NoteBatchItem,
   NoteBatchResult,
+  NoteDeleteResult,
 } from "./sync/bulkTypes";
 
 // The ONE typed HTTP boundary to the Baalda server. Every `fetch`
@@ -618,6 +619,57 @@ export interface VaultDeleteResult {
   subscription: { cancelAtPeriodEnd: boolean; currentPeriodEnd: string | null } | null;
 }
 
+/**
+ * What `GET /api/orgs/:orgId/unsync-preview` reports: everything the server
+ * would destroy if this vault were made local only.
+ *
+ * `members` EXCLUDES the owner — it is the number of people who lose access,
+ * which is the sentence the confirm dialog has to say out loud.
+ */
+export interface UnsyncPreview {
+  orgName: string;
+  notes: number;
+  files: number;
+  folders: number;
+  attachmentBytes: number;
+  members: number;
+  publicLinks: number;
+  mcpTokens: number;
+  checkpoints: number;
+  /** The vault's live subscription, when it has one — the period-end sentence. */
+  subscription: {
+    status: string;
+    currentPeriodEnd: string | null;
+    cancelAtPeriodEnd: boolean;
+  } | null;
+}
+
+/** What `POST /api/orgs/:orgId/unsync` reports back once the server copy is gone. */
+export interface UnsyncResult {
+  unsynced: boolean;
+  notes: number;
+  files: number;
+  members: number;
+  /** Set when the vault carried a live subscription: cancelled at the period end. */
+  subscription: { cancelAtPeriodEnd: boolean; currentPeriodEnd: string | null } | null;
+}
+
+/**
+ * `GET /api/orgs/:orgId/status`, as a VALUE rather than an exception.
+ *
+ * The three answers mean three different things to the folder on disk, and the
+ * caller has to tell them apart: `vault-not-found` is "this vault was made local
+ * only (or deleted) — offer the fix", `not-a-member` is "it is somebody else's
+ * folder — keep refusing", and `unknown` is "we could not ask", which must stay
+ * silent (fail closed). Returning them instead of throwing is what keeps that
+ * distinction from collapsing into one `catch`.
+ */
+export type OrgStatus =
+  | { kind: "member"; orgId: string; name: string; role: string }
+  | { kind: "not-a-member" }
+  | { kind: "vault-not-found" }
+  | { kind: "unknown" };
+
 /** A rejected server response — carries the HTTP status for callers to branch on. */
 export class ApiError extends Error {
   constructor(
@@ -939,7 +991,7 @@ export class ApiClient {
        */
       timeoutMs?: number;
     } = {},
-  ): Promise<{ data: T; authToken: string | null }> {
+  ): Promise<{ data: T; authToken: string | null; status: number }> {
     const url = new URL(this.baseUrl + path);
     if (opts.query) {
       for (const [k, v] of Object.entries(opts.query)) {
@@ -1010,7 +1062,11 @@ export class ApiClient {
       throw new ApiError(res.status, msg, parsed);
     }
 
-    return { data: parsed as T, authToken };
+    // The status rides along because a couple of routes say something in it that
+    // the body does not: `POST /api/notes` answers 201 for a row it created and
+    // 200 for one it adopted, and only the first is provably empty on the
+    // server. Every other caller destructures `data` and never sees this.
+    return { data: parsed as T, authToken, status: res.status };
   }
 
   // ---- Reachability -------------------------------------------------------
@@ -1418,6 +1474,71 @@ export class ApiClient {
   }
 
   /**
+   * What making this vault local only would destroy (owner only). Pure counting
+   * — nothing is changed. Throws ApiError 403 `owner_only` for anyone else and
+   * 404 `vault_not_found` for a vault that is already gone.
+   */
+  async getUnsyncPreview(organizationId: string): Promise<UnsyncPreview> {
+    const { data } = await this.request<UnsyncPreview>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(organizationId)}/unsync-preview`,
+    );
+    return data;
+  }
+
+  /**
+   * Make a vault local only (owner only): the server deletes everything it
+   * holds for the vault — notes, files, history, shares, links, tokens — and
+   * the caller keeps its `.md` files on disk.
+   *
+   * `confirmName` must equal the vault's name; the server answers 409
+   * `name_mismatch` otherwise and destroys NOTHING. Same billing rule as
+   * `deleteRemoteVault`: a paid vault is cancelled at the provider first and a
+   * provider refusal aborts the whole thing with 502
+   * `subscription_cancel_failed`, so a throw here means the server copy is
+   * still intact — which is exactly why the caller must not touch this device
+   * until this resolves.
+   */
+  async unsyncVault(organizationId: string, confirmName: string): Promise<UnsyncResult> {
+    const { data } = await this.request<UnsyncResult>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(organizationId)}/unsync`,
+      { body: { confirmName } },
+    );
+    return data;
+  }
+
+  /**
+   * Does this vault still exist, and are we in it? The one probe that can tell
+   * "the owner made it local only" apart from "it is another account's vault" —
+   * a folder stamped for an org we cannot see looks identical in both cases,
+   * and only the first one deserves the recovery banner.
+   *
+   * Never throws: every refusal becomes an {@link OrgStatus}, and an
+   * unreachable server answers `unknown` so the caller stays silent rather than
+   * accusing a perfectly good folder.
+   */
+  async getOrgStatus(organizationId: string): Promise<OrgStatus> {
+    try {
+      const { data } = await this.request<{ orgId: string; name: string; role: string }>(
+        "GET",
+        `/api/orgs/${encodeURIComponent(organizationId)}/status`,
+      );
+      return { kind: "member", orgId: data.orgId, name: data.name, role: data.role };
+    } catch (e) {
+      if (e instanceof ApiError) {
+        // The code is the contract, the status is the fallback — same rule as
+        // `blobErrorCode`, so an older server that sends a bare status still
+        // lands in the right branch.
+        const code = errorCodeOf(e.body);
+        if (code === "vault_not_found" || e.status === 404) return { kind: "vault-not-found" };
+        if (code === "not_a_member" || e.status === 403) return { kind: "not-a-member" };
+      }
+      return { kind: "unknown" };
+    }
+  }
+
+  /**
    * Remove a member from a vault (owner/admin). The server deletes the
    * membership, purges any shares granted directly to that user, and force-closes
    * their live sync sockets so access is revoked immediately. Throws ApiError 403
@@ -1783,15 +1904,27 @@ export class ApiClient {
     };
   }
 
+  /**
+   * Register one note. `created` distinguishes the two 2xx answers this route
+   * gives (201 a new row, 200 an existing one adopted by path/doc_id) — the
+   * single-note twin of the batch route's `status: "created" | "adopted"`, and
+   * the same question: a row the server just made holds no CRDT, so it can be
+   * seeded in bulk; an adopted one may hold a teammate's content.
+   *
+   * Optional on purpose: absent reads as "not known to be new", which is the
+   * safe direction — the caller simply does not announce it.
+   */
   async createNote(input: {
     vaultId: string;
     relPath: string;
     title?: string | null;
     folderId?: string | null;
     docId?: string;
-  }): Promise<RegisteredNote> {
-    const { data } = await this.request<RegisteredNote>("POST", "/api/notes", { body: input });
-    return data;
+  }): Promise<RegisteredNote & { created?: boolean }> {
+    const { data, status } = await this.request<RegisteredNote>("POST", "/api/notes", {
+      body: input,
+    });
+    return { ...data, created: status === 201 };
   }
 
   /** Rename/move a note (rel_path/folder/title); doc_id is unchanged. */
@@ -1930,6 +2063,23 @@ export class ApiClient {
     return this.bulk<{ results: DocPushResult[] }>(
       `/api/vaults/${encodeURIComponent(vaultId)}/docs/batch`,
       { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /**
+   * Soft-delete N notes in one request — the batched twin of
+   * {@link ApiClient.deleteNote}, same write, same broadcast, one of each.
+   *
+   * Chunking is the CALLER's (`registry.deletePaths`, at `BATCH_MAX_NOTES`):
+   * this method sends exactly what it is given, so an over-long list comes back
+   * as `batch_too_large` rather than being silently truncated here. The answer
+   * is per item, in request order, and a 404 on the route is the usual terminal
+   * `server_too_old` — a server that predates it still has the per-note DELETE.
+   */
+  async deleteNotesBatch(vaultId: string, docIds: string[]): Promise<NoteDeleteResult[]> {
+    return this.bulk<{ results: NoteDeleteResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/notes/delete-batch`,
+      { docIds },
     ).then((d) => d.results ?? []);
   }
 

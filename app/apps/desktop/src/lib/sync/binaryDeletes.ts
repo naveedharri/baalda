@@ -38,6 +38,8 @@
 // asked to make. So there is none, and the refusals above are what stand in for
 // it.
 
+import { IPC_CONCURRENCY, REGISTRY_CONCURRENCY, runPool } from "./pool";
+
 /** How long a vanished binary waits before it is believed. Same window the
  *  notes use (`docSession.DISK_DELETE_GRACE_MS`) — the events it filters are
  *  the same events. */
@@ -56,6 +58,14 @@ export const BINARY_DELETE_GRACE_MS = 2_500;
  * same "a later pass brings the file back and deleting it again makes it stick"
  * outcome as before, just three tries later.
  */
+/**
+ * How many "is it still there?" disk checks run at once when a window closes.
+ *
+ * Local IPC calls, bounded by Rust's file work rather than by a host's
+ * connection pool — so the shared local width, not the registry's HTTP one.
+ */
+const EXISTS_CONCURRENCY = IPC_CONCURRENCY;
+
 export const MAX_LISTING_RETRIES = 3;
 
 /**
@@ -299,19 +309,29 @@ export class BinaryDeleteQueue {
       // 1. Ask the DISK, which is the only thing that knows. Gone ⇒ a delete;
       //    still there ⇒ it was a save, a rewrite, a checkout — or the arrival
       //    half of a rename, which step 2 pairs by content.
+      //    Pooled: these are N independent disk questions, and a window that
+      //    caught a deleted folder asks hundreds of them. The ANSWERS are
+      //    collected by index and read back in order below, so which lane
+      //    finished first can never reorder `gone` (the rename pairing in step 2
+      //    walks it).
+      const missing = new Array<boolean>(batch.length).fill(false);
+      let switched = false;
+      await runPool(
+        batch,
+        async (item, i) => {
+          try {
+            missing[i] = !(await this.deps.exists(item.relPath));
+          } catch {
+            missing[i] = false; // couldn't ask ⇒ never assume a delete
+          }
+          if (!this.deps.isCurrent()) switched = true;
+        },
+        { concurrency: EXISTS_CONCURRENCY, shouldStop: () => switched },
+      );
+      if (switched || !this.deps.isCurrent()) return;
       const gone: Pending[] = [];
       const present: string[] = [];
-      for (const item of batch) {
-        let missing = false;
-        try {
-          missing = !(await this.deps.exists(item.relPath));
-        } catch {
-          missing = false; // couldn't ask ⇒ never assume a delete
-        }
-        if (!this.deps.isCurrent()) return;
-        if (missing) gone.push(item);
-        else present.push(item.relPath);
-      }
+      batch.forEach((item, i) => (missing[i] ? gone.push(item) : present.push(item.relPath)));
       if (gone.length === 0) return;
 
       let local: LocalBinary[];
@@ -412,30 +432,38 @@ export class BinaryDeleteQueue {
       // 4. Tell the server. A tree file goes through its `files` row, which
       //    takes the blob with it; an `attachments/` drop (and a tree file this
       //    device never registered) has only its blob to remove.
+      //    Pooled at the registry width — every decision that could refuse a
+      //    removal (the grace window, the rename pairing, the cap in step 3) has
+      //    already run, so all that is left is N independent requests.
       let changed = false;
-      for (const d of deletes) {
-        if (!this.deps.isCurrent()) return;
-        const id = this.deps.fileId(d.relPath);
-        try {
-          if (id) await this.deps.deleteFile(id);
-          else await this.deps.deleteBlob(d.blob.id);
-        } catch (e) {
-          if (errStatus(e) === 409) {
-            // `blob_referenced`: a note still embeds these bytes. The file is
-            // gone from THIS disk, but the server's copy is somebody's image —
-            // leave it, and let it come back down here on the next pass.
-            console.info(
-              `[attachments] ${d.relPath} is still embedded in a note — keeping the server copy`,
-            );
-            continue;
+      await runPool(
+        deletes,
+        async (d) => {
+          const id = this.deps.fileId(d.relPath);
+          try {
+            if (id) await this.deps.deleteFile(id);
+            else await this.deps.deleteBlob(d.blob.id);
+          } catch (e) {
+            if (errStatus(e) === 409) {
+              // `blob_referenced`: a note still embeds these bytes. The file is
+              // gone from THIS disk, but the server's copy is somebody's image —
+              // leave it, and let it come back down here on the next pass.
+              console.info(
+                `[attachments] ${d.relPath} is still embedded in a note — keeping the server copy`,
+              );
+              return;
+            }
+            console.warn(`[attachments] couldn't remove ${d.relPath} from the server`, e);
+            return;
           }
-          console.warn(`[attachments] couldn't remove ${d.relPath} from the server`, e);
-          continue;
-        }
-        this.deps.forgetFileId(d.relPath);
-        changed = true;
-        console.info(`[attachments] ${d.relPath} was deleted on this device — removed from the server`);
-      }
+          this.deps.forgetFileId(d.relPath);
+          changed = true;
+          console.info(
+            `[attachments] ${d.relPath} was deleted on this device — removed from the server`,
+          );
+        },
+        { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !this.deps.isCurrent() },
+      );
       if (changed) this.deps.onServerChanged?.();
     } finally {
       this.draining = false;

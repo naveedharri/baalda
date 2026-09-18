@@ -43,6 +43,15 @@
 // Net effect: the text is never doubled (no second insert history) and never
 // lost (the file is never written, and its bytes rejoin through the diff).
 //
+// ── Two things it will NOT do ───────────────────────────────────────────────
+// A doc whose local CRDT is empty and which the server never called empty is
+// DEFERRED to the per-doc path rather than sent: there is nothing here to seed
+// it from and its encoded "no state" is 2 bytes the server would accept, which
+// would check the note in as pushed with its text nowhere but the `.md`. And the
+// local-change drain's file ingest (`ingestFromFile`) runs only on a doc that
+// already HAS content — on an empty one that ingest would be a seed, i.e. the
+// same doubling this module is built around.
+//
 // No streak abort. `ContentUploader.failureStreakLimit` is deliberately not
 // carried over — that mechanism is what stranded 613 notes. Per-chunk
 // `withRetry` plus per-item failures into the same sink `completeRun` reads.
@@ -57,12 +66,21 @@ import {
   BATCH_MAX_DECODED_BYTES,
   BATCH_MAX_DOCS,
   BULK_ITEM_MAX_BYTES,
-  UPLOAD_CONCURRENCY,
+  BULK_PACK_CONCURRENCY,
   runPool,
   withRetry,
 } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { bytesToBase64 } from "./vaultProtocol";
+
+/**
+ * How many packed chunks may wait behind the request on the wire.
+ *
+ * 2 — enough that the uplink never goes idle waiting for the packer, small
+ * enough that peak packed memory is bounded at ~3 × {@link BATCH_MAX_DECODED_BYTES}
+ * (12 MiB) however slow the link is.
+ */
+export const MAX_OUTSTANDING_CHUNKS = 2;
 
 /** One note to push. `serverEmpty` is the SERVER's statement, never a guess. */
 export interface DocPushWork {
@@ -70,6 +88,29 @@ export interface DocPushWork {
   relPath: string;
   /** The server holds no content for this doc (bootstrap `emptyDocs` / `ready.empty`). */
   serverEmpty: boolean;
+  /**
+   * Diff-merge the file's current bytes into the doc before packing it — what
+   * `ContentUploader`'s `ingestFromFile` does, minus the socket. Set by the
+   * LOCAL-CHANGE drain, whose whole premise is that the new text is in the file
+   * and not yet in the doc.
+   *
+   * Split-brain safe for exactly the reason the uploader's pre-connect ingest
+   * is: it runs ONLY on a doc that already has content (a diff-merge of CRDT
+   * state this device already owns). An EMPTY doc is never ingested here — that
+   * would be a seed without a pull — it is deferred to the per-doc path instead
+   * (see {@link DocBatchPushResult.deferred}).
+   */
+  ingestFromFile?: boolean;
+  /**
+   * With {@link ingestFromFile}: an ingest that changed nothing means this doc
+   * has nothing to send, because the server already holds its state.
+   *
+   * The caller is the only one who can say that — it owns `isPushed`,
+   * `serverEmpty`/`serverBehind` and `divergedDocs` — so it is passed in rather
+   * than guessed here. It is what keeps a watcher echo of our own egest free:
+   * most local-change events are exactly that.
+   */
+  settledIfUnchanged?: boolean;
 }
 
 export interface DocBatchPushDeps {
@@ -104,7 +145,7 @@ export interface DocBatchPusherOptions {
   onFailure?: (failure: UploadFailure) => void;
   /** Abandon the run (vault switch). Checked before every doc and every chunk. */
   shouldStop?: () => boolean;
-  /** Bridges opened at once while packing. Default {@link UPLOAD_CONCURRENCY}. */
+  /** Bridges opened at once while packing. Default {@link BULK_PACK_CONCURRENCY}. */
   concurrency?: number;
 }
 
@@ -115,10 +156,30 @@ export interface DocBatchPushResult {
   conflicts: string[];
   /** Docs too big for one batch item — also for `DocSync`, unchanged semantics. */
   oversized: DocPushWork[];
+  /**
+   * Docs this path may not settle: the local doc is EMPTY and the server never
+   * said it is. Nothing can be sent for them without first pulling (their text,
+   * if any, lives only in the `.md`), so they go to the per-doc path exactly as
+   * a conflict does.
+   *
+   * Without this bucket such a doc encodes to a 2-byte "no state" update, which
+   * the server accepts and the client then marks pushed — a note claimed synced
+   * with its content nowhere but this disk. At `enable` time the bootstrap's
+   * `emptyDocs` makes the case unreachable; a LIVE run (whose `ready.empty` may
+   * be a truncated list, or may not have arrived yet for a just-registered
+   * note) is where it appears.
+   */
+  deferred: DocPushWork[];
   failures: UploadFailure[];
   cancelled: boolean;
   /** Requests actually sent (tests: packing). */
   requests: number;
+  /**
+   * The error that failed a whole request, if any — the caller's only way to
+   * see a verdict about the ROUTE rather than about a note (`server_too_old`
+   * being the one that must stop the run rather than retry it).
+   */
+  transportError: unknown;
 }
 
 /** A prepared item: the bytes to send plus what we must remember about them. */
@@ -139,14 +200,19 @@ export class DocBatchPusher {
   private failures: UploadFailure[] = [];
   private conflicts: string[] = [];
   private oversized: DocPushWork[] = [];
+  private deferred: DocPushWork[] = [];
   private pushed = 0;
   private requests = 0;
+  private transportError: unknown = null;
 
   /** Items packed but not yet sent, and their decoded byte total. */
   private pending: Prepared[] = [];
   private pendingBytes = 0;
   /** Serializes the sends, so two full chunks can never be in flight together. */
   private sendChain: Promise<void> = Promise.resolve();
+  /** Chunks queued on {@link sendChain} and not yet settled (incl. the one on
+   *  the wire). The packer's backpressure signal — see {@link awaitSendSlot}. */
+  private outstanding = 0;
 
   constructor(opts: DocBatchPusherOptions) {
     this.opts = opts;
@@ -166,20 +232,32 @@ export class DocBatchPusher {
     this.failures = [];
     this.conflicts = [];
     this.oversized = [];
+    this.deferred = [];
     this.pushed = 0;
     this.requests = 0;
+    this.transportError = null;
     this.pending = [];
     this.pendingBytes = 0;
+    this.outstanding = 0;
 
     const work = this.opts.work;
     if (work.length === 0) {
-      return { pushed: 0, conflicts: [], oversized: [], failures: [], cancelled: false, requests: 0 };
+      return {
+        pushed: 0,
+        conflicts: [],
+        oversized: [],
+        deferred: [],
+        failures: [],
+        cancelled: false,
+        requests: 0,
+        transportError: null,
+      };
     }
     for (const w of work) this.progress.doc(w.docId, "queued");
     this.progress.flush();
 
     await runPool(work, (item) => this.prepare(item), {
-      concurrency: Math.max(1, this.opts.concurrency ?? UPLOAD_CONCURRENCY),
+      concurrency: Math.max(1, this.opts.concurrency ?? BULK_PACK_CONCURRENCY),
       shouldStop: () => this.shouldStop(),
     });
     // Whatever is left over goes as a short final request.
@@ -191,9 +269,11 @@ export class DocBatchPusher {
       pushed: this.pushed,
       conflicts: [...this.conflicts],
       oversized: [...this.oversized],
+      deferred: [...this.deferred],
       failures: [...this.failures],
       cancelled: this.shouldStop(),
       requests: this.requests,
+      transportError: this.transportError,
     };
   }
 
@@ -204,6 +284,13 @@ export class DocBatchPusher {
    */
   private async prepare(item: DocPushWork): Promise<void> {
     const { docId, relPath } = item;
+    if (this.shouldStop()) return;
+    // Backpressure BEFORE the bridge is opened: a packer that outruns the uplink
+    // would otherwise hold every queued chunk's `Uint8Array`s alive in the send
+    // chain's closures — hundreds of MB on a big vault of large notes over a
+    // slow link. Waiting here (rather than in `enqueue`) keeps bridge residency
+    // at the pool width and never stretches a doc's open window.
+    await this.awaitSendSlot();
     if (this.shouldStop()) return;
     // Re-checked here and not only when the work list was built: the user can
     // open a note mid-run, and once its editor owns a provider we must not
@@ -233,6 +320,26 @@ export class DocBatchPusher {
       if (stateBytes > MAX_NOTE_BYTES) {
         this.fail(docId, relPath, sizeReason(stateBytes, "of edit history"), { permanent: true });
         return;
+      }
+
+      // The local-change drain's ingest: fold the file's new bytes into a doc
+      // that ALREADY has content, which is a diff-merge of state this device
+      // owns and needs no pull. An empty doc is deliberately left alone — that
+      // ingest would be a seed, and a seed without the server's word is the
+      // doubling bug; it falls through to the deferral below instead.
+      if (item.ingestFromFile && bridge.serialize().length > 0) {
+        const changed = await bridge.ingestNow();
+        if (this.shouldStop()) return;
+        if (!changed && item.settledIfUnchanged) {
+          // Our own egest echoing back through the watcher: the file and the doc
+          // agree and the server already holds that state. Nothing to send — and
+          // deliberately NOT `markPushed`, which is already true; this only
+          // stops the badge sitting on "queued". Same settle the per-doc
+          // uploader's ingest fast-path makes, minus the socket it also skips.
+          this.progress.doc(docId, "synced");
+          this.progress.item("ok");
+          return;
+        }
       }
 
       let seeded = false;
@@ -267,6 +374,17 @@ export class DocBatchPusher {
           }
         }
         seeded = await bridge.seedFromFileIfEmpty();
+      }
+
+      if (!seeded && bridge.serialize().length === 0) {
+        // An empty doc the server never called empty. Its `.md` may hold text
+        // that only a pull-then-seed can put on the wire, and its encoded state
+        // is a 2-byte "I know nothing" that the server would happily accept —
+        // so sending it would mark the note synced with its content nowhere but
+        // this disk. Hand it to the per-doc path, which pulls first.
+        this.deferred.push(item);
+        this.progress.item("ok");
+        return;
       }
 
       const update = Y.encodeStateAsUpdate(bridge.doc);
@@ -318,17 +436,36 @@ export class DocBatchPusher {
     }
   }
 
+  /**
+   * Hold the packer back while the send chain is already carrying its limit.
+   *
+   * Only the SENDS were serialized; queuing was not, so nothing bounded how much
+   * packed-but-unsent memory could accumulate ahead of one slow request. At most
+   * {@link MAX_OUTSTANDING_CHUNKS} queued chunks plus the one on the wire, which
+   * keeps the "one request on the wire" invariant exactly as it was (this only
+   * decides when the NEXT chunk is built, never how many are in flight).
+   */
+  private async awaitSendSlot(): Promise<void> {
+    while (this.outstanding > MAX_OUTSTANDING_CHUNKS && !this.shouldStop()) {
+      await this.sendChain;
+    }
+  }
+
   /** Take the open chunk and queue it behind whatever is already in flight. */
   private flushPending(final: boolean): Promise<void> {
     if (this.pending.length === 0) return final ? this.sendChain : Promise.resolve();
     const chunk = this.pending;
     this.pending = [];
     this.pendingBytes = 0;
+    this.outstanding++;
     this.sendChain = this.sendChain
       .then(() => this.send(chunk))
       // A listener (or a `markPushed`) that throws must not turn into an
       // unhandled rejection that kills the run's remaining chunks.
-      .catch((e) => console.warn("[docs/batch] chunk failed", e));
+      .catch((e) => console.warn("[docs/batch] chunk failed", e))
+      .finally(() => {
+        this.outstanding--;
+      });
     return this.sendChain;
   }
 
@@ -349,7 +486,10 @@ export class DocBatchPusher {
     });
     if (!out.ok) {
       // The whole chunk failed: a transport failure says nothing about any one
-      // note, so each is reported (and retried by the next run) individually.
+      // note, so each is reported (and retried by the next run) individually —
+      // but the error itself is kept, because a verdict about the ROUTE (a 404
+      // from a server without this engine) is not a per-note failure at all.
+      this.transportError ??= out.error;
       for (const p of chunk) this.fail(p.docId, p.relPath, reasonOf(out.error));
       return;
     }

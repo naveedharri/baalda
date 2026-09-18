@@ -9,6 +9,7 @@ import {
   type Member,
   type MyBillingVault,
   type OrgBilling,
+  type UnsyncPreview,
   type VaultCheckpoint,
 } from "../lib/api";
 import { toast } from "../lib/toast";
@@ -245,6 +246,10 @@ export function VaultSettingsDialog({
   if (!session && !vault) return null;
   const myMember = members.find((m) => m.userId === session?.user.id);
   const canManage = myMember?.role === "owner" || myMember?.role === "admin";
+  // Stricter than `canManage`: making a vault local only destroys the server
+  // copy for everyone, so an admin may not do it (the server agrees — 403
+  // `owner_only`) and the control simply isn't drawn for them.
+  const isOwner = myMember?.role === "owner";
   const activeTab = tabs.find((t) => t.id === tab) ?? tabs[0];
   const lockedTab = TEAM_TABS.has(activeTab.id) && !isSynced;
 
@@ -305,6 +310,7 @@ export function VaultSettingsDialog({
             <GeneralTab
               isSynced={isSynced}
               canManage={canManage}
+              isOwner={isOwner}
               activeOrgName={activeOrg?.name ?? null}
               onRequestSignIn={onRequestSignIn}
             />
@@ -349,12 +355,15 @@ export function VaultSettingsDialog({
 function GeneralTab({
   isSynced,
   canManage,
+  isOwner,
   activeOrgName,
   onRequestSignIn,
 }: {
   isSynced: boolean;
   /** Owner/admin — the only roles that may flip a vault-wide latch. */
   canManage: boolean;
+  /** Owner alone — the only role that may destroy the server copy. */
+  isOwner: boolean;
   activeOrgName: string | null;
   onRequestSignIn?: () => void;
 }) {
@@ -499,8 +508,261 @@ function GeneralTab({
         </code>
       </div>
 
+      {isSynced && isOwner && <UnsyncDangerZone />}
+
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
     </>
+  );
+}
+
+/**
+ * The mirror of "Turn on sync": take the vault back off the server and keep the
+ * folder. Owner-only, at the bottom of the page, behind a type-the-name confirm
+ * — the three things that stop a mis-click on the one action in this dialog that
+ * destroys other people's access.
+ *
+ * The counts come from the preview call rather than from anything this device
+ * knows: what matters is what the SERVER is about to lose (edit history, version
+ * checkpoints, public links, MCP tokens), none of which the local index can see.
+ */
+function UnsyncDangerZone() {
+  const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const orgName = useStore(
+    (s) =>
+      s.organizations.find((o) => o.id === s.session?.activeOrganizationId)?.name ?? null,
+  );
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const serverUrl = useStore((s) => s.serverUrl);
+  const [preview, setPreview] = useState<UnsyncPreview | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    if (!orgId) return;
+    let cancelled = false;
+    authManager.api
+      .getUnsyncPreview(orgId)
+      .then((p) => {
+        if (!cancelled) setPreview(p);
+      })
+      // A preview that won't load must not hide the control: the confirm asks
+      // again, and the server is the gate either way.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId]);
+
+  if (!orgId || !orgName) return null;
+  const folder = vaultPath ? (vaultPath.split("/").pop() ?? vaultPath) : null;
+
+  return (
+    <>
+      <div className="menu-sep" />
+      <div className="subhead">Danger zone</div>
+      <div className="menu-row">
+        <span className="menu-row-label">
+          Make this vault local only
+          <span className="field-hint">
+            {folder ? (
+              <>
+                Your notes stay in <strong>{folder}</strong> on this device.
+              </>
+            ) : (
+              "Your notes stay on this device."
+            )}{" "}
+            Everything on {serverHost(serverUrl)} is deleted:{" "}
+            {preview ? (
+              <>
+                {preview.notes} note{plural(preview.notes)} and {preview.files} file
+                {plural(preview.files)}, history and sharing.{" "}
+                {preview.members > 0
+                  ? `${preview.members} teammate${plural(preview.members)} lose access.`
+                  : "Nobody else has access to it."}
+              </>
+            ) : (
+              "counting…"
+            )}
+          </span>
+        </span>
+        <button className="link-btn danger" onClick={() => setConfirming(true)}>
+          Make local only
+        </button>
+      </div>
+      {confirming && (
+        <UnsyncConfirmDialog
+          orgId={orgId}
+          orgName={orgName}
+          folderName={folder}
+          seed={preview}
+          onCancel={() => setConfirming(false)}
+          onDone={() => setConfirming(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/** "1 note" / "2 notes", without reaching for a formatting library. */
+function plural(n: number): string {
+  return n === 1 ? "" : "s";
+}
+
+/** Just the host of the server URL — the whole URL is noise inside a sentence. */
+function serverHost(serverUrl: string): string {
+  try {
+    return new URL(serverUrl).host;
+  } catch {
+    return serverUrl;
+  }
+}
+
+/**
+ * The confirm for "make local only".
+ *
+ * Wraps the shared `ConfirmDialog` rather than replacing it, and uses its
+ * `confirmDisabled` for a type-the-vault-name gate: this is the one action in
+ * the app that destroys data for people who are not at the keyboard, so there is
+ * deliberately no path from a single click to done.
+ *
+ * On failure the dialog STAYS OPEN so the server's reason (403 `owner_only`, a
+ * 409 `name_mismatch`, the 502 a refusing billing provider produces) has
+ * somewhere to show, with a sticky error toast beside it — a destructive path
+ * must never look like a success (#85). Nothing was destroyed in that case: the
+ * store only touches this device once the server has answered.
+ */
+function UnsyncConfirmDialog({
+  orgId,
+  orgName,
+  folderName,
+  seed,
+  onCancel,
+  onDone,
+}: {
+  orgId: string;
+  orgName: string;
+  folderName: string | null;
+  /** An already-loaded preview, so the page and the dialog don't both count. */
+  seed?: UnsyncPreview | null;
+  onCancel: () => void;
+  onDone: () => void;
+}) {
+  const serverUrl = useStore((s) => s.serverUrl);
+  const [preview, setPreview] = useState<UnsyncPreview | null>(seed ?? null);
+  const [loading, setLoading] = useState(!seed);
+  const [error, setError] = useState<string | null>(null);
+  const [typed, setTyped] = useState("");
+
+  useEffect(() => {
+    if (seed) return;
+    let cancelled = false;
+    setLoading(true);
+    authManager.api
+      .getUnsyncPreview(orgId)
+      .then((p) => {
+        if (!cancelled) setPreview(p);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId, seed]);
+
+  const run = async () => {
+    setError(null);
+    try {
+      await useStore.getState().unsyncVault(orgId, orgName);
+      onDone();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      toast(`Couldn't make the vault local only — ${message}`, "error");
+    }
+  };
+
+  const sub = preview?.subscription ?? null;
+
+  return (
+    <ConfirmDialog
+      title={`Make ${orgName} local only?`}
+      confirmLabel="Make local only"
+      // The name has to match exactly. The server re-checks it too (409
+      // `name_mismatch`), so a slip here can't get past either gate.
+      confirmDisabled={loading || typed.trim() !== orgName}
+      onCancel={onCancel}
+      onConfirm={run}
+    >
+      <p>
+        Your files stay where they are.{" "}
+        {folderName ? (
+          <>
+            <strong>{folderName}</strong> on this device keeps every note and
+            attachment as ordinary files.
+          </>
+        ) : (
+          "This device keeps every note and attachment as ordinary files."
+        )}
+      </p>
+      <p>
+        <strong>Deleted from {serverHost(serverUrl)}, permanently:</strong>
+      </p>
+      {loading && !preview ? (
+        <p className="muted">Counting what would be deleted…</p>
+      ) : preview ? (
+        <ul className="confirm-list">
+          <li>
+            {preview.notes} note{plural(preview.notes)} and {preview.files} file
+            {plural(preview.files)}, with all of their edit history
+            {preview.checkpoints > 0
+              ? ` and ${preview.checkpoints} version checkpoint${plural(preview.checkpoints)}`
+              : ""}
+          </li>
+          {preview.members > 0 && (
+            <li>
+              {preview.members} teammate{plural(preview.members)} lose access
+              immediately; their own local copies are kept
+            </li>
+          )}
+          {preview.publicLinks > 0 && (
+            <li>
+              {preview.publicLinks} public share link{plural(preview.publicLinks)} stop
+              working
+            </li>
+          )}
+          {preview.mcpTokens > 0 && (
+            <li>
+              {preview.mcpTokens} MCP token{plural(preview.mcpTokens)} stop working — AI
+              clients lose access
+            </li>
+          )}
+        </ul>
+      ) : null}
+      {sub && (
+        <p>
+          {sub.currentPeriodEnd
+            ? `Pro ends on ${formatDate(sub.currentPeriodEnd)} — until then you can move the subscription to another vault from Billing.`
+            : "Pro ends when the current period does — until then you can move the subscription to another vault from Billing."}
+        </p>
+      )}
+      <p>This cannot be undone. Teammates cannot get the vault back from us.</p>
+      <label className="confirm-type">
+        <span>
+          Type <strong>{orgName}</strong> to confirm
+        </span>
+        <input
+          autoFocus
+          value={typed}
+          spellCheck={false}
+          placeholder={orgName}
+          onChange={(e) => setTyped(e.target.value)}
+        />
+      </label>
+      {error && <div className="auth-error">{error}</div>}
+    </ConfirmDialog>
   );
 }
 
@@ -636,6 +898,12 @@ function VaultsTab() {
   // A vault the user is about to leave (#121). Always the full dialog: it has
   // to say that the folder on this device goes too, which a row can't.
   const [confirmLeave, setConfirmLeave] = useState<{ orgId: string; name: string } | null>(
+    null,
+  );
+  // A vault the user is about to make LOCAL ONLY. Always the full dialog: the
+  // counts, the teammates who lose access and the type-the-name gate have
+  // nowhere to live in a two-click row.
+  const [confirmUnsync, setConfirmUnsync] = useState<{ orgId: string; name: string } | null>(
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
@@ -973,6 +1241,22 @@ function VaultsTab() {
                       Leave
                     </button>
                   )}
+                  {/* Same owner heuristic as Delete: on the active row we know
+                      the caller's role, elsewhere we don't, so we offer it and
+                      let the server's 403 `owner_only` settle it. */}
+                  {canDelete(o.id) && (
+                    <button
+                      className="link-btn danger"
+                      disabled={busy}
+                      title="Delete this vault from the server and keep its files on this device"
+                      onClick={() => {
+                        setActionError(null);
+                        setConfirmUnsync({ orgId: o.id, name: o.name });
+                      }}
+                    >
+                      Make local only
+                    </button>
+                  )}
                   {canDelete(o.id) && (
                     <AsyncButton
                       className="link-btn danger"
@@ -1232,6 +1516,19 @@ function VaultsTab() {
           <p>To come back later, you'll need a new invitation or join code.</p>
           {actionError && <div className="auth-error">{actionError}</div>}
         </ConfirmDialog>
+      )}
+
+      {confirmUnsync && (
+        <UnsyncConfirmDialog
+          orgId={confirmUnsync.orgId}
+          orgName={confirmUnsync.name}
+          folderName={folderName(confirmUnsync.orgId)}
+          onCancel={() => setConfirmUnsync(null)}
+          onDone={() => {
+            setConfirmUnsync(null);
+            setBound(readOrgVaults());
+          }}
+        />
       )}
 
       {subDelete && (

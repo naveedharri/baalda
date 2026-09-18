@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import {
@@ -7,9 +7,18 @@ import {
   recordVersion,
   sha256Hex,
 } from "../src/versions/capture.js";
+import {
+  applyDocPushBatch,
+  BULK_ORIGIN,
+  BULK_SEED_ORIGIN,
+  setDocBatchRuntime,
+  type DocApplyItem,
+} from "../src/sync/doc-batch.js";
 import { recordingAppDeps, type RecordingAppDeps } from "./helpers/app.js";
 import { authHeaders, signUp, type TestUser } from "./helpers/auth.js";
 import { resetDb } from "./helpers/db.js";
+import * as Y from "yjs";
+import { flushIndexQueue } from "../src/index/indexer.js";
 import {
   seedFolder,
   seedLock,
@@ -30,6 +39,16 @@ import {
 let rec: RecordingAppDeps;
 let app: ReturnType<typeof createApp>;
 
+/** A Yjs update that sets a note's body to `text` — the wire shape a batch
+ *  push carries, built the same way `tests/bulk-docs-batch.test.ts` builds it. */
+function updateFor(text: string): Uint8Array {
+  const doc = new Y.Doc();
+  doc.getText("content").insert(0, text);
+  const update = Y.encodeStateAsUpdate(doc);
+  doc.destroy();
+  return update;
+}
+
 function api(user: TestUser | null, path: string, init: RequestInit = {}) {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (user) headers.authorization = `Bearer ${user.token}`;
@@ -42,6 +61,7 @@ describe("per-note versions", () => {
     rec = recordingAppDeps();
     app = createApp(rec.deps);
   });
+  afterEach(() => setDocBatchRuntime(null));
   afterAll(async () => {
     await pool.end();
   });
@@ -201,6 +221,201 @@ describe("per-note versions", () => {
     expect(second.updated).toBeGreaterThan(first.updated);
     expect(second.edited).toBeGreaterThan(first.edited);
     expect(rec.registryBroadcasts).toHaveLength(1); // …and still only one fan-out
+  });
+
+  /**
+   * The #98 shape, re-run for the version machinery: a bulk push is ONE editor
+   * touching ONE vault in one second, and it used to fire a null-origin
+   * `registry-changed` PER DOC. A null origin marks the channel's 120 ms
+   * coalescing window anonymous, which forces `origins = []` — so every frame
+   * landed on every subscriber INCLUDING the pushing client, and each one cost a
+   * whole-vault ACL recompute plus a registry re-pull. At ~8/s for the length of
+   * an import.
+   *
+   * The throttle is now keyed by vault rather than by doc: same rule ("announce
+   * when the editor changes hands, else at most once a minute"), applied at the
+   * scope the broadcast actually has.
+   */
+  it("a 50-doc batch from one editor is at most ONE broadcast", async () => {
+    const user = await signUp("batch-stamp@t.com");
+    const org = await seedOrg("Acme", "acme-v5d");
+    await seedMember(org, user.userId, "owner");
+    const vault = await seedVault(org);
+    const docIds: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const id = await seedNote(vault, null, `n${i}.md`, user.userId);
+      rec.docWriter.store.set(id, "hello");
+      docIds.push(id);
+    }
+
+    const capture = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 60_000,
+    });
+    for (const docId of docIds) capture.touch(vault, docId, user.userId, BULK_SEED_ORIGIN);
+    // The stamps are fire-and-forget inside touch(); wait for all 50 to land.
+    const stamped = async (): Promise<number> =>
+      (
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM notes WHERE vault_id = $1 AND last_edited_by = $2",
+          [vault, user.userId],
+        )
+      ).rows[0].n;
+    for (let i = 0; i < 100 && (await stamped()) < 50; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    capture.stop();
+
+    expect(rec.registryBroadcasts.length).toBeLessThanOrEqual(1);
+    // Every row is still stamped — attribution is not what was throttled (#104).
+    expect(await stamped()).toBe(50);
+
+    // …and the coalescing is BULK-only. The same person hand-editing one of the
+    // notes they just imported announces at once: keying the live throttle by
+    // vault too meant an import swallowed the human's very next edit — and every
+    // teammate's "edited by X, <time>" — for up to 60 s.
+    const before = rec.registryBroadcasts.length;
+    const live = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 60_000,
+    });
+    live.touch(vault, docIds[0], user.userId);
+    await new Promise((r) => setTimeout(r, 100));
+    live.stop();
+    expect(rec.registryBroadcasts.length).toBe(before + 1);
+  });
+
+  /**
+   * …and a bulk seed arms no ten-minute idle timer. 5,000 of those were 5,000
+   * live timers and 5,000 `Session` objects that later fired at once, each a
+   * SELECT plus a full `loadDocState` + `Y.Doc` rebuild — for a doc that had
+   * just received its FIRST copy of its own `.md` and so had no prior state a
+   * version could preserve.
+   */
+  it("a bulk SEED captures no idle version — but a plain bulk merge does", async () => {
+    const user = await signUp("bulk-noversion@t.com");
+    const org = await seedOrg("Acme", "acme-v5e");
+    await seedMember(org, user.userId, "owner");
+    const vault = await seedVault(org);
+    const docId = await seedNote(vault, null, "n.md", user.userId);
+    rec.docWriter.store.set(docId, "seeded from disk");
+
+    const capture = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 10,
+    });
+    capture.touch(vault, docId, user.userId, BULK_SEED_ORIGIN);
+    await new Promise((r) => setTimeout(r, 120));
+    capture.stop();
+    const seedOnly = await pool.query("SELECT id FROM note_versions WHERE doc_id = $1", [docId]);
+    expect(seedOnly.rowCount).toBe(0);
+
+    // A NON-seed batch write to the same doc does capture: `docs/batch` also
+    // carries the live local-change drain, which is a merge into prior state.
+    const bulk = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 10,
+    });
+    rec.docWriter.store.set(docId, "rewritten in bulk");
+    bulk.touch(vault, docId, user.userId, BULK_ORIGIN);
+    await new Promise((r) => setTimeout(r, 120));
+    bulk.stop();
+    expect(
+      (await pool.query("SELECT id FROM note_versions WHERE doc_id = $1", [docId])).rowCount,
+    ).toBe(1);
+
+    // A human edit to the same doc still does, so this is a source filter and
+    // not a switch that turned versions off.
+    const human = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 10,
+    });
+    rec.docWriter.store.set(docId, "and then typed on");
+    human.touch(vault, docId, user.userId);
+    await new Promise((r) => setTimeout(r, 120));
+    human.stop();
+    const after = await pool.query("SELECT id FROM note_versions WHERE doc_id = $1", [docId]);
+    expect(after.rowCount).toBe(2);
+  });
+
+  /**
+   * H1: the skip is a SEED filter, not a "came in through the batch route"
+   * filter. The desktop routes its live local-change drain through the same
+   * `docs/batch` endpoint once enough notes changed at once — `expectEmpty:
+   * false`, a real diff-merge into docs that already hold text. Tagging those
+   * `bulk` too meant an AI rewriting 40 existing notes captured ZERO versions
+   * while 24 captured 24: history that depended on how many files a tool
+   * touched in one go, in exactly the case a restore point matters most.
+   *
+   * Driven through `applyDocPushBatch` (not `touch` directly) so what is pinned
+   * is the wiring: which source the batch applier hands the hook for a seed and
+   * for a merge.
+   */
+  it("a batch SEED captures nothing; a batch MERGE captures one version per doc", async () => {
+    const user = await signUp("batch-versions@t.com");
+    const org = await seedOrg("Acme", "acme-v5f");
+    await seedMember(org, user.userId, "owner");
+    const vault = await seedVault(org);
+
+    const capture = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 60_000, // `flush` ends each session, exactly as the timer would
+    });
+    setDocBatchRuntime({
+      // No live docs in this test: every item takes the detached path, which is
+      // the one that calls `onDocWritten`.
+      server: { hocuspocus: { documents: new Map() } } as never,
+      hooks: {
+        onDocWritten: (v, d, u, src) => capture.touch(v, d, u, src),
+      },
+    });
+
+    const seeded: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const id = await seedNote(vault, null, `seed${i}.md`, user.userId);
+      rec.docWriter.store.set(id, `first copy ${i}`);
+      seeded.push(id);
+    }
+    const seedItems: DocApplyItem[] = seeded.map((docId, i) => ({
+      docId,
+      update: updateFor(`first copy ${i}`),
+      expectEmpty: true,
+    }));
+    const seedOut = await applyDocPushBatch(vault, seedItems, { userId: user.userId });
+    expect(seedOut.every((r) => r.outcome === "applied")).toBe(true);
+    for (const id of seeded) await capture.flush(id);
+    expect(await pool.query("SELECT id FROM note_versions")).toMatchObject({ rowCount: 0 });
+
+    // Now the merge: 30 of those docs already hold text, and a tool rewrites
+    // them in one drain. `expectEmpty` is false — there IS prior state.
+    const merged = seeded.slice(0, 30);
+    for (const [i, id] of merged.entries()) rec.docWriter.store.set(id, `rewritten ${i}`);
+    const mergeItems: DocApplyItem[] = merged.map((docId, i) => ({
+      docId,
+      update: updateFor(`rewritten ${i}`),
+    }));
+    const mergeOut = await applyDocPushBatch(vault, mergeItems, { userId: user.userId });
+    expect(mergeOut.every((r) => r.outcome === "applied")).toBe(true);
+    for (const id of merged) await capture.flush(id);
+    capture.stop();
+
+    // One per doc — exactly what 30 single writes down the live path produce.
+    const { rows } = await pool.query<{ doc_id: string; content: string }>(
+      "SELECT doc_id, content FROM note_versions",
+    );
+    expect(rows).toHaveLength(30);
+    expect(new Set(rows.map((r) => r.doc_id))).toEqual(new Set(merged));
+    // …and the untouched 20 still have none.
+    expect(rows.some((r) => seeded.slice(30).includes(r.doc_id))).toBe(false);
+    // The batch path defers its re-index; drain it so no timer fires after the
+    // suite closes the pool.
+    await flushIndexQueue();
   });
 
   it("broadcasts immediately when the editor changes hands", async () => {

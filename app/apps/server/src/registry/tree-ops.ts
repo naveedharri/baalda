@@ -142,11 +142,25 @@ export function joinPath(dir: string, name: string): string {
   return dir === "" ? name : `${dir}/${name}`;
 }
 
+/**
+ * How a resolver finds the folder at a path. Defaults to {@link findFolderByPath}
+ * — a query per call. The registration BATCH routes pass a memoised version so
+ * 200 notes under the same 20 folders ask Postgres once instead of 200 times;
+ * the lookup is the only thing that changes, never the rules applied to what it
+ * returns.
+ */
+export type FolderByPath = (
+  db: Queryable,
+  vaultId: string,
+  path: string,
+) => Promise<FolderRow | null>;
+
 export async function resolveParentFolder(
   db: Queryable,
   vaultId: string,
   relPath: string,
   folderId: string | null | undefined,
+  byPathLookup: FolderByPath = findFolderByPath,
 ): Promise<ResolvedLocation> {
   assertValidRelPath(relPath);
   const dir = dirname(relPath);
@@ -162,7 +176,7 @@ export async function resolveParentFolder(
     return { folderId: folder.id, relPath: joinPath(folder.path, basename(relPath)) };
   }
   if (dir === "") return { folderId: null, relPath };
-  const byPath = await findFolderByPath(db, vaultId, dir);
+  const byPath = await byPathLookup(db, vaultId, dir);
   if (!byPath) throw new TreeOpError(`No folder at "${dir}" — create it first`);
   return { folderId: byPath.id, relPath: joinPath(byPath.path, basename(relPath)) };
 }
@@ -177,6 +191,7 @@ export async function resolveFolderParent(
   vaultId: string,
   path: string,
   parentId: string | null | undefined,
+  byPathLookup: FolderByPath = findFolderByPath,
 ): Promise<ResolvedLocation> {
   assertValidRelPath(path, "folder path");
   const dir = dirname(path);
@@ -190,7 +205,7 @@ export async function resolveFolderParent(
     return { folderId: parent.id, relPath: joinPath(parent.path, basename(path)) };
   }
   if (dir === "") return { folderId: null, relPath: path };
-  const byPath = await findFolderByPath(db, vaultId, dir);
+  const byPath = await byPathLookup(db, vaultId, dir);
   if (!byPath) throw new TreeOpError(`No folder at "${dir}" — create it first`);
   return { folderId: byPath.id, relPath: joinPath(byPath.path, basename(path)) };
 }

@@ -155,16 +155,57 @@ export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): voi
 }
 
 /**
- * Backfill: index any live note that has no note_index row yet, using its
+ * Run every pending debounced index NOW, and wait for it.
+ *
+ * A test hook, and the reason the bulk `docs/batch` path may hand its docs to
+ * {@link scheduleIndex} instead of awaiting {@link indexDoc} per item: search is
+ * eventually consistent on that path, so a test that wants to observe
+ * `note_index` after a batch push asks for the queue to be flushed rather than
+ * forcing the request path to pay for a second CRDT load per doc.
+ *
+ * Sequential on purpose — the same shape the timers would have had, and it must
+ * not open 100 pool connections at once. New work scheduled WHILE this runs is
+ * not awaited (its own timer still fires), so callers that need a quiet point
+ * flush after the writes have settled.
+ */
+export async function flushIndexQueue(): Promise<void> {
+  const ids = [...pending.keys()];
+  for (const id of ids) {
+    const timer = pending.get(id);
+    if (timer) clearTimeout(timer);
+    pending.delete(id);
+  }
+  for (const id of ids) {
+    try {
+      await indexDoc(id);
+    } catch (err) {
+      console.error(`[indexer] failed to index ${id}:`, err);
+    }
+  }
+}
+
+/**
+ * Backfill: index any live note whose derived row is MISSING or STALE, using its
  * already-stored Yjs state. Runs once on boot so existing docs become
  * searchable/graphable without waiting for a fresh edit. Best-effort — a
  * failure on one doc is logged and skipped. Returns the count indexed.
+ *
+ * "Stale" (`note_index.updated_at < notes.updated_at`) is the other half, and it
+ * is what makes {@link scheduleIndex}'s debounce safe to lean on: the bulk
+ * `docs/batch` path defers its re-index by {@link DEBOUNCE_MS}, so a deploy or a
+ * crash inside that window would otherwise leave a doc that ALREADY had a row
+ * describing its previous body — forever, since a missing-row backfill cannot
+ * see it and nothing re-indexes it until the next edit. Both timestamps are
+ * written by the same edit (the stamp in `versions/capture.ts`, then this
+ * module), so an up-to-date row is strictly the newer of the two and is left
+ * alone.
  */
 export async function backfillIndex(db: Queryable = defaultPool): Promise<number> {
   const { rows } = await db.query<{ id: string }>(
     `SELECT n.id FROM notes n
        LEFT JOIN note_index ni ON ni.doc_id = n.id
-      WHERE n.deleted_at IS NULL AND ni.doc_id IS NULL`,
+      WHERE n.deleted_at IS NULL
+        AND (ni.doc_id IS NULL OR ni.updated_at < n.updated_at)`,
   );
   let count = 0;
   for (const { id } of rows) {

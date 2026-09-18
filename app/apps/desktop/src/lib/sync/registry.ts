@@ -25,6 +25,7 @@ import {
   ACCESS_CHECK_MAX,
   ApiClient,
   ApiError,
+  isServerTooOld,
   noteCreatedBy,
   noteDocId,
   noteLastEdited,
@@ -41,10 +42,11 @@ import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { planInbound, samePath, type InboundPlan, type InboundTrash } from "./inbound";
 import type { BootstrapResume } from "./bootstrap";
-import type { FolderBatchItem, NoteBatchItem } from "./bulkTypes";
+import type { FolderBatchItem, NoteBatchItem, NoteDeleteResult } from "./bulkTypes";
 import {
   BATCH_MAX_FOLDERS,
   BATCH_MAX_NOTES,
+  IPC_CONCURRENCY,
   REGISTRY_CONCURRENCY,
   runPool,
   useBulkPath,
@@ -57,6 +59,22 @@ import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScop
 export interface DocMapping {
   vaultId: string;
   docId: string;
+}
+
+/**
+ * What {@link VaultRegistry.deletePaths} did with ONE path.
+ *
+ * Reported rather than thrown, because a batch has N answers: the single-item
+ * `deletePath` says "done" by returning and "refused" by throwing, and this is
+ * the same two verdicts per path — plus `denied`, which the single path spells
+ * as a 403 thrown out of `deleteNote`.
+ */
+export interface NoteDeleteOutcome {
+  path: string;
+  /** `deleted` ⇒ the mapping is gone locally too; the other two keep it. */
+  status: "deleted" | "denied" | "failed";
+  reason: string | null;
+  code: string | null;
 }
 
 interface VaultSyncConfig {
@@ -296,6 +314,23 @@ export interface InboundHost {
    * file, `null` when it was removed outright.
    */
   fileRemoved?(docId: string, path: string, trashedTo: string | null): void;
+  /**
+   * These docs were just CREATED server-side by this pass — rows that did not
+   * exist a moment ago, never rows adopted by path or doc_id.
+   *
+   * The difference is the whole point: a row the server has only now made holds
+   * no CRDT at all, so its content can be pushed through the batch path with
+   * `expectEmpty`; an ADOPTED row may already hold a teammate's (or this user's
+   * other device's) work, and seeding it is precisely the split-brain the
+   * pull-before-seed rule exists to prevent. The session uses this to route a
+   * live import of brand-new notes through `DocBatchPusher` instead of one
+   * WebSocket per note.
+   *
+   * Called once per registration chunk, never with an empty list, and always
+   * AFTER the mapping is in place — so a handler may look the path up
+   * immediately. Fire-and-forget: a throwing handler must not fail a pass.
+   */
+  noteServerCreated?(docIds: readonly string[]): void;
 }
 
 export interface ReconcileInput {
@@ -325,6 +360,33 @@ export interface RegistryFailure {
 /** Paths already toasted about a frozen-root refusal — reconcile re-runs and
  *  retry clicks re-hit the same 403, and one sticky explanation is enough. */
 const frozenRootNotified = new Set<string>();
+
+/**
+ * How many inbound REMOVALS run at once.
+ *
+ * A unit here is a pair of local IPC calls (a read, then one
+ * `trashNote`/`deleteFile`), so it takes the shared local width
+ * ({@link IPC_CONCURRENCY}) rather than the registry's HTTP one. A folder a
+ * teammate deleted arrives here as hundreds of independent paths, and serially
+ * that was one round trip through the bridge per file with the link and the
+ * disk idle in between.
+ */
+const INBOUND_REMOVE_CONCURRENCY = IPC_CONCURRENCY;
+
+/**
+ * Notes per page when THIS file asks for the registry.
+ *
+ * 5,000 — the server's own `PAGE_LIMIT_MAX` (`http/routes/registry.ts`), not
+ * `api.ts`'s gentler 1,000 default. A pull re-reads the whole listing, and
+ * during an import the watcher fires it about once a second: at 1,000 a
+ * 5,000-note vault paid FIVE round trips per pull, each one rebuilding the
+ * permission-filtered readable set on the server from scratch. One page is one
+ * build. A server that predates pagination ignores `limit` entirely and answers
+ * the whole vault, exactly as before, and one that supports it accepts 5,000 as
+ * its documented ceiling (above it the route answers 400, which is why this
+ * tracks the cap rather than exceeding it).
+ */
+const PULL_PAGE_LIMIT = 5000;
 
 /** Extensions treated as editable notes (reconciled to the server `notes` set).
  *  Images/PDFs surface in the tree but sync as embedded attachments, not notes.
@@ -750,6 +812,13 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving — and a stale entry would
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
+    // The identical-config memo (see {@link writeConfig}) is only honest while
+    // this registry is the last thing that wrote `.context/config.json`. A
+    // teardown ends that: `store.clearVaultStamp` writes the same file through
+    // `ipc.setVaultConfig`, and deleting `.context/` by hand (a documented dev
+    // habit) rewrites it to nothing — either way a surviving memo would make the
+    // next identical write a no-op and leave the doc-id map unpersisted.
+    this.lastWrittenConfig = null;
     this.bound = null;
     this.progress = nullProgressSink;
   }
@@ -1526,84 +1595,103 @@ export class VaultRegistry {
     // One stamp per pass, so everything a single remote delete removed lands in
     // one recoverable folder.
     const stamp = trashStamp();
-    for (const gone of plan.trash) {
-      if (this.stopRun()) break;
-      if (gone.binary) {
-        if (await this.removeRevokedBinary(gone, stamp)) changedDisk = true;
-        continue;
-      }
-      // A note whose content this device never confirmed upstream may hold local
-      // edits that exist NOWHERE else, so removing it could lose the only copy.
-      // Read `pushed` before the prune below has a chance to drop it. This
-      // matters most for `revoked`: access can be taken away mid-edit, and the
-      // one thing a permission change must never do is destroy work that only
-      // exists here.
-      if (!this.pushed.has(gone.docId) && !(await this.isEmptyOnDisk(gone.path))) {
-        this.recordFailure({
-          kind: "orphan",
-          path: gone.path,
-          docId: gone.docId,
-          reason:
-            gone.reason === "revoked"
-              ? "access was removed, but this device never confirmed its content upstream — left on disk"
-              : "deleted on the server, but this device never confirmed its content — left on disk",
-          code: null,
-        });
-        // Stop claiming the path, so the file can re-register on a later pass.
-        //
-        // Without this the baseline keeps naming this docId at this path, the
-        // plan suppresses the path on every pass, and the file is stranded:
-        // visible in the sidebar, never counted, never uploaded, while the header
-        // reads "Synced". For a note whose content this device never confirmed
-        // upstream that is the worst possible outcome — the local copy is the ONLY
-        // copy, and we were leaving it unsyncable on purpose. Re-registering it
-        // gets that work onto the server instead.
-        //
-        // NOT for a revocation: there the server still holds the content and the
-        // user has lost write access, so re-registering would only 403 in a loop.
-        if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
-        continue;
-      }
-      await this.host?.releaseDoc(gone.docId);
-      if (this.stale()) return { changedDisk, suppress: plan.suppress };
-      try {
-        // A DELETED note goes to the vault's recoverable trash: someone chose to
-        // remove it, and the trash is the undo. A REVOKED note is removed
-        // outright: nothing was deleted (the server still holds every byte, and
-        // the note comes straight back if access is restored), while a copy in
-        // `.context/trash` would leave the ex-reader with exactly the readable
-        // `.md` the revocation exists to take away. `deleteFile` is the
-        // epoch-pinned Rust call that refuses a directory outright; the
-        // sidebar's own Delete is the only caller of the recursive `deletePath`.
-        let dest: string | null = null;
-        if (gone.reason === "revoked" && !gone.recoverable) {
-          // `deleteFile`, not `deletePath`: the recursive one is the sidebar's,
-          // where a person picked the folder. This is the one removal with no
-          // recoverable copy, so it is structurally unable to take a tree.
-          await ipc.deleteFile(gone.path, this.epoch());
-        } else {
-          // `recoverable` on a revocation means THIS user wrote the note (see
-          // `InboundTrash.recoverable`): losing read access to your own writing
-          // must not destroy your only local copy of it.
-          dest = await ipc.trashNote(gone.path, stamp, this.epoch());
+    // Pooled, not serial: each removal is an independent IPC pair (a read, then
+    // one `trashNote`/`deleteFile`) against a different path, and a cascade that
+    // reaches a peer is hundreds of them. Nothing about WHICH removals happen
+    // moves here — every refusal above (the `pushed` orphan rail, the empty-file
+    // check, `recoverable` → trash) is inside the worker and runs per item
+    // exactly as it did, and the caps that decided this list ran in `planInbound`
+    // long before. `bail` is the one shared verdict: a vault-mismatch or a stale
+    // run abandons the whole pass, which is what the loop's early `return` did.
+    let bail = false;
+    await runPool(
+      plan.trash,
+      async (gone) => {
+        if (gone.binary) {
+          if (await this.removeRevokedBinary(gone, stamp)) changedDisk = true;
+          return;
         }
-        changedDisk = true;
-        // The file left, so the baseline entry goes with it — otherwise every
-        // later pass would keep trying to remove a path that isn't there.
-        this.baselineDocs.delete(gone.docId);
-        this.authoredDocs.delete(gone.docId);
-        this.host?.noteRemoved(gone.docId, gone.path, dest, gone.reason);
-      } catch (e) {
-        if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
-        this.recordFailure({
-          kind: "inbound",
-          path: gone.path,
-          docId: gone.docId,
-          reason: reasonOf(e),
-          code: null,
-        });
-      }
-    }
+        // A note whose content this device never confirmed upstream may hold local
+        // edits that exist NOWHERE else, so removing it could lose the only copy.
+        // Read `pushed` before the prune below has a chance to drop it. This
+        // matters most for `revoked`: access can be taken away mid-edit, and the
+        // one thing a permission change must never do is destroy work that only
+        // exists here.
+        if (!this.pushed.has(gone.docId) && !(await this.isEmptyOnDisk(gone.path))) {
+          this.recordFailure({
+            kind: "orphan",
+            path: gone.path,
+            docId: gone.docId,
+            reason:
+              gone.reason === "revoked"
+                ? "access was removed, but this device never confirmed its content upstream — left on disk"
+                : "deleted on the server, but this device never confirmed its content — left on disk",
+            code: null,
+          });
+          // Stop claiming the path, so the file can re-register on a later pass.
+          //
+          // Without this the baseline keeps naming this docId at this path, the
+          // plan suppresses the path on every pass, and the file is stranded:
+          // visible in the sidebar, never counted, never uploaded, while the header
+          // reads "Synced". For a note whose content this device never confirmed
+          // upstream that is the worst possible outcome — the local copy is the ONLY
+          // copy, and we were leaving it unsyncable on purpose. Re-registering it
+          // gets that work onto the server instead.
+          //
+          // NOT for a revocation: there the server still holds the content and the
+          // user has lost write access, so re-registering would only 403 in a loop.
+          if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
+          return;
+        }
+        await this.host?.releaseDoc(gone.docId);
+        if (this.stale()) {
+          bail = true;
+          return;
+        }
+        try {
+          // A DELETED note goes to the vault's recoverable trash: someone chose to
+          // remove it, and the trash is the undo. A REVOKED note is removed
+          // outright: nothing was deleted (the server still holds every byte, and
+          // the note comes straight back if access is restored), while a copy in
+          // `.context/trash` would leave the ex-reader with exactly the readable
+          // `.md` the revocation exists to take away. `deleteFile` is the
+          // epoch-pinned Rust call that refuses a directory outright; the
+          // sidebar's own Delete is the only caller of the recursive `deletePath`.
+          let dest: string | null = null;
+          if (gone.reason === "revoked" && !gone.recoverable) {
+            // `deleteFile`, not `deletePath`: the recursive one is the sidebar's,
+            // where a person picked the folder. This is the one removal with no
+            // recoverable copy, so it is structurally unable to take a tree.
+            await ipc.deleteFile(gone.path, this.epoch());
+          } else {
+            // `recoverable` on a revocation means THIS user wrote the note (see
+            // `InboundTrash.recoverable`): losing read access to your own writing
+            // must not destroy your only local copy of it.
+            dest = await ipc.trashNote(gone.path, stamp, this.epoch());
+          }
+          changedDisk = true;
+          // The file left, so the baseline entry goes with it — otherwise every
+          // later pass would keep trying to remove a path that isn't there.
+          this.baselineDocs.delete(gone.docId);
+          this.authoredDocs.delete(gone.docId);
+          this.host?.noteRemoved(gone.docId, gone.path, dest, gone.reason);
+        } catch (e) {
+          if (ipc.isVaultMismatch(e)) {
+            bail = true;
+            return;
+          }
+          this.recordFailure({
+            kind: "inbound",
+            path: gone.path,
+            docId: gone.docId,
+            reason: reasonOf(e),
+            code: null,
+          });
+        }
+      },
+      { concurrency: INBOUND_REMOVE_CONCURRENCY, shouldStop: () => bail || this.stopRun() },
+    );
+    if (bail) return { changedDisk, suppress: plan.suppress };
 
     // Paths the plan suppressed WITHOUT trashing: a tombstoned note whose file
     // is still on disk under an identity the index no longer ties to the
@@ -1748,8 +1836,24 @@ export class VaultRegistry {
     // checkpoint and holds three entries per note; two-space indentation added
     // ~35% to every one of those writes for the benefit of nobody — it is derived
     // state, not something a person edits.
-    await ipc.setVaultConfig(JSON.stringify(cfg), this.epoch());
+    const json = JSON.stringify(cfg);
+    // Identical bytes are not a write. A checkpoint fires on a timer as well as
+    // on a count, and during a bulk run most of those ticks find a map nothing
+    // has added to — a 5,000-note vault's config is ~500 KB, and re-serializing
+    // it into a temp file and renaming it over the old one several times a
+    // second is pure I/O for a file that did not change. Keyed by collection so
+    // a vault switch can never be mistaken for a no-op, and this stays the ONLY
+    // writer of the file (anything else touching it would make the memo lie).
+    if (this.lastWrittenConfig?.vaultId === cfg.serverVaultId && this.lastWrittenConfig.json === json) {
+      return;
+    }
+    await ipc.setVaultConfig(json, this.epoch());
+    this.lastWrittenConfig = { vaultId: cfg.serverVaultId, json };
   }
+
+  /** The last bytes {@link writeConfig} actually persisted, and for which
+   *  collection. See the no-op check there. */
+  private lastWrittenConfig: { vaultId: string; json: string } | null = null;
 
   private newCheckpointer(): Checkpointer<VaultSyncConfig> {
     this.checkpoint?.dispose();
@@ -2114,7 +2218,7 @@ export class VaultRegistry {
     // with no `nextAfter`, and is therefore asked exactly once.
     const p = Promise.all([
       this.api.listFolderRegistry(vaultId),
-      this.api.listNoteRegistryPaged(vaultId),
+      this.api.listNoteRegistryPaged(vaultId, { limit: PULL_PAGE_LIMIT }),
     ]) as Promise<[FolderRegistry, NoteRegistry]>;
     // The consumer awaits this and handles the failure; attach here so a reject
     // that arrives before `takeListings` runs is never an unhandled rejection.
@@ -2136,7 +2240,7 @@ export class VaultRegistry {
     if (hit && hit.vaultId === vaultId) return hit.p;
     return Promise.all([
       this.api.listFolderRegistry(vaultId),
-      this.api.listNoteRegistryPaged(vaultId),
+      this.api.listNoteRegistryPaged(vaultId, { limit: PULL_PAGE_LIMIT }),
     ]) as Promise<[FolderRegistry, NoteRegistry]>;
   }
 
@@ -2253,7 +2357,7 @@ export class VaultRegistry {
         titlesCache = null;
         // Re-read the server's notes too: `move_note` bumps rows we may have just
         // raced, and a stale list here would undo the move we just applied.
-        const fresh = await this.api.listNoteRegistryPaged(vaultId);
+        const fresh = await this.api.listNoteRegistryPaged(vaultId, { limit: PULL_PAGE_LIMIT });
         if (this.stale()) return false;
         serverNotes = fresh.notes;
       }
@@ -2400,6 +2504,10 @@ export class VaultRegistry {
     // `phase("registering", 0)`); this is the quiet path for everything after.
     const toCreate = missingFolders.length + missingNotes.length;
     if (toCreate > 0) this.sink.phase("registering", toCreate);
+    // A bulk pass stretches the checkpoint's TIME window (the batch trigger is
+    // what flushes during a run; see `Checkpointer.setBulk`). Same threshold the
+    // batch paths below take, so the two can never disagree about what "bulk" is.
+    checkpoint.setBulk(useBulkPath(toCreate));
 
     // Titles + local doc_ids for the notes we are about to CREATE server-side —
     // so the index read happens only when there is something to create (on a
@@ -2470,6 +2578,8 @@ export class VaultRegistry {
     // `withRetry` per request, `recordFailure` per item, `checkpoint.touch` per
     // accepted row, one `sink.item` per item, and the 402 stop through
     // `stopRun()` — so the two paths cannot report a vault differently.
+    // Filled by the per-note path below; the batch path announces per chunk.
+    const createdNow: string[] = [];
     if (useBulkPath(missingNotes.length)) {
       const bulk = await this.registerNotesBatched(vaultId, missingNotes, {
         titleByPath,
@@ -2540,9 +2650,13 @@ export class VaultRegistry {
           }
           // Keep `rp` (the local spelling) even when the server adopted a
           // case-variant and answered with its own — see `resolveNote`.
-          this.setMapping(rp, noteDocId(out.value), vaultId);
+          const noteId = noteDocId(out.value);
+          this.setMapping(rp, noteId, vaultId);
           resolvedNotePaths.add(rp);
           resolvedNotePathsCi.add(rp.toLowerCase());
+          // 201, not 200: a row the server MADE (see `api.createNote`). An
+          // adopted one may already hold content and must never be announced.
+          if (out.value.created && noteId) createdNow.push(noteId);
           checkpoint.touch();
           mutated = true;
           this.sink.item("ok");
@@ -2571,6 +2685,8 @@ export class VaultRegistry {
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
     );
+    // After the mappings, so a handler can resolve every id it is given.
+    this.announceCreated(createdNow);
     if (this.stale()) return mutated;
 
     // 4. Prune mappings for notes that no longer exist anywhere (deleted on the
@@ -2632,6 +2748,9 @@ export class VaultRegistry {
       (rp) => !localNotePaths.has(rp.toLowerCase()),
     );
     this.sink.addTotal(toMaterialize.length);
+    // Materializing is the other half a pull can be bulk for — a fresh device
+    // writes the whole vault here without registering a single row above.
+    if (useBulkPath(toMaterialize.length)) checkpoint.setBulk(true);
     if (useBulkPath(toMaterialize.length)) {
       if (await this.materializeBatched(toMaterialize)) mutated = true;
     } else
@@ -2743,6 +2862,9 @@ export class VaultRegistry {
     // can't happen after a relaunch.
     checkpoint.touch();
     await checkpoint.flush();
+    // The run is over, so the short idle window comes back — and the flush above
+    // means nothing is owed across the switch.
+    checkpoint.setBulk(false);
     perf.mark("reconcile-done");
     return mutated;
   }
@@ -2833,6 +2955,20 @@ export class VaultRegistry {
    * `folderPath` (the parent's path) rather than `folderId` is what makes the
    * chunking safe: a folder created in an earlier chunk needs no id lookup here.
    */
+  /**
+   * Hand the session the ids the server just CREATED (see
+   * {@link InboundHost.noteServerCreated}). Empty lists are not announced, and a
+   * throwing listener is a listener problem — never a failed pass.
+   */
+  private announceCreated(docIds: readonly string[]): void {
+    if (docIds.length === 0) return;
+    try {
+      this.host?.noteServerCreated?.(docIds);
+    } catch (e) {
+      console.warn("[registry] noteServerCreated listener threw", e);
+    }
+  }
+
   private async registerNotesBatched(
     vaultId: string,
     notes: TreeNode[],
@@ -2890,6 +3026,9 @@ export class VaultRegistry {
           byPath.set(res.relPath, res);
           if (sent && !byPath.has(sent)) byPath.set(sent, res);
         }
+        // Ids the server MADE in this chunk — announced once, after the loop
+        // has mapped them all (see `InboundHost.noteServerCreated`).
+        const createdInChunk: string[] = [];
         for (const n of group) {
           const rp = n.path;
           const localDocId = ctx.idByPath.get(rp) ?? null;
@@ -2937,6 +3076,9 @@ export class VaultRegistry {
             this.setMapping(rp, res.docId, vaultId);
             ctx.resolvedNotePaths.add(rp);
             ctx.resolvedNotePathsCi.add(rp.toLowerCase());
+            // `created` only — an ADOPTED row may already hold content, and
+            // seeding one is the split-brain pull-before-seed exists to prevent.
+            if (res.status === "created") createdInChunk.push(res.docId);
             ctx.checkpoint.touch();
             mutated = true;
             this.sink.item("ok");
@@ -2952,6 +3094,7 @@ export class VaultRegistry {
           });
           this.sink.item("failed");
         }
+        this.announceCreated(createdInChunk);
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
     );
@@ -3237,12 +3380,151 @@ export class VaultRegistry {
         if (!(e instanceof ApiError && e.status === 404)) throw e;
       }
       if (this.stale() || this.serverVaultId !== vaultId) return;
-      this.byPath.delete(path);
-      this.byDocId.delete(mapping.docId);
-      this.pushed.delete(mapping.docId);
+      this.forgetNote(path, mapping.docId);
       this.persist();
       this.notifyMapChanged();
     }
+  }
+
+  /**
+   * Local bookkeeping for ONE deleted note: the map entries and the push
+   * checkpoint, nothing else.
+   *
+   * Shared by {@link deletePath} and {@link deletePaths} so the single and the
+   * batched route cannot drift — a batch of N must leave this registry in the
+   * state N single deletes would (`registryDeleteBatch.test.ts` pins it).
+   * Deliberately does NOT persist or notify: the batch does both once, at the
+   * end, instead of N times.
+   */
+  private forgetNote(path: string, docId: string): void {
+    this.byPath.delete(path);
+    this.byDocId.delete(docId);
+    this.pushed.delete(docId);
+  }
+
+  /**
+   * Propagate MANY note deletes — one request per {@link BATCH_MAX_NOTES}
+   * chunk instead of one per note.
+   *
+   * The batched twin of {@link deletePath}, and the same soft delete: the server
+   * stamps `deleted_at`, keeps the doc_id and the Yjs doc, and broadcasts ONE
+   * `registry-changed` per request rather than one per note (500 sidebar deletes
+   * used to be 500 requests and 500 whole-vault re-pulls on every peer).
+   *
+   * Per item it is exactly what the single route does, which is why the outcome
+   * is reported per path rather than thrown:
+   *  · `deleted` — the row is gone (or `unknown_note`: already gone, the batch's
+   *    404, which the single path also treats as success) and the mapping with it;
+   *  · `denied`  — no edit grant. The mapping SURVIVES, so the next pull
+   *    re-materializes the file instead of leaving a half-deleted ghost;
+   *  · `failed`  — offline, or the server refused. Mapping survives too.
+   *
+   * Two paths deliberately stay single-item: a FOLDER path (already one
+   * cascading request, batching it would be a regression), and a whole chunk on
+   * a server that answers 404 `server_too_old` — an older self-hosted instance
+   * that has the per-note route and not this one.
+   */
+  async deletePaths(paths: readonly string[]): Promise<NoteDeleteOutcome[]> {
+    const unique = [...new Set(paths)];
+    // Default `deleted`: the no-op cases (stale registry, no server vault, an
+    // unmapped path) are exactly the ones `deletePath` returns silently from,
+    // and the caller reads that as done. Same verdict, same bookkeeping.
+    const out = new Map<string, NoteDeleteOutcome>(
+      unique.map((p) => [p, { path: p, status: "deleted" as const, reason: null, code: null }]),
+    );
+    const answer = () => unique.map((p) => out.get(p)!);
+    const fail = (path: string, e: unknown) =>
+      out.set(path, { path, status: "failed", reason: reasonOf(e), code: errorCode(e) });
+
+    if (this.stale()) return answer();
+    const vaultId = this.serverVaultId;
+    if (!vaultId) return answer();
+
+    const notes: Array<{ path: string; docId: string }> = [];
+    for (const path of unique) {
+      if (this.folderByPath.has(path)) {
+        // One folder is one cascading request already — see the doc comment.
+        try {
+          await this.deletePath(path);
+        } catch (e) {
+          fail(path, e);
+        }
+        continue;
+      }
+      const mapping = this.byPath.get(path);
+      if (mapping) notes.push({ path, docId: mapping.docId });
+    }
+    if (notes.length === 0) return answer();
+
+    let mutated = false;
+    for (const group of chunked(notes, BATCH_MAX_NOTES)) {
+      if (this.stale()) break;
+      let results: NoteDeleteResult[];
+      try {
+        results = await this.api.deleteNotesBatch(
+          vaultId,
+          group.map((g) => g.docId),
+        );
+      } catch (e) {
+        if (isServerTooOld(e)) {
+          // The one fallback: this server has `DELETE /api/notes/:id` and not
+          // the batch route. Per note, pooled — the same call, N times.
+          await runPool(
+            group,
+            async (g) => {
+              try {
+                await this.deletePath(g.path);
+              } catch (err) {
+                fail(g.path, err);
+              }
+            },
+            { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stale() },
+          );
+          continue;
+        }
+        for (const g of group) fail(g.path, e);
+        continue;
+      }
+      // The vault may have moved on while the request was in flight; mutating
+      // the maps now would rewrite ANOTHER vault's mapping (see `deletePath`).
+      if (this.stale() || this.serverVaultId !== vaultId) return answer();
+      const byDocId = new Map<string, NoteDeleteResult>();
+      results.forEach((r, i) => {
+        // Positional fallback for a server that answers without echoing the id:
+        // the contract is order-preserving, so result i is item i.
+        byDocId.set(r.docId || group[i]?.docId || `#${i}`, r);
+      });
+      for (const g of group) {
+        const res = byDocId.get(g.docId);
+        if (!res) {
+          out.set(g.path, {
+            path: g.path,
+            status: "failed",
+            reason: "the server did not answer for this note",
+            code: null,
+          });
+          continue;
+        }
+        // `unknown_note` is this route's 404: no LIVE row with that id here, so
+        // the delete's goal state already holds.
+        if (res.status === "deleted" || res.code === "unknown_note") {
+          this.forgetNote(g.path, g.docId);
+          mutated = true;
+          continue;
+        }
+        out.set(g.path, {
+          path: g.path,
+          status: res.status === "denied" ? "denied" : "failed",
+          reason: res.error ?? res.code ?? "the server refused this delete",
+          code: res.code ?? null,
+        });
+      }
+    }
+    if (mutated) {
+      this.persist();
+      this.notifyMapChanged();
+    }
+    return answer();
   }
 
   /** Rebuild byDocId from byPath after a bulk prefix remap/drop. */

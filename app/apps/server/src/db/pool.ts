@@ -11,13 +11,20 @@ import { config } from "../config.js";
  * routes and requests queued behind `pool.connect()` with no timeout.
  * Override per deployment with `PG_POOL_MAX` (keep it under the Postgres
  * `max_connections` budget shared with every other instance).
+ *
+ * Raised 20 → 30 (2026-09-18). During an import a registration batch holds one
+ * slot, each pushed doc up to two, a bootstrap page one (×4 by
+ * `BOOTSTRAP_CONCURRENCY`), and each vault-channel backfill runs 6 wide — a
+ * couple of importers plus a few joining devices reached 20, after which
+ * `connectionTimeoutMillis` failed requests at 5 s while Postgres itself was
+ * idle.
  */
 function poolMax(): number {
   const raw = process.env.PG_POOL_MAX;
   const n = raw ? Number(raw) : NaN;
   // Guards "" and garbage: Number("") is 0, and a max of 0 is a pool that never
   // hands out a connection — i.e. a server that silently serves nothing.
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 20;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 30;
 }
 
 export const pool = new pg.Pool({

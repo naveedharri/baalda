@@ -77,8 +77,12 @@ async function main() {
   // sync server, which needs this hook) — hence the late binding. Every edit,
   // however it arrived, ends up in exactly one place.
   let versionCapture: VersionCapture | null = null;
-  const noteEdited = (vaultId: string, docId: string, userId: string | null) =>
-    versionCapture?.touch(vaultId, docId, userId);
+  const noteEdited = (
+    vaultId: string,
+    docId: string,
+    userId: string | null,
+    source?: string | null,
+  ) => versionCapture?.touch(vaultId, docId, userId, source);
 
   // Every persisted doc change is fanned out to background vault subscribers.
   const sync = createSyncServer(

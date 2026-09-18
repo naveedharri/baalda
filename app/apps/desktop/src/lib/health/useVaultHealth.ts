@@ -514,6 +514,14 @@ async function deleteVaultPaths(
     epoch: st.vault?.epoch,
     deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
     unregister: (p) => syncManager.registry.deletePath(p),
+    // "Delete all" on a check row is the size this exists for — see the same
+    // dep on the sidebar's bulk delete. Below the threshold nothing changes.
+    unregisterMany: async (ps) =>
+      (await syncManager.registry.deletePaths(ps)).map((o) => ({
+        path: o.path,
+        ok: o.status === "deleted",
+        reason: o.reason,
+      })),
     onProgress,
   });
   if (deleted.length > 0) {

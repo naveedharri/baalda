@@ -183,12 +183,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   the same window is a RENAME — `registry.renamePath` + `ipc.rebindNoteId` keep the `doc_id` (a batch that
   queued a delete also defers its registry pull, or the new path would register as a second note first).
   Survivors write the doc's text to `.context/trash/<stamp>/` (`ipc.writeTrashCopy`) and then call
-  `registry.deletePath` — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
+  `registry.deletePath` — or `registry.deletePaths` → `POST /notes/delete-batch` above `BULK_THRESHOLD_DOCS`,
+  both pooled — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
   is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
-  startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window —
-  which abandons the whole batch and reports it, because an unmounted volume looks exactly like a bulk
-  delete. The ingest side is guarded too: a 0-byte file never clears a populated doc
+  startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
+  FIRST, before any trash copy or server call, and abandoning the whole batch, because an unmounted
+  volume looks exactly like a bulk delete. The ingest side is guarded too: a 0-byte file never clears a populated doc
   (`allowTruncateFromDisk`, default false).
 - **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
   readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing

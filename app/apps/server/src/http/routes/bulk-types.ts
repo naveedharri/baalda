@@ -117,6 +117,24 @@ export interface DocPushResult {
   error: string | null;
 }
 
+/**
+ * Outcome of soft-deleting ONE note through `POST /vaults/:id/notes/delete-batch`.
+ *
+ *  · `deleted` — the row now carries a `deleted_at` (the same soft delete
+ *    `DELETE /api/notes/:id` performs; the doc_id and the Yjs doc survive).
+ *  · `denied`  — the caller may not edit this note (`no_edit_permission`).
+ *  · `error`   — anything else, per item; `unknown_note` for an id that is not a
+ *    LIVE note of this vault (already deleted, a file, or somewhere else).
+ */
+export type DeleteStatus = "deleted" | "denied" | "error";
+
+export interface NoteDeleteResult {
+  docId: string;
+  status: DeleteStatus;
+  code: string | null;
+  error: string | null;
+}
+
 /** A bootstrap download session: a MATERIALISED, ACL-resolved doc list with a
  *  stable order, so every page is an index-only keyset read rather than a
  *  re-run of the permission CTEs. */
@@ -158,6 +176,7 @@ export type BulkErrorCode =
   | "root_frozen"
   | "no_write_access"
   | "no_edit_permission"
+  | "unknown_note"
   | "note_too_large"
   | "vault_limit_reached"
   | "session_expired"
