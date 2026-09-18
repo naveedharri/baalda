@@ -21,7 +21,10 @@ import { HealthView } from "../HealthTab";
 import { HealthIssues } from "../HealthIssues";
 import { InspectionCard } from "../HealthInspector";
 import { HealthTimeline } from "../HealthTimeline";
+import { HealthChecks } from "../HealthChecks";
 import type { HealthHandlers } from "../HealthShared";
+import { checkActionPlans } from "../../lib/health/checkActions";
+import { checkRows } from "../../lib/health/checks";
 import type {
   HealthActions,
   HealthExplanation,
@@ -71,16 +74,28 @@ function actions(): HealthActions {
     ),
     emptyTrash: vi.fn(async () => ({ filesRemoved: 0, bytesFreed: 0 })),
     rebuildIndex: vi.fn(async () => {}),
+    applyCheckAction: vi.fn(async (plan) => ({
+      action: plan.action,
+      done: 0,
+      total: 0,
+      note: null,
+      errors: [],
+      skipped: [],
+      cancelled: false,
+    })),
   };
 }
 
-function handlers(): HealthHandlers {
+function handlers(over: Partial<HealthHandlers> = {}): HealthHandlers {
   return {
     actions: actions(),
     openNote: vi.fn(),
     confirm: vi.fn(),
     reclaim: vi.fn(async () => {}),
+    runCheck: vi.fn(),
+    checkRuns: {},
     now: 1_700_000_000_000,
+    ...over,
   };
 }
 
@@ -355,6 +370,95 @@ describe("HealthView — checks", () => {
     expect(html).toContain("Empty trash");
     // One check failing, and it is housekeeping rather than a fault.
     expect(html).toContain("housekeeping");
+  });
+
+  it("offers Delete all on a check whose items can all be deleted", () => {
+    const checks = allPassing({
+      "empty-notes": {
+        id: "empty-notes",
+        count: 2,
+        items: [{ path: "a.md" }, { path: "b.md" }],
+      },
+    });
+    const html = render(snapshot({ checks }));
+    expect(html).toContain("Delete all");
+    // It is destructive, and it looks it.
+    expect(html).toContain("ghost-pill sm danger");
+  });
+
+  it("marks a healable check with the heal button and leaves the others alone", () => {
+    const checks = allPassing({
+      "stale-index": {
+        id: "stale-index",
+        count: 1,
+        items: [{ path: "a.md", docId: "doc-a" }],
+      },
+      "case-collisions": {
+        id: "case-collisions",
+        count: 2,
+        items: [{ path: "A.md" }, { path: "a.md" }],
+      },
+    });
+    const html = render(snapshot({ checks }));
+    expect(html).toContain("health-heal");
+    expect(html).toContain("Rebuild index");
+    // Case collisions are a judgement call: instructions, no button.
+    expect(html).not.toContain("Rename one of the pair</button>");
+  });
+});
+
+describe("HealthChecks — a running action", () => {
+  const failing = {
+    computedAt: 1,
+    results: [
+      { id: "empty-notes" as const, count: 2, items: [{ path: "a.md" }, { path: "b.md" }] },
+    ],
+  };
+  const row = () => checkRows(failing).find((r) => r.def.id === "empty-notes")!;
+
+  const renderChecks = (over: Partial<HealthHandlers>) =>
+    renderToStaticMarkup(
+      createElement(HealthChecks, {
+        checks: failing,
+        loading: false,
+        handlers: handlers(over),
+        onRefresh: vi.fn(),
+      }),
+    );
+
+  it("says what it is doing while it runs, and disables the buttons", () => {
+    const plan = checkActionPlans(row())[0]!;
+    const html = renderChecks({
+      checkRuns: { "empty-notes": { plan, running: true, done: 1, total: 2, outcome: null } },
+    });
+    expect(html).toContain("Deleting 1 of 2…");
+    expect(html).toContain("disabled");
+  });
+
+  it("reports the result on the row, errors and all", () => {
+    const plan = checkActionPlans(row())[0]!;
+    const html = renderChecks({
+      checkRuns: {
+        "empty-notes": {
+          plan,
+          running: false,
+          done: 1,
+          total: 2,
+          outcome: {
+            action: "delete-all",
+            done: 1,
+            total: 2,
+            note: null,
+            errors: [{ path: "b.md", reason: "no permission" }],
+            skipped: [],
+            cancelled: false,
+          },
+        },
+      },
+    });
+    expect(html).toContain("Deleted 1 of 2 · 1 failed");
+    expect(html).toContain("no permission");
+    expect(html).toContain('data-state="bad"');
   });
 });
 

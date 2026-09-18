@@ -5,7 +5,8 @@
    just as true for a vault that has never had a server. */
 import { useState } from "react";
 import type { HistoryFootprint, SizedFile, VaultCheckId, VaultStats } from "../lib/health/types";
-import { activityCellTitle, activityGrid, formatBytes, relativeTime } from "../lib/health/format";
+import { activityCellTitle, formatBytes, relativeTime } from "../lib/health/format";
+import { buildHeatmap, heatmapRangeLabel } from "../lib/health/heatmapRange";
 import { MAX_NOTE_BYTES } from "../lib/sync/contentUpload";
 import { AsyncButton } from "./AsyncButton";
 import { Glyph, PathText, type GlyphName, type HealthHandlers } from "./HealthShared";
@@ -180,12 +181,20 @@ export function HealthStats({
 // ── Activity ──────────────────────────────────────────────────────────────────
 
 /**
- * Twelve rolling seven-day windows as a contribution strip.
+ * A calendar of per-day edits: a column per week, a row per weekday.
  *
- * v1 drew these as bar heights, which failed the commonest case there is: a
- * vault whose notes were all touched this week rendered eleven invisible stubs
- * beside one full-height block. A filled cell with its count inside is legible
- * at every distribution, including a single week and a flat one.
+ * v1 drew twelve rolling seven-day windows as bar heights, which failed the
+ * commonest case there is: a vault whose notes were all touched this week
+ * rendered eleven invisible stubs beside one full-height block. v2 became a
+ * GitHub-style contribution grid, and inherited GitHub's trailing TWELVE
+ * MONTHS with it — 52 columns of grey on a vault that is a fortnight old.
+ *
+ * The window is `heatmapRange.ts` now: last month, this month, and three
+ * months of empty days ahead. The forward stretch is the point — it is the
+ * space the vault is about to fill, and it keeps today near the middle of the
+ * strip instead of jammed against the right edge. Those days carry
+ * `data-future` and never take a heat level, so "nothing yet" and "nothing
+ * happened" cannot read the same.
  */
 export function HealthActivity({
   activity,
@@ -196,11 +205,13 @@ export function HealthActivity({
   now?: number;
 }) {
   const days = activity.days ?? [];
-  const grid = activityGrid(days, now);
+  const grid = buildHeatmap(days, now);
   const caption =
     `${activity.modifiedLast7d.toLocaleString()} ${activity.modifiedLast7d === 1 ? "note" : "notes"} ` +
     `edited in the last 7 days · ${activity.modifiedLast30d.toLocaleString()} in 30 days`;
-  const active = days.filter((n) => n > 0).length;
+  // Counted over the DRAWN days, not the whole census: the label describes the
+  // strip a reader is looking at.
+  const active = grid.cells.filter((c) => !c.future && c.count > 0).length;
 
   return (
     <div className="health-activity">
@@ -211,7 +222,7 @@ export function HealthActivity({
         <div
           className="health-heatmap"
           role="img"
-          aria-label={`Notes edited per day over the last ${days.length} days: ${active} active ${active === 1 ? "day" : "days"}. ${caption}`}
+          aria-label={`Notes edited per day, ${heatmapRangeLabel(grid.range)}: ${active} active ${active === 1 ? "day" : "days"}. ${caption}`}
           style={{ ["--heat-cols" as string]: grid.columns }}
         >
           {grid.months.map((m) => (
@@ -237,7 +248,10 @@ export function HealthActivity({
             <span
               key={c.date}
               className="health-heatcell"
-              data-level={c.level}
+              // A future day gets no `data-level` at all: the shade scale means
+              // "this many edits", and 0 there would claim a quiet day.
+              data-level={c.future ? undefined : c.level}
+              data-future={c.future ? "" : undefined}
               data-today={c.today ? "" : undefined}
               style={{ gridColumn: c.col + 2, gridRow: c.row + 2 }}
               title={activityCellTitle(c)}

@@ -8,6 +8,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Heal and bulk actions on the Health checks (desktop).** A failing check row now
+  carries the whole-check buttons its items allow: "Delete all" on empty or unreadable
+  notes, "Save copies" on unreadable and oversized ones, "Empty trash", and a single
+  accented **Heal** on the six findings Baalda can fix itself — rebuild the index
+  (stale index, markdown not picked up), reclaim leftover history, reset the history of
+  every heavy note, create the empty notes a broken `[[wikilink]]` points at, and rename
+  illegal Windows filenames to legal ones through the path that preserves `doc_id`.
+  Destructive runs confirm once, with the true count, in the page's existing dialog;
+  the row then reports "Deleted 11 of 12 · 1 failed" inline (never only a toast), lists
+  what it left alone and why, and the checks re-run afterwards. Case collisions, long
+  paths, duplicate titles, broken properties blocks and missing embeds stay MANUAL on
+  purpose, and each now says so in its own "What to do". Wording and the per-check
+  action table live in `lib/health/checks.ts`; the planning, skip rules and execution
+  loop are pure and injected (`lib/health/checkActions.ts`), so all of it is tested in
+  Node with no vault underneath.
 - **Files in the Access panel.** `GET /vaults/:id/access-tree` now returns the
   vault's `files` rows beside its notes, and the panel lists them with the
   sidebar's own glyph. They were already enforceable — one
@@ -64,7 +79,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (only markdown runs tag/wikilink parsing); `.txt`/`.markdown`/`.mdx` open in the
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
+### Changed
+- **The Health page's activity strip looks forward.** The heat-map ran GitHub's
+  trailing twelve months, so a young vault was 52 columns of grey with two coloured
+  cells in the far right. It now spans the 1st of last month through the end of the
+  month three ahead (`HEATMAP_FORWARD_MONTHS` in `lib/health/heatmapRange.ts`, a pure
+  range/grid module): five months, today near the middle, and the days that have not
+  happened drawn as dashed `data-future` cells that never take a heat level.
+
 ### Fixed
+- **A re-shared file took a restart to come back, and downloaded in silence
+  (desktop).** The blob mirror was driven by local disk events alone — a watcher
+  change, the delete queue, and the one pass inside `enable` — so no server-side
+  signal ever scheduled it: a note whose access returned was materialized by the
+  `reauth` pull in seconds, while the `.docx` beside it waited for an unrelated
+  file to change or for the app to relaunch (the same silence hid a teammate's
+  newly added binary). `handleServerReauth`, `handleServerRevoked` and a registry
+  pull that changed something now each schedule a (debounced, coalesced) pass,
+  and that pass reports itself: it announces its downloads to the vault's
+  `SyncProgressReporter`, so the header counts files beside notes and refuses to
+  stamp `done` while bytes are still moving, and it badges each incoming path
+  `queued` → `syncing` → `synced` — which the folder roll-up credits even before
+  the file exists on disk, since a file the sidebar has no row for yet still has
+  a folder. Per-file byte progress is deliberately not surfaced: the Rust
+  streaming download hashes into a temp file and renames, and emits no progress
+  events.
 - **Dev only: the app stopped reporting its sync status after a hot reload.** `useStore`
   and `syncManager` are module singletons, and every listener that connects them (badge
   status, progress, per-doc and per-file dots, registry map, presence) is registered once

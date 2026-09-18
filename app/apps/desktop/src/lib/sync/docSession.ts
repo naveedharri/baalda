@@ -562,6 +562,18 @@ export class SyncManager implements InboundHost {
   private channelStalled = false;
   private lastInboundDone = 0;
   private lastInboundTotal = 0;
+  /**
+   * Files the blob mirror has announced and not yet settled — the byte half of
+   * the same counter the note backfill drives (see {@link handleBinaryDownloads}).
+   *
+   * Also a gate on the terminal phase: a vault is not "done" while a 50 MB
+   * `.docx` is still coming down, and the wave's last settle is what re-enters
+   * {@link startContentRunIfNeeded} to stamp it.
+   */
+  private binaryDownloads = 0;
+  /** True while the progress phase belongs to a binary wave rather than to a
+   *  note run — i.e. this manager stamped `downloading` for the mirror. */
+  private binaryDownloadPhase = false;
   /** Resolves when the current bulk run finishes (tests). */
   private bulkRun: Promise<void> | null = null;
 
@@ -1124,7 +1136,17 @@ export class SyncManager implements InboundHost {
           // can see. A refresh replaces the tree's row objects, which reads as
           // a flicker under the pointer — needless on the common "nothing new"
           // pull (e.g. the catch-up pull every reconnect now makes).
-          if (changed) this.onRegistryChanged?.();
+          if (changed) {
+            this.onRegistryChanged?.();
+            // The structure moved, so the set of BINARIES this device should
+            // hold may have moved with it — a teammate's new `.docx`, a file
+            // that came back into a folder we can read. The blob mirror has no
+            // pull of its own to ride on and was driven by local disk events
+            // alone, so a server-side arrival waited for an unrelated watcher
+            // event or an app restart. Debounced (400ms) and coalesced with
+            // whatever the watcher already armed.
+            this.attachments?.scheduleReconcile();
+          }
           this.settleAfterPull(scope);
         })
         .catch((e) => console.warn("[sync] registry pull failed", e));
@@ -1134,6 +1156,12 @@ export class SyncManager implements InboundHost {
   /** True while a debounced registry pull is still armed (teardown assertions). */
   hasPendingRegistryPull(): boolean {
     return this.registryPullTimer != null;
+  }
+
+  /** True while the blob mirror has a debounced pass armed — the binary half of
+   *  {@link hasPendingRegistryPull} (teardown assertions / tests). */
+  hasPendingAttachmentReconcile(): boolean {
+    return this.attachments?.hasPendingReconcile() ?? false;
   }
 
   /**
@@ -1308,6 +1336,14 @@ export class SyncManager implements InboundHost {
     // structural change or an app restart - long enough to look like the
     // revocation hadn't worked.
     this.handleRegistryChanged("reauth");
+    // ...and the BINARIES are re-diffed against the server. This is the file
+    // half of that same pull, and it has to be asked for separately: the pull
+    // plans notes (`planInbound` materializes one the moment access returns),
+    // while a `.pdf`/`.docx` comes back only through the blob mirror, which
+    // nothing but a local disk event ever scheduled. Without this line a
+    // re-granted file sat missing until some unrelated binary changed on disk
+    // or the app was restarted, while a re-granted note was back in seconds.
+    this.attachments?.scheduleReconcile();
     // ...and the UI's lock overlay refreshes, so the NEXT open of a just-locked
     // note starts read-only from its first frame.
     this.onAclChangedListener?.();
@@ -1358,6 +1394,11 @@ export class SyncManager implements InboundHost {
       `Access to ${docIds.length} ${docIds.length === 1 ? "item" : "items"} was removed`,
     );
     this.handleRegistryChanged("acl-revoked");
+    // The cold-start ACL signal, so the binary half is re-diffed on a launch
+    // whose `ready` carries an access change — the same reason the live `reauth`
+    // asks for one. A pass here also re-publishes the file dots against what the
+    // server will actually serve us now.
+    this.attachments?.scheduleReconcile();
   }
 
   /**
@@ -2155,6 +2196,11 @@ export class SyncManager implements InboundHost {
     const engine = this.vaultEngine;
     if (engine && !engine.backfillSettled()) return;
     if (this.contentWorkList().length === 0) {
+      // …but bytes may still be moving. A binary wave reports through the same
+      // counter (see `handleBinaryDownloads`), and stamping `done` on top of it
+      // would badge the vault fully synced while a 50 MB file is mid-flight.
+      // The wave's last settle re-enters here.
+      if (this.binaryDownloads > 0) return;
       // Nothing to send. Stamp a terminal phase once, and only once: this edge
       // fires again on every drained inbound frame (a teammate typing), and
       // re-stamping `done` there would be a store write per keystroke.
@@ -3038,6 +3084,10 @@ export class SyncManager implements InboundHost {
     this.channelStalled = false;
     this.lastInboundDone = 0;
     this.lastInboundTotal = 0;
+    // The binary wave's counters belong to the vault we are leaving; a stopped
+    // mirror will never settle what it announced.
+    this.binaryDownloads = 0;
+    this.binaryDownloadPhase = false;
     this.attachments?.stop();
     this.attachments = null;
     this.binaryDeletes?.stop();
@@ -3439,6 +3489,52 @@ export class SyncManager implements InboundHost {
   }
 
   /**
+   * The blob mirror is about to pull `count` files down.
+   *
+   * Bytes are work, and the header counts work: a wave of binaries reports
+   * through the SAME {@link SyncProgressReporter} a note backfill does, so
+   * "Syncing 1/1" covers a re-granted `.docx` exactly as it covers a note. The
+   * alternative — a second counter for files — would mean two things on screen
+   * disagreeing about whether the vault is settled.
+   *
+   * Two cases, one rule: when a note run (or the channel backfill) already owns
+   * the phase, the files JOIN its denominator; when nothing else is running,
+   * this stamps `downloading` itself and the wave's last settle hands the
+   * terminal phase back to {@link startContentRunIfNeeded}.
+   */
+  private handleBinaryDownloads(count: number, scope: VaultScope): void {
+    if (count <= 0 || !scope.isCurrent()) return;
+    const progress = this.progress;
+    if (!progress) return;
+    this.binaryDownloads += count;
+    if (this.downloadPhase || this.uploader?.isRunning() || this.binaryDownloadPhase) {
+      progress.addTotal(count);
+    } else {
+      this.binaryDownloadPhase = true;
+      progress.phase("downloading", count);
+    }
+    progress.flush();
+  }
+
+  /** One announced file landed (or failed). See {@link handleBinaryDownloads}. */
+  private handleBinaryDownloadSettled(outcome: "ok" | "failed", scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    const progress = this.progress;
+    if (!progress) return;
+    if (this.binaryDownloads > 0) this.binaryDownloads--;
+    progress.item(outcome);
+    if (this.binaryDownloads > 0) return;
+    progress.flush();
+    this.binaryDownloadPhase = false;
+    // The wave is over, so re-enter the ONE place that decides a terminal phase.
+    // Unconditionally, not just for a phase this wave opened: the note run's own
+    // settle edge may have come and gone while these bytes were moving (the gate
+    // in `startContentRunIfNeeded` sent it away), and then nobody else is left to
+    // stamp `done`. It no-ops while a run is live.
+    this.startContentRunIfNeeded(scope);
+  }
+
+  /**
    * The index finished extracting text for these tree binaries (`files-indexed`).
    *
    * Public like `handleAttachmentChanged`: it is an external signal for this
@@ -3597,6 +3693,10 @@ export class SyncManager implements InboundHost {
       onFileStates: (states) => {
         if (scope.isCurrent()) this.onFileState?.(states);
       },
+      // …and the counted half of the same fact, on the vault's one progress
+      // reporter. Scope-guarded inside the handlers, for the same reason.
+      onDownloadsQueued: (count) => this.handleBinaryDownloads(count, scope),
+      onDownloadSettled: (outcome) => this.handleBinaryDownloadSettled(outcome, scope),
     });
   }
 
