@@ -34,7 +34,14 @@ import { useHealthIgnores } from "../lib/health/useHealthIgnores";
 import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
 import { HealthActivity, HealthLargest, HealthStats } from "./HealthStats";
-import { Section, type ConfirmState, type HealthHandlers } from "./HealthShared";
+import {
+  Section,
+  type CheckRun,
+  type ConfirmState,
+  type HealthHandlers,
+} from "./HealthShared";
+import type { CheckActionPlan } from "../lib/health/checkActions";
+import type { VaultCheckId } from "../lib/health/types";
 import "./health.css";
 
 export interface HealthTabProps {
@@ -114,6 +121,43 @@ export function HealthView({
   const [inspectRequest, setInspectRequest] = useState<{ path: string; n: number } | null>(
     null,
   );
+  // A check's heal / bulk run lives HERE, beside the confirms and for the same
+  // reason: the row that started it collapses the moment the checks re-run, and
+  // a result that vanished with it would leave the reader guessing whether the
+  // twelve deletes landed.
+  const [checkRuns, setCheckRuns] = useState<Partial<Record<VaultCheckId, CheckRun>>>({});
+
+  const startCheckAction = async (plan: CheckActionPlan): Promise<void> => {
+    setCheckRuns((r) => ({
+      ...r,
+      [plan.checkId]: {
+        plan,
+        running: true,
+        done: 0,
+        total: plan.wholeVault ? 0 : plan.targets.length,
+        outcome: null,
+      },
+    }));
+    const outcome = await actions.applyCheckAction(plan, (done, total) => {
+      setCheckRuns((r) => {
+        const cur = r[plan.checkId];
+        if (!cur?.running) return r;
+        return { ...r, [plan.checkId]: { ...cur, done, total } };
+      });
+    });
+    setCheckRuns((r) => ({
+      ...r,
+      [plan.checkId]: {
+        plan,
+        running: false,
+        done: outcome.done,
+        total: outcome.total,
+        outcome,
+      },
+    }));
+    // The census and the checks both describe a vault this just changed.
+    if (!outcome.cancelled) refresh();
+  };
 
   const handlers: HealthHandlers = {
     actions,
@@ -124,6 +168,14 @@ export function HealthView({
       // The note is behind the settings card; leaving it open would look like
       // nothing happened.
       onClose?.();
+    },
+    checkRuns,
+    runCheck(plan) {
+      // A plan with a confirm never runs until the dialog says so; everything
+      // else is a button press away, because it is either reversible or
+      // additive.
+      if (plan.confirm) setConfirming({ kind: "check-action", plan });
+      else void startCheckAction(plan);
     },
     async reclaim() {
       const { docsRemoved, bytesReclaimed } = await actions.reclaimOrphans();
@@ -231,6 +283,7 @@ export function HealthView({
         confirming={confirming}
         onDone={() => setConfirming(null)}
         actions={actions}
+        onRunCheckAction={startCheckAction}
       />
     </div>
   );
@@ -244,10 +297,13 @@ function Confirms({
   confirming,
   onDone,
   actions,
+  onRunCheckAction,
 }: {
   confirming: ConfirmState | null;
   onDone: () => void;
   actions: VaultHealthSnapshot["actions"];
+  /** Start a confirmed check action; the row reports on it, not a toast. */
+  onRunCheckAction?: (plan: CheckActionPlan) => Promise<void>;
 }) {
   if (!confirming) return null;
 
@@ -332,6 +388,39 @@ function Confirms({
           </p>
         </ConfirmDialog>
       );
+    case "check-action": {
+      // Every word of this dialog — including how many files it names — was
+      // decided by `planCheckAction` from the wording in `checks.ts`, so the
+      // page cannot promise something the run will not do.
+      const { plan } = confirming;
+      return (
+        <ConfirmDialog
+          title={plan.confirm?.title ?? plan.label}
+          confirmLabel={plan.confirm?.confirmLabel ?? plan.label}
+          tone={plan.confirm?.tone ?? "danger"}
+          onCancel={onDone}
+          onConfirm={() => {
+            onDone();
+            void onRunCheckAction?.(plan);
+          }}
+        >
+          <p className="muted">{plan.confirm?.body}</p>
+          {plan.unlisted > 0 && (
+            <p className="muted">
+              Only the {plan.targets.length.toLocaleString()} shown are touched —{" "}
+              {plan.unlisted.toLocaleString()} more were found but not listed. Run the
+              checks again afterwards to reach them.
+            </p>
+          )}
+          {plan.skipped.length > 0 && (
+            <p className="muted">
+              {plan.skipped.length.toLocaleString()}{" "}
+              {plan.skipped.length === 1 ? "item is" : "items are"} left alone.
+            </p>
+          )}
+        </ConfirmDialog>
+      );
+    }
     case "rebuild-index":
       return (
         <ConfirmDialog

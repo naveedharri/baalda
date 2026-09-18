@@ -19,6 +19,7 @@ import { deletePaths } from "../vault/mutatePaths";
 import { removeFromOrder } from "../ordering";
 import { copyText } from "../clipboard";
 import { toast } from "../toast";
+import { runCheckAction, type CheckActionDeps } from "./checkActions";
 import {
   buildHealthReport,
   composeInspectionVerdict,
@@ -227,8 +228,11 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const actions = useMemo<HealthActions>(
-    () => ({
+  // Self-referential on purpose: `applyCheckAction` runs the OTHER actions in
+  // this object rather than a second copy of them, so a heal and the per-item
+  // button beside it can never drift apart.
+  const actions = useMemo<HealthActions>(() => {
+    const api: HealthActions = {
       syncNow: () => syncManager.retrySync(),
 
       retryDoc: (docId: string) => syncManager.retryDoc(docId),
@@ -266,18 +270,8 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       },
 
       async deleteNote(path: string) {
-        // The sidebar's delete, verbatim: server row first (so a refusal leaves
-        // the file alone instead of producing a reappearing ghost), then disk.
-        const st = useStore.getState();
-        const { deleted, failed } = await deletePaths([path], {
-          epoch: st.vault?.epoch,
-          deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
-          unregister: (p) => syncManager.registry.deletePath(p),
-        });
+        const { failed } = await deleteVaultPaths([path]);
         if (failed.length > 0) throw new Error(failed[0].reason);
-        if (deleted.length === 0) return;
-        st.setItemOrder(removeFromOrder(st.itemOrder, path));
-        st.pruneTabs([path]);
         refresh();
       },
 
@@ -446,9 +440,44 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         await st.refreshTree();
         refresh();
       },
-    }),
-    [refresh],
-  );
+
+      applyCheckAction(plan, onProgress) {
+        // Every dep is an EXISTING path: the sidebar's delete, the sync layer's
+        // history reset, the startup sweep, `ipc.createNote`, and the store's
+        // rename — which is the one that keeps `doc_id` stable across a move.
+        // A heal that wrote to disk by itself would fork notes the moment two
+        // devices ran it.
+        const epoch = () => useStore.getState().vault?.epoch;
+        const deps: CheckActionDeps = {
+          deleteNotes: (paths, onStep) => deleteVaultPaths(paths, onStep),
+          resetHistory: (docId) => api.resetHistory(docId),
+          reclaim: () => api.reclaimOrphans(),
+          emptyTrash: () => api.emptyTrash(),
+          rebuildIndex: () => api.rebuildIndex(),
+          syncNow: () => api.syncNow(),
+          pickFolder: () => ipc.pickFolder(),
+          exportTo: (path, dest) => ipc.exportPath(path, dest, epoch()),
+          readNote: (path) => ipc.readNote(path, epoch()),
+          resolveLink: (target) => ipc.resolveWikilink(target).then((r) => r != null),
+          async createNote(dir, name) {
+            // The root-freeze latch is the sidebar's rule and it applies here
+            // too: a vault whose root is frozen does not get notes dropped into
+            // it by a heal either.
+            if (dir === "" && useStore.getState().rootFrozen) {
+              throw new Error("this vault's root is frozen — create it inside a folder");
+            }
+            return ipc.createNote(dir, name, epoch());
+          },
+          isFile: (path) => ipc.noteExists(path, epoch()),
+          async rename(from, to) {
+            await useStore.getState().renameNoteFileExact(from, to);
+          },
+        };
+        return runCheckAction(plan, deps, onProgress);
+      },
+    };
+    return api;
+  }, [refresh]);
 
   // A reset discards history on both sides, so the census it produced is stale.
   // Wrapping here (rather than inside the memo) keeps `actions` stable.
@@ -465,6 +494,35 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   );
 
   return { report, stats, checks, statsError, loading, log, refresh, actions: wrapped };
+}
+
+/**
+ * The sidebar's delete, for one path or twenty: server row first (so a refusal
+ * leaves the file alone instead of producing a reappearing ghost), then disk,
+ * then the view state that named the gone paths.
+ *
+ * One function because the single Delete on a check row and its Delete all are
+ * the same operation at two sizes — the bug this whole helper exists to prevent
+ * (`vault/mutatePaths.ts`) was two hand-copied deletes drifting apart.
+ */
+async function deleteVaultPaths(
+  paths: string[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ deleted: string[]; failed: Array<{ path: string; reason: string }> }> {
+  const st = useStore.getState();
+  const { deleted, failed } = await deletePaths(paths, {
+    epoch: st.vault?.epoch,
+    deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
+    unregister: (p) => syncManager.registry.deletePath(p),
+    onProgress,
+  });
+  if (deleted.length > 0) {
+    let order = st.itemOrder;
+    for (const path of deleted) order = removeFromOrder(order, path);
+    st.setItemOrder(order);
+    st.pruneTabs(deleted);
+  }
+  return { deleted, failed };
 }
 
 /** The last path segment — what the save dialog should offer as a filename. */

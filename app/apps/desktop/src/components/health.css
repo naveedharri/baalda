@@ -1678,3 +1678,93 @@ button.health-metric-flag:hover {
 .health-heatmap-legend span:last-child {
   margin-left: 2px;
 }
+
+/* ── Activity heat-map: future days ───────────────────────────────────────────
+   Appended block (heat-map range change) — keep at the end of the file.
+   The strip now runs from last month into the coming months, so most of it is
+   days that have not happened yet. They must not read as "a quiet day": no
+   fill, a dashed outline instead of the filled cell's inset ring, and they
+   never carry `data-level`, so nothing here can be overridden by a shade. */
+.health-heatcell[data-future] {
+  background: transparent;
+  box-shadow: none;
+  border: 1px dashed color-mix(in srgb, var(--text-primary) 14%, transparent);
+}
+/* Today can be in the future by no more than the moment the page rendered, but
+   the marker has to win over the dashed outline if it ever lands there. */
+.health-heatcell[data-future][data-today] {
+  border-style: solid;
+  border-color: transparent;
+  box-shadow: 0 0 0 1.5px var(--accent);
+}
+
+/* ── Checks: heal & bulk actions ──────────────────────────────────────────────
+   Appended block (check-level actions) — keep at the end of the file.
+
+   Two button shapes in a failing row's header, and the difference has to be
+   visible before the labels are read: the HEAL is the one that fixes the
+   finding itself, so it carries the accent and a spark; a bulk action is the
+   per-item button applied to everything listed, so it stays a plain ghost pill
+   and turns red only when it deletes.
+
+   Under the header sits the run line. It is deliberately part of the ROW rather
+   than a toast: "Deleted 11 of 12 · 1 failed" is a finding of its own, and a
+   toast throws it away three seconds after the reader stops looking. */
+.health-check-bulk {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.health-heal {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.health-heal:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-surface));
+}
+.health-check-bulk button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* The run line. Indented to the panel's own gutter so it lines up with the
+   reasoning rather than with the badge. */
+.health-check-run {
+  margin: 0 0 var(--sp-2);
+  padding-left: calc(20px + var(--sp-3));
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+.health-check-run[data-state="running"] {
+  color: var(--text-tertiary);
+}
+.health-check-run[data-state="good"] .health-check-run-line {
+  color: var(--success);
+  font-weight: 600;
+}
+.health-check-run[data-state="bad"] .health-check-run-line {
+  color: var(--danger);
+  font-weight: 600;
+}
+.health-check-run-line {
+  margin: 0;
+}
+.health-check-run-errors {
+  margin: var(--sp-1) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-tertiary);
+}
+.health-check-run-errors li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 1px 0;
+  min-width: 0;
+}

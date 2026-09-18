@@ -21,10 +21,21 @@ import {
   type CheckAction,
   type CheckRow,
 } from "../lib/health/checks";
+import {
+  checkActionPlans,
+  outcomeSummary,
+  type CheckActionPlan,
+} from "../lib/health/checkActions";
 import type { VaultCheckId, VaultCheckItem, VaultChecks } from "../lib/health/types";
 import { formatBytes } from "../lib/health/format";
 import { AsyncButton } from "./AsyncButton";
-import { Eyebrow, Glyph, PathText, type HealthHandlers } from "./HealthShared";
+import {
+  Eyebrow,
+  Glyph,
+  PathText,
+  type CheckRun,
+  type HealthHandlers,
+} from "./HealthShared";
 
 /**
  * The lead sentence of a check's `whyItMatters`, for the collapsed row. The
@@ -235,6 +246,7 @@ function CheckItem({
   // check counts the things it lists.
   const isTrash = def.id === "trash";
   const more = isTrash ? 0 : Math.max(0, result.count - result.items.length);
+  const run = handlers.checkRuns[def.id] ?? null;
 
   return (
     <li
@@ -282,7 +294,7 @@ function CheckItem({
           )}
           {state === "unknown" && <span className="health-check-note">Not run</span>}
         </button>
-        {failed && def.bulkAction && <BulkAction action={def.bulkAction} handlers={handlers} />}
+        {failed && <CheckActions row={row} handlers={handlers} />}
         {failed && onIgnore && (
           <button
             type="button"
@@ -294,6 +306,11 @@ function CheckItem({
           </button>
         )}
       </div>
+
+      {/* Shown on a PASSING row too, once a run has happened: healing a check
+          makes its row go green, and "Reclaimed 18 · 3.4 MB freed" vanishing at
+          the same moment is the one report the reader was waiting for. */}
+      {run && <CheckRunLine run={run} />}
 
       {failed && open && (
         <div className="health-check-panel" id={panelId}>
@@ -366,49 +383,110 @@ function CheckBadge({ def, state }: { def: CheckRow["def"]; state: CheckState })
   );
 }
 
-function BulkAction({
-  action,
-  handlers,
-}: {
-  action: CheckAction;
-  handlers: HealthHandlers;
-}) {
-  switch (action) {
-    case "rebuild-index":
-      return (
+/**
+ * The buttons that treat the WHOLE check: its heal first, then the bulk forms
+ * of its per-item actions.
+ *
+ * Nothing is decided here — `checkActionPlans` reads the definition, works out
+ * which listed items each action can reach and what it will say, and this only
+ * paints the result. That is what keeps "Delete all" from ever appearing on a
+ * check whose items it could not delete.
+ */
+function CheckActions({ row, handlers }: { row: CheckRow; handlers: HealthHandlers }) {
+  const plans = checkActionPlans(row);
+  if (plans.length === 0) return null;
+  const run = handlers.checkRuns[row.def.id] ?? null;
+  const busy = run?.running === true;
+  return (
+    <span className="health-check-bulk">
+      {plans.map((plan) => (
         <button
+          key={plan.action}
           type="button"
-          className="ghost-pill sm"
-          onClick={() => handlers.confirm({ kind: "rebuild-index" })}
+          className={
+            plan.kind === "heal"
+              ? "ghost-pill sm health-heal"
+              : `ghost-pill sm${plan.confirm?.tone === "danger" ? " danger" : ""}`
+          }
+          disabled={busy}
+          title={healTitle(plan)}
+          onClick={() => handlers.runCheck(plan)}
         >
-          Rebuild index
+          {plan.kind === "heal" && <Glyph name="spark" size={13} />}
+          {plan.label}
         </button>
-      );
-    case "empty-trash":
-      return (
-        <button
-          type="button"
-          className="ghost-pill sm"
-          onClick={() => handlers.confirm({ kind: "empty-trash" })}
-        >
-          Empty trash
-        </button>
-      );
-    case "reclaim":
-      return (
-        <AsyncButton className="ghost-pill sm" onClick={handlers.reclaim}>
-          Reclaim
-        </AsyncButton>
-      );
-    case "sync-now":
-      return (
-        <AsyncButton className="ghost-pill sm" onClick={() => handlers.actions.syncNow()}>
-          Sync now
-        </AsyncButton>
-      );
-    default:
-      return null;
+      ))}
+    </span>
+  );
+}
+
+/** What the button is about to do, in the exact numbers, before it is pressed. */
+function healTitle(plan: CheckActionPlan): string {
+  if (plan.wholeVault) return plan.label;
+  const bits = [`${plan.label}: ${plan.targets.length.toLocaleString()} listed`];
+  if (plan.skipped.length > 0) bits.push(`${plan.skipped.length.toLocaleString()} left alone`);
+  if (plan.unlisted > 0) {
+    bits.push(`${plan.unlisted.toLocaleString()} more are not listed and stay as they are`);
   }
+  return bits.join(" · ");
+}
+
+/**
+ * What the action is doing, or did. It lives on the row rather than in a toast
+ * because the reader is looking at the row — and because a partial result ("11
+ * of 12, 1 failed") is a finding of its own, which a toast throws away.
+ */
+function CheckRunLine({ run }: { run: CheckRun }) {
+  const { plan, outcome } = run;
+  if (run.running) {
+    const progress =
+      run.total > 0
+        ? ` ${run.done.toLocaleString()} of ${run.total.toLocaleString()}`
+        : "";
+    return (
+      <p className="health-check-run" data-state="running" aria-live="polite">
+        {plan.gerund}
+        {progress}…
+      </p>
+    );
+  }
+  if (!outcome) return null;
+  const bad = outcome.errors.length > 0;
+  return (
+    <div
+      className="health-check-run"
+      data-state={outcome.cancelled ? "idle" : bad ? "bad" : "good"}
+      aria-live="polite"
+    >
+      <p className="health-check-run-line">{outcomeSummary(outcome, plan)}</p>
+      {outcome.errors.length > 0 && (
+        <ul className="health-check-run-errors">
+          {outcome.errors.slice(0, 5).map((e, i) => (
+            <li key={`${e.path}-${i}`}>
+              {e.path !== "" && <PathText path={e.path} chars={40} />}
+              <span className="health-check-detail">{e.reason}</span>
+            </li>
+          ))}
+          {outcome.errors.length > 5 && (
+            <li className="muted">and {(outcome.errors.length - 5).toLocaleString()} more</li>
+          )}
+        </ul>
+      )}
+      {outcome.skipped.length > 0 && (
+        <ul className="health-check-run-errors">
+          {outcome.skipped.slice(0, 5).map((e, i) => (
+            <li key={`${e.path}-${i}`}>
+              {e.path !== "" && <PathText path={e.path} chars={40} />}
+              <span className="health-check-detail">{e.reason}</span>
+            </li>
+          ))}
+          {outcome.skipped.length > 5 && (
+            <li className="muted">and {(outcome.skipped.length - 5).toLocaleString()} more</li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function ItemAction({

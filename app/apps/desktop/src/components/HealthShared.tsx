@@ -6,20 +6,27 @@
 import { useState, type ReactNode } from "react";
 import { copyText } from "../lib/clipboard";
 import { middleTruncate } from "../lib/health/format";
-import type { HealthActions } from "../lib/health/types";
+import type {
+  CheckActionOutcome,
+  CheckActionPlan,
+} from "../lib/health/checkActions";
+import type { HealthActions, VaultCheckId } from "../lib/health/types";
 
 /** Characters of a path that fit on one row before the middle is elided. */
 export const PATH_CHARS = 52;
 
-/** The two destructive confirms the page can raise. Both live at the top of the
- *  page rather than inside a row, so a row unmounting mid-confirm (a refresh
+/** The confirms the page can raise. All of them live at the top of the page
+ *  rather than inside a row, so a row unmounting mid-confirm (a refresh
  *  landing, a filter changing) cannot take the dialog with it. */
 export type ConfirmState =
   | { kind: "delete"; path: string }
   | { kind: "reset"; docId: string; path: string | null }
   | { kind: "reregister"; path: string }
   | { kind: "empty-trash" }
-  | { kind: "rebuild-index" };
+  | { kind: "rebuild-index" }
+  /** A check's heal or bulk action that asked to be confirmed. The plan carries
+   *  its own wording (from `checks.ts`) and the exact number it will touch. */
+  | { kind: "check-action"; plan: CheckActionPlan };
 
 /** Everything a section needs to act. One object, so adding a remedy is one
  *  field rather than five prop lists. */
@@ -31,9 +38,25 @@ export interface HealthHandlers {
   confirm: (c: ConfirmState) => void;
   /** Reclaim orphan history and toast the result. */
   reclaim: () => Promise<void>;
+  /** Start a check's heal or bulk action, confirming first when its plan says
+   *  to. The page owns the run so a collapsing row cannot abandon it. */
+  runCheck: (plan: CheckActionPlan) => void;
+  /** What each check's action is doing, or last did. Keyed by check id and kept
+   *  on the page, not in the row, for the same reason. */
+  checkRuns: Partial<Record<VaultCheckId, CheckRun>>;
   /** A slowly-ticking clock, so relative times do not go stale in an open
    *  dialog and every section agrees on "now". */
   now: number;
+}
+
+/** One check's action, in flight or finished. */
+export interface CheckRun {
+  plan: CheckActionPlan;
+  running: boolean;
+  /** Progress while `running`; both 0 before the first report. */
+  done: number;
+  total: number;
+  outcome: CheckActionOutcome | null;
 }
 
 // ── Section chrome ────────────────────────────────────────────────────────────
@@ -163,7 +186,8 @@ export type GlyphName =
   | "disk"
   | "database"
   | "history"
-  | "search";
+  | "search"
+  | "spark";
 
 const PATHS: Record<GlyphName, ReactNode> = {
   check: <path d="M20 6 9 17l-5-5" />,
@@ -245,6 +269,14 @@ const PATHS: Record<GlyphName, ReactNode> = {
     <>
       <circle cx="11" cy="11" r="7" />
       <path d="m20 20-3.5-3.5" />
+    </>
+  ),
+  // The heal mark: a wand's four-pointed sparkle. Used only on the one button
+  // per row that fixes the finding itself, so it stays meaningful.
+  spark: (
+    <>
+      <path d="M12 3v3M12 18v3M3 12h3M18 12h3" />
+      <path d="M12 8.5 13.2 11l2.8 1-2.8 1-1.2 2.5L10.8 13 8 12l2.8-1z" />
     </>
   ),
 };

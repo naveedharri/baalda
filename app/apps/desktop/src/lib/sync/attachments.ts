@@ -444,6 +444,25 @@ export interface AttachmentSyncDeps {
    * cannot fix. One vocabulary is what makes the two dots mean the same thing.
    */
   onFileStates?: (states: Record<string, DocSyncState>) => void;
+  /**
+   * This pass is about to pull `count` files DOWN — a teammate's drop, or a
+   * file whose access just came back.
+   *
+   * The counted half of the sidebar's dots: it feeds the same
+   * {@link import("./progress").SyncProgressSink} a note backfill reports
+   * through, so the header's "Syncing n/m" covers bytes as well as documents.
+   * A 50 MB `.docx` arriving after a Private → Shared flip otherwise moved in
+   * total silence — no row (the tree comes from the disk, and the file is not
+   * on it yet) and no counter.
+   *
+   * Announced once per pass, before the first byte, so the denominator is whole
+   * from the first frame rather than climbing one file at a time.
+   */
+  onDownloadsQueued?: (count: number) => void;
+  /** One of those files landed, or failed. Exactly one call per file announced
+   *  by {@link onDownloadsQueued} — including the ones a pass cut short never
+   *  got to, or the counter would hang at `n/m` forever. */
+  onDownloadSettled?: (outcome: "ok" | "failed") => void;
 
   // ---- Tree binaries: `files` rows + extracted text (PR3 Stage A) ---------
 
@@ -662,6 +681,18 @@ export class AttachmentSync {
     this.localPathKeys = new Set(local.map((a) => a.relPath.toLowerCase()));
     const { toUpload, toDownload } = diffAttachments(local, server);
 
+    // The downloads this pass will actually make, decided BEFORE anything is
+    // reported: a file inside an open delete window is not a file this device is
+    // missing, and it must not be counted or badged as one.
+    const downloads: ServerBlob[] = [];
+    for (const b of toDownload) {
+      if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
+        console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
+        continue;
+      }
+      downloads.push(b);
+    }
+
     // Where every tree binary stands, rebuilt from the two listings rather than
     // accumulated across passes: a file deleted or renamed since the last one
     // must LOSE its dot, and this is the only place that knows the full local
@@ -681,6 +712,15 @@ export class AttachmentSync {
               ? "queued"
               : "synced",
         );
+      }
+      // …plus the files this pass is about to PULL DOWN. They have no local row
+      // yet — the sidebar's tree is the disk — but the roll-up credits a path to
+      // its ancestors whether or not the file is there (`syncRollup.ts`), so the
+      // folder a re-granted 50 MB `.docx` is arriving into reads as busy from the
+      // first frame instead of settled until the file lands.
+      for (const b of downloads) {
+        if (!b.relPath || isUnderAttachments(b.relPath)) continue;
+        this.fileStates.set(b.relPath, "queued");
       }
       this.publishFileStates();
     }
@@ -728,13 +768,16 @@ export class AttachmentSync {
         console.error("[attachments] upload failed", a.relPath, e);
       }
     }
-    for (const b of toDownload) {
+    // One announcement for the whole wave (see `deps.onDownloadsQueued`), and
+    // then exactly one settle per file — including the tail a cut-short pass
+    // never reaches, which is what keeps the header's counter from hanging.
+    if (downloads.length > 0) this.deps.onDownloadsQueued?.(downloads.length);
+    let settled = 0;
+    for (const b of downloads) {
       if (!this.current()) break;
-      // A file this device just deleted is not a file it is missing.
-      if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
-        console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
-        continue;
-      }
+      // Its bytes are moving now. The dot was already `queued` from the rebuild
+      // above; this is the same queued → syncing → synced walk an upload makes.
+      if (b.relPath) this.setFileState(b.relPath, "syncing");
       try {
         await this.downloadOne(b);
         downloaded++;
@@ -748,10 +791,20 @@ export class AttachmentSync {
         // It came FROM the server, so the server has it — and its row appears
         // in the sidebar on the watcher echo, before the next pass would say so.
         if (b.relPath) this.setFileState(b.relPath, "synced");
+        settled++;
+        this.deps.onDownloadSettled?.("ok");
       } catch (e) {
         console.error("[attachments] download failed", b.relPath, e);
+        // The dot stays `syncing` — like a failed upload, `error` is reserved
+        // for a refusal retrying cannot fix, and the next pass tries again.
+        settled++;
+        this.deps.onDownloadSettled?.("failed");
       }
     }
+    // A pass the vault switch cut short still owes the counter every file it
+    // announced. Reported as failures rather than silently dropped: the work was
+    // queued and did not happen.
+    for (let i = settled; i < downloads.length; i++) this.deps.onDownloadSettled?.("failed");
     return { uploaded, downloaded };
   }
 

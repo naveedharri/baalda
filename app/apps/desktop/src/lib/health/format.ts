@@ -201,7 +201,7 @@ export function dayLabel(ms: number, now: number): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 }
 
-// ── Activity grid ─────────────────────────────────────────────────────────────
+// ── Activity strip cells (laid out by `heatmapRange.ts`) ─────────────────────
 
 export interface ActivityCell {
   /** 0-based column, oldest week first. */
@@ -216,71 +216,10 @@ export interface ActivityCell {
   today: boolean;
 }
 
-export interface ActivityGrid {
-  cells: ActivityCell[];
-  columns: number;
-  /** Month labels: which column a month starts in ("Sep" over column 3). */
-  months: Array<{ col: number; label: string }>;
-  peak: number;
-}
-
-const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-/**
- * Lay `days` (oldest first, last = today) out as GitHub does: a column per
- * week, a row per weekday, today in the last column. Pure, so the tests can
- * pin the placement without a DOM; `now` fixes which weekday "today" is.
- */
-export function activityGrid(days: number[], now: number): ActivityGrid {
-  const n = days.length;
-  const todayStart = new Date(now);
-  todayStart.setHours(0, 0, 0, 0);
-  const wd = todayStart.getDay(); // 0 = Sunday
-  // Weeks back from the current week's Sunday; the oldest day may need one
-  // more column than n/7 because the current week is usually partial.
-  const weeksBack = (daysAgo: number) => Math.floor((daysAgo + (6 - wd)) / 7);
-  const columns = n === 0 ? 0 : weeksBack(n - 1) + 1;
-  const peak = Math.max(0, ...days);
-  const cells: ActivityCell[] = [];
-  const months: Array<{ col: number; label: string }> = [];
-  let lastMonth = -1;
-  for (let i = 0; i < n; i++) {
-    const daysAgo = n - 1 - i;
-    const d = new Date(todayStart.getTime());
-    d.setDate(d.getDate() - daysAgo);
-    const col = columns - 1 - weeksBack(daysAgo);
-    const row = d.getDay();
-    const count = days[i] ?? 0;
-    cells.push({
-      col,
-      row,
-      date: d.getTime(),
-      count,
-      level: activityLevel(count, peak),
-      today: daysAgo === 0,
-    });
-    // Label the column in which a month's first day falls (or the very first
-    // column), never twice for one month.
-    const month = d.getMonth();
-    if (month !== lastMonth) {
-      if (d.getDate() === 1 || i === 0) {
-        // A label needs about two columns of room. The only pair that can be
-        // closer is the partial month in the first column and the month that
-        // starts right after it; GitHub drops the partial one, so do we.
-        const prev = months[months.length - 1];
-        if (prev && col - prev.col < 2) months.pop();
-        months.push({ col, label: MONTH_SHORT[month] });
-      }
-      lastMonth = month;
-    }
-  }
-  return { cells, columns, months, peak };
-}
-
 /** "Tue 3 Sep · 2 notes" — the cell tooltip. */
 export function activityCellTitle(cell: ActivityCell): string {
   const d = new Date(cell.date);
   const day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
-  const when = cell.today ? "Today" : `${day} ${d.getDate()} ${MONTH_SHORT[d.getMonth()]}`;
+  const when = cell.today ? "Today" : `${day} ${d.getDate()} ${MONTHS[d.getMonth()]}`;
   return `${when} · ${cell.count.toLocaleString()} ${cell.count === 1 ? "note" : "notes"}`;
 }

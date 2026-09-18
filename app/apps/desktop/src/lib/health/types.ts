@@ -7,7 +7,11 @@
 //   - `components/HealthTab.tsx` renders both and drives `HealthActions`.
 //
 // Pure types only. No imports from React, Tauri or the store, so the model and
-// its tests stay dependency-free like `syncRollup.ts`.
+// its tests stay dependency-free like `syncRollup.ts`. (The two check-action
+// types below are a TYPE-only import from `checkActions.ts`, which imports this
+// file back — erased at compile time, so nothing circular survives to runtime.)
+
+import type { CheckActionOutcome, CheckActionPlan } from "./checkActions";
 
 // ── Vault analytics (Rust) ─────────────────────────────────────────────────────
 
@@ -405,6 +409,17 @@ export interface HealthActions {
   emptyTrash(): Promise<{ filesRemoved: number; bytesFreed: number }>;
   /** Drop and rebuild the local search index from the files (fixes stale rows). */
   rebuildIndex(): Promise<void>;
+  /**
+   * Run one planned check-level action — a heal or a bulk form of a per-item
+   * button. The plan (and every word it says) comes from
+   * `lib/health/checkActions.ts`; this only supplies the I/O. It never throws:
+   * a failure is a line in the outcome, so a partial run still reports what it
+   * managed to do.
+   */
+  applyCheckAction(
+    plan: CheckActionPlan,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<CheckActionOutcome>;
 }
 
 /** What `useVaultHealth()` hands the tab. */
