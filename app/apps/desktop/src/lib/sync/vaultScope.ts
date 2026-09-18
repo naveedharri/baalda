@@ -222,6 +222,18 @@ export interface SyncProgress {
   total: number;
   /** Subset of `done` that failed — surfaced so a partial run isn't reported clean. */
   failed: number;
+  /**
+   * Bytes moved / bytes to move, when the phase knows (today: the bootstrap
+   * download). A SUBTITLE on the one item counter, never a second denominator:
+   * "settled" is `done === total` on ITEMS and nothing else. Two counters on
+   * screen would disagree with each other about whether the vault is finished,
+   * which is the same reason binaries join the item denominator rather than
+   * opening one of their own.
+   *
+   * Absent whenever the current phase has no byte figure to report.
+   */
+  bytesDone?: number;
+  bytesTotal?: number;
 }
 
 /**

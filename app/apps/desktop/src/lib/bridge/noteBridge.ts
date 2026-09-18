@@ -82,6 +82,10 @@ export class NoteBridge {
    *  drain and the sync layer's `ingestNow` target the same doc routinely, so
    *  passes are chained here rather than left to interleave. */
   private ingestInFlight: Promise<boolean> | null = null;
+  /** The egest pass in flight, if any — the same chain as `ingestInFlight`, for
+   *  the same reason: two passes racing `writeFileAtomic` on one path share a
+   *  temp file, so an interleave is what lands on the note. See `drainEgest`. */
+  private egestInFlight: Promise<void> | null = null;
   /** Appends still in flight. Updates are persisted fire-and-forget and
    *  `destroy()` is synchronous, so a bridge torn down right after it applied
    *  ops used to drop them — while `flushEgest` had already put the same text in
@@ -91,6 +95,13 @@ export class NoteBridge {
    *  it under a fresh clientID. `whenPersisted()` is the way to close a bridge
    *  without opening that gap. */
   private persistQueue: Promise<void> = Promise.resolve();
+  /** Highest `yjs_updates` row id this bridge has been told about. The
+   *  compaction watermark: every row up to it is committed AND folded into the
+   *  snapshot a compaction takes after `whenPersisted()`, so deleting `id <=
+   *  it` is exactly the set the snapshot covers — while a keystroke appended
+   *  during the save gets a higher id and survives. 0 means "nothing known",
+   *  which truncates nothing. */
+  private maxPersistedRow = 0;
   private destroyed = false;
   /** Consecutive failed egest writes (0 once one lands). Drives the retry
    *  backoff and the `onWriteFailed`/`onWriteRecovered` UI cues. */
@@ -147,9 +158,17 @@ export class NoteBridge {
       );
       this.persistQueue = this.persistQueue
         .catch(() => {})
-        .then(() => appended);
+        .then(async () => {
+          await appended;
+        });
       appended
-        .then(() => {
+        .then((rowId) => {
+          // Row ids are monotonic in commit order, so the max is the watermark.
+          // A store that answers nothing (an older host, a test fake) simply
+          // leaves it at 0 and compaction then truncates nothing.
+          if (typeof rowId === "number" && rowId > this.maxPersistedRow) {
+            this.maxPersistedRow = rowId;
+          }
           // Compact LIVE, not only on the next load: one paste or AI rewrite can
           // put megabytes into the log, and until now nothing shrank it until
           // the note was reopened (and the row-count trigger never fired at
@@ -221,6 +240,9 @@ export class NoteBridge {
         for (const u of state.updates) Y.applyUpdate(this.doc, u, "persistence");
       }, "persistence");
       this.logLength = state.updateCount;
+      // The watermark for the rows we just READ: a compaction below (or the
+      // first live one) may truncate exactly these and nothing newer.
+      this.maxPersistedRow = state.lastUpdateId ?? 0;
       // What the log actually COST to load, which is the number the compaction
       // trigger cares about.
       this.logBytes = state.updates.reduce((sum, u) => sum + u.byteLength, 0);
@@ -234,10 +256,19 @@ export class NoteBridge {
       // CRDT we just hydrated describes the LAST session; the .md on disk is
       // the durable source of truth (spec 00), so reconcile against it now
       // rather than waiting for a watcher event that already fired (or never
-      // will). Converged content no-ops. Guarded on a non-empty doc: an empty
-      // doc must go through the deferred pull-before-seed path, never a
-      // pre-sync ingest (that's the note-doubling bug).
-      if (this.text.length > 0) this.ingest();
+      // will). Converged content no-ops.
+      //
+      // A doc that hydrated EMPTY is armed too, but only on a local-only vault
+      // (`seedOnOpen`). A signed-in doc must go through the deferred
+      // pull-before-seed path, never a pre-sync ingest — that is the
+      // note-doubling bug, and `runIngest`'s unseeded-empty refusal is the
+      // matching half. But with no server to pull from, "empty doc, persisted
+      // log" is an ordinary state: the user cleared the note, closed the app,
+      // and something else (an AI, Obsidian, `git checkout`) then wrote the
+      // file. Without this the editor paints empty over that file and the first
+      // keystroke egests the emptiness away — the file's content destroyed with
+      // no trash copy (desktop-audit #2).
+      if (this.text.length > 0 || this.seedOnOpen) this.ingest();
       if (this.shouldCompact()) await this.compact();
     } else {
       // No CRDT yet. Normally seed Y.Text from the file in a 'disk' transaction
@@ -473,11 +504,19 @@ export class NoteBridge {
       // (spec 02 §6, spec 03 §5). The snapshot row IS the recovery point; the
       // diff then lands as fresh updates on top of it.
       try {
+        // Same watermarked order as `compact()`: flush the appends we know
+        // about, snapshot, then truncate only up to the last of them — an
+        // update appended while this save is in flight is not in the snapshot
+        // and must not be deleted with the log it describes.
+        await this.whenPersisted();
+        const upTo = this.maxPersistedRow;
+        const rows = this.logLength;
+        const bytes = this.logBytes;
         const snapshot = Y.encodeStateAsUpdate(this.doc);
         const stateVector = Y.encodeStateVector(this.doc);
-        await this.io.persistence.saveSnapshot(this.docId, snapshot, stateVector);
-        this.logLength = 0;
-        this.logBytes = 0;
+        await this.io.persistence.saveSnapshot(this.docId, snapshot, stateVector, upTo);
+        this.logLength = Math.max(0, this.logLength - rows);
+        this.logBytes = Math.max(0, this.logBytes - bytes);
         this.recoverySnapshotTaken = true;
       } catch (e) {
         this.reportError(e, "ingest:recoverySnapshot");
@@ -516,7 +555,38 @@ export class NoteBridge {
     }, this.cfg.egestDebounceMs);
   }
 
-  private async drainEgest(): Promise<void> {
+  /**
+   * Run one egest pass, never overlapping another — the twin of
+   * {@link drainIngest}'s chain.
+   *
+   * Two overlapping passes both write the SAME file through
+   * `write_note`'s temp-file-and-rename, and neither holds a lock: they
+   * interleave in the temp file and the loser's rename fails (a spurious egest
+   * failure + backoff). `writeThrough` calling `drainEgest` while a debounced
+   * one is still awaiting its write is the routine way in — the registry's
+   * `materializeContent` does exactly that. Serialized here, so the second pass
+   * writes the doc as the first left it (and usually finds the echo hash
+   * already matching, so it writes nothing at all).
+   */
+  private drainEgest(): Promise<void> {
+    const prior = this.egestInFlight;
+    const run = (async () => {
+      if (prior) {
+        try {
+          await prior;
+        } catch {
+          // A failed pass must not strand the queue behind it.
+        }
+      }
+      return this.runEgest();
+    })();
+    this.egestInFlight = run;
+    return run.finally(() => {
+      if (this.egestInFlight === run) this.egestInFlight = null;
+    });
+  }
+
+  private async runEgest(): Promise<void> {
     if (this.destroyed) return;
     const content = this.text.toString();
     // Data-loss guard: a doc that has never held content this session is either
@@ -768,15 +838,34 @@ export class NoteBridge {
     return this.logLength > this.cfg.compactThreshold;
   }
 
-  /** Merge the log into one snapshot and truncate it (spec 02 §4). */
+  /**
+   * Merge the log into one snapshot and truncate it (spec 02 §4).
+   *
+   * Watermarked, and in this order: settle every append we have issued
+   * (`whenPersisted`), THEN encode, THEN delete only up to the highest row id
+   * we were told about. Compaction fires mid-typing (64 rows), and the awaited
+   * `saveSnapshot` is a window in which `onDocUpdate` keeps appending; those
+   * rows are not in the snapshot, and a log truncation that took them too left
+   * the doc loading short — later updates referencing a missing item stay
+   * pending in Yjs forever. See {@link CrdtPersistence.saveSnapshot}.
+   */
   async compact(): Promise<void> {
     this.compacting = true;
     try {
+      await this.whenPersisted();
+      // Taken together, and only after the flush: every row at or below this id
+      // is committed, and every update it holds is already in the doc we are
+      // about to encode.
+      const upTo = this.maxPersistedRow;
+      const rows = this.logLength;
+      const bytes = this.logBytes;
       const snapshot = Y.encodeStateAsUpdate(this.doc);
       const stateVector = Y.encodeStateVector(this.doc);
-      await this.io.persistence.saveSnapshot(this.docId, snapshot, stateVector);
-      this.logLength = 0;
-      this.logBytes = 0;
+      await this.io.persistence.saveSnapshot(this.docId, snapshot, stateVector, upTo);
+      // Subtracted, never zeroed: what this snapshot replaced is what it
+      // covered, and anything appended during the save is still in the log.
+      this.logLength = Math.max(0, this.logLength - rows);
+      this.logBytes = Math.max(0, this.logBytes - bytes);
     } finally {
       this.compacting = false;
     }

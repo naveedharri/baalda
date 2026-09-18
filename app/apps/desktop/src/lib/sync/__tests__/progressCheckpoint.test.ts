@@ -71,6 +71,56 @@ describe("SyncProgressReporter", () => {
     expect(progress.length).toBeLessThanOrEqual(4);
   });
 
+  it("carries BYTES as a subtitle on the same emission, never a second counter", () => {
+    // The bootstrap download knows how many bytes it is moving; the pill shows
+    // them beside the item counter ("Downloading 12,430 / 100,000 · 310 MB /
+    // 2.1 GB"). They must ride the SAME throttled emission — two counters
+    // emitted independently would disagree on screen about where the run is —
+    // and they must never be what "settled" is read from, which stays
+    // `done === total` on items.
+    const clock = fakeClock();
+    const progress: SyncProgress[] = [];
+    const r = new SyncProgressReporter({
+      onProgress: (p) => {
+        if (p) progress.push(p);
+      },
+      onDocState: () => {},
+      throttleMs: 100,
+      now: clock.now,
+      setTimeoutImpl: clock.setTimeoutImpl,
+      clearTimeoutImpl: clock.clearTimeoutImpl,
+    });
+
+    r.phase("downloading", 100);
+    // A phase with no byte figure reports none at all.
+    expect(progress[0].bytesTotal).toBeUndefined();
+
+    // One page: 10 docs and 4 MiB, reported as two calls inside one window.
+    for (let i = 0; i < 10; i++) r.item("ok");
+    r.bytes(4 * 1024 * 1024, 40 * 1024 * 1024);
+    expect(progress).toHaveLength(1); // still throttled
+    clock.advance(100);
+    expect(progress).toHaveLength(2);
+    expect(progress[1]).toEqual({
+      phase: "downloading",
+      done: 10,
+      total: 100,
+      failed: 0,
+      bytesDone: 4 * 1024 * 1024,
+      bytesTotal: 40 * 1024 * 1024,
+    });
+
+    // Re-reporting the same figures is not news and emits nothing.
+    r.bytes(4 * 1024 * 1024, 40 * 1024 * 1024);
+    clock.advance(100);
+    expect(progress).toHaveLength(2);
+
+    // A new phase drops them: they described the phase that ended.
+    r.phase("uploading", 5);
+    expect(progress[progress.length - 1].bytesDone).toBeUndefined();
+    expect(progress[progress.length - 1].bytesTotal).toBeUndefined();
+  });
+
   it("batches per-doc transitions, last-state-wins inside a window", () => {
     const clock = fakeClock();
     const patches: Array<Record<string, DocSyncState | null>> = [];

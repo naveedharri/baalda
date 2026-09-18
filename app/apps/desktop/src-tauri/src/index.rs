@@ -89,6 +89,19 @@ pub struct IndexOutcome {
     pub unchanged: Vec<PathBuf>,
 }
 
+/// One doc of a bootstrap page, as far as the index is concerned: the file is
+/// already on disk, these are the rows it needs.
+#[derive(Debug, Clone)]
+pub struct BootstrapRow {
+    /// The SERVER's doc id — the identity every layer keys by.
+    pub doc_id: String,
+    pub rel_path: String,
+    /// The merged Yjs snapshot for `yjs_snapshot.snapshot`.
+    pub snapshot: Vec<u8>,
+    /// Its state vector, i.e. this doc's line in the durable `hello` manifest.
+    pub state_vector: Vec<u8>,
+}
+
 pub struct Index {
     conn: Connection,
     /// Test-only: how many times `resolve_links` has run. The entire point of
@@ -2095,8 +2108,15 @@ impl Index {
     // mirroring y-leveldb's "updates + separate state-vector" model. The
     // TS bridge owns the Yjs semantics; Rust is a dumb, durable byte store.
 
-    /// Append one binary Yjs update to a doc's log.
-    pub fn append_yjs_update(&self, doc_id: &str, update: &[u8]) -> AppResult<()> {
+    /// Append one binary Yjs update to a doc's log. Returns the row's `id` —
+    /// the COMPACTION WATERMARK the caller hands back to
+    /// [`Index::save_yjs_snapshot`].
+    ///
+    /// `yjs_updates.id` is an `INTEGER PRIMARY KEY`, i.e. the rowid, so
+    /// `last_insert_rowid` is exactly the id just written and ids are
+    /// monotonic per connection. Returning it is what lets a snapshot delete
+    /// only the rows it actually folded in (see `save_yjs_snapshot`).
+    pub fn append_yjs_update(&self, doc_id: &str, update: &[u8]) -> AppResult<i64> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -2105,7 +2125,7 @@ impl Index {
             "INSERT INTO yjs_updates (doc_id, \"update\", created_at) VALUES (?1, ?2, ?3)",
             params![doc_id, update, now],
         )?;
-        Ok(())
+        Ok(self.conn.last_insert_rowid())
     }
 
     /// Load a doc's persisted CRDT state: the latest snapshot (if any) plus every
@@ -2126,30 +2146,54 @@ impl Index {
             .optional()?
             .flatten();
 
-        let updates: Vec<Vec<u8>> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT \"update\" FROM yjs_updates WHERE doc_id = ?1 ORDER BY id ASC")?;
-            let rows = stmt.query_map(params![doc_id], |r| r.get::<_, Vec<u8>>(0))?;
+        // Id AND bytes in ONE statement, so `last_update_id` can only ever name
+        // a row that is in `updates`. A separate `SELECT MAX(id)` would be a
+        // second read with its own moment in time, and a row appended between
+        // the two would be named by a watermark whose snapshot does not contain
+        // it — the exact bug the watermark exists to prevent.
+        let rows: Vec<(i64, Vec<u8>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, \"update\" FROM yjs_updates WHERE doc_id = ?1 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![doc_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+        let last_update_id = rows.last().map(|(id, _)| *id);
+        let updates: Vec<Vec<u8>> = rows.into_iter().map(|(_, u)| u).collect();
 
         let update_count = updates.len() as i64;
         Ok(YjsState {
             snapshot,
             updates,
             update_count,
+            last_update_id,
         })
     }
 
-    /// Write a doc's merged snapshot + state vector and truncate its update log,
-    /// atomically in one transaction. The caller (TS bridge) encodes the snapshot
-    /// from the fully-loaded doc, so the truncated updates are already folded in.
+    /// Write a doc's merged snapshot + state vector and truncate its update log
+    /// **up to a watermark**, atomically in one transaction.
+    ///
+    /// `up_to` is the last `yjs_updates.id` the snapshot covers — the highest id
+    /// [`Index::append_yjs_update`] returned before the caller encoded it.
+    /// `None` deletes NOTHING and writes the snapshot only.
+    ///
+    /// The watermark is the whole point (desktop-audit #4). This used to be a
+    /// bare `DELETE FROM yjs_updates WHERE doc_id = ?`, and the bridge's
+    /// `compact()` encodes the snapshot synchronously and then *awaits* the IPC
+    /// while `onDocUpdate` keeps appending a row per keystroke. Any append that
+    /// committed inside that window was deleted by a snapshot that does not
+    /// contain it, so on the next load the surviving later updates referenced a
+    /// missing item, Yjs parked them as pending forever, and the doc loaded
+    /// short. Deleting only `id <= up_to` cannot touch a row the caller never
+    /// saw.
     pub fn save_yjs_snapshot(
         &self,
         doc_id: &str,
         snapshot: &[u8],
         state_vector: &[u8],
+        up_to: Option<i64>,
     ) -> AppResult<()> {
         let tx = self.conn.unchecked_transaction()?;
         let prior_seq: i64 = tx
@@ -2170,7 +2214,12 @@ impl Index {
                 seq=excluded.seq",
             params![doc_id, snapshot, state_vector, seq],
         )?;
-        tx.execute("DELETE FROM yjs_updates WHERE doc_id = ?1", params![doc_id])?;
+        if let Some(up_to) = up_to {
+            tx.execute(
+                "DELETE FROM yjs_updates WHERE doc_id = ?1 AND id <= ?2",
+                params![doc_id, up_to],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -2224,6 +2273,246 @@ impl Index {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ---- Bulk sync batches (the bootstrap + materialize commands) --------
+    //
+    // Both of these exist for ONE reason: a cold join used 2-3 IPC round trips
+    // and 2-3 SQLite transactions PER NOTE, each carrying its own whole-vault
+    // link pass (`rebind_note_id` is `LinkScope::All`). On a 600-note vault that
+    // is the join, all of it. These are the batch shape — one transaction, one
+    // link pass, N docs — and they are the only place `rebind`'s row work runs
+    // without its own pass.
+
+    /// Does this doc already have LOCAL CRDT state?
+    ///
+    /// The bootstrap's eligibility gate: any `yjs_updates` row or any
+    /// `yjs_snapshot` row (even the snapshot-NULL, state-vector-only shape
+    /// `save_yjs_state_vectors` writes) means this device holds ops the incoming
+    /// page did not produce, so the fast path must refuse it and let the TS side
+    /// cold-apply the update through `VaultDocStore`, which MERGES. Writing a
+    /// server snapshot over local CRDT would drop whatever this device knew.
+    pub fn has_local_crdt(&self, doc_id: &str) -> AppResult<bool> {
+        let updates: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM yjs_updates WHERE doc_id = ?1)",
+            params![doc_id],
+            |r| r.get(0),
+        )?;
+        if updates != 0 {
+            return Ok(true);
+        }
+        let snapshot: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM yjs_snapshot WHERE doc_id = ?1)",
+            params![doc_id],
+            |r| r.get(0),
+        )?;
+        Ok(snapshot != 0)
+    }
+
+    /// One doc's row work for a bootstrap page: its file is already on disk
+    /// (the caller wrote it), this is the index + CRDT half.
+    pub fn commit_bootstrap_rows(
+        &self,
+        vault: &Path,
+        rows: &[BootstrapRow],
+    ) -> AppResult<Vec<(String, AppError)>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
+        let tx = self.conn.unchecked_transaction()?;
+        let mut failures: Vec<(String, AppError)> = Vec::new();
+        let mut touched: Vec<String> = Vec::with_capacity(rows.len() * 2);
+        let mut committed: Vec<&BootstrapRow> = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            // Index the file we just wrote, INSIDE this transaction. That is
+            // what makes the watcher's echo free rather than needing a
+            // suppression set: by the time the 150 ms-debounced drain looks at
+            // these paths, `notes.sha256` already equals the bytes on disk, so
+            // `index_one`'s hash gate returns `IndexedNote::Unchanged`,
+            // `index_notes` reports them in `IndexOutcome::unchanged` and
+            // `watcher.rs mark_unchanged` flags each `files-changed` entry
+            // `unchanged: true` — which the TS side already drops.
+            let indexed = crate::vault::resolve_in_vault(vault, &row.rel_path).and_then(|abs| {
+                let reuse = self.id_for_path(&tx, &row.rel_path)?;
+                let outcome = self.index_one(&tx, vault, &abs, reuse.clone())?;
+                Ok(match outcome {
+                    IndexedNote::Indexed(id) => id,
+                    // `Unchanged` only happens when `reuse` was Some (the gate
+                    // needs a row to compare against), so the id is known.
+                    IndexedNote::Unchanged => reuse.unwrap_or_default(),
+                })
+            });
+            let local_id = match indexed {
+                Ok(id) if !id.is_empty() => id,
+                Ok(_) => {
+                    failures.push((
+                        row.doc_id.clone(),
+                        AppError::new("could not index the note that was written"),
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    failures.push((row.doc_id.clone(), e));
+                    continue;
+                }
+            };
+            touched.push(local_id.clone());
+
+            // Re-key the row to the SERVER's doc_id. Identity is the doc_id
+            // everywhere (`.context/config.json`, the CRDT tables, the server),
+            // so a note indexed under a fresh local uuid would register as a
+            // second note on the next pull.
+            match self.rebind_in_tx(&tx, &local_id, &row.doc_id, &mut touched) {
+                Ok(true) => committed.push(row),
+                Ok(false) => failures.push((
+                    row.doc_id.clone(),
+                    AppError::new("that doc id is already indexed at another path"),
+                )),
+                Err(e) => failures.push((row.doc_id.clone(), e)),
+            }
+        }
+
+        // The one pass the whole batch shares.
+        if !touched.is_empty() {
+            self.resolve_links(&tx, LinkScope::Touched(&touched))?;
+        }
+
+        {
+            // `seq` starts at 1 here: an eligible doc has NO prior row by
+            // definition (`has_local_crdt`), and the conflict arm exists only so
+            // a re-run cannot fail the batch.
+            let mut stmt = tx.prepare(
+                "INSERT INTO yjs_snapshot (doc_id, snapshot, state_vector, seq)
+                 VALUES (?1, ?2, ?3, 1)
+                 ON CONFLICT(doc_id) DO UPDATE SET
+                    snapshot=excluded.snapshot,
+                    state_vector=excluded.state_vector,
+                    seq=yjs_snapshot.seq + 1",
+            )?;
+            for row in committed {
+                stmt.execute(params![row.doc_id, row.snapshot, row.state_vector])?;
+            }
+        }
+        tx.commit()?;
+        log::info!(
+            "[index] bootstrap batch: {} docs, {} failed, {} ms",
+            rows.len(),
+            failures.len(),
+            started.elapsed().as_millis()
+        );
+        Ok(failures)
+    }
+
+    /// Index + rebind a batch of just-materialized placeholder notes: ONE
+    /// transaction, ONE link pass. Returns `(rel_path, rebound)` per row, in
+    /// input order; a path with no row on disk is reported `false` rather than
+    /// failing the batch.
+    pub fn commit_materialized(
+        &self,
+        vault: &Path,
+        rows: &[(String, Option<String>)],
+    ) -> AppResult<Vec<bool>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
+        let tx = self.conn.unchecked_transaction()?;
+        let mut touched: Vec<String> = Vec::with_capacity(rows.len() * 2);
+        let mut out = Vec::with_capacity(rows.len());
+
+        for (rel, doc_id) in rows {
+            let indexed = crate::vault::resolve_in_vault(vault, rel).and_then(|abs| {
+                let reuse = self.id_for_path(&tx, rel)?;
+                let outcome = self.index_one(&tx, vault, &abs, reuse.clone())?;
+                Ok(match outcome {
+                    IndexedNote::Indexed(id) => Some(id),
+                    IndexedNote::Unchanged => reuse,
+                })
+            });
+            let local_id = match indexed {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    out.push(false);
+                    continue;
+                }
+                Err(e) => {
+                    // Per-path and non-fatal, like `index_notes`: one unreadable
+                    // placeholder must not cost the other 599 their rows.
+                    log::warn!("[index] materialize: could not index {rel}: {}", e.0);
+                    out.push(false);
+                    continue;
+                }
+            };
+            touched.push(local_id.clone());
+            match doc_id {
+                Some(doc_id) => {
+                    out.push(self.rebind_in_tx(&tx, &local_id, doc_id, &mut touched)?)
+                }
+                None => out.push(false),
+            }
+        }
+
+        if !touched.is_empty() {
+            self.resolve_links(&tx, LinkScope::Touched(&touched))?;
+        }
+        tx.commit()?;
+        log::info!(
+            "[index] materialize batch: {} notes, {} ms",
+            rows.len(),
+            started.elapsed().as_millis()
+        );
+        Ok(out)
+    }
+
+    /// [`Index::rebind_note_id`]'s row work, inside a caller-owned transaction
+    /// and WITHOUT the link pass — the batch does one at the end.
+    ///
+    /// The standalone command runs `resolve_links(LinkScope::All)`, a full
+    /// `links` scan, once per call; N of those is the single largest cost in a
+    /// cold join. Both ids go into `touched` on purpose: the note's OUTBOUND
+    /// links move with the new id, and its INBOUND ones still carry the OLD id
+    /// in `dst_note_id`, so the pass has to be asked about both or backlinks
+    /// break across the rebind.
+    ///
+    /// Returns whether the row at this path now carries `doc_id` — true when it
+    /// already did (a re-run), false when the id belongs to a DIFFERENT path,
+    /// which is never merged: that would silently drop one note's index entry.
+    fn rebind_in_tx(
+        &self,
+        tx: &Connection,
+        current: &str,
+        doc_id: &str,
+        touched: &mut Vec<String>,
+    ) -> AppResult<bool> {
+        if current == doc_id {
+            return Ok(true);
+        }
+        let taken: Option<String> = tx
+            .query_row(
+                "SELECT path FROM notes WHERE id = ?1",
+                params![doc_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if taken.is_some() {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE notes SET id = ?1 WHERE id = ?2",
+            params![doc_id, current],
+        )?;
+        tx.execute(
+            "UPDATE note_tags SET note_id = ?1 WHERE note_id = ?2",
+            params![doc_id, current],
+        )?;
+        tx.execute(
+            "UPDATE links SET src_note_id = ?1 WHERE src_note_id = ?2",
+            params![doc_id, current],
+        )?;
+        touched.push(doc_id.to_string());
+        Ok(true)
     }
 
     /// Drop every CRDT row whose `doc_id` is not in `live`, then report what went.
@@ -2572,6 +2861,19 @@ pub struct YjsState {
     pub updates: Vec<Vec<u8>>,
     /// `updates.len()` — the TS side compacts when this exceeds 64.
     pub update_count: i64,
+    /// The `yjs_updates.id` of the LAST row in `updates`, or `None` when the
+    /// log was empty — the compaction watermark for a log this process did not
+    /// append itself.
+    ///
+    /// A bridge that hydrates and immediately compacts (a big log survives a
+    /// relaunch, and `shouldCompact` fires right after `hydrate`) has appended
+    /// nothing, so it knows no watermark of its own and would have to pass
+    /// `None` — which, by design, truncates nothing, and the log would never
+    /// shrink again. This is that watermark, and it is taken from the last row
+    /// actually returned rather than from a separate `MAX(id)`: a second query
+    /// could name a row that landed after the read and is therefore NOT in the
+    /// snapshot the caller is about to write.
+    pub last_update_id: Option<i64>,
 }
 
 /// One doc's persisted Yjs state vector — the durable sync manifest entry.
@@ -3876,13 +4178,54 @@ mod tests {
     }
 
     #[test]
+    fn load_yjs_state_names_the_last_row_it_returned() {
+        // The load-time compaction watermark. A bridge that hydrates and
+        // immediately compacts has appended nothing of its own, so without this
+        // it passes no watermark, truncates nothing, and a log that survived a
+        // relaunch never shrinks again.
+        let idx = Index::open_in_memory().unwrap();
+        // Empty log ⇒ no watermark. NOT 0: 0 would be a legal rowid, and
+        // "delete up to 0" must not be confused with "nothing to delete".
+        assert_eq!(idx.load_yjs_state("doc-a").unwrap().last_update_id, None);
+
+        let first = idx.append_yjs_update("doc-a", &[1]).unwrap();
+        let last = idx.append_yjs_update("doc-a", &[2]).unwrap();
+        // Another doc's rows are interleaved in the same table and must not be
+        // named by this doc's watermark.
+        let other = idx.append_yjs_update("doc-b", &[3]).unwrap();
+        assert!(other > last, "ids are monotonic across docs");
+
+        let a = idx.load_yjs_state("doc-a").unwrap();
+        assert_eq!(a.updates, vec![vec![1], vec![2]]);
+        assert_eq!(
+            a.last_update_id,
+            Some(last),
+            "the id is the LAST row returned, never another doc's"
+        );
+        assert_ne!(a.last_update_id, Some(first));
+
+        // And it is exactly the watermark that empties what was read: feeding
+        // it straight back leaves nothing behind.
+        idx.save_yjs_snapshot("doc-a", &[9], &[1], a.last_update_id)
+            .unwrap();
+        let after = idx.load_yjs_state("doc-a").unwrap();
+        assert_eq!(after.update_count, 0);
+        assert_eq!(after.last_update_id, None);
+        // ...and it never reached doc-b.
+        assert_eq!(
+            idx.load_yjs_state("doc-b").unwrap().last_update_id,
+            Some(other)
+        );
+    }
+
+    #[test]
     fn yjs_snapshot_truncates_only_its_own_log() {
         let idx = Index::open_in_memory().unwrap();
         idx.append_yjs_update("doc-a", &[1]).unwrap();
-        idx.append_yjs_update("doc-a", &[2]).unwrap();
+        let watermark = idx.append_yjs_update("doc-a", &[2]).unwrap();
         idx.append_yjs_update("doc-b", &[7]).unwrap();
 
-        idx.save_yjs_snapshot("doc-a", &[10, 20, 30], &[40])
+        idx.save_yjs_snapshot("doc-a", &[10, 20, 30], &[40], Some(watermark))
             .unwrap();
 
         let a = idx.load_yjs_state("doc-a").unwrap();
@@ -3897,12 +4240,53 @@ mod tests {
     }
 
     #[test]
+    fn yjs_snapshot_leaves_rows_appended_after_its_watermark() {
+        // desktop-audit #4. The bridge encodes a snapshot, then awaits this call
+        // while typing keeps appending. A row that commits inside that window is
+        // NOT in the snapshot, so deleting it strands every later update behind a
+        // missing item and the doc loads short.
+        let idx = Index::open_in_memory().unwrap();
+        idx.append_yjs_update("doc-a", &[1]).unwrap();
+        let watermark = idx.append_yjs_update("doc-a", &[2]).unwrap();
+        // ...the caller encodes its snapshot here, and these land while it awaits.
+        idx.append_yjs_update("doc-a", &[3]).unwrap();
+        idx.append_yjs_update("doc-a", &[4]).unwrap();
+
+        idx.save_yjs_snapshot("doc-a", &[99], &[1], Some(watermark))
+            .unwrap();
+
+        let a = idx.load_yjs_state("doc-a").unwrap();
+        assert_eq!(a.snapshot, Some(vec![99]));
+        assert_eq!(
+            a.updates,
+            vec![vec![3], vec![4]],
+            "rows appended after the watermark survive, in order"
+        );
+    }
+
+    #[test]
+    fn yjs_snapshot_without_a_watermark_deletes_nothing() {
+        // `None` is the "snapshot only" call: it must never be read as "delete
+        // everything", which is what the unwatermarked version did.
+        let idx = Index::open_in_memory().unwrap();
+        idx.append_yjs_update("doc-a", &[1]).unwrap();
+        idx.append_yjs_update("doc-a", &[2]).unwrap();
+
+        idx.save_yjs_snapshot("doc-a", &[9], &[1], None).unwrap();
+
+        let a = idx.load_yjs_state("doc-a").unwrap();
+        assert_eq!(a.snapshot, Some(vec![9]));
+        assert_eq!(a.update_count, 2, "the log is untouched");
+    }
+
+    #[test]
     fn yjs_snapshot_overwrites_and_bumps_seq() {
         let idx = Index::open_in_memory().unwrap();
-        idx.save_yjs_snapshot("doc-a", &[1], &[1]).unwrap();
+        idx.save_yjs_snapshot("doc-a", &[1], &[1], None).unwrap();
         // Updates after the first snapshot, then re-snapshot.
-        idx.append_yjs_update("doc-a", &[99]).unwrap();
-        idx.save_yjs_snapshot("doc-a", &[2, 2], &[2]).unwrap();
+        let watermark = idx.append_yjs_update("doc-a", &[99]).unwrap();
+        idx.save_yjs_snapshot("doc-a", &[2, 2], &[2], Some(watermark))
+            .unwrap();
 
         let a = idx.load_yjs_state("doc-a").unwrap();
         assert_eq!(a.snapshot, Some(vec![2, 2]));
@@ -3944,7 +4328,7 @@ mod tests {
     #[test]
     fn state_vector_write_preserves_an_existing_snapshot() {
         let idx = Index::open_in_memory().unwrap();
-        idx.save_yjs_snapshot("doc-a", &[10, 20], &[1]).unwrap();
+        idx.save_yjs_snapshot("doc-a", &[10, 20], &[1], None).unwrap();
         idx.save_yjs_state_vectors(&[("doc-a".to_string(), vec![2, 2])])
             .unwrap();
 
@@ -3984,15 +4368,17 @@ mod tests {
     #[test]
     fn prune_yjs_docs_removes_only_unreachable_docs() {
         let idx = Index::open_in_memory().unwrap();
-        idx.append_yjs_update("live-a", &[1, 2, 3]).unwrap();
+        let live_a_mark = idx.append_yjs_update("live-a", &[1, 2, 3]).unwrap();
         idx.append_yjs_update("live-b", &[4]).unwrap();
-        idx.append_yjs_update("dead", &[5, 6, 7, 8]).unwrap();
-        idx.save_yjs_snapshot("dead", &[9; 64], &[1]).unwrap();
+        let dead_mark = idx.append_yjs_update("dead", &[5, 6, 7, 8]).unwrap();
+        idx.save_yjs_snapshot("dead", &[9; 64], &[1], Some(dead_mark))
+            .unwrap();
         idx.append_yjs_update("dead", &[11]).unwrap();
-        // Snapshotting truncates the doc's update log, so append AFTER it to
-        // give live-a both halves — the state a doc edited since its last
-        // compaction is really in.
-        idx.save_yjs_snapshot("live-a", &[7; 32], &[1]).unwrap();
+        // Snapshotting truncates the doc's update log up to its watermark, so
+        // append AFTER it to give live-a both halves — the state a doc edited
+        // since its last compaction is really in.
+        idx.save_yjs_snapshot("live-a", &[7; 32], &[1], Some(live_a_mark))
+            .unwrap();
         idx.append_yjs_update("live-a", &[10]).unwrap();
 
         let report = idx
@@ -4026,7 +4412,7 @@ mod tests {
     fn clear_yjs_doc_drops_both_halves_of_one_doc() {
         let idx = Index::open_in_memory().unwrap();
         idx.append_yjs_update("target", &[1, 2]).unwrap();
-        idx.save_yjs_snapshot("target", &[3; 16], &[1]).unwrap();
+        idx.save_yjs_snapshot("target", &[3; 16], &[1], None).unwrap();
         idx.append_yjs_update("target", &[4]).unwrap();
         idx.append_yjs_update("bystander", &[5]).unwrap();
 

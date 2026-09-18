@@ -66,6 +66,7 @@
 // upload pays for the probe.
 
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
+import { BATCH_MAX_FILES, useBulkPath } from "./pool";
 import type { DocSyncState } from "./vaultScope";
 import type {
   BlobCompleteBody,
@@ -191,17 +192,39 @@ export function routesToAttachmentSync(path: string): boolean {
  * limit rather than a decision. Server blobs without a sha or a rel_path — or
  * with a relPath neither guard accepts (see {@link isSafeBlobRelPath}) — can't
  * be placed on disk, so they're skipped from the download set.
+ *
+ * **Invariant: a download never lands on a path the disk already holds.** Sha
+ * is identity, but the server keeps ONE ready row per content, not per path, so
+ * editing a synced `Report.docx` in place leaves the server holding both the
+ * old sha and the new one. Keyed on sha alone the superseded row reads as "a
+ * file this device is missing", and writing it back destroys the edit — then
+ * the next pass sees the old sha locally and pulls the new one, and the file
+ * flip-flops between two versions forever. So a path the disk occupies is not
+ * missing locally, whatever its bytes are: sha-only identity stays for paths
+ * with NO local file (the genuine "this device doesn't have it" case), and a
+ * disagreement at an occupied path is a conflict the uploader resolves the
+ * other way (uploads run first in every pass), never an overwrite.
+ *
+ * Compared case-insensitively, like `samePath`/`planInbound` and the server's
+ * `lower(path)` unique indexes — on macOS `Report.docx` and `report.docx` are
+ * the same file on disk.
  */
 export function diffAttachments(
   local: LocalAttachment[],
   server: ServerBlob[],
 ): AttachmentDiff {
   const localShas = new Set(local.map((a) => a.sha256));
+  const localPaths = new Set(local.map((a) => a.relPath.toLowerCase()));
   const serverShas = new Set(server.map((b) => b.sha256));
 
   const toUpload = local.filter((a) => !serverShas.has(a.sha256));
   const toDownload = server.filter(
-    (b) => !!b.sha256 && !!b.relPath && isSafeBlobRelPath(b.relPath) && !localShas.has(b.sha256),
+    (b) =>
+      !!b.sha256 &&
+      !!b.relPath &&
+      isSafeBlobRelPath(b.relPath) &&
+      !localShas.has(b.sha256) &&
+      !localPaths.has(b.relPath.toLowerCase()),
   );
   return { toUpload, toDownload };
 }
@@ -474,6 +497,32 @@ export interface AttachmentSyncDeps {
   knownFileId?: (relPath: string) => string | null;
   /** Create (or adopt) the server `files` row and answer with its id. */
   registerFile?: (input: { relPath: string; id: string }) => Promise<string | null>;
+  /**
+   * The same thing for N files in ONE request (`POST /vaults/:id/files/batch`).
+   *
+   * Used only above {@link BULK_THRESHOLD_DOCS} files and only to PRE-FILL the
+   * ids `ensureFileRow` would otherwise mint one round trip at a time — every
+   * decision after that (dedupe, adoption, authorship, the refusal memo) is
+   * still made per file, by the same code, in the same order. Optional: a host
+   * that does not provide it keeps today's per-file path at every size.
+   */
+  registerFiles?: (
+    inputs: Array<{
+      relPath: string;
+      id: string;
+      sha256: string;
+      size: number;
+      mime: string | null;
+    }>,
+  ) => Promise<
+    Array<{
+      relPath: string;
+      id: string | null;
+      status: "created" | "adopted" | "conflict" | "error";
+      code: string | null;
+      error: string | null;
+    }>
+  >;
   /** Remember a registered row for the next session. */
   rememberFileId?: (relPath: string, id: string, opts?: { authored?: boolean }) => void;
   /** Forget a mapping whose path is not this file's any more — the other half
@@ -724,6 +773,13 @@ export class AttachmentSync {
       }
       this.publishFileStates();
     }
+
+    // Above the threshold, mint every `files` row this pass needs in one
+    // request per chunk. Purely a pre-fill: `ensureFileRow` below then finds
+    // each id remembered and every later decision is unchanged. Never fatal —
+    // anything it could not settle falls through to the per-file path.
+    await this.preregisterFiles(toUpload);
+    if (!this.current()) return { uploaded: 0, downloaded: 0 };
 
     let uploaded = 0;
     let downloaded = 0;
@@ -1069,6 +1125,16 @@ export class AttachmentSync {
    */
   private async downloadOne(b: ServerBlob): Promise<void> {
     const relPath = b.relPath as string;
+    // Last line of the "never overwrite an occupied path" invariant
+    // ({@link diffAttachments}). The diff already subtracts every path this
+    // pass's listing saw, so reaching here means the file appeared AFTER the
+    // listing — a drop, or an in-place save racing the pass. Either way these
+    // are not the bytes at that path, and a download is a conflict, never an
+    // overwrite: it is refused, reported as a failed download, and the next
+    // pass uploads the local file instead (uploads run first).
+    if (this.localPathKeys.has(relPath.toLowerCase())) {
+      throw new Error(`${relPath} is occupied on disk — refusing to overwrite it with a download`);
+    }
     const tree = !isUnderAttachments(relPath);
     // A tree binary needs a host that can write outside `attachments/`. Without
     // one (a unit test, an older host) it is left alone rather than pushed
@@ -1148,6 +1214,122 @@ export class AttachmentSync {
     if (this.fileIds.get(a.relPath) ?? this.deps.knownFileId?.(a.relPath)) return false;
     console.info(`[attachments] ${a.relPath} — a delete window is unsettled; leaving it queued`);
     return true;
+  }
+
+  /**
+   * Register every tree binary this pass is about to upload in ONE request per
+   * {@link BATCH_MAX_FILES}, instead of one round trip per file inside
+   * {@link AttachmentSync.ensureFileRow}.
+   *
+   * Deliberately a PRE-FILL and nothing more: it writes the ids it learns into
+   * `fileIds` (and `.context/config.json` via `rememberFileId`), after which
+   * `ensureFileRow` takes its `remembered` fast path and every decision that
+   * follows — the dedupe/adoption repair, the authorship claim, the refusal
+   * memo, the per-file upload — is the same code in the same order it has
+   * always been. A file this skips (no local id yet, already remembered,
+   * already refused, under `attachments/`, deferred by a pending rename) simply
+   * reaches `ensureFileRow` exactly as before.
+   *
+   * Below the threshold it does not run at all, so a small vault's behaviour is
+   * byte for byte what it was.
+   *
+   * Per-item outcomes mirror the single path's `catch` exactly:
+   *  • `created`/`adopted` with an id ⇒ remember it (`authored`, because this is
+   *    the upload side — it is the only authorship signal a binary has);
+   *  • `path_folder_mismatch` ⇒ the server resolved a different parent than our
+   *    path implies because its folder rows are mid-reconcile: per file, never
+   *    fatal, retried next pass;
+   *  • any other ANSWERED refusal ⇒ a decision, not a hiccup: remembered in
+   *    `registerRefused` so we stop asking, and the bytes still upload without a
+   *    doc_id;
+   *  • no answer for an item ⇒ nothing is recorded, and `ensureFileRow` asks for
+   *    that one file the old way.
+   */
+  private async preregisterFiles(toUpload: LocalAttachment[]): Promise<void> {
+    type BatchRow = {
+      relPath: string;
+      id: string | null;
+      status: "created" | "adopted" | "conflict" | "error";
+      code: string | null;
+      error: string | null;
+    };
+    if (!this.deps.registerFiles || !this.deps.registerFile) return;
+    const candidates: Array<{
+      relPath: string;
+      id: string;
+      sha256: string;
+      size: number;
+      mime: string | null;
+    }> = [];
+    for (const a of toUpload) {
+      if (!this.current()) return;
+      if (isUnderAttachments(a.relPath)) continue;
+      if (this.permanentSkips.has(a.sha256)) continue;
+      if (this.registerRefused.has(a.relPath)) continue;
+      if (this.fileIds.get(a.relPath) ?? this.deps.knownFileId?.(a.relPath)) continue;
+      // The arrival half of a rename the delete queue is still pairing must not
+      // be registered as a new file — the same rail `uploadOne` rides.
+      if (this.deferForRename(a)) continue;
+      // No local `files` row yet (the extraction worker is seconds behind a
+      // drop): the next pass registers it, exactly as the single path decides.
+      const id = await this.localFileId(a.relPath);
+      if (!id) continue;
+      candidates.push({
+        relPath: a.relPath,
+        id,
+        sha256: a.sha256,
+        size: a.size ?? 0,
+        mime: mimeForPath(a.relPath),
+      });
+    }
+    if (!useBulkPath(candidates.length)) return;
+
+    for (let i = 0; i < candidates.length; i += BATCH_MAX_FILES) {
+      if (!this.current()) return;
+      const chunk = candidates.slice(i, i + BATCH_MAX_FILES);
+      let results: BatchRow[];
+      try {
+        results = await this.deps.registerFiles(chunk);
+      } catch (e) {
+        const status = errStatus(e);
+        const code = errCode(e);
+        // A plan limit stops the PRE-REGISTRATION and nothing else: the files
+        // are not broken, the vault is full. The upload loop below then hits the
+        // same limit and aborts the pass the way it always has.
+        if (status === 402 || code === "vault_limit_reached") {
+          console.warn(`[attachments] files/batch stopped — ${code ?? status}`);
+          return;
+        }
+        // Same reading as one refused registration, applied to the request: an
+        // ANSWER (4xx that is not the retryable 400) is a decision about these
+        // files; anything else is a hiccup that must not cost them their doc_id.
+        const permanent = status != null && status >= 400 && status < 500 && status !== 400;
+        if (permanent) for (const c of chunk) this.registerRefused.add(c.relPath);
+        console.warn(
+          `[attachments] files/batch failed (${status ?? "?"} ${code ?? "?"})${
+            permanent ? "; uploading without doc_ids" : "; retrying next pass"
+          }`,
+          e,
+        );
+        continue;
+      }
+      if (!this.current()) return;
+      const byPath = new Map(results.map((r) => [r.relPath, r]));
+      for (const c of chunk) {
+        const res = byPath.get(c.relPath);
+        if (!res) continue; // unanswered ⇒ the per-file path asks again
+        if (res.id && (res.status === "created" || res.status === "adopted")) {
+          this.fileIds.set(c.relPath, res.id);
+          this.deps.rememberFileId?.(c.relPath, res.id, { authored: true });
+          continue;
+        }
+        if (res.code === "path_folder_mismatch") continue; // retried next pass
+        this.registerRefused.add(c.relPath);
+        console.warn(
+          `[attachments] ${c.relPath} — no files row (${res.code ?? res.error ?? "refused"}); uploading without a doc_id`,
+        );
+      }
+    }
   }
 
   /**

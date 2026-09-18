@@ -189,10 +189,20 @@ function normalizeDocId(raw: unknown): string | null {
  * has.
  */
 async function adoptDocId(blobId: string, docId: string): Promise<void> {
-  await pool.query(
-    "UPDATE blobs SET doc_id = $2, updated_at = now() WHERE id = $1 AND doc_id IS NULL",
-    [blobId, docId],
-  );
+  try {
+    await pool.query(
+      "UPDATE blobs SET doc_id = $2, updated_at = now() WHERE id = $1 AND doc_id IS NULL",
+      [blobId, docId],
+    );
+  } catch (err) {
+    // 23505 on `blobs_vault_sha_doc_idx` (migration 029): a concurrent upload
+    // already claimed this content for the same doc. The other row is just as
+    // good an answer — the bytes are identical by construction — so the caller
+    // keeps the unclaimed row rather than getting a 500 for a race it won
+    // nothing by losing.
+    if ((err as { code?: string })?.code !== "23505") throw err;
+    console.info(`[blobs] ${blobId} lost the adopt race for file ${docId}; leaving it unclaimed`);
+  }
 }
 
 /** 64 lowercase hex characters, or null. */
@@ -288,7 +298,7 @@ blobRoutes.post(
     // header is verified against the real hash below.
     const claimedSha = normalizeSha(c.req.header("x-sha256"));
     if (claimedSha) {
-      const hit = await findBlob(vaultId, claimedSha);
+      const hit = await findBlob(vaultId, claimedSha, docId);
       if (hit) return c.json({ ...toMeta(await claimDoc(hit, docId)), deduped: true }, 200);
     }
 
@@ -357,12 +367,18 @@ blobRoutes.post(
       // Dedupe per vault by content hash: return the existing row if present.
       // Doing this before the bytes are handed to the store means a re-upload of
       // known content never pays the encode/serialize cost at all.
-      const existing = await findBlob(vaultId, sha256);
+      const existing = await findBlob(vaultId, sha256, docId);
       if (existing) {
         return c.json({ ...toMeta(await claimDoc(existing, docId)), deduped: true }, 200);
       }
 
       const id = randomUUID();
+      // The object key follows the provider exactly as the intent route does
+      // (`objectKey` for S3/R2, NULL for postgres whose key IS the row id):
+      // `blobs_external_key_chk` refuses an external row with no key, so a
+      // direct upload against an S3-backed server used to 500 here and only
+      // the presign flow could ever store a byte.
+      const storageKey = store.provider === "postgres" ? null : objectKey(vaultId, sha256);
       // The row is created `pending` and the bytes are written into it through
       // the store, then it is flipped to `ready` — the flow PR 2b's
       // intent → PUT → complete needs, run here inside one transaction so a
@@ -373,8 +389,8 @@ blobRoutes.post(
         const inserted = await client.query<BlobRow>(
           `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
                               storage_provider, storage_key, status, created_by, doc_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, 'pending', $10, $11)
-           ON CONFLICT (vault_id, sha256) DO NOTHING
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $12, 'pending', $10, $11)
+           ON CONFLICT DO NOTHING
            RETURNING ${BLOB_ROW_COLUMNS}`,
           [
             id,
@@ -388,20 +404,21 @@ blobRoutes.post(
             store.provider,
             session.userId,
             docId,
+            storageKey,
           ],
         );
         if (!inserted.rows[0]) {
           // Another request uploaded the same content between the dedupe read
-          // and this insert. `blobs_vault_sha_idx` is what settles it; the loser
-          // returns the winner's row rather than a 500.
+          // and this insert. The per-doc unique index (migration 029) is what
+          // settles it; the loser returns the winner's row rather than a 500.
           await client.query("ROLLBACK");
-          const winner = await findBlob(vaultId, sha256);
+          const winner = await findBlob(vaultId, sha256, docId);
           if (winner) return c.json({ ...toMeta(await claimDoc(winner, docId)), deduped: true }, 200);
           return c.json({ error: "Upload conflicted — retry" }, 409);
         }
         await store.put(
           {
-            key: id,
+            key: storageKey ?? id,
             blobId: id,
             vaultId,
             body: Readable.from(buf),
@@ -416,6 +433,9 @@ blobRoutes.post(
           id,
         ]);
         await client.query("COMMIT");
+        // After COMMIT: this row is the file's current content, so any older
+        // ready row still claiming the same doc is a stale duplicate listing.
+        await retireSupersededDocBlobs(docId, id);
         return c.json({ ...toMeta(inserted.rows[0]), deduped: false }, 201);
       } catch (e) {
         await client.query("ROLLBACK").catch(() => {});
@@ -429,13 +449,76 @@ blobRoutes.post(
   },
 );
 
-async function findBlob(vaultId: string, sha256: string): Promise<BlobRow | undefined> {
+/**
+ * The ready row this upload may dedupe onto — content hash AND doc.
+ *
+ * `docId` is load-bearing, not a filter for tidiness. Keyed on `(vault, sha256)`
+ * alone, two REGISTERED FILES holding identical bytes at different paths
+ * collapsed into one row with one `rel_path` and one `doc_id`: the second file
+ * never appeared in `GET /vaults/:id/blobs` (so a new device could not
+ * materialize it), and deleting the FIRST file ran `deleteDocBlobs` over the
+ * shared row and took the second one's bytes with it (migration 029).
+ *
+ * So a tree file matches only its OWN row, or an unclaimed one it can adopt
+ * (`claimDoc`) — never another file's. An attachment (`docId` null) matches only
+ * unclaimed rows, which keeps the zero-bytes-moved dedupe that makes a fresh
+ * device settle a vault full of attachments cheaply. When both are on offer the
+ * doc's own row wins, because adopting the unclaimed one would leave two rows
+ * claiming the same content for the same doc.
+ */
+async function findBlob(
+  vaultId: string,
+  sha256: string,
+  docId: string | null = null,
+): Promise<BlobRow | undefined> {
   const { rows } = await pool.query<BlobRow>(
     `SELECT ${BLOB_ROW_COLUMNS}
-       FROM blobs WHERE vault_id = $1 AND sha256 = $2 AND status = 'ready'`,
-    [vaultId, sha256],
+       FROM blobs b
+      WHERE b.vault_id = $1 AND b.sha256 = $2 AND b.status = 'ready'
+        AND (
+          b.doc_id IS NULL
+          OR b.doc_id = $3
+          -- A row bound to a file that NO LONGER EXISTS is not a claimant; it is
+          -- bytes stranded on an id the resolver cannot answer for. claimDoc
+          -- rebinds it rather than leaving it there.
+          OR NOT EXISTS (SELECT 1 FROM files f WHERE f.id = b.doc_id)
+        )
+      ORDER BY (b.doc_id IS NOT DISTINCT FROM $3) DESC, (b.doc_id IS NULL) DESC,
+               b.created_at ASC, b.id ASC
+      LIMIT 1`,
+    [vaultId, sha256, docId],
   );
   return rows[0];
+}
+
+/**
+ * Retire any OTHER ready row still claiming this doc.
+ *
+ * A file's content changes: a new upload for the same `doc_id` carries a new
+ * sha256, and migration 029's per-doc dedupe slot means it lands in a row of its
+ * OWN rather than overwriting the old one. Left alone, `GET /vaults/:id/blobs`
+ * would list the doc twice — two paths, two hashes — and the desktop's diff
+ * would flap between them, re-downloading one over the other forever.
+ *
+ * Deleting the loser queues its object through migration 027's trigger, and the
+ * drain re-checks for a live row on the key first, so a sibling that shares the
+ * content keeps its bytes.
+ */
+async function retireSupersededDocBlobs(docId: string | null, keepBlobId: string): Promise<void> {
+  if (!docId) return;
+  try {
+    const { rowCount } = await pool.query(
+      "DELETE FROM blobs WHERE doc_id = $1 AND id <> $2 AND status = 'ready'",
+      [docId, keepBlobId],
+    );
+    if (rowCount) {
+      console.info(`[blobs] retired ${rowCount} superseded row(s) for file ${docId}`);
+    }
+  } catch (err) {
+    // Never fail an upload that has already landed over housekeeping — a stale
+    // sibling is a duplicate listing, not lost content.
+    console.warn(`[blobs] could not retire superseded rows for file ${docId}:`, err);
+  }
 }
 
 /**
@@ -462,10 +545,18 @@ async function claimDoc(row: BlobRow, docId: string | null): Promise<BlobRow> {
   }
   const { rows } = await pool.query("SELECT 1 FROM files WHERE id = $1", [row.doc_id]);
   if (rows.length > 0) return row;
-  await pool.query(
-    "UPDATE blobs SET doc_id = $2, updated_at = now() WHERE id = $1 AND doc_id = $3",
-    [row.id, docId, row.doc_id],
-  );
+  try {
+    await pool.query(
+      "UPDATE blobs SET doc_id = $2, updated_at = now() WHERE id = $1 AND doc_id = $3",
+      [row.id, docId, row.doc_id],
+    );
+  } catch (err) {
+    // 23505 on `blobs_vault_sha_doc_idx`: this doc already has a row for these
+    // bytes, so the stranded one has nothing to offer it. Leave it — the pending
+    // and orphan sweeps are what clear up rows nobody claims.
+    if ((err as { code?: string })?.code !== "23505") throw err;
+    return row;
+  }
   console.info(`[blobs] ${row.id} was bound to the deleted file ${row.doc_id} — rebound to ${docId}`);
   return { ...row, doc_id: docId };
 }
@@ -677,14 +768,14 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   // Already here → the answer is a blob id and NOT ONE BYTE of the file. This
   // is the case the whole flow exists for: a fresh device with a vault full of
   // attachments settles them all with one round trip each.
-  const hit = await findBlob(vaultId, sha256);
+  const hit = await findBlob(vaultId, sha256, docId);
   if (hit) return c.json({ deduped: true, blob: toMeta(await claimDoc(hit, docId)) }, 200);
 
   const quota = await checkStorageQuota(vaultId, org, size);
   if (quota) return c.json(quota, 402);
 
   // An existing PENDING row for the same content is re-used rather than
-  // conflicting: `blobs_vault_sha_idx` would refuse a second insert anyway, and
+  // conflicting: the per-doc unique index would refuse a second insert anyway, and
   // re-issuing the same blob id with a fresh presign is exactly what a client
   // retrying an interrupted upload needs. `updated_at` is bumped so the pending
   // sweep does not collect a row a client is actively working on.
@@ -696,6 +787,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
             filename = $5,
             doc_id = coalesce(blobs.doc_id, $6)
       WHERE vault_id = $1 AND sha256 = $2 AND status = 'pending'
+        AND (doc_id IS NULL OR doc_id = $6)
       RETURNING ${UPLOAD_ROW_COLUMNS}`,
     [vaultId, sha256, mime, relPath, filename, docId],
   );
@@ -711,7 +803,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
       `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
                           storage_provider, storage_key, status, created_by, doc_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
-       ON CONFLICT (vault_id, sha256) DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING ${UPLOAD_ROW_COLUMNS}`,
       [id, vaultId, org, sha256, size, mime, relPath, filename, store.provider, storageKey,
         session.userId, docId],
@@ -720,7 +812,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     if (!row) {
       // Someone finished uploading this content between the dedupe read and the
       // insert. The winner's row is the answer, not a 409.
-      const winner = await findBlob(vaultId, sha256);
+      const winner = await findBlob(vaultId, sha256, docId);
       if (winner) return c.json({ deduped: true, blob: toMeta(await claimDoc(winner, docId)) }, 200);
       return c.json({ error: "Upload conflicted — retry" }, 409);
     }
@@ -1150,6 +1242,7 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
         RETURNING ${BLOB_ROW_COLUMNS}`,
       [row.id, head.size],
     );
+    await retireSupersededDocBlobs(rows[0]?.doc_id ?? row.doc_id, row.id);
     return c.json(toMeta(rows[0]), 200);
   } catch (e) {
     return storeError(c, e);

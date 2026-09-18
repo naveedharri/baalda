@@ -153,6 +153,7 @@ function rig(opts: RigOptions) {
   });
   const { connect, connects } = makeConnect(server, opts.behaviour);
   const pushedSet = opts.pushed ?? new Set<string>();
+  const trashed: Array<{ relPath: string; content: string }> = [];
   const marked: string[] = [];
   const sink = recordingSink();
   const uploader = new ContentUploader({
@@ -170,6 +171,10 @@ function rig(opts: RigOptions) {
       release: (docId) => store.demote(docId),
       connect,
       ...(opts.readFile ? { readFile: (relPath: string) => harness.io.readFile(relPath) } : {}),
+      writeTrashCopy: async (relPath: string, stamp: string, content: string) => {
+        trashed.push({ relPath, content });
+        return `.context/trash/${stamp}/${relPath}`;
+      },
     },
     isPushed: (id) => pushedSet.has(id),
     markPushed: (id) => {
@@ -190,7 +195,7 @@ function rig(opts: RigOptions) {
     syncTimeoutMs: 50,
     flushTimeoutMs: 50,
   });
-  return { uploader, store, server, harness, connects, marked, sink, pushedSet };
+  return { uploader, store, server, harness, connects, marked, sink, pushedSet, trashed };
 }
 
 describe("ContentUploader — pre-network checks (readFile)", () => {
@@ -349,6 +354,50 @@ describe("ContentUploader — pushing local content", () => {
 
     expect(r.server.text("d1")).toBe("theirs"); // our text was NOT pushed
     expect(r.harness.fs.get("Note.md")).toBe("theirs");
+  });
+
+  it("a read-only doc keeps a copy of the file it is about to overwrite", async () => {
+    // View-only grant: the seed and the ingest are both skipped, so the bytes on
+    // disk exist nowhere but disk — and `flushEgest` is about to write the
+    // server's copy over them. The server's copy IS the content for a doc you
+    // cannot write, but the edit may not vanish without a copy and a word.
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const r = rig({
+      files: { "Note.md": "an edit nobody can send" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
+    });
+    await r.uploader.run();
+
+    expect(r.trashed).toEqual([
+      { relPath: "Note.md", content: "an edit nobody can send" },
+    ]);
+    const failure = r.uploader.failedDocs().find((f) => f.docId === "d1");
+    expect(failure?.reason).toContain("no write access");
+    expect(failure?.reason).toContain(".context/trash/");
+    expect(failure?.permanent).toBe(true);
+    // The server's copy still lands on disk, and the doc still settles: there is
+    // nothing more this device can do for it.
+    expect(r.harness.fs.get("Note.md")).toBe("theirs");
+    expect(r.marked).toEqual(["d1"]);
+  });
+
+  it("keeps no copy when the file already matches a read-only doc", async () => {
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const r = rig({
+      files: { "Note.md": "theirs" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
+    });
+    await r.uploader.run();
+    expect(r.trashed).toEqual([]);
+    expect(r.uploader.failedDocs()).toEqual([]);
   });
 });
 

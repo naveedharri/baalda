@@ -500,3 +500,83 @@ describe("ApiClient.health", () => {
     }
   });
 });
+
+describe("listNoteRegistryPaged — the keyset listing the reconciler pulls", () => {
+  /** Script a server that pages: `limit` rows at a time, `nextAfter` = the last
+   *  `rel_path`, and tombstones ONLY on the final page (the server's contract,
+   *  which is what preserves the "one snapshot, no precedence rule" property). */
+  function pagingServer(paths: string[], tombstones: string[]) {
+    return fakeFetch((call) => {
+      const url = new URL(call.url);
+      if (!url.pathname.endsWith("/api/notes")) return { json: {} };
+      const after = url.searchParams.get("after");
+      const limit = Number(url.searchParams.get("limit") ?? paths.length);
+      const start = after ? paths.indexOf(after) + 1 : 0;
+      const slice = paths.slice(start, start + limit);
+      const last = start + slice.length >= paths.length;
+      return {
+        json: {
+          notes: slice.map((p) => ({ id: `srv-${p}`, rel_path: p })),
+          ...(last ? { tombstones } : {}),
+          ...(last ? {} : { nextAfter: slice[slice.length - 1] }),
+        },
+      };
+    });
+  }
+
+  it("follows the cursor and returns what one unpaged answer would have", async () => {
+    const paths = ["a.md", "b.md", "c.md", "d.md", "e.md"];
+    const { impl, calls } = pagingServer(paths, ["dead-1"]);
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+
+    const out = await api.listNoteRegistryPaged("v1", { limit: 2 });
+    expect(out.notes.map((n) => n.rel_path)).toEqual(paths);
+    // Tombstones ride the LAST page, and that is the set the caller gets.
+    expect(out.tombstones).toEqual(["dead-1"]);
+    expect(calls).toHaveLength(3); // 2 + 2 + 1
+    expect(new URL(calls[0].url).searchParams.get("after")).toBeNull();
+    expect(new URL(calls[1].url).searchParams.get("after")).toBe("b.md");
+    expect(new URL(calls[2].url).searchParams.get("after")).toBe("d.md");
+  });
+
+  it("asks an OLD server exactly once, and answers identically", async () => {
+    // A server that predates the keyset: it ignores `limit`/`after` and returns
+    // the whole vault with no `nextAfter`. That is one request, and the result
+    // must be indistinguishable from `listNoteRegistry`'s.
+    const rows = [
+      { id: "srv-a", rel_path: "a.md" },
+      { id: "srv-b", rel_path: "b.md" },
+    ];
+    const { impl, calls } = fakeFetch(() => ({
+      json: { notes: rows, tombstones: ["dead-1"] },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+
+    const paged = await api.listNoteRegistryPaged("v1");
+    expect(calls).toHaveLength(1);
+    expect(paged).toEqual({ notes: rows, tombstones: ["dead-1"] });
+
+    const unpaged = await api.listNoteRegistry("v1");
+    expect(paged).toEqual(unpaged);
+  });
+
+  it("keeps `tombstones: null` meaning 'the server did not say'", async () => {
+    // Null is NOT `[]`. The reconciler must never infer a delete from silence,
+    // so an answer with no `tombstones` key stays null through the paging loop.
+    const { impl } = fakeFetch(() => ({ json: { notes: [] } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    expect((await api.listNoteRegistryPaged("v1")).tombstones).toBeNull();
+  });
+
+  it("stops rather than looping when a server repeats its cursor", async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      json: { notes: [{ id: "srv-a", rel_path: "a.md" }], nextAfter: "a.md" },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    const out = await api.listNoteRegistryPaged("v1", { limit: 1 });
+    // Second request returns the same cursor ⇒ a server bug; stopping beats
+    // paging forever.
+    expect(calls.length).toBeLessThanOrEqual(2);
+    expect(out.notes.length).toBeGreaterThan(0);
+  });
+});

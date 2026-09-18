@@ -8,6 +8,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Bulk sync engine (server + desktop).** Above `BULK_THRESHOLD_DOCS` (25) the desktop
+  registers folders/notes/files through `POST /api/vaults/:id/{folders,notes,files}/batch`,
+  pushes content through `POST /api/vaults/:id/docs/batch` (base64 Yjs V1, per-item
+  `effectivePermission`, `expectEmpty` re-checked under the per-doc lock so a seeded push
+  can never double a teammate's text), and downloads a whole vault through a paged, gzipped
+  bootstrap (`POST /api/vaults/:id/bootstrap` + `GET …/bootstrap/:sid?cursor=`) applied by one
+  Rust IPC per page (`apply_bootstrap_batch`), which writes a file only over nothing
+  (missing or 0 bytes), reports identical bytes `unchanged` (still committing the CRDT rows,
+  the crash-mid-page idempotency), and answers `conflict` for differing content so the
+  per-doc merge path handles it. Server-only notes materialize through one
+  `materialize_notes_batch` IPC per chunk. Registry reads gain keyset pagination
+  (`limit`/`after`); the vault channel hello gains `mode: "live-only"`. Resume state lives
+  on `VaultSyncConfig.bootstrap`; a 404 on any bulk route is a terminal `server_too_old`
+  error with no silent per-note fallback. Migration 030, env keys `BATCH_MAX_*` /
+  `BOOTSTRAP_*` (see `docs/DEPLOY.md`). 5,000 docs bootstrap in ~0.7 s server-side with a
+  constant 5 queries per page.
+
 - **Heal and bulk actions on the Health checks (desktop).** A failing check row now
   carries the whole-check buttons its items allow: "Delete all" on empty or unreadable
   notes, "Save copies" on unreadable and oversized ones, "Empty trash", and a single
@@ -88,6 +105,37 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   happened drawn as dashed `data-future` cells that never take a heat level.
 
 ### Fixed
+- **Server CRDT store.** `compact()` runs under a per-doc advisory lock in one transaction
+  with a `seq` guard, so two racing compactions can no longer overwrite a newer snapshot
+  and delete its log (committed edits were lost). `loadDocState`/`loadDocDiff` read snapshot
+  + log in one `REPEATABLE READ` transaction, so a compaction landing between the two reads
+  can no longer serve a truncated doc and cache its state vector as authoritative. A failed
+  `appendUpdate` in Hocuspocus `onChange` is logged instead of crashing the process
+  (`unhandledRejection`/`uncaughtException` guards in `index.ts`).
+- **Blobs.** The orphan sweep no longer collects doc-backed tree files (`doc_id IS NULL`);
+  the object-deletion drain skips keys a live row still references; two identical tree
+  files get their own rows (migration 029 replaces the `(vault, sha)` unique with per-doc /
+  attachment partials) so deleting one no longer destroys the other's bytes; a folder
+  move rewrites `files.path` and `blobs.rel_path`; a folder delete removes its files and
+  writes `file_tombstones` so `/access-check` answers `none` for them; superseded rows for
+  an edited file are retired; the direct upload route derives the S3 object key so it
+  works against an S3/R2 server. Desktop: `diffAttachments` never downloads onto a path the
+  disk already occupies, so an edited attachment is not overwritten by its older server copy.
+- **Desktop bridge.** Local-only vaults reconcile a persisted-empty doc against a file that
+  gained content while the app was closed (the first keystroke used to erase it);
+  `VaultDocStore.promote` waits for an in-flight cold apply (one bridge per doc_id);
+  `save_yjs_snapshot` truncates the update log only up to a watermark the bridge saw
+  (`appendYjsUpdate` returns the rowid, `loadYjsState` reports `lastUpdateId`); atomic writes
+  use unique temp names; `drainEgest` serializes; `settleServerEmpty` also checks the local
+  CRDT before marking a doc pushed; a read-only doc keeps a `.context/trash` copy of an
+  on-disk edit it cannot send.
+- **Server permissions / versions.** `scopedDocs` includes the per-user vault-scoped grant
+  (readable set ≡ resolver); revert runs content writes after COMMIT, skips a 23505 note
+  re-insert, and refuses a revert that would soft-delete more than `max(5, 20%)` notes
+  (409 `revert_too_destructive`); `noteSizeRefusal` compares bytes; migrations take an
+  advisory lock; `canWriteBlob` asks `canEditDoc` first.
+- **Tests.** The server suite pins `BLOB_STORAGE=postgres` in a vitest setup file so a dev
+  `.env` pointing attachments at a real bucket does not change what the suite asserts.
 - **A re-shared file took a restart to come back, and downloaded in silence
   (desktop).** The blob mirror was driven by local disk events alone — a watcher
   change, the delete queue, and the one pass inside `enable` — so no server-side

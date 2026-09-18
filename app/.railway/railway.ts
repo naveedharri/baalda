@@ -77,6 +77,19 @@ const SERVER_ENV = [
   "S3_MULTIPART_PART_BYTES",
   "MAX_BLOB_BYTES_DIRECT",
   "BACKFILL_CONCURRENCY",
+  // Bulk sync engine: the per-request item ceilings for the `/batch` routes and
+  // the bootstrap page/session budgets. All have safe defaults in
+  // `apps/server/src/config.ts` — they are listed so a deployment CAN tune them
+  // without the next `railway config apply` deleting the value.
+  "BATCH_MAX_NOTES",
+  "BATCH_MAX_FOLDERS",
+  "BATCH_MAX_FILES",
+  "BATCH_MAX_DOCS",
+  "BATCH_MAX_DECODED_BYTES",
+  "BOOTSTRAP_MAX_PAGE_BYTES",
+  "BOOTSTRAP_MAX_PAGE_DOCS",
+  "BOOTSTRAP_CONCURRENCY",
+  "BOOTSTRAP_TTL_HOURS",
   "VERSION_IDLE_MS",
   "VAULT_SYNC_PATH",
   "VAULT_HEARTBEAT_MS",

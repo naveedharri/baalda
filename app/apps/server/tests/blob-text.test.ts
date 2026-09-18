@@ -8,6 +8,7 @@ import { signUp, type TestUser } from "./helpers/auth.js";
 import {
   seedFile,
   seedFolder,
+  seedLock,
   seedMember,
   seedOrg,
   seedShare,
@@ -290,5 +291,26 @@ describe("blobs bound to a files doc", () => {
     expect((await get(member)).status).toBe(403);
     await seedShare(org, "folder", folder, member.userId, "view");
     expect((await get(member)).status).toBe(200);
+  });
+
+  it("a LOCKED file refuses to be deleted, however editable its folder", async () => {
+    const member = await signUp(`viewer+${randomUUID()}@docid.test`);
+    await seedMember(org, member.userId, "member");
+    // Edit on the folder — so `canCreateIn` says yes — and a lock on the FILE,
+    // which caps it at view for everyone. The lock is invisible to the folder
+    // question, so create rights in a folder used to be enough to destroy
+    // someone else's bytes.
+    await seedShare(org, "folder", folder, member.userId, "edit");
+    await seedLock(org, "file", fileDoc, { type: "org" });
+
+    const res = await app.fetch(
+      new Request(`http://local/api/files/${fileDoc}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${member.token}` },
+      }),
+    );
+    expect(res.status).toBe(403);
+    const { rows } = await pool.query("SELECT 1 FROM files WHERE id = $1", [fileDoc]);
+    expect(rows).toHaveLength(1);
   });
 });

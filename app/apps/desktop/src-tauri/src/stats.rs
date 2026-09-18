@@ -587,8 +587,10 @@ mod tests {
     fn snapshot_bytes_count_toward_a_docs_footprint() {
         let (tmp, index) = fixture();
         let alpha = doc_id_of(&index, "Alpha.md");
-        index.append_yjs_update(&alpha, &[0u8; 10]).unwrap();
-        index.save_yjs_snapshot(&alpha, &[0u8; 100], &[0u8; 4]).unwrap();
+        let mark = index.append_yjs_update(&alpha, &[0u8; 10]).unwrap();
+        index
+            .save_yjs_snapshot(&alpha, &[0u8; 100], &[0u8; 4], Some(mark))
+            .unwrap();
         // A manifest-only row (snapshot NULL) is not history and must not count.
         index
             .save_yjs_state_vectors(&[("sv-only".to_string(), vec![0u8; 16])])

@@ -11,9 +11,10 @@
 // the bridge's normal seed-from-file (pure local-first).
 
 import { Awareness } from "y-protocols/awareness";
+import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
-import type { NoteLastEdited, SessionInfo } from "../api";
+import { isServerTooOld, type NoteLastEdited, type SessionInfo } from "../api";
 import * as ipc from "../ipc";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
@@ -23,9 +24,11 @@ import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
 import { BinaryDeleteQueue } from "./binaryDeletes";
+import { BootstrapRunner } from "./bootstrap";
+import { DocBatchPusher, type DocPushWork } from "./docBatchPush";
 import { ContentUploader, type UploadFailure } from "./contentUpload";
 import { collectCrdtGarbage } from "./crdtGc";
-import { runPool } from "./pool";
+import { runPool, useBulkPath } from "./pool";
 import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
 import { SessionRejectionGuard } from "./sessionGuard";
@@ -294,6 +297,10 @@ export class SyncManager implements InboundHost {
    *  state is reported under. Keyed by docId, never by path. */
   private currentDocId: string | null = null;
   private currentLocalAwareness: Awareness | null = null;
+  /** Docs already reported as "you edited this but cannot send it" — one trash
+   *  copy and one failure line per doc per session, however often it is
+   *  reopened (see `keepUnsendableOpenEdit`). */
+  private readonly unsendableReported = new Set<string>();
   private enabled = false;
   /**
    * The registry has been primed from `.context/config.json`: this device
@@ -423,6 +430,51 @@ export class SyncManager implements InboundHost {
   private onFileState?: (states: Record<string, DocSyncState>) => void;
   /** The content upload for the current scope, while one is running. */
   private uploader: ContentUploader | null = null;
+  /**
+   * True while the BULK engine owns the vault's content: the bootstrap download
+   * and the batched push, in that order.
+   *
+   * It is what keeps the two engines from running at once. The vault channel is
+   * live-only during this window, so its `ready` lands with a settled (empty)
+   * backfill and would otherwise start the per-doc content run over the very
+   * docs the bulk push is about to send — two writers per doc, and the doubling
+   * risk that comes with them. The bulk phase re-enters `startContentRunIfNeeded`
+   * itself when it finishes, for whatever it deliberately left behind.
+   */
+  private bulkPhase = false;
+  /** The bulk download/push for the current scope, so teardown can cancel them. */
+  private bootstrapRunner: BootstrapRunner | null = null;
+  private batchPusher: DocBatchPusher | null = null;
+  /**
+   * Notes the bulk engine could not get through, this scope, by docId.
+   *
+   * `completeRun` reads it beside `uploader.failedDocs()`: a bootstrap page that
+   * refused a doc, or a batch item the server denied, is exactly as much "this
+   * vault is not fully synced" as a failed per-doc push, and stamping `done`
+   * over it would be the lie every counter here exists to prevent.
+   */
+  private bulkFailures = new Map<string, UploadFailure>();
+  /**
+   * The server does not have the bulk sync engine (404 on one of its routes).
+   *
+   * Terminal for the session and deliberately NOT a silent fallback to the
+   * per-note path: that path is what takes 22 minutes on a 5,000-note vault, and
+   * "it worked, slowly, forever" is not a diagnosis anyone can act on. The
+   * structure reconcile and the vault channel still run, so the vault is
+   * populated and never empty — only the content phase reports the error.
+   */
+  private serverTooOld = false;
+  /**
+   * Did we start the current vault channel in LIVE-ONLY mode?
+   *
+   * Tracked here rather than read back off the engine because it is OUR
+   * decision (the doc count at the moment the channel was started), and because
+   * the answer has to survive a `stopVaultEngine`/`startVaultEngine` pair. It is
+   * what decides whether the bulk phase owes the channel a reconnect — and, when
+   * the reconcile turns out to disagree with the prime window about the vault's
+   * size, whether one is owed immediately.
+   */
+  private vaultEngineLiveOnly = false;
   /** Locally-changed MAPPED notes awaiting a content push (docId → relPath):
    *  the watcher saw an external writer (an AI, another editor) change their
    *  .md on disk. Drained by {@link runLocalChangePush}, debounced so a burst
@@ -2189,6 +2241,18 @@ export class SyncManager implements InboundHost {
   private startContentRunIfNeeded(scope: VaultScope): void {
     if (!this.enabled || !scope.isCurrent()) return;
     if (this.uploader?.isRunning()) return;
+    // The bulk engine owns the vault's content right now. Its channel is
+    // live-only, so `ready` arrives with a settled backfill and this edge fires
+    // immediately — starting the per-doc run here would put a second writer on
+    // every doc the batch push is about to send. The bulk phase re-enters here
+    // itself once it is done, with only what it left behind.
+    if (this.bulkPhase) return;
+    // This server does not have the bulk engine. Falling back to the per-note
+    // path here is exactly the silent degradation the hard cut exists to
+    // prevent: it would open a socket per note, take ~22 minutes on a large
+    // vault, and report success. The channel still backfills (the vault is
+    // never empty); the content run stays stopped and the phase stays `error`.
+    if (this.serverTooOld) return;
     // The `ready.empty` list is still being checked against disk. Starting now
     // would queue every named doc — including the empty placeholders the probe
     // is about to settle — so the probe's completion re-enters here instead.
@@ -2358,6 +2422,16 @@ export class SyncManager implements InboundHost {
           empty = false; // unreadable ⇒ let the run try (and report) it
         }
         if (!scope.isCurrent()) return;
+        // The FILE being empty is only half the question. `materializeContent`
+        // fills a server-only placeholder from this device's local CRDT, and
+        // when its `writeThrough` fails (disk full, permission, epoch switch)
+        // the file stays 0 bytes while the doc still holds the note. Settling on
+        // the file alone marked that doc pushed and badged it synced, so it was
+        // never queued again and its text lived only in `index.sqlite` —
+        // permanent divergence behind a green badge. "Nothing anywhere" has to
+        // mean the doc too.
+        if (empty && !(await this.docEmptyLocally(docId, scope))) empty = false;
+        if (!scope.isCurrent()) return;
         if (!empty) {
           keep.add(docId);
           return;
@@ -2374,6 +2448,37 @@ export class SyncManager implements InboundHost {
       this.serverEmpty = keep;
       this.progress?.flush();
     });
+  }
+
+  /**
+   * Does this device hold NO text for a doc — resident bridge first, then the
+   * local CRDT store?
+   *
+   * The companion probe to `registry.isNoteEmptyOnDisk`, and deliberately
+   * conservative: anything unreadable answers false, which keeps the doc in the
+   * push queue (a re-push costs a round trip; a wrong settle costs the text).
+   */
+  private async docEmptyLocally(docId: string, scope: VaultScope): Promise<boolean> {
+    const resident = this.docStore?.peekResident(docId);
+    if (resident) return resident.serialize().length === 0;
+    let state: Awaited<ReturnType<typeof ipc.loadYjsState>>;
+    try {
+      state = await ipc.loadYjsState(docId, scope.vaultEpoch);
+    } catch {
+      return false;
+    }
+    // The cheap answer for a doc this device never opened: no rows at all.
+    if (!state.snapshot && state.updates.length === 0) return true;
+    const doc = new Y.Doc();
+    try {
+      if (state.snapshot) Y.applyUpdate(doc, state.snapshot);
+      for (const u of state.updates) Y.applyUpdate(doc, u);
+      return doc.getText("content").length === 0;
+    } catch {
+      return false;
+    } finally {
+      doc.destroy();
+    }
   }
 
   /** Remember the run's permanent failures so later runs neither re-queue nor
@@ -2568,6 +2673,23 @@ export class SyncManager implements InboundHost {
       // in the BACKGROUND — `enable` must return as soon as the vault is usable,
       // or "Turn on sync" would block the UI for the whole backfill.
       this.beginDownloadPhase(scope);
+      // …and, on a vault big enough for it, the BULK engine owns that phase:
+      // the bootstrap download, then the batched push, then a normal reconnect.
+      // Background, like the content run it replaces — `enable` must return as
+      // soon as the vault is usable or "Turn on sync" blocks the UI for the
+      // whole backfill.
+      if (useBulkPath(this.registry.mappedNotes().length)) {
+        this.bulkRun = this.runBulkEngine(scope).catch((e) => {
+          console.warn("[sync] bulk sync failed", e);
+        });
+      } else if (this.vaultEngineLiveOnly) {
+        // The prime window sized the channel from the LOCAL doc map and put it
+        // in live-only mode; the reconcile then found a vault below the
+        // threshold. Nothing is going to page it down over HTTP, so give the
+        // channel its backfill back — otherwise the content would arrive from
+        // nowhere at all.
+        this.restoreChannelBackfill();
+      }
       return { ok: true, seeded, scope };
     } catch (e) {
       if (scope.isCurrent()) this.disable();
@@ -2713,6 +2835,289 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return;
     if (changed) this.onRegistryChanged?.();
     this.settleAfterPull(scope);
+  }
+
+  /**
+   * The BULK content engine: download the vault over the bootstrap route, then
+   * push what the server is missing in batched requests — the replacement for
+   * "one WS frame + three IPC calls per doc down, one token mint + one WebSocket
+   * per doc up" (measured at 3.7 notes/second, i.e. ~22 minutes for 5,000 notes
+   * before the second thousand had moved).
+   *
+   * Ordered, and the order is the safety argument:
+   *
+   *   1. BOOTSTRAP first. A doc the server already has is downloaded, not
+   *      uploaded — and a doc whose local file diverges comes back `conflict`,
+   *      having written nothing, so step 2 never seeds over it.
+   *   2. BATCH PUSH for what the server itself named empty or behind, plus
+   *      anything this device has not confirmed.
+   *   3. PER-DOC `DocSync` for exactly what cannot be batched: the conflicts and
+   *      anything over `BULK_ITEM_MAX_BYTES`. Those need a real pull-then-merge,
+   *      which is a socket, which is `ContentUploader`.
+   *   4. RECONNECT the channel normally. The manifest now covers everything the
+   *      bootstrap wrote, so the backfill this asks for is ~0 frames wide, and
+   *      its `ready` restates `empty`/`behind`/`revoked` for the ordinary run.
+   *
+   * Runs in the BACKGROUND (`enable` returns as soon as the vault is usable) and
+   * holds {@link bulkPhase} throughout, which is what keeps the per-doc run from
+   * starting underneath it.
+   */
+  private async runBulkEngine(scope: VaultScope): Promise<void> {
+    const vaultId = this.registry.vaultId;
+    const store = this.docStore;
+    const progress = this.progress;
+    if (!vaultId || !store || !progress) return;
+    this.bulkPhase = true;
+    try {
+      const bootstrap = await this.runBootstrapPhase(scope, vaultId, store);
+      if (!scope.isCurrent()) return;
+      const conflicts = new Set(bootstrap?.conflicts ?? []);
+      // The server's own statement of what it holds nothing for: the bootstrap
+      // session's `emptyDocs` plus whatever the channel's `ready.empty` has
+      // named by now. Both are the SERVER talking; `registry.isPushed` is only
+      // this device's optimisation and joins the work list separately.
+      const serverEmpty = new Set([...(bootstrap?.emptyDocs ?? []), ...this.serverEmpty]);
+      const push = await this.runBatchPushPhase(scope, vaultId, store, serverEmpty, conflicts);
+      if (!scope.isCurrent()) return;
+      for (const docId of push?.conflicts ?? []) conflicts.add(docId);
+      const followUp = [...conflicts, ...(push?.oversized ?? []).map((o) => o.docId)];
+      await this.runBulkFollowUp(scope, vaultId, store, followUp);
+    } catch (e) {
+      if (isServerTooOld(e)) this.reportServerTooOld(scope);
+      else console.warn("[sync] bulk content engine failed", e);
+    } finally {
+      this.bulkPhase = false;
+      this.bootstrapRunner = null;
+      this.batchPusher = null;
+    }
+    if (!scope.isCurrent()) return;
+    // Durably record everything the phase confirmed BEFORE anything claims the
+    // vault is settled: this is the resume point a kill -9 falls back to.
+    await this.registry.flushCheckpoint();
+    if (!scope.isCurrent()) return;
+    // Back to an ordinary channel (see step 4 above). A no-op when the engine
+    // was never put in live-only mode — below the threshold nothing here ran.
+    this.restoreChannelBackfill();
+    this.startContentRunIfNeeded(scope);
+  }
+
+  /** Step 1: page the vault down. `null` when it was cancelled or never ran. */
+  private async runBootstrapPhase(
+    scope: VaultScope,
+    vaultId: string,
+    store: VaultDocStore,
+  ): Promise<Awaited<ReturnType<BootstrapRunner["run"]>> | null> {
+    const runner: BootstrapRunner = new BootstrapRunner({
+      serverVaultId: vaultId,
+      progress: this.progress ?? undefined,
+      shouldStop: () => !scope.isCurrent() || this.bootstrapRunner !== runner,
+      onFailure: (f) => this.recordBulkFailure(f),
+      deps: {
+        createSession: (have) => api.createBootstrapSession(vaultId, have),
+        fetchPage: (sessionId, cursor) =>
+          api.fetchBootstrapPage(vaultId, sessionId, { cursor }),
+        // ONE IPC (and one SQLite transaction) per page. Rust decides each doc's
+        // fate from the FILE and the local CRDT tables, never from this list.
+        applyBatch: (entries) => ipc.applyBootstrapBatch(entries, scope.vaultEpoch),
+        // A doc that already has local CRDT: merge it the normal cold way, which
+        // is what makes re-running a page free.
+        coldApply: (docId, update) => store.applyUpdate(docId, update),
+        haveDocs: async () => {
+          // The DURABLE manifest, not an in-memory guess — the same list the
+          // channel's `hello` announces. Everything in it is state the server
+          // can skip sending.
+          await store.whenReady();
+          return store.knownDocs();
+        },
+        markPushed: (docId) => {
+          this.registry.markPushed(docId);
+          this.serverEmpty.delete(docId);
+          this.serverBehind.delete(docId);
+        },
+        markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
+        loadResume: () => this.registry.bootstrapResume(),
+        saveResume: (state) => this.registry.setBootstrapResume(state),
+        flushCheckpoint: () => this.registry.flushCheckpoint(),
+      },
+    });
+    this.bootstrapRunner = runner;
+    const result = await runner.run();
+    if (!scope.isCurrent() || this.bootstrapRunner !== runner) return null;
+    if (result.applied > 0 || result.merged > 0) {
+      this.note(
+        "info",
+        "bootstrap",
+        `Downloaded ${result.applied + result.merged} ${
+          result.applied + result.merged === 1 ? "note" : "notes"
+        } from the server`,
+      );
+    }
+    return result;
+  }
+
+  /** Step 2: push, batched. `null` when there was nothing to send. */
+  private async runBatchPushPhase(
+    scope: VaultScope,
+    vaultId: string,
+    store: VaultDocStore,
+    serverEmpty: Set<string>,
+    conflicts: Set<string>,
+  ): Promise<Awaited<ReturnType<DocBatchPusher["run"]>> | null> {
+    const open = store.suppressedDoc();
+    const work: DocPushWork[] = this.registry
+      .mappedNotes()
+      .filter(
+        (n) =>
+          n.docId !== open &&
+          // Settled as "nothing anywhere", permanently refused, or already
+          // owned by the per-doc follow-up — none of them are work here.
+          !this.emptyEverywhere.has(n.docId) &&
+          !this.permanentFailures.has(n.docId) &&
+          !conflicts.has(n.docId) &&
+          (serverEmpty.has(n.docId) ||
+            this.serverBehind.has(n.docId) ||
+            !this.registry.isPushed(n.docId)),
+      )
+      .map((n) => ({
+        docId: n.docId,
+        relPath: n.relPath,
+        // The SERVER's word, never a guess: it is what licenses a seed from the
+        // file without a pull, and what `expectEmpty` makes the server re-check.
+        serverEmpty: serverEmpty.has(n.docId),
+      }));
+    if (work.length === 0) return null;
+    const progress = this.progress;
+    progress?.phase("uploading", work.length);
+    const pusher: DocBatchPusher = new DocBatchPusher({
+      work,
+      progress: progress ?? undefined,
+      markPushed: (docId) => {
+        this.registry.markPushed(docId);
+        this.divergedDocs.delete(docId); // a confirmed push carries any merged ops
+        this.serverEmpty.delete(docId);
+        this.serverBehind.delete(docId);
+      },
+      // Never touch the open note: its editor session owns that doc's provider.
+      skip: (docId) => store.suppressedDoc() === docId,
+      onFailure: (f) => this.recordBulkFailure(f),
+      shouldStop: () => !scope.isCurrent() || this.batchPusher !== pusher,
+      deps: {
+        acquire: (docId, relPath) =>
+          store.promote(docId, relPath, {
+            seedFromFile: false, // the pusher seeds, and only what the server called empty
+            markRecent: false, // a 5,000-note run must not evict the real recency list
+            pin: true,
+          }),
+        release: (docId) => store.demote(docId),
+        push: (items) => api.batchPushDocs(vaultId, items),
+        readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        // The `conflict` undo: throw away the seed this run just made (and the
+        // cached state vector that describes it) so the follow-up's pull lands
+        // in an EMPTY doc and nothing can double. See `docBatchPush.ts`.
+        discardLocalCrdt: async (docId) => {
+          store.drop(docId);
+          await ipc.clearYjsDoc(docId, scope.vaultEpoch);
+        },
+      },
+    });
+    this.batchPusher = pusher;
+    const result = await pusher.run();
+    if (!scope.isCurrent() || this.batchPusher !== pusher) return null;
+    await this.registry.flushCheckpoint();
+    return result;
+  }
+
+  /**
+   * Step 3: the per-doc `DocSync` path, for the docs that genuinely need one.
+   *
+   * `force` + `ingestFromFile` + an `include` that matches everything is the
+   * real merge: connect, PULL FIRST, find the doc non-empty so
+   * `seedFromFileIfEmpty` inserts nothing, then fold the file's bytes back in as
+   * a DIFF. That is why a conflict can neither double the text (no second insert
+   * history) nor lose it (the file rejoins through the diff).
+   */
+  private async runBulkFollowUp(
+    scope: VaultScope,
+    vaultId: string,
+    store: VaultDocStore,
+    docIds: string[],
+  ): Promise<void> {
+    const progress = this.progress;
+    if (!progress || docIds.length === 0) return;
+    const notes = docIds
+      .map((docId) => ({ docId, relPath: this.registry.pathForDocId(docId) }))
+      .filter((n): n is { docId: string; relPath: string } => n.relPath != null);
+    if (notes.length === 0) return;
+    const uploader: ContentUploader = new ContentUploader({
+      vaultId,
+      notes,
+      deps: {
+        acquire: (docId, relPath) =>
+          store.promote(docId, relPath, { seedFromFile: false, markRecent: false, pin: true }),
+        release: (docId) => store.demote(docId),
+        connect: ({ docId, vaultId: collectionId, doc }) =>
+          new DocSync({
+            api,
+            doc,
+            docId,
+            vaultId: collectionId,
+            onSessionRejected: () => this.noteSessionRejected(),
+          }),
+        readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        writeTrashCopy: (relPath, stamp, content) =>
+          ipc.writeTrashCopy(relPath, stamp, content, scope.vaultEpoch),
+      },
+      isPushed: (docId) => this.registry.isPushed(docId),
+      // Everything here is work by construction — the batch already decided it
+      // cannot settle these — so nothing may be skipped as "already confirmed",
+      // and `include` also forces a real connect rather than the ingest
+      // fast-path (which would see file == doc and send nothing).
+      force: true,
+      include: () => true,
+      ingestFromFile: true,
+      markPushed: (docId) => {
+        this.registry.markPushed(docId);
+        this.divergedDocs.delete(docId);
+        this.serverEmpty.delete(docId);
+        this.serverBehind.delete(docId);
+      },
+      skip: (docId) => store.suppressedDoc() === docId,
+      progress,
+      onFailure: (f) => this.logUploadFailure(f),
+      shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
+    });
+    this.uploader = uploader;
+    await uploader.run();
+    if (!scope.isCurrent() || this.uploader !== uploader) return;
+    this.recordPermanentFailures(uploader);
+    await this.registry.flushCheckpoint();
+  }
+
+  /** One note the bulk engine could not get through. */
+  private recordBulkFailure(f: UploadFailure): void {
+    this.bulkFailures.set(f.docId, f);
+    if (f.permanent) this.permanentFailures.set(f.docId, f);
+    this.logUploadFailure(f);
+  }
+
+  /**
+   * The server answered 404 on a bulk route: it predates this engine.
+   *
+   * Terminal and loud. There is deliberately no silent per-note fallback (design
+   * §3.7): the structure reconcile and the vault channel have already run, so
+   * the vault is populated and never empty — it is the CONTENT phase that stops,
+   * and it says why.
+   */
+  private reportServerTooOld(scope: VaultScope): void {
+    if (!scope.isCurrent() || this.serverTooOld) return;
+    this.serverTooOld = true;
+    this.note(
+      "error",
+      "server-too-old",
+      "Update your Baalda server — this app needs its bulk sync routes",
+    );
+    this.progress?.phase("error");
+    this.progress?.flush();
   }
 
   /**
@@ -2917,6 +3322,11 @@ export class SyncManager implements InboundHost {
     const uploadFailures = this.uploader?.failedDocs().length ?? 0;
     const clean =
       uploadFailures === 0 &&
+      // The bulk engine's own refusals count exactly as much as the per-doc
+      // ones: a bootstrap page that could not be applied, or a doc the batch
+      // push was denied, leaves the vault partly unsynced either way.
+      this.bulkFailures.size === 0 &&
+      !this.serverTooOld &&
       this.permanentFailures.size === 0 &&
       !this.registry.hasFailures() &&
       this.registry.limitCode() == null;
@@ -2977,6 +3387,13 @@ export class SyncManager implements InboundHost {
     // ones. A doc in both is listed once.
     const content = [...this.permanentFailures.values()];
     const seen = new Set(content.map((f) => f.docId));
+    // The bulk engine's failures, before the per-doc uploader's: a doc in both
+    // is listed once, and the bulk verdict is the more recent one.
+    for (const f of this.bulkFailures.values()) {
+      if (seen.has(f.docId)) continue;
+      seen.add(f.docId);
+      content.push(f);
+    }
     for (const f of this.uploader?.failedDocs() ?? []) {
       if (seen.has(f.docId)) continue;
       // A doc sitting in the local-change queue is being pushed again right now
@@ -3078,6 +3495,17 @@ export class SyncManager implements InboundHost {
     // when `stopVaultEngine` destroys the store underneath it.
     this.uploader?.stop();
     this.uploader = null;
+    // Same reason, one layer up: both bulk engines check `shouldStop` between
+    // every page / every doc, so stopping them here means nothing is still
+    // holding a bridge when the store is destroyed below.
+    this.bootstrapRunner?.stop();
+    this.bootstrapRunner = null;
+    this.batchPusher?.stop();
+    this.batchPusher = null;
+    this.bulkPhase = false;
+    this.vaultEngineLiveOnly = false;
+    this.bulkFailures.clear();
+    this.serverTooOld = false;
     this.bulkRun = null;
     this.downloadPhase = false;
     this.clearChannelWatchdog();
@@ -3370,6 +3798,14 @@ export class SyncManager implements InboundHost {
       },
     });
     this.docStore = store;
+    // Skip the server's cold backfill when the bulk engine is going to page the
+    // same content out over HTTP (with a cursor, and without a WS frame per
+    // doc). Decided from the doc count we know at THIS moment: the prime window
+    // knows the local map, and a cold join — which does not prime at all — knows
+    // the server's full listing by the time this runs. Below the threshold the
+    // flag is off and the channel behaves exactly as it always has.
+    const liveOnly = useBulkPath(this.registry.allDocIds().length);
+    this.vaultEngineLiveOnly = liveOnly;
     // A note opened during the PRIME window already owns a provider for its doc.
     // `openDoc` suppressed it on the store that existed then — which was null —
     // and a fresh store suppresses nothing, so without this the background feed
@@ -3436,6 +3872,7 @@ export class SyncManager implements InboundHost {
       // The live half of the same statement: `refreshAcl` names each lost doc
       // with a `drop` just before the `reauth`, so both paths carry a list.
       onServerDrop: (docId) => this.handleServerDrop(docId, scope),
+      liveOnly,
       // The tree binaries this device holds. Not in the manifest — a binary has
       // no CRDT and so no state vector — but announced all the same, because
       // `ready.revoked` can only name what we say we hold, and a `.pdf` set to
@@ -3445,6 +3882,22 @@ export class SyncManager implements InboundHost {
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).
     this.pushLocalPresence();
+  }
+
+  /**
+   * Give the vault channel its backfill back: one fresh `hello`, without
+   * `mode: "live-only"`.
+   *
+   * Idempotent and silent when the channel was never live-only, which is what
+   * lets both callers — the bulk phase finishing, and a reconcile that found a
+   * vault below the threshold after the prime window sized it above — just call
+   * it. By the time the bulk phase calls it the manifest covers everything the
+   * bootstrap wrote, so the backfill it asks for is ≈0 frames wide.
+   */
+  private restoreChannelBackfill(): void {
+    if (!this.vaultEngineLiveOnly) return;
+    this.vaultEngineLiveOnly = false;
+    this.vaultEngine?.reconnect({ liveOnly: false });
   }
 
   private stopVaultEngine(): void {
@@ -3660,6 +4113,32 @@ export class SyncManager implements InboundHost {
         // holds without this side having to guess.
         return row.docId ?? row.id ?? null;
       },
+      // The batch twin, used only above the bulk threshold (see
+      // `AttachmentSync.preregisterFiles`). The server resolves each parent from
+      // the path, exactly as `registerFile` relies on it to — `folderPath` is
+      // sent so it can, and a mismatch comes back per item rather than as a
+      // failed request.
+      registerFiles: (inputs) =>
+        api.batchCreateFiles(
+          vaultId,
+          inputs.map((i) => ({
+            fileId: i.id,
+            relPath: i.relPath,
+            folderPath: parentDirOf(i.relPath),
+            sha256: i.sha256,
+            size: i.size,
+            mime: i.mime,
+          })),
+        ).then((results) =>
+          results.map((r) => ({
+            relPath: r.relPath,
+            // The server echoes the row's own id, like `registerFile` does.
+            id: r.fileId,
+            status: r.status,
+            code: r.code,
+            error: r.error,
+          })),
+        ),
       rememberFileId: (relPath, id, opts) => this.registry.setFileId(relPath, id, opts),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
@@ -3796,9 +4275,23 @@ export class SyncManager implements InboundHost {
   ): Promise<void> {
     const current = (): boolean =>
       (!scope || scope.isCurrent()) && this.current === sync && this.syncable();
+    // A doc this user may read but not write: the server's copy is the truth,
+    // and the pull about to land is what the editor will egest over the file.
+    // Anything the file holds that the doc does not is unsendable AND about to
+    // be overwritten, so keep a copy first (the uploader's `pushOne` does the
+    // same for a background doc). Checked BEFORE the pull, which is the last
+    // moment the file and the doc can still be compared honestly — and again
+    // after it, because `readOnly` is only authoritative once the socket has
+    // authenticated (the first call is a no-op for a grant this session has not
+    // learned yet, and the once-per-doc guard makes the second one free when it
+    // isn't).
+    if (sync.readOnly) await this.keepUnsendableOpenEdit(bridge, docId, scope);
+    if (!current()) return;
     // Up to 5s of waiting — easily long enough to span a vault switch. Seeding
     // then would read the NEW vault's file at this path into the OLD vault's doc.
     await sync.whenSynced(5000);
+    if (!current()) return;
+    if (sync.readOnly) await this.keepUnsendableOpenEdit(bridge, docId, scope);
     if (!current()) return;
     const decision = decideSeed({
       signedIn: true,
@@ -3819,6 +4312,49 @@ export class SyncManager implements InboundHost {
     if (!current()) return;
     this.registry.markPushed(docId);
     this.progress?.doc(docId, "synced");
+  }
+
+  /**
+   * The open note is read-only and its file diverges from the doc: save the
+   * file's bytes to `.context/trash/` and report that they could not be sent.
+   *
+   * Best effort — a failed read or a failed copy must not stop the doc from
+   * confirming — but never silent: an edit the app is about to overwrite is the
+   * one thing a user must be told about. Once per doc per session, so reopening
+   * a note that is still diverged doesn't fill the trash.
+   */
+  private async keepUnsendableOpenEdit(
+    bridge: NoteBridge,
+    docId: string,
+    scope: VaultScope | null,
+  ): Promise<void> {
+    if (this.unsendableReported.has(docId)) return;
+    const relPath = bridge.path;
+    let fileText: string;
+    try {
+      fileText = await ipc.readNote(relPath, scope?.vaultEpoch);
+    } catch {
+      return; // nothing readable to lose
+    }
+    if (scope && !scope.isCurrent()) return;
+    if (fileText === bridge.serialize()) return; // converged — nothing to keep
+    this.unsendableReported.add(docId);
+    let dest: string | null = null;
+    try {
+      dest = await ipc.writeTrashCopy(relPath, trashStamp(), fileText, scope?.vaultEpoch);
+    } catch (e) {
+      if (ipc.isVaultMismatch(e)) return;
+      console.warn(`[sync] couldn't keep a copy of ${relPath}`, e);
+    }
+    this.registry.recordFailure({
+      kind: "note",
+      path: relPath,
+      docId,
+      reason:
+        "edit could not be sent: no write access" +
+        (dest ? `; copy saved to ${dest}` : "; the local copy could not be saved either"),
+      code: null,
+    });
   }
 
   currentSync(): DocSync | null {
@@ -3893,4 +4429,11 @@ if (import.meta.hot) {
   import.meta.hot.accept(() => {
     window.location.reload();
   });
+}
+
+/** The parent folder of a vault-relative path, or null at the root — the
+ *  `folderPath` the batch file route resolves each parent from. */
+function parentDirOf(relPath: string): string | null {
+  const i = relPath.lastIndexOf("/");
+  return i === -1 ? null : relPath.slice(0, i);
 }

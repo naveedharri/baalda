@@ -129,6 +129,9 @@ export class VaultDocStore implements DocUpdateSink {
    *  leaves it alone — deleting a live entry would let the next update for that
    *  doc run in parallel with the one still writing. */
   private readonly coldChains = new Map<string, Promise<void>>();
+  /** In-flight {@link promote} calls, keyed by doc_id — one writer per doc.
+   *  Self-clearing like `coldChains`, and read only by `promote` itself. */
+  private readonly promoting = new Map<string, Promise<NoteBridge>>();
 
   private touchSeq = 0;
   /** The currently-open note, if any: its own Hocuspocus provider syncs it, so
@@ -279,6 +282,50 @@ export class VaultDocStore implements DocUpdateSink {
       if (markRecent) this.markRecent(docId);
       return existing.bridge;
     }
+    // ONE writer per doc_id. Two promotes racing each other would each open a
+    // bridge and the second would overwrite the first in `hot`, leaking a live
+    // bridge nobody ever retires — two egests racing one file, two persist
+    // streams, and an `ingestNow` on one re-inserting what the other just
+    // wrote. Second caller in waits for the first and then takes the
+    // `existing` branch above (so its `pin`/`markRecent` still apply).
+    const inflight = this.promoting.get(docId);
+    if (inflight) {
+      await inflight.catch(() => {});
+      return this.promote(docId, path, opts);
+    }
+    const run = this.openHot(docId, path, opts);
+    this.promoting.set(docId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.promoting.get(docId) === run) this.promoting.delete(docId);
+    }
+  }
+
+  /** The bridge-opening half of {@link promote}, serialized by `promoting`. */
+  private async openHot(
+    docId: string,
+    path: string,
+    opts: { seedFromFile?: boolean; markRecent?: boolean; pin?: boolean },
+  ): Promise<NoteBridge> {
+    // Settle any in-flight cold apply FIRST, exactly as `release` does. A cold
+    // apply opens its own transient bridge on this doc_id and holds it across
+    // several awaits (loadYjsState, readFile, the egest write, whenPersisted);
+    // promoting inside that window is the second writer the whole tier exists
+    // to prevent — and on a `force`/`ingestFromFile` run the hot bridge would
+    // then ingest the file the cold one had just written from a remote update,
+    // re-inserting that text under a fresh clientID (the doubling loop that
+    // `isExternalEdit` closed on the cold side).
+    await this.coldChains.get(docId)?.catch(() => {});
+    // The cold chain may have been what created it (it does not promote today,
+    // but the await above is a real window and this is cheap).
+    const already = this.hot.get(docId);
+    if (already) {
+      already.touch = ++this.touchSeq;
+      if (opts.pin) already.pinned = true;
+      if (opts.markRecent ?? true) this.markRecent(docId);
+      return already.bridge;
+    }
     const bridge = await NoteBridge.open(this.io, {
       docId,
       path,
@@ -291,7 +338,7 @@ export class VaultDocStore implements DocUpdateSink {
       pinned: opts.pin ?? false,
     });
     this.rememberSv(docId, Y.encodeStateVector(bridge.doc));
-    if (markRecent) this.markRecent(docId);
+    if (opts.markRecent ?? true) this.markRecent(docId);
     this.evictIfNeeded();
     return bridge;
   }
@@ -454,6 +501,18 @@ export class VaultDocStore implements DocUpdateSink {
   }
 
   private async coldApply(docId: string, update: Uint8Array): Promise<void> {
+    // The doc may have gone HOT since this update was queued (a promote that
+    // ran while an earlier apply in this chain was in flight). Route it to the
+    // resident bridge instead of opening a second writer for the same doc_id —
+    // the same branch `applyUpdate` takes, re-asserted here because the queue
+    // decided "cold" at enqueue time.
+    const hot = this.hot.get(docId);
+    if (hot) {
+      hot.bridge.applyRemote(update);
+      hot.touch = ++this.touchSeq;
+      this.rememberSv(docId, Y.encodeStateVector(hot.bridge.doc));
+      return;
+    }
     const path = this.resolvePath(docId);
     if (!path) return; // unknown doc (not yet materialised) — skip; next reconnect retries
     // Transient bridge: hydrate from local CRDT, apply the delta, write, persist,

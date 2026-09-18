@@ -6,10 +6,10 @@ use crate::attachments::{self, AttachmentMeta, FileStat};
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
-    Backlink, FileRow, FileText, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult,
-    YjsPruneReport, YjsState, YjsStateVector,
+    Backlink, BootstrapRow, FileRow, FileText, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink,
+    SearchResult, YjsPruneReport, YjsState, YjsStateVector,
 };
-use crate::notefile;
+use crate::notefile::{self, WriteOutcome};
 use crate::state::AppState;
 use crate::checks::{self, EmptyTrashReport, VaultChecks};
 use crate::stats::{self, VaultStats};
@@ -1641,6 +1641,10 @@ struct SaveSnapshotMeta {
     expected_epoch: Option<u64>,
     /// Where the snapshot ends and the state vector begins in the payload.
     snapshot_len: usize,
+    /// The COMPACTION WATERMARK: the last `yjs_updates.id` this snapshot folds
+    /// in. Absent ⇒ delete nothing (see `Index::save_yjs_snapshot`).
+    #[serde(default)]
+    up_to: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1666,6 +1670,8 @@ struct WriteBinaryMeta {
 /// [snapshot bytes]
 /// [u32 update_count]
 /// update_count × ([u32 len][bytes])
+/// [u8  has_last_id]   1 when the log was non-empty        ─┐ trailer
+/// [i64 last_update_id] 0 when has_last_id == 0            ─┘ (9 bytes)
 /// ```
 ///
 /// Little-endian throughout. An explicit flag byte rather than a length
@@ -1673,10 +1679,25 @@ struct WriteBinaryMeta {
 /// genuinely different states here: `save_yjs_state_vectors` creates rows with a
 /// NULL snapshot, and `Index::load_yjs_state` goes out of its way to keep the
 /// two apart.
+///
+/// **Why the watermark is a TRAILER and not a header.** It is the
+/// `yjs_updates.id` of the last update in this frame, which a bridge needs so a
+/// load-time compaction can truncate exactly the rows it just read (see
+/// `YjsState::last_update_id`). Appending it leaves every existing byte at the
+/// offset it was at, so `ipcCodec.ts decodeYjsState` — which stops after
+/// `update_count` updates and never looks further — keeps working untouched,
+/// and `ipc.ts loadYjsState` reads the 9 bytes at the end. A header would have
+/// cost a `buf.slice()` copy of the whole frame (17.7 MB on the largest doc
+/// measured) purely to re-align the payload, which is the cost this format
+/// exists to avoid.
 fn encode_yjs_state(state: &YjsState) -> Vec<u8> {
     let snapshot_len = state.snapshot.as_ref().map_or(0, |s| s.len());
     let mut out = Vec::with_capacity(
-        1 + 4 + snapshot_len + 4 + state.updates.iter().map(|u| 4 + u.len()).sum::<usize>(),
+        1 + 4
+            + snapshot_len
+            + 4
+            + state.updates.iter().map(|u| 4 + u.len()).sum::<usize>()
+            + YJS_STATE_TRAILER_BYTES,
     );
     out.push(u8::from(state.snapshot.is_some()));
     out.extend_from_slice(&(snapshot_len as u32).to_le_bytes());
@@ -1688,8 +1709,14 @@ fn encode_yjs_state(state: &YjsState) -> Vec<u8> {
         out.extend_from_slice(&(u.len() as u32).to_le_bytes());
         out.extend_from_slice(u);
     }
+    out.push(u8::from(state.last_update_id.is_some()));
+    out.extend_from_slice(&state.last_update_id.unwrap_or(0).to_le_bytes());
     out
 }
+
+/// The byte width of `encode_yjs_state`'s trailer. `ipc.ts loadYjsState` reads
+/// the same nine bytes off the end of the buffer.
+const YJS_STATE_TRAILER_BYTES: usize = 9;
 
 /// Frame the state-vector manifest — see `ipcCodec.ts` `decodeStateVectors`:
 ///
@@ -1721,6 +1748,10 @@ fn encode_state_vectors(rows: &[YjsStateVector]) -> Vec<u8> {
 
 /// Append one Yjs update to a doc's log. Takes a raw frame — see `raw_frame`.
 ///
+/// Answers with the row's `yjs_updates.id`: the caller tracks the highest one it
+/// has seen and hands it back as `save_yjs_snapshot`'s `upTo`, so a snapshot can
+/// only ever truncate the log it actually covers (desktop-audit #4).
+///
 /// `#[tauri::command(async)]` on a SYNC fn (Tauri's own `sync_threadpool`
 /// mode): the body runs to completion before the future is built, so the
 /// `Request` borrow never crosses an await, and it still runs off the main
@@ -1729,7 +1760,7 @@ fn encode_state_vectors(rows: &[YjsStateVector]) -> Vec<u8> {
 pub fn append_yjs_update(
     state: State<'_, AppState>,
     request: tauri::ipc::Request<'_>,
-) -> AppResult<()> {
+) -> AppResult<i64> {
     let (meta, update) = raw_frame::<AppendUpdateMeta>(request.body())?;
     // The CRDT log lives in the vault's own `.context/index.sqlite`, so an
     // epoch-less append that crossed a switch would file vault A's doc history
@@ -1765,6 +1796,9 @@ pub async fn load_yjs_state(
 
 /// Write a doc's merged snapshot + state vector. Raw frame: the payload is the
 /// snapshot followed by the state vector, split at `snapshotLen`.
+///
+/// `upTo` is the watermark the log is truncated to; omitting it writes the
+/// snapshot and deletes NOTHING.
 #[tauri::command(async)]
 pub fn save_yjs_snapshot(
     state: State<'_, AppState>,
@@ -1779,7 +1813,7 @@ pub fn save_yjs_snapshot(
     let (snapshot, state_vector) = body.split_at(meta.snapshot_len);
     let (_, index) = require_vault_at(&state, meta.expected_epoch)?;
     let guard = index.lock().unwrap();
-    guard.save_yjs_snapshot(&meta.doc_id, snapshot, state_vector)
+    guard.save_yjs_snapshot(&meta.doc_id, snapshot, state_vector, meta.up_to)
 }
 
 /// Persist a batch of per-doc Yjs state vectors (the durable sync manifest).
@@ -1863,6 +1897,394 @@ pub async fn list_yjs_state_vectors(
         guard.list_yjs_state_vectors()?
     };
     Ok(tauri::ipc::Response::new(encode_state_vectors(&rows)))
+}
+
+// ---- Bulk sync: bootstrap pages + batched materialize ---------------------
+//
+// Two batch commands that replace the per-note IPC storm of a cold join. Both
+// are epoch-pinned, both are idempotent, and neither can write over content.
+
+/// The vault-root store `attachments.rs` owns. Content-addressed bytes, hidden
+/// from the sidebar, never a note and never in the CRDT pipeline.
+const ATTACHMENTS_PREFIX: &str = "attachments/";
+const MAX_SEGMENT_BYTES: usize = 255;
+const MAX_PATH_BYTES: usize = 1024;
+
+/// The Rust twin of `src/lib/sync/inbound.ts`'s path allowlist. `Some(reason)`
+/// when the path is refused.
+///
+/// Why an allowlist and not just `resolve_in_vault`: that one blocks `..` and
+/// absolute paths but deliberately PERMITS `.context/`, because that is how the
+/// vault's own config is read. A server row saying `rel_path =
+/// ".context/config.json"` — and `rel_path` is whatever string MCP's
+/// `create_note` was handed — would otherwise be "write the server's bytes over
+/// this vault's doc-id map". Dot-prefixed segments are refused wholesale for the
+/// same reason `vault.rs is_ignored_name` skips them: a file the walk and the
+/// watcher ignore is a file this app can never see again.
+fn refuse_bulk_note_path(rel: &str) -> Option<String> {
+    if rel.is_empty() || rel.len() > MAX_PATH_BYTES {
+        return Some("path is empty or too long".into());
+    }
+    if rel.starts_with('/') || rel.contains('\\') {
+        return Some("absolute or backslash paths are not allowed".into());
+    }
+    if rel.chars().any(|c| c.is_control()) {
+        return Some("path contains control characters".into());
+    }
+    if rel.to_ascii_lowercase().starts_with(ATTACHMENTS_PREFIX) {
+        return Some("attachments/ is not a note path".into());
+    }
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Some("path has an empty or traversal segment".into());
+        }
+        if seg.len() > MAX_SEGMENT_BYTES {
+            return Some("path segment is too long".into());
+        }
+        // Covers `.context`, `.git` and every hidden directory the walker skips.
+        if vault::is_ignored_name(seg) {
+            return Some(format!("'{seg}' is an ignored or denied directory"));
+        }
+    }
+    let ext = rel.rsplit_once('.').map(|(stem, e)| {
+        (
+            !stem.is_empty() && !stem.ends_with('/'),
+            e.to_ascii_lowercase(),
+        )
+    });
+    match ext {
+        // `vault::NOTE_EXTS` itself, not a copy: that list, `src/lib/formats.ts`,
+        // `sync/registry.ts` and `sync/inbound.ts` are ONE contract, pinned by
+        // `formatsLockstep.test.ts`, and a fourth literal here could drift.
+        Some((true, e)) if vault::NOTE_EXTS.contains(&e.as_str()) => None,
+        _ => Some("not a note extension".into()),
+    }
+}
+
+/// One doc of a bootstrap page, decoded from the frame.
+#[derive(Debug, Clone)]
+pub struct BootstrapEntry {
+    pub doc_id: String,
+    pub rel_path: String,
+    /// The markdown the server's Y.Doc serializes to.
+    pub content: String,
+    /// That doc's merged Yjs update (its snapshot), verbatim.
+    pub snapshot: Vec<u8>,
+    pub state_vector: Vec<u8>,
+}
+
+/// What the batch did with one doc. `written`/`unchanged` mean the CRDT rows are
+/// stored and the TS side may `markPushed`; `conflict` and `rejected` mean the
+/// doc still needs the slow path (a `DocSync`, or a cold apply through
+/// `VaultDocStore`, which MERGES).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapOutcome {
+    pub doc_id: String,
+    /// `written` | `unchanged` | `conflict` | `rejected`.
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+impl BootstrapOutcome {
+    fn new(doc_id: &str, status: &str, reason: Option<String>) -> Self {
+        Self {
+            doc_id: doc_id.to_string(),
+            status: status.to_string(),
+            reason,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapEntryMeta {
+    doc_id: String,
+    rel_path: String,
+    content_len: usize,
+    snapshot_len: usize,
+    state_vector_len: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapBatchMeta {
+    expected_epoch: Option<u64>,
+    entries: Vec<BootstrapEntryMeta>,
+}
+
+/// Apply one bootstrap page: N docs' markdown + CRDT, in one IPC and one
+/// SQLite transaction.
+///
+/// ## The eligibility rule (this is `startup.ts decideSeed`, for the bulk case)
+///
+/// | local CRDT rows | local file | outcome |
+/// |---|---|---|
+/// | none | missing or 0 bytes | `written` — file + snapshot + state vector |
+/// | none | non-empty, sha256 == content | `unchanged` — **still writes the CRDT rows** |
+/// | none | non-empty, differs | `conflict` — writes NOTHING |
+/// | any | any | `rejected` — the TS side cold-applies, which merges |
+///
+/// `unchanged` is what makes a crash mid-page idempotent: the files are written
+/// before the transaction commits, so a killed process can leave files with no
+/// CRDT rows, and a re-apply must still be allowed to write them — otherwise
+/// those docs are stranded and the vault channel re-backfills them forever.
+/// Re-applying a page that DID commit is a no-op: every entry then has CRDT rows
+/// and comes back `rejected`, having written nothing.
+///
+/// ## What it is not
+///
+/// Not all-or-nothing across files, and it does not need to be: each file is
+/// atomic on its own (`write_note`'s temp + rename), every outcome is
+/// idempotent, and the caller's page cursor only advances after this returns.
+///
+/// ## Watcher interaction — deliberately no suppression set
+///
+/// The rows are written INSIDE this call's transaction, so when the
+/// 150 ms-debounced watcher drains these paths, `index_one`'s hash gate
+/// (`index.rs`, "The hash gate") finds `notes.sha256` already equal to the bytes
+/// on disk, returns `IndexedNote::Unchanged`, and `watcher.rs mark_unchanged`
+/// flags each `files-changed` entry `unchanged: true` — which the TS side
+/// already drops. A Rust-side suppression set would be a second, weaker copy of
+/// a guarantee the hash gate already gives.
+pub fn apply_bootstrap_entries(
+    vault: &Path,
+    index: &Index,
+    entries: &[BootstrapEntry],
+) -> AppResult<Vec<BootstrapOutcome>> {
+    let mut outcomes: Vec<BootstrapOutcome> = Vec::with_capacity(entries.len());
+    let mut rows: Vec<BootstrapRow> = Vec::with_capacity(entries.len());
+    // Where each queued row's outcome sits, so a transaction-level refusal can
+    // correct it in place rather than guessing later.
+    let mut row_slots: Vec<usize> = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        if let Some(reason) = refuse_bulk_note_path(&entry.rel_path) {
+            outcomes.push(BootstrapOutcome::new(
+                &entry.doc_id,
+                "rejected",
+                Some(reason),
+            ));
+            continue;
+        }
+        // Any local CRDT at all and the fast path is off: this device holds ops
+        // the page does not contain, and a snapshot write would drop them.
+        match index.has_local_crdt(&entry.doc_id) {
+            Ok(true) => {
+                outcomes.push(BootstrapOutcome::new(
+                    &entry.doc_id,
+                    "rejected",
+                    Some("the doc already has local CRDT state".into()),
+                ));
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                outcomes.push(BootstrapOutcome::new(&entry.doc_id, "rejected", Some(e.0)));
+                continue;
+            }
+        }
+        match notefile::write_note_if_absent_or_empty(vault, &entry.rel_path, &entry.content) {
+            Ok(WriteOutcome::Conflict) => {
+                outcomes.push(BootstrapOutcome::new(
+                    &entry.doc_id,
+                    "conflict",
+                    Some("the file on disk has different content".into()),
+                ));
+            }
+            Ok(outcome) => {
+                row_slots.push(outcomes.len());
+                outcomes.push(BootstrapOutcome::new(
+                    &entry.doc_id,
+                    if outcome == WriteOutcome::Written {
+                        "written"
+                    } else {
+                        "unchanged"
+                    },
+                    None,
+                ));
+                rows.push(BootstrapRow {
+                    doc_id: entry.doc_id.clone(),
+                    rel_path: entry.rel_path.clone(),
+                    snapshot: entry.snapshot.clone(),
+                    state_vector: entry.state_vector.clone(),
+                });
+            }
+            Err(e) => {
+                outcomes.push(BootstrapOutcome::new(&entry.doc_id, "rejected", Some(e.0)));
+            }
+        }
+    }
+
+    // ONE transaction for the whole page: index + rebind + snapshot upserts.
+    let failures = index.commit_bootstrap_rows(vault, &rows)?;
+    for (doc_id, err) in failures {
+        if let Some(slot) = row_slots
+            .iter()
+            .find(|i| outcomes[**i].doc_id == doc_id)
+            .copied()
+        {
+            outcomes[slot].status = "rejected".to_string();
+            outcomes[slot].reason = Some(err.0);
+        }
+    }
+    Ok(outcomes)
+}
+
+/// Apply one bootstrap page. Raw frame: the payload is every entry's
+/// `content || snapshot || stateVector`, concatenated in `entries` order —
+/// the shape `save_yjs_state_vectors` already uses.
+///
+/// `#[tauri::command(async)]` on a SYNC fn, like the other framed commands: the
+/// body runs to completion before the future is built, so the `Request` borrow
+/// never crosses an await, and it still runs off the main thread.
+///
+/// The index mutex is held across the file writes as well as the transaction.
+/// That is deliberate: it keeps the watcher's own index pass from landing
+/// between a write and the row that makes it `unchanged`, and a page is bounded
+/// (256 docs server-side).
+#[tauri::command(async)]
+pub fn apply_bootstrap_batch(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> AppResult<Vec<BootstrapOutcome>> {
+    let (meta, body) = raw_frame::<BootstrapBatchMeta>(request.body())?;
+    // Epoch FIRST: these are one vault's doc ids and one vault's paths, and a
+    // page applied across a vault switch would write vault A's notes into B.
+    let (vault, index) = require_vault_at(&state, meta.expected_epoch)?;
+
+    let mut entries: Vec<BootstrapEntry> = Vec::with_capacity(meta.entries.len());
+    let mut off = 0usize;
+    // The meta carries only lengths, so a short body is a malformed frame,
+    // never a silently truncated note.
+    let mut take = |len: usize| -> AppResult<&[u8]> {
+        let end = off
+            .checked_add(len)
+            .filter(|e| *e <= body.len())
+            .ok_or_else(|| AppError::new("binary ipc: bootstrap entry past end of frame"))?;
+        let slice = &body[off..end];
+        off = end;
+        Ok(slice)
+    };
+    for e in &meta.entries {
+        let content = std::str::from_utf8(take(e.content_len)?)
+            .map_err(|_| AppError::new("binary ipc: note content is not valid utf-8"))?
+            .to_string();
+        let snapshot = take(e.snapshot_len)?.to_vec();
+        let state_vector = take(e.state_vector_len)?.to_vec();
+        entries.push(BootstrapEntry {
+            doc_id: e.doc_id.clone(),
+            rel_path: e.rel_path.clone(),
+            content,
+            snapshot,
+            state_vector,
+        });
+    }
+
+    let guard = index.lock().unwrap();
+    apply_bootstrap_entries(&vault, &guard, &entries)
+}
+
+/// One server-only note to materialize as a local placeholder.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeItem {
+    pub rel_path: String,
+    /// The server's doc id for this path. `None` leaves the index row on
+    /// whatever id it already has.
+    pub doc_id: Option<String>,
+}
+
+/// What the batch did with one path.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeOutcome {
+    pub rel_path: String,
+    /// The file did not exist and was created EMPTY. False means it was already
+    /// there and was left byte-for-byte alone.
+    pub created: bool,
+    /// The index row at this path now carries the server's `doc_id`.
+    pub rebound: bool,
+}
+
+/// Materialize N server-only notes as create-only placeholders, then index and
+/// re-key them in ONE transaction with ONE link pass.
+///
+/// This is the registry's join loop, batched: it used to be 2-3 IPC round trips
+/// per note, each with its own transaction, and each `rebind_note_id` carried a
+/// `LinkScope::All` pass — a whole-`links` scan per note, which was the single
+/// largest cost of joining a vault.
+///
+/// Every write is `write_note_if_missing`: create-only, never an overwrite. That
+/// guard is why the 428-note incident (a lazily-loaded tree mistaken for the
+/// whole vault) cost nothing, and the batching must not weaken it.
+pub fn materialize_notes(
+    vault: &Path,
+    index: &Index,
+    items: &[MaterializeItem],
+) -> AppResult<Vec<MaterializeOutcome>> {
+    let mut outcomes: Vec<MaterializeOutcome> = Vec::with_capacity(items.len());
+    // (rel_path, doc_id) for the rows that exist on disk, plus where each one's
+    // outcome sits.
+    let mut rows: Vec<(String, Option<String>)> = Vec::with_capacity(items.len());
+    let mut row_slots: Vec<usize> = Vec::with_capacity(items.len());
+
+    for item in items {
+        if let Some(reason) = refuse_bulk_note_path(&item.rel_path) {
+            log::warn!(
+                "[materialize] refusing {}: {reason}",
+                item.rel_path
+            );
+            outcomes.push(MaterializeOutcome {
+                rel_path: item.rel_path.clone(),
+                created: false,
+                rebound: false,
+            });
+            continue;
+        }
+        let created = match notefile::write_note_if_missing(vault, &item.rel_path, "") {
+            Ok(made) => made,
+            Err(e) => {
+                // Per-path and non-fatal: one unwritable placeholder must not
+                // cost the rest of the join.
+                log::warn!("[materialize] {}: {}", item.rel_path, e.0);
+                outcomes.push(MaterializeOutcome {
+                    rel_path: item.rel_path.clone(),
+                    created: false,
+                    rebound: false,
+                });
+                continue;
+            }
+        };
+        row_slots.push(outcomes.len());
+        outcomes.push(MaterializeOutcome {
+            rel_path: item.rel_path.clone(),
+            created,
+            rebound: false,
+        });
+        rows.push((item.rel_path.clone(), item.doc_id.clone()));
+    }
+
+    let rebound = index.commit_materialized(vault, &rows)?;
+    for (slot, ok) in row_slots.into_iter().zip(rebound) {
+        outcomes[slot].rebound = ok;
+    }
+    Ok(outcomes)
+}
+
+/// Materialize a batch of server-only notes. Plain JSON — no bytes cross here,
+/// these placeholders are empty by construction.
+#[tauri::command]
+pub async fn materialize_notes_batch(
+    state: State<'_, AppState>,
+    items: Vec<MaterializeItem>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<MaterializeOutcome>> {
+    // Epoch-pinned like `rebind_note_id`: the doc ids come from ONE vault's
+    // registry map, and writing them into another vault's index forks its notes.
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    materialize_notes(&vault, &guard, &items)
 }
 
 // ---- Attachment I/O (Phase 3 blob store, spec 02 §2) ----------------------
@@ -2362,7 +2784,7 @@ mod tests {
     /// The `ipcCodec.ts` decoder, in Rust, so a round trip pins the frame
     /// format from this side too. `src/lib/__tests__/ipcCodec.test.ts` asserts
     /// the same byte fixtures from the TS side.
-    fn decode_yjs_state(buf: &[u8]) -> (Option<Vec<u8>>, Vec<Vec<u8>>) {
+    fn decode_yjs_state(buf: &[u8]) -> (Option<Vec<u8>>, Vec<Vec<u8>>, Option<i64>) {
         let mut off = 0usize;
         let has_snapshot = buf[off] == 1;
         off += 1;
@@ -2385,16 +2807,154 @@ mod tests {
             updates.push(buf[off..off + len].to_vec());
             off += len;
         }
+        let has_last_id = buf[off] == 1;
+        off += 1;
+        let raw = i64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        off += 8;
         assert_eq!(off, buf.len(), "frame must be consumed exactly");
-        (snapshot, updates)
+        (snapshot, updates, has_last_id.then_some(raw))
     }
 
     fn yjs_state(snapshot: Option<Vec<u8>>, updates: Vec<Vec<u8>>) -> YjsState {
         let update_count = updates.len() as i64;
+        let last_update_id = (update_count > 0).then_some(update_count * 10);
         YjsState {
             snapshot,
             updates,
             update_count,
+            last_update_id,
+        }
+    }
+
+    /// The Rust half of the path allowlist must refuse exactly what
+    /// `src/lib/sync/inbound.ts` refuses, plus `attachments/`. `resolve_in_vault`
+    /// is NOT a substitute: it permits `.context/`, which is how the vault's own
+    /// config is read.
+    #[test]
+    fn bulk_path_allowlist_is_the_twin_of_inbound_ts() {
+        for ok in [
+            "Note.md",
+            "Folder/Sub/Note.markdown",
+            "a/b/c.txt",
+            "Canvas.canvas",
+            "page.html",
+        ] {
+            assert!(
+                refuse_bulk_note_path(ok).is_none(),
+                "{ok} should be allowed"
+            );
+        }
+        for bad in [
+            "",
+            "../escape.md",
+            "/abs/note.md",
+            "C:\\note.md",
+            ".context/config.json",
+            ".context/trash/x.md",
+            ".git/HEAD.md",
+            "Notes/.hidden/x.md",
+            ".hidden.md",
+            "attachments/abcdef01.md",
+            "Attachments/abcdef01.md",
+            "node_modules/pkg/readme.md",
+            "dist/out.md",
+            "Notes//double.md",
+            "Notes/report.pdf",
+            "Notes/image.png",
+            "noextension",
+            "trailing/.md",
+            "with\u{0}null.md",
+        ] {
+            assert!(
+                refuse_bulk_note_path(bad).is_some(),
+                "{bad:?} should be refused"
+            );
+        }
+        // Long paths and segments.
+        assert!(refuse_bulk_note_path(&format!("{}.md", "x".repeat(300))).is_some());
+        assert!(refuse_bulk_note_path(&format!("{}/a.md", "d/".repeat(600))).is_some());
+    }
+
+    /// The bootstrap frame is the same `[u32 metaLen][meta JSON][payload]` shape
+    /// `ipcCodec.ts frame()` builds, with each entry's three parts concatenated
+    /// in `entries` order. Pinned here so a change on either side fails a test
+    /// rather than silently splitting a note in the wrong place.
+    #[test]
+    fn bootstrap_frame_splits_each_entry_into_its_three_parts() {
+        let meta = serde_json::json!({
+            "expectedEpoch": 4,
+            "entries": [
+                { "docId": "d1", "relPath": "A.md", "contentLen": 5, "snapshotLen": 3, "stateVectorLen": 2 },
+                { "docId": "d2", "relPath": "B.md", "contentLen": 0, "snapshotLen": 1, "stateVectorLen": 0 },
+            ],
+        });
+        let meta_bytes = serde_json::to_vec(&meta).unwrap();
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&meta_bytes);
+        framed.extend_from_slice(b"alpha"); // d1 content
+        framed.extend_from_slice(&[1, 2, 3]); // d1 snapshot
+        framed.extend_from_slice(&[7, 7]); // d1 state vector
+        framed.extend_from_slice(&[9]); // d2 snapshot (empty content + sv)
+
+        let body = tauri::ipc::InvokeBody::Raw(framed);
+        let (parsed, payload) = raw_frame::<BootstrapBatchMeta>(&body).unwrap();
+        assert_eq!(parsed.expected_epoch, Some(4));
+        assert_eq!(parsed.entries.len(), 2);
+
+        let mut off = 0usize;
+        let mut take = |n: usize| {
+            let s = payload[off..off + n].to_vec();
+            off += n;
+            s
+        };
+        let e0 = &parsed.entries[0];
+        assert_eq!(take(e0.content_len), b"alpha".to_vec());
+        assert_eq!(take(e0.snapshot_len), vec![1, 2, 3]);
+        assert_eq!(take(e0.state_vector_len), vec![7, 7]);
+        let e1 = &parsed.entries[1];
+        assert!(take(e1.content_len).is_empty(), "a 0-length part is legal");
+        assert_eq!(take(e1.snapshot_len), vec![9]);
+        assert!(take(e1.state_vector_len).is_empty());
+        assert_eq!(off, payload.len(), "the payload is exactly consumed");
+    }
+
+    /// `upTo` is optional on the wire: an older caller that omits it must still
+    /// deserialize, and must mean "delete nothing" rather than "delete all".
+    #[test]
+    fn save_snapshot_meta_defaults_its_watermark_to_none() {
+        let with: SaveSnapshotMeta =
+            serde_json::from_str(r#"{"docId":"d","snapshotLen":2,"upTo":41}"#).unwrap();
+        assert_eq!(with.up_to, Some(41));
+        let without: SaveSnapshotMeta =
+            serde_json::from_str(r#"{"docId":"d","snapshotLen":2}"#).unwrap();
+        assert_eq!(without.up_to, None);
+    }
+
+    /// Both bulk commands must resolve the vault (and its epoch) BEFORE they
+    /// touch anything — a page applied across a vault switch would write vault
+    /// A's notes into vault B. Source-level, like `formatsLockstep.test.ts`:
+    /// the ordering is the invariant and there is no Tauri `State` to build in
+    /// a unit test.
+    #[test]
+    fn the_bulk_commands_pin_the_vault_epoch_first() {
+        let src = include_str!("commands.rs");
+        for (cmd, pin, work) in [
+            (
+                "pub fn apply_bootstrap_batch",
+                "require_vault_at(&state, meta.expected_epoch)?",
+                "apply_bootstrap_entries(&vault, &guard, &entries)",
+            ),
+            (
+                "pub async fn materialize_notes_batch",
+                "require_vault_at(&state, expected_epoch)?",
+                "materialize_notes(&vault, &guard, &items)",
+            ),
+        ] {
+            let body = &src[src.find(cmd).unwrap_or_else(|| panic!("{cmd} is gone"))..];
+            let pin_at = body.find(pin).unwrap_or_else(|| panic!("{cmd} lost its epoch pin"));
+            let work_at = body.find(work).unwrap_or_else(|| panic!("{cmd} lost its body"));
+            assert!(pin_at < work_at, "{cmd} must pin the epoch before it works");
         }
     }
 
@@ -2413,13 +2973,18 @@ mod tests {
             yjs_state(Some(vec![7]), vec![vec![], vec![255, 0, 128]]),
         ];
         for state in &cases {
-            let (snapshot, updates) = decode_yjs_state(&encode_yjs_state(state));
+            let (snapshot, updates, last_update_id) =
+                decode_yjs_state(&encode_yjs_state(state));
             assert_eq!(snapshot, state.snapshot);
             assert_eq!(updates, state.updates);
+            // The compaction watermark rides in the trailer, and `None` (an
+            // empty log) must not decode as 0 — 0 is a legal rowid.
+            assert_eq!(last_update_id, state.last_update_id);
         }
 
-        // The empty state is the shortest legal frame: flag + len + count.
-        assert_eq!(encode_yjs_state(&yjs_state(None, vec![])), vec![0; 9]);
+        // The empty state is the shortest legal frame: flag + len + count, then
+        // the 9-byte trailer with its flag clear.
+        assert_eq!(encode_yjs_state(&yjs_state(None, vec![])), vec![0; 18]);
         // An EMPTY snapshot still sets the flag byte, so it cannot be confused
         // with a doc that has none.
         assert_eq!(

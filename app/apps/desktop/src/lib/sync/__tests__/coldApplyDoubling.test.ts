@@ -99,3 +99,93 @@ describe("cold apply: a local store behind its own file", () => {
     await store.destroyAll();
   });
 });
+
+/**
+ * One writer per doc_id — the promote side of the same rule.
+ *
+ * `coldApply` holds its transient bridge across several awaits (loadYjsState,
+ * the `isExternalEdit` read, the egest write, `whenPersisted`). A `promote`
+ * landing inside that window used to see nothing in the hot tier and open a
+ * SECOND bridge on the same doc_id: two egests racing one file, two persist
+ * streams, and — on a `force`/`ingestFromFile` run — the hot bridge ingesting
+ * the text the cold one had just written from the remote update, which is the
+ * doubling loop `isExternalEdit` closed on the cold side. `release` already
+ * awaited the chain; `promote` now does too.
+ */
+describe("one writer per doc_id", () => {
+  it("promote waits for an in-flight cold apply on the same doc", async () => {
+    const { io, fs } = makeHarness({ [PATH]: BASE });
+    // A gate the cold apply blocks on, inside its `isExternalEdit` read.
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let hold = false;
+    const slow = {
+      ...io,
+      readFile: async (p: string) => {
+        if (hold) {
+          hold = false;
+          await gate;
+        }
+        return io.readFile(p);
+      },
+    };
+    const store = new VaultDocStore({ io: slow, resolvePath: () => PATH });
+    const server = serverDoc(BASE);
+    await store.applyUpdate(DOC, stateOf(server));
+
+    // A teammate's block arrives while the file is one step ahead — the shape
+    // that makes `coldApply` read the file, where it now blocks.
+    server.getText("content").insert(BASE.length, ADDED);
+    fs.externalWrite(PATH, BASE + ADDED);
+    const order: string[] = [];
+    hold = true;
+    const cold = store.applyUpdate(DOC, stateOf(server)).then(() => order.push("cold"));
+    expect(store.pendingColdDocs()).toEqual([DOC]);
+
+    // The content uploader promotes the very same doc mid-apply.
+    const promoted = store.promote(DOC, PATH).then((b) => {
+      order.push("promote");
+      return b;
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual([]); // neither has resolved: the promote is waiting
+
+    open();
+    const bridge = await promoted;
+    await cold;
+    expect(order).toEqual(["cold", "promote"]);
+    // One writer, so one copy of the teammate's block everywhere.
+    expect(occurrences(fs.get(PATH)!, "## Team")).toBe(1);
+    expect(bridge.serialize()).toBe(BASE + ADDED);
+    await store.destroyAll();
+  });
+
+  it("routes an update queued mid-promote into the resident bridge", async () => {
+    const { io } = makeHarness({ [PATH]: BASE });
+    const store = new VaultDocStore({ io, resolvePath: () => PATH });
+    const server = serverDoc(BASE);
+    await store.applyUpdate(DOC, stateOf(server));
+
+    const bridge = await store.promote(DOC, PATH);
+    server.getText("content").insert(BASE.length, ADDED);
+    await store.applyUpdate(DOC, stateOf(server));
+
+    // It reached the hot bridge, not a second transient one.
+    expect(bridge.serialize()).toBe(BASE + ADDED);
+    expect(store.pendingColdDocs()).toEqual([]);
+    await store.destroyAll();
+  });
+
+  it("two concurrent promotes share one bridge", async () => {
+    const { io } = makeHarness({ [PATH]: BASE });
+    const store = new VaultDocStore({ io, resolvePath: () => PATH });
+    const [a, b] = await Promise.all([
+      store.promote(DOC, PATH, { pin: true }),
+      store.promote(DOC, PATH),
+    ]);
+    expect(a).toBe(b);
+    await store.destroyAll();
+  });
+});

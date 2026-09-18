@@ -89,6 +89,80 @@ describe("empty-egest clobber guard", () => {
 });
 
 /**
+ * A local-only vault's persisted-but-EMPTY doc must reconcile against the file
+ * on reopen (desktop-audit #2).
+ *
+ * Emptying a note is legal — `everHadContent` lets it egest — so a local vault
+ * routinely holds a doc whose persisted log serializes to "". If something else
+ * writes the file while the app is closed, `hydrate` used to skip the ingest
+ * (text.length === 0) and paint an empty editor over real content; the first
+ * keystroke then egested the emptiness. The signed-in path must NOT change:
+ * there an empty doc belongs to the deferred pull-before-seed order.
+ */
+describe("hydrate — empty doc vs a file that moved on", () => {
+  it("ingests the file on a local-only vault (seedFromFile)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { io, fs } = makeHarness({ [PATH]: CONTENT });
+      // Session 1: seeded from disk, then the user clears the note.
+      const first = await NoteBridge.open(io, { docId: "doc-1", path: PATH });
+      first.edit((t) => t.delete(0, t.length));
+      await vi.advanceTimersByTimeAsync(300);
+      expect(fs.get(PATH)).toBe("");
+      await first.whenPersisted();
+      first.destroy();
+
+      // App closed. An AI / Obsidian / `git checkout` fills the file in.
+      fs.externalWrite(PATH, "world");
+
+      // Session 2: the CRDT is persisted AND empty.
+      const bridge = await NoteBridge.open(io, { docId: "doc-1", path: PATH });
+      expect(bridge.serialize()).toBe(""); // nothing merged yet — the ingest is debounced
+      await vi.advanceTimersByTimeAsync(200);
+
+      // The file's content reached the doc instead of being painted over.
+      expect(bridge.serialize()).toBe("world");
+      expect(fs.get(PATH)).toBe("world");
+
+      bridge.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("changes nothing for a signed-in doc (seedFromFile false)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { io, fs } = makeHarness({ [PATH]: CONTENT });
+      const first = await NoteBridge.open(io, { docId: "doc-1", path: PATH });
+      first.edit((t) => t.delete(0, t.length));
+      await vi.advanceTimersByTimeAsync(300);
+      await first.whenPersisted();
+      first.destroy();
+
+      fs.externalWrite(PATH, "world");
+
+      // The sync path: the doc stays empty until the server's state has been
+      // pulled, and only `seedFromFileIfEmpty` may seed it after that.
+      const bridge = await NoteBridge.open(io, {
+        docId: "doc-1",
+        path: PATH,
+        seedFromFile: false,
+      });
+      const reads = fs.readCount;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(bridge.serialize()).toBe("");
+      expect(fs.readCount).toBe(reads); // no ingest was armed at all
+      expect(fs.get(PATH)).toBe("world"); // and nothing was written over it
+
+      bridge.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
  * The ingest twin (#93): a 0-byte FILE must not clear a doc that holds text.
  *
  * The registry materializes a server-only note as an empty placeholder, and on a

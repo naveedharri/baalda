@@ -71,8 +71,8 @@ describe("note-doubling: ingest vs. pull", () => {
     const racing: CrdtPersistence = {
       loadState: (id) => persistence.loadState(id),
       appendUpdate: (id, u) => persistence.appendUpdate(id, u),
-      saveSnapshot: async (id, s, v) => {
-        await persistence.saveSnapshot(id, s, v);
+      saveSnapshot: async (id, s, v, upTo) => {
+        await persistence.saveSnapshot(id, s, v, upTo);
         if (!landed) {
           landed = true;
           applyRemote(bridge, SERVER_TEXT);

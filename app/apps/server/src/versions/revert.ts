@@ -31,6 +31,36 @@ import {
 /** The checkpoint disappeared (pruned/deleted) between the request and the lock. */
 export class RevertError extends Error {}
 
+/**
+ * The revert would soft-delete more notes than a revert plausibly should, so it
+ * did nothing at all.
+ *
+ * Every note not named by the checkpoint is treated as "created after it" and
+ * soft-deleted — which for a checkpoint whose `structure.notes` came back EMPTY
+ * (a capture that failed, a truncated row, a vault whose structure was never
+ * recorded) means the whole vault. Same shape, and the same reasoning, as the
+ * desktop's disk-delete cap: a plausible mass deletion and a corrupt input look
+ * identical from here, so the large one is refused and REPORTED rather than
+ * guessed at. The pre-revert checkpoint is not an excuse — it only exists if the
+ * revert got far enough to take it.
+ */
+export class RevertTooDestructiveError extends RevertError {
+  constructor(
+    readonly wouldDelete: number,
+    readonly cap: number,
+  ) {
+    super(
+      `Refusing to revert: it would delete ${wouldDelete} note(s), over the ${cap} this vault allows in one revert. ` +
+        `Restore a different checkpoint, or delete the extra notes yourself first.`,
+    );
+  }
+}
+
+/** Notes one revert may soft-delete. Mirrors the desktop's `max(5, ceil(mapped * 0.2))`. */
+export function revertDeleteCap(liveNotes: number): number {
+  return Math.max(5, Math.ceil(liveNotes * 0.2));
+}
+
 export interface VaultRevertOutcome {
   docsChanged: number;
   docsRestored: number;
@@ -63,9 +93,17 @@ export async function revertVaultToCheckpoint(
   const pool = opts.pool ?? defaultPool;
   const { vaultId, checkpointId, userId, docWriter } = opts;
 
+  // Content writes commit through the GLOBAL pool (`docWriter.setContent`), not
+  // through this transaction, so running them inline mixed two things that
+  // cannot roll back together: a later failure — notably the 23505 the note
+  // re-insert can still raise — rolled the STRUCTURE back while leaving every
+  // already-rewritten note body reverted, with no record of which. They are
+  // collected here and run after COMMIT, where a failure costs exactly itself.
+  const pendingWrites: Array<{ docId: string; content: string }> = [];
+
   const outcome = await withVaultCheckpointLock(
     vaultId,
-    async (db): Promise<VaultRevertOutcome> => {
+    async (db): Promise<Omit<VaultRevertOutcome, "docsChanged">> => {
       const { rows: cpRows } = await db.query<{ structure: CheckpointStructure }>(
         "SELECT structure FROM vault_checkpoints WHERE id = $1 AND vault_id = $2",
         [checkpointId, vaultId],
@@ -146,7 +184,6 @@ export async function revertVaultToCheckpoint(
       }
 
       // ── notes ──────────────────────────────────────────────────────────────
-      let docsChanged = 0;
       let docsRestored = 0;
       let docsKeptOverEmpty = 0;
       for (const note of structure.notes) {
@@ -167,13 +204,37 @@ export async function revertVaultToCheckpoint(
         if (!row) {
           // Hard-gone (or never existed on this server): re-create with the
           // original doc_id so its CRDT history and backlinks reattach.
-          await db.query(
-            `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id)
-             VALUES ($1, $2, $3, $4, $5, $1)
-             ON CONFLICT (id) DO NOTHING`,
-            [note.id, vaultId, folderId, note.title, note.rel_path],
-          );
-          docsRestored++;
+          //
+          // `ON CONFLICT (id)` covers the id, and NOT the two live-path unique
+          // indexes (`notes_live_path_uq` m021, `notes_live_path_ci_uq` m023),
+          // which raise a bare 23505 when a DIFFERENT doc already occupies this
+          // note's old path. Skipping that one note is right: the path is taken
+          // by something the user has since made, and the alternative — letting
+          // the error out — used to abort a revert that had already rewritten
+          // other notes' bodies.
+          // Under a SAVEPOINT, because this runs inside ONE transaction
+          // (`withVaultCheckpointLock`): a failed statement poisons it, and
+          // every later query would fail with "current transaction is aborted"
+          // — turning a single skippable note into a failed revert.
+          await db.query("SAVEPOINT revert_note");
+          try {
+            await db.query(
+              `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id)
+               VALUES ($1, $2, $3, $4, $5, $1)
+               ON CONFLICT (id) DO NOTHING`,
+              [note.id, vaultId, folderId, note.title, note.rel_path],
+            );
+            await db.query("RELEASE SAVEPOINT revert_note");
+            docsRestored++;
+          } catch (err) {
+            await db.query("ROLLBACK TO SAVEPOINT revert_note");
+            await db.query("RELEASE SAVEPOINT revert_note");
+            if ((err as { code?: string })?.code !== "23505") throw err;
+            console.warn(
+              `[revert] skipping ${note.id}: another live note already occupies ${note.rel_path}`,
+            );
+            continue;
+          }
         } else {
           const moved =
             row.rel_path !== note.rel_path ||
@@ -211,15 +272,33 @@ export async function revertVaultToCheckpoint(
           docsKeptOverEmpty++;
           continue;
         }
-        await docWriter.setContent(vaultId, note.id, snapshot.content, { userId });
-        await stampLastEdited(note.id, userId, db);
-        docsChanged++;
+        pendingWrites.push({ docId: note.id, content: snapshot.content });
       }
 
       // ── notes created after the checkpoint ─────────────────────────────────
       // Soft-deleted, exactly as a user delete would: the row and the CRDT doc
       // survive, so a later revert to a newer checkpoint brings them back.
       const keepIds = structure.notes.map((n) => n.id);
+      // COUNT FIRST, refuse over the cap. An empty or truncated
+      // `structure.notes` makes every live note in the vault a candidate, and
+      // "delete everything" is indistinguishable here from a legitimate revert
+      // of a vault that has since been filled — so the big one is refused.
+      // Throwing rolls the whole transaction back, which is the point.
+      const { rows: counts } = await db.query<{ live: number; doomed: number }>(
+        `SELECT (SELECT count(*) FROM notes WHERE vault_id = $1 AND deleted_at IS NULL)::int AS live,
+                (SELECT count(*) FROM notes
+                  WHERE vault_id = $1 AND deleted_at IS NULL
+                    AND NOT (id = ANY($2::text[])))::int AS doomed`,
+        [vaultId, keepIds],
+      );
+      const doomed = counts[0]?.doomed ?? 0;
+      const cap = revertDeleteCap(counts[0]?.live ?? 0);
+      if (doomed > cap) {
+        console.error(
+          `[revert] refusing checkpoint ${checkpointId} for vault ${vaultId}: ${doomed} note(s) would be deleted (cap ${cap}, checkpoint names ${keepIds.length})`,
+        );
+        throw new RevertTooDestructiveError(doomed, cap);
+      }
       const { rows: removed } = await db.query<{ id: string }>(
         `UPDATE notes SET deleted_at = now()
           WHERE vault_id = $1 AND deleted_at IS NULL AND NOT (id = ANY($2::text[]))
@@ -234,7 +313,6 @@ export async function revertVaultToCheckpoint(
       }
 
       return {
-        docsChanged,
         docsRestored,
         docsDeleted: removed.length,
         foldersCreated,
@@ -246,7 +324,22 @@ export async function revertVaultToCheckpoint(
   );
 
   if (!outcome.acquired) return outcome;
+
+  // AFTER COMMIT. Each write is independent and idempotent (`setContent` is a
+  // forward CRDT transaction), so one that fails costs one note and is fixed by
+  // re-running the revert — rather than taking the committed structure with it.
+  let docsChanged = 0;
+  for (const write of pendingWrites) {
+    try {
+      await docWriter.setContent(vaultId, write.docId, write.content, { userId });
+      await stampLastEdited(write.docId, userId, pool);
+      docsChanged++;
+    } catch (err) {
+      console.error(`[revert] could not restore the body of ${write.docId}:`, err);
+    }
+  }
+
   // After COMMIT, so a client that re-pulls on the broadcast sees the new tree.
   opts.onRegistryChanged?.(vaultId, null);
-  return { acquired: true, result: outcome.value };
+  return { acquired: true, result: { ...outcome.value, docsChanged } };
 }

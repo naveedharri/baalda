@@ -156,3 +156,112 @@ describe("registry file registration", () => {
     ]);
   });
 });
+
+/**
+ * What a folder move and a folder delete do to the BINARIES underneath them.
+ * Both used to ignore `files` entirely, and both lost data by doing so.
+ */
+describe("files under a folder that moves or is deleted", () => {
+  let owner: TestUser;
+  let org: string;
+  let vault: string;
+  let folder: string;
+
+  beforeEach(async () => {
+    await resetDb();
+    rec.reset();
+    const tag = randomUUID().slice(0, 8);
+    owner = await signUp(`owner+${tag}@files.tree.test`);
+    org = (await createOrg(owner, "Files Tree", `files-tree-${tag}`)).id;
+    vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    folder = await seedFolder(vault, null, "Alpha", "Alpha", owner.userId);
+  });
+
+  /** Register a file and give it a blob row at the same path. */
+  async function seedFileWithBlob(path: string): Promise<{ docId: string; blobId: string }> {
+    const docId = randomUUID();
+    const res = await req(owner, "POST", "/api/files", { vaultId: vault, docId, path });
+    expect(res.status).toBe(201);
+    const blobId = randomUUID();
+    await pool.query(
+      `INSERT INTO blobs (id, vault_id, org_id, doc_id, sha256, size, mime, rel_path, filename,
+                          storage_provider, status, data)
+       VALUES ($1, $2, $3, $4, $5, 3, 'application/pdf', $6, 'f.pdf', 'postgres', 'ready',
+               decode('000102','hex'))`,
+      [blobId, vault, org, docId, randomUUID().replace(/-/g, "") + "9".repeat(32), path],
+    );
+    return { docId, blobId };
+  }
+
+  it("rewrites files.path and blobs.rel_path when the folder is renamed", async () => {
+    const { docId, blobId } = await seedFileWithBlob("Alpha/spec.pdf");
+
+    const moved = await req(owner, "PATCH", `/api/folders/${folder}`, { name: "Beta" });
+    expect(moved.status).toBe(200);
+
+    // Without this, `files.folder_id` pointed at the moved folder while
+    // `files.path` still spelled `Alpha/` — the exact disagreement
+    // `resolveParentFolder` refuses with 400 `path_folder_mismatch` — and
+    // `GET /vaults/:id/blobs` kept advertising the OLD path, so the desktop's
+    // attachment diff re-downloaded the binary into a RESURRECTED `Alpha/`.
+    const file = await pool.query<{ path: string }>("SELECT path FROM files WHERE id = $1", [docId]);
+    expect(file.rows[0]?.path).toBe("Beta/spec.pdf");
+    const blob = await pool.query<{ rel_path: string }>(
+      "SELECT rel_path FROM blobs WHERE id = $1",
+      [blobId],
+    );
+    expect(blob.rows[0]?.rel_path).toBe("Beta/spec.pdf");
+  });
+
+  it("never rewrites an attachments/ blob, which lives outside the tree", async () => {
+    const attachment = randomUUID();
+    await pool.query(
+      `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
+                          storage_provider, status, data)
+       VALUES ($1, $2, $3, $4, 3, 'image/png', 'attachments/pic.png', 'pic.png',
+               'postgres', 'ready', decode('000102','hex'))`,
+      [attachment, vault, org, randomUUID().replace(/-/g, "") + "8".repeat(32)],
+    );
+    await req(owner, "PATCH", `/api/folders/${folder}`, { name: "Beta" });
+    const { rows } = await pool.query<{ rel_path: string }>(
+      "SELECT rel_path FROM blobs WHERE id = $1",
+      [attachment],
+    );
+    expect(rows[0]?.rel_path).toBe("attachments/pic.png");
+  });
+
+  it("takes files, their bytes and a tombstone with the folder it deletes", async () => {
+    const { docId, blobId } = await seedFileWithBlob("Alpha/spec.pdf");
+
+    const del = await req(owner, "DELETE", `/api/folders/${folder}`);
+    expect([200, 204]).toContain(del.status);
+
+    // The row is gone: left behind, a vault-wide member re-downloaded it and
+    // RECREATED the folder on their next pull.
+    expect(
+      (await pool.query("SELECT 1 FROM files WHERE id = $1", [docId])).rowCount,
+    ).toBe(0);
+    // And so are the bytes.
+    expect(
+      (await pool.query("SELECT 1 FROM blobs WHERE id = $1", [blobId])).rowCount,
+    ).toBe(0);
+    // The tombstone is what makes this a DELETION rather than a revocation: a
+    // share-only member whose file merely left the readable set has it removed
+    // outright, with no `.context/trash` copy.
+    const tomb = await pool.query<{ path: string }>(
+      "SELECT path FROM file_tombstones WHERE id = $1",
+      [docId],
+    );
+    expect(tomb.rows[0]?.path).toBe("Alpha/spec.pdf");
+  });
+
+  it("counts files when asking whether a folder is empty", async () => {
+    const { folderIsEmpty } = await import("../src/registry/tree-ops.js");
+    expect(await folderIsEmpty(pool, folder)).toBe(true);
+    await seedFileWithBlob("Alpha/spec.pdf");
+    // MCP's `delete_folder` consults this before refusing a non-recursive
+    // delete; a folder holding nothing but PDFs used to answer "empty".
+    expect(await folderIsEmpty(pool, folder)).toBe(false);
+  });
+});

@@ -10,6 +10,7 @@ import { resetDb } from "./helpers/db.js";
 import {
   seedFolder,
   seedMember,
+  seedItemPrivate,
   seedNote,
   seedOrg,
   seedShare,
@@ -152,6 +153,33 @@ describe("listReadableDocsInVault agrees with effectivePermission (spec 05 §3.1
     expect(await listReadableDocsInVault(guest, vault)).toEqual(new Set(all));
     // …but the org-wide grant never leaks to outsiders.
     expect(await listReadableDocsInVault(outsider, vault)).toEqual(new Set());
+  });
+
+  it("rescues an item-Private doc through a per-USER vault grant, like the resolver", async () => {
+    // `resolver.sharePermission`'s personal branch has always matched a per-user
+    // row on the VAULT resource; `scopedDocs`' personal pass looked only at
+    // folder/file shares. So this user was READABLE to the resolver and ABSENT
+    // from the set — and by the desktop's rule a disagreement leaves the WHOLE
+    // revoked group, which means one such doc permanently stalls revocation
+    // cleanup on that device.
+    const org = await seedOrg("Delta", "delta-vd");
+    const owner = await seedUser("o4@d.com");
+    const named = await seedUser("n4@d.com");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, named, "member");
+
+    const vault = await seedVault(org);
+    const folder = await seedFolder(vault, null, "Team", "Team");
+    const note = await seedNote(vault, folder, "Team/secret.md");
+    // Shared vault, one note taken out of the team's reach…
+    await seedVaultShare(org, "org", org, "edit");
+    // …and this user named on the vault itself, which is what lifts it back.
+    await seedVaultShare(org, "user", named, "edit");
+    await seedItemPrivate(org, "file", note);
+
+    await assertAgrees(named, vault, [note]);
+    expect(await effectivePermission(named, note)).not.toBe("none");
+    expect(await listReadableDocsInVault(named, vault)).toContain(note);
   });
 
   it("excludes soft-deleted notes and returns empty for a non-member", async () => {

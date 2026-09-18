@@ -205,8 +205,20 @@ export function likeEscape(s: string): string {
 /** A move/rename was refused for an integrity reason (not permissions). */
 export class TreeOpError extends Error {}
 
-/** Rewrite the path prefix of every descendant folder + note of a moved folder.
- *  `oldPath`/`newPath` are the folder's own paths; children share the prefix. */
+/**
+ * Rewrite the path prefix of every descendant of a moved folder — folders,
+ * notes, registered FILES, and the blob rows that carry those files' bytes.
+ *
+ * All four, or the move corrupts the subtree. `files.folder_id` follows the
+ * folder automatically (it points at the row that moved) while `files.path`
+ * would keep spelling the old location — the exact `rel_path`/`folder_id`
+ * disagreement `resolveParentFolder` refuses with 400 `path_folder_mismatch`,
+ * so every later write to that file fails. And `GET /vaults/:id/blobs` serves
+ * `blobs.rel_path`, so a stale one makes the desktop's attachment diff download
+ * the binary back into a RESURRECTED copy of the old folder.
+ *
+ * `oldPath`/`newPath` are the folder's own paths; children share the prefix.
+ */
 export async function rewriteDescendantPaths(
   db: Queryable,
   vaultId: string,
@@ -231,6 +243,22 @@ export async function rewriteDescendantPaths(
     `UPDATE notes
         SET rel_path = $2 || substring(rel_path FROM $4::int), updated_at = now()
       WHERE vault_id = $1 AND rel_path LIKE $3 || '/%' ESCAPE '\\'`,
+    [vaultId, newPath, prefix, from],
+  );
+  await db.query(
+    `UPDATE files
+        SET path = $2 || substring(path FROM $4::int)
+      WHERE vault_id = $1 AND path LIKE $3 || '/%' ESCAPE '\\'`,
+    [vaultId, newPath, prefix, from],
+  );
+  // Only the blobs that ARE those files. An `attachments/…` drop lives outside
+  // the tree by definition (`blobs/refs.ts` will not even index a path that
+  // starts anywhere else), so a folder move must never touch one.
+  await db.query(
+    `UPDATE blobs
+        SET rel_path = $2 || substring(rel_path FROM $4::int), updated_at = now()
+      WHERE vault_id = $1 AND doc_id IS NOT NULL
+        AND rel_path LIKE $3 || '/%' ESCAPE '\\'`,
     [vaultId, newPath, prefix, from],
   );
 }
@@ -473,12 +501,20 @@ export async function moveNote(
   return { id: docId, vaultId: note.vault_id, relPath, title, folderId };
 }
 
-/** Does this folder directly contain any live note or subfolder? */
+/**
+ * Does this folder directly contain any live note, subfolder or registered file?
+ *
+ * FILES count. This is what MCP's `delete_folder` consults before refusing a
+ * non-`recursive` delete, and a folder holding nothing but PDFs used to answer
+ * "empty" — so the AI deleted a folder full of binaries without being asked to
+ * recurse.
+ */
 export async function folderIsEmpty(db: Queryable, folderId: string): Promise<boolean> {
   const { rows } = await db.query<{ n: string }>(
     `SELECT (
         (SELECT count(*) FROM notes WHERE folder_id = $1 AND deleted_at IS NULL)
       + (SELECT count(*) FROM folders WHERE parent_id = $1)
+      + (SELECT count(*) FROM files WHERE folder_id = $1)
      )::text AS n`,
     [folderId],
   );
@@ -502,7 +538,12 @@ export async function folderIsEmpty(db: Queryable, folderId: string): Promise<bo
 export async function deleteFolderCascade(
   db: Queryable,
   folderId: string,
-): Promise<{ vaultId: string; path: string; deletedNoteIds: string[] }> {
+): Promise<{
+  vaultId: string;
+  path: string;
+  deletedNoteIds: string[];
+  deletedFileIds: string[];
+}> {
   const folder = await findFolder(db, folderId);
   if (!folder) throw new TreeOpError("Unknown folder");
 
@@ -542,10 +583,83 @@ export async function deleteFolderCascade(
      ON CONFLICT (id) DO NOTHING`,
     [folderId],
   );
+  // FILES, which the cascade used to ignore entirely. `files.folder_id` is
+  // `ON DELETE SET NULL` and `files.path` was left spelling the deleted folder,
+  // so the row and its bytes survived a folder delete — a vault-wide member
+  // re-downloaded them and RECREATED the folder, while a share-only member (for
+  // whom the file merely left the readable set, with no tombstone to explain it)
+  // had it treated as a REVOCATION and removed outright, with no trash copy.
+  //
+  // Same double match as the notes above: `folder_id` and the path prefix can
+  // disagree, and either one alone leaves rows behind.
+  const { rows: files } = await db.query<{ id: string }>(
+    `WITH RECURSIVE subtree AS (
+        SELECT id FROM folders WHERE id = $1
+        UNION
+        SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+     )
+     SELECT id FROM files
+      WHERE vault_id = $4
+        AND (
+          folder_id IN (SELECT id FROM subtree)
+          OR path = $2
+          OR path LIKE $3 || '/%' ESCAPE '\\'
+        )`,
+    [folderId, folder.path, likeEscape(folder.path), folder.vault_id],
+  );
+  const deletedFileIds = files.map((f) => f.id);
+  if (deletedFileIds.length > 0) {
+    // Tombstone BEFORE the row goes, so `/access-check` can answer `none` for
+    // the id instead of leaving it unanswered — which is what makes the desktop
+    // treat this as a deletion rather than stalling its whole revocation group.
+    await db.query(
+      `INSERT INTO file_tombstones (id, vault_id, path)
+       SELECT id, vault_id, path FROM files WHERE id = ANY($1::text[])
+       ON CONFLICT (id) DO NOTHING`,
+      [deletedFileIds],
+    );
+    // The bytes go with the file. Deleting the `blobs` rows is what queues their
+    // objects (migration 027's AFTER DELETE trigger), and the queue drain
+    // re-checks for a live row on the key first, so a sibling file sharing the
+    // content keeps its bytes.
+    // Vault-scoped as well as id-scoped: `blobs.doc_id` carries no FK, so the
+    // vault is the only thing stopping an id collision from reaching another
+    // team's bytes.
+    await db.query(
+      "DELETE FROM blobs WHERE doc_id = ANY($1::text[]) AND vault_id = $2",
+      [deletedFileIds, folder.vault_id],
+    );
+    await db.query(
+      "DELETE FROM files WHERE id = ANY($1::text[]) AND vault_id = $2",
+      [deletedFileIds, folder.vault_id],
+    );
+  }
   await db.query("DELETE FROM folders WHERE id = $1", [folderId]);
   return {
     vaultId: folder.vault_id,
     path: folder.path,
     deletedNoteIds: cascaded.map((n) => n.id),
+    deletedFileIds,
   };
+}
+
+/**
+ * Record that a registered file is gone, so `/access-check` can answer `none`
+ * for its id rather than leaving it UNANSWERED.
+ *
+ * An unanswered id is the worst of the three outcomes for the desktop: its rule
+ * is "a disagreement, an unanswered id or a throw LEAVES the whole group", so a
+ * single deleted binary stalls revocation cleanup for every other doc on that
+ * device, permanently. Call this in the same transaction as the row delete.
+ */
+export async function tombstoneFile(
+  db: Queryable,
+  fileId: string,
+): Promise<void> {
+  await db.query(
+    `INSERT INTO file_tombstones (id, vault_id, path)
+     SELECT id, vault_id, path FROM files WHERE id = $1
+     ON CONFLICT (id) DO NOTHING`,
+    [fileId],
+  );
 }

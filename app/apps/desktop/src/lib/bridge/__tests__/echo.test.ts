@@ -177,3 +177,60 @@ describe("reopen after an external edit while the doc was closed", () => {
     }
   });
 });
+
+
+/**
+ * Two egests for one note never overlap (desktop-audit #7).
+ *
+ * `write_note` writes through ONE temp path per target and holds no lock, so
+ * two passes in flight at once interleave in that temp file and the loser's
+ * rename fails. `writeThrough` (the registry filling in a materialized
+ * placeholder) drains while a debounced pass may still be awaiting its write,
+ * which is the routine way to get two. `drainIngest` has always chained its
+ * passes; `drainEgest` now does too.
+ */
+describe("egest serialization", () => {
+  it("chains an overlapping writeThrough behind the pass already writing", async () => {
+    const { io, fs } = makeHarness({ [PATH]: SEED });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let first = true;
+    const slow = {
+      ...io,
+      writeFileAtomic: async (path: string, content: string) => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        if (first) {
+          first = false;
+          await held; // the first write is still in flight…
+        }
+        try {
+          await io.writeFileAtomic(path, content);
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+    const bridge = await NoteBridge.open(slow, { docId: "doc-1", path: PATH });
+    bridge.edit((t) => t.insert(t.length, "!!!"));
+
+    const flushing = bridge.flushEgest(); // the debounced pass, forced now
+    await Promise.resolve();
+    // …and the registry writes the doc through on top of it.
+    const through = bridge.writeThrough();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(maxInFlight).toBe(1);
+
+    release();
+    await flushing;
+    await through;
+
+    expect(maxInFlight).toBe(1); // never two writers on one temp path
+    expect(fs.get(PATH)).toBe(bridge.serialize());
+    bridge.destroy();
+  });
+});

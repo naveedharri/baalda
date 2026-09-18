@@ -22,7 +22,33 @@ import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
  *     as-is for back-compat with existing desktop builds and local dev.
  * See README "Ports".
  */
+/**
+ * Last line of defence for the whole process.
+ *
+ * Node 22 exits on an unhandled rejection, and this server has hooks it does not
+ * own the call sites of — Hocuspocus invokes `onChange` unawaited and uncaught,
+ * so one rejected query there used to end the process and drop every connected
+ * client. Each call site still handles its own errors (see `onChange`); this
+ * catches the ones nobody anticipated rather than trading a degraded request for
+ * a total outage.
+ *
+ * `uncaughtException` is the same bargain and the more dangerous one — the
+ * process continues with unknown state — but for a relay whose durable state is
+ * in Postgres, a logged exception beats every open socket dying at once. A
+ * supervisor restart is still the right answer to a *repeating* one, which is
+ * why these are loud.
+ */
+function installProcessGuards(): void {
+  process.on("unhandledRejection", (reason) => {
+    console.error("[process] unhandled promise rejection (keeping the process alive):", reason);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[process] uncaught exception (keeping the process alive):", err);
+  });
+}
+
 async function main() {
+  installProcessGuards();
   // Vault replication channel (spec 05): pub/sub is in-memory unless REDIS_URL
   // is set, in which case fanout spans instances (HA / rolling deploys).
   const pubsub = await createPubSub(config.redisUrl);

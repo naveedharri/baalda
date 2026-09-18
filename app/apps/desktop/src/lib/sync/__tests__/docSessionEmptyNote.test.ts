@@ -205,6 +205,7 @@ vi.mock("../syncManager", () => ({
 }));
 
 import type { NoteBridge } from "../../bridge/noteBridge";
+import * as ipc from "../../ipc";
 import type { SessionInfo } from "../../api";
 import { SyncManager } from "../docSession";
 import { vaultScopes } from "../vaultScope";
@@ -276,6 +277,11 @@ beforeEach(() => {
   storeHooks.opts = null;
   storeHooks.open = null;
   connects.order = [];
+  vi.mocked(ipc.loadYjsState).mockResolvedValue({
+    snapshot: null,
+    updates: [],
+    updateCount: 0,
+  });
 });
 
 afterEach(async () => {
@@ -353,5 +359,33 @@ describe("a note created empty", () => {
 
     expect(fakeRegistry.isNoteEmptyOnDisk).toHaveBeenCalledWith(REL);
     expect(connects.order).toEqual([]);
+  });
+
+  it("refuses to settle a 0-byte file whose local CRDT still holds the note", async () => {
+    // `materializeContent` created the placeholder and then FAILED to write the
+    // local CRDT's text into it (disk full, permission, an epoch switch). The
+    // server holds nothing, the file is 0 bytes — and the note is alive in
+    // `index.sqlite`. Settling here marked it pushed and badged it synced, so it
+    // was never queued again and the text was stranded forever.
+    const held = new Y.Doc();
+    held.getText("content").insert(0, "the text only index.sqlite has");
+    vi.mocked(ipc.loadYjsState).mockResolvedValue({
+      snapshot: null,
+      updates: [Y.encodeStateAsUpdate(held)],
+      updateCount: 1,
+    });
+
+    const sm = manager();
+    await enable(sm);
+    await ready(sm, [DOC]);
+
+    // Queued for the push path instead: a socket carried the text up, and the
+    // doc got no "empty everywhere" verdict — the next connect probes it again
+    // rather than skipping it forever.
+    expect(connects.order).toEqual([DOC]);
+    connects.order = [];
+    fakeRegistry.isNoteEmptyOnDisk.mockClear();
+    await ready(sm, [DOC]);
+    expect(fakeRegistry.isNoteEmptyOnDisk).toHaveBeenCalledWith(REL);
   });
 });

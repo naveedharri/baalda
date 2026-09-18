@@ -15,6 +15,19 @@ export async function runMigrations(
   await client.connect();
   const applied: string[] = [];
   try {
+    // ONE migrator at a time, across processes. Railway runs this as a
+    // pre-deploy step and a rolling deploy (or a retried one) can start two at
+    // once: both read `_migrations`, both see the same file as unapplied, and
+    // both run its DDL — the second failing halfway through a migration whose
+    // first half already committed in the other transaction, leaving the schema
+    // in a state no file describes.
+    //
+    // Session-scoped (`pg_advisory_lock`, not `_xact_`) because the run is many
+    // transactions, and WAITING rather than trying: the loser's job is to apply
+    // the same migrations, so queueing and then finding them all done is exactly
+    // right. Released by `client.end()` in the `finally` even if a migration
+    // throws.
+    await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", ["baalda-migrations"]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS _migrations (
         name TEXT PRIMARY KEY,

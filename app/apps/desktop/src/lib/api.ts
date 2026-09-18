@@ -1,3 +1,17 @@
+// Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
+// wire contract, and importing the TYPES keeps this module a runtime leaf.
+import type {
+  BootstrapSession,
+  DocPushItem,
+  DocPushResult,
+  FileBatchItem,
+  FileBatchResult,
+  FolderBatchItem,
+  FolderBatchResult,
+  NoteBatchItem,
+  NoteBatchResult,
+} from "./sync/bulkTypes";
+
 // The ONE typed HTTP boundary to the Baalda server. Every `fetch`
 // to the server lives here — auth, organizations, registry, shares, sync-token.
 // Components and managers call these methods; they never call `fetch` directly.
@@ -656,6 +670,111 @@ function errorCodeOf(body: unknown): string | null {
   if (typeof b.error === "string") return b.error;
   return null;
 }
+
+/**
+ * A refused bulk-sync call, carrying the machine-readable `code` the engine
+ * branches on next to the status.
+ *
+ * An {@link ApiError} subclass, like {@link BlobTransportError}, so every
+ * existing `catch (e) { if (e instanceof ApiError) }` keeps working.
+ * `retryAfterMs` is set only for a 503 `bootstrap_busy`, where the server told
+ * us when to come back.
+ */
+export class BulkApiError extends ApiError {
+  constructor(
+    status: number,
+    public code: string | null,
+    message: string,
+    body?: unknown,
+    public retryAfterMs: number | null = null,
+  ) {
+    super(status, message, body);
+    this.name = "BulkApiError";
+  }
+}
+
+/**
+ * The error code for a failed bulk call.
+ *
+ * The server's own `code` wins; the three statuses below are what a bare status
+ * MEANS on these routes. `server_too_old` in particular is never sent by anyone
+ * — it is what a 404 on a route this build requires means, and it is terminal.
+ */
+function bulkCodeFor(status: number, body: unknown): string | null {
+  const code = errorCodeOf(body);
+  if (code) return code;
+  if (status === 404) return "server_too_old";
+  if (status === 410) return "session_expired";
+  if (status === 503) return "bootstrap_busy";
+  return null;
+}
+
+/** Re-type a failed bulk call so callers can branch on the server's `code`. */
+function asBulkError(e: unknown): unknown {
+  if (e instanceof BulkApiError) return e;
+  if (e instanceof ApiError) {
+    return new BulkApiError(e.status, bulkCodeFor(e.status, e.body), e.message, e.body);
+  }
+  return e;
+}
+
+/**
+ * The bulk `code` an error carries, or null (a network failure names none).
+ *
+ * Also reads a plain `code` property off anything else thrown, because the
+ * engine's own modules (`bootstrap.ts`, `docBatchPush.ts`) branch on exactly
+ * that field and their injected transports are not required to be an
+ * {@link ApiError} — the code is the contract, not the class.
+ */
+export function bulkErrorCode(e: unknown): string | null {
+  if (e instanceof BulkApiError) return e.code;
+  if (e instanceof ApiError) return bulkCodeFor(e.status, e.body);
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code ? code : null;
+}
+
+/** "This server does not have the bulk engine" — the one terminal verdict. */
+export function isServerTooOld(e: unknown): boolean {
+  return bulkErrorCode(e) === "server_too_old";
+}
+
+/** `Retry-After` as milliseconds: seconds, or an HTTP date, or null. */
+function retryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const at = Date.parse(header);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - Date.now());
+}
+
+function numHeader(v: string | null): number {
+  const n = v ? Number(v) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** One `GET …/bootstrap/:sessionId` page: bytes plus the three headers. */
+export interface BootstrapPageResponse {
+  /** The page, already un-gzipped by the fetch stack. Decode with
+   *  `sync/bootstrapCodec.ts`. */
+  bytes: Uint8Array;
+  /** Cursor for the NEXT page; `null` (header absent) ⇒ drained. */
+  nextCursor: number | null;
+  /** Docs in this page, as the server counted them. */
+  docs: number;
+  /** Uncompressed payload bytes, for the progress subtitle. */
+  uncompressedBytes: number;
+}
+
+/**
+ * Notes per page in {@link ApiClient.listNoteRegistryPaged}.
+ *
+ * 1000 rows is a body of a few hundred KB — small enough that a page parses in
+ * one frame, large enough that a 6,000-note vault is six round trips rather
+ * than sixty. Omitting `limit` entirely is what an OLD server does with it, and
+ * that is exactly today's unpaged behaviour.
+ */
+export const REGISTRY_PAGE_LIMIT = 1000;
 
 /**
  * A server address didn't check out. Thrown by {@link ApiClient.health}, which
@@ -1753,6 +1872,199 @@ export class ApiClient {
     await this.request<unknown>("DELETE", `/api/blobs/${encodeURIComponent(id)}`, {
       query: opts.force ? { force: "1" } : undefined,
     });
+  }
+
+  // ---- Bulk sync engine (batch registry, batched push, bootstrap) ---------
+  //
+  // Every route here is NEW. A server that predates them answers 404, and a 404
+  // on any of them is terminal `server_too_old` — deliberately NOT the tri-state
+  // capability memo `blobIntentSupported` uses, which exists to degrade
+  // silently. Degrading silently here would put a 5,000-note vault back on the
+  // per-note path at 3.7 notes/second and call it success.
+
+  /**
+   * Register folders in bulk. No `parentId`: the server sorts by depth and
+   * resolves parents inside the request, which deletes the client's
+   * level-by-level loop.
+   */
+  async batchCreateFolders(
+    vaultId: string,
+    items: FolderBatchItem[],
+  ): Promise<FolderBatchResult[]> {
+    return this.bulk<{ results: FolderBatchResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/folders/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /** Register notes in bulk. `folderPath`, never `folderId` — see the type. */
+  async batchCreateNotes(
+    vaultId: string,
+    items: NoteBatchItem[],
+  ): Promise<NoteBatchResult[]> {
+    return this.bulk<{ results: NoteBatchResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/notes/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /** Register tree binaries (`files` rows) in bulk. */
+  async batchCreateFiles(
+    vaultId: string,
+    items: FileBatchItem[],
+  ): Promise<FileBatchResult[]> {
+    return this.bulk<{ results: FileBatchResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/files/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /**
+   * Push N docs' CRDT state in one request (base64 Yjs V1 per doc).
+   *
+   * The caller packs by BYTES as well as by count — see `BATCH_MAX_DOCS` /
+   * `BATCH_MAX_DECODED_BYTES` in `sync/pool.ts`, which mirror the server's
+   * limits; overshooting them is `batch_too_large`, not a truncated apply.
+   */
+  async batchPushDocs(vaultId: string, items: DocPushItem[]): Promise<DocPushResult[]> {
+    return this.bulk<{ results: DocPushResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/docs/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /**
+   * Open a bootstrap session: the server takes one snapshot of what this member
+   * may read and pages it out from a cursor.
+   *
+   * `have` is the docIds this device already holds CRDT state for — the server
+   * subtracts them from the download set, so a second device with most of the
+   * vault pays for the difference and not for the vault.
+   */
+  async createBootstrapSession(
+    vaultId: string,
+    have: string[] = [],
+  ): Promise<BootstrapSession> {
+    const data = await this.bulk<BootstrapSession>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/bootstrap`,
+      have.length > 0 ? { have } : {},
+    );
+    return {
+      sessionId: data.sessionId,
+      docs: data.docs ?? 0,
+      bytes: data.bytes ?? 0,
+      emptyDocs: data.emptyDocs ?? [],
+      emptyTruncated: data.emptyTruncated === true,
+      expiresAt: data.expiresAt ?? "",
+    };
+  }
+
+  /**
+   * Fetch one page of a bootstrap session: gzip binary, decoded by
+   * `sync/bootstrapCodec.ts`.
+   *
+   * Bypasses {@link ApiClient.request} on purpose — the body is bytes, not JSON
+   * — and is modelled on {@link ApiClient.downloadBlob}/{@link
+   * ApiClient.downloadBytesFrom}. `Content-Encoding: gzip` is handled by the
+   * fetch stack itself, so what lands here is already the plain page.
+   *
+   * Three statuses carry meaning rather than failure: 410 `session_expired`
+   * (the caller re-POSTs with a fresh `have`), 503 `bootstrap_busy` with a
+   * `Retry-After` (the server's bootstrap semaphore is full), and 404
+   * `server_too_old`.
+   */
+  async fetchBootstrapPage(
+    vaultId: string,
+    sessionId: string,
+    opts: { cursor?: number; maxBytes?: number } = {},
+  ): Promise<BootstrapPageResponse> {
+    const url = new URL(
+      `${this.baseUrl}/api/vaults/${encodeURIComponent(vaultId)}/bootstrap/${encodeURIComponent(sessionId)}`,
+    );
+    if (opts.cursor !== undefined) url.searchParams.set("cursor", String(opts.cursor));
+    if (opts.maxBytes !== undefined) url.searchParams.set("maxBytes", String(opts.maxBytes));
+    const res = await this.fetchImpl(url.toString(), {
+      method: "GET",
+      headers: { ...this.baseHeaders(), [ORIGIN_HEADER]: this.clientId },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let parsed: unknown = text;
+      try {
+        parsed = text ? JSON.parse(text) : undefined;
+      } catch {
+        /* a plain-text body is fine; `bulkCodeFor` falls back to the status */
+      }
+      throw new BulkApiError(
+        res.status,
+        bulkCodeFor(res.status, parsed),
+        text || `HTTP ${res.status}`,
+        parsed,
+        retryAfterMs(res.headers.get("retry-after")),
+      );
+    }
+    const cursorHeader = res.headers.get("x-baalda-cursor");
+    const body = new Uint8Array(await res.arrayBuffer());
+    return {
+      bytes: body,
+      // ABSENT means drained. An empty string is not a cursor either.
+      nextCursor: cursorHeader ? Number(cursorHeader) : null,
+      docs: numHeader(res.headers.get("x-baalda-docs")),
+      uncompressedBytes: numHeader(res.headers.get("x-baalda-bytes")),
+    };
+  }
+
+  /** POST a bulk route, re-typing any refusal as a {@link BulkApiError}. */
+  private async bulk<T>(path: string, body: unknown): Promise<T> {
+    try {
+      const { data } = await this.request<T>("POST", path, { body });
+      return data;
+    } catch (e) {
+      throw asBulkError(e);
+    }
+  }
+
+  /**
+   * The registry pull's note listing, following the server's keyset pages.
+   *
+   * Callers are unchanged: this answers exactly what {@link listNoteRegistry}
+   * does. `limit` is what asks a NEW server to page; a server that predates
+   * pagination ignores it and answers the whole vault with no `nextAfter`, which
+   * is the single-page case below — so there is no capability probe and no
+   * fallback path to get wrong.
+   *
+   * `tombstones` ride the LAST page only (that is what keeps the "one snapshot,
+   * no precedence rule" property of the unpaged listing), so they are taken from
+   * whichever response ended the loop, and `null` still means "the server did not
+   * answer the question" rather than "nothing is deleted".
+   */
+  async listNoteRegistryPaged(
+    vaultId: string,
+    opts: { limit?: number } = {},
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null }> {
+    const limit = opts.limit ?? REGISTRY_PAGE_LIMIT;
+    const notes: RegisteredNote[] = [];
+    let tombstones: string[] | null = null;
+    let after: string | undefined;
+    // Bounded so a server that keeps answering the same `nextAfter` cannot spin
+    // this loop forever; 1000 pages is 1,000,000 notes at the default limit.
+    for (let page = 0; page < 1000; page++) {
+      const { data } = await this.request<{
+        notes: RegisteredNote[];
+        tombstones?: string[];
+        nextAfter?: string | null;
+      }>("GET", "/api/notes", {
+        query: { vaultId, limit: String(limit), after },
+      });
+      notes.push(...(data.notes ?? []));
+      tombstones = Array.isArray(data.tombstones) ? data.tombstones : null;
+      const next = typeof data.nextAfter === "string" ? data.nextAfter : null;
+      // No cursor ⇒ the last (or only) page. A cursor that did not ADVANCE is a
+      // server bug; stopping is strictly better than looping on it.
+      if (!next || next === after) return { notes, tombstones };
+      after = next;
+    }
+    return { notes, tombstones };
   }
 
   // ---- Versioning ---------------------------------------------------------

@@ -479,7 +479,13 @@ class VaultConnection {
       this.handlePresence(parked);
     }
 
-    await this.backfill(hello.manifest, hello.priority ?? []);
+    // `mode: "live-only"` — the client is pulling its cold state over the
+    // bootstrap HTTP routes, so the socket is for live updates only. `ready`
+    // still ships below: its `empty` and `revoked` lists are what the client
+    // ACTS on (seed these from disk; remove these from disk), and they cost one
+    // query and no query respectively. `behind` is the only casualty, and it is
+    // a by-product of the diff this mode is skipping.
+    if (hello.mode !== "live-only") await this.backfill(hello.manifest, hello.priority ?? []);
 
     // Backfill sends nothing for a doc with no server state, so the client would
     // otherwise sit on a blank note it can't tell apart from one still in flight

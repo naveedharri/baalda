@@ -4,7 +4,11 @@
 
 pub mod attachments;
 pub mod checks;
-mod commands;
+// `pub` so the integration tests can drive the batch appliers
+// (`apply_bootstrap_entries`, `materialize_notes`) directly: they are the whole
+// policy of the bulk sync path — the eligibility table, the path allowlist —
+// and the `#[tauri::command]` wrappers around them are only frame decoding.
+pub mod commands;
 mod error;
 pub mod extract;
 pub mod extract_worker;
@@ -196,6 +200,8 @@ pub fn run() {
             commands::rebind_note_id,
             commands::write_note,
             commands::write_note_if_missing,
+            commands::materialize_notes_batch,
+            commands::apply_bootstrap_batch,
             commands::create_note,
             commands::create_folder,
             commands::ensure_folder,

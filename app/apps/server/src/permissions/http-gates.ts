@@ -392,12 +392,12 @@ export async function canWriteAttachment(
  * The single gate every blob mutation now asks, and the place the folder-lock
  * hole in {@link canWriteAttachment} finally closes — for the blobs that can
  * close it. A blob with a `doc_id` IS a file at a known place in the tree, so
- * there is a folder to resolve a lock or a `view` grant against, and the answer
- * is {@link canCreateIn} on that folder: exactly the gate the `files` row's own
- * registration went through, so bytes and row cannot end up with different
- * locks. At the vault root that is `vaultRootWritable` — the same test
- * `canWriteAttachment` applies — so nothing changes for a file sitting at the
- * top of a vault.
+ * there is a doc to resolve a lock or a `view` grant against, and that question
+ * is asked FIRST ({@link canEditDoc}) — the same gate a rename or a registry
+ * delete of that file answers to, so bytes and row cannot end up with different
+ * locks. A blob whose `doc_id` names no registered file yet is a fresh upload:
+ * there is nothing to have edit rights ON, so it falls through to the vault
+ * posture.
  *
  * Without a resolvable `doc_id` there is still no folder to ask about, and the
  * vault-wide posture remains the whole answer. That is the documented limit
@@ -414,7 +414,25 @@ export async function canWriteBlob(
   if (!vaultId) return false; // a legacy row with no collection has no folder and no posture
   if (blob.doc_id) {
     const file = await fileDoc(db, vaultId, blob.doc_id);
-    if (file) return canCreateIn(userId, vaultId, file.folder_id, db);
+    if (file) {
+      // The file ALREADY EXISTS, so `canCreateIn` on its folder is not the whole
+      // question: it answers "may you put something here", and a share that caps
+      // THIS DOC at view — a `locked` row, or a view-only grant on the file —
+      // does not show up in it at all. Create rights in the folder were
+      // therefore enough to destroy someone else's file bytes.
+      //
+      // Asked in two steps rather than swapped for `canEditDoc` outright,
+      // because the resolver and the folder gate disagree in a direction that
+      // matters: in a vault that was never shared, `effectivePermission`
+      // withdraws the owner/admin shortcut (the private-by-default space) and
+      // answers `none` for a file nobody is recorded as having authored, while
+      // `canCreateIn` correctly still lets the owner write in their own vault.
+      // So an explicit `view` — the cap this is about — refuses, and everything
+      // else keeps the folder answer.
+      if (await canEditDoc(userId, blob.doc_id, db)) return true;
+      if ((await effectivePermission(userId, blob.doc_id, db)) === "view") return false;
+      return canCreateIn(userId, vaultId, file.folder_id, db);
+    }
   }
   return canWriteAttachment(userId, vaultId, db);
 }

@@ -154,7 +154,9 @@ fn write_bytes_atomic(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| AppError::new("invalid file name"))?;
-    let tmp = parent.join(format!(".{file_name}.tmp"));
+    // Unique per call, never one shared `.{name}.tmp`: two writers of the same
+    // path would otherwise interleave into it (see `notefile::temp_sibling`).
+    let tmp = crate::notefile::temp_sibling(parent, file_name);
 
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, &abs)?;
@@ -613,7 +615,9 @@ pub async fn download_file(
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| AppError::new("invalid file name"))?;
-    let tmp = parent.join(format!(".{file_name}.tmp"));
+    // Unique per call, never one shared `.{name}.tmp`: two writers of the same
+    // path would otherwise interleave into it (see `notefile::temp_sibling`).
+    let tmp = crate::notefile::temp_sibling(parent, file_name);
 
     let mut res = client()?
         .get(url)

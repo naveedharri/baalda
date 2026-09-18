@@ -12,6 +12,8 @@ import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { blobRoutes } from "./routes/blobs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
+import { createBulkRoutes } from "./routes/bulk.js";
+import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
 import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { desktopOauthRoutes } from "./routes/desktop-oauth.js";
@@ -95,6 +97,8 @@ function allowedOrigins(): string[] {
  *                   invitations, members, etc.)
  *  - /api/sync-token → mint per-doc sync JWTs
  *  - /api/{vaults,folders,notes,files} → registry
+ *  - /api/vaults/:id/{folders,notes,files,docs}/batch → bulk registration + push
+ *  - /api/vaults/:id/bootstrap[/:sessionId] → whole-vault download session
  *  - /api/vaults/:id/blobs, /api/blobs/:id → attachment blob store
  *  - /api/notes/:id/versions, /api/vaults/:id/checkpoints → version history
  *  - /api/shares → folder/file ACL management
@@ -137,7 +141,20 @@ export function createApp(deps: AppDeps): Hono {
       ],
       // set-auth-token carries the session token the desktop client reads after
       // sign-in/up; without exposing it the browser hides it even on success.
-      exposeHeaders: ["set-auth-token"],
+      //
+      // The bootstrap page headers are here for exactly the same reason, and the
+      // failure is sharper: a cross-origin reader that cannot see
+      // `X-Baalda-Cursor` cannot tell a drained session from a page boundary, so
+      // it would stop after the first page of a whole-vault download and report
+      // success. The webview IS cross-origin to the API in every configuration
+      // we ship.
+      exposeHeaders: [
+        "set-auth-token",
+        "X-Baalda-Cursor",
+        "X-Baalda-Docs",
+        "X-Baalda-Bytes",
+        "ETag",
+      ],
     }),
   );
 
@@ -210,6 +227,12 @@ export function createApp(deps: AppDeps): Hono {
       disconnectDoc: deps.disconnectDoc,
     }),
   );
+  // Bulk engine: the batched twins of the registry creates, plus the whole-vault
+  // bootstrap download. Mounted beside the registry because they ARE the
+  // registry — same shared `registry/batch-ops.ts` body, same refusal codes —
+  // only without a network round trip per item.
+  app.route("/api", createBulkRoutes({ onRegistryChanged: deps.onRegistryChanged }));
+  app.route("/api", bootstrapRoutes);
   app.route("/api", blobRoutes);
   app.route(
     "/api",

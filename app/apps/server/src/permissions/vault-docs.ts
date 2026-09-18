@@ -187,7 +187,8 @@ async function listDocsInVault(
     : `UNION
      SELECT fi.id FROM files fi
        WHERE fi.vault_id = $2
-         AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files))`;
+         AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files)
+              OR EXISTS (SELECT 1 FROM user_vault_grant))`;
   // Deleting a folder HARD-deletes its rows (`tree-ops.ts deleteFolder`) after
   // soft-deleting the notes inside, and `notes.folder_id` is `ON DELETE SET
   // NULL`. So for a tombstone the walk above finds nothing: the folder that
@@ -268,6 +269,21 @@ async function listDocsInVault(
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
              )
+       ),
+       -- A per-USER grant on the VAULT resource, which reaches every doc in it.
+       -- resolver.sharePermission has always matched this row in its personal
+       -- branch and this set did not, so a user holding one on an item-Private
+       -- doc was READABLE to the resolver and ABSENT from the set. By the
+       -- desktop's rule a disagreement leaves the WHOLE revoked group, so one
+       -- such doc stalled every revocation cleanup on that device, forever.
+       --
+       -- Deliberately per-user only: the ORG-principal vault grant is the vault
+       -- posture, which vaultAccess has already answered as vaultWide.
+       user_vault_grant AS (
+          SELECT 1 FROM shares
+           WHERE resource_type = 'vault' AND resource_id = $3
+             AND permission IN ('view', 'edit')
+             AND principal_type = 'user' AND principal_id = $1
        )${deadFolderCte}
        SELECT n.id FROM notes n
          WHERE n.vault_id = $2 AND n.${livePredicate}
@@ -275,6 +291,7 @@ async function listDocsInVault(
              ($4 AND $6 AND n.created_by = $1)
              OR n.folder_id IN (SELECT id FROM subtree)
              OR n.id IN (SELECT id FROM shared_files)
+             OR EXISTS (SELECT 1 FROM user_vault_grant)
              ${deadFolderPredicate}
            )
        ${filesUnion}`,

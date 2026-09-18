@@ -199,6 +199,11 @@ function fakeApi(state: ServerState) {
       notes: state.notes,
       tombstones: state.tombstones === undefined ? [] : state.tombstones,
     })),
+    // The paged twin the reconciler actually calls; identical answer.
+    listNoteRegistryPaged: vi.fn(async () => ({
+      notes: state.notes,
+      tombstones: state.tombstones === undefined ? [] : state.tombstones,
+    })),
     createNote: vi.fn(async (i: { relPath: string; docId?: string }) => ({
       id: i.docId ?? `note-${i.relPath}`,
       rel_path: i.relPath,

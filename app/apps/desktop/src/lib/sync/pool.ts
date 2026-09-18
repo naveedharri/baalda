@@ -137,3 +137,64 @@ export async function withRetry<T>(
   }
   return { ok: false, error: lastError, terminal: true, attempts };
 }
+
+// ---- Bulk sync engine thresholds & batch bounds --------------------------
+//
+// Mirrored (env-overridable) by the server's `src/config.ts`. The client's
+// copies are the ones that decide how a request is PACKED; the server's are the
+// ones that decide whether it is accepted, so a client that drifts above them
+// gets `batch_too_large` rather than silent truncation.
+
+/**
+ * At or above this many docs, a bulk path is used instead of the per-doc one.
+ *
+ * 25, one number for register, push and bootstrap alike:
+ *  (1) it is already the vault's durability quantum — `checkpointBatchFor`
+ *      floors at 25 — so below it a run is one checkpoint and the resume
+ *      machinery buys nothing;
+ *  (2) 25 token mints + 25 WS handshakes at width 4 and ~150 ms RTT is ≈2 s
+ *      against ONE request; below that the saving is sub-second and not worth a
+ *      second, rarely-exercised code path (a rarely-exercised safety path IS
+ *      the bug);
+ *  (3) the per-request fixed cost (`getSession` + `vaultOrg` + `orgRole`)
+ *      amortises to <12 % at 25;
+ *  (4) it makes the batch path the COMMON one — every real vault is >25 notes —
+ *      so it is exercised constantly.
+ *
+ * The per-doc `DocSync` path survives only where it is semantically required:
+ * the conflict/merge case, the open note, the local-change drain, and items over
+ * {@link BULK_ITEM_MAX_BYTES}. Never as a size fallback.
+ */
+export const BULK_THRESHOLD_DOCS = 25;
+
+/**
+ * A single item larger than this leaves the batch for its own `DocSync` socket.
+ *
+ * A byte budget EXCLUDES, it never triggers: one 3 MB doc must not be allowed to
+ * dominate (or blow) a 4 MiB request that a hundred ordinary notes would share.
+ * Anything over `MAX_NOTE_BYTES` (contentUpload.ts, = the server's `maxNoteMb`)
+ * is a permanent failure as before, and that check still comes first.
+ */
+export const BULK_ITEM_MAX_BYTES = 1 * 1024 * 1024;
+
+/** Items per `POST /notes/batch` request. */
+export const BATCH_MAX_NOTES = 200;
+/** Items per `POST /folders/batch` request. */
+export const BATCH_MAX_FOLDERS = 500;
+/** Items per `POST /files/batch` request. */
+export const BATCH_MAX_FILES = 200;
+/** Docs per `POST /docs/batch` request. */
+export const BATCH_MAX_DOCS = 100;
+/** Total DECODED Yjs bytes per `POST /docs/batch` request (4 MiB). */
+export const BATCH_MAX_DECODED_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Does a run of `count` items take the batch path?
+ *
+ * One pure function, applied at all three sites (the two reconcile pools and the
+ * content run) so the threshold cannot drift between them — and so a test can
+ * pin 24 ⇒ per-doc, 25 ⇒ batch without touching the network.
+ */
+export function useBulkPath(count: number): boolean {
+  return count >= BULK_THRESHOLD_DOCS;
+}

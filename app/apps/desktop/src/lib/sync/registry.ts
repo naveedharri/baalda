@@ -40,7 +40,16 @@ import * as perf from "../perf";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { planInbound, samePath, type InboundPlan, type InboundTrash } from "./inbound";
-import { REGISTRY_CONCURRENCY, runPool, withRetry } from "./pool";
+import type { BootstrapResume } from "./bootstrap";
+import type { FolderBatchItem, NoteBatchItem } from "./bulkTypes";
+import {
+  BATCH_MAX_FOLDERS,
+  BATCH_MAX_NOTES,
+  REGISTRY_CONCURRENCY,
+  runPool,
+  useBulkPath,
+  withRetry,
+} from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { toast } from "../toast";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
@@ -131,6 +140,17 @@ interface VaultSyncConfig {
    * reason; the next pass relearns it.)
    */
   authored?: { userId: string; docIds: string[] };
+  /**
+   * Where the bulk BOOTSTRAP download got to, so a killed run resumes instead of
+   * re-paging the vault (`sync/bootstrap.ts`).
+   *
+   * Written through this same checkpointer — i.e. through the already-atomic
+   * `set_vault_config` — and always AFTER the page it describes has been
+   * applied, so the worst a crash can do is re-send one page, which the Rust
+   * eligibility table makes a no-op. Guarded by `serverVaultId` like every other
+   * key here: a cursor into another collection's session names nothing.
+   */
+  bootstrap?: BootstrapResume;
 }
 
 /**
@@ -376,6 +396,13 @@ function isTerminalApiError(err: unknown): boolean {
   return err instanceof ApiError && err.status >= 400 && err.status < 500;
 }
 
+/** Split `items` into consecutive groups of at most `size` (never empty). */
+function chunked<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
 function reasonOf(err: unknown): string {
   if (err instanceof ApiError) return `${err.status}: ${err.message}`;
   if (err instanceof Error) return err.message;
@@ -495,6 +522,8 @@ export class VaultRegistry {
    * can't snapshot the vault we left and write it into the one we just opened.
    */
   private checkpoint: Checkpointer<VaultSyncConfig> | null = null;
+  /** Resume point for the bulk bootstrap download; see {@link VaultSyncConfig.bootstrap}. */
+  private bootstrapState: BootstrapResume | null = null;
 
   /**
    * The config `primeLocal` parsed, held for the `reconcile` that follows it.
@@ -898,6 +927,16 @@ export class VaultRegistry {
     }
   }
 
+  /** Adopt a bootstrap cursor read from `.context/config.json`, under the same
+   *  collection guard everything else here is adopted under. */
+  private adoptBootstrap(cfg: VaultSyncConfig, vaultId: string): void {
+    const saved = cfg.bootstrap;
+    this.bootstrapState =
+      saved && saved.serverVaultId === vaultId && typeof saved.sessionId === "string"
+        ? saved
+        : null;
+  }
+
   /** All mapped doc ids (for the vault sync engine's initial doc set). */
   allDocIds(): string[] {
     return [...this.byDocId.keys()];
@@ -960,6 +999,30 @@ export class VaultRegistry {
    */
   unmarkPushed(docId: string): void {
     if (!this.pushed.delete(docId)) return;
+    this.checkpoint?.touch();
+  }
+
+  // ---- bootstrap resume point (the bulk download's cursor) ---------------
+
+  /**
+   * Where the bootstrap download got to for THIS collection, or null.
+   *
+   * Collection-guarded on read as well as on write: a cursor recorded against
+   * another `vaults` row would page a session that does not exist here, and the
+   * honest answer to that is "start again", not "resume into the wrong vault".
+   */
+  bootstrapResume(): BootstrapResume | null {
+    const state = this.bootstrapState;
+    if (!state) return null;
+    if (!this.serverVaultId || state.serverVaultId !== this.serverVaultId) return null;
+    return state;
+  }
+
+  /** Record (or clear, with `null`) the bootstrap cursor. Checkpointed, never
+   *  written synchronously — the page it describes is already applied. */
+  setBootstrapResume(state: BootstrapResume | null): void {
+    if (this.stale()) return;
+    this.bootstrapState = state;
     this.checkpoint?.touch();
   }
 
@@ -1063,6 +1126,9 @@ export class VaultRegistry {
       ...(this.authoredBy
         ? { authored: { userId: this.authoredBy, docIds: [...this.authoredDocs] } }
         : {}),
+      // Omitted when there is no run to resume, so a drained session leaves no
+      // stale cursor behind for the next launch to chase.
+      ...(this.bootstrapState ? { bootstrap: this.bootstrapState } : {}),
     };
   }
 
@@ -1823,6 +1889,7 @@ export class VaultRegistry {
       if (typeof rp === "string" && rp) this.baselineDocs.set(docId, rp);
     }
     this.adoptAuthored(cfg);
+    this.adoptBootstrap(cfg, cfg.serverVaultId);
     this.baselineVaultId = cfg.serverVaultId;
     return true;
   }
@@ -1963,6 +2030,7 @@ export class VaultRegistry {
     // Same guard for the tree-binary map: an id minted against another
     // collection names nothing here.
     if (cfg.serverVaultId === vaultId && cfg.files) this.adoptConfigFiles(cfg.files);
+    this.adoptBootstrap(cfg, vaultId);
 
     // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —
     //     with nothing on the server AND an empty local folder — gets
@@ -2037,9 +2105,16 @@ export class VaultRegistry {
    */
   private prefetchListings(vaultId: string): void {
     if (this.prefetchedListings?.vaultId === vaultId) return;
+    // PAGED: the note listing follows the server's keyset cursor internally, so
+    // a 6,000-note vault is a handful of round trips instead of one response
+    // that has to be built, serialized and parsed whole. The answer is
+    // identical either way — including `tombstones: null` meaning "the server
+    // did not say", which is what stops the reconciler inferring a delete — and
+    // a server that predates `limit`/`after` ignores them, answers everything
+    // with no `nextAfter`, and is therefore asked exactly once.
     const p = Promise.all([
       this.api.listFolderRegistry(vaultId),
-      this.api.listNoteRegistry(vaultId),
+      this.api.listNoteRegistryPaged(vaultId),
     ]) as Promise<[FolderRegistry, NoteRegistry]>;
     // The consumer awaits this and handles the failure; attach here so a reject
     // that arrives before `takeListings` runs is never an unhandled rejection.
@@ -2061,7 +2136,7 @@ export class VaultRegistry {
     if (hit && hit.vaultId === vaultId) return hit.p;
     return Promise.all([
       this.api.listFolderRegistry(vaultId),
-      this.api.listNoteRegistry(vaultId),
+      this.api.listNoteRegistryPaged(vaultId),
     ]) as Promise<[FolderRegistry, NoteRegistry]>;
   }
 
@@ -2178,7 +2253,7 @@ export class VaultRegistry {
         titlesCache = null;
         // Re-read the server's notes too: `move_note` bumps rows we may have just
         // raced, and a stale list here would undo the move we just applied.
-        const fresh = await this.api.listNoteRegistry(vaultId);
+        const fresh = await this.api.listNoteRegistryPaged(vaultId);
         if (this.stale()) return false;
         serverNotes = fresh.notes;
       }
@@ -2349,6 +2424,14 @@ export class VaultRegistry {
       if (bucket) bucket.push(f);
       else byDepth.set(depth, [f]);
     }
+    // At/above the threshold the whole set goes in batches instead: the server
+    // sorts by depth and resolves parents IN-REQUEST, which is what removes the
+    // level-by-level serialization (a deep tree paid one round trip per level).
+    if (useBulkPath(missingFolders.length)) {
+      if (await this.registerFoldersBatched(vaultId, missingFolders, checkpoint)) {
+        mutated = true;
+      }
+    } else
     for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
       if (this.stopRun()) break;
       await runPool(
@@ -2382,7 +2465,22 @@ export class VaultRegistry {
     }
     if (this.stale()) return mutated;
 
-    // ---- notes, one flat pool (parentIds are all resolved by now) ----
+    // ---- notes ----
+    // Above the threshold: the same work, batched. Identical accounting —
+    // `withRetry` per request, `recordFailure` per item, `checkpoint.touch` per
+    // accepted row, one `sink.item` per item, and the 402 stop through
+    // `stopRun()` — so the two paths cannot report a vault differently.
+    if (useBulkPath(missingNotes.length)) {
+      const bulk = await this.registerNotesBatched(vaultId, missingNotes, {
+        titleByPath,
+        idByPath,
+        resolvedNotePaths,
+        resolvedNotePathsCi,
+        checkpoint,
+      });
+      if (bulk) mutated = true;
+    } else
+    // ---- …or one flat pool (parentIds are all resolved by now) ----
     await runPool(
       missingNotes,
       async (note) => {
@@ -2534,6 +2632,9 @@ export class VaultRegistry {
       (rp) => !localNotePaths.has(rp.toLowerCase()),
     );
     this.sink.addTotal(toMaterialize.length);
+    if (useBulkPath(toMaterialize.length)) {
+      if (await this.materializeBatched(toMaterialize)) mutated = true;
+    } else
     await runPool(
       toMaterialize,
       async (rp) => {
@@ -2643,6 +2744,290 @@ export class VaultRegistry {
     checkpoint.touch();
     await checkpoint.flush();
     perf.mark("reconcile-done");
+    return mutated;
+  }
+
+  // ---- batched structure registration (the bulk engine's outbound half) ----
+  //
+  // Substitutions INSIDE reconcile, not a second reconciler: same `withRetry`,
+  // same `recordFailure`, same `checkpoint.touch`, same `sink.item` accounting,
+  // same 402 stop through `stopRun()`. Only the number of round trips changes.
+
+  /**
+   * Register every missing folder in `POST /folders/batch` requests.
+   *
+   * No `parentId` and no depth loop: the server sorts by depth and resolves each
+   * parent inside the request. Sent in depth order anyway so a chunk boundary
+   * can never split a parent from its child in a way the server has to guess at.
+   */
+  private async registerFoldersBatched(
+    vaultId: string,
+    folders: TreeNode[],
+    checkpoint: Checkpointer<VaultSyncConfig>,
+  ): Promise<boolean> {
+    let mutated = false;
+    const ordered = [...folders].sort(
+      (a, b) => a.path.split("/").length - b.path.split("/").length,
+    );
+    const chunks = chunked(ordered, BATCH_MAX_FOLDERS);
+    await runPool(
+      chunks,
+      async (group) => {
+        const items: FolderBatchItem[] = group.map((f) => ({ path: f.path, name: f.name }));
+        const out = await withRetry(() => this.api.batchCreateFolders(vaultId, items), {
+          isTerminal: isTerminalApiError,
+          shouldStop: () => this.stopRun(),
+        });
+        if (!out.ok) {
+          // A failed REQUEST is a failure of every folder in it: the run must
+          // not claim work it cannot prove happened.
+          for (const f of group) {
+            this.recordFailure({
+              kind: "folder",
+              path: f.path,
+              docId: null,
+              reason: reasonOf(out.error),
+              code: errorCode(out.error),
+            });
+            this.sink.item("failed");
+          }
+          return;
+        }
+        const byPath = new Map(out.value.map((r) => [r.path, r]));
+        for (const f of group) {
+          const res = byPath.get(f.path);
+          if (res && res.id && (res.status === "created" || res.status === "adopted")) {
+            this.folderByPath.set(f.path, res.id);
+            checkpoint.touch();
+            mutated = true;
+            this.sink.item("ok");
+            continue;
+          }
+          this.recordFailure({
+            kind: "folder",
+            path: f.path,
+            docId: null,
+            reason: res?.error ?? res?.code ?? "the server did not answer for this folder",
+            code: res?.code ?? null,
+          });
+          this.sink.item("failed");
+        }
+      },
+      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
+    );
+    return mutated;
+  }
+
+  /**
+   * Register every missing note in `POST /notes/batch` requests.
+   *
+   * Item for item this is the single-note path (`api.createNote`), including the
+   * two refusals that are NOT ordinary errors:
+   *
+   *  * a canonical `relPath` echo that differs from what we sent is the
+   *    duplicate-path alias of #129 — map nothing, claim nothing, remember the
+   *    path so the next pull does not ask again, leave the FILE alone;
+   *  * `path_folder_mismatch` means our parent mapping is stale, so it is
+   *    dropped and the next pass re-creates the folder.
+   *
+   * `folderPath` (the parent's path) rather than `folderId` is what makes the
+   * chunking safe: a folder created in an earlier chunk needs no id lookup here.
+   */
+  private async registerNotesBatched(
+    vaultId: string,
+    notes: TreeNode[],
+    ctx: {
+      titleByPath: Map<string, string>;
+      idByPath: Map<string, string>;
+      resolvedNotePaths: Set<string>;
+      resolvedNotePathsCi: Set<string>;
+      checkpoint: Checkpointer<VaultSyncConfig>;
+    },
+  ): Promise<boolean> {
+    let mutated = false;
+    const chunks = chunked(notes, BATCH_MAX_NOTES);
+    await runPool(
+      chunks,
+      async (group) => {
+        const items: NoteBatchItem[] = group.map((n) => ({
+          relPath: n.path,
+          title: ctx.titleByPath.get(n.path) ?? n.name,
+          folderPath: parentDir(n.path) || null,
+          // The local index's doc_id, so one note has ONE identity across the
+          // `.md`, the CRDT store and the server (see the single-note path).
+          ...(ctx.idByPath.get(n.path) ? { docId: ctx.idByPath.get(n.path)! } : {}),
+        }));
+        for (const n of group) {
+          const docId = ctx.idByPath.get(n.path);
+          if (docId) this.sink.doc(docId, "queued");
+        }
+        const out = await withRetry(() => this.api.batchCreateNotes(vaultId, items), {
+          isTerminal: isTerminalApiError,
+          shouldStop: () => this.stopRun(),
+        });
+        if (!out.ok) {
+          for (const n of group) {
+            this.recordFailure({
+              kind: "note",
+              path: n.path,
+              docId: ctx.idByPath.get(n.path) ?? null,
+              reason: reasonOf(out.error),
+              code: errorCode(out.error),
+            });
+            this.sink.item("failed");
+          }
+          return;
+        }
+        // The server echoes the path it was given, so results join on it; the
+        // CANONICAL spelling it registered is in the same row and is what the
+        // alias check below compares against.
+        const byPath = new Map<string, (typeof out.value)[number]>();
+        for (let i = 0; i < out.value.length; i++) {
+          const res = out.value[i];
+          // Positional fallback for a server that echoes only the canonical
+          // spelling: the contract is order-preserving, so index i is item i.
+          const sent = items[i]?.relPath;
+          byPath.set(res.relPath, res);
+          if (sent && !byPath.has(sent)) byPath.set(sent, res);
+        }
+        for (const n of group) {
+          const rp = n.path;
+          const localDocId = ctx.idByPath.get(rp) ?? null;
+          const res = byPath.get(rp);
+          if (!res) {
+            this.recordFailure({
+              kind: "note",
+              path: rp,
+              docId: localDocId,
+              reason: "the server did not answer for this note",
+              code: null,
+            });
+            this.sink.item("failed");
+            continue;
+          }
+          if (res.status === "created" || res.status === "adopted") {
+            // Same #129 guard as the single path: an echo at a DIFFERENT path
+            // means the docId we supplied already names a row elsewhere, so the
+            // file here is a stale second copy of a registered note.
+            if (res.relPath && !samePath(res.relPath, rp)) {
+              this.aliasPaths.add(rp);
+              this.recordFailure({
+                kind: "note",
+                path: rp,
+                docId: null,
+                reason: `already registered at ${res.relPath} — left on disk, not synced`,
+                code: null,
+              });
+              this.sink.item("failed");
+              continue;
+            }
+            if (!res.docId) {
+              this.recordFailure({
+                kind: "note",
+                path: rp,
+                docId: localDocId,
+                reason: "the server registered this note without an id",
+                code: null,
+              });
+              this.sink.item("failed");
+              continue;
+            }
+            // Keep `rp` (the local spelling) even when the server adopted a
+            // case-variant and answered with its own — see `resolveNote`.
+            this.setMapping(rp, res.docId, vaultId);
+            ctx.resolvedNotePaths.add(rp);
+            ctx.resolvedNotePathsCi.add(rp.toLowerCase());
+            ctx.checkpoint.touch();
+            mutated = true;
+            this.sink.item("ok");
+            continue;
+          }
+          if (res.code === "path_folder_mismatch") this.folderByPath.delete(parentDir(rp));
+          this.recordFailure({
+            kind: "note",
+            path: rp,
+            docId: localDocId,
+            reason: res.error ?? res.code ?? "the server refused this note",
+            code: res.code ?? null,
+          });
+          this.sink.item("failed");
+        }
+      },
+      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
+    );
+    return mutated;
+  }
+
+  /**
+   * Materialize server-only notes with ONE `materialize_notes_batch` per chunk.
+   *
+   * Identical semantics to the per-note loop it replaces: every write is
+   * create-only (`write_note_if_missing`, never an overwrite — which is why the
+   * 428-note incident cost nothing), each created path is remembered for exactly
+   * one watcher echo, and the server's doc_id is bound onto the row BEFORE
+   * anything can open the note. What changes is the cost: the per-note version
+   * paid 2–3 IPC round trips each, and each `rebind_note_id` carried a whole
+   * `links` scan plus an O(vault) `resolve_links` map rebuild (~88 ms on a
+   * 1,560-note vault ⇒ ~7 minutes of map rebuilds alone on 5,000 notes).
+   */
+  private async materializeBatched(paths: string[]): Promise<boolean> {
+    let mutated = false;
+    const chunks = chunked(paths, BATCH_MAX_NOTES);
+    for (const group of chunks) {
+      if (this.stopRun()) break;
+      let outcomes: ipc.MaterializeOutcome[];
+      try {
+        outcomes = await ipc.materializeNotesBatch(
+          group.map((rp) => ({ relPath: rp, docId: this.byPath.get(rp)?.docId ?? null })),
+          this.epoch(),
+        );
+      } catch (e) {
+        if (ipc.isVaultMismatch(e)) return mutated; // the vault moved on
+        for (const rp of group) {
+          this.recordFailure({
+            kind: "materialize",
+            path: rp,
+            docId: this.byPath.get(rp)?.docId ?? null,
+            reason: reasonOf(e),
+            code: null,
+          });
+          this.sink.item("failed");
+        }
+        continue;
+      }
+      const byPath = new Map(outcomes.map((o) => [o.relPath, o]));
+      const created: string[] = [];
+      for (const rp of group) {
+        const out = byPath.get(rp);
+        if (out?.created) {
+          mutated = true;
+          // One owed watcher echo, so the sync layer does not treat our own
+          // placeholder as an external edit worth pushing.
+          this.markMaterialized(rp);
+          created.push(rp);
+        }
+        this.sink.item("ok");
+      }
+      // Fill the placeholders in from THIS device's local CRDT where it has one.
+      // Still per-note: it is a bridge write, not an index write. Best effort —
+      // a failure leaves the 0-byte placeholder, which is today's behaviour.
+      const host = this.host;
+      if (host) {
+        await runPool(
+          created,
+          async (rp) => {
+            const docId = this.byPath.get(rp)?.docId ?? null;
+            if (!docId) return;
+            try {
+              await host.materializeContent(docId, rp);
+            } catch (e) {
+              console.warn(`[registry] hydrating ${rp} from local CRDT failed`, e);
+            }
+          },
+          { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
+        );
+      }
+    }
     return mutated;
   }
 

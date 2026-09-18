@@ -17,6 +17,105 @@ import { config } from "../config.js";
 export type Queryable = Pick<pg.Pool, "query">;
 
 /**
+ * Per-doc serialisation for the snapshot/log pair.
+ *
+ * Two statements against `doc_snapshots` and `doc_updates` are NOT one answer:
+ * a `compact()` that commits between them folds the log into the snapshot and
+ * deletes it, so a reader can see the PRE-compact snapshot and the POST-compact
+ * (empty) log — a state missing every op the compact absorbed. Read that way it
+ * serves a truncated doc; cached that way (`rememberStateVector` with a NULL
+ * watermark, which `currentStateVector` reads as fresh precisely because the log
+ * IS empty) it keeps serving it on every later connect.
+ *
+ * So both sides take a Postgres advisory lock keyed by doc, inside one
+ * transaction:
+ *   · `compact()` — EXCLUSIVE. Its read-merge-upsert-delete cycle is the only
+ *     thing that rewrites what the log contains, and two of them racing each
+ *     other silently drop committed updates (an older merge upserted over a
+ *     newer one).
+ *   · the readers — SHARED. They do not conflict with each other (backfill runs
+ *     many at once), only with a compact.
+ * Transaction-scoped, so COMMIT/ROLLBACK releases it even if the process dies.
+ */
+type ClientSource = { connect: () => Promise<pg.PoolClient> };
+
+/**
+ * The pool behind a `Queryable`, or null when it is a bare `{ query }` — the
+ * shape the tests inject to count SQL. Without a dedicated client there is no
+ * transaction to scope a lock to, so those callers run the same statements
+ * un-serialised; correctness in production rides on the real pool.
+ */
+function clientSource(db: Queryable): ClientSource | null {
+  const maybe = db as Partial<ClientSource>;
+  return typeof maybe.connect === "function" ? (maybe as ClientSource) : null;
+}
+
+async function withDocLock<T>(
+  docId: string,
+  db: Queryable,
+  mode: "shared" | "exclusive",
+  fn: (q: Queryable, inTransaction: boolean) => Promise<T>,
+): Promise<T> {
+  const source = clientSource(db);
+  if (!source) return fn(db, false);
+  const client = await source.connect();
+  try {
+    // REPEATABLE READ for the READERS, which is the whole point: their two
+    // statements must describe one instant. The WRITER stays READ COMMITTED —
+    // it holds the lock EXCLUSIVELY, so nothing can move under it anyway, and
+    // under RR its own writes would raise 40001 against a row some reader's
+    // cache write touched after its snapshot was taken (a lock statement takes
+    // the snapshot BEFORE it blocks, so a waiter's snapshot always predates the
+    // holder's commit).
+    await client.query(
+      mode === "exclusive" ? "BEGIN" : "BEGIN ISOLATION LEVEL REPEATABLE READ",
+    );
+    await client.query(
+      mode === "exclusive"
+        ? "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
+        : "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+      [`doc:${docId}`],
+    );
+    const out = await fn(client, true);
+    await client.query("COMMIT");
+    return out;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Run a best-effort write inside a transaction WITHOUT risking the transaction.
+ *
+ * A failed statement poisons a Postgres transaction: everything after it, COMMIT
+ * included, fails with "current transaction is aborted". So a write whose own
+ * contract is "a failure here is a slow read, never a failed one" — the state
+ * vector cache — has to be able to fail without taking the read it rode in on
+ * with it. Under REPEATABLE READ that is not hypothetical: two readers
+ * refreshing the same doc's cache is a plain 40001.
+ */
+async function bestEffort(
+  q: Queryable,
+  inTransaction: boolean,
+  name: string,
+  fn: (q: Queryable) => Promise<void>,
+): Promise<void> {
+  if (!inTransaction) return fn(q);
+  await q.query(`SAVEPOINT ${name}`);
+  try {
+    await fn(q);
+    await q.query(`RELEASE SAVEPOINT ${name}`);
+  } catch (err) {
+    await q.query(`ROLLBACK TO SAVEPOINT ${name}`).catch(() => {});
+    await q.query(`RELEASE SAVEPOINT ${name}`).catch(() => {});
+    console.warn(`[yjs] ${name} failed (ignored):`, err);
+  }
+}
+
+/**
  * Build a single merged update for a doc: snapshot (if any) + all logged
  * updates, in insertion order. Returns null if the doc has no state yet.
  *
@@ -35,19 +134,26 @@ export async function loadDocState(
   docId: string,
   db: Queryable = defaultPool,
 ): Promise<Uint8Array | null> {
-  const snap = await db.query<{ snapshot: Buffer | null }>(
-    "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
-    [docId],
-  );
-  const updates = await db.query<{ update: Buffer }>(
-    "SELECT update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
-    [docId],
-  );
+  // Snapshot + log under one consistent read (see `withDocLock`). Split across
+  // two transactions this can return a doc missing everything a concurrent
+  // `compact()` folded in — which for the detached MCP writer is content
+  // CORRUPTION, not a slow read: `setContent` deletes only the text it can see,
+  // so the unseen ops' text survives beside the new body once the two merge.
+  return withDocLock(docId, db, "shared", async (q) => {
+    const snap = await q.query<{ snapshot: Buffer | null }>(
+      "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
+      [docId],
+    );
+    const updates = await q.query<{ update: Buffer }>(
+      "SELECT update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+      [docId],
+    );
 
-  const snapshotBuf = snap.rows[0]?.snapshot ?? null;
-  if (!snapshotBuf && updates.rows.length === 0) return null;
+    const snapshotBuf = snap.rows[0]?.snapshot ?? null;
+    if (!snapshotBuf && updates.rows.length === 0) return null;
 
-  return mergeParts(snapshotBuf, updates.rows);
+    return mergeParts(snapshotBuf, updates.rows);
+  });
 }
 
 /**
@@ -274,36 +380,40 @@ export async function loadDocDiff(
   // is nullable and older rows have it NULL), a client with no vector, or a
   // client that is genuinely behind.
 
-  const snap = await db.query<{ snapshot: Buffer | null }>(
-    "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
-    [docId],
-  );
-  const updates = await db.query<{ id: string; update: Buffer }>(
-    "SELECT id, update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
-    [docId],
-  );
-  const snapshotBuf = snap.rows[0]?.snapshot ?? null;
-  if (!snapshotBuf && updates.rows.length === 0) return null;
+  // SLOW PATH, under the doc's shared lock and ONE repeatable-read snapshot
+  // (see `withDocLock`): the snapshot BYTEA, the whole log, and the cache write
+  // that records what they add up to, all describing the same instant. Read
+  // across two transactions instead, a `compact()` committing in between hands
+  // this the pre-compact snapshot with the post-compact (empty) log — a short
+  // doc that `rememberStateVector` then stamps with a NULL watermark, which
+  // reads as FRESH forever after because the log genuinely is empty. That
+  // combination does not just delay ops, it withholds them silently.
+  const read = await withDocLock(docId, db, "shared", async (q, inTx) => {
+    const snap = await q.query<{ snapshot: Buffer | null }>(
+      "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
+      [docId],
+    );
+    const updates = await q.query<{ id: string; update: Buffer }>(
+      "SELECT id, update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+      [docId],
+    );
+    const snapshotBuf = snap.rows[0]?.snapshot ?? null;
+    if (!snapshotBuf && updates.rows.length === 0) return null;
 
-  const merged = mergeParts(snapshotBuf, updates.rows);
-  const serverStateVector = Y.encodeStateVectorFromUpdate(merged);
-  // Seed the cache from the work we just did, so a doc that predates migration
-  // 025 pays this once rather than on every connect. `updates.rows` is the log we
-  // actually read, so its last id is exactly what this vector accounts for.
-  //
-  // AWAITED, not fire-and-forget. One INSERT is noise next to what this path has
-  // already spent — a snapshot BYTEA, the whole update log and a `Y.mergeUpdates`
-  // over it — and un-awaited it bought two problems. The write escaped the pool's
-  // backpressure, so a large vault's first connect fired a burst of unobserved
-  // INSERTs competing with `runPool`'s own backfill reads for the same
-  // connections. And the cache was not yet readable when this call returned, so
-  // the very next read of the same doc could still miss it and redo the merge.
-  await rememberStateVector(
-    docId,
-    serverStateVector,
-    updates.rows.length > 0 ? (updates.rows[updates.rows.length - 1]?.id ?? null) : null,
-    db,
-  );
+    const merged = mergeParts(snapshotBuf, updates.rows);
+    const serverStateVector = Y.encodeStateVectorFromUpdate(merged);
+    await bestEffort(q, inTx, "sv_cache", (qq) =>
+      rememberStateVector(
+        docId,
+        serverStateVector,
+        updates.rows.length > 0 ? (updates.rows[updates.rows.length - 1]?.id ?? null) : null,
+        qq,
+      ),
+    );
+    return { merged, serverStateVector };
+  });
+  if (!read) return null;
+  const { merged, serverStateVector } = read;
   const cmp = clientStateVector
     ? bytesEqual(clientStateVector, serverStateVector)
       ? { serverCovered: true, clientAhead: false }
@@ -415,61 +525,98 @@ export async function appendUpdate(
  * updates, which is the whole point of compacting. The read paths avoid the doc;
  * this write path wants it.
  *
- * It runs under the pool-wide `statement_timeout` (see `db/pool.ts`) and NOT a
- * tighter per-transaction one: `Queryable` is `Pick<Pool, "query">`, so
- * consecutive calls may land on different pooled connections and a
- * `BEGIN`/`SET LOCAL`/`COMMIT` sequence issued through it would set the timeout
- * on an arbitrary connection. Doing it properly means threading a checked-out
- * client through this signature — worth doing, not worth doing here.
+ * THREE belts keep two compactions of one doc from destroying each other's
+ * work (see `compactOnce`): an in-process per-doc promise chain, the doc's
+ * EXCLUSIVE advisory lock around a single transaction, and a `seq` guard on the
+ * upsert that refuses to move a snapshot backwards.
  */
 export async function compact(
   docId: string,
   db: Queryable = defaultPool,
 ): Promise<void> {
-  const snap = await db.query<{ snapshot: Buffer | null }>(
-    "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
-    [docId],
+  // FIRST belt, in-process: a per-doc promise chain, so the two `appendUpdate`
+  // calls that a pair of typists past the threshold fire concurrently cannot
+  // both be merging this doc at once inside ONE server.
+  const prev = compactChains.get(docId) ?? Promise.resolve();
+  const run = prev.then(
+    () => compactOnce(docId, db),
+    () => compactOnce(docId, db),
   );
-  const updates = await db.query<{ id: string; update: Buffer }>(
-    "SELECT id, update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
-    [docId],
-  );
-  if (updates.rows.length === 0) return;
-
-  const doc = new Y.Doc();
-  let maxId = "0";
+  const tail = run.catch(() => {});
+  compactChains.set(docId, tail);
   try {
-    const snapshotBuf = snap.rows[0]?.snapshot ?? null;
-    if (snapshotBuf) Y.applyUpdate(doc, new Uint8Array(snapshotBuf));
-    for (const row of updates.rows) {
-      Y.applyUpdate(doc, new Uint8Array(row.update));
-      maxId = row.id;
-    }
-    const merged = Buffer.from(Y.encodeStateAsUpdate(doc));
-    const stateVector = Buffer.from(Y.encodeStateVector(doc));
-
-    await db.query(
-      `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at)
-       VALUES ($1, $2, $3, $4, now())
-       ON CONFLICT (doc_id) DO UPDATE
-         SET snapshot = EXCLUDED.snapshot,
-             state_vector = EXCLUDED.state_vector,
-             seq = EXCLUDED.seq,
-             updated_at = now()`,
-      [docId, merged, stateVector, maxId],
-    );
-    await db.query(
-      "DELETE FROM doc_updates WHERE doc_id = $1 AND id <= $2",
-      [docId, maxId],
-    );
-    // Compacting rewrites what the log contains, so any cached vector's watermark
-    // now describes rows that are gone. Drop it and let the next read recompute —
-    // same reasoning as `appendUpdate`: an update appended while we were merging
-    // would otherwise be covered by a watermark whose vector predates it.
-    await invalidateStateVector(docId, db);
+    await run;
   } finally {
-    doc.destroy();
+    // Only the tail clears the entry, or a slow compact would delete a chain a
+    // later caller has already appended to.
+    if (compactChains.get(docId) === tail) compactChains.delete(docId);
   }
+}
+
+/** In-flight compaction per doc; see `compact`. Entries are removed as they drain. */
+const compactChains = new Map<string, Promise<void>>();
+
+async function compactOnce(docId: string, db: Queryable): Promise<void> {
+  // SECOND belt, cross-process and the real one: the doc's EXCLUSIVE advisory
+  // lock, with the reads, the upsert and the delete in that one transaction.
+  await withDocLock(docId, db, "exclusive", async (q, inTx) => {
+    const snap = await q.query<{ snapshot: Buffer | null }>(
+      "SELECT snapshot FROM doc_snapshots WHERE doc_id = $1",
+      [docId],
+    );
+    const updates = await q.query<{ id: string; update: Buffer }>(
+      "SELECT id, update FROM doc_updates WHERE doc_id = $1 ORDER BY id ASC",
+      [docId],
+    );
+    if (updates.rows.length === 0) return;
+
+    const doc = new Y.Doc();
+    let maxId = "0";
+    try {
+      const snapshotBuf = snap.rows[0]?.snapshot ?? null;
+      if (snapshotBuf) Y.applyUpdate(doc, new Uint8Array(snapshotBuf));
+      for (const row of updates.rows) {
+        Y.applyUpdate(doc, new Uint8Array(row.update));
+        maxId = row.id;
+      }
+      const merged = Buffer.from(Y.encodeStateAsUpdate(doc));
+      const stateVector = Buffer.from(Y.encodeStateVector(doc));
+
+      // THIRD belt: never move the snapshot BACKWARDS. `seq` is the
+      // `doc_updates.id` high-water mark the snapshot absorbed, so a merge that
+      // covers less than what is already stored is by definition older — and
+      // upserting it unconditionally is exactly how the racing pair destroyed a
+      // committed update: A read the log at 1-3, B wrote 1-4 and truncated, A
+      // then stamped its 1-3 merge over B's and update 4 existed nowhere.
+      const wrote = await q.query(
+        `INSERT INTO doc_snapshots (doc_id, snapshot, state_vector, seq, updated_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (doc_id) DO UPDATE
+           SET snapshot = EXCLUDED.snapshot,
+               state_vector = EXCLUDED.state_vector,
+               seq = EXCLUDED.seq,
+               updated_at = now()
+         WHERE doc_snapshots.seq IS NULL OR doc_snapshots.seq < EXCLUDED.seq
+         RETURNING doc_id`,
+        [docId, merged, stateVector, maxId],
+      );
+      // Refused by the belt: a newer snapshot already covers at least this much,
+      // so there is nothing to truncate against and nothing to invalidate.
+      if (wrote.rowCount === 0) return;
+
+      await q.query(
+        "DELETE FROM doc_updates WHERE doc_id = $1 AND id <= $2",
+        [docId, maxId],
+      );
+      // Compacting rewrites what the log contains, so any cached vector's watermark
+      // now describes rows that are gone. Drop it and let the next read recompute —
+      // same reasoning as `appendUpdate`: an update appended while we were merging
+      // would otherwise be covered by a watermark whose vector predates it.
+      await bestEffort(q, inTx, "sv_invalidate", (qq) => invalidateStateVector(docId, qq));
+    } finally {
+      doc.destroy();
+    }
+  });
 }
 
 export async function countUpdates(

@@ -60,11 +60,11 @@ describe("oversized-doc repair", () => {
     const CAP = 1000;
 
     it("lets an ordinary message through", () => {
-      expect(noteSizeRefusal(500, 400, CAP)).toBeNull();
+      expect(noteSizeRefusal(500, "x".repeat(400), CAP)).toBeNull();
     });
 
     it("refuses a single message bigger than the cap", () => {
-      expect(noteSizeRefusal(CAP + 1, 0, CAP)).toMatch(/oversized sync message/);
+      expect(noteSizeRefusal(CAP + 1, "", CAP)).toMatch(/oversized sync message/);
     });
 
     it("refuses any write to a doc already over the cap", () => {
@@ -72,11 +72,22 @@ describe("oversized-doc repair", () => {
       // every message in the cascade that took a customer's `Map of Content.md`
       // from 276 bytes to 16 MB was comfortably under the message cap, so the
       // message cap alone never fired. The doc cap turns the limit into a wall.
-      expect(noteSizeRefusal(10, CAP + 1, CAP)).toMatch(/oversized doc/);
+      expect(noteSizeRefusal(10, "x".repeat(CAP + 1), CAP)).toMatch(/oversized doc/);
     });
 
     it("still accepts one more message from a doc at the cap, so it can be edited down", () => {
-      expect(noteSizeRefusal(10, CAP, CAP)).toBeNull();
+      expect(noteSizeRefusal(10, "x".repeat(CAP), CAP)).toBeNull();
+    });
+
+    it("measures the doc in BYTES, not UTF-16 units", () => {
+      // 400 CJK characters are 400 `Y.Text` units and 1200 bytes. Compared as
+      // units this sails under a 1000-byte cap the doc is already 20% past —
+      // which is how a vault of non-Latin notes walks straight through the wall
+      // the cap is supposed to be.
+      const cjk = "漢".repeat(400);
+      expect(cjk.length).toBeLessThan(CAP);
+      expect(Buffer.byteLength(cjk, "utf8")).toBeGreaterThan(CAP);
+      expect(noteSizeRefusal(10, cjk, CAP)).toMatch(/oversized doc/);
     });
   });
 

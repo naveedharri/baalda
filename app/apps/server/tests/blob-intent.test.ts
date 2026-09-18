@@ -220,8 +220,10 @@ describe("blob intent → PUT → complete", () => {
     await complete(owner, plan.blobId!);
     expect(await docIdOf(plan.blobId!)).toBe("file-old");
 
-    // A LIVE row asking for the same bytes changes nothing: that is the
-    // identical-bytes limitation, not a rename.
+    // A LIVE second file asking for the same bytes gets a ROW OF ITS OWN
+    // (migration 029). It used to dedupe onto the incumbent, which meant it
+    // never appeared in `GET /vaults/:id/blobs` — so a new device could not
+    // materialize it — and deleting the incumbent took its bytes with it.
     await register("file-twin", "twin.pdf");
     const twin = await intent(owner, vault, {
       sha256: sha,
@@ -230,8 +232,14 @@ describe("blob intent → PUT → complete", () => {
       relPath: "twin.pdf",
       docId: "file-twin",
     });
-    expect(((await twin.json()) as Intent).deduped).toBe(true);
+    const twinPlan = (await twin.json()) as Intent;
+    expect(twinPlan.deduped).toBeFalsy();
+    expect(twinPlan.blobId).not.toBe(plan.blobId);
+    await putData(twinPlan.upload!.url, PNG, twinPlan.upload!.headers);
+    await complete(owner, twinPlan.blobId!);
+    // Each file owns its own row, and the incumbent is untouched.
     expect(await docIdOf(plan.blobId!)).toBe("file-old");
+    expect(await docIdOf(twinPlan.blobId!)).toBe("file-twin");
 
     // Now the row itself is gone (the desktop dropped its duplicate, or a
     // teammate deleted the file). The next dedupe hit adopts the live id.
@@ -246,6 +254,8 @@ describe("blob intent → PUT → complete", () => {
     });
     expect(((await again.json()) as Intent).deduped).toBe(true);
     expect(await docIdOf(plan.blobId!)).toBe("file-new");
+    // …and the twin, whose file is still very much alive, keeps its own.
+    expect(await docIdOf(twinPlan.blobId!)).toBe("file-twin");
   });
 
   it("re-issues the SAME blob id for a pending upload, with a fresh presign", async () => {
