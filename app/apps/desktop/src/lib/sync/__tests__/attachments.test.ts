@@ -55,6 +55,32 @@ describe("diffAttachments (content-hash diff)", () => {
     // Only the two legitimate attachment paths survive; the rest are dropped.
     expect(toDownload.map((b) => b.id).sort()).toEqual(["ok", "ok-sub"]);
   });
+
+  it("an edited file is not re-downloaded from its superseded server row", () => {
+    // `Report.docx` was synced at sha A, then edited in Word → sha B. B has
+    // been uploaded, so the server holds BOTH rows for that one path.
+    const local: LocalAttachment[] = [{ relPath: "Docs/Report.docx", sha256: "B" }];
+    const server: ServerBlob[] = [
+      { id: "old", relPath: "Docs/Report.docx", sha256: "A" },
+      { id: "new", relPath: "Docs/Report.docx", sha256: "B" },
+    ];
+    const { toUpload, toDownload } = diffAttachments(local, server);
+    // Nothing to do: the bytes are on the server, and the stale row must NOT be
+    // written back over the edit (which would flip-flop on every pass).
+    expect(toUpload).toHaveLength(0);
+    expect(toDownload).toHaveLength(0);
+  });
+
+  it("refuses a server blob whose path the disk occupies, whatever its case", () => {
+    const local: LocalAttachment[] = [{ relPath: "Docs/Report.docx", sha256: "B" }];
+    const server: ServerBlob[] = [
+      { id: "case", relPath: "docs/report.docx", sha256: "A" },
+      { id: "free", relPath: "Docs/Other.docx", sha256: "C" },
+    ];
+    const { toDownload } = diffAttachments(local, server);
+    // Only the path no local file holds is downloadable.
+    expect(toDownload.map((b) => b.id)).toEqual(["free"]);
+  });
 });
 
 describe("isSafeAttachmentRelPath", () => {

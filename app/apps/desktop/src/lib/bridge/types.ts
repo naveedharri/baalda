@@ -22,17 +22,43 @@ export interface YjsPersistedState {
   updates: Uint8Array[];
   /** `updates.length` — we compact when this exceeds the threshold after load. */
   updateCount: number;
+  /**
+   * The highest row id among `updates` (SQLite rowid), when the store can say.
+   *
+   * The compaction watermark for a log this bridge did not append itself: a
+   * load-time compaction has to truncate exactly the rows it just read and
+   * nothing newer. Absent (an older host that doesn't report it) means "no
+   * watermark", and a compaction then writes the snapshot without truncating —
+   * a log that is read twice, never an update that is deleted unseen.
+   */
+  lastUpdateId?: number;
 }
 
 /** Durable CRDT store. Production maps this to the SQLite-backed Rust commands. */
 export interface CrdtPersistence {
   loadState(docId: string): Promise<YjsPersistedState>;
-  appendUpdate(docId: string, update: Uint8Array): Promise<void>;
-  /** Write a merged snapshot + state vector, truncating the doc's update log. */
+  /** Append one update to the doc's log and answer the row it landed in. Row
+   *  ids are monotonic in commit order, which is what makes them a usable
+   *  compaction watermark (see {@link saveSnapshot}). */
+  appendUpdate(docId: string, update: Uint8Array): Promise<number>;
+  /**
+   * Write a merged snapshot + state vector, truncating the doc's update log up
+   * to `upTo` — and NO further.
+   *
+   * The watermark is the whole point. A snapshot is encoded from the doc as it
+   * was, then written; updates issued during that await (every keystroke of an
+   * ordinary typing session — the trigger fires at 64 rows) are NOT in it. A
+   * blanket `DELETE FROM yjs_updates WHERE doc_id = ?` deleted them anyway, and
+   * the doc then loaded SHORT: the surviving later updates reference the missing
+   * one's items, so Yjs parks them as pending and never integrates them.
+   * `upTo` is the highest row id the caller knows is both committed and folded
+   * into this snapshot; omitting it deletes NOTHING (snapshot only).
+   */
   saveSnapshot(
     docId: string,
     snapshot: Uint8Array,
     stateVector: Uint8Array,
+    upTo?: number,
   ): Promise<void>;
 }
 

@@ -81,9 +81,12 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
       // `YjsPersistedState` (`ipcCodec.ts`), where it used to hand back number
       // arrays this had to copy element by element.
       loadState: (docId) => ipc.loadYjsState(docId, epoch),
+      // The rowid the update landed in — the bridge's compaction watermark.
       appendUpdate: (docId, update) => ipc.appendYjsUpdate(docId, update, epoch),
-      saveSnapshot: (docId, snapshot, stateVector) =>
-        ipc.saveYjsSnapshot(docId, snapshot, stateVector, epoch),
+      // `upTo` is passed straight through: Rust deletes only `id <= upTo`, so a
+      // keystroke appended while this save was in flight survives it.
+      saveSnapshot: (docId, snapshot, stateVector, upTo) =>
+        ipc.saveYjsSnapshot(docId, snapshot, stateVector, epoch, upTo),
     },
   };
 }
@@ -210,6 +213,13 @@ export class BridgeManager {
     } catch (e) {
       console.error("[bridge] flush on close failed", e);
     }
+    // The ops this bridge applied must reach the CRDT store before it goes
+    // away. `destroy()` is synchronous and appends are fire-and-forget, so
+    // without this a close-then-quit leaves the local log BEHIND the `.md` the
+    // flush above just wrote — the gap the next bridge re-inserts from (see
+    // `NoteBridge.whenPersisted`, and `VaultDocStore.retire`, which already
+    // does this).
+    await bridge.whenPersisted();
     bridge.destroy();
   }
 }

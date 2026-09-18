@@ -12,7 +12,11 @@ import {
   listCheckpoints,
   withVaultCheckpointLock,
 } from "../../versions/checkpoints.js";
-import { revertVaultToCheckpoint, RevertError } from "../../versions/revert.js";
+import {
+  revertVaultToCheckpoint,
+  RevertError,
+  RevertTooDestructiveError,
+} from "../../versions/revert.js";
 import { getSession } from "../session.js";
 
 /**
@@ -280,6 +284,20 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
       if (!outcome.acquired) return c.json({ error: "Vault is busy, try again" }, 409);
       return c.json({ ok: true, ...outcome.result });
     } catch (err) {
+      // A refusal is not a missing checkpoint: the checkpoint is fine, the
+      // revert it describes is too destructive to run (see the class docblock).
+      // 409 + a code, so a client can say so rather than reporting "not found".
+      if (err instanceof RevertTooDestructiveError) {
+        return c.json(
+          {
+            error: err.message,
+            code: "revert_too_destructive",
+            wouldDelete: err.wouldDelete,
+            cap: err.cap,
+          },
+          409,
+        );
+      }
       if (err instanceof RevertError) return c.json({ error: err.message }, 404);
       throw err;
     }

@@ -91,6 +91,8 @@ function fakeApi(serverNotes: Array<{ id: string; rel_path: string }>) {
     createFolder: vi.fn(async (input: { path: string }) => ({ id: `f-${input.path}` })),
     listNotes,
     listNoteRegistry: vi.fn(async () => ({ notes: serverNotes, tombstones: [] })),
+    // The paged twin the reconciler actually calls; identical answer.
+    listNoteRegistryPaged: vi.fn(async () => ({ notes: serverNotes, tombstones: [] })),
     createNote: vi.fn(async (input: { relPath: string }) => ({
       id: `new-${input.relPath}`,
       rel_path: input.relPath,

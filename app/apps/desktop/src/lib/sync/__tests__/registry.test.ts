@@ -48,6 +48,8 @@ function fakeApi(opts: {
     createFolder: vi.fn(async (input: { path: string }) => ({ id: `folder-${input.path}` })),
     listNotes: vi.fn(async () => opts.notes ?? []),
     listNoteRegistry: vi.fn(async () => ({ notes: opts.notes ?? [], tombstones: [] })),
+    // The paged twin the reconciler actually calls; identical answer.
+    listNoteRegistryPaged: vi.fn(async () => ({ notes: opts.notes ?? [], tombstones: [] })),
     createNote,
   } as unknown as ApiClient;
   return { api, createVault, createNote };

@@ -129,12 +129,51 @@ export async function sweepPendingOnce(pool: pg.Pool = defaultPool): Promise<num
       // Aborts first: a multipart upload and a finished object are mutually
       // exclusive, and there is nowhere to record which one this row got to.
       await store.abortMultipartsForKey(key).catch(() => {});
+      // The swept row held the (vault, sha256) dedupe slot, so the most likely
+      // next event is someone re-uploading exactly these bytes — onto exactly
+      // this key. Never delete an object a live row is standing on.
+      if (await objectStillReferenced(pool, row.storage_provider, key)) {
+        console.log(
+          `[blob-gc] kept the bytes of swept pending blob ${row.id}: a live blobs row still points at ${key}.`,
+        );
+        continue;
+      }
       await store.delete(key);
     } catch (err) {
       console.warn(`[blob-gc] could not remove bytes for swept blob ${row.id}:`, err);
     }
   }
   return rows.length;
+}
+
+/**
+ * Is a LIVE `blobs` row still standing on this object?
+ *
+ * Object keys are content-addressed and deterministic (`keys.ts`:
+ * `vaults/<vaultId>/<sha256>`), so "the row that owned this key is gone" is NOT
+ * the same as "these bytes are unreferenced". Delete a file and re-upload the
+ * same content into the same vault inside the drain window (a tick is 15 min,
+ * and a failing row backs off up to ~64 more) and the queued key now addresses
+ * the NEW, `ready` row's object — removing it leaves a row whose downloads 404
+ * forever, because the desktop's diff sees the row and never re-uploads.
+ *
+ * Asked immediately before every `store.delete`, never once at claim time: the
+ * re-upload is exactly the thing that can happen in between.
+ */
+async function objectStillReferenced(
+  db: Pick<pg.Pool, "query">,
+  provider: string | null | undefined,
+  storageKey: string,
+): Promise<boolean> {
+  const { rows } = await db.query<{ live: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM blobs
+        WHERE storage_key = $1
+          AND lower(coalesce(storage_provider, 'postgres')) = lower($2)
+     ) AS live`,
+    [storageKey, provider ?? "postgres"],
+  );
+  return rows[0]?.live === true;
 }
 
 // ── the deletion queue ─────────────────────────────────────────────────────
@@ -224,6 +263,17 @@ export async function drainBlobDeletionsOnce(pool: pg.Pool = defaultPool): Promi
       // Aborts first: a key may hold an unfinished multipart upload instead of
       // an object, and only one of the two can be true.
       await store.abortMultipartsForKey(row.storage_key).catch(() => {});
+      // A queued key can have been re-claimed since the delete that queued it
+      // (see `objectStillReferenced`). Dropping the QUEUE row and keeping the
+      // object is right: the bytes are in use, and if that row is deleted later
+      // the trigger queues them again.
+      if (await objectStillReferenced(pool, row.provider, row.storage_key)) {
+        console.log(
+          `[blob-gc] discarding deletion ${row.id}: a live blobs row now points at ${row.provider}:${row.storage_key}.`,
+        );
+        await pool.query("DELETE FROM blob_deletions WHERE id = $1", [row.id]);
+        continue;
+      }
       await store.delete(row.storage_key);
       await pool.query("DELETE FROM blob_deletions WHERE id = $1", [row.id]);
       removed++;
@@ -292,6 +342,12 @@ interface OrphanRow {
  *   · **`rel_path IS NULL` is never collected** — a blob with no path cannot be
  *     referenced BY path, so the evidence that it is unused is missing rather
  *     than negative.
+ *   · **`doc_id IS NOT NULL` is never collected** — a doc-backed blob IS a
+ *     registered tree file, not an attachment, and `blob_refs` only ever holds
+ *     `attachments/…` paths (`refs.ts` returns early on anything else). So every
+ *     tree file is an "orphan" by construction and this sweep, once enabled,
+ *     would delete the bytes of every PDF in the vault. A tree file's lifetime is
+ *     `DELETE /api/files/:id`, never a TTL.
  *   · **`BLOB_GC_MAX_DELETES_PER_RUN`** — the blast radius if all of the above
  *     is somehow still wrong.
  *
@@ -334,6 +390,7 @@ export async function sweepOrphansOnce(
         WHERE b.status = 'ready'
           AND b.vault_id IS NOT NULL
           AND b.rel_path IS NOT NULL
+          AND b.doc_id IS NULL
           AND b.created_at < now() - ($1 || ' days')::interval`,
       [String(orphanDays)],
     );
@@ -376,6 +433,7 @@ export async function sweepOrphansOnce(
           WHERE b.vault_id = $1
             AND b.status = 'ready'
             AND b.rel_path IS NOT NULL
+            AND b.doc_id IS NULL
             AND b.created_at < now() - ($2 || ' days')::interval
             AND NOT EXISTS (
               SELECT 1 FROM blob_refs r

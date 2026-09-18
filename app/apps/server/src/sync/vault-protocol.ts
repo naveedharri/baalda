@@ -66,6 +66,22 @@ export interface HelloFrame {
    * new binary frame type to a connection that asked for it.
    */
   caps?: string[];
+  /**
+   * How much of the channel this connection wants.
+   *
+   * `"live-only"` says the client is fetching its cold state over the bootstrap
+   * HTTP routes and needs the socket ONLY for live updates: the server skips
+   * `backfill()` entirely and still sends `ready`. Everything on `ready` is
+   * either free set arithmetic (`revoked`) or one query over the readable set
+   * (`empty`), and all three lists are what the client acts on — so withholding
+   * them to save the backfill would trade a download for a stuck vault.
+   * `behind` may come back empty in this mode, because it is a BY-PRODUCT of the
+   * backfill diff and there is no backfill; the bootstrap session's byte-sized
+   * doc list answers the same question.
+   *
+   * Absent ⇒ full backfill, which is every shipped client.
+   */
+  mode?: "live-only";
 }
 
 /** A teammate's live "who's viewing what" state, forwarded to every subscriber
@@ -202,6 +218,9 @@ export function parseHello(text: string): HelloFrame | null {
       : undefined,
     origin: typeof f.origin === "string" && f.origin ? f.origin : undefined,
     caps: Array.isArray(f.caps) ? f.caps.filter((c): c is string => typeof c === "string") : undefined,
+    // Exactly one recognised value; anything else is an older or a confused
+    // client and gets the full backfill, which is always correct if slower.
+    mode: f.mode === "live-only" ? "live-only" : undefined,
   };
 }
 

@@ -122,6 +122,42 @@ describe("pending blob sweep", () => {
  * objects are billed forever": the row goes through an `ON DELETE CASCADE` and
  * a `DELETE FROM blobs WHERE org_id = $1` that neither know a bucket exists.
  */
+describe("pending sweep byte disposal", () => {
+  beforeEach(async () => {
+    await resetDb();
+    resetBlobStores();
+    const org = await seedOrg("Pend Co", `p-${randomUUID().slice(0, 8)}`);
+    orgId = org;
+    vaultId = await seedVault(org);
+  });
+  afterEach(() => resetBlobStores());
+
+  it("never removes the bytes of a swept pending row a ready row now stands on", async () => {
+    // The swept row held the (vault, sha256) dedupe slot, so the most likely
+    // next event is a client re-uploading exactly these bytes — onto exactly
+    // this key.
+    const store = new MemoryBlobStore();
+    store.objects.set("vaults/v/contended", Buffer.from("bytes"));
+    setBlobStoreOverride("s3", store);
+    const abandoned = randomUUID();
+    await pool.query(
+      `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
+                          storage_provider, storage_key, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 3, 'image/png', 'attachments/a.png', 'a.png', 's3',
+               'vaults/v/contended', 'pending',
+               now() - ($5 || ' minutes')::interval, now() - ($5 || ' minutes')::interval)`,
+      [abandoned, vaultId, orgId, randomUUID().replace(/-/g, "") + "e".repeat(32),
+        String(BLOB_PENDING_TTL_MINUTES + 10)],
+    );
+    // The retry that finished, on the same content and therefore the same key.
+    await seedStoredBlob("s3", "vaults/v/contended");
+
+    expect(await sweepPendingOnce()).toBe(1); // the abandoned ROW still goes
+    expect(await exists(abandoned)).toBe(false);
+    expect(store.objects.has("vaults/v/contended")).toBe(true); // the BYTES do not
+  });
+});
+
 describe("blob deletion queue", () => {
   beforeEach(async () => {
     await resetDb();
@@ -204,17 +240,50 @@ describe("blob deletion queue", () => {
     expect((await queued())[0].attempts).toBe(10);
   });
 
+  it("keeps an object a LIVE row has since re-claimed, and drops the queue row", async () => {
+    // Object keys are content-addressed (`keys.ts`), so the key a delete queued
+    // is exactly the key a re-upload of the same bytes into the same vault gets.
+    // Deleting a file and re-adding it inside the drain window (15 min a tick,
+    // plus up to ~64 more of backoff) used to destroy the NEW row's bytes:
+    // downloads 404 forever, and the desktop's diff sees the row and never
+    // re-uploads.
+    const store = new MemoryBlobStore();
+    store.objects.set("vaults/v/reused", Buffer.from("bytes"));
+    setBlobStoreOverride("s3", store);
+    await pool.query(
+      "INSERT INTO blob_deletions (provider, storage_key) VALUES ('s3', 'vaults/v/reused')",
+    );
+    await seedStoredBlob("s3", "vaults/v/reused");
+
+    expect(await drainBlobDeletionsOnce()).toBe(0); // nothing was REMOVED…
+    expect(store.objects.has("vaults/v/reused")).toBe(true); // …because the bytes are in use
+    expect(await queued()).toEqual([]); // and the stale instruction is discarded
+  });
+
   it("leaves a row alone when this build has no configuration for its provider", async () => {
     await pool.query(
       "INSERT INTO blob_deletions (provider, storage_key) VALUES ('s3', 'vaults/v/eee')",
     );
     // No override and no S3_* env: `storage_unavailable`. That is a deployment
     // that has not been given the bucket yet, not a failed attempt, so the
-    // row's ten tries must not be spent on it.
-    expect(await drainBlobDeletionsOnce()).toBe(0);
-    const rows = await queued();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].attempts).toBe(0);
+    // row's ten tries must not be spent on it. The test states "no bucket"
+    // itself rather than inheriting it from the developer's `.env` (a local
+    // setup that points attachments at a real bucket would otherwise make
+    // this drain succeed); `s3Config()` reads the env on every call, so
+    // clearing it and dropping the memoised store is enough.
+    const s3Env = ["S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"] as const;
+    const saved = s3Env.map((name) => [name, process.env[name]] as const);
+    for (const name of s3Env) delete process.env[name];
+    resetBlobStores();
+    try {
+      expect(await drainBlobDeletionsOnce()).toBe(0);
+      const rows = await queued();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].attempts).toBe(0);
+    } finally {
+      for (const [name, value] of saved) if (value !== undefined) process.env[name] = value;
+      resetBlobStores();
+    }
   });
 });
 
@@ -318,6 +387,32 @@ describe("orphan sweep", () => {
     // …and the refs are now built, so the next pass is a cheap one.
     const { rows } = await pool.query("SELECT 1 FROM blob_refs WHERE vault_id = $1", [vaultId]);
     expect(rows).toHaveLength(1);
+  });
+
+  it("never collects a registered tree file, however old and unreferenced", async () => {
+    // `blob_refs` can only ever hold `attachments/…` paths (`refs.ts` returns
+    // early on anything else), so a doc-backed blob — a registered PDF in a
+    // folder — is an "orphan" by CONSTRUCTION. Without the `doc_id IS NULL`
+    // filter, turning `BLOB_GC_ENABLED` on deleted the bytes of every tree file
+    // in every vault, 200 per run.
+    await seedIndexedNote(null);
+    const id = randomUUID();
+    const docId = randomUUID();
+    await pool.query(
+      "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, NULL, $3)",
+      [docId, vaultId, "Projects/spec.pdf"],
+    );
+    await pool.query(
+      `INSERT INTO blobs (id, vault_id, org_id, doc_id, sha256, size, mime, rel_path, filename,
+                          storage_provider, status, data, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 3, 'application/pdf', 'Projects/spec.pdf', 'spec.pdf',
+               'postgres', 'ready', decode('000102','hex'),
+               now() - interval '90 days', now() - interval '90 days')`,
+      [id, vaultId, orgId, docId, randomUUID().replace(/-/g, "") + "f".repeat(32)],
+    );
+
+    expect(await sweep()).toBe(0);
+    expect(await exists(id)).toBe(true);
   });
 
   it("honours the per-run deletion cap", async () => {

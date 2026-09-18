@@ -25,6 +25,15 @@ export interface SyncProgressSink {
   addTotal(n: number): void;
   /** One unit of work finished. `failed` counts it in BOTH `done` and `failed`. */
   item(outcome: "ok" | "failed"): void;
+  /**
+   * Bytes moved so far, out of the bytes this phase expects.
+   *
+   * OPTIONAL, and optional in two senses: a sink need not implement it (every
+   * pre-bulk harness predates it), and a phase need not report it. It rides the
+   * SAME throttled emission as the counters and is rendered as a subtitle on
+   * them — it is never a second completion signal (see `SyncProgress.bytesDone`).
+   */
+  bytes?(done: number, total: number): void;
   /** Record a document's state transition (batched). */
   doc(docId: string, state: DocSyncState): void;
   /** Emit everything pending right now (end of a phase / end of the run). */
@@ -37,6 +46,7 @@ export const nullProgressSink: SyncProgressSink = {
   phase: () => {},
   addTotal: () => {},
   item: () => {},
+  bytes: () => {},
   doc: () => {},
   flush: () => {},
 };
@@ -99,7 +109,9 @@ export class SyncProgressReporter implements SyncProgressSink {
       this.current = { ...this.current, phase };
     } else {
       // A new denominator means a new phase of work: reset the numerators too,
-      // or "12/500 uploading" would carry the registering phase's count.
+      // or "12/500 uploading" would carry the registering phase's count. The
+      // byte subtitle goes with them — a phase that reports no bytes must not
+      // inherit the previous phase's.
       this.current = { phase, done: 0, total, failed: 0 };
     }
     this.dirty = true;
@@ -121,6 +133,19 @@ export class SyncProgressReporter implements SyncProgressSink {
       done: this.current.done + 1,
       failed: this.current.failed + (outcome === "failed" ? 1 : 0),
     };
+    this.dirty = true;
+    this.schedule(false);
+  }
+
+  /**
+   * Byte progress for the current phase. Coalesced like everything else here:
+   * a 4 MiB bootstrap page ticks this once, and the emission it lands in is the
+   * same one that carries the item counts, so the pill can never show bytes from
+   * one moment beside items from another.
+   */
+  bytes(done: number, total: number): void {
+    if (this.current.bytesDone === done && this.current.bytesTotal === total) return;
+    this.current = { ...this.current, bytesDone: done, bytesTotal: total };
     this.dirty = true;
     this.schedule(false);
   }

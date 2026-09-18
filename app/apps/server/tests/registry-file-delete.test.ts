@@ -131,3 +131,51 @@ describe("DELETE /api/files/:id", () => {
     expect(await fileRows(docId)).toBe(1);
   });
 });
+
+/**
+ * Content dedupe used to be keyed on `(vault_id, sha256)` alone, so two
+ * REGISTERED FILES holding identical bytes collapsed into one row. Migration 029
+ * splits the slot: unclaimed (`attachments/…`) blobs keep the old one-row rule,
+ * a tree file gets a row per doc.
+ */
+describe("two tree files with identical bytes", () => {
+  beforeEach(async () => {
+    await resetDb();
+    const tag = randomUUID().slice(0, 8);
+    owner = await signUp(`owner+${tag}@dup.bytes.test`);
+    orgId = await seedOrg("Dup Co", `dup-${tag}`);
+    await seedMember(orgId, owner.userId, "owner");
+    vaultId = await seedVault(orgId);
+    await seedVaultGrant(orgId, "edit");
+    folderId = await seedFolder(vaultId, null, "Team", "Team", owner.userId);
+  });
+
+  it("each keeps its own row, and deleting one leaves the other downloadable", async () => {
+    const sha = "a".repeat(64);
+    const first = await seedFile(vaultId, folderId, "Team/one.pdf");
+    const second = await seedFile(vaultId, folderId, "Team/two.pdf");
+    // Under the old unique index the second insert was impossible; the whole
+    // point of 029 is that it now is.
+    const blobA = await seedBlob(vaultId, orgId, "Team/one.pdf", { docId: first, sha256: sha });
+    const blobB = await seedBlob(vaultId, orgId, "Team/two.pdf", { docId: second, sha256: sha });
+    expect(blobA).not.toBe(blobB);
+
+    expect((await del(owner, first)).status).toBe(204);
+
+    // The survivor still has its bytes — before this, `deleteDocBlobs(first)`
+    // took the shared row and the second, still-registered file went dark.
+    expect(await fileRows(second)).toBe(1);
+    expect(await blobRows(second)).toBe(1);
+    expect(await blobRows(first)).toBe(0);
+  });
+
+  it("still refuses a second UNCLAIMED blob with the same content", async () => {
+    const sha = "b".repeat(64);
+    await seedBlob(vaultId, orgId, "attachments/x.png", { sha256: sha });
+    // `blobs_vault_sha_attachment_idx`: the zero-bytes-moved dedupe that makes a
+    // fresh device settle a vault full of attachments cheaply depends on this.
+    await expect(
+      seedBlob(vaultId, orgId, "attachments/y.png", { sha256: sha }),
+    ).rejects.toMatchObject({ code: "23505" });
+  });
+});

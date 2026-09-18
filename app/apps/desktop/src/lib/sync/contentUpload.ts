@@ -67,6 +67,18 @@ export interface ContentUploadDeps {
    * short-circuit and the size ceiling.
    */
   readFile?(relPath: string): Promise<string>;
+  /**
+   * Keep a recoverable copy of a note's text under `.context/trash/<stamp>/`
+   * (`ipc.writeTrashCopy`, epoch-pinned), answering where it landed.
+   *
+   * Used for exactly one case: a doc this user may READ but not write, whose
+   * file on disk holds bytes the CRDT does not. The pull's `flushEgest` is about
+   * to put the server's copy there, and the server is the truth for a doc you
+   * cannot write — but destroying the local bytes without a copy is not
+   * something an app may do. Optional, like {@link readFile}: a host that can't
+   * make a copy still reports the loss rather than staying silent.
+   */
+  writeTrashCopy?(relPath: string, stamp: string, content: string): Promise<string>;
 }
 
 /**
@@ -529,6 +541,10 @@ export class ContentUploader {
       // so a doc whose grant was downgraded while it still held local-only ops
       // failed here on every pass, never reached `markPushed`, and came straight
       // back on the next `ready.behind` — a re-sync that could never finish.
+      // A read-only doc skipped both the seed and the ingest, so anything the
+      // file holds that the doc does not is about to be overwritten by the
+      // flush below and is unsendable besides. Keep a copy and say so.
+      if (push.readOnly) await this.keepUnsendableEdit(docId, relPath, bridge);
       const flushed = push.readOnly || (await push.whenFlushed(this.flushTimeoutMs));
       // Whatever the server had for this doc has landed in the Y.Doc by now;
       // write it out so the .md on disk matches. (The watcher will see this
@@ -586,6 +602,60 @@ export class ContentUploader {
     this.progress.item("ok");
   }
 
+  /**
+   * The file diverges from a doc this user cannot write: save it, report it.
+   *
+   * `flushEgest` (right after this) writes the server's state over the file.
+   * That is the right answer for a view-only grant — the server's copy IS the
+   * content — but the bytes on disk were somebody's work, and the read-only
+   * path deliberately skips the ingest that would have merged them, so they
+   * exist nowhere else. Best effort throughout: a failed read or a failed copy
+   * must not fail the push (the doc is confirmed either way), but it is always
+   * reported, because "your edit was not sent" is never a log line.
+   */
+  private async keepUnsendableEdit(
+    docId: string,
+    relPath: string,
+    bridge: NoteBridge,
+  ): Promise<void> {
+    const read = this.opts.deps.readFile;
+    if (!read) return;
+    let fileText: string;
+    try {
+      fileText = await read(relPath);
+    } catch {
+      return; // nothing readable to lose
+    }
+    if (fileText === bridge.serialize()) return; // converged — nothing to keep
+    let dest: string | null = null;
+    try {
+      dest =
+        (await this.opts.deps.writeTrashCopy?.(relPath, trashStamp(), fileText)) ?? null;
+    } catch (e) {
+      console.warn(`[upload] couldn't keep a copy of ${relPath}`, e);
+    }
+    this.report({
+      docId,
+      relPath,
+      reason:
+        "edit could not be sent: no write access" +
+        (dest ? `; copy saved to ${dest}` : "; the local copy could not be saved either"),
+      permanent: true,
+    });
+  }
+
+  /** Record a failure WITHOUT touching the progress counters or the streak —
+   *  for a doc that still settles (a read-only push is confirmed by the
+   *  server's own copy) but whose local bytes had nowhere to go. */
+  private report(failure: UploadFailure): void {
+    this.failures.push(failure);
+    try {
+      this.opts.onFailure?.(failure);
+    } catch (e) {
+      console.warn("[upload] failure listener threw", e);
+    }
+  }
+
   private fail(
     docId: string,
     relPath: string,
@@ -620,6 +690,12 @@ export class ContentUploader {
       );
     }
   }
+}
+
+/** One `.context/trash/<stamp>/` folder per save, the same shape the disk-delete
+ *  drain and the inbound trash executor use. */
+function trashStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 function msg(e: unknown): string {

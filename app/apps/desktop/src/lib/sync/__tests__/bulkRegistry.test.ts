@@ -100,6 +100,9 @@ function fakeApi(opts: FakeApiOpts = {}) {
     createdNotes: [] as string[],
     createdFolders: [] as string[],
     noteAttempts: new Map<string, number>(),
+    /** Batch REQUESTS sent (as opposed to rows created). */
+    noteBatches: 0,
+    folderBatches: 0,
   };
   const enter = async () => {
     state.inFlight++;
@@ -122,6 +125,11 @@ function fakeApi(opts: FakeApiOpts = {}) {
     })),
     listNotes: vi.fn(async () => opts.serverNotes ?? []),
     listNoteRegistry: vi.fn(async () => ({
+      notes: opts.serverNotes ?? [],
+      tombstones: [],
+    })),
+    // The paged twin the reconciler actually calls; identical answer.
+    listNoteRegistryPaged: vi.fn(async () => ({
       notes: opts.serverNotes ?? [],
       tombstones: [],
     })),
@@ -149,6 +157,66 @@ function fakeApi(opts: FakeApiOpts = {}) {
         state.inFlight--;
       }
     }),
+    // The BATCH routes, counted into the same state as their per-item twins so
+    // a test can assert "these rows were created" without caring which path
+    // created them. Which path runs is the threshold's business (see
+    // `bulkThreshold.test.ts`); what must not differ is the outcome.
+    batchCreateFolders: vi.fn(
+      async (_vaultId: string, items: Array<{ path: string }>) => {
+        await enter();
+        try {
+          for (const i of items) state.createdFolders.push(i.path);
+          state.folderBatches++;
+          return items.map((i) => ({
+            path: i.path,
+            id: `folder-${i.path}`,
+            status: "created" as const,
+            code: null,
+            error: null,
+          }));
+        } finally {
+          state.inFlight--;
+        }
+      },
+    ),
+    batchCreateNotes: vi.fn(
+      async (_vaultId: string, items: Array<{ relPath: string; docId?: string }>) => {
+        await enter();
+        try {
+          state.noteBatches++;
+          return items.map((i) => {
+            state.noteAttempts.set(
+              i.relPath,
+              (state.noteAttempts.get(i.relPath) ?? 0) + 1,
+            );
+            const status = opts.failNotes?.get(i.relPath);
+            if (status !== undefined) {
+              return {
+                relPath: i.relPath,
+                docId: null,
+                status: "error" as const,
+                folderId: null,
+                title: null,
+                code: null,
+                error: `boom ${status}`,
+              };
+            }
+            state.createdNotes.push(i.relPath);
+            return {
+              relPath: i.relPath,
+              docId: i.docId ?? `srv-${i.relPath}`,
+              status: "created" as const,
+              folderId: null,
+              title: null,
+              code: null,
+              error: null,
+            };
+          });
+        } finally {
+          state.inFlight--;
+        }
+      },
+    ),
   } as unknown as ApiClient;
   return { api, state };
 }
@@ -211,17 +279,37 @@ beforeEach(() => {
 });
 
 describe("bounded concurrency", () => {
-  it("registers 60 notes with at most REGISTRY_CONCURRENCY requests in flight", async () => {
+  it("registers 24 notes with at most REGISTRY_CONCURRENCY requests in flight", async () => {
+    // BELOW the bulk threshold, so this is the per-item path — the one this
+    // pool was built for, and the one that still runs on a small vault.
     const { api, state } = fakeApi();
     const reg = new VaultRegistry(api);
     await reconcileWithTree(
       reg,
       { organizationId: ORG, vaultName: "v" },
-      tree(60),
+      tree(24),
     );
 
-    expect(state.createdNotes).toHaveLength(60);
+    expect(state.createdNotes).toHaveLength(24);
+    expect(state.noteBatches).toBe(0);
     expect(state.maxInFlight).toBeGreaterThan(1); // NOT the old sequential loop
+    expect(state.maxInFlight).toBeLessThanOrEqual(REGISTRY_CONCURRENCY);
+  });
+
+  it("keeps the same bound over batch REQUESTS on a big vault", async () => {
+    // Above the threshold the unit of concurrency is a chunk, not a note: 900
+    // notes are 5 requests (200 + 200 + 200 + 200 + 100), still capped by the
+    // same pool width.
+    const { api, state } = fakeApi();
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "v" },
+      tree(900),
+    );
+
+    expect(state.createdNotes).toHaveLength(900);
+    expect(state.noteBatches).toBe(5);
     expect(state.maxInFlight).toBeLessThanOrEqual(REGISTRY_CONCURRENCY);
   });
 
@@ -280,7 +368,8 @@ describe("incremental checkpointing + resume", () => {
       tree(60),
     );
 
-    // 60 notes at a 25-item batch ⇒ several writes. The old code wrote exactly 1.
+    // 60 notes at a 25-item checkpoint batch ⇒ several writes, whichever path
+    // created the rows (here: one `notes/batch` request). The old code wrote 1.
     expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBeGreaterThan(1);
     expect(reg.checkpointWrites()).toBeGreaterThan(1);
     expect(
@@ -289,45 +378,59 @@ describe("incremental checkpointing + resume", () => {
   });
 
   it("keeps the work a killed run finished — the next run only creates the rest", async () => {
-    // Run 1 dies after 30 notes: everything it created is on the server, and the
-    // config it checkpointed records the collection id.
+    // The BATCH path (900 notes = 5 chunks of ≤200): run 1 dies after the first
+    // chunk has landed AND been checkpointed, which is the state a `kill -9`
+    // leaves behind. Everything it created is on the server and in
+    // `.context/config.json`; run 2 must create only the remainder.
     const cfg = configFile();
-    const created: string[] = [];
-    const { api } = fakeApi();
+    const { api, state: apiState } = fakeApi();
     const { source, state } = scopeSource();
-    vi.mocked(api.createNote).mockImplementation(
-      async (input: { relPath: string }) => {
+    let batch = 0;
+    vi.mocked(
+      api as unknown as {
+        batchCreateNotes: (v: string, items: Array<{ relPath: string }>) => Promise<unknown>;
+      },
+    ).batchCreateNotes.mockImplementation(
+      async (_vaultId: string, items: Array<{ relPath: string }>) => {
+        const mine = ++batch;
         await tick();
-        created.push(input.relPath);
-        if (created.length >= 30) state.current = false; // kill -9 stand-in
-        return serverNote(input.relPath);
+        if (mine > 1) {
+          // Give the first chunk's checkpoint flush time to reach "disk", then
+          // pull the vault out from under the run.
+          await tick();
+          await tick();
+          state.current = false;
+          return [];
+        }
+        for (const i of items) apiState.createdNotes.push(i.relPath);
+        return items.map((i) => ({
+          relPath: i.relPath,
+          docId: `srv-${i.relPath}`,
+          status: "created" as const,
+          folderId: null,
+          title: null,
+          code: null,
+          error: null,
+        }));
       },
     );
     const reg1 = new VaultRegistry(api, source);
-    await reconcileWithTree(
-      reg1,
-      { organizationId: ORG, vaultName: "v" },
-      tree(50),
-    );
-    expect(created.length).toBeGreaterThanOrEqual(30);
-    expect(created.length).toBeLessThan(50); // it really did stop early
+    await reconcileWithTree(reg1, { organizationId: ORG, vaultName: "v" }, tree(900));
+
+    const created = [...apiState.createdNotes];
+    expect(created.length).toBe(200); // one chunk landed…
+    const persisted = Object.keys((cfg.read()?.docs as Record<string, string>) ?? {});
+    expect(persisted.length).toBeGreaterThan(0); // …and it was checkpointed
     expect(cfg.read()!.serverVaultId).toBe(VAULT);
 
     // Run 2 sees the survivors as server rows and creates only the remainder.
-    const alreadyThere = created.map((rel) => ({
-      id: `srv-${rel}`,
-      rel_path: rel,
-    }));
+    const alreadyThere = created.map((rel) => ({ id: `srv-${rel}`, rel_path: rel }));
     const second = fakeApi({ serverNotes: alreadyThere });
     const reg2 = new VaultRegistry(second.api);
-    await reconcileWithTree(
-      reg2,
-      { organizationId: ORG, vaultName: "v" },
-      tree(50),
-    );
+    await reconcileWithTree(reg2, { organizationId: ORG, vaultName: "v" }, tree(900));
 
-    expect(second.state.createdNotes).toHaveLength(50 - created.length);
-    expect(reg2.allDocIds()).toHaveLength(50);
+    expect(second.state.createdNotes).toHaveLength(900 - created.length);
+    expect(reg2.allDocIds()).toHaveLength(900);
   });
 
   it("round-trips the content-push checkpoint through config.json", async () => {
@@ -573,13 +676,34 @@ describe("honest failure reporting", () => {
     await reconcileWithTree(
       reg,
       { organizationId: ORG, vaultName: "v" },
-      tree(100),
+      tree(24),
     );
 
     expect(reg.limitCode()).toBe("vault_limit_reached");
     expect(reg.failures()[0].code).toBe("vault_limit_reached");
-    // Bounded: it does not grind through 100 notes that would all 402.
+    // Bounded: it does not grind through 24 notes that would all 402.
     expect(n).toBeLessThanOrEqual(REGISTRY_CONCURRENCY);
+  });
+
+  it("stops the BATCH path on a 402 too — the remaining chunks are never sent", async () => {
+    const { api, state } = fakeApi();
+    vi.mocked(
+      api as unknown as { batchCreateNotes: (v: string, i: unknown[]) => Promise<unknown> },
+    ).batchCreateNotes.mockImplementation(async () => {
+      await tick();
+      state.noteBatches++;
+      throw new ApiError(402, "vault limit reached", { code: "vault_limit_reached" });
+    });
+    const reg = new VaultRegistry(api);
+    // 900 notes = 5 chunks; the limit must stop it long before the fifth.
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(900));
+
+    expect(reg.limitCode()).toBe("vault_limit_reached");
+    expect(state.noteBatches).toBeLessThanOrEqual(REGISTRY_CONCURRENCY);
+    expect(state.createdNotes).toHaveLength(0);
+    // …and every note in the chunk that DID go out is reported, not swallowed.
+    expect(reg.failures().length).toBeGreaterThan(0);
+    expect(reg.failures()[0].code).toBe("vault_limit_reached");
   });
 
   it("reports the registering phase and a per-item count", async () => {

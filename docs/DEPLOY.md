@@ -330,6 +330,15 @@ confirm `/health` and a real sync round-trip, then promote.
 | `REDIS_URL` | no | unset | **Multi-instance only.** Unset ⇒ single-instance (in-memory fanout), which is the default and covers hundreds of concurrent users. Set ⇒ the vault replication channel and the Hocuspocus editing path both fan out via Redis so N instances stay consistent (spec 05 §5). |
 | `BACKFILL_CONCURRENCY` | no | `6` | Max docs streamed concurrently to a freshly-connected vault subscriber. |
 | `VAULT_SYNC_PATH` | no | `/vault-sync` | WebSocket path for the background vault replication channel (served on `PORT`). |
+| `BATCH_MAX_NOTES` | no | `200` | Items one `POST /api/vaults/:id/notes/batch` may carry. Past it the request is refused with `batch_too_large`; the desktop chunks to this number. |
+| `BATCH_MAX_FOLDERS` | no | `500` | Same, for `folders/batch`. Higher than notes because a folder row is cheaper — no per-item permission walk on a resolved parent. |
+| `BATCH_MAX_FILES` | no | `200` | Same, for `files/batch`. |
+| `BATCH_MAX_DOCS` | no | `100` | Items one `POST /api/vaults/:id/docs/batch` (CRDT content push) may carry. |
+| `BATCH_MAX_DECODED_BYTES` | no | `4194304` | Total **decoded** update bytes one `docs/batch` may carry (4 MiB). The route also takes a 16 MB body limit; this is the heap bound behind it. |
+| `BOOTSTRAP_MAX_PAGE_BYTES` | no | `4194304` | Byte budget for one bootstrap page (4 MiB). A single doc larger than a page ships alone rather than being refused. |
+| `BOOTSTRAP_MAX_PAGE_DOCS` | no | `256` | Doc budget for one bootstrap page, for a vault of many tiny notes. |
+| `BOOTSTRAP_CONCURRENCY` | no | `4` | Bootstrap pages built at once across this instance. Past it a page request answers 503 + `Retry-After` (`bootstrap_busy`). Raise only alongside the container's memory: a page is merged and gzipped in heap before a byte is sent. |
+| `BOOTSTRAP_TTL_HOURS` | no | `24` | How long a bootstrap session's materialised doc list stays valid. Past it a page request answers 410 `session_expired` and the client re-POSTs with a fresh `have`. |
 | `POLAR_ACCESS_TOKEN` | no | unset | **Billing (optional).** Unset ⇒ billing fully disabled: no upgrade UI in clients, no free-tier limits — every self-hosted vault is unlimited. Set (with the vars below) ⇒ per-vault Pro subscriptions via [Polar](https://polar.sh). |
 | `POLAR_WEBHOOK_SECRET` | with billing | unset | Signing secret of a Polar webhook endpoint pointed at `https://<your-domain>/api/billing/webhook` (raw format, `subscription.*` events). |
 | `POLAR_PRODUCT_MONTHLY_ID` | with billing | unset | Polar product id for the monthly plan. |

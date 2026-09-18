@@ -204,6 +204,49 @@ export const config = {
    *  duplicating content on every bounce (2026-08-25: single updates reached
    *  17 MB and OOM-crash-looped the server). The cap is the circuit breaker. */
   maxNoteMb: int("MAX_NOTE_MB", 10),
+  // ---- Bulk sync engine (bootstrap + batch) ----
+  /**
+   * Per-request item ceilings for the batch registration routes, mirrored
+   * client-side in `apps/desktop/src/lib/sync/pool.ts` so the desktop chunks to
+   * them rather than earning a 400 `batch_too_large`.
+   *
+   * They are deliberately different numbers rather than one shared cap: a folder
+   * row is a handful of columns and resolves its parent from a path the server
+   * already indexed, while a note additionally walks `resolveParentFolder` and a
+   * permission gate. Sized so ONE request is bounded work at `PG_POOL_MAX`
+   * shared with the vault channel's backfill, not so the arithmetic is tidy.
+   */
+  batchMaxNotes: int("BATCH_MAX_NOTES", 200),
+  batchMaxFolders: int("BATCH_MAX_FOLDERS", 500),
+  batchMaxFiles: int("BATCH_MAX_FILES", 200),
+  batchMaxDocs: int("BATCH_MAX_DOCS", 100),
+  /**
+   * Total DECODED bytes one `docs/batch` may carry. The route also takes a
+   * 16 MB `bodyLimit`, which bounds what is read off the socket; this bounds
+   * what is held in heap after base64 decoding, which is the number that
+   * actually matters at a 512 MB cap with four of these in flight.
+   */
+  batchMaxDecodedBytes: int("BATCH_MAX_DECODED_BYTES", 4 * 1024 * 1024),
+  /**
+   * Bootstrap page budgets. A page is built in memory (merge + gzip) before a
+   * byte is written, so `bootstrapConcurrency × bootstrapMaxPageBytes` is the
+   * floor of the peak — ~50 MB at these defaults once the merge transient and
+   * the gzip buffer are counted. `bootstrapMaxPageDocs` bounds the per-page
+   * query fan-out instead of the bytes, for a vault of many tiny notes.
+   *
+   * A single doc larger than a page ships ALONE rather than being refused: a
+   * 6 MB note is legitimate and must still reach a joiner.
+   */
+  bootstrapMaxPageBytes: int("BOOTSTRAP_MAX_PAGE_BYTES", 4 * 1024 * 1024),
+  bootstrapMaxPageDocs: int("BOOTSTRAP_MAX_PAGE_DOCS", 256),
+  /** Concurrent page builds across the whole process. Past it a GET answers
+   *  503 + `Retry-After` with code `bootstrap_busy` — backpressure the client
+   *  can obey, rather than an OOM every joiner shares. */
+  bootstrapConcurrency: int("BOOTSTRAP_CONCURRENCY", 4),
+  /** How long a bootstrap session (its materialised doc list) stays valid.
+   *  Past it a GET answers 410 `session_expired` and the client re-POSTs with a
+   *  fresh `have` — which is also the resume path after a very long pause. */
+  bootstrapTtlHours: int("BOOTSTRAP_TTL_HOURS", 24),
 } as const;
 
 /**

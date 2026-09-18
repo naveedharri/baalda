@@ -511,31 +511,95 @@ export const listNoteTitles = (expectedEpoch?: VaultEpoch) =>
 // as the whole `invoke` payload. Every wrapper signature is unchanged, so no
 // caller (or test mock) had to move.
 
+/**
+ * Append one Yjs update to a doc's log. Resolves with the row's
+ * `yjs_updates.id` — the COMPACTION WATERMARK.
+ *
+ * The caller tracks the highest id it has seen and hands it back as
+ * {@link saveYjsSnapshot}'s `upTo`. Without it, `compact()` encoded a snapshot,
+ * awaited this IPC's siblings, and then truncated the WHOLE log — including the
+ * keystroke-sized appends that committed while it was awaiting and that the
+ * snapshot therefore does not contain. The surviving later updates then
+ * referenced a missing item, Yjs parked them as pending forever, and the doc
+ * loaded short (desktop-audit #4).
+ */
 export const appendYjsUpdate = (
   docId: string,
   update: Uint8Array,
   expectedEpoch?: VaultEpoch,
-) =>
-  invoke<void>(
+): Promise<number> =>
+  invoke<number>(
     "append_yjs_update",
     frame({ docId, expectedEpoch: expectedEpoch ?? null }, update),
   );
 
+/**
+ * Bytes of `encode_yjs_state`'s TRAILER: `[u8 hasLastId][i64 lastUpdateId]`,
+ * little-endian, at the very end of the frame.
+ *
+ * It rides at the end so every byte `decodeYjsState` reads stays at the offset
+ * it was at — a header would have forced a `buf.slice()` copy of the whole
+ * frame (17.7 MB on the largest doc measured) just to re-align the payload,
+ * which is the cost this binary format exists to avoid. `decodeYjsState` stops
+ * after `updateCount` updates and never looks further, so it is unaffected.
+ */
+const YJS_STATE_TRAILER_BYTES = 9;
+
+/**
+ * Read the compaction watermark off the end of a `load_yjs_state` frame: the
+ * `yjs_updates.id` of the LAST update in it, or `undefined` when the log was
+ * empty.
+ *
+ * `undefined` and `0` are different answers — 0 is a legal rowid — so the flag
+ * byte is what decides, never the value.
+ */
+function readLastUpdateId(buf: ArrayBuffer): number | undefined {
+  if (buf.byteLength < YJS_STATE_TRAILER_BYTES) return undefined;
+  const view = new DataView(buf, buf.byteLength - YJS_STATE_TRAILER_BYTES);
+  if (view.getUint8(0) !== 1) return undefined;
+  return Number(view.getBigInt64(1, true));
+}
+
+/**
+ * A doc's persisted CRDT state, plus the watermark a load-time compaction needs.
+ *
+ * `lastUpdateId` is the row id of the last update in `updates`. A bridge that
+ * hydrates and immediately compacts (the log outlived a relaunch, so
+ * `shouldCompact` fires right after `hydrate`) has appended nothing itself and
+ * would otherwise know no watermark — it would pass none, truncate nothing, and
+ * the log would never shrink again. Rust reads the id from the last row it
+ * actually returned, in the same statement, so it can never name a row that is
+ * not in `updates` and therefore not in the snapshot about to be written.
+ */
 export const loadYjsState = (
   docId: string,
   expectedEpoch?: VaultEpoch,
-): Promise<YjsState> =>
+): Promise<YjsState & { lastUpdateId?: number }> =>
   invoke<ArrayBuffer>("load_yjs_state", {
     docId,
     expectedEpoch: expectedEpoch ?? null,
-  }).then(decodeYjsState);
+  }).then((buf) => ({
+    ...decodeYjsState(buf),
+    lastUpdateId: readLastUpdateId(buf),
+  }));
 
+/**
+ * Write a doc's merged snapshot + state vector, truncating its update log up to
+ * `upTo`.
+ *
+ * `upTo` is the last `yjs_updates.id` this snapshot folds in — the highest id
+ * {@link appendYjsUpdate} returned BEFORE the snapshot was encoded. OMITTING it
+ * deletes nothing and writes the snapshot only, which is the safe default: a
+ * caller that cannot say what its snapshot covers must not be allowed to say
+ * "all of it".
+ */
 export const saveYjsSnapshot = (
   docId: string,
   snapshot: Uint8Array,
   stateVector: Uint8Array,
   expectedEpoch?: VaultEpoch,
-) =>
+  upTo?: number,
+): Promise<void> =>
   invoke<void>(
     "save_yjs_snapshot",
     frame(
@@ -544,6 +608,7 @@ export const saveYjsSnapshot = (
         expectedEpoch: expectedEpoch ?? null,
         // Where Rust splits the payload back into its two halves.
         snapshotLen: snapshot.byteLength,
+        upTo: upTo ?? null,
       },
       snapshot,
       stateVector,
@@ -606,6 +671,115 @@ export const listYjsStateVectors = (expectedEpoch?: VaultEpoch) =>
   invoke<ArrayBuffer>("list_yjs_state_vectors", {
     expectedEpoch: expectedEpoch ?? null,
   }).then(decodeStateVectors);
+
+// ---- Bulk sync: bootstrap pages + batched materialize ---------------------
+// The batch replacements for the per-note IPC storm of a cold join. Both are
+// epoch-pinned, both are idempotent, and neither can write over content.
+
+/** One doc of a bootstrap page: its markdown plus its CRDT. */
+export interface BootstrapEntry {
+  /** The SERVER's doc id — the identity every layer keys by. */
+  docId: string;
+  relPath: string;
+  /** The markdown the server's Y.Doc serializes to. */
+  content: string;
+  /** That doc's merged Yjs update, stored verbatim as its snapshot. */
+  snapshot: Uint8Array;
+  stateVector: Uint8Array;
+}
+
+/**
+ * What the batch did with one doc.
+ *
+ * | local CRDT rows | local file | status |
+ * |---|---|---|
+ * | none | missing or 0 bytes | `written` — file + snapshot + state vector |
+ * | none | non-empty, sha256 == content | `unchanged` — STILL writes the CRDT rows |
+ * | none | non-empty, differs | `conflict` — writes nothing; route it to a `DocSync` |
+ * | any | any | `rejected` — cold-apply through `VaultDocStore`, which MERGES |
+ *
+ * `written` and `unchanged` both mean the rows are stored, so both may
+ * `markPushed`. `rejected` also covers a refused path and a per-doc failure,
+ * and always carries a `reason`.
+ */
+export type BootstrapStatus = "written" | "unchanged" | "conflict" | "rejected";
+
+export interface BootstrapOutcome {
+  docId: string;
+  status: BootstrapStatus;
+  reason: string | null;
+}
+
+/**
+ * Apply one bootstrap page — N docs' markdown + CRDT in ONE IPC and ONE SQLite
+ * transaction.
+ *
+ * Rust decides each doc's fate from the FILE and the local CRDT tables, never
+ * from this list, so a wrong list costs nothing: the worst it can do is refuse
+ * work. Applying the same page twice is safe — every doc then has CRDT rows and
+ * comes back `rejected`, having written nothing.
+ *
+ * The payload is every entry's `content || snapshot || stateVector`
+ * concatenated in `entries` order; the meta carries only the lengths, exactly
+ * like {@link saveYjsStateVectors}.
+ */
+export const applyBootstrapBatch = (
+  entries: BootstrapEntry[],
+  expectedEpoch?: VaultEpoch,
+): Promise<BootstrapOutcome[]> => {
+  const encoder = new TextEncoder();
+  const bodies = entries.map((e) => encoder.encode(e.content));
+  return invoke<BootstrapOutcome[]>(
+    "apply_bootstrap_batch",
+    frame(
+      {
+        expectedEpoch: expectedEpoch ?? null,
+        // Lengths only; the three parts of each entry follow in this order.
+        entries: entries.map((e, i) => ({
+          docId: e.docId,
+          relPath: e.relPath,
+          contentLen: bodies[i].byteLength,
+          snapshotLen: e.snapshot.byteLength,
+          stateVectorLen: e.stateVector.byteLength,
+        })),
+      },
+      ...entries.flatMap((e, i) => [bodies[i], e.snapshot, e.stateVector]),
+    ),
+  );
+};
+
+/** One server-only note to materialize as a local placeholder. */
+export interface MaterializeItem {
+  relPath: string;
+  /** The server's doc id. `null` leaves the index row on the id it has. */
+  docId: string | null;
+}
+
+export interface MaterializeOutcome {
+  relPath: string;
+  /** The file was missing and was created EMPTY. */
+  created: boolean;
+  /** The index row at this path now carries the server's `docId`. */
+  rebound: boolean;
+}
+
+/**
+ * Materialize N server-only notes as create-only placeholders, then index and
+ * re-key them in ONE transaction with ONE link pass.
+ *
+ * The batch form of the registry's join loop, which was 2–3 IPC round trips per
+ * note — each `rebindNoteId` carrying a whole-`links` scan. Every write is
+ * `write_note_if_missing`: create-only, never an overwrite, which is why the
+ * 428-note incident cost nothing.
+ */
+export const materializeNotesBatch = (
+  items: MaterializeItem[],
+  expectedEpoch?: VaultEpoch,
+): Promise<MaterializeOutcome[]> =>
+  invoke<MaterializeOutcome[]>("materialize_notes_batch", {
+    items,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
 // ---- Attachment binary I/O (Phase 3 blob store, spec 02 §2) ---------------
 // Reads answer with raw bytes, like the CRDT reads above — the whole response

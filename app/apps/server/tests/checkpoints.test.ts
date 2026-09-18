@@ -483,6 +483,99 @@ describe("vault checkpoints", () => {
     expect(rec.docWriter.store.get(doc)).toBe("precious words");
   });
 
+  it("refuses a revert that would delete more notes than the cap allows", async () => {
+    const owner = await signUp("rv-cap@t.com");
+    const org = await seedOrg("Acme", "acme-cap");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+
+    // A checkpoint of an EMPTY vault. Everything created afterwards counts as
+    // "created after the checkpoint" and is soft-deleted on revert — so an empty
+    // (or truncated, or never-captured) `structure.notes` means the whole vault.
+    const create = await api(owner, `/api/vaults/${vault}/checkpoints`, {
+      method: "POST",
+      body: JSON.stringify({ label: "empty" }),
+    });
+    const checkpoint = (await create.json()) as { id: string };
+
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) ids.push(await seedNote(vault, null, `n${i}.md`, owner.userId));
+
+    const res = await api(owner, `/api/vaults/${vault}/checkpoints/${checkpoint.id}/revert`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      code: "revert_too_destructive",
+      wouldDelete: 12,
+      cap: 5,
+    });
+
+    // AND it did nothing: the refusal rolls the whole transaction back, so no
+    // note is half-deleted and no structure moved.
+    const { rows } = await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM notes WHERE vault_id = $1 AND deleted_at IS NULL",
+      [vault],
+    );
+    expect(rows[0]!.n).toBe(12);
+  });
+
+  it("leaves the structure committed when a content write fails", async () => {
+    const owner = await signUp("rv-partial@t.com");
+    const org = await seedOrg("Acme", "acme-part");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const a = await seedNote(vault, null, "a.md", owner.userId);
+    const b = await seedNote(vault, null, "b.md", owner.userId);
+    rec.docWriter.store.set(a, "A original");
+    rec.docWriter.store.set(b, "B original");
+
+    const create = await api(owner, `/api/vaults/${vault}/checkpoints`, {
+      method: "POST",
+      body: JSON.stringify({ label: "good" }),
+    });
+    const checkpoint = (await create.json()) as { id: string };
+    rec.docWriter.store.set(a, "A drifted");
+    rec.docWriter.store.set(b, "B drifted");
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [b]);
+
+    // One doc's content write blows up. Run INSIDE the lock's transaction, this
+    // rolled the structure back while leaving the other note's body already
+    // rewritten — reverted content with no record of it. Run after COMMIT, the
+    // failure costs exactly itself.
+    const realSetContent = rec.docWriter.setContent.bind(rec.docWriter);
+    rec.docWriter.setContent = async (
+      vaultId: string,
+      docId: string,
+      content: string,
+      actor?: { userId?: string | null },
+    ) => {
+      if (docId === a) throw new Error("doc writer exploded");
+      return realSetContent(vaultId, docId, content, actor);
+    };
+    try {
+      const res = await api(owner, `/api/vaults/${vault}/checkpoints/${checkpoint.id}/revert`, {
+        method: "POST",
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ docsChanged: 1, docsRestored: 1 });
+    } finally {
+      rec.docWriter.setContent = realSetContent;
+    }
+
+    // The structure change committed…
+    const { rows } = await pool.query<{ deleted_at: Date | null }>(
+      "SELECT deleted_at FROM notes WHERE id = $1",
+      [b],
+    );
+    expect(rows[0]!.deleted_at).toBeNull();
+    // …the write that worked landed, and the one that threw simply did not.
+    expect(rec.docWriter.store.get(b)).toBe("B original");
+    expect(rec.docWriter.store.get(a)).toBe("A drifted");
+  });
+
   it("404s a checkpoint from another vault", async () => {
     const owner = await signUp("rv-cross@t.com");
     const org = await seedOrg("Acme", "acme-c9");

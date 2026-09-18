@@ -205,6 +205,15 @@ export interface VaultSyncEngineOptions {
   fileDocIds?: () => string[];
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
+  /**
+   * Start the channel in LIVE-ONLY mode: `hello.mode = "live-only"`, so the
+   * server skips its cold backfill and sends only `ready` plus live traffic.
+   *
+   * Set while the bulk engine owns the download (`sync/bootstrap.ts`). Flipped
+   * back with {@link VaultSyncEngine.reconnect} once the bulk phase is done, at
+   * which point the manifest is complete and the resulting backfill is ~0.
+   */
+  liveOnly?: boolean;
   /** Backoff bounds (ms). */
   reconnect?: { baseMs?: number; maxMs?: number };
   /** Queued inbound bytes past which the engine applies backpressure (default
@@ -352,6 +361,8 @@ export class VaultSyncEngine {
    *  Live frames are never counted (see `onInboundProgress`). */
   private inboundTotal = 0;
   private inboundDone = 0;
+  /** Ask for a live-only channel in the next `hello` (see the option). */
+  private liveOnly = false;
   /** True from `hello` until the server's `ready`, which terminates the backfill
    *  it follows (server: "`ready` can never overtake the backfill it
    *  terminates"). This flag is the live/backfill boundary. */
@@ -382,6 +393,7 @@ export class VaultSyncEngine {
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
+    this.liveOnly = opts.liveOnly === true;
     this.baseMs = opts.reconnect?.baseMs ?? 150;
     this.maxMs = opts.reconnect?.maxMs ?? 15_000;
     this.random = opts.random ?? Math.random;
@@ -445,6 +457,28 @@ export class VaultSyncEngine {
     this.closeSocket();
     this.setStatus("connecting");
     this.scheduleReconnect();
+  }
+
+  /**
+   * Change the hello MODE and force a fresh handshake.
+   *
+   * The one way out of live-only: the bulk phase finishes, the manifest now
+   * covers everything it downloaded, and the reconnect's `hello` therefore asks
+   * the server for a backfill that is ~0 frames wide — while still collecting
+   * this connect's `ready.empty`/`behind`/`revoked`, which is what the session
+   * keys the remaining work off.
+   *
+   * Reuses {@link VaultSyncEngine.refresh} (and therefore the reconnect
+   * machinery) rather than opening a second socket: one WS per vault.
+   */
+  reconnect(opts: { liveOnly?: boolean } = {}): void {
+    if (opts.liveOnly !== undefined) this.liveOnly = opts.liveOnly;
+    this.refresh();
+  }
+
+  /** Is the channel currently asking for a live-only session? (tests) */
+  isLiveOnly(): boolean {
+    return this.liveOnly;
   }
 
   /** Tear down permanently; no further reconnects. */
@@ -640,6 +674,9 @@ export class VaultSyncEngine {
         // Omitted when empty, so the common frame stays byte-identical to what
         // every shipped server already parses.
         ...(files.length > 0 ? { files } : {}),
+        // …and the same for the mode: absent means "backfill me", exactly as
+        // every older client and server already behave.
+        ...(this.liveOnly ? { mode: "live-only" as const } : {}),
         origin: this.api.getClientId(),
         // Opt in to the frame types this build understands. Without it the
         // server withholds them (see `CLIENT_CAPS`).

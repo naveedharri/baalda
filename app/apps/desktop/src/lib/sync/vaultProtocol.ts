@@ -30,6 +30,20 @@ export interface HelloFrame {
    */
   origin?: string;
   /**
+   * Ask the server for a LIVE channel only: no cold `backfill()`.
+   *
+   * Sent while the bulk engine owns the download — the bootstrap route pages the
+   * same content out over HTTP with a resumable cursor, and having both deliver
+   * it means every doc arrives twice. The server still computes and sends
+   * `ready` (`empty`/`revoked`; `behind` may be empty), because those three
+   * lists are authorities the session needs on every connect, backfill or not.
+   *
+   * Omitted (not `false`) when the backfill IS wanted, so the common frame stays
+   * byte-identical to what every shipped server already parses; an older server
+   * ignores the unknown field and simply backfills, which is today's behaviour.
+   */
+  mode?: "live-only";
+  /**
    * Feature flags this build understands. The server withholds any NEW binary
    * frame type from a client that didn't list it — without that, an older build
    * would run a voice chunk through {@link decodeUpdateFrame} and apply the
