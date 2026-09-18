@@ -225,13 +225,23 @@ export function createApp(deps: AppDeps): Hono {
     createRegistryRoutes({
       onRegistryChanged: deps.onRegistryChanged,
       disconnectDoc: deps.disconnectDoc,
+      evictDoc: deps.evictDoc,
     }),
   );
   // Bulk engine: the batched twins of the registry creates, plus the whole-vault
   // bootstrap download. Mounted beside the registry because they ARE the
   // registry — same shared `registry/batch-ops.ts` body, same refusal codes —
   // only without a network round trip per item.
-  app.route("/api", createBulkRoutes({ onRegistryChanged: deps.onRegistryChanged }));
+  app.route(
+    "/api",
+    createBulkRoutes({
+      onRegistryChanged: deps.onRegistryChanged,
+      // The bulk delete route kicks + unloads the docs it removes, off the
+      // response path. `evictDoc` and not `disconnectDoc`: the rows are gone, so
+      // a cached `Y.Doc` served to the next connect would re-materialise them.
+      evictDoc: deps.evictDoc,
+    }),
+  );
   app.route("/api", bootstrapRoutes);
   app.route("/api", blobRoutes);
   app.route(

@@ -47,6 +47,9 @@ describe("SyncProgressReporter", () => {
       },
       onDocState: () => {},
       throttleMs: 100,
+      // One window for both cadences here: these cases pin COALESCING, not
+      // the bulk cadence (which has its own case below).
+      bulkThrottleMs: 100,
       now: clock.now,
       setTimeoutImpl: clock.setTimeoutImpl,
       clearTimeoutImpl: clock.clearTimeoutImpl,
@@ -86,6 +89,9 @@ describe("SyncProgressReporter", () => {
       },
       onDocState: () => {},
       throttleMs: 100,
+      // One window for both cadences here: these cases pin COALESCING, not
+      // the bulk cadence (which has its own case below).
+      bulkThrottleMs: 100,
       now: clock.now,
       setTimeoutImpl: clock.setTimeoutImpl,
       clearTimeoutImpl: clock.clearTimeoutImpl,
@@ -128,6 +134,9 @@ describe("SyncProgressReporter", () => {
       onProgress: () => {},
       onDocState: (p) => patches.push(p),
       throttleMs: 100,
+      // One window for both cadences here: these cases pin COALESCING, not
+      // the bulk cadence (which has its own case below).
+      bulkThrottleMs: 100,
       now: clock.now,
       setTimeoutImpl: clock.setTimeoutImpl,
       clearTimeoutImpl: clock.clearTimeoutImpl,
@@ -170,6 +179,9 @@ describe("SyncProgressReporter", () => {
       onProgress: (p) => seen.push(p),
       onDocState: () => {},
       throttleMs: 100,
+      // One window for both cadences here: these cases pin COALESCING, not
+      // the bulk cadence (which has its own case below).
+      bulkThrottleMs: 100,
       now: clock.now,
       setTimeoutImpl: clock.setTimeoutImpl,
       clearTimeoutImpl: clock.clearTimeoutImpl,
@@ -468,5 +480,113 @@ describe("runPool / withRetry", () => {
     expect(calls).toBe(1);
     expect(sleep).not.toHaveBeenCalled();
     expect(out).toMatchObject({ ok: false, terminal: true });
+  });
+});
+
+// ── Cadence during a bulk run ──────────────────────────────────────────────
+// Reporting has a cost of its own: every progress emission is a store write
+// that re-renders the sidebar, and every checkpoint tick re-serializes the whole
+// doc map. Both back off while a run is streaming — and neither may hold back
+// the things a user reads as "it finished".
+describe("bulk cadence", () => {
+  it("emits ~4×/s during a bulk phase and ~10×/s otherwise", () => {
+    const clock = fakeClock();
+    const progress: SyncProgress[] = [];
+    const r = new SyncProgressReporter({
+      onProgress: (p) => {
+        if (p) progress.push(p);
+      },
+      onDocState: () => {},
+      throttleMs: 100,
+      bulkThrottleMs: 300,
+      now: clock.now,
+      setTimeoutImpl: clock.setTimeoutImpl,
+      clearTimeoutImpl: clock.clearTimeoutImpl,
+    });
+
+    // 500 notes ⇒ a bulk phase (the engine's own `useBulkPath` threshold).
+    r.phase("uploading", 500);
+    expect(progress).toHaveLength(1); // the phase change is never throttled
+    r.item("ok");
+    clock.advance(100);
+    expect(progress).toHaveLength(1); // 100ms is inside the bulk window
+    clock.advance(200);
+    expect(progress).toHaveLength(2);
+
+    // A small phase is the interactive case and keeps the tighter window.
+    r.phase("uploading", 3);
+    expect(progress).toHaveLength(3);
+    r.item("ok");
+    clock.advance(100);
+    expect(progress).toHaveLength(4);
+  });
+
+  it("still emits the end of a bulk run immediately", () => {
+    const clock = fakeClock();
+    const progress: SyncProgress[] = [];
+    const r = new SyncProgressReporter({
+      onProgress: (p) => {
+        if (p) progress.push(p);
+      },
+      onDocState: () => {},
+      throttleMs: 100,
+      bulkThrottleMs: 300,
+      now: clock.now,
+      setTimeoutImpl: clock.setTimeoutImpl,
+      clearTimeoutImpl: clock.clearTimeoutImpl,
+    });
+    r.phase("uploading", 500);
+    for (let i = 0; i < 500; i++) r.item("ok");
+    r.flush(); // what a phase's end calls — never waits out the window
+    expect(progress[progress.length - 1]).toEqual({
+      phase: "uploading",
+      done: 500,
+      total: 500,
+      failed: 0,
+    });
+  });
+
+  it("checkpoints on a 3s window during a bulk run, 750ms when idle", async () => {
+    const clock = fakeClock();
+    const written: number[] = [];
+    let counter = 0;
+    const cp = new Checkpointer<number>({
+      write: async (v) => {
+        written.push(v);
+      },
+      snapshot: () => counter,
+      everyItems: 25,
+      everyMs: 750,
+      everyMsBulk: 3000,
+      setTimeoutImpl: clock.setTimeoutImpl,
+      clearTimeoutImpl: clock.clearTimeoutImpl,
+    });
+
+    cp.setBulk(true);
+    counter++;
+    cp.touch();
+    clock.advance(750);
+    await Promise.resolve(); // NOT flush() — that would write what we are testing
+    expect(written).toEqual([]); // the idle window no longer applies
+    clock.advance(2250);
+    await cp.flush();
+    expect(written).toEqual([1]);
+
+    // The batch trigger is untouched — it is what bounds a `kill -9`.
+    for (let i = 0; i < 25; i++) {
+      counter++;
+      cp.touch();
+    }
+    await cp.flush();
+    expect(written).toEqual([1, 26]);
+
+
+    // Run over: the short window is back.
+    cp.setBulk(false);
+    counter++;
+    cp.touch();
+    clock.advance(750);
+    await cp.flush();
+    expect(written).toEqual([1, 26, 27]);
   });
 });

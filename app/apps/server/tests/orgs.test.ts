@@ -128,6 +128,29 @@ describe("deleting a vault revokes access on the live channel", () => {
     expect(rec.aclBroadcasts.sort()).toEqual([a, b].sort());
   });
 
+  it("clears every session's dangling activeOrganizationId", async () => {
+    // `session."activeOrganizationId"` has no FK, so the cascade leaves every
+    // member's live session pointing at an org that no longer exists — and their
+    // next reload asks for a vault nobody can resolve. Shared with unsync.
+    const owner = await signUp("owner@del-sess.com");
+    const org = await createOrg(owner, "Acme", "acme-del-sess");
+    await seedVault(org.id, "A");
+    await pool.query(`UPDATE session SET "activeOrganizationId" = $1`, [org.id]);
+
+    const res = await app.fetch(
+      new Request(`http://local/api/orgs/${org.id}`, {
+        method: "DELETE",
+        headers: authHeaders(owner),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const { rows } = await pool.query<{ c: string }>(
+      `SELECT count(*)::bigint AS c FROM session WHERE "activeOrganizationId" = $1`,
+      [org.id],
+    );
+    expect(Number(rows[0].c)).toBe(0);
+  });
+
   it("broadcasts nothing when a non-owner tries to delete", async () => {
     const owner = await signUp("owner@del-acl2.com");
     const org = await createOrg(owner, "Acme", "acme-del-acl2");

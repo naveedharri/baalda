@@ -82,12 +82,35 @@ export async function vaultAccess(
  *   - `'org'`  — the item set to Private. Subtracted only from what the TEAM
  *     could otherwise reach, so the creator and explicit grantees keep it.
  */
+async function anyDenyRows(
+  db: Queryable,
+  principalType: "user" | "org",
+  principalId: string,
+): Promise<boolean> {
+  // The overwhelmingly common answer is "none", and without this the two calls
+  // below each scan the vault's whole `notes` UNION `files` to fold an EMPTY
+  // seed down through folder inheritance — twice per `listReadableDocsInVault`,
+  // which every connect, every registry pull and every backfill runs. This is
+  // one indexed probe on `shares`, and it is only ever skipped when the answer
+  // it protects is provably the empty set.
+  const { rows } = await db.query<{ ok: number }>(
+    `SELECT 1 AS ok FROM shares
+      WHERE permission = 'denied'
+        AND principal_type = $1 AND principal_id = $2
+        AND resource_type IN ('folder', 'file')
+      LIMIT 1`,
+    [principalType, principalId],
+  );
+  return rows.length > 0;
+}
+
 async function deniedDocsInVault(
   db: Queryable,
   principalType: "user" | "org",
   principalId: string,
   vaultId: string,
 ): Promise<Set<string>> {
+  if (!(await anyDenyRows(db, principalType, principalId))) return new Set();
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE denied_seed AS (
         SELECT resource_id AS id FROM shares
@@ -122,6 +145,9 @@ async function deniedFolderIds(
   principalType: "user" | "org",
   principalId: string,
 ): Promise<Set<string>> {
+  // Same short-circuit as {@link deniedDocsInVault}: an empty seed can only fold
+  // down to an empty set, so the recursive walk is worth a cheap probe first.
+  if (!(await anyDenyRows(db, principalType, principalId))) return new Set();
   const { rows } = await db.query<{ id: string }>(
     `WITH RECURSIVE denied_seed AS (
         SELECT resource_id AS id FROM shares

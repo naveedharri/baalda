@@ -25,10 +25,20 @@ import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
 import { BinaryDeleteQueue } from "./binaryDeletes";
 import { BootstrapRunner } from "./bootstrap";
-import { DocBatchPusher, type DocPushWork } from "./docBatchPush";
+import {
+  DocBatchPusher,
+  type DocBatchPushResult,
+  type DocPushWork,
+} from "./docBatchPush";
 import { ContentUploader, type UploadFailure } from "./contentUpload";
 import { collectCrdtGarbage } from "./crdtGc";
-import { runPool, useBulkPath } from "./pool";
+import {
+  IPC_CONCURRENCY,
+  REGISTRY_CONCURRENCY,
+  UPLOAD_CONCURRENCY,
+  runPool,
+  useBulkPath,
+} from "./pool";
 import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
 import { SessionRejectionGuard } from "./sessionGuard";
@@ -137,6 +147,15 @@ function trashStamp(): string {
  * socket that never opens gets here.
  */
 const CHANNEL_WATCHDOG_MS = 30_000;
+
+/**
+ * Past this many bytes, a note's file is "not empty" without reading it.
+ *
+ * 1 KiB: the question `settleServerEmpty` asks is whether a file is blank or
+ * whitespace-only, and a kilobyte of pure whitespace is not a thing a vault
+ * contains. See {@link SyncManager.fileIsEmpty}.
+ */
+const EMPTY_PROBE_MAX_BYTES = 1024;
 
 /**
  * Longest a burst of `registry`/`reauth` frames may push the debounced pull back.
@@ -445,6 +464,14 @@ export class SyncManager implements InboundHost {
   /** The bulk download/push for the current scope, so teardown can cancel them. */
   private bootstrapRunner: BootstrapRunner | null = null;
   private batchPusher: DocBatchPusher | null = null;
+  /**
+   * A batched content push is in flight.
+   *
+   * The twin of `uploader.isRunning()`: every guard that asks "is a content run
+   * happening?" has to get the same answer whichever path the run took, or a
+   * `ready` frame arriving mid-batch starts a second run over the same docs.
+   */
+  private batchPushing = false;
   /**
    * Notes the bulk engine could not get through, this scope, by docId.
    *
@@ -1672,20 +1699,26 @@ export class SyncManager implements InboundHost {
    *
    *   1. re-verify on DISK. The watcher's report is seconds old; anything that
    *      put the file back (a save, a checkout, a re-create) wins.
-   *   2. pair renames. A pending delete whose text hashes equal to an unmapped
+   *   2. cap the blast radius (see {@link diskDeleteCap}) — as early as the
+   *      numbers allow, which is BEFORE any per-note work. A batch that cannot
+   *      fit under the cap however the renames pair off is abandoned here, so an
+   *      unmounted volume costs one pooled existence check and nothing else.
+   *   3. pair renames. A pending delete whose text hashes equal to an unmapped
    *      file that appeared in the same window IS that file: the mapping moves
    *      (`registry.renamePath` + `ipc.rebindNoteId`) and no delete happens, so
    *      the doc_id — and with it the note's history and its backlinks —
-   *      survives a rename done outside the app.
-   *   3. cap the blast radius (see {@link diskDeleteCap}).
+   *      survives a rename done outside the app. Then the cap again, on what the
+   *      pairing actually left.
    *   4. keep the bytes: the doc's text goes into `.context/trash/<stamp>/` BEFORE
    *      the server is told, so a mistaken delete is recoverable by hand.
-   *   5. tell the server — `registry.deletePath`, the SAME call the sidebar's
-   *      delete makes (a soft delete: the row, doc_id and Yjs state survive) and
-   *      the same broadcast, so every teammate's device trashes its own copy
-   *      through the existing inbound path. Never `ipc.deletePath`: the file is
-   *      already gone, and the registry bookkeeping this does is what stops the
-   *      next pull materializing the path back as a ghost.
+   *   5. tell the server — `registry.deletePath`, or `registry.deletePaths` once
+   *      the batch is worth a request of its own (see
+   *      {@link SyncManager.propagateDiskDeletes}). Either way it is the SAME
+   *      soft delete the sidebar's delete makes (the row, doc_id and Yjs state
+   *      survive) and the same broadcast, so every teammate's device trashes its
+   *      own copy through the existing inbound path. Never `ipc.deletePath`: the
+   *      file is already gone, and the registry bookkeeping this does is what
+   *      stops the next pull materializing the path back as a ghost.
    */
   private async drainDiskDeletes(scope: VaultScope): Promise<void> {
     if (!this.enabled || !scope.isCurrent()) return;
@@ -1700,111 +1733,154 @@ export class SyncManager implements InboundHost {
     try {
       if (pending.length === 0) return;
 
-      // 1. Still gone?
-      const gone: Array<{ docId: string; relPath: string }> = [];
-      for (const item of pending) {
-        let missing = false;
-        try {
-          missing = !(await ipc.noteExists(item.relPath, scope.vaultEpoch));
-        } catch {
-          missing = false; // couldn't ask ⇒ never assume a delete
-        }
-        if (!scope.isCurrent()) return;
-        if (missing) gone.push(item);
-      }
+      // 1. Still gone? Pooled: on a bulk delete this is N IPC calls, and they
+      //    are independent questions about independent paths.
+      const stillGone: Array<{ docId: string; relPath: string } | null> = new Array(
+        pending.length,
+      ).fill(null);
+      await runPool(
+        pending,
+        async (item, index) => {
+          let missing = false;
+          try {
+            missing = !(await ipc.noteExists(item.relPath, scope.vaultEpoch));
+          } catch {
+            missing = false; // couldn't ask ⇒ never assume a delete
+          }
+          if (missing) stillGone[index] = item;
+        },
+        // Order is preserved by the index, not by the pool: the drain's
+        // reporting (and the rename pairing below) reads in watcher order.
+        { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
+      );
+      if (!scope.isCurrent()) return;
+      const gone = stillGone.filter((x): x is { docId: string; relPath: string } => x != null);
       if (gone.length === 0) return;
 
-      // 2. Renames. Each candidate pairs with at most one pending delete.
-      const unpaired = new Set(candidates);
-      const deletes: Array<{ docId: string; relPath: string; text: string }> = [];
-      for (const item of gone) {
-        const text = await this.docText(item.docId, item.relPath);
-        if (!scope.isCurrent()) return;
-        const renamedTo =
-          text == null ? null : await this.matchRename(text, item.relPath, unpaired, scope);
-        if (!scope.isCurrent()) return;
-        if (renamedTo) {
-          unpaired.delete(renamedTo);
-          await this.applyDiskRename(item.docId, item.relPath, renamedTo, scope);
-          if (!scope.isCurrent()) return;
-          continue;
-        }
-        deletes.push({ docId: item.docId, relPath: item.relPath, text: text ?? "" });
-      }
-      if (deletes.length === 0) return;
-
-      // 3. Blast radius, against the vault size as it stands right now — nothing
-      //    has been removed yet, so the mapped count still includes these.
+      // 2. Blast radius FIRST (see {@link diskDeleteCap}) — but ONLY for a
+      //    window that carries no rename candidates at all.
+      //
+      //    The late check (after step 3) is the real one. This early twin exists
+      //    for the worst shape in the whole drain: an unmounted volume used to
+      //    pay for N CRDT hydrations (a `load_yjs_state` IPC, a full decode and a
+      //    demote apiece) and N `get_note_meta` calls, and THEN the batch was
+      //    refused — maximum cost, zero result. An unmount, a `rm -rf` or a
+      //    `git clean` produces pure disappearance and NOTHING new on disk, so
+      //    `unpaired.size === 0` is exactly that shape and the perf win is intact.
+      //
+      //    It must NOT fire when a rename could be in play. `drainDiskDeletes`
+      //    has already destructively drained `renameCandidates` at the top, so
+      //    returning here would throw those candidates away for good: the renamed
+      //    files would sit at new paths with no mapping while the registry still
+      //    maps the old ones, and the next pull would re-materialize 150 ghosts
+      //    at the old paths AND register the new paths as brand-new doc_ids —
+      //    the 2026-08-25 fork shape, reached from an ordinary branch switch.
+      //    A window WITH candidates therefore always falls through to step 3, so
+      //    every pairing gets its `registry.renamePath` + `ipc.rebindNoteId` and
+      //    keeps its doc_id, and only what the pairing actually left is judged.
+      //    (That also keeps the refusal's count honest — see
+      //    {@link SyncManager.refuseBulkDiskDelete}: it never reports a note that
+      //    was moved, not deleted.)
       const cap = diskDeleteCap(this.registry.mappedNotes().length);
-      if (deletes.length > cap) {
-        const paths = deletes.map((d) => d.relPath);
-        console.warn(
-          `[sync] ${deletes.length} notes disappeared from disk at once (cap ${cap}) — not removed from the server`,
-          paths.slice(0, 10),
-        );
-        toast(
-          `${deletes.length} notes disappeared from disk at once — they were NOT removed from the server. ` +
-            `If the folder was unmounted or checked out, reopening the vault restores them.`,
-          "error",
-        );
-        this.note(
-          "warn",
-          "bulk-delete-refused",
-          `${deletes.length} notes vanished from this folder at once — they were left on the server ` +
-            `in case the folder was unmounted or checked out`,
-        );
-        for (const d of deletes) {
-          this.registry.recordFailure({
-            kind: "inbound",
-            path: d.relPath,
-            docId: d.docId,
-            reason:
-              `${deletes.length} notes vanished from disk in one window (cap ${cap}) — ` +
-              `left on the server deliberately`,
-            code: null,
-          });
-        }
+      const unpaired = new Set(candidates);
+      if (unpaired.size === 0 && gone.length > cap) {
+        this.refuseBulkDiskDelete(gone, cap);
         return;
       }
 
-      // 4 + 5. Recovery copy, then the server.
-      const stamp = trashStamp();
-      for (const d of deletes) {
+      // 3. Renames. Each candidate pairs with at most one pending delete.
+      const deletes: Array<{ docId: string; relPath: string; text: string }> = [];
+      if (unpaired.size === 0) {
+        // Nothing appeared in this window, so nothing can pair: the doc text is
+        // wanted only for the recovery copy, and those reads are independent.
+        const texts: Array<string | null> = new Array(gone.length).fill(null);
+        await runPool(
+          gone,
+          async (item, index) => {
+            texts[index] = await this.docText(item.docId, item.relPath);
+          },
+          { concurrency: UPLOAD_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
+        );
         if (!scope.isCurrent()) return;
-        if (d.text.length > 0) {
-          try {
-            const dest = await ipc.writeTrashCopy(d.relPath, stamp, d.text, scope.vaultEpoch);
-            console.info(`[sync] ${d.relPath} deleted on disk — copy kept at ${dest}`);
-          } catch (e) {
-            if (ipc.isVaultMismatch(e)) return;
-            // The bytes could not be saved, so do NOT make them unrecoverable.
-            this.registry.recordFailure({
-              kind: "inbound",
-              path: d.relPath,
-              docId: d.docId,
-              reason: `couldn't keep a local copy before removing it from the server (${reasonOf(e)})`,
-              code: null,
-            });
+        gone.forEach((item, index) => {
+          deletes.push({ docId: item.docId, relPath: item.relPath, text: texts[index] ?? "" });
+        });
+      } else {
+        // The index rows for everything that appeared, in ONE pooled pass rather
+        // than a nested serial loop per pending delete (`matchRename` used to
+        // re-ask for every candidate, for every deleted note).
+        const metas = await this.candidateMetas(unpaired, scope);
+        if (!scope.isCurrent()) return;
+        for (const item of gone) {
+          const text = await this.docText(item.docId, item.relPath);
+          if (!scope.isCurrent()) return;
+          const renamedTo =
+            text == null ? null : await this.matchRename(text, item.relPath, unpaired, metas, scope);
+          if (!scope.isCurrent()) return;
+          if (renamedTo) {
+            unpaired.delete(renamedTo);
+            await this.applyDiskRename(item.docId, item.relPath, renamedTo, scope);
+            if (!scope.isCurrent()) return;
             continue;
           }
+          deletes.push({ docId: item.docId, relPath: item.relPath, text: text ?? "" });
         }
-        if (!scope.isCurrent()) return;
-        try {
-          await this.registry.deletePath(d.relPath);
-        } catch (e) {
-          // Offline, or the server refused (no edit grant). The mapping is
-          // untouched, so a later pull re-materializes the file WITH its content
-          // — the delete simply did not happen, which is the honest outcome.
-          this.registry.recordFailure({
-            kind: "inbound",
-            path: d.relPath,
-            docId: d.docId,
-            reason: `deleted on disk, but the server refused to remove it (${reasonOf(e)})`,
-            code: null,
-          });
-          continue;
-        }
-        if (!scope.isCurrent()) return;
+      }
+      if (deletes.length === 0) return;
+
+      // …and the same cap again on what the pairing actually left, which is the
+      // check this has always made.
+      if (deletes.length > cap) {
+        this.refuseBulkDiskDelete(deletes, cap);
+        return;
+      }
+
+      // 4. Recovery copies for the WHOLE batch first — write-all-then-delete.
+      //    Pooled, but the ordering guarantee is per note and absolute: a doc
+      //    whose bytes could not be kept never reaches step 5 at all, so no
+      //    server delete can outrun its trash copy however the pool interleaves.
+      const stamp = trashStamp();
+      let vaultChanged = false;
+      const saved: Array<{ docId: string; relPath: string }> = [];
+      await runPool(
+        deletes,
+        async (d) => {
+          if (!scope.isCurrent() || vaultChanged) return;
+          if (d.text.length > 0) {
+            try {
+              const dest = await ipc.writeTrashCopy(d.relPath, stamp, d.text, scope.vaultEpoch);
+              console.info(`[sync] ${d.relPath} deleted on disk — copy kept at ${dest}`);
+            } catch (e) {
+              if (ipc.isVaultMismatch(e)) {
+                // The folder under us is not the one these notes belong to:
+                // abandon the whole batch, exactly as the serial drain did.
+                vaultChanged = true;
+                return;
+              }
+              // The bytes could not be saved, so do NOT make them unrecoverable.
+              this.registry.recordFailure({
+                kind: "inbound",
+                path: d.relPath,
+                docId: d.docId,
+                reason: `couldn't keep a local copy before removing it from the server (${reasonOf(e)})`,
+                code: null,
+              });
+              return;
+            }
+          }
+          saved.push({ docId: d.docId, relPath: d.relPath });
+        },
+        {
+          concurrency: REGISTRY_CONCURRENCY,
+          shouldStop: () => !scope.isCurrent() || vaultChanged,
+        },
+      );
+      if (!scope.isCurrent() || vaultChanged) return;
+
+      // 5. Tell the server about the notes whose bytes are safe.
+      const propagated = await this.propagateDiskDeletes(saved, scope);
+      if (!scope.isCurrent()) return;
+      for (const d of propagated) {
         this.note(
           "info",
           "disk-delete",
@@ -1860,6 +1936,151 @@ export class SyncManager implements InboundHost {
    * text. Falls back to a transient promote (hydrating from the local CRDT log)
    * for a doc nothing holds, and to null when there is no store at all.
    */
+  /**
+   * Step 5 of the drain: remove from the SERVER the notes whose recovery copy
+   * is already on disk, and answer with the ones that actually went.
+   *
+   * One request per {@link BATCH_MAX_NOTES} chunk once the batch is worth it
+   * ({@link useBulkPath}, 25) — a 500-note `git clean` was 500 serial DELETEs,
+   * each re-resolving the permission algebra and each broadcasting a
+   * `registry-changed` every peer re-pulled on. Below the threshold the per-note
+   * call stays: the saving is sub-second there and a rarely-exercised safety
+   * path IS the bug.
+   *
+   * Both paths make the SAME call the sidebar's Delete makes (a soft delete —
+   * never `ipc.deletePath`, the file is already gone) and refuse in the same
+   * way: a note the server would not remove keeps its mapping, so the next pull
+   * re-materializes it WITH its content rather than leaving a ghost.
+   */
+  private async propagateDiskDeletes(
+    saved: ReadonlyArray<{ docId: string; relPath: string }>,
+    scope: VaultScope,
+  ): Promise<Array<{ docId: string; relPath: string }>> {
+    const propagated: Array<{ docId: string; relPath: string }> = [];
+    if (saved.length === 0) return propagated;
+    const refused = (d: { docId: string; relPath: string }, reason: string, code: string | null) =>
+      this.registry.recordFailure({
+        kind: "inbound",
+        path: d.relPath,
+        docId: d.docId,
+        reason: `deleted on disk, but the server refused to remove it (${reason})`,
+        code,
+      });
+
+    if (useBulkPath(saved.length)) {
+      let outcomes;
+      try {
+        outcomes = await this.registry.deletePaths(saved.map((d) => d.relPath));
+      } catch (e) {
+        // `deletePaths` reports per path and does not throw, so this is the
+        // registry itself failing. Report every note: none of them went.
+        for (const d of saved) refused(d, reasonOf(e), null);
+        return propagated;
+      }
+      if (!scope.isCurrent()) return propagated;
+      const byPath = new Map(outcomes.map((o) => [o.path, o]));
+      for (const d of saved) {
+        const out = byPath.get(d.relPath);
+        if (out?.status === "deleted") {
+          propagated.push(d);
+          continue;
+        }
+        refused(d, out?.reason ?? "the server did not answer for this note", out?.code ?? null);
+      }
+      return propagated;
+    }
+
+    await runPool(
+      saved,
+      async (d) => {
+        if (!scope.isCurrent()) return;
+        try {
+          await this.registry.deletePath(d.relPath);
+        } catch (e) {
+          // Offline, or the server refused (no edit grant). The mapping is
+          // untouched, so a later pull re-materializes the file WITH its
+          // content — the delete simply did not happen, which is the honest
+          // outcome.
+          refused(d, reasonOf(e), null);
+          return;
+        }
+        if (!scope.isCurrent()) return;
+        propagated.push(d);
+      },
+      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
+    );
+    return propagated;
+  }
+
+  /**
+   * Abandon a whole window of disk deletes and say so, loudly and per note.
+   *
+   * The WHOLE batch, never a prefix: "the disk just lost a fifth of the vault"
+   * is never a delete a person meant, and propagating the first `cap` of them
+   * would be the same accident with a smaller blast radius. Shared by the two
+   * places that can reach the verdict — the cheap bound taken before any per-note
+   * work, and the exact count once renames have been paired off.
+   */
+  private refuseBulkDiskDelete(
+    items: ReadonlyArray<{ docId: string; relPath: string }>,
+    cap: number,
+  ): void {
+    console.warn(
+      `[sync] ${items.length} notes disappeared from disk at once (cap ${cap}) — not removed from the server`,
+      items.map((d) => d.relPath).slice(0, 10),
+    );
+    toast(
+      `${items.length} notes disappeared from disk at once — they were NOT removed from the server. ` +
+        `If the folder was unmounted or checked out, reopening the vault restores them.`,
+      "error",
+    );
+    this.note(
+      "warn",
+      "bulk-delete-refused",
+      `${items.length} notes vanished from this folder at once — they were left on the server ` +
+        `in case the folder was unmounted or checked out`,
+    );
+    for (const d of items) {
+      this.registry.recordFailure({
+        kind: "inbound",
+        path: d.relPath,
+        docId: d.docId,
+        reason:
+          `${items.length} notes vanished from disk in one window (cap ${cap}) — ` +
+          `left on the server deliberately`,
+        code: null,
+      });
+    }
+  }
+
+  /**
+   * The index rows for every file that appeared in this window, in one pooled
+   * pass.
+   *
+   * `matchRename` asks about the SAME candidate set for every deleted note, so
+   * reading them once turns an N×M serial IPC loop into M parallel reads. A row
+   * that cannot be read is recorded as `null` (the caller's basename fallback),
+   * never skipped, so the map answers for every candidate.
+   */
+  private async candidateMetas(
+    candidates: ReadonlySet<string>,
+    scope: VaultScope,
+  ): Promise<Map<string, Awaited<ReturnType<typeof ipc.getNoteMeta>>>> {
+    const metas = new Map<string, Awaited<ReturnType<typeof ipc.getNoteMeta>>>();
+    await runPool(
+      [...candidates],
+      async (candidate) => {
+        try {
+          metas.set(candidate, await ipc.getNoteMeta(candidate));
+        } catch {
+          metas.set(candidate, null);
+        }
+      },
+      { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
+    );
+    return metas;
+  }
+
   private async docText(docId: string, relPath: string): Promise<string | null> {
     const open = bridgeManager.currentBridge();
     if (open && open.docId === docId) return open.serialize();
@@ -1898,6 +2119,7 @@ export class SyncManager implements InboundHost {
     text: string,
     from: string,
     candidates: Set<string>,
+    metas: ReadonlyMap<string, Awaited<ReturnType<typeof ipc.getNoteMeta>>>,
     scope: VaultScope,
   ): Promise<string | null> {
     if (candidates.size === 0) return null;
@@ -1905,13 +2127,7 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return null;
     let byName: string | null = null;
     for (const candidate of candidates) {
-      let meta: Awaited<ReturnType<typeof ipc.getNoteMeta>> = null;
-      try {
-        meta = await ipc.getNoteMeta(candidate);
-      } catch {
-        continue;
-      }
-      if (!scope.isCurrent()) return null;
+      const meta = metas.get(candidate) ?? null;
       if (meta?.sha256) {
         if (meta.sha256 === wanted) return candidate;
         continue;
@@ -1980,7 +2196,7 @@ export class SyncManager implements InboundHost {
       // A bulk run (enable's backfill, or a settle pass) is single-writer on the
       // uploader slot AND may be about to push these very docs. Wait it out; the
       // queue survives, so nothing is dropped.
-      if (this.uploader?.isRunning()) {
+      if (this.contentRunInFlight()) {
         this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
         return;
       }
@@ -2015,9 +2231,88 @@ export class SyncManager implements InboundHost {
     this.localChanges.clear();
     if (notes.length === 0) return;
 
+    // This run emptied `localChanges` up front, so every note it did not manage
+    // to confirm is now owned by nobody: a doc that is already `isPushed` is not
+    // in the bulk run's work list either, so it would sit there until the next
+    // watcher event for that same file. Put the batch back before abandoning the
+    // run and let the next drain retry it — a note whose bytes DID land ingests
+    // to "no change" and costs no socket, so the retry is cheap (#104).
+    const requeue = (subset: ReadonlyArray<{ docId: string; relPath: string }> = notes): void => {
+      if (!scope.isCurrent()) return;
+      for (const n of subset) {
+        if (!this.localChanges.has(n.docId)) this.localChanges.set(n.docId, n.relPath);
+      }
+      this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
+    };
+
+    // ── Above the threshold this drain batches too ───────────────────────────
+    //
+    // An AI (or a `cp -r`) writing hundreds of `.md` into a running vault
+    // arrives here, and one socket per note is the same 3.7 notes/second the
+    // batch engine was built to kill. The ingest that makes this path different
+    // from the backfill — the new text is in the FILE, not in the doc — moves
+    // into the pusher, where it stays split-brain safe by running only on a doc
+    // that already has content (`docBatchPush.ts`). Everything else is the same
+    // batch: no token mint, no handshake, one request per 200 notes.
+    let pending: Array<{ docId: string; relPath: string }> = notes;
+    if (!this.serverTooOld && useBulkPath(notes.length)) {
+      const result = await this.runDocBatchPush(
+        scope,
+        vaultId,
+        store,
+        notes.map((n) => ({
+          docId: n.docId,
+          relPath: n.relPath,
+          serverEmpty: this.serverEmpty.has(n.docId),
+          ingestFromFile: true,
+          // "Nothing to send" for this drain means: the ingest found the file
+          // and the doc already equal AND the server holds that state. A doc the
+          // server named empty or behind, or one holding ops an out-of-band
+          // merge folded in (`divergedDocs`), is none of those — its state goes
+          // up even when the file changed nothing, which is what `mustConnect`
+          // buys on the per-doc path.
+          settledIfUnchanged:
+            this.registry.isPushed(n.docId) &&
+            !this.serverEmpty.has(n.docId) &&
+            !this.serverBehind.has(n.docId) &&
+            !this.divergedDocs.has(n.docId),
+        })),
+      );
+      if (result == null) return requeue();
+      if (isServerTooOld(result.transportError)) {
+        // Terminal for the session, like every other bulk route (design §3.7).
+        // Not requeued: the next drain would take the same 404.
+        this.reportServerTooOld(scope);
+        return;
+      }
+      if (result.cancelled) return requeue();
+
+      // A transport failure fails EVERY item of its chunk — up to
+      // `BATCH_MAX_DOCS` (100) notes on one 502 from a restarting server. Those
+      // docs are `isPushed`, so they are not in `contentWorkList` either, and
+      // their freshly-ingested text would sit in the local CRDT until a future
+      // reconnect's `ready.behind` noticed it — hours on a healthy socket. The
+      // old per-doc path retried within seconds because the update sat in the
+      // provider's buffer, so put the retryable ones back in the queue and let
+      // the debounced drain take them again. A note whose bytes DID land ingests
+      // to "no change" and costs nothing, so an over-broad requeue is cheap.
+      // PERMANENT failures (`denied`, `too_large`) keep `recordBulkFailure`
+      // alone: retrying them re-reports the same refusal forever.
+      const retryable = result.failures.filter((f) => !f.permanent);
+      if (retryable.length > 0) {
+        requeue(retryable.map((f) => ({ docId: f.docId, relPath: f.relPath })));
+      }
+
+      pending = this.batchLeftovers(result, notes);
+      if (pending.length === 0) {
+        this.completeRun(scope);
+        return;
+      }
+    }
+
     const uploader: ContentUploader = new ContentUploader({
       vaultId,
-      notes,
+      notes: pending,
       deps: {
         acquire: (docId, relPath) =>
           store.promote(docId, relPath, {
@@ -2058,26 +2353,12 @@ export class SyncManager implements InboundHost {
     });
     this.uploader = uploader;
 
-    // This run emptied `localChanges` up front, so every note it did not manage
-    // to confirm is now owned by nobody: a doc that is already `isPushed` is not
-    // in the bulk run's work list either, so it would sit there until the next
-    // watcher event for that same file. Put the batch back before abandoning the
-    // run and let the next drain retry it — a note whose bytes DID land ingests
-    // to "no change" and costs no socket, so the retry is cheap (#104).
-    const requeue = (): void => {
-      if (!scope.isCurrent()) return;
-      for (const n of notes) {
-        if (!this.localChanges.has(n.docId)) this.localChanges.set(n.docId, n.relPath);
-      }
-      this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
-    };
-
     const result = await uploader.run();
-    if (!scope.isCurrent() || this.uploader !== uploader) return requeue();
+    if (!scope.isCurrent() || this.uploader !== uploader) return requeue(pending);
     this.recordPermanentFailures(uploader);
     await this.registry.flushCheckpoint();
-    if (!scope.isCurrent() || this.uploader !== uploader) return requeue();
-    if (result.cancelled) return requeue();
+    if (!scope.isCurrent() || this.uploader !== uploader) return requeue(pending);
+    if (result.cancelled) return requeue(pending);
     this.completeRun(scope);
   }
 
@@ -2218,7 +2499,7 @@ export class SyncManager implements InboundHost {
     // pull added, because the queue is rebuilt from `mappedNotes()` minus the
     // pushed set. Restarting it here instead would let a busy team's structural
     // churn abandon the initial backfill over and over.
-    if (this.uploader?.isRunning()) return;
+    if (this.contentRunInFlight()) return;
     this.startContentRunIfNeeded(scope);
   }
 
@@ -2240,7 +2521,7 @@ export class SyncManager implements InboundHost {
    */
   private startContentRunIfNeeded(scope: VaultScope): void {
     if (!this.enabled || !scope.isCurrent()) return;
-    if (this.uploader?.isRunning()) return;
+    if (this.contentRunInFlight()) return;
     // The bulk engine owns the vault's content right now. Its channel is
     // live-only, so `ready` arrives with a settled backfill and this edge fires
     // immediately — starting the per-doc run here would put a second writer on
@@ -2315,6 +2596,19 @@ export class SyncManager implements InboundHost {
    * writes a placeholder and hydrates lazily), so "in this list" is literally
    * "somebody does not have the content" — not a bookkeeping detail.
    */
+  /**
+   * Is a content run — per-doc OR batched — in flight right now?
+   *
+   * Every caller wants the same thing: "somebody already owns these docs, leave
+   * them alone". Before the batch path existed, `uploader.isRunning()` answered
+   * it on its own; now a run can be a `DocBatchPusher` instead, and a guard that
+   * missed that would let a `ready` frame (or a local-change drain) start a
+   * second writer on docs the first run is mid-push on.
+   */
+  private contentRunInFlight(): boolean {
+    return (this.uploader?.isRunning() ?? false) || this.batchPushing;
+  }
+
   private contentWorkList(): Array<{ docId: string; relPath: string }> {
     const open = this.docStore?.suppressedDoc() ?? null;
     return this.registry
@@ -2330,6 +2624,37 @@ export class SyncManager implements InboundHost {
             this.serverEmpty.has(n.docId) ||
             this.serverBehind.has(n.docId)),
       );
+  }
+
+  /**
+   * The server just CREATED rows for these docs, so it holds no content for any
+   * of them — the same statement `ready.empty` makes, arriving earlier.
+   *
+   * Registration is the only moment a client learns this about a brand-new note,
+   * and it is what makes a LIVE import batch. `ready` is sent on a handshake and
+   * nowhere else, so notes registered mid-session have no server statement until
+   * the next connect: the batch pusher may not seed them (it seeds only what the
+   * SERVER called empty, under `expectEmpty`), so each one falls back to its own
+   * socket — which is precisely why dropping 500 files into a running vault was
+   * minutes while the identical import after a relaunch was seconds.
+   *
+   * `status: "created"` is a stronger statement than `ready.empty`, not a weaker
+   * one: the row did not exist a moment ago, so nothing can have pushed content
+   * into it. An `adopted` row is deliberately NOT included — adoption is
+   * by-path, and the incumbent it adopted may hold anything.
+   *
+   * This is the `InboundHost` hook the registry calls as it registers; a
+   * registry that does not call it simply leaves the live import on the per-doc
+   * path, which is the behaviour it had before.
+   */
+  noteServerCreated(docIds: readonly string[]): void {
+    if (!this.syncable()) return;
+    for (const docId of docIds) {
+      // A doc already settled as "nothing anywhere", or one this device has
+      // since confirmed, is not work — and must not be re-queued as if it were.
+      if (this.emptyEverywhere.has(docId) || this.permanentFailures.has(docId)) continue;
+      this.serverEmpty.add(docId);
+    }
   }
 
   /**
@@ -2417,7 +2742,7 @@ export class SyncManager implements InboundHost {
       async ({ docId, relPath }) => {
         let empty = false;
         try {
-          empty = await this.registry.isNoteEmptyOnDisk(relPath);
+          empty = await this.fileIsEmpty(relPath, scope);
         } catch {
           empty = false; // unreadable ⇒ let the run try (and report) it
         }
@@ -2442,7 +2767,7 @@ export class SyncManager implements InboundHost {
         this.registry.markPushed(docId);
         this.progress?.doc(docId, "synced");
       },
-      { concurrency: 8, shouldStop: () => !scope.isCurrent() },
+      { concurrency: IPC_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
     ).then(() => {
       if (!scope.isCurrent()) return;
       this.serverEmpty = keep;
@@ -2458,6 +2783,36 @@ export class SyncManager implements InboundHost {
    * conservative: anything unreadable answers false, which keeps the doc in the
    * push queue (a re-push costs a round trip; a wrong settle costs the text).
    */
+  /**
+   * Is this note's FILE empty — asking the cheapest question that can answer it?
+   *
+   * `ready.empty` names every readable doc the server holds no content for, on
+   * EVERY connect and up to 2,000 at a time, and reading all of them in full to
+   * learn "is it empty" was the single dumbest read in the sync layer: a vault
+   * of 300 zero-byte `_Index.md` stubs paid 300 whole-file reads per reconnect.
+   *
+   * `file_stat` answers it without the bytes for the two cases that matter:
+   * size 0 is empty, and anything over {@link EMPTY_PROBE_MAX_BYTES} has content
+   * — a file that large cannot be whitespace-only in any real vault, and the
+   * verdict it skips ("it only LOOKS non-empty") is the conservative one anyway:
+   * it keeps the doc in the push queue, where a re-push costs a round trip while
+   * a wrong settle costs the text. Only the small middle band is read, which is
+   * where `.trim()` semantics actually have something to decide. A host (or a
+   * test harness) without the stat command falls back to the full read.
+   */
+  private async fileIsEmpty(relPath: string, scope: VaultScope): Promise<boolean> {
+    try {
+      const stat = await ipc.fileStat(relPath, scope.vaultEpoch);
+      if (stat.size === 0) return true;
+      if (stat.size > EMPTY_PROBE_MAX_BYTES) return false;
+    } catch {
+      // No stat (older Rust core, a racing delete, a fake in a test): fall
+      // through to the read, which answers the same question the slow way.
+    }
+    if (!scope.isCurrent()) return false;
+    return this.registry.isNoteEmptyOnDisk(relPath);
+  }
+
   private async docEmptyLocally(docId: string, scope: VaultScope): Promise<boolean> {
     const resident = this.docStore?.peekResident(docId);
     if (resident) return resident.serialize().length === 0;
@@ -2575,7 +2930,7 @@ export class SyncManager implements InboundHost {
     // as "Syncing 585/164". Per-doc badge states stay through in all cases:
     // they are keyed by docId, so concurrent writers cannot garble them.
     const counterOwned = (): boolean =>
-      (this.uploader?.isRunning() ?? false) || this.downloadPhase;
+      this.contentRunInFlight() || this.downloadPhase;
     this.registry.setProgressSink({
       phase: (p, t) => {
         if (!counterOwned()) progress.phase(p, t);
@@ -2818,7 +3173,7 @@ export class SyncManager implements InboundHost {
   async retrySync(): Promise<void> {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
-    if (this.uploader?.isRunning()) return;
+    if (this.contentRunInFlight()) return;
     this.note("info", "retry", "Sync now requested");
     // The old uploader's failure list belongs to the run being retried; keeping
     // it would let `completeRun` re-report failures the retry just fixed.
@@ -2880,7 +3235,11 @@ export class SyncManager implements InboundHost {
       const push = await this.runBatchPushPhase(scope, vaultId, store, serverEmpty, conflicts);
       if (!scope.isCurrent()) return;
       for (const docId of push?.conflicts ?? []) conflicts.add(docId);
-      const followUp = [...conflicts, ...(push?.oversized ?? []).map((o) => o.docId)];
+      const followUp = [
+        ...conflicts,
+        ...(push?.oversized ?? []).map((o) => o.docId),
+        ...(push?.deferred ?? []).map((o) => o.docId),
+      ];
       await this.runBulkFollowUp(scope, vaultId, store, followUp);
     } catch (e) {
       if (isServerTooOld(e)) this.reportServerTooOld(scope);
@@ -2985,6 +3344,30 @@ export class SyncManager implements InboundHost {
         // file without a pull, and what `expectEmpty` makes the server re-check.
         serverEmpty: serverEmpty.has(n.docId),
       }));
+    return this.runDocBatchPush(scope, vaultId, store, work);
+  }
+
+  /**
+   * ONE batched content push, whoever asked for it.
+   *
+   * Extracted so the three sites that push content in bulk — `enable`'s bulk
+   * engine, the steady-state content run and the local-change drain — cannot
+   * drift apart in the things that make a batch push safe: the pusher seeds only
+   * what the SERVER called empty (and flags it `expectEmpty`), never touches the
+   * open note, releases every bridge it opens, and discards a seed the server
+   * refused before anything else can merge it. Everything that differs between
+   * the sites lives in the WORK LIST the caller builds, which is the only part
+   * worth reading twice.
+   *
+   * `null` means "this run is void" — the vault changed, or another pusher took
+   * the slot — never "nothing happened".
+   */
+  private async runDocBatchPush(
+    scope: VaultScope,
+    vaultId: string,
+    store: VaultDocStore,
+    work: DocPushWork[],
+  ): Promise<DocBatchPushResult | null> {
     if (work.length === 0) return null;
     const progress = this.progress;
     progress?.phase("uploading", work.length);
@@ -3021,10 +3404,47 @@ export class SyncManager implements InboundHost {
       },
     });
     this.batchPusher = pusher;
-    const result = await pusher.run();
+    // The in-flight marker every "is a content run happening?" guard reads (see
+    // {@link contentRunInFlight}). Without it a `ready` frame landing mid-batch
+    // starts a SECOND run over the same docs — two pushers promoting one doc.
+    this.batchPushing = true;
+    let result: DocBatchPushResult;
+    try {
+      result = await pusher.run();
+    } finally {
+      this.batchPushing = false;
+    }
     if (!scope.isCurrent() || this.batchPusher !== pusher) return null;
     await this.registry.flushCheckpoint();
     return result;
+  }
+
+  /**
+   * The docs a batch push could not settle, as notes the per-doc path can take.
+   *
+   * Three buckets, one destination: a `conflict` (the server was not empty after
+   * all), an item over `BULK_ITEM_MAX_BYTES`, and a doc whose local CRDT is
+   * empty with no server statement to license a seed. All three need the same
+   * thing — connect, PULL FIRST, then seed/merge — which is `ContentUploader`.
+   */
+  private batchLeftovers(
+    result: DocBatchPushResult,
+    known: ReadonlyArray<{ docId: string; relPath: string }> = [],
+  ): Array<{ docId: string; relPath: string }> {
+    const byDocId = new Map(known.map((n) => [n.docId, n.relPath]));
+    const out: Array<{ docId: string; relPath: string }> = [];
+    const seen = new Set<string>();
+    const add = (docId: string, relPath: string | null | undefined): void => {
+      if (seen.has(docId)) return;
+      const path = relPath ?? this.registry.pathForDocId(docId);
+      if (!path) return; // unmapped now — nothing to push it under
+      seen.add(docId);
+      out.push({ docId, relPath: path });
+    };
+    for (const docId of result.conflicts) add(docId, byDocId.get(docId));
+    for (const item of result.oversized) add(item.docId, item.relPath);
+    for (const item of result.deferred) add(item.docId, item.relPath);
+    return out;
   }
 
   /**
@@ -3139,6 +3559,63 @@ export class SyncManager implements InboundHost {
     const store = this.docStore;
     const progress = this.progress;
     if (!vaultId || !store || !progress) return;
+
+    // ── The batch path, for the same reason `enable` takes it ────────────────
+    //
+    // This run is what a LIVE import lands in: 500 files dropped into a vault
+    // that is already open and already synced register in one batched request
+    // each 200 — and then used to send their CONTENT one socket at a time, at
+    // 3.7 notes/second, because the threshold was only ever consulted inside
+    // `enable`. Quitting and relaunching the app made the identical import take
+    // seconds, which is the whole bug in one sentence (#audit §1).
+    //
+    // Everything that makes the batch safe is unchanged and lives in the work
+    // list: a doc is seeded from its file ONLY where the SERVER said it holds
+    // nothing (`expectEmpty`, re-checked under the server's per-doc lock), and
+    // the three buckets the batch cannot settle — conflict, oversized, and a
+    // doc with no local state and no server statement — go to the per-doc
+    // pull-then-merge path below, exactly as the bulk engine's follow-up does.
+    const batchWork = this.contentWorkList();
+    if (!this.serverTooOld && useBulkPath(batchWork.length)) {
+      // Everything already confirmed reads as synced straight away, the way the
+      // uploader's own first pass does it — the batch pusher only speaks about
+      // the docs in its work list.
+      this.badgeConfirmedDocs();
+      const result = await this.runDocBatchPush(
+        scope,
+        vaultId,
+        store,
+        batchWork.map((n) => ({
+          docId: n.docId,
+          relPath: n.relPath,
+          // The SERVER's word, never a guess.
+          serverEmpty: this.serverEmpty.has(n.docId),
+        })),
+      );
+      if (result == null || !scope.isCurrent()) return;
+      // A 404 on the batch route is a verdict about the SERVER, not about any
+      // note: it predates this engine. Terminal and loud, with no silent
+      // per-note fallback (design §3.7) — the same answer `runBulkEngine` gives.
+      if (isServerTooOld(result.transportError)) {
+        this.reportServerTooOld(scope);
+        return;
+      }
+      if (result.cancelled) return;
+      const leftovers = this.batchLeftovers(result, batchWork);
+      if (leftovers.length > 0) {
+        await this.runBulkFollowUp(scope, vaultId, store, leftovers.map((n) => n.docId));
+        if (!scope.isCurrent()) return;
+      }
+      this.completeRun(scope);
+      // Same rule as the per-doc run below: ask for the next slice of a
+      // truncated `ready.empty` only after a pass that actually sent something
+      // and failed nothing.
+      if (this.serverEmptyTruncated && result.pushed > 0 && result.failures.length === 0) {
+        this.serverEmptyTruncated = false;
+        this.vaultEngine?.refresh();
+      }
+      return;
+    }
 
     const uploader: ContentUploader = new ContentUploader({
       vaultId,
@@ -3502,6 +3979,10 @@ export class SyncManager implements InboundHost {
     this.bootstrapRunner = null;
     this.batchPusher?.stop();
     this.batchPusher = null;
+    // The run's own `finally` clears this when its pool notices `shouldStop`;
+    // clearing it here too means the next vault's guards are never held by the
+    // previous vault's in-flight pusher.
+    this.batchPushing = false;
     this.bulkPhase = false;
     this.vaultEngineLiveOnly = false;
     this.bulkFailures.clear();
@@ -3960,7 +4441,7 @@ export class SyncManager implements InboundHost {
     const progress = this.progress;
     if (!progress) return;
     this.binaryDownloads += count;
-    if (this.downloadPhase || this.uploader?.isRunning() || this.binaryDownloadPhase) {
+    if (this.downloadPhase || this.contentRunInFlight() || this.binaryDownloadPhase) {
       progress.addTotal(count);
     } else {
       this.binaryDownloadPhase = true;

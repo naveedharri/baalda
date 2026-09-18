@@ -19,6 +19,7 @@ import { setDocBatchRuntime } from "../src/sync/doc-batch.js";
 import { formatDocName } from "../src/sync/doc-name.js";
 import { loadDocState } from "../src/yjs/persistence.js";
 import { config } from "../src/config.js";
+import { flushIndexQueue } from "../src/index/indexer.js";
 import type { DocPushResult } from "../src/http/routes/bulk-types.js";
 
 /**
@@ -235,6 +236,44 @@ describe("docs batch push", () => {
     expect(tooBig.status).toBe(400);
     expect(tooBig.body.code).toBe("batch_too_large");
     expect(await contentOf(a)).toBeNull();
+  });
+
+  /**
+   * Search is EVENTUALLY consistent on this path, on purpose.
+   *
+   * `applyDetached` used to `await indexDoc(docId)` per item, which is a SECOND
+   * full `loadDocState` (another pool checkout, another REPEATABLE READ
+   * transaction, another `Y.mergeUpdates`, another `Y.Doc`) plus a synchronous
+   * `embed()` and one INSERT per wikilink — on the request's event loop, which
+   * the HTTP and WebSocket listeners share, which is why everyone ELSE's sync
+   * stalled during an import. The live Hocuspocus path has always used the
+   * debounced `scheduleIndex`; this is the same queue.
+   *
+   * `flushIndexQueue()` is the test hook that exists so this can be asserted
+   * without putting the cost back on the request.
+   */
+  it("indexes a batch push through the debounced queue, not inline", async () => {
+    const a = await seedNote(vault, null, "a.md", owner.userId);
+    const b = await seedNote(vault, null, "b.md", owner.userId);
+    const { body } = await push(owner, [
+      { docId: a, update: updateFor("alpha [[beta]]") },
+      { docId: b, update: updateFor("beta body") },
+    ]);
+    expect(body.results.every((r) => r.status === "applied")).toBe(true);
+    // The bytes are durable immediately…
+    expect(await contentOf(a)).toBe("alpha [[beta]]");
+    // …and the derived rows land once the queue drains.
+    await flushIndexQueue();
+    const { rows } = await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM note_index WHERE doc_id = ANY($1::text[])",
+      [[a, b]],
+    );
+    expect(rows[0].n).toBe(2);
+    const links = await pool.query<{ to_title: string }>(
+      "SELECT to_title FROM note_links WHERE from_doc = $1",
+      [a],
+    );
+    expect(links.rows.map((r) => r.to_title)).toEqual(["beta"]);
   });
 
   it("reports a malformed update per item and keeps going", async () => {

@@ -4,16 +4,19 @@ import type pg from "pg";
 import { config } from "../../config.js";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { effectivePermission } from "../../permissions/resolver.js";
+import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
 import {
   pathDepth,
+  prefetchFiles,
+  prefetchFolders,
   registerCtx,
   registerFile,
   registerFolder,
-  registerNote,
+  registerNotes,
   type RegisterCtx,
 } from "../../registry/batch-ops.js";
 import { dirname, samePath } from "../../registry/tree-ops.js";
+import { purgeNoteIndex } from "../../index/indexer.js";
 import { applyDocPushBatch, type DocApplyItem } from "../../sync/doc-batch.js";
 import { getSession } from "../session.js";
 import { ORIGIN_HEADER } from "./registry.js";
@@ -27,6 +30,7 @@ import type {
   FolderBatchResult,
   NoteBatchItem,
   NoteBatchResult,
+  NoteDeleteResult,
 } from "./bulk-types.js";
 
 /**
@@ -55,6 +59,31 @@ export interface BulkDeps {
    *  Fired ONCE per request, not per item: a 200-note batch that broadcast per
    *  item would cost 200 per-subscriber ACL recomputes for one logical change. */
   onRegistryChanged?: (vaultId: string, originId: string | null) => void;
+  /**
+   * Close every socket on a doc AND drop the server's cached copy.
+   *
+   * `disconnectDoc` alone is not enough once the row is gone: Hocuspocus keeps
+   * the loaded `Y.Doc` and serves that cached copy to the next connect, and 200
+   * of those stay resident afterwards. Deliberately run AFTER the response, off
+   * the request path — kicking an editor is not something the caller waits for.
+   */
+  evictDoc?: (vaultId: string, docId: string) => Promise<void> | void;
+}
+
+/** Ids per destructive statement. Postgres holds the whole `= ANY` array in
+ *  memory (a million ids is ~700 MB), so a big delete is chunked rather than
+ *  sent as one array.
+ *
+ *  It guards nothing today and is not meant to: this route rejects a body over
+ *  `config.batchMaxNotes` (200) long before it chunks, so every loop below is a
+ *  single pass. It is here so the chunking already exists the day that cap moves
+ *  or these helpers get a caller that is not the route. */
+const DELETE_CHUNK = 5000;
+
+function chunked<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 /** Auth, verbatim from `http/routes/vault-token.ts`: session → vault → member.
@@ -118,7 +147,16 @@ async function withRegisterCtx<T>(
 ): Promise<T> {
   const client = await pool.connect();
   try {
-    return await fn(registerCtx(vaultId, userId, client as unknown as Pick<pg.Pool, "query">));
+    return await fn(
+      registerCtx(vaultId, userId, client as unknown as Pick<pg.Pool, "query">, {
+        // One permission memo for the whole request. `canCreateIn` is already
+        // memoised per folder; this makes folders 2..N of a batch ~3 queries
+        // instead of ~7, because the member role and the vault baseline are
+        // facts about the VAULT, not about the folder. The verdict is still
+        // `canCreateIn`'s — see `permissions/resolver.ts ResolverCache`.
+        resolverCache: createResolverCache(),
+      }),
+    );
   } finally {
     client.release();
   }
@@ -166,6 +204,14 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
 
     let wrote = false;
     await withRegisterCtx(auth.vaultId, auth.userId, async (ctx) => {
+      // One `lower(path) = ANY($1)` read answers every adopt probe AND every
+      // parent lookup this batch is about to make. Misses are cached too — "no
+      // folder here yet" is the answer for most of a fresh tree — and each
+      // create writes through, so `a/b/c` still finds the `a/b` two items back.
+      await prefetchFolders(ctx, [
+        ...ordered.map((i) => i.path),
+        ...ordered.map((i) => dirname(i.path)),
+      ]);
       for (const item of ordered) {
         try {
           const out = await registerFolder(ctx, { path: item.path, name: item.name, color: item.color });
@@ -237,6 +283,11 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
 
     let wrote = false;
     await withRegisterCtx(auth.vaultId, auth.userId, async (ctx) => {
+      // Everything whose own two fields agree goes to `registerNotes` in ONE
+      // call: it prefills the adopt + parent-folder maps with one `= ANY` read
+      // each and writes the survivors with one `unnest` INSERT, instead of the
+      // 1–3 serial queries per item this loop used to pay on one connection.
+      const eligible: typeof parsed = [];
       for (const item of parsed) {
         if (item.relPath === "") continue;
         if (folderPathDisagrees(item.relPath, item.folderPath)) {
@@ -251,50 +302,27 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
           };
           continue;
         }
-        try {
-          const out = await registerNote(ctx, {
+        eligible.push(item);
+      }
+      if (eligible.length === 0) return;
+
+      let outcomes;
+      try {
+        outcomes = await registerNotes(
+          ctx,
+          eligible.map((item) => ({
             relPath: item.relPath,
             docId: item.docId,
             title: item.title,
-          });
-          if (out.status === "conflict") {
-            results[item.index] = {
-              relPath: item.relPath,
-              docId: item.docId ?? null,
-              status: "conflict",
-              folderId: null,
-              title: null,
-              code: out.code,
-              error: out.message,
-            };
-            continue;
-          }
-          if (out.status === "error") {
-            results[item.index] = {
-              relPath: item.relPath,
-              docId: null,
-              status: "error",
-              folderId: null,
-              title: null,
-              code: out.code,
-              error: out.message,
-            };
-            continue;
-          }
-          wrote ||= out.wrote;
-          // The row's CANONICAL spelling, exactly as `POST /api/notes` echoes
-          // it: a desktop whose disk spells the path differently adopts this and
-          // stops re-registering its own spelling on every pass.
-          results[item.index] = {
-            relPath: out.row.relPath,
-            docId: out.row.id,
-            status: out.status,
-            folderId: out.row.folderId,
-            title: out.row.title,
-            code: null,
-            error: null,
-          };
-        } catch (err) {
+          })),
+        );
+      } catch (err) {
+        // Per request now rather than per item, because the batch shares one
+        // statement: a failure that is not a per-row refusal (a dead connection,
+        // a statement timeout) is the same failure for every row in it, and each
+        // still gets its own result rather than a 500 for the whole call.
+        const error = err instanceof Error ? err.message : String(err);
+        for (const item of eligible) {
           results[item.index] = {
             relPath: item.relPath,
             docId: null,
@@ -302,10 +330,52 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
             folderId: null,
             title: null,
             code: null,
-            error: err instanceof Error ? err.message : String(err),
+            error,
           };
         }
+        return;
       }
+
+      outcomes.forEach((out, i) => {
+        const item = eligible[i];
+        if (out.status === "conflict") {
+          results[item.index] = {
+            relPath: item.relPath,
+            docId: item.docId ?? null,
+            status: "conflict",
+            folderId: null,
+            title: null,
+            code: out.code,
+            error: out.message,
+          };
+          return;
+        }
+        if (out.status === "error") {
+          results[item.index] = {
+            relPath: item.relPath,
+            docId: null,
+            status: "error",
+            folderId: null,
+            title: null,
+            code: out.code,
+            error: out.message,
+          };
+          return;
+        }
+        wrote ||= out.wrote;
+        // The row's CANONICAL spelling, exactly as `POST /api/notes` echoes
+        // it: a desktop whose disk spells the path differently adopts this and
+        // stops re-registering its own spelling on every pass.
+        results[item.index] = {
+          relPath: out.row.relPath,
+          docId: out.row.id,
+          status: out.status,
+          folderId: out.row.folderId,
+          title: out.row.title,
+          code: null,
+          error: null,
+        };
+      });
     });
     if (wrote) changed(c, auth.vaultId);
     return c.json({ results });
@@ -340,6 +410,10 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
 
     let wrote = false;
     await withRegisterCtx(auth.vaultId, auth.userId, async (ctx) => {
+      await prefetchFiles(
+        ctx,
+        parsed.map((i) => i.relPath),
+      );
       for (const item of parsed) {
         if (item.relPath === "") continue;
         if (folderPathDisagrees(item.relPath, item.folderPath)) {
@@ -471,9 +545,19 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       // disagreed with `effectivePermission` would not be a 403, it would be a
       // healing LOOP — the client is told a doc is empty, pushes, is refused,
       // and `ready.empty` names it again on the next connect, forever.
+      //
+      // What IS memoised is the resolver's INPUTS: the member role, the vault
+      // baseline and each folder's ancestor chain are facts the whole request
+      // shares, and they were 4 of the 7–8 queries every single doc paid for.
       const permission = new Map<string, string>();
+      const resolverCache = createResolverCache();
       await runPool(askedIds, config.backfillConcurrency, async (docId) => {
-        permission.set(docId, inVault.has(docId) ? await effectivePermission(auth.userId, docId) : "none");
+        permission.set(
+          docId,
+          inVault.has(docId)
+            ? await effectivePermission(auth.userId, docId, pool, resolverCache)
+            : "none",
+        );
       });
 
       const permitted: Array<{ index: number; item: DocApplyItem }> = [];
@@ -506,6 +590,123 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       return c.json({ results });
     },
   );
+
+  // ── delete (soft) ────────────────────────────────────────────────────────
+  //
+  // The batched twin of `DELETE /api/notes/:id`, and the SAME write: a row is
+  // soft-deleted (`deleted_at`, keeping its doc_id and its Yjs doc, so a
+  // teammate with it open loses tree visibility rather than their text) and its
+  // derived `note_index` / `note_links` / `blob_refs` rows go with it — those
+  // are a rebuildable cache of the canonical Yjs state (m005), and `note_index`
+  // holds a FULL PLAIN-TEXT COPY of the body, so leaving it behind is both
+  // unbounded growth and deleted content still readable server-side.
+  //
+  // What the batch removes is the transport: 500 sidebar deletes were 500
+  // requests, each re-resolving the permission algebra from scratch and each
+  // broadcasting a `registry-changed` the whole vault re-pulled on.
+  routes.post("/vaults/:vaultId/notes/delete-batch", async (c) => {
+    const auth = await gate(c);
+    if (auth instanceof Response) return auth;
+    const body = await c.req.json().catch(() => null);
+    const raw = (body as { docIds?: unknown } | null)?.docIds;
+    if (!Array.isArray(raw)) {
+      return c.json({ error: "docIds array required", code: "invalid_body" }, 400);
+    }
+    if (raw.length > config.batchMaxNotes) {
+      return c.json(
+        { error: `at most ${config.batchMaxNotes} items per request`, code: "batch_too_large" },
+        400,
+      );
+    }
+
+    const docIds = raw.map((d) => (typeof d === "string" ? d : ""));
+    const results: NoteDeleteResult[] = docIds.map((docId) => ({
+      docId,
+      status: "error",
+      code: "invalid_body",
+      error: "docId must be a string",
+    }));
+
+    // Scoped to THIS vault, exactly like the push route: an id with no LIVE
+    // `notes` row here never reaches the resolver, so a caller cannot delete
+    // through this vault's path something that lives in another one.
+    const asked = [...new Set(docIds.filter((d) => d !== ""))];
+    const inVault = new Set<string>();
+    for (const slice of chunked(asked, DELETE_CHUNK)) {
+      const { rows } = await pool.query<{ id: string }>(
+        "SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL AND id = ANY($2::text[])",
+        [auth.vaultId, slice],
+      );
+      for (const r of rows) inVault.add(r.id);
+    }
+
+    // ONE permission algebra: the same `effectivePermission` the single-item
+    // route asks through `canEditDoc`, per doc, with only its INPUTS memoised
+    // (see `permissions/resolver.ts ResolverCache`). A set-based "deletable
+    // docs" dual that disagreed would not be a 403, it would be a client that
+    // deletes its local file and finds the note again on the next pull.
+    const permission = new Map<string, string>();
+    const resolverCache = createResolverCache();
+    await runPool(asked, config.backfillConcurrency, async (docId) => {
+      permission.set(
+        docId,
+        inVault.has(docId) ? await effectivePermission(auth.userId, docId, pool, resolverCache) : "none",
+      );
+    });
+
+    const deletable: string[] = [];
+    docIds.forEach((docId, index) => {
+      if (docId === "") return;
+      if (!inVault.has(docId)) {
+        results[index] = {
+          docId,
+          status: "error",
+          code: "unknown_note",
+          error: "No live note with this id in this vault",
+        };
+        return;
+      }
+      if (permission.get(docId) !== "edit") {
+        results[index] = { docId, status: "denied", code: "no_edit_permission", error: null };
+        return;
+      }
+      results[index] = { docId, status: "deleted", code: null, error: null };
+      deletable.push(docId);
+    });
+
+    const unique = [...new Set(deletable)];
+    for (const slice of chunked(unique, DELETE_CHUNK)) {
+      await pool.query(
+        "UPDATE notes SET deleted_at = now() WHERE id = ANY($1::text[]) AND deleted_at IS NULL",
+        [slice],
+      );
+      await purgeNoteIndex(slice);
+    }
+
+    // ONE broadcast for the batch — the whole reason this route exists beside
+    // the per-item one.
+    if (unique.length > 0) changed(c, auth.vaultId);
+
+    // Off the response path: 200 `evictDoc` calls in one un-yielded tick block
+    // the event loop the HTTP and WebSocket listeners share, and nothing the
+    // caller does depends on the answer.
+    if (unique.length > 0 && deps.evictDoc) {
+      const evict = deps.evictDoc;
+      setImmediate(() => {
+        void (async () => {
+          for (const docId of unique) {
+            try {
+              await evict(auth.vaultId, docId);
+            } catch (err) {
+              console.warn(`[bulk] evictDoc failed for ${docId}:`, err);
+            }
+          }
+        })();
+      });
+    }
+
+    return c.json({ results });
+  });
 
   return routes;
 }

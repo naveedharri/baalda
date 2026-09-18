@@ -186,6 +186,29 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     expect(reg.getMapping("old.md")).toBeNull();
     expect(reg.getMapping("Welcome.md")).toEqual({ vaultId: "v-live", docId: "n1" });
   });
+
+  it("treats the config a vault UNSYNC leaves behind as no config at all", async () => {
+    // "Make this vault local only" rewrites `.context/config.json` to a bare
+    // tombstone — no `serverVaultId`, no `docs`, no `pushed`, no `baseline`, no
+    // `authored`. That file is the whole feature: with the old one in place the
+    // folder stays stamped for a vault that no longer exists and can never sync
+    // again. This pins the other half — that the cleared file is INERT, so the
+    // folder reconciles exactly as a never-synced one would.
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+      JSON.stringify({ unsyncedAt: "2026-09-18T10:00:00.000Z", unsyncedFrom: "org-dead" }),
+    );
+    const { api, createVault } = fakeApi({ vaults: [] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "acme" },
+      emptyTree(),
+    );
+    // Nothing was adopted from the file, so this is a brand-new vault.
+    expect(createVault).toHaveBeenCalledWith({ name: "acme", organizationId: ORG });
+    expect(reg.vaultId).toBe("created-acme");
+    expect(reg.getMapping("Welcome.md")).toBeNull();
+  });
 });
 
 describe("VaultRegistry.reconcile — seeding and materialization rules", () => {
@@ -602,6 +625,38 @@ describe("VaultRegistry tree-binary `files` map", () => {
     // The note map is the CRDT join and a binary must never appear in it: it
     // feeds `registerNote`, the bridge and the content uploader.
     expect(Object.keys(cfg.docs ?? {})).not.toContain("Team/report.docx");
+  });
+
+  it("re-writes config.json after a reset, even when the contents are identical", async () => {
+    // `writeConfig`'s no-op memo is only honest while this registry is the LAST
+    // thing that wrote the file. A teardown ends that — `store.clearVaultStamp`
+    // writes the same `.context/config.json` through `ipc.setVaultConfig`, and
+    // deleting `.context/` by hand (the documented dev habit) empties it — so a
+    // memo that survives `reset()` would leave the doc-id map unpersisted for
+    // the rest of the session.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+    const lastWrite = (): string | undefined => {
+      const calls = vi.mocked(ipc.setVaultConfig).mock.calls;
+      return calls.length > 0 ? (calls[calls.length - 1][0] as string) : undefined;
+    };
+    const first = lastWrite() as string;
+    expect(first).toBeTruthy();
+    // The memo holds while this registry is still the writer: an identical flush
+    // costs nothing (a 5,000-note config is ~500 KB, rewritten on a timer).
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls.length;
+    await reg.flushCheckpoint();
+    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(writes);
+
+    // …and it does NOT hold across a teardown, even though the bytes are the same.
+    reg.reset();
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+
+    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBeGreaterThan(writes);
+    expect(lastWrite()).toEqual(first);
   });
 
   it("forgets binary ids on a vault switch — an id from vault A names nothing in B", async () => {

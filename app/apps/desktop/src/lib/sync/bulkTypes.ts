@@ -109,6 +109,26 @@ export interface DocPushResult {
   error: string | null;
 }
 
+/**
+ * What a batched soft delete did with ONE note.
+ *
+ * `deleted` is the SAME write `DELETE /api/notes/:id` makes — a `deleted_at`
+ * stamp, with the doc_id and the Yjs doc left intact — so a client cannot tell
+ * the two routes apart by their effect, only by how many requests it sent.
+ * `denied` means the caller may not edit that note and its mapping must SURVIVE:
+ * dropping it locally would let the next pull re-materialize the file as a
+ * stranger. An `error` carrying `unknown_note` is the batch's 404 — the row is
+ * already gone, which is the goal state, and the client counts it as done.
+ */
+export type DeleteStatus = "deleted" | "denied" | "error";
+
+export interface NoteDeleteResult {
+  docId: string;
+  status: DeleteStatus;
+  code: string | null;
+  error: string | null;
+}
+
 /** The answer to `POST /api/vaults/:vaultId/bootstrap`. */
 export interface BootstrapSession {
   sessionId: string;
@@ -149,6 +169,7 @@ export type BulkErrorCode =
   | "root_frozen"
   | "no_write_access"
   | "no_edit_permission"
+  | "unknown_note"
   | "note_too_large"
   | "vault_limit_reached"
   | "session_expired"
@@ -166,6 +187,7 @@ export const BULK_ERROR_CODES: readonly BulkErrorCode[] = [
   "root_frozen",
   "no_write_access",
   "no_edit_permission",
+  "unknown_note",
   "note_too_large",
   "vault_limit_reached",
   "session_expired",

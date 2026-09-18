@@ -14,8 +14,13 @@ import { NoteBridge } from "../../bridge/noteBridge";
 import type { BridgeIO, CrdtPersistence, YjsPersistedState } from "../../bridge/types";
 import { FakeFs, sha256Hex } from "../../bridge/__tests__/helpers";
 import type { DocPushItem, DocPushResult } from "../bulkTypes";
-import { DocBatchPusher, type DocPushWork } from "../docBatchPush";
-import { BATCH_MAX_DECODED_BYTES, BATCH_MAX_DOCS, BULK_ITEM_MAX_BYTES } from "../pool";
+import { DocBatchPusher, MAX_OUTSTANDING_CHUNKS, type DocPushWork } from "../docBatchPush";
+import {
+  BATCH_MAX_DECODED_BYTES,
+  BATCH_MAX_DOCS,
+  BULK_ITEM_MAX_BYTES,
+  BULK_PACK_CONCURRENCY,
+} from "../pool";
 
 /** The SQLite CRDT tables, in memory, plus the one thing the conflict path
  *  needs that production gets from `ipc.clearYjsDoc`: a way to drop a doc. */
@@ -82,6 +87,8 @@ function pusher(
     readFile?: (relPath: string) => Promise<string>;
     discard?: (docId: string) => Promise<void>;
     skip?: (docId: string) => boolean;
+    /** Held before every request answers — a slow uplink, for backpressure. */
+    gate?: Promise<void>;
   } = {},
 ) {
   const bridges = new Map<string, NoteBridge>();
@@ -110,6 +117,7 @@ function pusher(
       },
       push: async (items) => {
         requests.push(items);
+        if (opts.gate) await opts.gate;
         opts.fail?.();
         return (
           opts.answer?.(items) ??
@@ -191,6 +199,113 @@ describe("what gets seeded, and what carries expectEmpty", () => {
     await h.p.run();
     expect(h.requests).toHaveLength(0);
     expect(h.bridges.size).toBe(0);
+  });
+});
+
+describe("what it refuses to settle at all", () => {
+  it("defers an empty doc the server never called empty — it may not be seeded", async () => {
+    // The live-run guard. With no server statement there is nothing to license a
+    // seed from the file, and an EMPTY doc still encodes to a 2-byte "I know
+    // nothing" that the server accepts — which would check the note in as pushed
+    // with its text nowhere but this disk. Nothing is sent; the doc goes to the
+    // per-doc path, which pulls first.
+    const { io, fs } = harness({ "d.md": "text only on disk" });
+    const h = pusher(io, [{ docId: "d", relPath: "d.md", serverEmpty: false }], {
+      readFile: (p) => fs.readFile(p),
+    });
+    const out = await h.p.run();
+
+    expect(h.requests).toHaveLength(0);
+    expect(h.pushed).toEqual([]);
+    expect(out.deferred.map((w) => w.docId)).toEqual(["d"]);
+    // The file is untouched — the merge path is where its bytes rejoin.
+    expect(await fs.readFile("d.md")).toBe("text only on disk");
+  });
+});
+
+describe("ingesting the file first (the local-change drain)", () => {
+  it("merges the file into a doc that already has text, then sends the state", async () => {
+    const { io, fs } = harness({ "b.md": "typed offline, then edited on disk" });
+    const bridge = await NoteBridge.open(io, { docId: "b", path: "b.md", seedFromFile: false });
+    bridge.edit((t) => t.insert(0, "typed offline"));
+    await bridge.whenPersisted();
+
+    const h = pusher(
+      io,
+      [
+        {
+          docId: "b",
+          relPath: "b.md",
+          serverEmpty: false,
+          ingestFromFile: true,
+          settledIfUnchanged: true,
+        },
+      ],
+      { readFile: (p) => fs.readFile(p) },
+    );
+    await h.p.run();
+
+    // A plain merge of CRDT state this device owns — never an emptiness claim.
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0][0].expectEmpty).toBeUndefined();
+    expect(text(h.bridges.get("b")!)).toBe("typed offline, then edited on disk");
+    expect(h.pushed).toEqual(["b"]);
+  });
+
+  it("sends nothing when the ingest found the file and the doc already equal", async () => {
+    // Our own egest echoing back through the watcher — most local-change events
+    // are exactly this, and they must cost neither a request nor a socket.
+    const { io, fs } = harness({ "b.md": "same on both sides" });
+    const bridge = await NoteBridge.open(io, { docId: "b", path: "b.md", seedFromFile: false });
+    bridge.edit((t) => t.insert(0, "same on both sides"));
+    await bridge.whenPersisted();
+
+    const h = pusher(
+      io,
+      [
+        {
+          docId: "b",
+          relPath: "b.md",
+          serverEmpty: false,
+          ingestFromFile: true,
+          settledIfUnchanged: true,
+        },
+      ],
+      { readFile: (p) => fs.readFile(p) },
+    );
+    const out = await h.p.run();
+
+    expect(h.requests).toHaveLength(0);
+    expect(out.deferred).toEqual([]); // settled, not deferred
+    // Not re-marked pushed either: it already was, and this path confirms
+    // nothing new — it only stops the badge sitting on "queued".
+    expect(h.pushed).toEqual([]);
+  });
+
+  it("still sends an unchanged doc the caller would not call settled", async () => {
+    // `ready.behind`, or ops an out-of-band merge folded in: the file matching
+    // the doc says nothing about what the SERVER has.
+    const { io, fs } = harness({ "b.md": "same on both sides" });
+    const bridge = await NoteBridge.open(io, { docId: "b", path: "b.md", seedFromFile: false });
+    bridge.edit((t) => t.insert(0, "same on both sides"));
+    await bridge.whenPersisted();
+
+    const h = pusher(
+      io,
+      [
+        {
+          docId: "b",
+          relPath: "b.md",
+          serverEmpty: false,
+          ingestFromFile: true,
+          settledIfUnchanged: false,
+        },
+      ],
+      { readFile: (p) => fs.readFile(p) },
+    );
+    await h.p.run();
+    expect(h.requests).toHaveLength(1);
+    expect(h.pushed).toEqual(["b"]);
   });
 });
 
@@ -316,6 +431,41 @@ describe("packing", () => {
     expect(out.oversized.map((o) => o.docId)).toEqual(["big"]);
     // …and it was NOT seeded on the way out: the per-doc path pulls first.
     expect(h.requests.flat().map((i) => i.docId)).toEqual(["small"]);
+  });
+
+  it("stops packing once MAX_OUTSTANDING_CHUNKS are waiting behind the wire", async () => {
+    // Only the SENDS were serialized; queuing was not. With the packer at
+    // `BULK_PACK_CONCURRENCY` it outruns one in-flight request, and every queued
+    // chunk holds its `Uint8Array`s alive in the send chain's closures — a vault
+    // of large notes on a slow uplink could pile up hundreds of MB.
+    const total = BATCH_MAX_DOCS * 6;
+    const { io, fs } = harness(
+      Object.fromEntries(Array.from({ length: total }, (_, i) => [`n${i}.md`, `note ${i}`])),
+    );
+    const work: DocPushWork[] = Array.from({ length: total }, (_, i) => ({
+      docId: `n${i}`,
+      relPath: `n${i}.md`,
+      serverEmpty: true,
+    }));
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const h = pusher(io, work, { readFile: (p) => fs.readFile(p), gate });
+    const run = h.p.run();
+    // Real turns, not microtasks: opening a bridge goes through the fake fs.
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // The invariant that did NOT change: one request on the wire.
+    expect(h.requests).toHaveLength(1);
+    // The one that is new: the packer stopped rather than running to the end.
+    const ceiling = BATCH_MAX_DOCS * (MAX_OUTSTANDING_CHUNKS + 1) + BULK_PACK_CONCURRENCY;
+    expect(h.bridges.size).toBeLessThanOrEqual(ceiling);
+    expect(h.bridges.size).toBeLessThan(total);
+
+    // …and it is only a pause: everything still goes once the link drains.
+    open();
+    const out = await run;
+    expect(h.requests.flat()).toHaveLength(total);
+    expect(out.pushed).toBe(total);
   });
 });
 

@@ -60,6 +60,10 @@ export interface RegistryDeps {
   /** Force-close live sync sockets for a doc, so an editor open on a note that
    *  just got deleted out from under it reconnects and learns it's gone. */
   disconnectDoc?: (vaultId: string, docId: string) => void;
+  /** Stronger than {@link disconnectDoc}: also drops the server's cached
+   *  `Y.Doc`, so the next connect reloads from Postgres instead of being handed
+   *  the state we just deleted. Used by the folder cascade. */
+  evictDoc?: (vaultId: string, docId: string) => Promise<void> | void;
   /**
    * Called after any change to a vault's folder/note structure (create, rename,
    * move, delete). The vault channel broadcasts a `registry` control frame so
@@ -467,7 +471,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const vaultId = c.req.query("vaultId");
     if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
     const org = await vaultOrg(vaultId);
-    if (!org || !(await orgRole(org, session.userId))) {
+    // A vault row that is GONE answers 404, never `200 []`. This is the only
+    // thing standing between a teammate's disk and a mass delete: after a vault
+    // is deleted or unsynced, every client's readable set is empty, and an
+    // empty 200 here reads as "everything you hold was revoked" — the inbound
+    // planner would then remove the lot. The listing has to THROW (R1).
+    if (!org) return c.json({ error: "vault_not_found" }, 404);
+    if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
     const page = readPage(c);
@@ -523,7 +533,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const vaultId = c.req.query("vaultId");
     if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
     const org = await vaultOrg(vaultId);
-    if (!org || !(await orgRole(org, session.userId))) {
+    // A vault row that is GONE answers 404, never `200 []`. This is the only
+    // thing standing between a teammate's disk and a mass delete: after a vault
+    // is deleted or unsynced, every client's readable set is empty, and an
+    // empty 200 here reads as "everything you hold was revoked" — the inbound
+    // planner would then remove the lot. The listing has to THROW (R1).
+    if (!org) return c.json({ error: "vault_not_found" }, 404);
+    if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
     const page = readPage(c);
@@ -640,12 +656,32 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const { deletedNoteIds } = await deleteFolderCascade(pool, id);
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
+    changed(c, row.vault_id);
     // …and anyone with one of them open is kicked off the now-gone doc. Without
     // this a folder delete left live editors happily typing into notes that no
     // longer exist anywhere in the tree — the single-note delete has always done
     // it, and there's no reason a cascade should be gentler.
-    for (const docId of deletedNoteIds) deps.disconnectDoc?.(row.vault_id, docId);
-    changed(c, row.vault_id);
+    //
+    // Moved OFF the response path: a 500-note cascade ran 500 of these in one
+    // un-yielded tick, on the event loop the HTTP and WebSocket listeners share,
+    // while the caller waited. `evictDoc` where it exists, because the rows are
+    // gone and a cached `Y.Doc` handed to the next connect would re-materialise
+    // the very state we just deleted; `disconnectDoc` remains the fallback.
+    if (deletedNoteIds.length > 0) {
+      const vaultId = row.vault_id;
+      setImmediate(() => {
+        void (async () => {
+          for (const docId of deletedNoteIds) {
+            try {
+              if (deps.evictDoc) await deps.evictDoc(vaultId, docId);
+              else deps.disconnectDoc?.(vaultId, docId);
+            } catch (err) {
+              console.warn(`[registry] evicting ${docId} after a folder delete failed:`, err);
+            }
+          }
+        })();
+      });
+    }
     return c.json({ ok: true }, 200);
   });
 
@@ -703,7 +739,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const vaultId = c.req.query("vaultId");
     if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
     const org = await vaultOrg(vaultId);
-    if (!org || !(await orgRole(org, session.userId))) {
+    // A vault row that is GONE answers 404, never `200 []`. This is the only
+    // thing standing between a teammate's disk and a mass delete: after a vault
+    // is deleted or unsynced, every client's readable set is empty, and an
+    // empty 200 here reads as "everything you hold was revoked" — the inbound
+    // planner would then remove the lot. The listing has to THROW (R1).
+    if (!org) return c.json({ error: "vault_not_found" }, 404);
+    if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
     const page = readPage(c);

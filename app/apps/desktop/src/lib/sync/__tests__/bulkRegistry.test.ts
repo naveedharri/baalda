@@ -720,3 +720,87 @@ describe("honest failure reporting", () => {
     expect(counts().failed).toBe(0);
   });
 });
+
+// ── `noteServerCreated` ────────────────────────────────────────────────────
+// The session needs to know which rows the server MADE, so a live import of
+// brand-new notes can push their content in one batch (`expectEmpty`) instead
+// of one WebSocket per note. An ADOPTED row is the case that must never be
+// announced: it may already hold a teammate's content, and seeding it is the
+// split-brain that pull-before-seed exists to prevent.
+describe("noteServerCreated", () => {
+  /** A registry whose host records nothing but the created-id announcements. */
+  function withHost(api: ApiClient) {
+    const announced: string[][] = [];
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async () => false,
+      noteServerCreated: (ids) => announced.push([...ids]),
+    });
+    return { reg, announced };
+  }
+
+  /** Answer `POST /notes/batch` with `created` for these paths, `adopted` for
+   *  the rest — the mixed answer a partly-registered vault really gets. */
+  function batchAnswering(api: ApiClient, createdPaths: Set<string>) {
+    (api as unknown as { batchCreateNotes: unknown }).batchCreateNotes = vi.fn(
+      async (_vaultId: string, items: Array<{ relPath: string; docId?: string }>) =>
+        items.map((i) => ({
+          relPath: i.relPath,
+          docId: i.docId ?? `srv-${i.relPath}`,
+          status: createdPaths.has(i.relPath) ? ("created" as const) : ("adopted" as const),
+          folderId: null,
+          title: null,
+          code: null,
+          error: null,
+        })),
+    );
+  }
+
+  it("announces the created ids once per chunk, and never an adopted one", async () => {
+    const { api } = fakeApi();
+    const created = new Set(["Note0.md", "Note1.md", "Note2.md"]);
+    batchAnswering(api, created);
+    const { reg, announced } = withHost(api);
+    // 30 notes ⇒ the batch path (threshold 25), one chunk (BATCH_MAX_NOTES 200).
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(30));
+
+    expect(announced).toHaveLength(1);
+    expect([...announced[0]].sort()).toEqual([
+      "srv-Note0.md",
+      "srv-Note1.md",
+      "srv-Note2.md",
+    ]);
+  });
+
+  it("says nothing at all when every row was adopted", async () => {
+    const { api } = fakeApi();
+    batchAnswering(api, new Set());
+    const { reg, announced } = withHost(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(30));
+
+    // Not an empty array either — an empty announcement is not made.
+    expect(announced).toEqual([]);
+  });
+
+  it("does the same on the per-note path, reading 201 vs 200", async () => {
+    const { api } = fakeApi();
+    (api as unknown as { createNote: unknown }).createNote = vi.fn(
+      async (input: { relPath: string; docId?: string }) => ({
+        id: input.docId ?? `srv-${input.relPath}`,
+        rel_path: input.relPath,
+        title: null,
+        // `api.createNote` sets this from the status code: 201 made it, 200
+        // adopted it.
+        created: input.relPath === "Note1.md",
+      }),
+    );
+    const { reg, announced } = withHost(api);
+    // 3 notes ⇒ below the threshold, so this is the single-note path.
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(3));
+
+    expect(announced).toEqual([["srv-Note1.md"]]);
+  });
+});

@@ -185,6 +185,60 @@ function runner(
 
 beforeEach(() => vi.clearAllMocks());
 
+describe("paging", () => {
+  it("asks for the next page BEFORE applying the one in hand", async () => {
+    // The loop used to fetch → decode → apply → fetch, so the network was idle
+    // through every Rust apply and the disk idle through every fetch (20 such
+    // alternations on a 5,000-doc vault). Depth 1 only: peak heap stays one page
+    // in flight plus one being applied.
+    const pages: PageDoc[][] = [
+      [{ docId: "a", relPath: "a.md", update: updateFor("one") }],
+      [{ docId: "b", relPath: "b.md", update: updateFor("two") }],
+      [{ docId: "c", relPath: "c.md", update: updateFor("three") }],
+    ];
+    const w = world();
+    const s = server(pages);
+    /** How many pages had been REQUESTED when each apply started. */
+    const requestedAtApply: number[] = [];
+    const realApply = w.applyBatch.getMockImplementation()!;
+    w.applyBatch.mockImplementation(async (entries) => {
+      requestedAtApply.push(s.state.fetched.length);
+      return realApply(entries);
+    });
+
+    const { r } = runner(w, s);
+    await r.run();
+
+    // Page 0 is applied with page 1 already on the wire, and so on; the last
+    // page (nextCursor null) starts nothing new.
+    expect(requestedAtApply).toEqual([2, 3, 3]);
+    // …and the vault is exactly what the serial loop produced: every page
+    // applied once, in order, with no extra request.
+    expect(s.state.fetched).toEqual([0, 1, 2]);
+    expect(w.files.get("a.md")).toBe("one");
+    expect(w.files.get("b.md")).toBe("two");
+    expect(w.files.get("c.md")).toBe("three");
+  });
+
+  it("drops a prefetched page when the session expires under it", async () => {
+    // The in-flight page belongs to a session the server has forgotten; the
+    // restart re-opens one and pages from ITS cursor, never applying the orphan.
+    const pages: PageDoc[][] = [
+      [{ docId: "a", relPath: "a.md", update: updateFor("one") }],
+      [{ docId: "b", relPath: "b.md", update: updateFor("two") }],
+    ];
+    const w = world();
+    const s = server(pages);
+    s.state.expireAfter = 1; // the prefetch of page 1 is the one that 410s
+    const { r } = runner(w, s);
+    await r.run();
+
+    expect(s.state.sessions).toBe(2);
+    expect(w.files.get("a.md")).toBe("one");
+    expect(w.files.get("b.md")).toBe("two");
+  });
+});
+
 describe("the eligibility table, end to end", () => {
   it("handles all four outcomes in one page", async () => {
     const pages: PageDoc[][] = [

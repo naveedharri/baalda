@@ -152,6 +152,12 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 const SESSION_EXPIRED = "session_expired";
 const BOOTSTRAP_BUSY = "bootstrap_busy";
 
+/** A page fetch that carries its own failure instead of rejecting — see
+ *  {@link BootstrapRunner.startFetch}. */
+type PendingPage = Promise<
+  { ok: true; value: BootstrapPageBytes } | { ok: false; error: unknown }
+>;
+
 export class BootstrapRunner {
   private readonly opts: BootstrapRunnerOptions;
   private readonly deps: BootstrapDeps;
@@ -209,13 +215,41 @@ export class BootstrapRunner {
     if (remaining > 0) this.progress.addTotal(remaining);
     this.progress.bytes?.(bytesDone, session.bytesTotal);
 
+    // Depth-1 prefetch: the next page is asked for BEFORE this one is decoded and
+    // applied, so the network is not idle through the Rust apply and the disk is
+    // not idle through the fetch. Strictly one page ahead — peak heap is one page
+    // in flight plus one being applied, and that is the number this stays at.
+    //
+    // Safe by construction: pages are idempotent (the eligibility table at the
+    // top of this file decides each doc's fate from the FILE and the local CRDT,
+    // never from the page), and the resume cursor is still saved only AFTER the
+    // apply — so a crash re-sends a page rather than skipping it, exactly as
+    // before. A prefetch whose session died (410) or whose run was cancelled is
+    // dropped, never applied.
+    let prefetch: { sessionId: string; cursor: number; page: PendingPage } | null = null;
+    const dropPrefetch = (): void => {
+      // The promise already absorbs its own rejection (see `startFetch`), so
+      // dropping it cannot become an unhandled rejection.
+      prefetch = null;
+    };
     try {
       while (this.pages < maxPages) {
-        if (this.shouldStop()) return this.result(session, bytesDone, true);
+        if (this.shouldStop()) {
+          dropPrefetch();
+          return this.result(session, bytesDone, true);
+        }
         let page: BootstrapPageBytes;
         try {
-          page = await this.fetchPage(session.sessionId, cursor);
+          const ready =
+            prefetch && prefetch.sessionId === session.sessionId && prefetch.cursor === cursor
+              ? prefetch.page
+              : this.startFetch(session.sessionId, cursor);
+          dropPrefetch();
+          const out = await ready;
+          if (!out.ok) throw out.error;
+          page = out.value;
         } catch (e) {
+          dropPrefetch();
           if (codeOf(e) === SESSION_EXPIRED) {
             // A fresh `have` makes the new session smaller than the old one.
             session = await this.openSession({ fresh: true, previous: session });
@@ -227,6 +261,16 @@ export class BootstrapRunner {
         this.pages++;
         if (this.shouldStop()) return this.result(session, bytesDone, true);
 
+        // …and the next page starts moving now, while the one in hand is decoded
+        // and handed to Rust.
+        if (page.nextCursor != null && this.pages < maxPages) {
+          prefetch = {
+            sessionId: session.sessionId,
+            cursor: page.nextCursor,
+            page: this.startFetch(session.sessionId, page.nextCursor),
+          };
+        }
+
         const docs = decodeBootstrapPage(page.bytes);
         const entries: BootstrapEntry[] = [];
         for (const doc of docs) {
@@ -235,7 +279,10 @@ export class BootstrapRunner {
           else docsDone++; // permanently refused; still one unit of the total
         }
         if (entries.length > 0) {
-          if (this.shouldStop()) return this.result(session, bytesDone, true);
+          if (this.shouldStop()) {
+            dropPrefetch();
+            return this.result(session, bytesDone, true);
+          }
           const outcomes = await this.deps.applyBatch(entries);
           await this.settle(entries, outcomes, docs);
           docsDone += entries.length;
@@ -248,6 +295,7 @@ export class BootstrapRunner {
         cursor = page.nextCursor ?? cursor;
         this.progress.bytes?.(bytesDone, session.bytesTotal);
         if (page.nextCursor == null) {
+          dropPrefetch(); // there is none — `nextCursor == null` is the end
           this.deps.saveResume(null); // drained
           await this.deps.flushCheckpoint();
           return this.result(session, bytesDone, false);
@@ -262,6 +310,7 @@ export class BootstrapRunner {
           bytesDone,
         });
       }
+      dropPrefetch(); // hit `maxPages` with one still in flight
       return this.result(session, bytesDone, false);
     } finally {
       this.progress.flush();
@@ -317,6 +366,22 @@ export class BootstrapRunner {
       bytesDone: session.bytesDone,
     });
     return session;
+  }
+
+  /**
+   * Start a page fetch and absorb its rejection into the result.
+   *
+   * A prefetched page is in flight while this runner is busy applying the
+   * previous one, so its failure must not surface as an unhandled rejection in
+   * the meantime; the error is carried in the value and re-thrown by whoever
+   * consumes the page — which is how it still reaches the `session_expired`
+   * restart and the caller's `server_too_old`.
+   */
+  private startFetch(sessionId: string, cursor: number): PendingPage {
+    return this.fetchPage(sessionId, cursor).then(
+      (value) => ({ ok: true as const, value }),
+      (error) => ({ ok: false as const, error }),
+    );
   }
 
   /**

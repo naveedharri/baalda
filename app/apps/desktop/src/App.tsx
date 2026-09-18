@@ -4,6 +4,7 @@ import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
+import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { SyncIssuesBannerView, syncIssuesBanner } from "./components/SyncIssuesBanner";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
@@ -178,6 +179,47 @@ function NotSyncingBanner() {
       reason={reason}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
       onOpenHealth={() => useStore.getState().requestSettings("health")}
+    />
+  );
+}
+
+/**
+ * The strip for a vault whose owner made it **local only** from somewhere else.
+ *
+ * The probe is here rather than in the launch chain because its two inputs land
+ * at different times: the folder's stamp is peeked during the auto-reopen, but
+ * `organizations` only arrives with the detached `initAuth`, and asking before
+ * that would accuse every vault of being deleted for the first second of every
+ * launch. Re-running it whenever the folder, the session or the vault list
+ * changes costs one `peekVaultStamp` for a healthy vault — `checkUnsyncedVaultStamp`
+ * answers those locally and never reaches the network.
+ *
+ * Wired here, alongside the other banners, so `VaultUnsyncedBannerView` stays a
+ * pure component and its one decision (`planUnsyncStamp`) stays unit-testable.
+ */
+function VaultUnsyncedBanner() {
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const authStatus = useStore((s) => s.authStatus);
+  // The IDS, not the count: swapping one vault for another (left one, joined
+  // one) leaves `organizations.length` identical, and the probe's whole question
+  // is whether THIS folder's org is still in that list. A joined string is exact
+  // and just as cheap as reading the length.
+  const orgIds = useStore((s) => s.organizations.map((o) => o.id).join(","));
+  const pending = useStore((s) => s.vaultUnsynced);
+
+  useEffect(() => {
+    if (!vaultPath || authStatus !== "signed-in") return;
+    void useStore
+      .getState()
+      .checkUnsyncedVaultStamp()
+      .catch((e) => console.warn("[vault] unsynced-stamp check failed", e));
+  }, [vaultPath, authStatus, orgIds]);
+
+  return (
+    <VaultUnsyncedBannerView
+      show={pending != null && pending.path === vaultPath}
+      onKeepLocal={() => useStore.getState().keepUnsyncedVaultLocal()}
+      onTurnOnSync={() => useStore.getState().resyncUnsyncedVault()}
     />
   );
 }
@@ -1259,6 +1301,7 @@ export default function App() {
               </svg>
             </button>
           </header>
+          <VaultUnsyncedBanner />
           <NotSyncingBanner />
           <SyncIssuesBanner />
           <RemovedBanner />

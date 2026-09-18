@@ -472,6 +472,73 @@ describe("AttachmentSync upload transport (intent → PUT → complete)", () => 
     expect(log.completes).toEqual([]);
   });
 
+  it("uploads identical bytes at two paths ONCE, even with the lanes racing", async () => {
+    // The loop used to be serial, so the second path found the bytes already on
+    // the server and deduped for free. At `BINARY_CONCURRENCY` both lanes reach
+    // the intent while the other's bytes are still ON THE WIRE — the server has
+    // no completed blob to dedupe against yet, so it hands out a second upload
+    // target and the same bytes go twice. Wasted bandwidth in exactly the
+    // workload this pass optimises (500 binaries, many duplicates).
+    const dupes = ["attachments/copy-a.png", "attachments/copy-b.png"];
+    // Three files: `runProbeFirst` runs item 0 alone, so the two duplicates only
+    // race each other if something else goes first.
+    const all = ["attachments/probe.png", ...dupes];
+    /** Shas whose bytes are FINISHED on the server — the only thing it can
+     *  dedupe against. A transfer still in flight is not one. */
+    const stored = new Set<string>();
+    const intents: string[] = [];
+    const puts: string[] = [];
+    const { deps } = makeTransport(
+      all.map((relPath) => ({ relPath, bytes: new Uint8Array([7, 7]) })),
+      () => SINGLE_INTENT,
+      {
+        // Two paths, ONE content hash — what the path-derived default can't say.
+        listLocal: async () =>
+          all.map((relPath) => ({
+            relPath,
+            sha256: dupes.includes(relPath) ? "sha-shared" : `sha-${relPath}`,
+            size: 2,
+          })),
+        createIntent: async (input) => {
+          intents.push(input.sha256);
+          await new Promise((r) => setTimeout(r, 2)); // a real round trip
+          if (stored.has(input.sha256)) {
+            return {
+              deduped: true,
+              blob: {
+                id: `b-${input.sha256}`,
+                sha256: input.sha256,
+                size: 2,
+                mime: null,
+                relPath: null,
+              },
+            } as never;
+          }
+          return {
+            ...SINGLE_INTENT,
+            completeUrl: `https://api.test/complete/${input.sha256}`,
+          } as never;
+        },
+        // Bytes take time — that is what makes the window a window.
+        putFile: async (input) => {
+          puts.push(input.relPath);
+          await new Promise((r) => setTimeout(r, 30));
+          return { status: 204, etag: '"e"' };
+        },
+        completeUpload: async (url) => {
+          stored.add(url.slice(url.lastIndexOf("/") + 1));
+        },
+      },
+    );
+    const res = await new AttachmentSync(deps).reconcile();
+
+    expect(res.uploaded).toBe(3);
+    // Both duplicates asked — they each need their own `files` row — but only
+    // one of them moved bytes.
+    expect(intents.filter((sha) => sha === "sha-shared")).toHaveLength(2);
+    expect(puts).toEqual(["attachments/probe.png", "attachments/copy-a.png"]);
+  });
+
   it("splits a multipart upload at partBytes and completes with the ETags", async () => {
     const bytes = new Uint8Array(25).fill(9);
     const { deps, log } = makeTransport(
@@ -549,8 +616,12 @@ describe("AttachmentSync upload transport (intent → PUT → complete)", () => 
     );
     await new AttachmentSync(deps).reconcile();
 
-    // Part 1 re-minted after the 403; part 2 re-minted because it was never given.
-    expect(log.partRequests).toEqual([
+    // Part 1 re-minted after the 403; part 2 re-minted because it was never
+    // given. Compared as a SET: the parts of one file run in lanes now, so part
+    // 2 (whose URL was missing from the intent) asks before part 1's 403 comes
+    // back. Which part asks first is a race; that each asks exactly once, and
+    // for itself, is the contract.
+    expect([...log.partRequests].sort((a, b) => a.partNumbers[0] - b.partNumbers[0])).toEqual([
       { url: "https://api.test/parts?t=tok", partNumbers: [1] },
       { url: "https://api.test/parts?t=tok", partNumbers: [2] },
     ]);
@@ -852,5 +923,148 @@ describe("AttachmentSync download transport (presigned URL)", () => {
     expect(res.downloaded).toBe(1);
     expect(seen).toEqual([{}]); // still no bearer on a presign
     expect(log.legacyDownloads).toEqual([]);
+  });
+});
+
+// ── Bounded concurrency (audit finding #2) ─────────────────────────────────
+// Every byte-moving loop here used to be `for (…) await …` — width 1 — so 500
+// files cost ~2,000 strictly sequential round trips. These pin the two budgets
+// that replaced it: six files in flight, and 32 MiB of them (Syncthing's
+// `pullerMaxPendingKiB` default), plus the two semantics concurrency could have
+// broken — a multipart complete's part ORDER, and the whole-pass 402 abort.
+
+/** A `putFile` that records how many transfers overlap. */
+function concurrencyProbe(delayMs = 0) {
+  const state = { inflight: 0, max: 0, bytesInflight: 0, maxBytes: 0 };
+  const putFile = async (input: { relPath: string; range?: { start: number; end: number } }) => {
+    const size = sizeOf(input.relPath);
+    state.inflight++;
+    state.bytesInflight += size;
+    state.max = Math.max(state.max, state.inflight);
+    state.maxBytes = Math.max(state.maxBytes, state.bytesInflight);
+    await new Promise((r) => setTimeout(r, delayMs));
+    state.inflight--;
+    state.bytesInflight -= size;
+    return { status: 204, etag: `"etag-${input.relPath}"` };
+  };
+  return { state, putFile };
+}
+
+const FILE_SIZES = new Map<string, number>();
+const sizeOf = (relPath: string) => FILE_SIZES.get(relPath) ?? 1;
+
+/** N files, each reported at `size` bytes without allocating them. */
+function manyFiles(n: number, size: number) {
+  const names = Array.from({ length: n }, (_, i) => `attachments/f${i}.bin`);
+  for (const name of names) FILE_SIZES.set(name, size);
+  return names;
+}
+
+describe("AttachmentSync bounded concurrency", () => {
+  it("moves files in parallel, but never more than six at once", async () => {
+    const names = manyFiles(20, 1);
+    const { state, putFile } = concurrencyProbe(1);
+    const { deps, log } = makeTransport(
+      names.map((relPath) => ({ relPath, bytes: new Uint8Array([1]) })),
+      () => SINGLE_INTENT,
+      { putFile },
+    );
+    const res = await new AttachmentSync(deps).reconcile();
+
+    expect(res.uploaded).toBe(20);
+    expect(log.completes).toHaveLength(20);
+    // Parallel (the old serial loop would have pinned this at 1) and bounded.
+    expect(state.max).toBeGreaterThan(1);
+    expect(state.max).toBeLessThanOrEqual(6);
+  });
+
+  it("holds no more than the byte budget in flight, whatever the file count", async () => {
+    const EIGHT_MIB = 8 * 1024 * 1024;
+    const names = manyFiles(20, EIGHT_MIB);
+    const { state, putFile } = concurrencyProbe(1);
+    const { deps } = makeTransport(
+      names.map((relPath) => ({ relPath, bytes: new Uint8Array([1]) })),
+      () => SINGLE_INTENT,
+      {
+        putFile,
+        // The sizes the mirror budgets against, without allocating 160 MB.
+        listLocal: async () =>
+          names.map((relPath) => ({ relPath, sha256: `sha-${relPath}`, size: EIGHT_MIB })),
+      },
+    );
+    await new AttachmentSync(deps).reconcile();
+
+    // 32 MiB / 8 MiB ⇒ four lanes' worth of BYTES, even though six lanes exist.
+    expect(state.maxBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    expect(state.max).toBeLessThanOrEqual(4);
+    expect(state.max).toBeGreaterThan(1);
+  });
+
+  it("completes a multipart upload in partNumber order when parts finish out of order", async () => {
+    const bytes = new Uint8Array(25).fill(9);
+    const { deps, log } = makeTransport(
+      [{ relPath: "attachments/clip.mp4", bytes }],
+      () => ({
+        blobId: "blob-mp",
+        completeUrl: "https://api.test/complete",
+        upload: {
+          kind: "multipart" as const,
+          method: "PUT",
+          uploadId: "u-order",
+          partBytes: 10,
+          parts: [
+            { partNumber: 1, url: "https://s3/p1" },
+            { partNumber: 2, url: "https://s3/p2" },
+            { partNumber: 3, url: "https://s3/p3" },
+          ],
+          headers: {},
+          expiresAt: Date.now() + 60_000,
+          direct: true,
+          partsUrl: "https://api.test/parts?t=tok",
+        },
+      }),
+      {
+        // Part 3 answers first, part 1 last — the shape S3 rejects if the
+        // complete is assembled in finish order.
+        putFile: async (input) => {
+          const n = Number(input.url.slice(-1));
+          await new Promise((r) => setTimeout(r, (4 - n) * 3));
+          return { status: 204, etag: `"etag-p${n}"` };
+        },
+      },
+    );
+    await new AttachmentSync(deps).reconcile();
+
+    expect(log.completes[0].body).toEqual({
+      uploadId: "u-order",
+      parts: [
+        { partNumber: 1, etag: '"etag-p1"' },
+        { partNumber: 2, etag: '"etag-p2"' },
+        { partNumber: 3, etag: '"etag-p3"' },
+      ],
+    });
+  });
+
+  it("stops starting new uploads the moment one answers 402", async () => {
+    const names = manyFiles(20, 1);
+    let intents = 0;
+    const { deps, log } = makeTransport(
+      names.map((relPath) => ({ relPath, bytes: new Uint8Array([1]) })),
+      () => {
+        intents++;
+        // The first file is the probe and succeeds; the vault fills after it.
+        return intents === 1 ? SINGLE_INTENT : serverError(402, "storage_limit_reached");
+      },
+      { putFile: concurrencyProbe(1).putFile },
+    );
+    const sync = new AttachmentSync(deps);
+    const res = await sync.reconcile();
+
+    // The lanes already in flight finish their refusal; nothing behind them is
+    // ever announced — the whole point of AbortPass.
+    expect(log.intents.length).toBeLessThan(20);
+    expect(log.intents.length).toBeLessThanOrEqual(1 + 6);
+    expect(res.uploaded).toBe(1);
+    expect(log.toasts).toHaveLength(1); // one fact about the vault, not per file
   });
 });

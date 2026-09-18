@@ -6,7 +6,12 @@
 // point of a threshold rather than a flag day — the safety path and the fast
 // path are both exercised on every ordinary launch, and the fast one is the
 // COMMON one (every real vault is >25 notes), so it cannot rot.
+//
+// Four sites now: registering notes, registering folders, materializing
+// server-only notes, and — since the live import fix — pushing note CONTENT from
+// a running vault (see `docSessionLiveBatch.test.ts` for what that one does).
 
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../ipc", () => ({
@@ -195,6 +200,40 @@ describe("site 2 — registering folders", () => {
     expect(calls.batchFolders).toBe(1);
     expect(calls.batchFolderItems).toBe(25);
     expect(reg.getFolderId("F7")).toBe("folder-F7");
+  });
+});
+
+describe("site 4 — pushing note CONTENT", () => {
+  // What a content push DOES above and below the threshold is pinned where the
+  // routing lives (`docSessionLiveBatch.test.ts`, `bulkEngine.test.ts`). What
+  // belongs here is the thing this file is about: that every site asks the SAME
+  // question, so the threshold cannot drift into a per-site constant.
+  //
+  // A source assertion, deliberately: the two live sites are ordinary private
+  // methods with no seam of their own, and a site that quietly stopped
+  // consulting `useBulkPath` would take the slow path forever while every
+  // behavioural test that mocks its way past it still passed. This is the same
+  // shape as `formatsLockstep.test.ts` — cheap, and it cannot rot in silence.
+  const source = readFileSync(new URL("../docSession.ts", import.meta.url), "utf8");
+
+  /** The body of one `private async <name>(…)` method, up to the next member. */
+  function methodBody(name: string): string {
+    const start = source.indexOf(`private async ${name}(`);
+    expect(start, `${name} is gone — has it been renamed?`).toBeGreaterThan(-1);
+    const end = source.indexOf("\n  private ", start + 1);
+    return source.slice(start, end === -1 ? source.length : end);
+  }
+
+  it("the steady-state content run gates on the same threshold", () => {
+    expect(methodBody("runBulkSync")).toContain("useBulkPath(");
+  });
+
+  it("…and so does the local-change drain", () => {
+    expect(methodBody("runLocalChangePush")).toContain("useBulkPath(");
+  });
+
+  it("…and `enable`'s own bulk engine, which had it first", () => {
+    expect(source).toContain("useBulkPath(this.registry.mappedNotes().length)");
   });
 });
 

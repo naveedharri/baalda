@@ -30,6 +30,16 @@ import type { BillingProvider } from "../../billing/provider.js";
  *    sessions stop pointing at the vault, and the owner and the leaver are each
  *    emailed when the server can send mail. The owner gets 409
  *    `owner_cannot_leave`: their exit is DELETE below (or, one day, a transfer).
+ *  - GET    /api/orgs/:orgId/status → any member asks whether a vault still
+ *    exists and whether they may see it. 404 `vault_not_found` (gone) vs 403
+ *    `not_a_member` (someone else's) — the two states a stamped folder cannot
+ *    otherwise tell apart.
+ *  - GET    /api/orgs/:orgId/unsync-preview → owner-only counts of everything
+ *    "make local only" would destroy, so the confirm dialog names real numbers.
+ *  - POST   /api/orgs/:orgId/unsync {confirmName} → owner-only "make this vault
+ *    local only": the SAME teardown as DELETE below (one shared helper, so the
+ *    two cannot drift), behind a type-the-name check (409 `name_mismatch`).
+ *    The client keeps its `.md` files and clears its vault stamp.
  *  - DELETE /api/orgs/:orgId → the vault **owner** permanently deletes the
  *    vault everywhere: members, invitations, note collections, folders, notes, files,
  *    shares, join codes, and MCP tokens cascade from the `organization` row;
@@ -174,6 +184,263 @@ async function revokeMembership(deps: OrgDeps, orgId: string, userId: string): P
   for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
 }
 
+/**
+ * What a vault holds, server-side, as plain counts.
+ *
+ * ONE shape produced by ONE query set, shared by the unsync preview and the
+ * unsync receipt, so the numbers an owner is shown in the confirm dialog are
+ * the numbers the teardown then reports. A preview that counted differently
+ * from the thing it previews is a lie at exactly the moment it matters.
+ *
+ * `members` EXCLUDES the owner: the sentence these feed is "N teammates lose
+ * access", and the owner is not one of them.
+ */
+export interface VaultContentCounts {
+  notes: number;
+  files: number;
+  folders: number;
+  attachmentBytes: number;
+  members: number;
+  publicLinks: number;
+  mcpTokens: number;
+  checkpoints: number;
+}
+
+/**
+ * The subscription facts a client needs to explain what happens to the money.
+ * Dates are ISO strings because this crosses the wire.
+ */
+export interface SubscriptionEcho {
+  status: string;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+}
+
+/** `count(*)` as a number — pg returns bigint as a string. */
+async function countOf(sql: string, params: unknown[]): Promise<number> {
+  const { rows } = await pool.query<{ c: string }>(sql, params);
+  return Number(rows[0]?.c ?? 0);
+}
+
+/**
+ * Count everything the server holds for one vault (org). Pure SELECTs — safe to
+ * call from a preview that must not change anything.
+ *
+ * Scoped two ways on purpose: the org id for rows that hang off the
+ * organization (members, public links, MCP tokens, blobs), the collection ids
+ * for rows that hang off a `vaults` row. Those are the same two scopes the
+ * teardown deletes by, which is what keeps the two in step.
+ */
+async function countVaultContents(
+  orgId: string,
+  vaultIds: string[],
+): Promise<VaultContentCounts> {
+  const byVault = (sql: string) => (vaultIds.length ? countOf(sql, [vaultIds]) : Promise.resolve(0));
+  const [notes, files, folders, checkpoints, attachmentBytes, members, publicLinks, mcpTokens] =
+    await Promise.all([
+      // Soft-deleted notes are already gone as far as any client is concerned,
+      // so they must not inflate the "412 notes" the dialog promises to delete.
+      byVault("SELECT count(*)::bigint AS c FROM notes WHERE vault_id = ANY($1) AND deleted_at IS NULL"),
+      byVault("SELECT count(*)::bigint AS c FROM files WHERE vault_id = ANY($1)"),
+      byVault("SELECT count(*)::bigint AS c FROM folders WHERE vault_id = ANY($1)"),
+      byVault("SELECT count(*)::bigint AS c FROM vault_checkpoints WHERE vault_id = ANY($1)"),
+      // `blobs.org_id` covers BOTH kinds of blob — a tree file's bytes and a
+      // hash-named `attachments/` drop, which has no vault_id.
+      countOf("SELECT coalesce(sum(size), 0)::bigint AS c FROM blobs WHERE org_id = $1", [orgId]),
+      countOf(
+        `SELECT count(*)::bigint AS c FROM member WHERE "organizationId" = $1 AND role <> 'owner'`,
+        [orgId],
+      ),
+      countOf("SELECT count(*)::bigint AS c FROM public_links WHERE org_id = $1", [orgId]),
+      countOf("SELECT count(*)::bigint AS c FROM mcp_tokens WHERE organization_id = $1", [orgId]),
+    ]);
+  return { notes, files, folders, attachmentBytes, members, publicLinks, mcpTokens, checkpoints };
+}
+
+/** A stored subscription as the wire sees it; a tombstone reads as "none". */
+function echoSubscriptionRow(
+  row: { status: string; current_period_end: Date | null; cancel_at_period_end: boolean; deleted_at: Date | null } | null,
+): SubscriptionEcho | null {
+  if (!row || row.deleted_at) return null;
+  return {
+    status: row.status,
+    currentPeriodEnd: row.current_period_end ? row.current_period_end.toISOString() : null,
+    cancelAtPeriodEnd: row.cancel_at_period_end,
+  };
+}
+
+export type VaultTeardown =
+  | {
+      ok: true;
+      orgName: string | null;
+      vaultIds: string[];
+      docIds: string[];
+      counts: VaultContentCounts;
+      subscription: SubscriptionEcho | null;
+    }
+  | { ok: false; error: "subscription_cancel_failed"; message: string };
+
+/**
+ * Remove a vault from the server, completely. THE one teardown.
+ *
+ * Extracted so `DELETE /api/orgs/:orgId` (permanent delete) and
+ * `POST /api/orgs/:orgId/unsync` ("make local only") run the SAME code: the two
+ * differ only in what the client does with its own files afterwards, and a
+ * second hand-written purge would drift from this one's table list the first
+ * time a table is added.
+ *
+ * Order is load-bearing:
+ *   1. money first — a provider that won't cancel aborts the whole thing (502),
+ *      before anything is destroyed (#109/#111);
+ *   2. snapshot vault/doc ids and the counts BEFORE the cascade removes the
+ *      rows we'd read them from;
+ *   3. kill live sockets so `onChange` can't re-append rows we're about to purge;
+ *   4. one transaction for the FK-less stores, the session pointers, the
+ *      subscription tombstone and the `organization` row;
+ *   5. `onAclChanged` per collection AFTER the commit — the vault channel
+ *      answers by re-resolving the readable set and must see the final state.
+ *
+ * The caller does the authz. This function assumes it has already happened.
+ */
+async function deleteVaultEverywhere(
+  deps: OrgDeps,
+  orgId: string,
+  actorUserId: string,
+): Promise<VaultTeardown> {
+  const { rows: orgNameRows } = await pool.query<{ name: string }>(
+    "SELECT name FROM organization WHERE id = $1",
+    [orgId],
+  );
+  const orgName = orgNameRows[0]?.name ?? null;
+
+  // Stop the money BEFORE anything is destroyed. `period_end` keeps the paid
+  // period the owner already bought; if the provider refuses we abandon the
+  // whole teardown with 502 rather than leave a live subscription that nothing
+  // records (#109/#111). This deliberately runs ahead of the socket teardown
+  // and the purge, so a 502 here costs nothing.
+  let subscription: SubscriptionEcho | null = null;
+  if (billingEnabled() && deps.billingProvider) {
+    const row = await findByOrg(pool, orgId);
+    const subId = row?.provider_subscription_id;
+    if (row && subId && isActiveStatus(row.status)) {
+      // Always ask, even when our row already says "ending": the flag is
+      // idempotent at the provider, and our copy can be stale — an owner who
+      // un-cancelled in Polar's portal while that webhook went missing would
+      // otherwise have the vault deleted and the subscription still renewing.
+      // The provider's answer is what we record and report.
+      try {
+        const snap = await deps.billingProvider.cancelSubscription(subId, "period_end");
+        // The provider's answer IS the state — persist it through the same
+        // upsert (and the same ordering guard) the webhook uses, so a
+        // webhook describing this very change can't fight it.
+        await applySubscriptionState(pool, {
+          organizationId: orgId,
+          providerCustomerId: snap.providerCustomerId,
+          providerSubscriptionId: snap.providerSubscriptionId,
+          plan: "pro",
+          status: snap.status,
+          currentPeriodEnd: snap.currentPeriodEnd,
+          cancelAtPeriodEnd: snap.cancelAtPeriodEnd,
+          eventTs: snap.modifiedAt,
+          interval: snap.interval,
+          amount: snap.amount,
+          currency: snap.currency,
+        });
+        subscription = {
+          status: snap.status,
+          cancelAtPeriodEnd: snap.cancelAtPeriodEnd,
+          currentPeriodEnd: snap.currentPeriodEnd ? snap.currentPeriodEnd.toISOString() : null,
+        };
+      } catch (err) {
+        console.error(
+          `vault-teardown: refusing to remove vault ${orgId} — the provider would not cancel subscription ${subId}:`,
+          (err as Error).message,
+        );
+        return {
+          ok: false,
+          error: "subscription_cancel_failed",
+          message: (err as Error).message || "provider cancel failed",
+        };
+      }
+    }
+  }
+
+  // `vaults` here = the org's note-collection rows (storage children), not the
+  // user-facing vault (the organization) being removed.
+  const vaults = await pool.query<{ id: string }>(
+    "SELECT id FROM vaults WHERE organization_id = $1",
+    [orgId],
+  );
+  const vaultIds = vaults.rows.map((r) => r.id);
+
+  const docs = vaultIds.length
+    ? await pool.query<{ id: string; vault_id: string }>(
+        `SELECT id, vault_id FROM notes WHERE vault_id = ANY($1)
+         UNION ALL
+         SELECT id, vault_id FROM files WHERE vault_id = ANY($1)`,
+        [vaultIds],
+      )
+    : { rows: [] as Array<{ id: string; vault_id: string }> };
+  const docIds = docs.rows.map((r) => r.id);
+
+  const counts = await countVaultContents(orgId, vaultIds);
+
+  // Instant-kill live sockets so onChange can't resurrect purged doc_updates.
+  for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    if (docIds.length) {
+      await client.query("DELETE FROM doc_updates WHERE doc_id = ANY($1)", [docIds]);
+      await client.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1)", [docIds]);
+      // The cached state vectors describe state that no longer exists; leaving
+      // them would have a recreated doc_id inherit a stranger's clocks.
+      await client.query("DELETE FROM doc_state_vectors WHERE doc_id = ANY($1)", [docIds]);
+    }
+    await client.query("DELETE FROM blobs WHERE org_id = $1", [orgId]);
+    if (vaultIds.length) {
+      await client.query("DELETE FROM note_index WHERE vault_id = ANY($1)", [vaultIds]);
+      await client.query("DELETE FROM note_links WHERE vault_id = ANY($1)", [vaultIds]);
+    }
+    // `session."activeOrganizationId"` has no FK, so the cascade below leaves
+    // every member's live session pointing at an org that no longer exists —
+    // and their next reload asks for a vault nobody can resolve. `revokeMembership`
+    // has always cleared it for one user; this is the same fix for all of them.
+    await client.query(
+      `UPDATE session SET "activeOrganizationId" = NULL WHERE "activeOrganizationId" = $1`,
+      [orgId],
+    );
+    // The subscription row is NOT cascaded away any more (migration 024 drops
+    // the FK). Turn whatever is there into a tombstone — including a canceled
+    // row, where it is harmless — so a webhook arriving after this has
+    // somewhere to land and the owner can still see what they were paying for.
+    await client.query(
+      `UPDATE subscriptions
+          SET deleted_at = now(), org_name = $2, owner_user_id = $3, updated_at = now()
+        WHERE organization_id = $1`,
+      [orgId, orgName, actorUserId],
+    );
+    // Cascades: member, invitation, vaults→(folders, notes, files), shares,
+    // org_join_codes, mcp_tokens, public_links.
+    await client.query("DELETE FROM organization WHERE id = $1", [orgId]);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // The whole org is gone, so every subscriber's readable set is now empty and
+  // the channel will drop every doc. Same reason as member removal: the
+  // vault-channel sockets survive `disconnectDoc` and would otherwise keep
+  // streaming content from a deleted vault until their tokens expired.
+  for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
+
+  return { ok: true, orgName, vaultIds, docIds, counts, subscription };
+}
+
 export function createOrgRoutes(deps: OrgDeps): Hono {
   const orgRoutes = new Hono();
 
@@ -305,11 +572,8 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     return c.json({ organizationId, name: target.name, alreadyMember: false, role });
   });
 
-  // Permanently delete a vault (owner only). Everything with a FK to the
-  // organization cascades; the FK-less binary CRDT stores and rebuildable caches
-  // are purged by hand. We snapshot the affected doc/vault ids BEFORE the delete
-  // (the cascade removes the `notes`/`files` rows we'd read them from) and kill
-  // live sockets first so an in-flight sync can't re-append rows we just purged.
+  // Permanently delete a vault (owner only). The teardown itself lives in
+  // `deleteVaultEverywhere` above, shared with `POST /orgs/:orgId/unsync`.
   orgRoutes.delete("/orgs/:orgId", async (c) => {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
@@ -321,139 +585,126 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "Only the vault owner can delete it" }, 403);
     }
 
-    // Stop the money BEFORE anything is destroyed. `period_end` keeps the paid
-    // period the owner already bought; if the provider refuses we abandon the
-    // whole delete with 502 rather than leave a live subscription that nothing
-    // records (#109/#111). This deliberately runs ahead of the socket teardown
-    // and the purge, so a 502 here costs nothing.
-    const { rows: orgNameRows } = await pool.query<{ name: string }>(
-      "SELECT name FROM organization WHERE id = $1",
-      [orgId],
-    );
-    const orgName = orgNameRows[0]?.name ?? null;
-
-    let subscription: {
-      cancelAtPeriodEnd: boolean;
-      currentPeriodEnd: string | null;
-    } | null = null;
-    if (billingEnabled() && deps.billingProvider) {
-      const row = await findByOrg(pool, orgId);
-      const subId = row?.provider_subscription_id;
-      if (row && subId && isActiveStatus(row.status)) {
-        // Always ask, even when our row already says "ending": the flag is
-        // idempotent at the provider, and our copy can be stale — an owner who
-        // un-cancelled in Polar's portal while that webhook went missing would
-        // otherwise have the vault deleted and the subscription still renewing.
-        // The provider's answer is what we record and report.
-        try {
-          const snap = await deps.billingProvider.cancelSubscription(subId, "period_end");
-          // The provider's answer IS the state — persist it through the same
-          // upsert (and the same ordering guard) the webhook uses, so a
-          // webhook describing this very change can't fight it.
-          await applySubscriptionState(pool, {
-            organizationId: orgId,
-            providerCustomerId: snap.providerCustomerId,
-            providerSubscriptionId: snap.providerSubscriptionId,
-            plan: "pro",
-            status: snap.status,
-            currentPeriodEnd: snap.currentPeriodEnd,
-            cancelAtPeriodEnd: snap.cancelAtPeriodEnd,
-            eventTs: snap.modifiedAt,
-            interval: snap.interval,
-            amount: snap.amount,
-            currency: snap.currency,
-          });
-          subscription = {
-            cancelAtPeriodEnd: snap.cancelAtPeriodEnd,
-            currentPeriodEnd: snap.currentPeriodEnd
-              ? snap.currentPeriodEnd.toISOString()
-              : null,
-          };
-        } catch (err) {
-          console.error(
-            `org-delete: refusing to delete vault ${orgId} — the provider would not cancel subscription ${subId}:`,
-            (err as Error).message,
-          );
-          return c.json(
-            {
-              error: "subscription_cancel_failed",
-              message: (err as Error).message || "provider cancel failed",
-            },
-            502,
-          );
-        }
-      }
-    }
-
-    // `vaults` here = the org's note-collection rows (storage children), not the
-    // user-facing vault (the organization) being deleted.
-    const vaults = await pool.query<{ id: string }>(
-      "SELECT id FROM vaults WHERE organization_id = $1",
-      [orgId],
-    );
-    const vaultIds = vaults.rows.map((r) => r.id);
-
-    const docs = vaultIds.length
-      ? await pool.query<{ id: string; vault_id: string }>(
-          `SELECT id, vault_id FROM notes WHERE vault_id = ANY($1)
-           UNION ALL
-           SELECT id, vault_id FROM files WHERE vault_id = ANY($1)`,
-          [vaultIds],
-        )
-      : { rows: [] as Array<{ id: string; vault_id: string }> };
-    const docIds = docs.rows.map((r) => r.id);
-
-    // Instant-kill live sockets so onChange can't resurrect purged doc_updates.
-    for (const d of docs.rows) deps.disconnectDoc(d.vault_id, d.id);
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      if (docIds.length) {
-        await client.query("DELETE FROM doc_updates WHERE doc_id = ANY($1)", [docIds]);
-        await client.query("DELETE FROM doc_snapshots WHERE doc_id = ANY($1)", [docIds]);
-        // The cached state vectors describe state that no longer exists; leaving
-        // them would have a recreated doc_id inherit a stranger's clocks.
-        await client.query("DELETE FROM doc_state_vectors WHERE doc_id = ANY($1)", [docIds]);
-      }
-      await client.query("DELETE FROM blobs WHERE org_id = $1", [orgId]);
-      if (vaultIds.length) {
-        await client.query("DELETE FROM note_index WHERE vault_id = ANY($1)", [vaultIds]);
-        await client.query("DELETE FROM note_links WHERE vault_id = ANY($1)", [vaultIds]);
-      }
-      // The subscription row is NOT cascaded away any more (migration 024 drops
-      // the FK). Turn whatever is there into a tombstone — including a canceled
-      // row, where it is harmless — so a webhook arriving after this has
-      // somewhere to land and the owner can still see what they were paying for.
-      await client.query(
-        `UPDATE subscriptions
-            SET deleted_at = now(), org_name = $2, owner_user_id = $3, updated_at = now()
-          WHERE organization_id = $1`,
-        [orgId, orgName, session.userId],
-      );
-      // Cascades: member, invitation, vaults→(folders, notes, files), shares,
-      // org_join_codes, mcp_tokens.
-      await client.query("DELETE FROM organization WHERE id = $1", [orgId]);
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
-
-    // The whole org is gone, so every subscriber's readable set is now empty and
-    // the channel will drop every doc. Same reason as member removal: the
-    // vault-channel sockets survive `disconnectDoc` and would otherwise keep
-    // streaming content from a deleted vault until their tokens expired.
-    for (const vaultId of vaultIds) deps.onAclChanged(vaultId);
+    const out = await deleteVaultEverywhere(deps, orgId, session.userId);
+    if (!out.ok) return c.json({ error: out.error, message: out.message }, 502);
 
     return c.json({
       deleted: true,
-      vaults: vaultIds.length,
-      docs: docIds.length,
-      subscription,
+      vaults: out.vaultIds.length,
+      docs: out.docIds.length,
+      subscription: out.subscription,
     });
+  });
+
+  /**
+   * What "make this vault local only" would destroy (owner only, read-only).
+   *
+   * The confirm dialog is the ONLY gate on an irreversible action, so it has to
+   * name real numbers rather than "everything". Pure SELECTs: calling this must
+   * never be the thing that breaks a vault.
+   */
+  orgRoutes.get("/orgs/:orgId/unsync-preview", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+
+    const orgId = c.req.param("orgId");
+    const role = await orgRole(orgId, session.userId);
+    // Same shape as the delete route's not-found: a stranger learns nothing
+    // about whether the vault exists.
+    if (!role) return c.json({ error: "vault_not_found" }, 404);
+    if (role !== "owner") return c.json({ error: "owner_only" }, 403);
+
+    const { rows: orgRows } = await pool.query<{ name: string }>(
+      "SELECT name FROM organization WHERE id = $1",
+      [orgId],
+    );
+    const orgName = orgRows[0]?.name ?? null;
+    if (orgName === null) return c.json({ error: "vault_not_found" }, 404);
+
+    const { rows: vaultRows } = await pool.query<{ id: string }>(
+      "SELECT id FROM vaults WHERE organization_id = $1",
+      [orgId],
+    );
+    const counts = await countVaultContents(orgId, vaultRows.map((r) => r.id));
+    const subscription = echoSubscriptionRow(await findByOrg(pool, orgId));
+
+    return c.json({ orgName, ...counts, subscription });
+  });
+
+  /**
+   * Make a Synced vault Local again: remove everything the server holds for it.
+   *
+   * Identical teardown to DELETE above — the difference is entirely on the
+   * client, which keeps its `.md` files and clears its vault stamp instead of
+   * walking away. Two extra guards, because this one is reached from a
+   * "keep my notes" flow and must not be mistaken for a reversible action:
+   *   - owner only (403 `owner_only`), and
+   *   - `confirmName` must match the vault's name exactly, or 409
+   *     `name_mismatch` and NOTHING is touched. The in-app type-the-name gate
+   *     is checked again here so the endpoint is safe on its own.
+   */
+  orgRoutes.post("/orgs/:orgId/unsync", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+
+    const orgId = c.req.param("orgId");
+    const role = await orgRole(orgId, session.userId);
+    if (!role) return c.json({ error: "vault_not_found" }, 404);
+    if (role !== "owner") return c.json({ error: "owner_only" }, 403);
+
+    const { rows: orgRows } = await pool.query<{ name: string }>(
+      "SELECT name FROM organization WHERE id = $1",
+      [orgId],
+    );
+    const orgName = orgRows[0]?.name;
+    if (orgName === undefined) return c.json({ error: "vault_not_found" }, 404);
+
+    const body = (await c.req.json().catch(() => ({}))) as { confirmName?: unknown };
+    const confirmName = typeof body.confirmName === "string" ? body.confirmName.trim() : null;
+    if (confirmName === null || confirmName !== orgName.trim()) {
+      return c.json({ error: "name_mismatch" }, 409);
+    }
+
+    const out = await deleteVaultEverywhere(deps, orgId, session.userId);
+    if (!out.ok) return c.json({ error: out.error, message: out.message }, 502);
+
+    return c.json({
+      unsynced: true,
+      notes: out.counts.notes,
+      files: out.counts.files,
+      members: out.counts.members,
+      subscription: out.subscription,
+    });
+  });
+
+  /**
+   * Does this vault still exist, and may I see it? (any signed-in user)
+   *
+   * Exists to tell "the vault was made local only" apart from "that folder
+   * belongs to another account" — states a client otherwise cannot distinguish,
+   * because both look like "stamped for an org that isn't in my list". A 404
+   * means the folder is safe to re-adopt; a 403 means it really is someone
+   * else's and must stay refused.
+   */
+  orgRoutes.get("/orgs/:orgId/status", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+
+    const orgId = c.req.param("orgId");
+    const { rows } = await pool.query<{ name: string }>(
+      "SELECT name FROM organization WHERE id = $1",
+      [orgId],
+    );
+    const name = rows[0]?.name;
+    // Deliberately NOT the delete route's opaque 404: the whole point is to
+    // distinguish gone from forbidden, and an org id is not a secret — the
+    // caller is holding it in their own vault stamp already.
+    if (name === undefined) return c.json({ error: "vault_not_found" }, 404);
+
+    const role = await orgRole(orgId, session.userId);
+    if (!role) return c.json({ error: "not_a_member" }, 403);
+
+    return c.json({ orgId, name, role });
   });
 
   // Remove a member from a vault (owner/admin). Revokes access on both paths

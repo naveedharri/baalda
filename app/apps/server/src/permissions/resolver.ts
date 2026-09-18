@@ -44,6 +44,61 @@ export function maxPermission(a: Permission, b: Permission): Permission {
 
 type Queryable = Pick<pg.Pool, "query">;
 
+/**
+ * A REQUEST-SCOPED memo for the inputs every doc in one batch shares.
+ *
+ * Read this before reaching for anything cleverer. The rule the whole ACL
+ * depends on is **one permission algebra**: a second, set-based "editable docs"
+ * query that disagreed with {@link effectivePermission} would not surface as a
+ * 403, it would be a healing LOOP — the client is told a doc is empty, pushes,
+ * is refused, and `ready.empty` names it again on the next connect, forever. So
+ * this memoises the resolver's INPUTS and never its verdict:
+ *
+ *   · `role` and `baseline` are facts about the VAULT, identical for every item
+ *     in a batch — 2 of the 7–8 queries per doc, ×5,000 docs;
+ *   · `ancestors` is a fact about a FOLDER, shared by every doc in it.
+ *
+ * Everything per-doc (`locateDoc`, both denies, the share lookup, the lock) is
+ * still asked per doc, in the same order, by the same code. The answer for any
+ * one doc is bit-for-bit what an uncached call returns — `resolveManyEqualsPerDoc`
+ * in `tests/permissions.test.ts` is the drift test that says so.
+ *
+ * Scoped to one request deliberately: a longer-lived cache would keep serving a
+ * role that was revoked or a posture that was just changed. Create one per
+ * request, pass it down, throw it away.
+ */
+export interface ResolverCache {
+  role(db: Queryable, organizationId: string, userId: string): Promise<string | null>;
+  baseline(db: Queryable, organizationId: string): Promise<VaultPosture>;
+  ancestors(db: Queryable, folderId: string | null): Promise<string[]>;
+}
+
+export function createResolverCache(): ResolverCache {
+  const roles = new Map<string, Promise<string | null>>();
+  const baselines = new Map<string, Promise<VaultPosture>>();
+  const chains = new Map<string, Promise<string[]>>();
+  // The promise is cached, not the value, so N concurrent resolves of the same
+  // key share ONE in-flight query instead of racing to fill the entry.
+  const memo = <T>(m: Map<string, Promise<T>>, key: string, run: () => Promise<T>): Promise<T> => {
+    let hit = m.get(key);
+    if (!hit) {
+      hit = run();
+      m.set(key, hit);
+    }
+    return hit;
+  };
+  return {
+    role: (db, organizationId, userId) =>
+      memo(roles, `${organizationId}\u0000${userId}`, () => memberRole(db, organizationId, userId)),
+    baseline: (db, organizationId) =>
+      memo(baselines, organizationId, () => vaultBaseline(db, organizationId)),
+    ancestors: (db, folderId) =>
+      folderId === null
+        ? Promise.resolve([])
+        : memo(chains, folderId, () => ancestorFolderIds(db, folderId)),
+  };
+}
+
 interface DocLocation {
   vaultId: string;
   folderId: string | null;
@@ -326,11 +381,16 @@ export async function effectivePermission(
   userId: string,
   docId: string,
   db: Queryable = defaultPool,
+  /** Optional request-scoped memo for the per-vault / per-folder inputs. Changes
+   *  nothing about the answer — see {@link ResolverCache}. */
+  cache?: ResolverCache,
 ): Promise<Permission> {
   const loc = await locateDoc(db, docId);
   if (!loc) return "none";
 
-  const folderIds = await ancestorFolderIds(db, loc.folderId);
+  const folderIds = cache
+    ? await cache.ancestors(db, loc.folderId)
+    : await ancestorFolderIds(db, loc.folderId);
 
   // Denies are first and unconditional. Both kinds outrank the role branch
   // below: what you set in the Access panel applies to you too, or a vault
@@ -341,12 +401,16 @@ export async function effectivePermission(
   if (await isDenied(db, "user", userId, docId, folderIds)) return "none";
   const itemPrivate = await isDenied(db, "org", loc.organizationId, docId, folderIds);
 
-  const role = await memberRole(db, loc.organizationId, userId);
+  const role = cache
+    ? await cache.role(db, loc.organizationId, userId)
+    : await memberRole(db, loc.organizationId, userId);
   // The vault's posture caps EVERY shortcut below it (see `vaultBaseline`).
   // Read-only and Private both skip the role AND the creator rule; they differ
   // only in what the vault itself then confers — `view` for one, nothing at all
   // for the other.
-  const baseline = await vaultBaseline(db, loc.organizationId);
+  const baseline = cache
+    ? await cache.baseline(db, loc.organizationId)
+    : await vaultBaseline(db, loc.organizationId);
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;
@@ -461,14 +525,17 @@ export async function buildAccessContext(
   resourceType: "folder" | "file",
   resourceId: string,
   db: Queryable = defaultPool,
+  cache?: ResolverCache,
 ): Promise<AccessContext | null> {
+  const chain = (folderId: string | null) =>
+    cache ? cache.ancestors(db, folderId) : ancestorFolderIds(db, folderId);
   if (resourceType === "file") {
     const loc = await locateDoc(db, resourceId);
     if (!loc) return null;
     return {
       organizationId: loc.organizationId,
       docId: resourceId,
-      folderIds: await ancestorFolderIds(db, loc.folderId),
+      folderIds: await chain(loc.folderId),
       createdBy: loc.createdBy,
     };
   }
@@ -484,7 +551,7 @@ export async function buildAccessContext(
   return {
     organizationId: org,
     docId: null,
-    folderIds: await ancestorFolderIds(db, resourceId),
+    folderIds: await chain(resourceId),
     createdBy: null, // folders have no creator column in the ACL context
   };
 }
@@ -495,6 +562,7 @@ export async function resolveAccessForUser(
   userId: string,
   role: string | null,
   db: Queryable = defaultPool,
+  cache?: ResolverCache,
 ): Promise<ResolvedAccess> {
   if (await isDenied(db, "user", userId, ctx.docId, ctx.folderIds)) {
     return { permission: "none", capped: false, denied: true };
@@ -503,7 +571,9 @@ export async function resolveAccessForUser(
   // Mirrors `effectivePermission` branch for branch. They MUST agree: this one
   // renders the "who can access" list, and a list that disagrees with the
   // enforcer is worse than no list.
-  const baseline = await vaultBaseline(db, ctx.organizationId);
+  const baseline = cache
+    ? await cache.baseline(db, ctx.organizationId)
+    : await vaultBaseline(db, ctx.organizationId);
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;

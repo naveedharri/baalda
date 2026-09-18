@@ -66,7 +66,7 @@
 // upload pays for the probe.
 
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
-import { BATCH_MAX_FILES, useBulkPath } from "./pool";
+import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
 import type { DocSyncState } from "./vaultScope";
 import type {
   BlobCompleteBody,
@@ -314,6 +314,107 @@ function isMissingCommand(e: unknown): boolean {
  * failed file.
  */
 const EXPIRED_PRESIGN: readonly number[] = [401, 403];
+
+/**
+ * How many binaries move at once — uploads, downloads and the text drain alike.
+ *
+ * 6, `REGISTRY_CONCURRENCY`'s reasoning rather than `UPLOAD_CONCURRENCY`'s (in
+ * `pool.ts`; not `{@link}`ed because this module imports neither): a unit here
+ * is an HTTP request against one host,
+ * not a WebSocket plus a resident `NoteBridge`, so the limit that binds is the
+ * per-host connection pool, not heap. Before this every one of these loops was a
+ * `for (…) await …` at width 1, and a 500-file vault paid ~2,000 strictly
+ * sequential round trips (≈5 minutes of pure latency) before a byte was counted.
+ *
+ * Request count alone is the wrong budget for binaries, though — six 200 MB
+ * videos at width 6 is 1.2 GB in flight — so {@link BYTES_IN_FLIGHT_BUDGET}
+ * bounds the other axis.
+ */
+const BINARY_CONCURRENCY = 6;
+
+/**
+ * How many outstanding transfer bytes we allow across the whole mirror.
+ *
+ * 32 MiB, Syncthing's `pullerMaxPendingKiB` default — the most-cited precedent
+ * for "how much should be in flight", and deliberately sized in BYTES: a
+ * concurrency number alone cannot tell a thousand 4 KB PNGs from six 1 GB
+ * videos, and only one of those two shapes threatens the heap and the link.
+ *
+ * A single transfer larger than the whole budget still runs (alone): the gate
+ * never refuses work, it only makes it wait for room, and "wait for room that
+ * can never exist" is a deadlock.
+ */
+const BYTES_IN_FLIGHT_BUDGET = 32 * 1024 * 1024;
+
+/**
+ * Parts of ONE multipart file in flight at once.
+ *
+ * 4, below {@link BINARY_CONCURRENCY} because these lanes compete with the other
+ * files' lanes for the same connections and the same byte budget. A 1 GB video
+ * was 64 sequential 16 MB PUTs — one TCP stream's throughput; four lanes is the
+ * cheapest multiple of that without letting one file own the whole mirror.
+ */
+const MULTIPART_CONCURRENCY = 4;
+
+/**
+ * Bytes-in-flight backpressure: run `fn` once there is room for `bytes`.
+ *
+ * Deliberately tiny and local — this is a budget, not a scheduler. The claim is
+ * clamped to the budget so an oversized transfer waits for an EMPTY pipe and
+ * then runs alone rather than blocking forever, and every waiter is woken on
+ * release (they re-check, and the ones that still do not fit queue again).
+ */
+class BytesInFlight {
+  private used = 0;
+  private waiters: Array<() => void> = [];
+
+  constructor(private readonly budget: number) {}
+
+  async run<T>(bytes: number, fn: () => Promise<T>): Promise<T> {
+    const claim = Math.max(0, Math.min(bytes || 0, this.budget));
+    while (this.used > 0 && this.used + claim > this.budget) {
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+    }
+    this.used += claim;
+    try {
+      return await fn();
+    } finally {
+      this.used -= claim;
+      const woken = this.waiters;
+      this.waiters = [];
+      for (const resolve of woken) resolve();
+    }
+  }
+}
+
+/**
+ * Run the FIRST item alone, then the rest through {@link runPool}.
+ *
+ * The first item of every pass is a probe, and what it probes is the SERVER, not
+ * the file: whether this server speaks the intent flow at all (404 ⇒ legacy for
+ * the whole session), whether it takes extracted text (404 ⇒ stop offering),
+ * whether the vault has storage left (402 ⇒ abandon the pass). Every one of
+ * those answers is remembered, so learning it before the fan-out costs one round
+ * trip instead of {@link BINARY_CONCURRENCY} of them — and, for the 402, means a
+ * full vault still aborts after exactly one refusal the way it always has.
+ *
+ * `worker` owns its errors, exactly as `runPool` requires; anything it throws is
+ * swallowed here for the same reason.
+ */
+async function runProbeFirst<T>(
+  items: readonly T[],
+  worker: (item: T, index: number) => Promise<void>,
+  opts: { concurrency: number; shouldStop?: () => boolean },
+): Promise<void> {
+  if (items.length === 0) return;
+  if (opts.shouldStop?.()) return;
+  try {
+    await worker(items[0], 0);
+  } catch {
+    /* the worker owns its own error reporting */
+  }
+  await runPool(items.slice(1), (item, i) => worker(item, i + 1), opts);
+}
 
 /** How long a `files-indexed` burst collects before the text pass runs. */
 const TEXT_DEBOUNCE_MS = 800;
@@ -612,6 +713,9 @@ export class AttachmentSync {
   /** sha256 → the blob the server holds for it. Rebuilt from each listing and
    *  extended by each upload, so the text pass can name a blob by content. */
   private readonly blobIdBySha = new Map<string, string>();
+  /** sha256 → the upload currently moving THOSE bytes. The claim that keeps
+   *  same-content dedupe working now that the lanes race — see {@link uploadOne}. */
+  private readonly uploadBySha = new Map<string, Promise<void>>();
   /** Every local binary path this pass saw, lowercased. What the rename
    *  adoption reads: a `files` row whose own path is NOT in here is a row this
    *  file left behind, not a second file holding the same bytes. Paths compare
@@ -783,80 +887,97 @@ export class AttachmentSync {
 
     let uploaded = 0;
     let downloaded = 0;
-    for (const a of toUpload) {
-      // Re-checked per file: a big vault is hundreds of awaits, and every one of
-      // them is a chance for the user to switch vaults. Continuing would upload
-      // the NEW vault's files into the OLD vault's blob store.
-      if (!this.current()) break;
-      // A file the server has already refused for good (too large, wrong type)
-      // is skipped without a round trip — see `permanentSkips`.
-      if (this.permanentSkips.has(a.sha256)) continue;
-      // An unregistered path while the delete queue is still trying to settle a
-      // window is very likely the arrival half of a rename it is about to pair.
-      // The WHOLE file waits, not just its registration: uploading it now would
-      // put its bytes on the server under no doc_id at all, and the next pass —
-      // which subtracts by sha — would never queue it again to fix that.
-      if (this.deferForRename(a)) {
-        this.setFileState(a.relPath, "queued");
-        continue;
-      }
-      this.setFileState(a.relPath, "syncing");
-      try {
-        if (await this.uploadOne(a)) {
-          uploaded++;
-          this.setFileState(a.relPath, "synced");
-        } else {
-          // The only `false` is a permanent refusal (413 too large, 415 wrong
-          // type), which `uploadOne` has already recorded in `permanentSkips`.
-          this.setFileState(a.relPath, "error");
-        }
-      } catch (e) {
-        if (e instanceof AbortPass) {
-          // Nothing else in this pass can succeed either. Downloads are skipped
-          // too: the vault is full, and the next pass will find the same state.
-          // This file is not broken — it is waiting, like every one behind it.
+    // Abandoned for the whole pass, not the one file (see {@link AbortPass}):
+    // the quota refusal is the vault's answer, so it becomes a flag the pool's
+    // `shouldStop` reads and every lane stops picking up new work at its next
+    // checkpoint. Downloads are skipped too, exactly as before.
+    let aborted: string | null = null;
+    const bytes = new BytesInFlight(BYTES_IN_FLIGHT_BUDGET);
+    await runProbeFirst(
+      toUpload,
+      async (a) => {
+        // A file the server has already refused for good (too large, wrong type)
+        // is skipped without a round trip — see `permanentSkips`.
+        if (this.permanentSkips.has(a.sha256)) return;
+        // An unregistered path while the delete queue is still trying to settle a
+        // window is very likely the arrival half of a rename it is about to pair.
+        // The WHOLE file waits, not just its registration: uploading it now would
+        // put its bytes on the server under no doc_id at all, and the next pass —
+        // which subtracts by sha — would never queue it again to fix that.
+        if (this.deferForRename(a)) {
           this.setFileState(a.relPath, "queued");
-          console.warn("[attachments] pass aborted:", e.reason);
-          return { uploaded, downloaded };
+          return;
         }
-        // Transient (offline, a 5xx). It stays `syncing`: the next pass runs it
-        // again, and `error` is reserved for a refusal retrying cannot fix.
-        console.error("[attachments] upload failed", a.relPath, e);
-      }
-    }
+        this.setFileState(a.relPath, "syncing");
+        try {
+          if (await bytes.run(a.size ?? 0, () => this.uploadOne(a))) {
+            uploaded++;
+            this.setFileState(a.relPath, "synced");
+          } else {
+            // The only `false` is a permanent refusal (413 too large, 415 wrong
+            // type), which `uploadOne` has already recorded in `permanentSkips`.
+            this.setFileState(a.relPath, "error");
+          }
+        } catch (e) {
+          if (e instanceof AbortPass) {
+            // Nothing else in this pass can succeed either. Downloads are skipped
+            // too: the vault is full, and the next pass will find the same state.
+            // This file is not broken — it is waiting, like every one behind it.
+            this.setFileState(a.relPath, "queued");
+            if (!aborted) console.warn("[attachments] pass aborted:", e.reason);
+            aborted = e.reason;
+            return;
+          }
+          // Transient (offline, a 5xx). It stays `syncing`: the next pass runs it
+          // again, and `error` is reserved for a refusal retrying cannot fix.
+          console.error("[attachments] upload failed", a.relPath, e);
+        }
+      },
+      {
+        concurrency: BINARY_CONCURRENCY,
+        // Re-checked per file: a big vault is hundreds of awaits, and every one
+        // of them is a chance for the user to switch vaults. Continuing would
+        // upload the NEW vault's files into the OLD vault's blob store.
+        shouldStop: () => aborted != null || !this.current(),
+      },
+    );
+    if (aborted) return { uploaded, downloaded };
     // One announcement for the whole wave (see `deps.onDownloadsQueued`), and
     // then exactly one settle per file — including the tail a cut-short pass
     // never reaches, which is what keeps the header's counter from hanging.
     if (downloads.length > 0) this.deps.onDownloadsQueued?.(downloads.length);
     let settled = 0;
-    for (const b of downloads) {
-      if (!this.current()) break;
-      // Its bytes are moving now. The dot was already `queued` from the rebuild
-      // above; this is the same queued → syncing → synced walk an upload makes.
-      if (b.relPath) this.setFileState(b.relPath, "syncing");
-      try {
-        await this.downloadOne(b);
-        downloaded++;
-        // Remember whose `files` row these bytes are. Not an optimisation: it is
-        // what puts a teammate's binary into the map the `hello` announces, and
-        // so what lets a later revocation of it be named and removed.
-        if (b.relPath && b.docId && !isUnderAttachments(b.relPath)) {
-          this.fileIds.set(b.relPath, b.docId);
-          this.deps.rememberFileId?.(b.relPath, b.docId);
+    await runProbeFirst(
+      downloads,
+      async (b) => {
+        // Its bytes are moving now. The dot was already `queued` from the rebuild
+        // above; this is the same queued → syncing → synced walk an upload makes.
+        if (b.relPath) this.setFileState(b.relPath, "syncing");
+        try {
+          await bytes.run(b.size ?? 0, () => this.downloadOne(b));
+          downloaded++;
+          // Remember whose `files` row these bytes are. Not an optimisation: it is
+          // what puts a teammate's binary into the map the `hello` announces, and
+          // so what lets a later revocation of it be named and removed.
+          if (b.relPath && b.docId && !isUnderAttachments(b.relPath)) {
+            this.fileIds.set(b.relPath, b.docId);
+            this.deps.rememberFileId?.(b.relPath, b.docId);
+          }
+          // It came FROM the server, so the server has it — and its row appears
+          // in the sidebar on the watcher echo, before the next pass would say so.
+          if (b.relPath) this.setFileState(b.relPath, "synced");
+          settled++;
+          this.deps.onDownloadSettled?.("ok");
+        } catch (e) {
+          console.error("[attachments] download failed", b.relPath, e);
+          // The dot stays `syncing` — like a failed upload, `error` is reserved
+          // for a refusal retrying cannot fix, and the next pass tries again.
+          settled++;
+          this.deps.onDownloadSettled?.("failed");
         }
-        // It came FROM the server, so the server has it — and its row appears
-        // in the sidebar on the watcher echo, before the next pass would say so.
-        if (b.relPath) this.setFileState(b.relPath, "synced");
-        settled++;
-        this.deps.onDownloadSettled?.("ok");
-      } catch (e) {
-        console.error("[attachments] download failed", b.relPath, e);
-        // The dot stays `syncing` — like a failed upload, `error` is reserved
-        // for a refusal retrying cannot fix, and the next pass tries again.
-        settled++;
-        this.deps.onDownloadSettled?.("failed");
-      }
-    }
+      },
+      { concurrency: BINARY_CONCURRENCY, shouldStop: () => !this.current() },
+    );
     // A pass the vault switch cut short still owes the counter every file it
     // announced. Reported as failures rather than silently dropped: the work was
     // queued and did not happen.
@@ -871,8 +992,40 @@ export class AttachmentSync {
    * uploaded (a dedupe does — the server has the bytes, which is the point).
    *
    * Throws {@link AbortPass} when the failure is the vault's, not the file's.
+   *
+   * Serialized BY CONTENT. The loop used to be serial, so two vault paths
+   * holding identical bytes uploaded once and the second found the sha already
+   * known; at {@link BINARY_CONCURRENCY} both lanes reach the intent together
+   * and both PUT the bytes. Claiming the sha first (the same shape as
+   * `drainText`'s `textDone` claim) puts the second lane behind the first, where
+   * the server answers its intent `deduped` and it moves no bytes at all — which
+   * is exactly the workload this pass optimises (a vault of near-duplicate
+   * binaries). Distinct content never waits: the key is the sha.
    */
   private async uploadOne(a: LocalAttachment): Promise<boolean> {
+    // `while`, not `if`: several lanes can be parked on one sha, and each must
+    // re-check — the first to wake claims it, the rest queue behind that claim.
+    while (this.uploadBySha.has(a.sha256)) {
+      await this.uploadBySha.get(a.sha256);
+      if (!this.current()) return false;
+      // The lane ahead may have learned these bytes are refused for good.
+      if (this.permanentSkips.has(a.sha256)) return false;
+    }
+    let release!: () => void;
+    const claim = new Promise<void>((resolve) => (release = resolve));
+    this.uploadBySha.set(a.sha256, claim);
+    try {
+      return await this.uploadOneClaimed(a);
+    } finally {
+      // Drop the claim BEFORE waking the waiters, so the first one out of the
+      // loop sees a free sha and takes it.
+      if (this.uploadBySha.get(a.sha256) === claim) this.uploadBySha.delete(a.sha256);
+      release();
+    }
+  }
+
+  /** {@link uploadOne}'s body, with this sha's claim already held. */
+  private async uploadOneClaimed(a: LocalAttachment): Promise<boolean> {
     const mime = mimeForPath(a.relPath);
     // A tree binary is a `files` row FIRST: the id has to exist before the
     // bytes, because it is what the blob carries as `doc_id` and what the
@@ -968,41 +1121,64 @@ export class AttachmentSync {
     const known = new Map(upload.parts.map((p) => [p.partNumber, p.url]));
     let parts: Array<{ partNumber: number; etag: string }> = [];
     const runParts = async () => {
-      const out: Array<{ partNumber: number; etag: string }> = [];
       const count = Math.max(1, Math.ceil(size / upload.partBytes));
-      for (let n = 1; n <= count; n++) {
-        if (!this.current()) throw new Error("vault changed mid-upload");
-        const range = {
-          start: (n - 1) * upload.partBytes,
-          end: Math.min(n * upload.partBytes, size),
-        };
-        // A part URL we were never given — or one whose presign died while the
-        // earlier parts were in flight — is re-minted rather than failing the
-        // whole file. `partsUrl` carries its own token.
-        let url = known.get(n) ?? (await this.freshPartUrl(upload.partsUrl, n, known));
-        let res = await this.putOnce(a, {
-          url,
-          method: upload.method ?? "PUT",
-          headers: upload.headers ?? {},
-          range,
-          loadBytes,
-          tolerate: EXPIRED_PRESIGN,
-        });
-        if (EXPIRED_PRESIGN.includes(res.status)) {
-          url = await this.freshPartUrl(upload.partsUrl, n, known);
-          res = await this.putOnce(a, {
-            url,
-            method: upload.method ?? "PUT",
-            headers: upload.headers ?? {},
-            range,
-            loadBytes,
-          });
-        }
-        const etag = res.etag;
-        if (!etag) throw new Error(`part ${n} of ${a.relPath} came back without an ETag`);
-        out.push({ partNumber: n, etag });
-      }
-      return out;
+      const numbers = Array.from({ length: count }, (_, i) => i + 1);
+      // Keyed by part number, never appended in finish order: with lanes racing,
+      // part 3 can answer before part 1, and S3 rejects a complete whose parts
+      // are not in ascending order. The map is assembled here, the ORDER below.
+      const etags = new Map<number, string>();
+      let failure: unknown = null;
+      await runPool(
+        numbers,
+        async (n) => {
+          const range = {
+            start: (n - 1) * upload.partBytes,
+            end: Math.min(n * upload.partBytes, size),
+          };
+          try {
+            // A part URL we were never given — or one whose presign died while
+            // the earlier parts were in flight — is re-minted rather than
+            // failing the whole file. `partsUrl` carries its own token, and
+            // `freshPartUrl` is per part, so lanes never contend for one URL.
+            let url = known.get(n) ?? (await this.freshPartUrl(upload.partsUrl, n, known));
+            let res = await this.putOnce(a, {
+              url,
+              method: upload.method ?? "PUT",
+              headers: upload.headers ?? {},
+              range,
+              loadBytes,
+              tolerate: EXPIRED_PRESIGN,
+            });
+            if (EXPIRED_PRESIGN.includes(res.status)) {
+              url = await this.freshPartUrl(upload.partsUrl, n, known);
+              res = await this.putOnce(a, {
+                url,
+                method: upload.method ?? "PUT",
+                headers: upload.headers ?? {},
+                range,
+                loadBytes,
+              });
+            }
+            const etag = res.etag;
+            if (!etag) throw new Error(`part ${n} of ${a.relPath} came back without an ETag`);
+            etags.set(n, etag);
+          } catch (e) {
+            // `runPool` swallows what a worker throws, and a silently missing
+            // part would be COMPLETED as a truncated file. So the first failure
+            // is kept, stops the remaining lanes, and is re-thrown below —
+            // exactly what the serial loop's throw used to do.
+            failure ??= e;
+          }
+        },
+        {
+          concurrency: MULTIPART_CONCURRENCY,
+          shouldStop: () => failure != null || !this.current(),
+        },
+      );
+      if (failure) throw failure;
+      if (!this.current()) throw new Error("vault changed mid-upload");
+      if (etags.size !== count) throw new Error(`${a.relPath}: only ${etags.size}/${count} parts`);
+      return numbers.map((n) => ({ partNumber: n, etag: etags.get(n) as string }));
     };
     parts = await runParts();
     await this.completeUpload(
@@ -1549,54 +1725,62 @@ export class AttachmentSync {
     const upload = this.deps.uploadText;
     const read = this.deps.fileText;
     if (!upload || !read) return;
-    for (const relPath of paths) {
-      if (!this.current()) return;
-      if (this.textSupported === false) return;
-      let text: Awaited<ReturnType<typeof read>>;
-      try {
-        text = await read(relPath);
-      } catch (e) {
-        console.warn("[attachments] extracted text unavailable", relPath, e);
-        continue;
-      }
-      // `pending` is the worker still working; anything else with no words is
-      // a file whose text is legitimately empty (a video, an unsupported type).
-      if (!text || text.status !== "ok" || text.chars <= 0 || !text.sha256) continue;
-      const blobId = this.blobIdBySha.get(text.sha256);
-      // Not uploaded yet — the byte mirror will name the blob, and its own
-      // completion re-queues this path.
-      if (!blobId) continue;
-      if (this.textDone.has(blobId)) continue;
-      const content = capText(text.text);
-      try {
-        await upload({
-          blobId,
-          docId: this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null,
-          sha256: text.sha256,
-          chars: content.length,
-          content,
-        });
-        this.textDone.add(blobId);
-      } catch (e) {
-        const status = errStatus(e);
-        if (status === 404) {
-          // The route is absent, or the blob is. Neither is worth another file.
-          this.textSupported = false;
-          this.pendingText.clear();
-          console.warn("[attachments] server takes no extracted text — stopping for this session");
+    await runProbeFirst(
+      paths,
+      async (relPath) => {
+        let text: Awaited<ReturnType<typeof read>>;
+        try {
+          text = await read(relPath);
+        } catch (e) {
+          console.warn("[attachments] extracted text unavailable", relPath, e);
           return;
         }
-        if (status === 413 || status === 409) {
-          // 413: our char cap still overflowed the server's byte cap (multibyte
-          // text). 409: the blob's bytes moved under us, and the new bytes get
-          // their own extraction. Both are permanent for THIS blob.
-          this.textDone.add(blobId);
-          console.warn(`[attachments] ${relPath} text refused (${status}) — not retrying`);
-          continue;
+        // `pending` is the worker still working; anything else with no words is
+        // a file whose text is legitimately empty (a video, an unsupported type).
+        if (!text || text.status !== "ok" || text.chars <= 0 || !text.sha256) return;
+        const blobId = this.blobIdBySha.get(text.sha256);
+        // Not uploaded yet — the byte mirror will name the blob, and its own
+        // completion re-queues this path.
+        if (!blobId) return;
+        if (this.textDone.has(blobId)) return;
+        const content = capText(text.text);
+        // Claimed BEFORE the send, not after: text describes BYTES, and two
+        // paths holding the same bytes are now in flight at the same time. The
+        // claim is given back below for a failure worth retrying.
+        this.textDone.add(blobId);
+        try {
+          await upload({
+            blobId,
+            docId: this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null,
+            sha256: text.sha256,
+            chars: content.length,
+            content,
+          });
+        } catch (e) {
+          const status = errStatus(e);
+          if (status === 404) {
+            // The route is absent, or the blob is. Neither is worth another file.
+            this.textSupported = false;
+            this.pendingText.clear();
+            console.warn("[attachments] server takes no extracted text — stopping for this session");
+            return;
+          }
+          if (status === 413 || status === 409) {
+            // 413: our char cap still overflowed the server's byte cap (multibyte
+            // text). 409: the blob's bytes moved under us, and the new bytes get
+            // their own extraction. Both are permanent for THIS blob.
+            console.warn(`[attachments] ${relPath} text refused (${status}) — not retrying`);
+            return;
+          }
+          this.textDone.delete(blobId);
+          console.warn("[attachments] text upload failed", relPath, e);
         }
-        console.warn("[attachments] text upload failed", relPath, e);
-      }
-    }
+      },
+      {
+        concurrency: BINARY_CONCURRENCY,
+        shouldStop: () => !this.current() || this.textSupported === false,
+      },
+    );
   }
 
   /** Debounced reconcile — collapses a burst of watcher events into one pass. */

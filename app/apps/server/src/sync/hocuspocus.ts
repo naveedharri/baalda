@@ -85,6 +85,9 @@ export type DocEditedHook = (
   vaultId: string,
   docId: string,
   userId: string | null,
+  /** The transaction origin's `source` tag (`bulk`, `mcp`, …) when the write came
+   *  from the server itself; undefined for an ordinary client edit. */
+  source?: string | null,
 ) => void;
 
 /**
@@ -330,8 +333,9 @@ export function createSyncServer(
       // update) lands as `{}`, i.e. anonymous.
       if (onDocEdited) {
         try {
-          const editorId = (data.context as Partial<SyncContext> | undefined)?.userId ?? null;
-          onDocEdited(parsed.vaultId, parsed.docId, editorId);
+          const ctx = data.context as (Partial<SyncContext> & { source?: string }) | undefined;
+          const editorId = ctx?.userId ?? null;
+          onDocEdited(parsed.vaultId, parsed.docId, editorId, ctx?.source ?? null);
         } catch (err) {
           console.error("onDocEdited hook failed:", err);
         }

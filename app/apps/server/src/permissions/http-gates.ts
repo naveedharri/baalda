@@ -9,6 +9,7 @@ import {
   isLocked,
   resolveAccessForUser,
   vaultBaseline,
+  type ResolverCache,
 } from "./resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "./vault-docs.js";
 
@@ -60,6 +61,9 @@ export async function canEditFolder(
   userId: string,
   folderId: string,
   db: Queryable = defaultPool,
+  /** Request-scoped memo for the per-vault / per-folder inputs. Never changes
+   *  the answer — see `permissions/resolver.ts ResolverCache`. */
+  cache?: ResolverCache,
 ): Promise<boolean> {
   const { rows } = await db.query<{
     created_by: string | null;
@@ -73,16 +77,22 @@ export async function canEditFolder(
   const row = rows[0];
   if (!row) return false;
 
-  const role = await orgRole(row.organization_id, userId, db);
+  const role = cache
+    ? await cache.role(db, row.organization_id, userId)
+    : await orgRole(row.organization_id, userId, db);
   if (role === null) return false; // not a member of the vault
 
   // Overlays first — they outrank the role below, because what the Access panel
   // sets applies to whoever set it.
-  const chain = await ancestorFolderIds(db, folderId);
+  const chain = cache
+    ? await cache.ancestors(db, folderId)
+    : await ancestorFolderIds(db, folderId);
   if (await isDenied(db, "user", userId, null, chain)) return false;
   if (await isLocked(db, userId, null, chain)) return false;
   const itemPrivate = await isDenied(db, "org", row.organization_id, null, chain);
-  const baseline = await vaultBaseline(db, row.organization_id);
+  const baseline = cache
+    ? await cache.baseline(db, row.organization_id)
+    : await vaultBaseline(db, row.organization_id);
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;
@@ -91,9 +101,9 @@ export async function canEditFolder(
   // shortcuts AND the creator rule, and let the share lookup decide — that is
   // how a folder marked Shared still lifts someone out of any of the three.
   if (itemPrivate || readOnlyVault || sealedVault) {
-    const ctx = await buildAccessContext("folder", folderId, db);
+    const ctx = await buildAccessContext("folder", folderId, db, cache);
     if (!ctx) return false;
-    return (await resolveAccessForUser(ctx, userId, role, db)).permission === "edit";
+    return (await resolveAccessForUser(ctx, userId, role, db, cache)).permission === "edit";
   }
   // A never-shared vault skips only the role shortcut; the creator rule below
   // is the private-by-default space, so it has to stay ordered this way round.
@@ -101,9 +111,9 @@ export async function canEditFolder(
   if (row.created_by && row.created_by === userId) return true;
 
   // Else: an explicit user/team edit share on the folder or an ancestor.
-  const ctx = await buildAccessContext("folder", folderId, db);
+  const ctx = await buildAccessContext("folder", folderId, db, cache);
   if (!ctx) return false;
-  const resolved = await resolveAccessForUser(ctx, userId, role, db);
+  const resolved = await resolveAccessForUser(ctx, userId, role, db, cache);
   return resolved.permission === "edit";
 }
 
@@ -308,14 +318,15 @@ export async function canCreateIn(
   vaultId: string,
   folderId: string | null,
   db: Queryable = defaultPool,
+  cache?: ResolverCache,
 ): Promise<boolean> {
-  if (folderId) return canEditFolder(userId, folderId, db);
+  if (folderId) return canEditFolder(userId, folderId, db, cache);
 
   const org = await vaultOrg(vaultId, db);
   if (!org) return false;
-  const role = await orgRole(org, userId, db);
+  const role = cache ? await cache.role(db, org, userId) : await orgRole(org, userId, db);
   if (role === null) return false; // not a member of the vault
-  return vaultRootWritable(userId, org, db);
+  return vaultRootWritable(userId, org, db, cache);
 }
 
 /**
@@ -343,8 +354,11 @@ export async function vaultRootWritable(
   userId: string,
   organizationId: string,
   db: Queryable = defaultPool,
+  cache?: ResolverCache,
 ): Promise<boolean> {
-  const posture = await vaultBaseline(db, organizationId);
+  const posture = cache
+    ? await cache.baseline(db, organizationId)
+    : await vaultBaseline(db, organizationId);
   if (posture !== "view" && posture !== "sealed") return true;
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM shares

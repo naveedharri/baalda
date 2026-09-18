@@ -15,6 +15,7 @@
 //
 // Pure: all timers are injectable, so the unit tests drive it deterministically.
 
+import { useBulkPath } from "./pool";
 import type { DocSyncState, SyncProgress, SyncProgressPhase } from "./vaultScope";
 
 /** The write surface a bulk phase uses to report itself. */
@@ -59,6 +60,25 @@ export interface SyncProgressReporterOptions {
   onDocState: (patch: Record<string, DocSyncState | null>) => void;
   /** Minimum gap between emissions. Default 100ms (≈10 store writes/second). */
   throttleMs?: number;
+  /**
+   * Minimum gap between emissions while a BULK phase is running. Default 300ms
+   * (≈4 store writes/second).
+   *
+   * A bulk phase is one whose total is at or above the engine's own bulk
+   * threshold (`useBulkPath`) — the same 25 that decides whether the work takes
+   * the batch path — so this needs no wiring: the phase that declared the
+   * denominator has already said how big it is.
+   *
+   * Why slower when there is MORE to report: each emission is a Zustand write
+   * that re-renders the sidebar and the corner pill, and during a 5,000-note
+   * import the app is competing with the indexer and the bridge for the main
+   * thread. Syncthing documents the same cost and lets you turn progress off
+   * entirely; NN/g finds ~4 updates a second is already past the point where a
+   * determinate bar reads as smooth. The counters themselves are unaffected —
+   * only how often the screen is told about them — and a phase change, a
+   * `flush()` and the run's final emission stay immediate.
+   */
+  bulkThrottleMs?: number;
   now?: () => number;
   setTimeoutImpl?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimeoutImpl?: (h: ReturnType<typeof setTimeout>) => void;
@@ -77,6 +97,7 @@ export class SyncProgressReporter implements SyncProgressSink {
   private readonly onProgress: (p: SyncProgress | null) => void;
   private readonly onDocState: (patch: Record<string, DocSyncState | null>) => void;
   private readonly throttleMs: number;
+  private readonly bulkThrottleMs: number;
   private readonly nowFn: () => number;
   private readonly setT: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly clearT: (h: ReturnType<typeof setTimeout>) => void;
@@ -94,6 +115,7 @@ export class SyncProgressReporter implements SyncProgressSink {
     this.onProgress = opts.onProgress;
     this.onDocState = opts.onDocState;
     this.throttleMs = opts.throttleMs ?? 100;
+    this.bulkThrottleMs = opts.bulkThrottleMs ?? 300;
     this.nowFn = opts.now ?? (() => Date.now());
     this.setT = opts.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearT = opts.clearTimeoutImpl ?? ((h) => clearTimeout(h));
@@ -185,10 +207,16 @@ export class SyncProgressReporter implements SyncProgressSink {
     this.onProgress(null);
   }
 
+  /** The window this phase reports at — see {@link SyncProgressReporterOptions.bulkThrottleMs}. */
+  private window(): number {
+    return useBulkPath(this.current.total) ? this.bulkThrottleMs : this.throttleMs;
+  }
+
   private schedule(immediate: boolean): void {
     if (this.disposed || this.timer) return;
+    const window = this.window();
     const since = this.nowFn() - this.lastEmitAt;
-    if (immediate || since >= this.throttleMs) {
+    if (immediate || since >= window) {
       this.emit();
       return;
     }
@@ -197,7 +225,7 @@ export class SyncProgressReporter implements SyncProgressSink {
     this.timer = this.setT(() => {
       this.timer = null;
       this.emit();
-    }, this.throttleMs - since);
+    }, window - since);
   }
 
   private emit(): void {

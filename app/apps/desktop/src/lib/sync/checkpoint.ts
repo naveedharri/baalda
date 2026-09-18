@@ -46,6 +46,18 @@ export interface CheckpointOptions<T> {
   everyItems?: number;
   /** Flush at most this long after the first pending `touch()`. Default 750ms. */
   everyMs?: number;
+  /**
+   * The same window while a BULK run is active ({@link Checkpointer.setBulk}).
+   * Default 3000ms.
+   *
+   * The file is rewritten WHOLE on every flush — ~500 KB at 5,000 notes — so a
+   * long run was paying a temp-write + rename at least every 750 ms for its
+   * whole duration, most of them for a map that had barely moved. The item
+   * trigger is untouched, and it is the one that bounds what a `kill -9` loses;
+   * this only stretches the idle half of the rule, for the phase where items
+   * are streaming anyway.
+   */
+  everyMsBulk?: number;
   setTimeoutImpl?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimeoutImpl?: (h: ReturnType<typeof setTimeout>) => void;
 }
@@ -64,6 +76,9 @@ export class Checkpointer<T> {
    *  knows how big this vault's map actually is. */
   private everyItems: number;
   private readonly everyMs: number;
+  private readonly everyMsBulk: number;
+  /** Is a bulk run in progress? See {@link Checkpointer.setBulk}. */
+  private bulk = false;
   private readonly setT: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly clearT: (h: ReturnType<typeof setTimeout>) => void;
 
@@ -81,6 +96,7 @@ export class Checkpointer<T> {
     this.snapshotFn = opts.snapshot;
     this.everyItems = Math.max(1, opts.everyItems ?? 25);
     this.everyMs = Math.max(0, opts.everyMs ?? 750);
+    this.everyMsBulk = Math.max(0, opts.everyMsBulk ?? 3000);
     this.setT = opts.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearT = opts.clearTimeoutImpl ?? ((h) => clearTimeout(h));
   }
@@ -97,6 +113,19 @@ export class Checkpointer<T> {
     if (!this.disposed && this.pending >= this.everyItems) void this.flush();
   }
 
+  /**
+   * A bulk run started (`true`) or ended (`false`).
+   *
+   * Only the TIME window moves: while a run is live the batch trigger is doing
+   * the flushing anyway, and every write the timer adds on top of it is a whole
+   * re-serialization of a map the batch is about to persist regardless. The
+   * caller still flushes explicitly at the end of each phase, so nothing is left
+   * owed when this goes back to `false`.
+   */
+  setBulk(active: boolean): void {
+    this.bulk = active;
+  }
+
   /** Note that `n` units of work happened. Flushes when the batch fills, else
    *  arms the time window. Never awaited by the caller — that's the point. */
   touch(n = 1): void {
@@ -111,7 +140,7 @@ export class Checkpointer<T> {
       this.timer = this.setT(() => {
         this.timer = null;
         void this.flush();
-      }, this.everyMs);
+      }, this.bulk ? this.everyMsBulk : this.everyMs);
     }
   }
 

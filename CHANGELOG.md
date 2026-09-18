@@ -8,6 +8,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Make a vault local only (server + desktop).** `GET /api/orgs/:orgId/unsync-preview`
+  (owner; counts notes/files/folders/`attachmentBytes`/members/publicLinks/mcpTokens/
+  checkpoints plus the live `subscription` `{status, currentPeriodEnd, cancelAtPeriodEnd}`),
+  `POST /api/orgs/:orgId/unsync` (`{confirmName}`; 409 `name_mismatch` and NOTHING is
+  touched, 403 `owner_only`, 404 `vault_not_found`, 502 `subscription_cancel_failed`), and
+  `GET /api/orgs/:orgId/status` (404 `vault_not_found` vs 403 `not_a_member` — the one probe
+  that tells "the owner made it local only" apart from "that folder is someone else's").
+  The teardown is `deleteVaultEverywhere`, SHARED with `DELETE /api/orgs/:orgId` so a second
+  hand-written purge cannot drift from its table list: money first (a provider that will not
+  cancel aborts with a 502 before anything is destroyed), then the rows, then every session's
+  `activeOrganizationId` nulled. `GET /api/folders|/notes|/files` now answer **404
+  `vault_not_found`** for a vault row that is gone instead of `200 []` — an empty listing
+  reads as "everything you hold was revoked" and the inbound planner would remove the lot,
+  so the listing has to throw. Desktop: a danger-zone action in Vault Settings behind a
+  type-the-name confirm, `lib/vault/unsyncPlan.ts` for the local half, a
+  `VaultUnsyncedBanner` and `stampedOrgGone` in the store for a folder whose vault is gone.
+  The `.md` files on disk are never touched.
+- **Bulk note deletes.** `POST /api/vaults/:vaultId/notes/delete-batch` soft-deletes up to
+  `batchMaxNotes` ids in one request: scoped to the vault (an id with no live `notes` row
+  here never reaches the resolver), per-doc `effectivePermission` through the shared
+  `ResolverCache`, `NoteDeleteResult` `deleted` | `denied` | `error` per id, ONE
+  `registry-changed` for the batch, and `evictDoc` off the response path. The desktop's
+  `registry.deletePaths` takes it above `BULK_THRESHOLD_DOCS`.
 - **Bulk sync engine (server + desktop).** Above `BULK_THRESHOLD_DOCS` (25) the desktop
   registers folders/notes/files through `POST /api/vaults/:id/{folders,notes,files}/batch`,
   pushes content through `POST /api/vaults/:id/docs/batch` (base64 Yjs V1, per-item
@@ -230,6 +253,52 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `src/__tests__/csp.test.ts`.
 
 ### Performance
+- **Batched sync is no longer only the first-enable path.** The live import
+  (`runLocalChangePush`, the debounced drain of notes that arrive while the app is open)
+  and `runBulkSync` both route through `DocBatchPusher` once a run holds at least
+  `BULK_THRESHOLD_DOCS` (25) docs, so an import lands in batches instead of one WebSocket
+  connect per note. `DocBatchPusher` reports `deferred` (items the run did not finish, which
+  the session re-queues) apart from `transportError` (the whole request failed — a 404 on a
+  bulk route is still the terminal `server_too_old`), and the registry's new
+  `noteServerCreated` hook — fed by `createNote`'s **201 created vs 200 adopted** answer, the
+  single-note twin of the batch route's `created`/`adopted` — hands the session the ids the
+  server just made, which hold no CRDT and can therefore be seeded in bulk rather than pulled.
+- **Attachments transfer in parallel.** `BINARY_CONCURRENCY` 6 under a 32 MiB
+  `BYTES_IN_FLIGHT_BUDGET` (six large videos at width 6 would otherwise be 1.2 GB in flight),
+  `MULTIPART_CONCURRENCY` 4 within a single file, and a probe-first pass that asks what the
+  server already holds before reading bytes off disk.
+- **Disk deletes are one round trip.** The blast-radius cap (`max(5, ceil(mapped * 0.2))`) is
+  judged FIRST — before any trash copy or server call — the recovery copies and the local
+  deletes then run pooled instead of serially, and the server rows go through the new
+  `delete-batch` above the bulk threshold. Write-all-then-delete still holds per note: a doc
+  whose bytes could not be kept never reaches the delete.
+- **Hocuspocus `flushDelay` 300 ms** (`FLUSH_DELAY_MS`) instead of per-update sends, with an
+  explicit `flushPending` on every deliberate teardown (destroy, token-refresh reconnect) so
+  the last window's ops cannot be dropped by the close.
+- **The registry listings are prefetched** (`prefetchListings`/`takeListings`): the folder and
+  paged note reads start during the connect window and are consumed once by the pull.
+- **`settleServerEmpty` asks `fileStat`** rather than reading the file, pooled 8 wide; a doc is
+  only settled when the file AND the local doc are empty, so a failed `materializeContent`
+  cannot badge a 0-byte file as synced.
+- **Progress and checkpoint cadence follow the bulk run**, not each item, and `patchTitles` is
+  bounded: above `PATCH_TITLES_MAX` paths it does one `refreshTitles` instead of that many
+  concurrent `get_note_meta` invokes contending for the Rust index mutex, and below it runs
+  through a pool rather than an unbounded `Promise.all`.
+- **Registry pages up to `PAGE_LIMIT_MAX` (5000)**, and `writeConfig` skips a rewrite whose
+  bytes are identical — a 5,000-note `.context/config.json` is ~500 KB and a checkpoint fires
+  on a timer as well as a count, so most ticks during a bulk run were re-serializing an
+  unchanged map several times a second.
+- **Server: `docs/batch` defers indexing.** Index work is queued and drained at a quiet point
+  (`flushIndexQueue`) instead of running inline per doc; `registry-changed` is coalesced per
+  vault inside the vault channel; and a bulk push arms no version timers at all
+  (`NO_VERSION_SOURCES`), so an import cannot schedule one idle-capture per note.
+- **Server: `ResolverCache` + an `unnest` register.** `registerNotes` inserts a chunk with one
+  `INSERT … SELECT FROM unnest(…) ON CONFLICT` and the permission algebra memoises its inputs
+  across the batch, so 200 notes cost ~10 queries rather than per-note round trips.
+- **`PG_POOL_MAX` default 20 → 30.** During an import a registration batch holds one slot, each
+  pushed doc up to two, a bootstrap page one (×`BOOTSTRAP_CONCURRENCY`) and each vault-channel
+  backfill runs 6 wide; a couple of importers plus a few joining devices reached 20, after
+  which `connectionTimeoutMillis` failed requests at 5 s while Postgres itself was idle.
 - **Time to connect, on launch and on every vault switch.** The vault channel is
   now opened during the PRIME window, in parallel with `registry.reconcile()`,
   instead of after it (`docSession.ts enable`). The collection id is the only

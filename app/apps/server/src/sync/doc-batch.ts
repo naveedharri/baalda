@@ -3,7 +3,7 @@ import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
 import { formatDocName } from "./doc-name.js";
 import type { SyncContext } from "./hocuspocus.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
-import { indexDoc } from "../index/indexer.js";
+import { indexDoc, scheduleIndex } from "../index/indexer.js";
 
 /**
  * The server-side CRDT write path, shared by the MCP tools (`mcp/doc-writer.ts`)
@@ -27,9 +27,38 @@ const CONTENT_FIELD = "content";
  *  attribution and any future origin-based filter can tell them apart. */
 export const BULK_ORIGIN = "bulk";
 
+/**
+ * Origin tag for a bulk **seed** — a `docs/batch` item the server accepted under
+ * `expectEmpty`, i.e. one whose doc provably held NO text immediately before the
+ * write (re-checked under the per-doc lock, on both the live and the detached
+ * path).
+ *
+ * Split out from {@link BULK_ORIGIN} because "came in through the batch route"
+ * and "has no prior state" stopped being the same thing: the desktop now routes
+ * its LIVE local-change drain through the same endpoint once enough notes
+ * changed at once, with `expectEmpty: false` — a real diff-merge into docs that
+ * already hold server state. Only a seed may skip version capture
+ * (`versions/capture.ts NO_VERSION_SOURCES`); a merge captures exactly like a
+ * single Hocuspocus write, however many notes a tool touched in one go.
+ */
+export const BULK_SEED_ORIGIN = "bulk-seed";
+
 /** Who is behind a server-side write, for attribution (versions, last-edited). */
 export interface DocActor {
   userId?: string | null;
+  /**
+   * Where the write came from — {@link BULK_ORIGIN} for a `docs/batch` push,
+   * `mcp` for a tool call, absent for anything else.
+   *
+   * Carried so the version machinery can tell a person typing from a client
+   * uploading a file it already has: a bulk SEED ({@link BULK_SEED_ORIGIN}) arms
+   * no idle-capture timer, because a doc that just received its first copy of
+   * its own `.md` has no PRIOR state worth versioning and 5,000 of those armed
+   * 5,000 ten-minute timers that all fired at once. A non-seed bulk write
+   * ({@link BULK_ORIGIN}) is an ordinary merge and versions like any other edit.
+   * Attribution (`last_edited_by`) is unchanged either way.
+   */
+  source?: string | null;
 }
 
 /**
@@ -37,7 +66,12 @@ export interface DocActor {
  * identity. The live path needs no equivalent: it goes through Hocuspocus, whose
  * `onChange` already reports the editor via the transaction origin's context.
  */
-export type DocWrittenHook = (vaultId: string, docId: string, userId: string | null) => void;
+export type DocWrittenHook = (
+  vaultId: string,
+  docId: string,
+  userId: string | null,
+  source?: string | null,
+) => void;
 
 /**
  * Publishes a doc update to background vault subscribers — the same fan-out the
@@ -112,6 +146,22 @@ export interface DetachedOptions {
    * Returning false aborts with `conflict` and writes nothing.
    */
   precondition?: (doc: Y.Doc) => boolean;
+  /**
+   * Hand the re-index to the debounced queue instead of awaiting it here.
+   *
+   * The bulk push path sets this. Awaiting `indexDoc` inline costs a SECOND
+   * full `loadDocState` (another pool checkout, another REPEATABLE READ
+   * transaction, another `Y.mergeUpdates`, another `Y.Doc`) plus a synchronous
+   * `embed()` and one INSERT per wikilink — per doc, on the request's event
+   * loop, which is why other clients' sync stalled during an import. The LIVE
+   * Hocuspocus write path has always used `scheduleIndex` (`hocuspocus.ts`
+   * onChange); this makes the two write paths consistent rather than divergent.
+   *
+   * Search is then eventually consistent for a batch push — a test that needs a
+   * quiet point calls `flushIndexQueue()`. MCP writes deliberately keep the
+   * inline await: a tool that writes and then searches must see its own write.
+   */
+  deferIndex?: boolean;
 }
 
 /**
@@ -164,11 +214,12 @@ export async function applyDetached(
       console.warn(`[doc-batch] failed to publish update for ${docId}`, err);
     }
     // Keep search/graph in sync (best-effort; never fail the write on it).
-    await indexDoc(docId).catch(() => {});
+    if (opts.deferIndex) scheduleIndex(docId);
+    else await indexDoc(docId).catch(() => {});
     // Attribution + version capture, the detached counterpart of the sync
     // server's `onDocEdited`.
     try {
-      opts.hooks?.onDocWritten?.(vaultId, docId, userId);
+      opts.hooks?.onDocWritten?.(vaultId, docId, userId, actor?.source ?? null);
     } catch (err) {
       console.warn(`[doc-batch] onDocWritten hook failed for ${docId}`, err);
     }
@@ -248,6 +299,12 @@ export async function applyDocPush(
   actor?: DocActor,
 ): Promise<DocApplyResult> {
   const { docId, update, expectEmpty } = item;
+  // A SEED is precisely the `expectEmpty` case, and that claim is re-checked
+  // below inside the lock (live: the text must still be empty; detached: the
+  // `isEmpty` precondition) — so if this write lands at all, the doc held no
+  // text before it. Everything else through this route is a merge into prior
+  // state and must version like a single live write. See {@link BULK_SEED_ORIGIN}.
+  const source = expectEmpty ? BULK_SEED_ORIGIN : BULK_ORIGIN;
   try {
     const outcome = await withDocLock(docId, async () => {
       const live = runtime?.server.hocuspocus.documents.get(formatDocName(vaultId, docId));
@@ -259,7 +316,7 @@ export async function applyDocPush(
         // origin.context : {}`, so a string origin is permanently anonymous.
         const origin: LocalTransactionOrigin = {
           source: "local",
-          context: { source: BULK_ORIGIN, userId: actor?.userId ?? null },
+          context: { source, userId: actor?.userId ?? null },
         };
         const captured: Uint8Array[] = [];
         const capture = (u: Uint8Array) => captured.push(u);
@@ -273,10 +330,19 @@ export async function applyDocPush(
         }
         return captured.length === 0 ? ("skipped" as const) : ("applied" as const);
       }
-      return applyDetached(vaultId, docId, (doc) => Y.applyUpdate(doc, update, BULK_ORIGIN), actor, {
-        hooks: runtime?.hooks,
-        precondition: expectEmpty ? isEmpty : undefined,
-      });
+      return applyDetached(
+        vaultId,
+        docId,
+        (doc) => Y.applyUpdate(doc, update, BULK_ORIGIN),
+        { ...actor, source },
+        {
+          hooks: runtime?.hooks,
+          precondition: expectEmpty ? isEmpty : undefined,
+          // See `DetachedOptions.deferIndex`: a 100-doc batch must not do a
+          // second CRDT load + merge + synchronous embed per doc inline.
+          deferIndex: true,
+        },
+      );
     });
     return { docId, outcome };
   } catch (err) {

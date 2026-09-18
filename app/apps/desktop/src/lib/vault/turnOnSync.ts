@@ -68,6 +68,15 @@ export interface TurnOnSyncInput {
    * we're not → block) that the binding alone would happily re-adopt.
    */
   stampedOrgId?: string | null;
+  /**
+   * The stamped vault is GONE from the server — `GET /api/orgs/:id/status`
+   * answered 404 (see `lib/vault/unsyncPlan.ts`). The refusal below exists to
+   * stop us adopting someone else's folder; a vault that no longer exists is
+   * nobody's, so there is nothing left to protect and refusing would strand the
+   * folder forever. Only ever set from a 404 — never from a network error, or a
+   * flaky connection would hand a live teammate's folder to the wrong account.
+   */
+  stampedOrgGone?: boolean;
 }
 
 export function planTurnOnSync(input: TurnOnSyncInput): TurnOnSyncAction {
@@ -95,10 +104,11 @@ export function planTurnOnSync(input: TurnOnSyncInput): TurnOnSyncAction {
       : { kind: "switch", orgId: stamped };
   }
 
-  // Stamped for a vault this account can't see: refuse to adopt. (This also
-  // catches a vault the account deleted server-side — inconvenient, but the
-  // safe default; the folder can be re-adopted by copying the notes out.)
-  if (stamped) return { kind: "blocked-foreign", orgId: stamped };
+  // Stamped for a vault this account can't see: refuse to adopt — UNLESS the
+  // server has confirmed that vault no longer exists, in which case the stamp is
+  // a tombstone and this folder is free to become a new vault (reusing the doc
+  // ids already in the local index, so its history survives the round trip).
+  if (stamped && !input.stampedOrgGone) return { kind: "blocked-foreign", orgId: stamped };
 
   return { kind: "create-vault" };
 }

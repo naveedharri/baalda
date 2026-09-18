@@ -289,8 +289,13 @@ async function twoPasses(opts: {
    *  ever removed when it is on this list; there is no listing absence to read
    *  for one. */
   named?: ReadonlySet<string>;
+  /** Re-wire an IPC mock AFTER `install` has laid down the fake disk (a slow or
+   *  refusing `trashNote`, say). `install` overwrites every mock, so a test that
+   *  patched one before calling this would silently get the default back. */
+  patch?: () => void;
 }) {
   install(opts.disk);
+  opts.patch?.();
   const reg1 = new VaultRegistry(fakeApi(opts.first));
   reg1.setInboundHost(recordingHost().host);
   await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
@@ -1505,5 +1510,75 @@ describe("a revoked binary that is already off disk", () => {
 
     expect(reg.getFileId("Team/gone.pdf")).toBeNull();
     expect(reg.hasFailures()).toBe(false);
+  });
+});
+
+// ── Bulk removals run pooled ───────────────────────────────────────────────
+// A folder a teammate deleted arrives here as one path per note. The loop that
+// executes them used to be serial — one IPC round trip per file with the disk
+// idle in between — while every decision about WHICH files go was already made
+// (and capped) by `planInbound`. These pin the two halves of that change: the
+// removals overlap, and one refusal is still just one file's.
+describe("inbound removals are pooled", () => {
+  /** 100 notes on the server so 20 deletions fit under `trashCap` (20%). */
+  function hundredNotes() {
+    return Array.from({ length: 100 }, (_, i) => ({ id: `d${i}`, rel_path: `n${i}.md` }));
+  }
+
+  it("runs removals concurrently, bounded", async () => {
+    const disk = new FakeDisk();
+    const notes = hundredNotes();
+    for (const n of notes) disk.notes.set(n.rel_path, n.id);
+
+    let inflight = 0;
+    let maxInflight = 0;
+    const gone = notes.slice(0, 20);
+    const { removed } = await twoPasses({
+      disk,
+      first: { notes },
+      then: { notes: notes.slice(20), tombstones: gone.map((n) => n.id) },
+      patch: () => {
+        const trash = vi.mocked(ipc.trashNote).getMockImplementation()!;
+        vi.mocked(ipc.trashNote).mockImplementation((async (...args: unknown[]) => {
+          inflight++;
+          maxInflight = Math.max(maxInflight, inflight);
+          await new Promise((r) => setTimeout(r, 1));
+          inflight--;
+          return (trash as (...a: unknown[]) => unknown)(...args);
+        }) as never);
+      },
+    });
+
+    expect(removed).toHaveLength(20);
+    // Serially this was pinned at 1; the pool is bounded at 8.
+    expect(maxInflight).toBeGreaterThan(1);
+    expect(maxInflight).toBeLessThanOrEqual(8);
+  });
+
+  it("a refusal on one removal leaves the other nineteen done", async () => {
+    const disk = new FakeDisk();
+    const notes = hundredNotes();
+    for (const n of notes) disk.notes.set(n.rel_path, n.id);
+    const gone = notes.slice(0, 20);
+    const { reg, removed } = await twoPasses({
+      disk,
+      first: { notes },
+      then: { notes: notes.slice(20), tombstones: gone.map((n) => n.id) },
+      patch: () => {
+        const trash = vi.mocked(ipc.trashNote).getMockImplementation()!;
+        vi.mocked(ipc.trashNote).mockImplementation((async (...args: unknown[]) => {
+          // The one file the OS refuses (locked by another process, say).
+          if (args[0] === "n7.md") throw new Error("permission denied");
+          return (trash as (...a: unknown[]) => unknown)(...args);
+        }) as never);
+      },
+    });
+
+    expect(removed).toHaveLength(19);
+    expect(removed.map((r) => r.path)).not.toContain("n7.md");
+    expect(disk.notes.has("n7.md")).toBe(true); // still there, to try again
+    // Recorded, not swallowed — and it is the only failure.
+    expect(reg.hasFailures()).toBe(true);
+    expect(reg.failures().map((f) => f.path)).toEqual(["n7.md"]);
   });
 });

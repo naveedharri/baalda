@@ -29,6 +29,7 @@ import {
   type SessionInfo,
   type Share,
   type VaultCheckpoint,
+  type UnsyncResult,
   type VaultDeleteResult,
   type VaultRevertResult,
   vaultOrgId,
@@ -66,7 +67,10 @@ import type { SettingsTab } from "./lib/settingsTabs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { planTurnOnSync } from "./lib/vault/turnOnSync";
+import { planUnsyncStamp } from "./lib/vault/unsyncPlan";
+import { forgetTeamAccessCache } from "./lib/teamAccessCache";
 import { planOpen } from "./lib/sync/openGate";
+import { IPC_CONCURRENCY, runPool } from "./lib/sync/pool";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
@@ -277,6 +281,15 @@ interface AppStore {
   organizations: Organization[];
   members: Member[];
   pendingInvitations: Invitation[];
+  /**
+   * The open folder is stamped for a vault the SERVER says no longer exists —
+   * its owner made it local only (or deleted it). Set only by
+   * `checkUnsyncedVaultStamp`, and only on a 404: a folder we merely can't reach
+   * stays silent. Drives `VaultUnsyncedBanner`, which is the one way out of the
+   * `blocked-foreign` dead end (the stamp names an org that can never come back,
+   * so "Turn on sync" would refuse this folder forever).
+   */
+  vaultUnsynced: { organizationId: string; path: string } | null;
   userInvitations: Invitation[];
   syncEnabled: boolean;
   syncStatus: SyncStatus;
@@ -644,6 +657,29 @@ interface AppStore {
    *  vault's subscription — deleting a Pro vault stops it at the END of the
    *  period rather than instantly, and that date is the whole message (#111). */
   deleteRemoteVault: (organizationId: string) => Promise<VaultDeleteResult>;
+  /**
+   * Make a synced vault LOCAL ONLY (owner only): the server destroys everything
+   * it holds for the vault, and this device keeps every `.md` file, attachment
+   * and `.context/index.sqlite` row exactly where they are — including the CRDT
+   * log, so a later re-sync reuses the same doc ids and the history survives.
+   *
+   * Server first: a refusal (403, 409 `name_mismatch`, 502
+   * `subscription_cancel_failed`, offline) must leave this device untouched.
+   */
+  unsyncVault: (organizationId: string, confirmName: string) => Promise<UnsyncResult>;
+  /**
+   * Ask the server whether the open folder's stamp names a vault that still
+   * exists, and raise (or clear) `vaultUnsynced` accordingly. Cheap: a folder
+   * with no stamp, or one stamped for a vault we're a member of, never hits the
+   * network.
+   */
+  checkUnsyncedVaultStamp: () => Promise<void>;
+  /** Banner action: accept that the vault is gone and keep this folder as a
+   *  plain local vault. Clears the stamp and the binding; touches no file. */
+  keepUnsyncedVaultLocal: () => Promise<void>;
+  /** Banner action: clear the dead stamp and sync this folder up as a NEW
+   *  vault, reusing the doc ids in the local index so history survives. */
+  resyncUnsyncedVault: () => Promise<void>;
 
   /** Open a plain local folder as the current (unsynced) vault — leaving any
    *  synced vault's sync context behind. Used by the switcher's local rows
@@ -887,6 +923,59 @@ async function findExistingVaultFolder(orgId: string): Promise<string | null> {
 async function peekStampedOrgId(path: string): Promise<string | null> {
   const stamp = await ipc.peekVaultStamp(path).catch(() => null);
   return stamp?.organizationId ?? null;
+}
+
+/**
+ * Wipe the open folder's sync identity out of `.context/config.json`.
+ *
+ * **This one call is the whole "make local only" feature.** Skip it and
+ * `peekVaultStamp` keeps naming a vault that no longer exists, so
+ * `planTurnOnSync` answers `blocked-foreign` (`lib/vault/turnOnSync.ts`) and the
+ * folder can never sync again — the documented dead end this feature exists to
+ * remove.
+ *
+ * It deliberately does NOT go through `Registry.writeConfig`, which refuses a
+ * config with no `serverVaultId` and would silently keep the old file. What
+ * lands is a tombstone — `unsyncedAt` / `unsyncedFrom` — and nothing else:
+ * `organizationId`, `serverVaultId`, `docs`, `folders`, `files`, `pushed`,
+ * `baseline`, `authored` and `bootstrap` are all gone, which is what makes the
+ * folder read as completely unbound. (`VaultSyncConfig` drops unknown keys, so
+ * the two that remain are inert everywhere except a support transcript.)
+ *
+ * Retried once. If it still fails the server copy is already gone, so throwing
+ * would only report a failure for work that DID happen; the launch-time
+ * `/status` probe and its banner are the recovery net for that folder.
+ */
+/**
+ * Vaults this session has PROVED no longer exist on the server — either we
+ * unsynced them ourselves, or `/api/orgs/:id/status` answered 404 for them.
+ *
+ * Read by `turnOnSyncForCurrentVault` as `planTurnOnSync`'s `stampedOrgGone`:
+ * the refusal it lifts is there to stop us adopting a folder that belongs to
+ * someone else, and a vault that does not exist belongs to nobody. Only ever
+ * filled from a definite server answer — never from a failed request — because
+ * the cost of being wrong is uploading a teammate's whole folder into our own
+ * account. It survives a failed stamp clear, which is exactly the case where the
+ * refusal would otherwise strand the folder.
+ */
+const vaultsConfirmedGone = new Set<string>();
+
+async function clearVaultStamp(vault: ipc.VaultInfo, orgId: string): Promise<boolean> {
+  const tombstone = JSON.stringify({
+    unsyncedAt: new Date().toISOString(),
+    unsyncedFrom: orgId,
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await ipc.setVaultConfig(tombstone, vault.epoch);
+      return true;
+    } catch (e) {
+      if (attempt === 1) {
+        console.warn("[vault] couldn't clear the sync stamp after unsync", vault.path, e);
+      }
+    }
+  }
+  return false;
 }
 
 /** Drop a vault's remembered local folder (used when removing/deleting it). */
@@ -1180,6 +1269,17 @@ let authInitGen = 0;
 /** How long a click will wait for sync to prime before opening anyway. The
  *  prime is local-only (one config read), so this is a belt, not a budget: a bug
  *  must never wedge the user's first click. */
+/**
+ * Above this many changed notes in one watcher batch, the sidebar's title map is
+ * refreshed with ONE `list_note_titles` instead of one `get_note_meta` per path.
+ *
+ * 200: a per-path patch is cheaper than reading the whole vault's titles for the
+ * handful of files an edit or a small move touches, and ruinous for the
+ * thousands an import does — each `get_note_meta` takes the Rust index mutex,
+ * and the importer's own indexing is holding it.
+ */
+const PATCH_TITLES_MAX = 200;
+
 const SYNC_GATE_MS = 3000;
 
 /**
@@ -1398,7 +1498,87 @@ function vaultScopedSyncReset() {
     openTabs: [] as string[],
     // A folder's own stamp says nothing about the next folder.
     openFolderIsSynced: null as boolean | null,
+    // Same rule: the "this vault was made local only" verdict belongs to ONE
+    // folder, and leaving it up over the next one would accuse a healthy vault.
+    vaultUnsynced: null as { organizationId: string; path: string } | null,
   } satisfies Partial<AppStore>;
+}
+
+/**
+ * This device's half of "make local only", shared by the owner's own unsync and
+ * by the banner that meets the SAME fact on another device.
+ *
+ * Order is load-bearing and matches the design doc:
+ *
+ *   3. stop the sync layer (`disable()` → `teardown()` already stops the vault
+ *      channel, every per-doc provider, the uploader/bootstrap/batch-pusher, the
+ *      attachment mirror and presence, and resets the registry — there is no new
+ *      teardown code here);
+ *   4. clear the stamp — BEFORE forgetting the localStorage binding, so a crash
+ *      between the two leaves the more recoverable of the two states;
+ *   5. forget the bindings, but never `removeVaultLocally`: that switches away
+ *      to another vault, and the whole point is that we stay in this folder;
+ *   6. re-read session + vault list so the dead vault disappears from the app;
+ *   7. flip to Local in one `set()`, and open the sync gate the way a plain
+ *      local folder does (nothing is coming to prime it);
+ *   9. repaint.
+ *
+ * Nothing here touches the disk. No `ipc.deleteVault`, no recents removal:
+ * `.md` files, `attachments/`, `.context/index.sqlite` (CRDT log included),
+ * `.context/trash/`, `.context/types.json` and the account's keychain entry all
+ * survive untouched — which is what makes a later re-sync reuse the same doc ids.
+ *
+ * `folderPath` is where that vault lives on this device. When it is NOT the
+ * folder that is open right now, only the account-level bookkeeping runs: the
+ * stamp lives in the OPEN vault's `.context/`, so writing it would tombstone the
+ * wrong folder, and disabling sync would stop the vault the user is actually in.
+ * That folder heals itself the next time it is opened, via
+ * `checkUnsyncedVaultStamp`.
+ */
+async function unsyncLocalTeardown(
+  get: () => AppStore,
+  set: (partial: Partial<AppStore>) => void,
+  organizationId: string,
+  folderPath: string | null,
+): Promise<void> {
+  const vault = get().vault;
+  const isOpenFolder = vault != null && folderPath != null && vault.path === folderPath;
+
+  if (isOpenFolder) {
+    leaveVaultSync();
+    await clearVaultStamp(vault, organizationId);
+  }
+  forgetOrgVault(organizationId);
+  forgetLastVault(organizationId);
+  forgetTeamAccessCache(get().serverUrl, organizationId);
+
+  // The server unpinned the vault from our session (and the org is gone from
+  // the account), so pick both up rather than keep asking about a dead vault.
+  const refreshed = await authManager.currentSession().catch(() => null);
+  if (refreshed) set({ session: refreshed });
+  await get()
+    .refreshVault()
+    .catch((e: unknown) => console.warn("[vault] refresh after unsync failed", e));
+
+  if (!isOpenFolder) return;
+
+  set({
+    ...vaultScopedSyncReset(),
+    // Not `null`: `vaultScopedSyncReset` means "ask again", and here we KNOW
+    // the answer — this folder does not sync, and nothing will make it.
+    openFolderIsSynced: false,
+    members: [],
+    pendingInvitations: [],
+    orgBilling: null,
+    vaultUnsynced: null,
+  });
+  // A local folder's open gate opens at once: there is no prime coming to
+  // release it, and every note open would otherwise sit out the full belt.
+  armSyncGate();
+  resolveSyncGate();
+
+  await get().refreshTree();
+  await get().refreshTitles();
 }
 
 export const useStore = create<AppStore>((set, get) => ({
@@ -1686,10 +1866,24 @@ export const useStore = create<AppStore>((set, get) => ({
     // refresh.
     const md = changes.filter((c) => isNoteExt(c.path));
     if (md.length === 0) return;
+    // A big batch asks ONCE instead of per file. `get_note_meta` takes the Rust
+    // index mutex on every call, and a flat import of thousands of `.md` arrives
+    // here as one debounce flush — which used to fire that many concurrent
+    // invokes, all contending for the same lock the watcher's own 128-file index
+    // chunks are holding. `list_note_titles` is one call, one lock acquire, and
+    // above this many paths it is also less data than the patch would have been.
+    if (md.length > PATCH_TITLES_MAX) {
+      await get().refreshTitles();
+      return;
+    }
     const removed: string[] = [];
     const updates: ipc.NoteTitle[] = [];
-    await Promise.all(
-      md.map(async (c) => {
+    // Bounded, not an unbounded `Promise.all`: below the threshold above this is
+    // still up to 200 lock acquisitions, and eight in flight keeps the bridge
+    // busy without starving the indexer that is writing those same rows.
+    await runPool(
+      md,
+      async (c) => {
         if (c.kind === "removed") {
           removed.push(c.path);
           return;
@@ -1703,7 +1897,8 @@ export const useStore = create<AppStore>((set, get) => ({
           // Leave that row alone; the next full refresh (a structural batch or a
           // vault open) reconciles it.
         }
-      }),
+      },
+      { concurrency: IPC_CONCURRENCY, shouldStop: () => !sameVault(get, epoch) },
     );
     if (!sameVault(get, epoch)) return;
     const next = applyTitlePatch(get().titles, updates, removed);
@@ -2722,6 +2917,7 @@ export const useStore = create<AppStore>((set, get) => ({
   turnOnSyncForCurrentVault: async (name) => {
     const vault = get().vault;
     if (!vault) throw new Error("Open a vault first.");
+    const stampedOrgId = await peekStampedOrgId(vault.path);
     // Which vault this folder belongs to (if any) decides what happens — NOT
     // whether the account happens to have an active vault. See `planTurnOnSync`
     // for why: `activeOrganizationId` survives opening a plain local folder, so
@@ -2734,7 +2930,10 @@ export const useStore = create<AppStore>((set, get) => ({
       orgVaults: readOrgVaults(),
       // The folder's own stamp: heals a lost binding (switch back to the vault
       // this folder already is) and blocks adopting another account's folder.
-      stampedOrgId: await peekStampedOrgId(vault.path),
+      stampedOrgId: stampedOrgId,
+      // …unless the server has told us that vault is gone, in which case the
+      // stamp is a tombstone and refusing would strand the folder forever.
+      stampedOrgGone: stampedOrgId != null && vaultsConfirmedGone.has(stampedOrgId),
     });
     if (plan.kind === "blocked-foreign") {
       // Creating a vault here would upload every note in this folder into a
@@ -3261,6 +3460,100 @@ export const useStore = create<AppStore>((set, get) => ({
     // Then tear down the same local state as a device-level removal.
     await get().removeVaultLocally(organizationId);
     return result;
+  },
+
+  unsyncVault: async (organizationId, confirmName) => {
+    // 1. Server first. Anything thrown here — 403, a 409 `name_mismatch`, the
+    //    502 a refusing billing provider produces, or simply being offline —
+    //    propagates with NOTHING changed on this device, the same rule
+    //    `leaveVault` states. Only once this returns is the server copy gone.
+    const result = await authManager.api.unsyncVault(organizationId, confirmName);
+    // It is gone, and we watched it go: the stamp on its folder is a tombstone
+    // from here on, even if the clear below fails.
+    vaultsConfirmedGone.add(organizationId);
+    // 2. Where this vault lives here, captured BEFORE the binding is forgotten.
+    const folderPath = readOrgVaults()[organizationId] ?? null;
+    const label =
+      get().organizations.find((o) => o.id === organizationId)?.name ?? "This vault";
+    // Whether this is the folder on screen decides what the user still has to
+    // do, so read it BEFORE the teardown moves the state underneath.
+    const wasOpenFolder = folderPath != null && get().vault?.path === folderPath;
+    await unsyncLocalTeardown(get, set, organizationId, folderPath);
+    const folder = folderPath ? (folderPath.split("/").pop() ?? folderPath) : null;
+    // Neutral, not success: nothing was gained, and the one thing the user needs
+    // to hear is WHERE their notes still are.
+    //
+    // A folder that is NOT open keeps its stamp by design (`unsyncLocalTeardown`
+    // only clears the open one), and heals on its next open via
+    // `checkUnsyncedVaultStamp`. Say so, or the user is left thinking the job is
+    // finished while that folder still needs one more action before it can sync
+    // again.
+    toast(
+      folder
+        ? wasOpenFolder
+          ? `${label} is local only now. Your files are still in ${folder}.`
+          : `${label} is local only now. Your files are still in ${folder}. Open that folder to keep it local or turn sync back on.`
+        : `${label} is local only now. Your files were not touched.`,
+      "neutral",
+    );
+    return result;
+  },
+
+  checkUnsyncedVaultStamp: async () => {
+    const vault = get().vault;
+    if (!vault) return;
+    // Signed out we have no way to ask, and no right to conclude anything.
+    if (get().authStatus !== "signed-in") return;
+    const stampedOrgId = await peekStampedOrgId(vault.path);
+    // The cheap half: a folder with no stamp, or one stamped for a vault we are
+    // plainly a member of, is answered locally and never touches the network.
+    // `"unknown"` here is a placeholder — the two `ok` branches don't read it.
+    if (
+      planUnsyncStamp({
+        stampedOrgId,
+        knownOrgIds: get().organizations.map((o) => o.id),
+        statusAnswer: "unknown",
+      }) === "ok"
+    ) {
+      if (get().vaultUnsynced) set({ vaultUnsynced: null });
+      return;
+    }
+    const stamped = stampedOrgId as string;
+    // Never throws: an unreachable server answers `unknown`, which stays silent.
+    const status = await authManager.api.getOrgStatus(stamped);
+    // A vault switch while we asked: the answer is about the folder we left.
+    if (get().vault?.path !== vault.path) return;
+    const verdict = planUnsyncStamp({
+      stampedOrgId: stamped,
+      knownOrgIds: get().organizations.map((o) => o.id),
+      statusAnswer: status.kind,
+    });
+    if (verdict === "local-only") vaultsConfirmedGone.add(stamped);
+    set({
+      vaultUnsynced:
+        verdict === "local-only" ? { organizationId: stamped, path: vault.path } : null,
+    });
+  },
+
+  keepUnsyncedVaultLocal: async () => {
+    const pending = get().vaultUnsynced;
+    if (!pending) return;
+    // The server side already happened (somewhere else, or by the owner). All
+    // that is left is this device's half of the teardown — and it touches no
+    // file: the folder stays open, the notes stay put, the index survives.
+    await unsyncLocalTeardown(get, set, pending.organizationId, pending.path);
+    toast("This vault is a local folder now. Your files were not touched.", "neutral");
+  },
+
+  resyncUnsyncedVault: async () => {
+    const pending = get().vaultUnsynced;
+    if (!pending) return;
+    // Clear the dead stamp FIRST: with it in place `planTurnOnSync` answers
+    // `blocked-foreign` and refuses. Cleared, the folder belongs to nobody and
+    // turns into a brand-new vault — reusing the doc ids already in
+    // `.context/index.sqlite`, so every note keeps its identity and history.
+    await unsyncLocalTeardown(get, set, pending.organizationId, pending.path);
+    await get().turnOnSyncForCurrentVault();
   },
 
   // ---- Vault folder resolution ----
