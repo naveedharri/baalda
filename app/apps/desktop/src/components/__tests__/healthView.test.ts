@@ -37,6 +37,7 @@ import type {
   VaultStats,
 } from "../../lib/health/types";
 import { CHECK_DEFINITIONS } from "../../lib/health/checks";
+import { localAttachmentPresence } from "../../lib/health/useVaultHealth";
 
 function actions(): HealthActions {
   return {
@@ -100,7 +101,7 @@ function handlers(over: Partial<HealthHandlers> = {}): HealthHandlers {
 }
 
 const explanation: HealthExplanation = {
-  meaning: "The server refused this note because of its size.",
+  meaning: "The Remote Vault refused this note because of its size.",
   next: "Nothing — it will not retry until the note is smaller.",
   fixes: ["Split the note in two.", "Move the images into attachments."],
   safety: "only-here",
@@ -123,7 +124,7 @@ const localReport: HealthReport = {
     { id: "index", label: "Local index", state: "ok", headline: "12", detail: "i" },
     { id: "history", label: "Local history", state: "ok", headline: "3", detail: "h" },
     { id: "connection", label: "Connection", state: "off", headline: "Off", detail: "c" },
-    { id: "server", label: "Server", state: "off", headline: "Off", detail: "s" },
+    { id: "server", label: "Remote Vault", state: "off", headline: "Off", detail: "s" },
   ],
   counts: null,
   issues: [],
@@ -197,6 +198,16 @@ function allPassing(
   };
 }
 
+describe("local attachment detection", () => {
+  it("distinguishes hidden attachments, surfaced files, note-only vaults, and unknown reads", () => {
+    expect(localAttachmentPresence(1, 0)).toBe(true);
+    expect(localAttachmentPresence(0, 1)).toBe(true);
+    expect(localAttachmentPresence(0, 0)).toBe(false);
+    expect(localAttachmentPresence(null, 0)).toBeNull();
+    expect(localAttachmentPresence(0, null)).toBeNull();
+  });
+});
+
 describe("HealthView", () => {
   it("renders a local vault without a sync breakdown", () => {
     const html = render(snapshot());
@@ -237,6 +248,37 @@ describe("HealthView", () => {
     expect(html.indexOf("health-metrics")).toBeLessThan(html.indexOf("health-verdict"));
   });
 
+  it("organises advanced diagnostics around clear tools and safe actions", () => {
+    const html = render(snapshot({ checks: allPassing() }));
+    expect(html).toContain("Advanced diagnostics");
+    expect(html).toContain("Run all checks");
+    expect(html).toContain("Retry sync");
+    expect(html).toContain("Copy report");
+    expect(html).toContain("Inspect a note");
+    expect(html).toContain("Integrity checks");
+    expect(html).toContain("Recent sync activity");
+    expect(html).not.toContain("Sync path");
+    expect(html).not.toContain("health-pipeline");
+    expect(html).toContain(`${CHECK_DEFINITIONS.length} checks passed`);
+    expect(html).toContain("Sync retry is unavailable because this vault is local only.");
+  });
+
+  it("summarises the number of findings rather than the number of affected checks", () => {
+    const html = render(
+      snapshot({
+        checks: allPassing({
+          trash: {
+            id: "trash",
+            count: 412,
+            items: [{ path: "2026-09-16T10-00-00/note.md" }],
+          },
+        }),
+      }),
+    );
+    expect(html).toContain("412 findings");
+    expect(html).not.toContain("1 finding");
+  });
+
   it("separates inventory differences from content confirmation", () => {
     const html = render(
       snapshot({
@@ -268,8 +310,9 @@ describe("HealthView", () => {
     );
     expect(html).toContain("6 item paths differ");
     expect(html).toContain("Review differences");
-    expect(html).toContain("9 of 12 notes have confirmed content on the server");
-    expect(html).toContain("Current server view");
+    expect(html).toContain("9 of 12 notes have confirmed content on the Remote Vault");
+    expect(html).toContain("Current Remote Vault view");
+    expect(html).not.toMatch(/\bserver\b/i);
   });
 
   it("labels an offline server inventory as cached", () => {
@@ -289,7 +332,7 @@ describe("HealthView", () => {
         },
       }),
     );
-    expect(html).toContain("Last known server view");
+    expect(html).toContain("Last known Remote Vault view");
     expect(html).toContain("The same item paths are present in both places");
   });
 
@@ -316,7 +359,7 @@ describe("HealthView", () => {
               kind: "too-large",
               severity: "error",
               title: "Too large to sync",
-              why: "This note is 12.4 MB; the server accepts up to 10 MB.",
+              why: "This note is 12.4 MB; the Remote Vault accepts up to 10 MB.",
               remedies: ["open", "reveal", "delete"],
               code: null,
               ...issueBase,
@@ -338,45 +381,7 @@ describe("HealthView", () => {
   });
 });
 
-describe("HealthView — the pipeline", () => {
-  const count = (html: string) => (html.match(/class="health-node"/g) ?? []).length;
-
-  it("shows three cards while the local stages are fine", () => {
-    // Nobody opens this page to be told the index has twelve rows. The index
-    // and history stages stay out of the way until they are the problem.
-    const html = render(snapshot());
-    expect(count(html)).toBe(3);
-    expect(html).toContain("Files on disk");
-    expect(html).toContain("Connection");
-    // The model's word is "Server"; the page's is the reader's own vault.
-    expect(html).toContain("Remote vault");
-    expect(html).not.toContain(">Local index<");
-    expect(html).not.toContain(">Local history<");
-  });
-
-  it("expands to five, in order, when a local stage needs attention", () => {
-    const html = render(
-      snapshot({
-        report: {
-          ...localReport,
-          stages: localReport.stages.map((s) =>
-            s.id === "index" || s.id === "history" ? { ...s, state: "warn" as const } : s,
-          ),
-        },
-      }),
-    );
-    expect(count(html)).toBe(5);
-    expect(html).toContain("Local index");
-    expect(html).toContain("Local history");
-    // Surfaced deliberately, and it says so.
-    expect(html).toContain("shown because it needs attention");
-    expect(html).toContain("data-conditional");
-    // Natural position: disk, then index, then history, then connection.
-    expect(html.indexOf("Files on disk")).toBeLessThan(html.indexOf("Local index"));
-    expect(html.indexOf("Local index")).toBeLessThan(html.indexOf("Local history"));
-    expect(html.indexOf("Local history")).toBeLessThan(html.indexOf(">Connection<"));
-  });
-
+describe("HealthView — verdict details", () => {
   it("sets the server host as a chip instead of ending a sentence in it", () => {
     const html = render(
       snapshot({
@@ -640,12 +645,12 @@ describe("HealthIssues", () => {
           key: "doc-10",
           kind: "unregistered",
           severity: "warn",
-          title: "Not on the server yet",
+          title: "Not on the Remote Vault yet",
         },
       ],
     });
     expect(html).toContain("Too large");
-    expect(html).toContain("Not on server yet");
+    expect(html).toContain("Not uploaded yet");
     expect(html).toContain("Errors");
     expect(html).toContain("Warnings");
   });
@@ -653,7 +658,7 @@ describe("HealthIssues", () => {
   it("calms down to a single card when there is nothing to report", () => {
     const html = renderIssues({ issues: [] });
     expect(html).toContain("Nothing needs attention");
-    expect(html).toContain("Every note the server knows about is confirmed");
+    expect(html).toContain("Every note the Remote Vault knows about is confirmed");
   });
 });
 
@@ -671,7 +676,7 @@ describe("InspectionCard", () => {
     bytes: 4096,
     mtime: 1_699_999_000_000,
     historyBytes: 2048,
-    verdict: "Synced — the server confirmed this note's content.",
+    verdict: "Synced — the Remote Vault confirmed this note's content.",
     issue: null,
   };
   const card = (over: Partial<NoteInspection> = {}) =>
@@ -685,8 +690,8 @@ describe("InspectionCard", () => {
 
   it("leads with the verdict and lays the facts out underneath", () => {
     const html = card();
-    expect(html).toContain("Synced — the server confirmed this note&#x27;s content.");
-    expect(html).toContain("On server");
+    expect(html).toContain("Synced — the Remote Vault confirmed this note&#x27;s content.");
+    expect(html).toContain("On Remote Vault");
     expect(html).toContain("Waiting to push");
     expect(html).toContain("Has unsent edits");
     expect(html).toContain("History size");
@@ -698,7 +703,7 @@ describe("InspectionCard", () => {
   it("says there is no file rather than reporting a state for one", () => {
     const html = card({ exists: false });
     expect(html).toContain("There is no file at this path.");
-    expect(html).not.toContain("On server");
+    expect(html).not.toContain("On Remote Vault");
   });
 
   it("points at the issue row when this note has one", () => {
@@ -710,7 +715,7 @@ describe("InspectionCard", () => {
         kind: "upload-failed",
         severity: "error",
         title: "Couldn't upload",
-        why: "It did not reach the server.",
+        why: "It did not reach the Remote Vault.",
         remedies: ["retry"],
         code: null,
         ...issueBase,

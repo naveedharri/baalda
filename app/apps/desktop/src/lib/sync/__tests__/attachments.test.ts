@@ -228,6 +228,25 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(listServer).toHaveBeenCalledTimes(2);
   });
 
+  it("remembers a plan refusal without announcing it for a note-only vault", async () => {
+    const { deps } = makeDeps();
+    const listServer = vi.fn(async () => {
+      throw serverError(402, "attachment_sync_requires_pro");
+    });
+    const notify = vi.fn();
+    const onEntitlementBlocked = vi.fn();
+    const sync = new AttachmentSync({
+      ...deps,
+      listServer,
+      notify,
+      onEntitlementBlocked,
+    });
+
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(onEntitlementBlocked).toHaveBeenCalledWith(true);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("scheduleReconcile debounces a burst into a single pass", () => {
     const { deps } = makeDeps();
     const reconcile = vi.spyOn(AttachmentSync.prototype, "reconcile").mockResolvedValue({

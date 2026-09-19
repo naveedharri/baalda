@@ -5,6 +5,10 @@ import { useStore } from "../store";
 import { Banner } from "./Banner";
 import { UpgradeDialog } from "./UpgradeDialog";
 
+export function attachmentNoticeVisible(blocked: boolean, detected: boolean): boolean {
+  return blocked && detected;
+}
+
 /**
  * Persistent explanation for the attachment mirror's explicit Pro refusal.
  * The file remains fully usable from disk; only its cross-device copy is
@@ -30,25 +34,47 @@ export function AttachmentLocalOnlyNoticeView({
       className={`attachment-sync-notice attachment-sync-notice-${surface}`}
       role="status"
     >
-      <span>
-        <strong>Attachments are local only in this vault.</strong>{" "}
-        Notes still sync, and you can preview every supported file on this device.
+      <span className="attachment-sync-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M8.5 12.5 14 7a3 3 0 0 1 4.2 4.2l-7.1 7.1a5 5 0 0 1-7.1-7.1l7.5-7.5" />
+          <path d="m15.5 15.5 4 4m0-4-4 4" />
+        </svg>
+      </span>
+      <span className="attachment-sync-copy">
+        <strong className="attachment-sync-title">
+          Attachment sync requires Pro
+        </strong>
+        <span className="attachment-sync-body">
+          Notes still sync. Attachments stay on this device and remain available to
+          preview locally.
+        </span>
       </span>
       {(showUpgrade || onOpenHealth) && (
         <div className="banner-actions">
           {showUpgrade && onUpgrade && (
-            <button className="primary" onClick={onUpgrade}>
-              Upgrade to sync attachments
+            <button className="primary sm attachment-sync-cta" onClick={onUpgrade}>
+              Upgrade to Pro
             </button>
           )}
-          {onOpenHealth && <button onClick={onOpenHealth}>Open Health</button>}
+          {onOpenHealth && (
+            <button className="link-btn attachment-sync-health-link" onClick={onOpenHealth}>
+              Open Health
+            </button>
+          )}
         </div>
       )}
     </Banner>
   );
 }
 
-export function AttachmentSyncNotice({ surface = "preview" }: { surface?: "preview" | "health" }) {
+export function AttachmentSyncNotice({
+  surface = "preview",
+  detected = true,
+}: {
+  surface?: "preview" | "health";
+  /** False/unknown callers keep the notice hidden until a local attachment exists. */
+  detected?: boolean;
+}) {
   const blocked = useStore((s) => s.attachmentSyncBlocked);
   const billingEnabled = useStore((s) => s.billingConfig?.enabled === true);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
@@ -56,7 +82,7 @@ export function AttachmentSyncNotice({ surface = "preview" }: { surface?: "previ
   return (
     <>
       <AttachmentLocalOnlyNoticeView
-        show={blocked}
+        show={attachmentNoticeVisible(blocked, detected)}
         showUpgrade={billingEnabled}
         onUpgrade={() => setUpgradeOpen(true)}
         onOpenHealth={

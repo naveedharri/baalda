@@ -191,7 +191,7 @@ describe("verdict precedence", () => {
   it("reports `healthy` only when every note is confirmed", () => {
     const r = buildHealthReport(input(healthyVault(1204)));
     expect(r.verdict).toBe("healthy");
-    expect(r.headline).toBe("All 1,204 notes are on the server");
+    expect(r.headline).toBe("All 1,204 notes are on the Remote Vault");
     expect(r.detail).toContain("api.baalda.com");
     expect(r.detail).toContain("2 min ago");
     expect(r.counts).toEqual({
@@ -220,7 +220,7 @@ describe("verdict precedence", () => {
     expect(r.counts?.total).toBe(3);
     expect(r.counts?.synced).toBe(2);
     expect(r.verdict).toBe("attention");
-    expect(r.headline).toBe("1 note is not on the server");
+    expect(r.headline).toBe("1 note is not on the Remote Vault");
   });
 });
 
@@ -1053,9 +1053,9 @@ describe("classifyUploadReason", () => {
     );
     // `syncManager.ts` rejects with the terminal status as the message.
     expect(classifyUploadReason("no-access")).toContain("view-only");
-    expect(classifyUploadReason("deleted")).toContain("no row for this note");
+    expect(classifyUploadReason("deleted")).toContain("no record for this note");
     expect(classifyUploadReason("error")).toContain("connection");
-    expect(classifyUploadReason("Failed to fetch")).toContain("could not reach the server");
+    expect(classifyUploadReason("Failed to fetch")).toContain("could not reach the Remote Vault");
     expect(classifyUploadReason("HTTP 503")).toContain("error of its own");
   });
 

@@ -89,6 +89,7 @@ const sync = vi.hoisted(() => ({
   setColorListener: vi.fn(),
   setFailureListener: vi.fn(),
   recheckAttachmentEntitlement: vi.fn(),
+  checkAttachmentEntitlement: vi.fn(),
   announcePresence: vi.fn(),
 }));
 
@@ -280,6 +281,24 @@ describe("attachment entitlement — vault-scoped server verdict", () => {
 
     await useStore.getState().refreshMyBilling();
     expect(sync.recheckAttachmentEntitlement).toHaveBeenCalledOnce();
+    expect(sync.checkAttachmentEntitlement).toHaveBeenCalledOnce();
+  });
+
+  it("probes again when a still-Free account may have a stale server-policy verdict", async () => {
+    useStore.setState({
+      session: session(),
+      billingConfig: { enabled: true } as never,
+      myBilling: { vaults: [{ orgId: ORG, plan: "free" }] } as never,
+      attachmentSyncBlocked: false,
+    });
+    api.getMyBilling.mockResolvedValue({
+      vaults: [{ orgId: ORG, plan: "free" }],
+    } as never);
+
+    await useStore.getState().refreshMyBilling();
+
+    expect(sync.recheckAttachmentEntitlement).not.toHaveBeenCalled();
+    expect(sync.checkAttachmentEntitlement).toHaveBeenCalledOnce();
   });
 });
 

@@ -44,6 +44,14 @@
   /* Links (secondary accent) */
   --link: #3b82f6;
 
+  /* Text selection is its own interaction colour. Our editor lifts
+     drawSelection's wash above rich content, while native selection paints
+     behind text, so they need separate values for the two rendering paths. */
+  --selection-bg: #d8d3ff;
+  --selection-text: var(--text-primary);
+  --editor-selection-bg: rgba(127, 115, 255, 0.28);
+  --editor-selection-bg-inactive: rgba(127, 115, 255, 0.28);
+
   /* Brand — Baalda logo. Fixed identity colors (not themed): the
      bracket mark's dot + wordmark brackets are green; the mark tile is a
      dark app-icon square so the off-white brackets read in either theme. */
@@ -200,25 +208,36 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --bg-app: #101014;
-  --bg-surface: #1d1d24;
-  --bg-subtle: #17171c;
-  --bg-hover: #26262e;
-  --bg-active: #2f2f38;
+  /* Neutral charcoal layers: elevation gets lighter in small, predictable
+     steps, so cards and controls separate without purple-grey colour noise. */
+  --bg-app: #121214;
+  --bg-surface: #1c1c20;
+  --bg-subtle: #242429;
+  --bg-hover: #2b2b31;
+  --bg-active: #35353d;
 
-  --text-primary: #f2f2f5;
-  --text-secondary: #a6a6b2;
-  --text-tertiary: #6e6e78;
-  --text-faint: #55555f;
+  /* Off-white body copy is comfortable over long sessions. Secondary and
+     tertiary copy remain above 4.5:1 even on the lighter interaction layers. */
+  --text-primary: #ececf1;
+  --text-secondary: #b8b8c0;
+  --text-tertiary: #9d9da7;
+  --text-faint: #85858f;
 
-  --accent: #8f84ff;
-  --accent-hover: #a49bff;
+  --accent: #a69cff;
+  --accent-hover: #bbb4ff;
   --accent-soft: rgba(127, 115, 255, 0.18);
   --accent-soft-hover: rgba(127, 115, 255, 0.26);
   --accent-gradient: linear-gradient(135deg, #9a8fff 0%, #7f73ff 100%);
   --decor-gradient: linear-gradient(135deg, #7f73ff 0%, #ff6a3d 120%);
 
-  --link: #6ea8ff;
+  --link: #82b7ff;
+
+  --selection-bg: #384f83;
+  --selection-text: #f4f4f6;
+  /* drawSelection sits above editor text and opaque widgets. A restrained
+     navy overlay keeps selected body text at 7:1 and links at 4.5:1. */
+  --editor-selection-bg: rgba(53, 90, 159, 0.32);
+  --editor-selection-bg-inactive: rgba(53, 90, 159, 0.20);
 
   --danger-soft: rgba(229, 72, 77, 0.18);
   --success: #3cb883;
@@ -243,22 +262,27 @@
   :root:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
 
-    --bg-app: #101014;
-    --bg-surface: #1d1d24;
-    --bg-subtle: #17171c;
-    --bg-hover: #26262e;
-    --bg-active: #2f2f38;
+    --bg-app: #121214;
+    --bg-surface: #1c1c20;
+    --bg-subtle: #242429;
+    --bg-hover: #2b2b31;
+    --bg-active: #35353d;
 
-    --text-primary: #f2f2f5;
-    --text-secondary: #a6a6b2;
-    --text-tertiary: #6e6e78;
-    --text-faint: #55555f;
+    --text-primary: #ececf1;
+    --text-secondary: #b8b8c0;
+    --text-tertiary: #9d9da7;
+    --text-faint: #85858f;
 
-    --accent: #8f84ff;
-    --accent-hover: #a49bff;
+    --accent: #a69cff;
+    --accent-hover: #bbb4ff;
     --accent-soft: rgba(127, 115, 255, 0.18);
     --accent-soft-hover: rgba(127, 115, 255, 0.26);
-    --link: #6ea8ff;
+    --link: #82b7ff;
+
+    --selection-bg: #384f83;
+    --selection-text: #f4f4f6;
+    --editor-selection-bg: rgba(53, 90, 159, 0.32);
+    --editor-selection-bg-inactive: rgba(53, 90, 159, 0.20);
 
     --danger-soft: rgba(229, 72, 77, 0.18);
     --success: #3cb883;

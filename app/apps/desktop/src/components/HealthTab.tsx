@@ -23,8 +23,6 @@ import { useStore } from "../store";
 import type { NoteTitle } from "../lib/ipc";
 import type {
   HealthInventory,
-  HealthStage,
-  HealthStageId,
   VaultHealthSnapshot,
 } from "../lib/health/types";
 import { useVaultHealth } from "../lib/health/useVaultHealth";
@@ -85,7 +83,10 @@ export function HealthTab({
 
   return (
     <>
-      <AttachmentSyncNotice surface="health" />
+      <AttachmentSyncNotice
+        surface="health"
+        detected={snapshot.hasLocalAttachments === true}
+      />
       <HealthView
         snapshot={snapshot}
         notes={notes}
@@ -244,26 +245,36 @@ export function HealthView({
         <summary>
           <span>
             <strong>Advanced diagnostics</strong>
-            <small>File checks, activity, large items and sync history</small>
+            <small>Inspect one note, verify local files, and review sync history</small>
           </span>
-          <Glyph name="chevron" />
+          <span className="health-advanced-summary-meta">
+            <AdvancedSummary snapshot={snapshot} />
+            <Glyph name="chevron" />
+          </span>
         </summary>
         <div className="health-advanced-body">
-          <Pipeline stages={report.stages} />
+          <DiagnosticsToolbar snapshot={snapshot} />
 
-          <Section title="Check a note">
+          <div className="health-diagnostic-card health-diagnostic-inspector">
+            <DiagnosticHeading
+              eyebrow="Single note"
+              title="Inspect a note"
+              description="Search by name or path to see its local and Remote Vault state."
+            />
             <HealthInspector
               notes={notes}
               handlers={handlers}
               request={inspectRequest}
               onShowIssue={setFocusIssue}
             />
-          </Section>
+          </div>
 
-          <Section
-            title="File checks"
-            description="What Baalda verifies about the files in this vault."
-          >
+          <div className="health-diagnostic-card health-diagnostic-checks">
+            <DiagnosticHeading
+              eyebrow="Vault files"
+              title="Integrity checks"
+              description="Review what Baalda verified on this computer and fix individual findings."
+            />
             <HealthChecks
               checks={checks}
               loading={loading}
@@ -274,23 +285,35 @@ export function HealthView({
               onRestore={ignores.restoreCheck}
               focus={focusCheck}
             />
-          </Section>
+          </div>
 
           {stats && (
-            <>
-              <Section title="Activity">
+            <div className="health-diagnostic-grid">
+              <div className="health-diagnostic-card">
+                <DiagnosticHeading
+                  eyebrow="Local activity"
+                  title="Editing activity"
+                  description="See when notes in this vault changed."
+                />
                 <HealthActivity activity={stats.activity} />
-              </Section>
-              <Section title="Largest files">
+              </div>
+              <div className="health-diagnostic-card">
+                <DiagnosticHeading
+                  eyebrow="Local storage"
+                  title="Largest items"
+                  description="Find files and history using the most space."
+                />
                 <HealthLargest stats={stats} handlers={handlers} />
-              </Section>
-            </>
+              </div>
+            </div>
           )}
 
-          <Section
-            title="Sync history"
-            description="What the sync layer has done since this app launched."
-          >
+          <div className="health-diagnostic-card">
+            <DiagnosticHeading
+              eyebrow="This app session"
+              title="Recent sync activity"
+              description="Review connection, upload, and retry events since Baalda launched. Select a note path to inspect it."
+            />
             <HealthTimeline
               log={log}
               now={now}
@@ -298,7 +321,7 @@ export function HealthView({
                 setInspectRequest((r) => ({ path, n: (r?.n ?? 0) + 1 }))
               }
             />
-          </Section>
+          </div>
         </div>
       </details>
 
@@ -308,6 +331,142 @@ export function HealthView({
         actions={actions}
         onRunCheckAction={startCheckAction}
       />
+    </div>
+  );
+}
+
+function AdvancedSummary({ snapshot }: { snapshot: VaultHealthSnapshot }) {
+  const reported = snapshot.checks?.results.length ?? 0;
+  const findings =
+    snapshot.checks?.results.reduce((sum, result) => sum + result.count, 0) ?? 0;
+
+  return (
+    <>
+      {snapshot.loading ? (
+        <span className="health-advanced-summary-pill">Checking…</span>
+      ) : snapshot.checks ? (
+        <span
+          className="health-advanced-summary-pill"
+          data-tone={findings > 0 ? "warn" : "good"}
+        >
+          {findings > 0
+            ? `${findings.toLocaleString()} ${findings === 1 ? "finding" : "findings"}`
+            : `${reported.toLocaleString()} checks passed`}
+        </span>
+      ) : (
+        <span className="health-advanced-summary-pill">Checks unavailable</span>
+      )}
+    </>
+  );
+}
+
+function DiagnosticsToolbar({ snapshot }: { snapshot: VaultHealthSnapshot }) {
+  const [feedback, setFeedback] = useState<{
+    tone: "good" | "bad";
+    message: string;
+  } | null>(null);
+  const { actions, loading, refresh, report, statsError } = snapshot;
+  const syncAvailable =
+    report.counts != null && report.verdict !== "signed-out" && report.verdict !== "no-access";
+
+  const run = async (task: () => Promise<unknown>, success: string) => {
+    setFeedback(null);
+    try {
+      await task();
+      setFeedback({ tone: "good", message: success });
+    } catch (error) {
+      setFeedback({
+        tone: "bad",
+        message: error instanceof Error ? error.message : "That action could not be completed.",
+      });
+      throw error;
+    }
+  };
+
+  return (
+    <div className="health-diagnostics-toolbar">
+      <div className="health-diagnostics-toolbar-copy">
+        <span className="health-kicker">Diagnostic tools</span>
+        <h3>Run a fresh check or share a report</h3>
+        <p>
+          Checks read this vault without changing your notes. Sync retry uses the normal safe
+          Remote Vault reconciliation flow.
+        </p>
+      </div>
+      <div className="health-diagnostics-actions">
+        <button
+          type="button"
+          className="primary sm"
+          disabled={loading}
+          aria-busy={loading || undefined}
+          onClick={() => {
+            setFeedback(null);
+            refresh();
+          }}
+        >
+          {loading ? "Running checks…" : "Run all checks"}
+        </button>
+        <AsyncButton
+          className="ghost-pill sm"
+          disabled={!syncAvailable}
+          onClick={() =>
+            run(async () => {
+              await actions.syncNow();
+              refresh();
+            }, "Sync check started. Results will update as notes are confirmed.")
+          }
+        >
+          Retry sync
+        </AsyncButton>
+        <AsyncButton
+          className="ghost-pill sm"
+          confirm
+          onClick={() => run(() => actions.copyDiagnostics(), "Diagnostic report copied.")}
+        >
+          Copy report
+        </AsyncButton>
+      </div>
+      {!syncAvailable && (
+        <p className="health-diagnostics-hint">
+          {report.verdict === "local"
+            ? "Sync retry is unavailable because this vault is local only."
+            : report.verdict === "signed-out"
+              ? "Sign in before retrying sync."
+              : report.verdict === "no-access"
+                ? "Sync retry is unavailable until access is restored."
+                : "Sync retry is not available yet."}
+        </p>
+      )}
+      {feedback && (
+        <p className="health-diagnostics-feedback" data-tone={feedback.tone} aria-live="polite">
+          <Glyph name={feedback.tone === "good" ? "check" : "alert"} size={14} />
+          {feedback.message}
+        </p>
+      )}
+      {!feedback && statsError && (
+        <p className="health-diagnostics-feedback" data-tone="bad" role="alert">
+          <Glyph name="alert" size={14} />
+          Checks could not finish: {statsError}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function DiagnosticHeading({
+  eyebrow,
+  title,
+  description,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="health-diagnostic-heading">
+      <span className="health-kicker">{eyebrow}</span>
+      <h3>{title}</h3>
+      <p>{description}</p>
     </div>
   );
 }
@@ -351,7 +510,7 @@ function InventoryComparison({
       <div className="health-inventory-head">
         <div>
           <span className="health-kicker">Your copies</span>
-          <h3 id="health-inventory-title">This computer and the server</h3>
+          <h3 id="health-inventory-title">This computer and the Remote Vault</h3>
           <p>
             Compare notes, folders and standalone files in each place. Matching counts
             describe the structure; content confirmation is shown separately.
@@ -359,7 +518,7 @@ function InventoryComparison({
         </div>
         {inventory.server && (
           <span className="health-freshness" data-state={inventory.serverState}>
-            {stateLabel} server view
+            {stateLabel} Remote Vault view
           </span>
         )}
       </div>
@@ -379,7 +538,7 @@ function InventoryComparison({
         {inventory.server ? (
           <InventoryPlace
             icon="database"
-            title="Server"
+            title="Remote Vault"
             subtitle={report.serverHost ?? "Connected vault"}
             counts={inventory.server}
           />
@@ -387,11 +546,11 @@ function InventoryComparison({
           <div className="health-place is-unavailable">
             <span className="health-place-icon"><Glyph name="database" size={18} /></span>
             <div>
-              <strong>Server</strong>
+              <strong>Remote Vault</strong>
               <p>
                 {report.verdict === "local"
                   ? "Sync is off for this vault."
-                  : "No server inventory has been received yet."}
+                  : "No Remote Vault inventory has been received yet."}
               </p>
             </div>
           </div>
@@ -419,7 +578,7 @@ function InventoryComparison({
         <div className="health-inventory-result-copy">
           <strong>
             {!inventory.server
-              ? "A server comparison is not available"
+              ? "A Remote Vault comparison is not available"
               : differences > 0
                 ? `${differences.toLocaleString()} item ${differences === 1 ? "path differs" : "paths differ"}`
                 : countsDiffer
@@ -428,7 +587,7 @@ function InventoryComparison({
           </strong>
           <p>
             {inventory.server
-              ? `${confirmed.toLocaleString()} of ${totalNotes.toLocaleString()} notes have confirmed content on the server.`
+              ? `${confirmed.toLocaleString()} of ${totalNotes.toLocaleString()} notes have confirmed content on the Remote Vault.`
               : "Your local files remain available on this computer."}
           </p>
         </div>
@@ -450,7 +609,7 @@ function InventoryComparison({
         <div className="health-differences">
           <DifferenceList
             title="Only on this computer"
-            description="These notes have no matching server registry path yet. Open one to review it, or check again to retry sync."
+            description="These notes have no matching Remote Vault path yet. Open one to review it, or check again to retry sync."
             paths={inventory.deviceOnlyNotes}
             details={issueWhy}
             actionLabel="Open"
@@ -458,32 +617,32 @@ function InventoryComparison({
           />
           <DifferenceList
             title="Folders only on this computer"
-            description="These folders have no matching server registry path yet. Check again to retry sync."
+            description="These folders have no matching Remote Vault path yet. Check again to retry sync."
             paths={inventory.deviceOnlyFolders}
             actionLabel="Show"
             onAction={(path) => void handlers.actions.reveal(path)}
           />
           <DifferenceList
             title="Files only on this computer"
-            description="These standalone files have no matching server registry path yet. Check again to retry sync."
+            description="These standalone files have no matching Remote Vault path yet. Check again to retry sync."
             paths={inventory.deviceOnlyFiles}
             actionLabel="Show"
             onAction={(path) => void handlers.actions.reveal(path)}
           />
           <DifferenceList
-            title="Only in the server view"
-            description="Baalda knows these server paths but cannot see a matching local note. Check again to download anything you can access."
+            title="Only in the Remote Vault view"
+            description="The Remote Vault knows these paths but this computer has no matching note. Check again to download anything you can access."
             paths={inventory.serverOnlyNotes}
             details={issueWhy}
           />
           <DifferenceList
-            title="Folders only in the server view"
-            description="Baalda knows these server folders but cannot see matching local folders. Check again to download anything you can access."
+            title="Folders only in the Remote Vault view"
+            description="The Remote Vault knows these folders but this computer has no matching folders. Check again to download anything you can access."
             paths={inventory.serverOnlyFolders}
           />
           <DifferenceList
-            title="Files only in the server view"
-            description="Baalda knows these server files but cannot see matching local files. Check again to download anything you can access."
+            title="Files only in the Remote Vault view"
+            description="The Remote Vault knows these files but this computer has no matching files. Check again to download anything you can access."
             paths={inventory.serverOnlyFiles}
           />
         </div>
@@ -623,7 +782,7 @@ function Confirms({
     case "reregister":
       return (
         <ConfirmDialog
-          title="Put this file back on the server?"
+          title="Put this file back on the Remote Vault?"
           confirmLabel="Re-register"
           tone="accent"
           onCancel={onDone}
@@ -634,7 +793,7 @@ function Confirms({
           }}
         >
           <p className="muted">
-            Registers <code>{confirming.path}</code> with the server as a note again and
+            Registers <code>{confirming.path}</code> with the Remote Vault as a note again and
             uploads its content. Everyone with access to this vault will see it.
           </p>
         </ConfirmDialog>
@@ -828,99 +987,6 @@ function VerdictCard({
           {copied ? "Copied ✓" : "Copy diagnostics"}
         </AsyncButton>
       </div>
-    </div>
-  );
-}
-
-// ── Pipeline strip ────────────────────────────────────────────────────────────
-
-/** A stage that is `off` is not a fault — a local vault's connection and server
- *  nodes are simply not in play — so the diagnosis walks past it looking for the
- *  first stage that is actually degraded or moving. */
-function isSettled(stage: HealthStage): boolean {
-  return stage.state === "ok" || stage.state === "off";
-}
-
-/** The two stages that are normally NOISE. Nobody opens this page to be told
- *  the local index holds nineteen rows; they open it because something is not
- *  on the server. So these appear only when they are the thing that is wrong,
- *  in their natural position, marked as surfaced deliberately. */
-const CONDITIONAL: ReadonlySet<HealthStageId> = new Set<HealthStageId>([
-  "index",
-  "history",
-]);
-
-/** The page's own words. The model calls the last stage "Server"; on this page
- *  it is the reader's own vault up there, not a machine. */
-const STAGE_LABELS: Partial<Record<HealthStageId, string>> = {
-  server: "Remote vault",
-};
-
-export function Pipeline({ stages }: { stages: HealthStage[] }) {
-  const shown = stages.filter((s) => !CONDITIONAL.has(s.id) || !isSettled(s));
-  // The first unsettled stage is where the pipeline stops; -1 when everything
-  // that can be confirmed is confirmed.
-  const focus = shown.findIndex((s) => !isSettled(s));
-  const [picked, setPicked] = useState<number | null>(null);
-  // A pick survives until the diagnosis itself moves, so re-reading a stage
-  // does not fight the auto-focus on the next poll.
-  useEffect(() => setPicked(null), [focus]);
-
-  if (shown.length === 0) return null;
-  const at = picked ?? (focus >= 0 ? focus : shown.length - 1);
-  const legend = shown[at];
-  // The line under the strip restates the highlighted card's own number on a
-  // healthy vault ("19" in the card, "19 notes and 3 folders…" below it), so it
-  // only appears when it has something the card does not: a stage that is
-  // actually degraded, or one the reader asked about by clicking it.
-  const showLegend = legend != null && (picked != null || !isSettled(legend));
-
-  return (
-    <div className="health-pipeline-wrap">
-      <ol className="health-pipeline" aria-label="Sync pipeline">
-        {shown.map((stage, i) => {
-          const conditional = CONDITIONAL.has(stage.id);
-          return (
-            <li key={stage.id} className="health-stage-cell">
-              {i > 0 && (
-                <span
-                  className="health-edge"
-                  data-state={stage.state}
-                  data-broken={i === focus ? "" : undefined}
-                  aria-hidden="true"
-                />
-              )}
-              <button
-                type="button"
-                className="health-node"
-                data-state={stage.state}
-                data-focus={i === focus ? "" : undefined}
-                data-picked={i === at ? "" : undefined}
-                data-conditional={conditional ? "" : undefined}
-                title={stage.detail}
-                aria-current={i === at ? "step" : undefined}
-                onClick={() => setPicked(i)}
-              >
-                <span className="health-node-top">
-                  <span className="health-node-dot" aria-hidden="true" />
-                  <span className="health-node-label">
-                    {STAGE_LABELS[stage.id] ?? stage.label}
-                  </span>
-                </span>
-                <span className="health-node-headline">{stage.headline}</span>
-                {conditional && (
-                  <span className="health-node-note">shown because it needs attention</span>
-                )}
-              </button>
-            </li>
-          );
-        })}
-      </ol>
-      {showLegend && (
-        <p className="health-legend" data-state={legend.state}>
-          <strong>{STAGE_LABELS[legend.id] ?? legend.label}</strong> {legend.detail}
-        </p>
-      )}
     </div>
   );
 }

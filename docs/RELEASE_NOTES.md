@@ -21,10 +21,10 @@
 ## 0.1.62
 
 - More files now open, embed and search inside Baalda, including Office documents, CSV, audio, video, code and archives. Notes sync on every plan; Pro also syncs attachments, with a clear local-only notice on Free.
-- Health now leads with useful vault totals and a clear computer-versus-server comparison. Differences can be inspected and retried, while detailed checks and history stay one click away.
-- Access selection now guides you smoothly to the next step. Sidebar colors have far more variety, can be changed from an item's menu, and can be disabled in Appearance.
+- Health now leads with useful vault totals and a clear device-versus-Remote Vault comparison. Advanced diagnostics groups fresh checks, note inspection, sync retry and a shareable report.
+- Selecting a folder in Access now clearly includes its contents. Sidebar colors have more variety and stay off until enabled; item menus focus on choosing or clearing a color.
 - Large vaults join and sync much faster with resumable batch transfers. A vault owner can also remove a vault from the server while keeping its Markdown files safely on disk.
-- Tabs blend cleanly into the left sidebar, previews work again in installed builds, and fixes protect concurrent note history, edited attachments, read-only changes and folder deletes.
+- Dark mode uses neutral charcoal with clearer selection. File icons stay visible on open, tabs and previews are polished, and fixes protect history, attachments and deletes.
 
 ## 0.1.61
 

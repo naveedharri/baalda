@@ -123,7 +123,7 @@ export function HealthIssues({
               {hidden.length > 0
                 ? `${hidden.length} ${hidden.length === 1 ? "row is" : "rows are"} dismissed below.`
                 : syncEnabled
-                  ? "Every note the server knows about is confirmed."
+                  ? "Every note the Remote Vault knows about is confirmed."
                   : "Sync is off, so there is nothing to report here."}
             </p>
           </div>

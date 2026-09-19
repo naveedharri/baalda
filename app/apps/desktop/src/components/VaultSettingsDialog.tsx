@@ -18,9 +18,11 @@ import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
+  FREE_PLAN_EXPLANATION,
   type LimitKind,
   limitFromError,
   planPillLabel,
+  PRO_BENEFITS,
   subscriptionStatusLine,
   transferTargets,
 } from "../lib/billing";
@@ -2120,7 +2122,8 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
         <p>
           Choose the vault that becomes Pro. It keeps the same billing period and
           price. <strong>{transfer.sourceLabel}</strong> drops to Free — its members
-          and notes stay, but free-plan limits apply to it again.
+          and notes stay, but its attachments stop syncing. Every local copy remains
+          available on its device.
         </p>
         <div className="transfer-targets" role="radiogroup" aria-label="Destination vault">
           {targets.map((t) => {
@@ -2185,7 +2188,9 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
                   : "Active"}
             </span>
           </div>
-          <div className="muted">Everything unlimited on this vault.</div>
+          <div className="muted">
+            Attachment sync is active across devices and with your team.
+          </div>
           {orgBilling.currentPeriodEnd && (
             <div className="menu-row">
               <span className="menu-row-label">
@@ -2238,11 +2243,11 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
         )}
 
         <div className="subhead">Upgrade to Pro unlocks</div>
+        <div className="muted">{FREE_PLAN_EXPLANATION}</div>
         <ul className="upgrade-features">
-          <li>Unlimited team members</li>
-          <li>Unlimited notes, devices &amp; AI edits</li>
-          <li>Doesn't count toward your free vaults</li>
-          <li>Priority support</li>
+          {PRO_BENEFITS.map((benefit) => (
+            <li key={benefit}>{benefit}</li>
+          ))}
         </ul>
 
         {canManage ? (

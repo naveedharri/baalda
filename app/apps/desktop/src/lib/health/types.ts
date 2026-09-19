@@ -443,6 +443,9 @@ export interface HealthActions {
 export interface VaultHealthSnapshot {
   report: HealthReport;
   inventory: HealthInventory;
+  /** Local attachment evidence from both the hidden store and surfaced binary
+   * files. Null while either census is still unknown. */
+  hasLocalAttachments?: boolean | null;
   stats: VaultStats | null;
   statsError: string | null;
   /** The integrity checks; null until the first pass lands or when it failed. */
