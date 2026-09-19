@@ -559,32 +559,38 @@ function UnsyncDangerZone() {
     <>
       <div className="menu-sep" />
       <div className="subhead">Danger zone</div>
-      <div className="menu-row">
-        <span className="menu-row-label">
-          Make this vault local only
+      <div className="vault-local-only-card">
+        <span className="vault-local-only-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3 2.5 20h19L12 3Z" />
+            <path d="M12 9v5M12 17h.01" />
+          </svg>
+        </span>
+        <div className="vault-local-only-copy">
+          <strong>Make this vault local only</strong>
           <span className="field-hint">
             {folder ? (
               <>
-                Your notes stay in <strong>{folder}</strong> on this device.
+                Keep the <strong>{folder}</strong> folder on this device and remove its synced copy
+                from {serverHost(serverUrl)}.
               </>
             ) : (
-              "Your notes stay on this device."
+              <>Keep the local folder on this device and remove its synced copy from {serverHost(serverUrl)}.</>
             )}{" "}
-            Everything on {serverHost(serverUrl)} is deleted:{" "}
             {preview ? (
               <>
-                {preview.notes} note{plural(preview.notes)} and {preview.files} file
-                {plural(preview.files)}, history and sharing.{" "}
+                The server copy of {preview.notes} note{plural(preview.notes)} and {preview.files} file
+                {plural(preview.files)}, version history, and sharing will be deleted.{" "}
                 {preview.members > 0
                   ? `${preview.members} teammate${plural(preview.members)} lose access.`
-                  : "Nobody else has access to it."}
+                  : "No teammates currently have access."}
               </>
             ) : (
-              "counting…"
+              "Checking what will be removed…"
             )}
           </span>
-        </span>
-        <button className="link-btn danger" onClick={() => setConfirming(true)}>
+        </div>
+        <button className="vault-local-only-action" onClick={() => setConfirming(true)}>
           Make local only
         </button>
       </div>
@@ -1141,6 +1147,25 @@ function VaultsTab() {
     }
   };
 
+  const openExisting = async () => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      // Pick only. `openLocalVault` retires the current sync scope before Rust
+      // swaps its one global vault slot; `pickVault` opens during the dialog and
+      // cannot provide that ordering guarantee.
+      const path = await ipc.pickFolder();
+      if (path) await useStore.getState().openLocalVault(path);
+      setBound(readOrgVaults());
+      setLocalsNonce((n) => n + 1);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const changeRoot = async () => {
     try {
       const picked = await ipc.pickVaultsRoot();
@@ -1366,6 +1391,13 @@ function VaultsTab() {
               </svg>
               <span>Join with code</span>
             </button>
+            <AsyncButton
+              className="ghost-pill vault-tab-add"
+              disabled={busy}
+              onClick={openExisting}
+            >
+              <span>Open existing</span>
+            </AsyncButton>
           </>
         )}
       </div>

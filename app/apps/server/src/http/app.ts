@@ -273,6 +273,7 @@ export function createApp(deps: AppDeps): Hono {
       docWriter: deps.docWriter,
       disconnectDoc: deps.disconnectDoc,
       onRegistryChanged: deps.onRegistryChanged,
+      onAclChanged: deps.onAclChanged,
     }),
   );
 

@@ -107,6 +107,59 @@ describe("ApiClient against a mocked fetch", () => {
     expect(notes[0].id).toBe("n1");
   });
 
+  it("reads and updates the future-member access default", async () => {
+    const { impl, calls } = fakeFetch((call) => ({
+      json: { mode: call.method === "PUT" ? "readonly" : "private" },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+
+    expect(await api.getAccessDefault("org one")).toEqual({ mode: "private" });
+    expect(await api.setAccessDefault("org one", "readonly")).toEqual({ mode: "readonly" });
+    expect(calls[0]).toMatchObject({
+      url: "http://localhost:3010/api/orgs/org%20one/access-default",
+      method: "GET",
+    });
+    expect(calls[1]).toMatchObject({
+      url: "http://localhost:3010/api/orgs/org%20one/access-default",
+      method: "PUT",
+      body: { mode: "readonly" },
+    });
+  });
+
+  it("sends the bulk access audience and resources without widening their scope", async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      json: {
+        mode: "private",
+        resourcesChanged: 2,
+        overridesCleared: 4,
+        membersAffected: 2,
+        disconnectedDocs: 1,
+      },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+    const input = {
+      resources: [
+        { resourceType: "folder" as const, resourceId: "folder-1" },
+        { resourceType: "file" as const, resourceId: "doc-2" },
+      ],
+      audience: { type: "users" as const, userIds: ["u2", "u3"] },
+      mode: "private" as const,
+    };
+
+    expect(await api.setBulkAccess("org-1", input)).toEqual({
+      mode: "private",
+      resourcesChanged: 2,
+      overridesCleared: 4,
+      membersAffected: 2,
+      disconnectedDocs: 1,
+    });
+    expect(calls[0]).toMatchObject({
+      url: "http://localhost:3010/api/orgs/org-1/access/bulk",
+      method: "POST",
+      body: input,
+    });
+  });
+
   it("base URL trailing slashes are stripped so paths don't double up", async () => {
     const { impl, calls } = fakeFetch(() => ({ json: { vaults: [] } }));
     const api = new ApiClient({ baseUrl: "http://localhost:3010/", token: "t", fetchImpl: impl });

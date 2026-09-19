@@ -13,6 +13,16 @@ import {
   resolveAccessForUser,
 } from "../../permissions/resolver.js";
 import { getSession } from "../session.js";
+import {
+  AccessManagementError,
+  applyBulkAccess,
+  getJoinDefault,
+  nextAccessRevision,
+  setJoinDefault,
+  type AccessAudience,
+  type AccessMode,
+  type AccessResource,
+} from "../../permissions/access-management.js";
 
 /**
  * Share management API (session-authenticated) — spec 04 §3/§4.
@@ -53,7 +63,7 @@ const MODE_PERMISSION: Record<TeamAccessMode, "edit" | "view" | "denied"> = {
  * already follows when it kicks on view/locked/denied and never on edit.
  */
 function grantRank(permission: string | null | undefined): number {
-  return permission === "edit" ? 2 : permission === "view" ? 1 : 0;
+  return permission === "edit" ? 2 : permission === "view" || permission === "readonly" ? 1 : 0;
 }
 
 /**
@@ -73,7 +83,7 @@ export interface TeamAccessOverride {
   vaultId: string;
   resourceType: "folder" | "file";
   resourceId: string;
-  permission: "edit" | "view" | "locked" | "denied";
+  permission: "edit" | "view" | "locked" | "denied" | "readonly";
 }
 
 /**
@@ -103,7 +113,7 @@ async function teamOverrides(
     vault_id: string;
     resource_type: "folder" | "file";
     resource_id: string;
-    permission: "edit" | "view" | "locked" | "denied";
+    permission: "edit" | "view" | "locked" | "denied" | "readonly";
   }>(
     `SELECT s.id, loc.vault_id, s.resource_type, s.resource_id, s.permission
        FROM shares s
@@ -211,6 +221,13 @@ export interface ShareDeps {
 export function createShareRoutes(deps: ShareDeps): Hono {
   const app = new Hono();
 
+  const accessError = (c: { json: (body: unknown, status: 400 | 403 | 404) => Response }, error: unknown) => {
+    if (error instanceof AccessManagementError) {
+      return c.json({ error: error.code, message: error.message }, error.status);
+    }
+    throw error;
+  };
+
   async function canManage(
     userId: string,
     // 'vault' = the vault-wide grant (resourceId is the organization id).
@@ -250,6 +267,77 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         : [info.vaultId];
     return { ok: true, organizationId: info.organizationId, vaultIds };
   }
+
+  app.get("/orgs/:orgId/access-default", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    try {
+      return c.json({ mode: await getJoinDefault(c.req.param("orgId"), session.userId) });
+    } catch (error) {
+      return accessError(c, error);
+    }
+  });
+
+  app.put("/orgs/:orgId/access-default", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const body = await c.req.json().catch(() => ({}));
+    const mode = body.mode as AccessMode;
+    if (mode !== "private" && mode !== "readonly" && mode !== "open") {
+      return c.json({ error: "invalid_mode", message: "mode must be private, readonly, or open" }, 400);
+    }
+    try {
+      return c.json({ mode: await setJoinDefault(c.req.param("orgId"), session.userId, mode) });
+    } catch (error) {
+      return accessError(c, error);
+    }
+  });
+
+  app.post("/orgs/:orgId/access/bulk", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const body = await c.req.json().catch(() => ({}));
+    const mode = body.mode as AccessMode;
+    if (mode !== "private" && mode !== "readonly" && mode !== "open") {
+      return c.json({ error: "invalid_mode", message: "mode must be private, readonly, or open" }, 400);
+    }
+    if (!Array.isArray(body.resources) || !body.audience || typeof body.audience !== "object") {
+      return c.json({ error: "invalid_request", message: "resources and audience are required" }, 400);
+    }
+    const resources: AccessResource[] = body.resources;
+    const audience: AccessAudience = body.audience;
+    if (
+      resources.some(
+        (resource) =>
+          !resource ||
+          (resource.resourceType !== "folder" &&
+            resource.resourceType !== "file" &&
+            resource.resourceType !== "vault") ||
+          typeof resource.resourceId !== "string" ||
+          !resource.resourceId,
+      ) ||
+      (audience.type !== "org" &&
+        (audience.type !== "users" || !Array.isArray(audience.userIds)))
+    ) {
+      return c.json({ error: "invalid_request", message: "Invalid resources or audience" }, 400);
+    }
+    try {
+      return c.json(
+        await applyBulkAccess(
+          {
+            organizationId: c.req.param("orgId"),
+            actorUserId: session.userId,
+            resources,
+            audience,
+            mode,
+          },
+          deps,
+        ),
+      );
+    } catch (error) {
+      return accessError(c, error);
+    }
+  });
 
   // Create or update a share (upsert on the unique resource+principal key).
   // permission 'locked' is the deny overlay (spec 04 §3 extension): it caps
@@ -346,12 +434,13 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     }
 
     const id = randomUUID();
+    const accessRevision = await nextAccessRevision(pool, gate.organizationId!);
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO shares
-         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by, access_revision)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
-       DO UPDATE SET permission = EXCLUDED.permission
+       DO UPDATE SET permission = EXCLUDED.permission, access_revision = EXCLUDED.access_revision
        RETURNING id`,
       [
         id,
@@ -362,6 +451,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         principalId,
         permission,
         session.userId,
+        accessRevision,
       ],
     );
 
@@ -462,7 +552,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       `SELECT s.id, s.resource_type, s.resource_id, s.principal_type, s.principal_id,
               s.permission, s.created_by, s.created_at
          FROM shares s
-        WHERE s.permission IN ('locked', 'denied')
+        WHERE s.permission IN ('locked', 'denied', 'readonly')
           AND (
             (s.resource_type = 'folder' AND s.resource_id IN
                (SELECT id FROM folders WHERE vault_id = $1))
@@ -596,6 +686,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      const accessRevision = await nextAccessRevision(client, orgId);
 
       const overrides = await teamOverrides(client, orgId, vaultIds);
       const dead = await deadNoteOverrideIds(client, orgId, vaultIds);
@@ -629,11 +720,11 @@ export function createShareRoutes(deps: ShareDeps): Hono {
 
       await client.query(
         `INSERT INTO shares
-           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
-         VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6)
+           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by, access_revision)
+         VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6, $7)
          ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
-         DO UPDATE SET permission = EXCLUDED.permission`,
-        [randomUUID(), orgId, orgId, orgId, permission, session.userId],
+         DO UPDATE SET permission = EXCLUDED.permission, access_revision = EXCLUDED.access_revision`,
+        [randomUUID(), orgId, orgId, orgId, permission, session.userId, accessRevision],
       );
 
       await client.query("COMMIT");

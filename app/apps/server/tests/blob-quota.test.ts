@@ -74,6 +74,13 @@ describe("storage quota", () => {
   beforeEach(async () => {
     await resetDb();
     owner = await signUp(`owner-${randomUUID().slice(0, 8)}@quota.com`);
+    // Quota behavior remains relevant for grandfathered free accounts, which
+    // keep attachment sync but still retain the existing storage ceiling.
+    await pool.query(
+      `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
+       VALUES ($1, 3, true)`,
+      [owner.userId],
+    );
     orgId = await seedOrg("Quota Co", `quota-${randomUUID().slice(0, 8)}`);
     await seedMember(orgId, owner.userId, "owner");
     vaultId = await seedVault(orgId);

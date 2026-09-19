@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
-import { orgRole } from "../permissions/lookup.js";
+import { orgRole, resolveResource } from "../permissions/lookup.js";
 import { effectivePermission, type Permission } from "../permissions/resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "../permissions/vault-docs.js";
 import {
@@ -25,6 +25,17 @@ import {
 import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
 import { StaleRevisionError, revisionOf, type DocWriter, type TextOp } from "./doc-writer.js";
+import {
+  AccessManagementError,
+  applyBulkAccess,
+  getJoinDefault,
+  requireAccessManager,
+  setJoinDefault,
+  type AccessAudience,
+  type AccessMode,
+  type AccessResource,
+} from "../permissions/access-management.js";
+import { buildAccessContext, resolveAccessForUser } from "../permissions/resolver.js";
 
 /**
  * The CRUD operations the MCP exposes, each one gated by the SAME ACL the rest
@@ -53,10 +64,92 @@ export interface McpContext {
    * edit announces itself.
    */
   onRegistryChanged?: (vaultId: string) => void;
+  onAclChanged?: (vaultId: string) => void;
 }
 
 /** A tool tried to touch something it may not, or that doesn't exist. */
 export class McpToolError extends Error {}
+
+function accessToolError(error: unknown): never {
+  if (error instanceof AccessManagementError) throw new McpToolError(error.message);
+  throw error;
+}
+
+export async function getAccessDefaultTool(ctx: McpContext) {
+  try {
+    return { mode: await getJoinDefault(ctx.auth.organizationId, ctx.auth.userId) };
+  } catch (error) {
+    accessToolError(error);
+  }
+}
+
+export async function setAccessDefaultTool(ctx: McpContext, mode: AccessMode) {
+  try {
+    return { mode: await setJoinDefault(ctx.auth.organizationId, ctx.auth.userId, mode) };
+  } catch (error) {
+    accessToolError(error);
+  }
+}
+
+export async function manageAccessTool(
+  ctx: McpContext,
+  resources: AccessResource[],
+  audience: AccessAudience,
+  mode: AccessMode,
+) {
+  try {
+    return await applyBulkAccess(
+      {
+        organizationId: ctx.auth.organizationId,
+        actorUserId: ctx.auth.userId,
+        resources,
+        audience,
+        mode,
+      },
+      { disconnectDoc: ctx.disconnectDoc, onAclChanged: ctx.onAclChanged },
+    );
+  } catch (error) {
+    accessToolError(error);
+  }
+}
+
+export async function listResourceAccessTool(
+  ctx: McpContext,
+  resourceType: "folder" | "file",
+  resourceId: string,
+) {
+  try {
+    await requireAccessManager(ctx.auth.organizationId, ctx.auth.userId);
+    const resource = await resolveResource(resourceType, resourceId);
+    if (!resource || resource.organizationId !== ctx.auth.organizationId) {
+      throw new McpToolError("Unknown resource or outside this token's vault");
+    }
+    const accessContext = await buildAccessContext(resourceType, resourceId);
+    if (!accessContext) throw new McpToolError("Unknown resource");
+    const { rows } = await pool.query<{
+      user_id: string;
+      role: string;
+      name: string | null;
+      email: string | null;
+    }>(
+      `SELECT m."userId" AS user_id, m.role, u.name, u.email
+         FROM member m JOIN "user" u ON u.id = m."userId"
+        WHERE m."organizationId" = $1`,
+      [ctx.auth.organizationId],
+    );
+    return Promise.all(
+      rows.map(async (member) => ({
+        userId: member.user_id,
+        name: member.name,
+        email: member.email,
+        role: member.role,
+        ...(await resolveAccessForUser(accessContext, member.user_id, member.role)),
+      })),
+    );
+  } catch (error) {
+    accessToolError(error);
+  }
+}
 
 function relPathStem(relPath: string): string {
   const base = relPath.split("/").pop() ?? relPath;

@@ -23,6 +23,7 @@ export const ACTIVITY_STATUSES: Array<{
 
 const STATUS_KEY = "context.activityStatus";
 const MENTION_SOUND_KEY = "context.mentionSound";
+const AUTOMATIC_ITEM_COLORS_KEY = "context.automaticItemColors:";
 
 function isActivityStatus(v: unknown): v is ActivityStatus {
   return v === "online" || v === "away" || v === "busy" || v === "invisible";
@@ -57,6 +58,34 @@ export function readMentionSound(): boolean {
 export function writeMentionSound(enabled: boolean): void {
   try {
     localStorage.setItem(MENTION_SOUND_KEY, enabled ? "on" : "off");
+  } catch {
+    /* localStorage unavailable — preference stays in-memory only */
+  }
+}
+
+/**
+ * Give otherwise-uncoloured sidebar items a stable personal colour. The key is
+ * account-scoped: two people sharing one computer can keep different choices,
+ * just as two people looking at the same synced vault can see different auto
+ * colours. Automatic colours are on unless that account explicitly opts out.
+ */
+export function readAutomaticItemColors(userId: string | null | undefined): boolean {
+  try {
+    return localStorage.getItem(AUTOMATIC_ITEM_COLORS_KEY + (userId ?? "local")) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function writeAutomaticItemColors(
+  userId: string | null | undefined,
+  enabled: boolean,
+): void {
+  try {
+    localStorage.setItem(
+      AUTOMATIC_ITEM_COLORS_KEY + (userId ?? "local"),
+      enabled ? "on" : "off",
+    );
   } catch {
     /* localStorage unavailable — preference stays in-memory only */
   }

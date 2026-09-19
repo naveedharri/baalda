@@ -20,7 +20,8 @@ import {
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { TreeNode } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
-import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
+import { automaticItemColorId, ITEM_COLORS, itemColorValue } from "../lib/appearance";
+import { readAutomaticItemColors } from "../lib/prefs";
 import {
   applyOrder,
   childrenAt,
@@ -224,6 +225,8 @@ export function FileTree() {
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
   const itemColors = useStore((s) => s.itemColors);
+  const automaticItemColors = useStore((s) => s.automaticItemColors);
+  const vault = useStore((s) => s.vault);
   const rootFrozen = useStore((s) => s.rootFrozen);
   const itemOrder = useStore((s) => s.itemOrder);
   const treeSort = useStore((s) => s.treeSort);
@@ -234,6 +237,9 @@ export function FileTree() {
   const docIdByPath = useStore((s) => s.docIdByPath);
   const titles = useStore((s) => s.titles);
   const [containerRef, dim] = useDimensions();
+  useEffect(() => {
+    useStore.setState({ automaticItemColors: readAutomaticItemColors(session?.user.id) });
+  }, [session?.user.id]);
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   // Resolved once the menu has been measured; null means "not placed yet", which
@@ -1525,6 +1531,10 @@ export function FileTree() {
       syncIndex,
       presenceByDoc,
       itemColors,
+      automaticItemColors,
+      automaticColorOwner: session?.user.id ?? "local",
+      automaticColorVault: session?.activeOrganizationId ?? vault?.path ?? "vault",
+      docIdByPath,
       onMenu: onRowMenu,
       selectMode,
       selected,
@@ -1539,6 +1549,11 @@ export function FileTree() {
       syncIndex,
       presenceByDoc,
       itemColors,
+      automaticItemColors,
+      session?.user.id,
+      session?.activeOrganizationId,
+      vault?.path,
+      docIdByPath,
       onRowMenu,
       selectMode,
       selected,
@@ -2026,6 +2041,10 @@ interface RowShared {
   presenceByDoc: Map<string, VaultPeer[]>;
   /** Item color ids (vault-local preference) — tint the type glyph. */
   itemColors: Record<string, string | undefined>;
+  automaticItemColors: boolean;
+  automaticColorOwner: string;
+  automaticColorVault: string;
+  docIdByPath: Record<string, string>;
   onMenu: (
     x: number,
     y: number,
@@ -2058,7 +2077,16 @@ function TreeRow(props: NodeRendererProps<TreeNode>) {
       lock={shared.lockByPath.get(path) ?? null}
       syncIndex={shared.syncIndex}
       presenceByDoc={shared.presenceByDoc}
-      color={shared.itemColors[path]}
+      color={
+        shared.itemColors[path] ??
+        (shared.automaticItemColors
+          ? automaticItemColorId(
+              shared.automaticColorOwner,
+              shared.automaticColorVault,
+              shared.docIdByPath[path] ?? path,
+            )
+          : undefined)
+      }
       onMenu={shared.onMenu}
       selectMode={shared.selectMode}
       checked={shared.selected.has(path)}

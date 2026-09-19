@@ -257,7 +257,7 @@ export interface Share {
   principal_type?: "user" | "org";
   principalId?: string;
   principal_id?: string;
-  permission: "view" | "edit" | "locked" | "denied";
+  permission: "view" | "edit" | "readonly" | "locked" | "denied";
   createdBy?: string;
   created_by?: string;
 }
@@ -273,7 +273,7 @@ export interface TeamAccessOverride {
   vaultId: string;
   resourceType: "folder" | "file";
   resourceId: string;
-  permission: "edit" | "view" | "locked" | "denied";
+  permission: "edit" | "view" | "readonly" | "locked" | "denied";
 }
 
 /**
@@ -300,6 +300,34 @@ export interface TeamAccessResult {
   disconnectedDocs: number;
   /** False when the mode was already this and only the per-item rows went. */
   postureChanged: boolean;
+}
+
+/** Access granted to members who join after this setting is changed. */
+export interface AccessDefault {
+  mode: TeamAccessMode;
+}
+
+export interface BulkAccessResource {
+  resourceType: "folder" | "file" | "vault";
+  resourceId: string;
+}
+
+export type BulkAccessAudience =
+  | { type: "org" }
+  | { type: "users"; userIds: string[] };
+
+export interface BulkAccessInput {
+  resources: BulkAccessResource[];
+  audience: BulkAccessAudience;
+  mode: TeamAccessMode;
+}
+
+export interface BulkAccessResult {
+  mode: TeamAccessMode;
+  resourcesChanged: number;
+  overridesCleared: number;
+  membersAffected: number;
+  disconnectedDocs: number;
 }
 
 /** One member's effective access to a resource, as resolved server-side. */
@@ -2356,7 +2384,7 @@ export class ApiClient {
     /** Required for user shares; ignored for org-wide grants/locks. */
     principalId?: string;
     principalType?: "user" | "org";
-    permission: Permission | "locked" | "denied";
+    permission: Permission | "readonly" | "locked" | "denied";
   }): Promise<Share> {
     const { data } = await this.request<Share>("POST", "/api/shares", { body: input });
     return data;
@@ -2403,6 +2431,40 @@ export class ApiClient {
       cleared: data.cleared ?? 0,
       disconnectedDocs: data.disconnectedDocs ?? 0,
       postureChanged: data.postureChanged ?? true,
+    };
+  }
+
+  /** What future members may see when they join. Existing members are unchanged. */
+  async getAccessDefault(orgId: string): Promise<AccessDefault> {
+    const { data } = await this.request<AccessDefault>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/access-default`,
+    );
+    return { mode: data.mode ?? "private" };
+  }
+
+  async setAccessDefault(orgId: string, mode: TeamAccessMode): Promise<AccessDefault> {
+    const { data } = await this.request<AccessDefault>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/access-default`,
+      { body: { mode } },
+    );
+    return { mode: data.mode ?? mode };
+  }
+
+  /** Apply one access mode to one or more resource roots in a single transaction. */
+  async setBulkAccess(orgId: string, input: BulkAccessInput): Promise<BulkAccessResult> {
+    const { data } = await this.request<BulkAccessResult>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/access/bulk`,
+      { body: input },
+    );
+    return {
+      mode: data.mode ?? input.mode,
+      resourcesChanged: data.resourcesChanged ?? 0,
+      overridesCleared: data.overridesCleared ?? 0,
+      membersAffected: data.membersAffected ?? 0,
+      disconnectedDocs: data.disconnectedDocs ?? 0,
     };
   }
 

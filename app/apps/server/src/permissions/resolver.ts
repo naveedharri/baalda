@@ -70,12 +70,14 @@ type Queryable = Pick<pg.Pool, "query">;
 export interface ResolverCache {
   role(db: Queryable, organizationId: string, userId: string): Promise<string | null>;
   baseline(db: Queryable, organizationId: string): Promise<VaultPosture>;
+  snapshot(db: Queryable, organizationId: string, userId: string): Promise<MemberAccessSnapshot | null>;
   ancestors(db: Queryable, folderId: string | null): Promise<string[]>;
 }
 
 export function createResolverCache(): ResolverCache {
   const roles = new Map<string, Promise<string | null>>();
   const baselines = new Map<string, Promise<VaultPosture>>();
+  const snapshots = new Map<string, Promise<MemberAccessSnapshot | null>>();
   const chains = new Map<string, Promise<string[]>>();
   // The promise is cached, not the value, so N concurrent resolves of the same
   // key share ONE in-flight query instead of racing to fill the entry.
@@ -92,6 +94,10 @@ export function createResolverCache(): ResolverCache {
       memo(roles, `${organizationId}\u0000${userId}`, () => memberRole(db, organizationId, userId)),
     baseline: (db, organizationId) =>
       memo(baselines, organizationId, () => vaultBaseline(db, organizationId)),
+    snapshot: (db, organizationId, userId) =>
+      memo(snapshots, `${organizationId}\u0000${userId}`, () =>
+        memberAccessSnapshot(db, organizationId, userId),
+      ),
     ancestors: (db, folderId) =>
       folderId === null
         ? Promise.resolve([])
@@ -105,6 +111,7 @@ interface DocLocation {
   organizationId: string;
   /** Creator of the note (null for files, which have no creator column). */
   createdBy: string | null;
+  createdAt: Date;
 }
 
 /**
@@ -121,12 +128,13 @@ async function locateDoc(
     folder_id: string | null;
     organization_id: string;
     created_by: string | null;
+    created_at: Date;
   }>(
-    `SELECT loc.vault_id, loc.folder_id, loc.created_by, v.organization_id
+    `SELECT loc.vault_id, loc.folder_id, loc.created_by, loc.created_at, v.organization_id
        FROM (
-         SELECT vault_id, folder_id, created_by FROM notes  WHERE id = $1 AND deleted_at IS NULL
+         SELECT vault_id, folder_id, created_by, created_at FROM notes  WHERE id = $1 AND deleted_at IS NULL
          UNION ALL
-         SELECT vault_id, folder_id, NULL::text FROM files  WHERE id = $1
+         SELECT vault_id, folder_id, NULL::text, created_at FROM files  WHERE id = $1
        ) loc
        JOIN vaults v ON v.id = loc.vault_id
       LIMIT 1`,
@@ -139,7 +147,40 @@ async function locateDoc(
     folderId: row.folder_id,
     organizationId: row.organization_id,
     createdBy: row.created_by,
+    createdAt: row.created_at,
   };
+}
+
+export interface MemberAccessSnapshot {
+  mode: "private" | "readonly" | "open";
+  accessRevision: number;
+  snapshotAt: Date;
+}
+
+/** Null is intentional: memberships predating migration 032 keep legacy ACLs. */
+export async function memberAccessSnapshot(
+  db: Queryable,
+  organizationId: string,
+  userId: string,
+): Promise<MemberAccessSnapshot | null> {
+  const { rows } = await db.query<{
+    mode: MemberAccessSnapshot["mode"];
+    access_revision: string | number;
+    snapshot_at: Date;
+  }>(
+    `SELECT mode, access_revision, snapshot_at
+       FROM member_access_snapshots
+      WHERE organization_id = $1 AND user_id = $2`,
+    [organizationId, userId],
+  );
+  const row = rows[0];
+  return row
+    ? {
+        mode: row.mode,
+        accessRevision: Number(row.access_revision),
+        snapshotAt: row.snapshot_at,
+      }
+    : null;
 }
 
 /** Walk parent_id up from a folder, collecting all ancestor folder ids (inclusive). */
@@ -198,6 +239,8 @@ async function sharePermission(
   isMember: boolean,
   /** False when an org deny covers this resource — see {@link isDenied}. */
   orgGrantsApply = true,
+  snapshot?: MemberAccessSnapshot | null,
+  resourceCreatedAt?: Date,
 ): Promise<Permission> {
   // Team (org-wide) grants apply ONLY to actual vault members — never to
   // outsiders who merely know a doc id. They can target a specific folder/file
@@ -217,9 +260,13 @@ async function sharePermission(
   // $2 (the doc id) is always referenced with an explicit cast + null guard so
   // Postgres can infer its type even for a folder resource, where docId is null
   // and the file branch is inert.
-  const { rows } = await db.query<{ permission: string }>(
-    `SELECT permission FROM shares
-      WHERE permission IN ('view', 'edit')
+  const { rows } = await db.query<{
+    permission: string;
+    principal_type: "user" | "org";
+    access_revision: string | number;
+  }>(
+    `SELECT permission, principal_type, access_revision FROM shares
+      WHERE permission IN ('view', 'edit', 'readonly')
         AND (
           (principal_type = 'user' AND principal_id = $1 AND (
             ($2::text IS NOT NULL AND resource_type = 'file' AND resource_id = $2)
@@ -232,8 +279,15 @@ async function sharePermission(
   );
   let best: Permission = "none";
   for (const r of rows) {
-    if (r.permission === "edit" || r.permission === "view") {
-      best = maxPermission(best, r.permission);
+    const existingAtJoin = !!snapshot && !!resourceCreatedAt && resourceCreatedAt <= snapshot.snapshotAt;
+    if (
+      r.principal_type === "org" &&
+      existingAtJoin &&
+      Number(r.access_revision) <= snapshot.accessRevision
+    ) continue;
+    if (r.permission === "edit") best = maxPermission(best, "edit");
+    else if (r.permission === "view" || r.permission === "readonly") {
+      best = maxPermission(best, "view");
     }
   }
   return best;
@@ -258,7 +312,7 @@ export async function isLocked(
   // infer its type for a folder resource (docId null → file branch inert).
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM shares
-      WHERE permission = 'locked'
+      WHERE permission IN ('locked', 'readonly')
         AND (
           principal_type = 'org'
           OR (principal_type = 'user' AND principal_id = $1)
@@ -404,6 +458,37 @@ export async function effectivePermission(
   const role = cache
     ? await cache.role(db, loc.organizationId, userId)
     : await memberRole(db, loc.organizationId, userId);
+  const snapshot = cache
+    ? await cache.snapshot(db, loc.organizationId, userId)
+    : await memberAccessSnapshot(db, loc.organizationId, userId);
+  const existingAtJoin = !!snapshot && loc.createdAt <= snapshot.snapshotAt;
+
+  // A join default is a one-time view of content that already existed. It does
+  // not rewrite the organization's live posture, and it is not an immutable
+  // deny: an org grant written at a later ACL revision can raise it.
+  if (existingAtJoin) {
+    const direct = await sharePermission(
+      db,
+      userId,
+      docId,
+      folderIds,
+      loc.organizationId,
+      role !== null,
+      !itemPrivate,
+      snapshot,
+      loc.createdAt,
+    );
+    let snapped: Permission = itemPrivate
+      ? "none"
+      : snapshot.mode === "open"
+        ? "edit"
+        : snapshot.mode === "readonly"
+          ? "view"
+          : "none";
+    snapped = maxPermission(snapped, direct);
+    if (snapped !== "none" && (await isLocked(db, userId, docId, folderIds))) return "view";
+    return snapped;
+  }
   // The vault's posture caps EVERY shortcut below it (see `vaultBaseline`).
   // Read-only and Private both skip the role AND the creator rule; they differ
   // only in what the vault itself then confers — `view` for one, nothing at all
@@ -510,6 +595,7 @@ export interface AccessContext {
    * either answer alone.
    */
   createdBy: string | null;
+  createdAt: Date;
 }
 
 export interface ResolvedAccess {
@@ -537,22 +623,24 @@ export async function buildAccessContext(
       docId: resourceId,
       folderIds: await chain(loc.folderId),
       createdBy: loc.createdBy,
+      createdAt: loc.createdAt,
     };
   }
   // folder: resolve its owning vault (organization), then walk itself + ancestors.
-  const { rows } = await db.query<{ organization_id: string }>(
-    `SELECT v.organization_id
+  const { rows } = await db.query<{ organization_id: string; created_at: Date }>(
+    `SELECT v.organization_id, f.created_at
        FROM folders f JOIN vaults v ON v.id = f.vault_id
       WHERE f.id = $1 LIMIT 1`,
     [resourceId],
   );
-  const org = rows[0]?.organization_id;
-  if (!org) return null;
+  const row = rows[0];
+  if (!row) return null;
   return {
-    organizationId: org,
+    organizationId: row.organization_id,
     docId: null,
     folderIds: await chain(resourceId),
     createdBy: null, // folders have no creator column in the ACL context
+    createdAt: row.created_at,
   };
 }
 
@@ -568,6 +656,36 @@ export async function resolveAccessForUser(
     return { permission: "none", capped: false, denied: true };
   }
   const itemPrivate = await isDenied(db, "org", ctx.organizationId, ctx.docId, ctx.folderIds);
+  const snapshot = cache
+    ? await cache.snapshot(db, ctx.organizationId, userId)
+    : await memberAccessSnapshot(db, ctx.organizationId, userId);
+  const existingAtJoin = !!snapshot && ctx.createdAt <= snapshot.snapshotAt;
+  if (existingAtJoin) {
+    const direct = await sharePermission(
+      db,
+      userId,
+      ctx.docId,
+      ctx.folderIds,
+      ctx.organizationId,
+      role !== null,
+      !itemPrivate,
+      snapshot,
+      ctx.createdAt,
+    );
+    let permission: Permission = itemPrivate
+      ? "none"
+      : snapshot.mode === "open"
+        ? "edit"
+        : snapshot.mode === "readonly"
+          ? "view"
+          : "none";
+    permission = maxPermission(permission, direct);
+    if (permission === "none") return { permission, capped: false, denied: itemPrivate };
+    const locked = await isLocked(db, userId, ctx.docId, ctx.folderIds);
+    if (locked && permission === "edit") return { permission: "view", capped: true };
+    if (locked) return { permission: "view", capped: false };
+    return { permission, capped: false };
+  }
   // Mirrors `effectivePermission` branch for branch. They MUST agree: this one
   // renders the "who can access" list, and a list that disagrees with the
   // enforcer is worse than no list.
