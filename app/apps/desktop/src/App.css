@@ -3089,6 +3089,21 @@ body:has(.sidebar-resizer.dragging) {
   color: var(--warning);
 }
 
+.attachment-sync-notice {
+  margin: 0;
+  border-radius: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  padding: var(--sp-3) var(--sp-6);
+}
+.attachment-sync-notice strong {
+  color: var(--warning);
+}
+.attachment-sync-notice-health {
+  margin: 0 var(--sp-6) var(--sp-4);
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  border-radius: var(--radius-md);
+}
+
 /* Sync-issues strip: the not-syncing geometry (flush, full-width, same amber),
    for the other half of the same message — a run that FINISHED and left notes
    behind. Same rule rather than a new look, because they are the same kind of

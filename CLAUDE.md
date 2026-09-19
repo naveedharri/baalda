@@ -289,6 +289,11 @@ Vault Health keeps its local census separate from its server inventory. Local to
 disk/index pass; the server comparison reads the registry's last reconciled note, folder and file paths.
 That server view is explicitly last-known while offline, signed out, reconnecting or denied, and matching
 paths/counts never imply matching content — per-note pushed/sync state remains the content authority.
+An attachment-local-only notice is driven only by the server's explicit
+`attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
+grandfathered users and billing-disabled self-hosts may still sync attachments.
+The notice persists in file previews and Vault Health while notes continue to
+report their own sync state.
 
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same

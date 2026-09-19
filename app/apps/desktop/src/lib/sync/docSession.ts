@@ -447,6 +447,8 @@ export class SyncManager implements InboundHost {
   /** Whole-map mirror of the attachment mirror's per-file state
    *  (`store.fileSyncState`), keyed by path. */
   private onFileState?: (states: Record<string, DocSyncState>) => void;
+  /** Explicit server verdict that this vault's attachments stay local. */
+  private onAttachmentEntitlement?: (blocked: boolean) => void;
   /** The content upload for the current scope, while one is running. */
   private uploader: ContentUploader | null = null;
   /**
@@ -902,6 +904,10 @@ export class SyncManager implements InboundHost {
     cb: ((states: Record<string, DocSyncState>) => void) | undefined,
   ): void {
     this.onFileState = cb;
+  }
+
+  setAttachmentEntitlementListener(cb: ((blocked: boolean) => void) | undefined): void {
+    this.onAttachmentEntitlement = cb;
   }
 
   /** Map the vault channel's status onto the app-wide SyncStatus vocabulary.
@@ -4658,6 +4664,9 @@ export class SyncManager implements InboundHost {
       // vault's rows with the old vault's paths.
       onFileStates: (states) => {
         if (scope.isCurrent()) this.onFileState?.(states);
+      },
+      onEntitlementBlocked: (blocked) => {
+        if (scope.isCurrent()) this.onAttachmentEntitlement?.(blocked);
       },
       // …and the counted half of the same fact, on the vault's one progress
       // reporter. Scope-guarded inside the handlers, for the same reason.

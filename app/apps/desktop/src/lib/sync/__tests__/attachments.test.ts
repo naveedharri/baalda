@@ -200,7 +200,14 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     });
     const notify = vi.fn();
     const onFileStates = vi.fn();
-    const sync = new AttachmentSync({ ...deps, listServer, notify, onFileStates });
+    const onEntitlementBlocked = vi.fn();
+    const sync = new AttachmentSync({
+      ...deps,
+      listServer,
+      notify,
+      onFileStates,
+      onEntitlementBlocked,
+    });
 
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
@@ -209,11 +216,14 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(notify.mock.calls[0]?.[0]).toMatch(/stay on this device/i);
     expect(notify.mock.calls[0]?.[0]).toMatch(/upgrade.*Pro/i);
     expect(onFileStates).toHaveBeenLastCalledWith({});
+    expect(onEntitlementBlocked).toHaveBeenCalledTimes(1);
+    expect(onEntitlementBlocked).toHaveBeenLastCalledWith(true);
 
     // A confirmed billing refresh explicitly re-enables the probe; successful
     // entitlement recovery resumes the ordinary mirror in this same session.
     pro = true;
     sync.resetEntitlement();
+    expect(onEntitlementBlocked).toHaveBeenLastCalledWith(false);
     expect(await sync.reconcile()).toEqual({ uploaded: 1, downloaded: 0 });
     expect(listServer).toHaveBeenCalledTimes(2);
   });

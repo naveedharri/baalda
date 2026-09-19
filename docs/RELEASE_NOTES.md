@@ -20,7 +20,7 @@
 
 ## 0.1.62
 
-- More files now open, embed, search and sync inside Baalda, including Office documents, CSV, audio, video, code and archives. Shared-folder access also applies to every file inside it.
+- More files now open, embed and search inside Baalda, including Office documents, CSV, audio, video, code and archives. Notes sync on every plan; Pro also syncs attachments, with a clear local-only notice on Free.
 - Health now leads with useful vault totals and a clear computer-versus-server comparison. Differences can be inspected and retried, while detailed checks and history stay one click away.
 - Access selection now guides you smoothly to the next step. Sidebar colors have far more variety, can be changed from an item's menu, and can be disabled in Appearance.
 - Large vaults join and sync much faster with resumable batch transfers. A vault owner can also remove a vault from the server while keeping its Markdown files safely on disk.

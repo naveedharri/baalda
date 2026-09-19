@@ -152,6 +152,7 @@ describe("billing", () => {
       const fourth = await createOrg(user, "U4", "unl-w4");
       expect(fourth.id).toBeTruthy();
       expect((await canCreateOrganization(user.userId)).allowed).toBe(true);
+      expect(await canSyncAttachments(user.userId, fourth.id)).toBe(true);
 
       // Pending invitations that would matter under a cap — still unblocked here.
       await pool.query(
@@ -217,7 +218,7 @@ describe("billing", () => {
       expect((await canCreateOrganization(user.userId)).limit).toBe(3);
     });
 
-    it("an active Pro vault unlocks attachment sync for every member", async () => {
+    it("an active or past-due Pro vault unlocks attachment sync for every member", async () => {
       const owner = await signUp("pro-owner@billing.com");
       const member = await signUp("pro-member@billing.com");
       const org = await createOrg(owner, "Pro files", "pro-files");
@@ -229,6 +230,10 @@ describe("billing", () => {
       expect(await canSyncAttachments(member.userId, org.id)).toBe(false);
       await seedSubscription(org.id, "active");
       expect(await canSyncAttachments(member.userId, org.id)).toBe(true);
+      await seedSubscription(org.id, "past_due");
+      expect(await canSyncAttachments(member.userId, org.id)).toBe(true);
+      await seedSubscription(org.id, "canceled");
+      expect(await canSyncAttachments(member.userId, org.id)).toBe(false);
     });
 
     it("seatCount / canAddMember count members + pending invitations", async () => {

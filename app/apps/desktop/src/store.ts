@@ -336,6 +336,8 @@ interface AppStore {
    * Dropped on every vault switch alongside `docSyncState`.
    */
   fileSyncState: Record<string, DocSyncState>;
+  /** True only after this vault's server explicitly refuses attachment sync. */
+  attachmentSyncBlocked: boolean;
   /**
    * Vault-relative note path → that note's **server docId**, mirroring the
    * registry's map for the open vault (empty when sync is off).
@@ -778,6 +780,7 @@ interface AppStore {
   patchDocSyncState: (patch: Record<string, DocSyncState | null>) => void;
   /** Replace the per-file sync map (keys are paths; `{}` = nothing to draw). */
   setFileSyncState: (states: Record<string, DocSyncState>) => void;
+  setAttachmentSyncBlocked: (blocked: boolean) => void;
   /** Replace the path→docId index (the registry mirror; `{}` = nothing synced). */
   setDocIdByPath: (map: Record<string, string>) => void;
   /**
@@ -1491,6 +1494,7 @@ function vaultScopedSyncReset() {
     failedRunToken: 0,
     docSyncState: {} as Record<string, DocSyncState>,
     fileSyncState: {} as Record<string, DocSyncState>,
+    attachmentSyncBlocked: false,
     docIdByPath: {} as Record<string, string>,
     locks: [] as Share[],
     denies: [] as Share[],
@@ -2472,6 +2476,11 @@ export const useStore = create<AppStore>((set, get) => ({
     // The same signal for files: the attachment mirror speaks once per pass and
     // once per upload, which is orders of magnitude quieter than the note run.
     syncManager.setFileStateListener((states) => get().setFileSyncState(states));
+    // Optional chaining keeps narrow test/legacy manager shims compatible;
+    // the production manager always exposes this listener.
+    syncManager.setAttachmentEntitlementListener?.((blocked) =>
+      get().setAttachmentSyncBlocked(blocked),
+    );
     // The path→docId index the sidebar needs to attach a docId-keyed sync state
     // to a path-keyed row. Coalesced by SyncManager on the same ~10/second budget.
     syncManager.setRegistryMapListener((map) => get().setDocIdByPath(map));
@@ -4097,6 +4106,7 @@ export const useStore = create<AppStore>((set, get) => ({
   // publishes the whole local binary set each pass, so a merge would keep dots
   // for files that have since been deleted, renamed, or left with the vault.
   setFileSyncState: (states) => set({ fileSyncState: states }),
+  setAttachmentSyncBlocked: (blocked) => set({ attachmentSyncBlocked: blocked }),
 
   // Replaced, not merged: the registry publishes the whole index for the open
   // vault, so a merge would keep rows for notes it has stopped mapping (deleted,

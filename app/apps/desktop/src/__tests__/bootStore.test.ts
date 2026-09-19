@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
   listUserInvitations: vi.fn(async () => [] as unknown[]),
   getBillingConfig: vi.fn(async () => ({ enabled: false })),
   getOrgBilling: vi.fn(async () => null),
+  getMyBilling: vi.fn(async () => ({ vaults: [] })),
   listVaults: vi.fn(async () => [] as unknown[]),
   listVaultLocks: vi.fn(async () => [] as unknown[]),
 }));
@@ -34,6 +35,10 @@ const authManager = vi.hoisted(() => ({
   currentSession: vi.fn(async () => null as unknown),
   signOut: vi.fn(async () => {}),
   getServerUrl: () => "http://localhost:3010",
+}));
+
+const attachmentEntitlement = vi.hoisted(() => ({
+  listener: undefined as ((blocked: boolean) => void) | undefined,
 }));
 
 vi.mock("../lib/auth/authManager", () => {
@@ -76,10 +81,14 @@ const sync = vi.hoisted(() => ({
   setSyncProgressListener: vi.fn(),
   setDocStateListener: vi.fn(),
   setFileStateListener: vi.fn(),
+  setAttachmentEntitlementListener: vi.fn((listener: (blocked: boolean) => void) => {
+    attachmentEntitlement.listener = listener;
+  }),
   setRegistryMapListener: vi.fn(),
   setNoteMetaListener: vi.fn(),
   setColorListener: vi.fn(),
   setFailureListener: vi.fn(),
+  recheckAttachmentEntitlement: vi.fn(),
   announcePresence: vi.fn(),
 }));
 
@@ -240,6 +249,37 @@ describe("enableSyncForVault — background returns at the prime", () => {
     await enabling;
     expect(settled).toBe(true);
     expect(useStore.getState().syncEnabled).toBe(true);
+  });
+});
+
+describe("attachment entitlement — vault-scoped server verdict", () => {
+  it("publishes the explicit verdict and clears it when the vault closes", () => {
+    const listener = attachmentEntitlement.listener;
+    expect(listener).toBeTypeOf("function");
+
+    listener?.(true);
+    expect(useStore.getState().attachmentSyncBlocked).toBe(true);
+
+    useStore.getState().closeLocalVault();
+    expect(useStore.getState().attachmentSyncBlocked).toBe(false);
+  });
+
+  it("retries attachments exactly when billing confirms a Free-to-Pro upgrade", async () => {
+    useStore.setState({
+      session: session(),
+      billingConfig: { enabled: true } as never,
+      myBilling: { vaults: [{ orgId: ORG, plan: "free" }] } as never,
+      attachmentSyncBlocked: true,
+    });
+    api.getMyBilling.mockResolvedValue({
+      vaults: [{ orgId: ORG, plan: "pro" }],
+    } as never);
+
+    await useStore.getState().refreshMyBilling();
+    expect(sync.recheckAttachmentEntitlement).toHaveBeenCalledOnce();
+
+    await useStore.getState().refreshMyBilling();
+    expect(sync.recheckAttachmentEntitlement).toHaveBeenCalledOnce();
   });
 });
 

@@ -39,6 +39,7 @@ import { useHealthIgnores } from "../lib/health/useHealthIgnores";
 import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
 import { HealthActivity, HealthLargest, HealthStats } from "./HealthStats";
+import { AttachmentSyncNotice } from "./AttachmentSyncNotice";
 import {
   Glyph,
   PathText,
@@ -84,6 +85,7 @@ export function HealthTab({
 
   return (
     <>
+      <AttachmentSyncNotice surface="health" />
       <HealthView
         snapshot={snapshot}
         notes={notes}
