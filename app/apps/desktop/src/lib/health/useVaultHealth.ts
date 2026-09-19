@@ -18,6 +18,7 @@ import { collectCrdtGarbage } from "../sync/crdtGc";
 import { deletePaths } from "../vault/mutatePaths";
 import { removeFromOrder } from "../ordering";
 import { copyText } from "../clipboard";
+import { isNoteExt } from "../formats";
 import { toast } from "../toast";
 import { runCheckAction, type CheckActionDeps } from "./checkActions";
 import {
@@ -30,6 +31,7 @@ import {
 } from "./model";
 import type {
   HealthActions,
+  HealthInventory,
   HealthIssue,
   NoteInspection,
   SyncLogEntry,
@@ -66,6 +68,11 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const [stats, setStats] = useState<VaultStats | null>(null);
   const [checks, setChecks] = useState<VaultChecks | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [localInventoryPaths, setLocalInventoryPaths] = useState<{
+    notes: string[];
+    folders: string[];
+    files: string[];
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   /** Bumped by `refresh()` and by any action that changes what a census would
    *  say (reclaim, reset-history). */
@@ -82,12 +89,14 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     if (!vaultPath) {
       setStats(null);
       setChecks(null);
+      setLocalInventoryPaths(null);
       setStatsError(null);
       setLoading(false);
       return;
     }
     let live = true;
     setLoading(true);
+    setLocalInventoryPaths(null);
     // The registry's ids are the second live id space (see `crdtGc.ts`): without
     // them a server-pulled note's history reads as an orphan the sweep then
     // refuses to remove — "18 reclaimable" beside a Reclaim that frees nothing.
@@ -121,6 +130,33 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       })
       .catch(() => {
         if (live) setChecks(null);
+      });
+    // The census gives totals; the full tree gives the paths needed to explain
+    // a folder/file mismatch. `listTree` is the complete Rust walk (not the
+    // sidebar's lazy tree), and carries the same vault-epoch race guard.
+    void ipc
+      .listTree(vaultEpoch)
+      .then((tree) => {
+        if (!live) return;
+        const paths = { notes: [] as string[], folders: [] as string[], files: [] as string[] };
+        const walk = (node: ipc.TreeNode): void => {
+          if (node.isDir) {
+            if (node.path) paths.folders.push(node.path);
+            for (const child of node.children ?? []) walk(child);
+          } else if (isNoteExt(node.path)) {
+            paths.notes.push(node.path);
+          } else {
+            paths.files.push(node.path);
+          }
+        };
+        walk(tree);
+        paths.notes.sort();
+        paths.folders.sort();
+        paths.files.sort();
+        setLocalInventoryPaths(paths);
+      })
+      .catch(() => {
+        if (live) setLocalInventoryPaths(null);
       });
     return () => {
       live = false;
@@ -216,6 +252,77 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     stats,
     members,
   ]);
+
+  const inventory = useMemo<HealthInventory>(() => {
+    const localNotes = localInventoryPaths?.notes ?? [...localNotePaths];
+    const localFolders = localInventoryPaths?.folders ?? [];
+    const localFilesPaths = localInventoryPaths?.files ?? [];
+    const folded = (paths: string[]) => new Set(paths.map((path) => path.toLowerCase()));
+    const localNotesFolded = folded(localNotes);
+    const localFoldersFolded = folded(localFolders);
+    const localFilesFolded = folded(localFilesPaths);
+    let remote: ReturnType<typeof syncManager.registry.healthInventory> | null = null;
+    try {
+      remote = syncManager.registry.healthInventory();
+    } catch {
+      /* The registry may not be available during the first paint in a test host. */
+    }
+
+    const remoteView = syncEnabled && remote?.hasServerVault === true ? remote : null;
+    const remoteNotes = remoteView?.notePaths ?? [];
+    const remoteFolders = remoteView?.folderPaths ?? [];
+    const remoteFiles = remoteView?.filePaths ?? [];
+    const remoteNotesFolded = folded(remoteNotes);
+    const remoteFoldersFolded = folded(remoteFolders);
+    const remoteFilesFolded = folded(remoteFiles);
+    // Attachments use their own content-addressed transport and do not have a
+    // registry row, so comparing them with `fileByPath` would invent a gap.
+    const localFiles = stats?.otherFiles.count ?? 0;
+    const local = {
+      notes: stats?.notes.count ?? localNotes.length,
+      folders: stats?.folders ?? 0,
+      files: localFiles,
+      total: (stats?.notes.count ?? localNotes.length) + (stats?.folders ?? 0) + localFiles,
+    };
+    const server = remoteView
+      ? {
+          notes: remoteNotes.length,
+          folders: remoteView.folderPaths.length,
+          files: remoteView.filePaths.length,
+          total:
+            remoteNotes.length + remoteView.folderPaths.length + remoteView.filePaths.length,
+        }
+      : null;
+    const serverState: HealthInventory["serverState"] = !server
+      ? "unavailable"
+      : report.verdict === "offline" ||
+          report.verdict === "signed-out" ||
+          report.verdict === "no-access" ||
+          report.verdict === "connecting" ||
+          report.verdict === "syncing"
+        ? "last-known"
+        : "current";
+
+    return {
+      local,
+      server,
+      serverState,
+      deviceOnlyNotes: localNotes.filter((path) => !remoteNotesFolded.has(path.toLowerCase())).sort(),
+      serverOnlyNotes: remoteNotes.filter((path) => !localNotesFolded.has(path.toLowerCase())).sort(),
+      deviceOnlyFolders: localInventoryPaths
+        ? localFolders.filter((path) => !remoteFoldersFolded.has(path.toLowerCase())).sort()
+        : [],
+      serverOnlyFolders: localInventoryPaths
+        ? remoteFolders.filter((path) => !localFoldersFolded.has(path.toLowerCase())).sort()
+        : [],
+      deviceOnlyFiles: localInventoryPaths
+        ? localFilesPaths.filter((path) => !remoteFilesFolded.has(path.toLowerCase())).sort()
+        : [],
+      serverOnlyFiles: localInventoryPaths
+        ? remoteFiles.filter((path) => !localFilesFolded.has(path.toLowerCase())).sort()
+        : [],
+    };
+  }, [localNotePaths, localInventoryPaths, stats, syncEnabled, report.verdict, docIdByPath]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
   // Kept in a ref-backed object so the identity is stable across renders: the
@@ -493,7 +600,17 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     [actions, refresh],
   );
 
-  return { report, stats, checks, statsError, loading, log, refresh, actions: wrapped };
+  return {
+    report,
+    inventory,
+    stats,
+    checks,
+    statsError,
+    loading,
+    log,
+    refresh,
+    actions: wrapped,
+  };
 }
 
 /**

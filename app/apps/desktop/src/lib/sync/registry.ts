@@ -1016,6 +1016,21 @@ export class VaultRegistry {
     return [...this.byDocId].map(([docId, relPath]) => ({ docId, relPath }));
   }
 
+  /** Read-only census of the last reconciled server registry for Health. */
+  healthInventory(): {
+    hasServerVault: boolean;
+    notePaths: string[];
+    folderPaths: string[];
+    filePaths: string[];
+  } {
+    return {
+      hasServerVault: this.serverVaultId != null,
+      notePaths: [...this.byPath.keys()].sort(),
+      folderPaths: [...this.folderByPath.keys()].sort(),
+      filePaths: [...this.fileByPath.keys()].sort(),
+    };
+  }
+
   /** Server folder id for a folder's vault-relative path, if registered. */
   getFolderId(relPath: string): string | null {
     return this.folderByPath.get(relPath) ?? null;

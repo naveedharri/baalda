@@ -82,6 +82,12 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     // test); in the app it is what makes Rust refuse the write after a switch.
     expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Team/hello.md", "", null);
     expect(reg.getMapping("Team/hello.md")).toEqual({ vaultId: "v-owner", docId: "n1" });
+    expect(reg.healthInventory()).toEqual({
+      hasServerVault: true,
+      notePaths: ["Team/hello.md"],
+      folderPaths: [],
+      filePaths: [],
+    });
   });
 
   it("resolves a mapped note through a case-different disk spelling", async () => {

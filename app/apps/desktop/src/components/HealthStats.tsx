@@ -30,12 +30,8 @@ interface Metric {
   action?: "reclaim";
 }
 
-/**
- * The census as one compact strip under the verdict card: ten numbers, each a
- * value over a tiny label, with the detail on hover. It used to be three groups
- * of tall cards further down the page, which pushed everything a person came
- * for (what failed, and why) below the fold behind numbers that rarely change.
- */
+/** The four numbers people use to understand the size of a vault. Detailed
+ * index/history/link figures live in Advanced diagnostics below. */
 export function HealthStats({
   stats,
   loading,
@@ -56,7 +52,7 @@ export function HealthStats({
       <>
         {statsError && <div className="auth-error">{statsError}</div>}
         <ul className="health-metrics" aria-busy={loading || undefined}>
-          {Array.from({ length: 10 }, (_, i) => (
+          {Array.from({ length: 4 }, (_, i) => (
             <li key={i} className="health-metric is-skeleton" aria-hidden="true">
               <span className="health-metric-value" />
               <span className="health-metric-label" />
@@ -70,70 +66,36 @@ export function HealthStats({
     );
   }
 
-  const orphans = stats.history.orphanDocs;
   const totalBytes = stats.notes.bytes + stats.attachments.bytes + stats.otherFiles.bytes;
+  const totalFiles = stats.notes.count + stats.attachments.count + stats.otherFiles.count;
+  const totalItems = totalFiles + stats.folders;
 
   const metrics: Metric[] = [
-    { icon: "note", label: "Notes", value: stats.notes.count.toLocaleString(), sub: formatBytes(stats.notes.bytes) },
-    { icon: "folder", label: "Folders", value: stats.folders.toLocaleString() },
     {
-      icon: "paperclip",
-      label: "Attachments",
-      value: stats.attachments.count.toLocaleString(),
-      sub: formatBytes(stats.attachments.bytes),
+      icon: "database",
+      label: "Total items",
+      value: totalItems.toLocaleString(),
+      sub: `${totalFiles.toLocaleString()} files · ${stats.folders.toLocaleString()} folders`,
     },
     {
-      icon: "file",
-      label: "Other files",
-      value: stats.otherFiles.count.toLocaleString(),
-      sub: formatBytes(stats.otherFiles.bytes),
-    },
-    { icon: "tag", label: "Tags", value: stats.tags.toLocaleString() },
-    {
-      icon: "link",
-      label: "Links",
-      value: stats.links.toLocaleString(),
-      flag: stats.brokenLinks > 0 ? `${stats.brokenLinks.toLocaleString()} broken` : undefined,
-      check: "broken-links",
-    },
-    {
-      icon: "empty",
-      label: "Empty notes",
-      value: stats.notes.empty.toLocaleString(),
-      flag: stats.notes.empty > 0 ? "0 bytes" : undefined,
+      icon: "note",
+      label: "Notes",
+      value: stats.notes.count.toLocaleString(),
+      sub: `${formatBytes(stats.notes.bytes)}${stats.notes.empty > 0 ? ` · ${stats.notes.empty.toLocaleString()} empty` : ""}`,
+      flag: stats.notes.empty > 0 ? `${stats.notes.empty.toLocaleString()} empty` : undefined,
       check: "empty-notes",
     },
     {
+      icon: "folder",
+      label: "Folders",
+      value: stats.folders.toLocaleString(),
+      sub: "Folders on this computer",
+    },
+    {
       icon: "disk",
-      label: "Total size",
+      label: "Stored locally",
       value: formatBytes(totalBytes),
       sub: "Notes, attachments and other files",
-    },
-    {
-      icon: "database",
-      label: "Index",
-      value: formatBytes(stats.index.bytes),
-      // Files are named alongside notes because they are why this number can
-      // jump: dropping a folder of documents adds their extracted text to the
-      // index, and "the index grew 40 MB" deserves an answer on the same tile.
-      sub:
-        stats.index.files > 0
-          ? `${stats.notes.count.toLocaleString()} notes · ${stats.index.files.toLocaleString()} files · ${formatBytes(
-              stats.index.extractedTextBytes,
-            )} extracted text`
-          : `${stats.notes.count.toLocaleString()} notes indexed`,
-    },
-    {
-      icon: "history",
-      label: "History",
-      value: formatBytes(stats.history.bytes),
-      sub: `${stats.history.docs.toLocaleString()} notes · ${stats.history.updates.toLocaleString()} updates`,
-      flag:
-        orphans > 0
-          ? `${formatBytes(stats.history.orphanBytes)} reclaimable`
-          : undefined,
-      check: "orphan-history",
-      action: orphans > 0 ? "reclaim" : undefined,
     },
   ];
 

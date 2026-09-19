@@ -1948,6 +1948,14 @@ body:has(.sidebar-resizer.dragging) {
 .context-menu li.menu-note:hover {
   background: none;
 }
+.context-menu li.menu-note.menu-link {
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.context-menu li.menu-note.menu-link:hover {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
 /* The toolbar popover hangs off its button instead of the pointer, so it is
    absolute within the wrapper rather than fixed like the row menu. */
 .tree-sort-wrap {
@@ -2106,9 +2114,11 @@ body:has(.sidebar-resizer.dragging) {
 
 /* Color swatch row inside the ⋯ menu (Finder-tag style) */
 .context-menu li.menu-swatches {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(6, 18px);
   align-items: center;
-  gap: var(--sp-1);
+  justify-content: start;
+  gap: var(--sp-2);
   cursor: default;
 }
 .context-menu li.menu-swatches:hover {
@@ -2573,13 +2583,13 @@ body:has(.sidebar-resizer.dragging) {
 /* Inside the header: take the row and shrink rather than push the controls off.
    `margin-bottom: -1px` lets the strip reach 1px INTO the header's bottom rule,
    so the active card (which sits at the strip's bottom edge) paints over the
-   rule and joins the sheet below. The left pad keeps the first tab's fillet off
-   the scroll container's clip edge. The mask fades the last tabs out before
-   they reach the badge, so overflow reads as "more to the right". */
+   rule and joins the sheet below. The mask fades the last tabs out before they
+   reach the badge, so overflow reads as "more to the right". The first tab
+   starts at the sidebar seam; its left fillet is removed below. */
 .main-header > .tab-strip {
   flex: 1 1 auto;
   min-width: 0;
-  padding: var(--tab-inset) 0 0 calc(var(--tab-radius) + 2px);
+  padding: var(--tab-inset) 0 0;
   margin-bottom: -1px;
   mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
@@ -2628,6 +2638,12 @@ body:has(.sidebar-resizer.dragging) {
   width: var(--tab-radius);
   height: var(--tab-radius);
   pointer-events: none;
+}
+/* The strip begins at the sidebar seam. Its first tab therefore has no left
+   bottom fillet: the sheet meets that edge cleanly while the right shoulder
+   keeps the browser-tab shape used everywhere else. */
+.tab.first-tab .tab-active-bg::before {
+  display: none;
 }
 /* The square starts ON the card's border column, not one pixel outside it: the
    sheet-coloured part of the gradient then paints over the card's straight side
@@ -4129,7 +4145,7 @@ body:has(.sidebar-resizer.dragging) {
 .access-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
 }
 .access-intro {
   margin: 0;
@@ -4154,6 +4170,8 @@ body:has(.sidebar-resizer.dragging) {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-5);
+  background: var(--bg-subtle);
+  scroll-margin-top: var(--sp-5);
 }
 .access-default-copy {
   display: flex;
@@ -4231,8 +4249,10 @@ body:has(.sidebar-resizer.dragging) {
    screen by default is the vault's top level, not everything in it. */
 .access-master {
   background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle, var(--border));
   border-radius: var(--radius-lg);
-  padding: var(--sp-2);
+  padding: var(--sp-3);
+  scroll-margin-top: var(--sp-5);
 }
 .access-listhead {
   display: flex;
@@ -4380,7 +4400,9 @@ body:has(.sidebar-resizer.dragging) {
 .access-bulk-card {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
+  background: var(--bg-subtle);
+  scroll-margin-top: var(--sp-5);
 }
 .access-bulk-heading {
   display: flex;
@@ -4401,7 +4423,8 @@ body:has(.sidebar-resizer.dragging) {
   gap: var(--sp-1);
   padding: var(--sp-1);
   border-radius: var(--radius-md);
-  background: var(--bg-subtle);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle, var(--border));
 }
 .access-audience-tabs button {
   border: none;
@@ -4433,6 +4456,7 @@ body:has(.sidebar-resizer.dragging) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-2);
+  scroll-margin-top: var(--sp-5);
 }
 .access-member-choice {
   display: flex;
@@ -4445,6 +4469,7 @@ body:has(.sidebar-resizer.dragging) {
   color: var(--text-secondary);
   font-size: var(--fs-sm);
   cursor: pointer;
+  background: var(--bg-surface);
 }
 .access-member-choice.selected {
   border-color: var(--accent);
@@ -4696,10 +4721,19 @@ body:has(.sidebar-resizer.dragging) {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: var(--sp-1);
-  background: var(--bg-subtle);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle, var(--border));
   border-radius: var(--radius-lg);
   padding: var(--sp-1);
   margin-bottom: var(--sp-5);
+}
+@media (prefers-reduced-motion: reduce) {
+  .access-row,
+  .access-twisty,
+  .access-seg,
+  .access-segbtn {
+    transition: none;
+  }
 }
 .access-segbtn {
   border: 1px solid transparent;
