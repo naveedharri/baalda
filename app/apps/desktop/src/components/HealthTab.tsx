@@ -21,7 +21,12 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import type { NoteTitle } from "../lib/ipc";
-import type { HealthStage, HealthStageId, VaultHealthSnapshot } from "../lib/health/types";
+import type {
+  HealthInventory,
+  HealthStage,
+  HealthStageId,
+  VaultHealthSnapshot,
+} from "../lib/health/types";
 import { useVaultHealth } from "../lib/health/useVaultHealth";
 import { formatBytes, verdictLabel, verdictTone } from "../lib/health/format";
 import { toast } from "../lib/toast";
@@ -35,6 +40,8 @@ import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
 import { HealthActivity, HealthLargest, HealthStats } from "./HealthStats";
 import {
+  Glyph,
+  PathText,
   Section,
   type CheckRun,
   type ConfirmState,
@@ -190,6 +197,17 @@ export function HealthView({
 
   return (
     <div className="health-tab">
+      <HealthStats
+        stats={stats}
+        loading={loading}
+        statsError={statsError}
+        handlers={handlers}
+        onFlag={(id) => {
+          ignores.restoreCheck(id);
+          setFocusCheck((f) => ({ id, n: (f?.n ?? 0) + 1 }));
+        }}
+      />
+
       <VerdictCard
         snapshot={snapshot}
         onRefresh={refresh}
@@ -198,22 +216,11 @@ export function HealthView({
       />
 
 
-      {/* The vault's numbers sit right under the verdict as one quiet strip:
-          they frame everything below ("15 notes, 259 KB") without competing
-          with it. */}
-      <HealthStats
-        stats={stats}
-        loading={loading}
-        statsError={statsError}
+      <InventoryComparison
+        inventory={snapshot.inventory}
+        report={report}
         handlers={handlers}
-        onFlag={(id) => {
-          // A flag the reader clicks is one they want to see, ignored or not.
-          ignores.restoreCheck(id);
-          setFocusCheck((f) => ({ id, n: (f?.n ?? 0) + 1 }));
-        }}
       />
-
-      <Pipeline stages={report.stages} />
 
 
       <Section
@@ -231,53 +238,67 @@ export function HealthView({
         />
       </Section>
 
-      <Section title="Check a note">
-        <HealthInspector
-          notes={notes}
-          handlers={handlers}
-          request={inspectRequest}
-          onShowIssue={setFocusIssue}
-        />
-      </Section>
+      <details className="health-advanced">
+        <summary>
+          <span>
+            <strong>Advanced diagnostics</strong>
+            <small>File checks, activity, large items and sync history</small>
+          </span>
+          <Glyph name="chevron" />
+        </summary>
+        <div className="health-advanced-body">
+          <Pipeline stages={report.stages} />
 
-      <Section
-        title="Checks"
-        description="What Baalda verifies about the files in this vault."
-      >
-        <HealthChecks
-          checks={checks}
-          loading={loading}
-          handlers={handlers}
-          onRefresh={refresh}
-          ignored={ignores.checks}
-          onIgnore={ignores.ignoreCheck}
-          onRestore={ignores.restoreCheck}
-          focus={focusCheck}
-        />
-      </Section>
-
-      {stats && (
-        <>
-          <Section title="Activity">
-            <HealthActivity activity={stats.activity} />
+          <Section title="Check a note">
+            <HealthInspector
+              notes={notes}
+              handlers={handlers}
+              request={inspectRequest}
+              onShowIssue={setFocusIssue}
+            />
           </Section>
 
-          <Section title="Largest">
-            <HealthLargest stats={stats} handlers={handlers} />
+          <Section
+            title="File checks"
+            description="What Baalda verifies about the files in this vault."
+          >
+            <HealthChecks
+              checks={checks}
+              loading={loading}
+              handlers={handlers}
+              onRefresh={refresh}
+              ignored={ignores.checks}
+              onIgnore={ignores.ignoreCheck}
+              onRestore={ignores.restoreCheck}
+              focus={focusCheck}
+            />
           </Section>
-        </>
-      )}
 
-      <Section
-        title="Timeline"
-        description="What the sync layer has done since this app launched."
-      >
-        <HealthTimeline
-          log={log}
-          now={now}
-          onInspect={(path) => setInspectRequest((r) => ({ path, n: (r?.n ?? 0) + 1 }))}
-        />
-      </Section>
+          {stats && (
+            <>
+              <Section title="Activity">
+                <HealthActivity activity={stats.activity} />
+              </Section>
+              <Section title="Largest files">
+                <HealthLargest stats={stats} handlers={handlers} />
+              </Section>
+            </>
+          )}
+
+          <Section
+            title="Sync history"
+            description="What the sync layer has done since this app launched."
+          >
+            <HealthTimeline
+              log={log}
+              now={now}
+              onInspect={(path) =>
+                setInspectRequest((r) => ({ path, n: (r?.n ?? 0) + 1 }))
+              }
+            />
+          </Section>
+        </div>
+      </details>
 
       <Confirms
         confirming={confirming}
@@ -285,6 +306,259 @@ export function HealthView({
         actions={actions}
         onRunCheckAction={startCheckAction}
       />
+    </div>
+  );
+}
+
+// ── Device and server inventory ─────────────────────────────────────────────
+
+function InventoryComparison({
+  inventory,
+  report,
+  handlers,
+}: {
+  inventory: HealthInventory;
+  report: VaultHealthSnapshot["report"];
+  handlers: HealthHandlers;
+}) {
+  const [open, setOpen] = useState(false);
+  const differences =
+    inventory.deviceOnlyNotes.length +
+    inventory.serverOnlyNotes.length +
+    inventory.deviceOnlyFolders.length +
+    inventory.serverOnlyFolders.length +
+    inventory.deviceOnlyFiles.length +
+    inventory.serverOnlyFiles.length;
+  const countsDiffer = inventory.server != null && inventory.local.total !== inventory.server.total;
+  const confirmed = report.counts?.synced ?? 0;
+  const totalNotes = report.counts?.total ?? inventory.local.notes;
+  const stateLabel =
+    inventory.serverState === "current"
+      ? "Current"
+      : inventory.serverState === "last-known"
+        ? "Last known"
+        : "Unavailable";
+  const issueWhy = new Map(
+    report.issues
+      .filter((issue) => issue.path != null)
+      .map((issue) => [issue.path!.toLowerCase(), issue.why] as const),
+  );
+
+  return (
+    <section className="health-inventory" aria-labelledby="health-inventory-title">
+      <div className="health-inventory-head">
+        <div>
+          <span className="health-kicker">Your copies</span>
+          <h3 id="health-inventory-title">This computer and the server</h3>
+          <p>
+            Compare notes, folders and standalone files in each place. Matching counts
+            describe the structure; content confirmation is shown separately.
+          </p>
+        </div>
+        {inventory.server && (
+          <span className="health-freshness" data-state={inventory.serverState}>
+            {stateLabel} server view
+          </span>
+        )}
+      </div>
+
+      <div className="health-inventory-grid">
+        <InventoryPlace
+          icon="disk"
+          title="This computer"
+          subtitle="Files in the open vault folder"
+          counts={inventory.local}
+        />
+        <div className="health-inventory-bridge" aria-hidden="true">
+          <span className="health-inventory-line" />
+          <Glyph name={differences > 0 || countsDiffer ? "alert" : "check"} size={16} />
+          <span className="health-inventory-line" />
+        </div>
+        {inventory.server ? (
+          <InventoryPlace
+            icon="database"
+            title="Server"
+            subtitle={report.serverHost ?? "Connected vault"}
+            counts={inventory.server}
+          />
+        ) : (
+          <div className="health-place is-unavailable">
+            <span className="health-place-icon"><Glyph name="database" size={18} /></span>
+            <div>
+              <strong>Server</strong>
+              <p>
+                {report.verdict === "local"
+                  ? "Sync is off for this vault."
+                  : "No server inventory has been received yet."}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div
+        className="health-inventory-result"
+        data-tone={
+          !inventory.server ? "muted" : differences > 0 || countsDiffer ? "warn" : "good"
+        }
+      >
+        <div className="health-inventory-result-icon" aria-hidden="true">
+          <Glyph
+            name={
+              !inventory.server
+                ? "database"
+                : differences > 0 || countsDiffer
+                  ? "alert"
+                  : "check"
+            }
+            size={16}
+          />
+        </div>
+        <div className="health-inventory-result-copy">
+          <strong>
+            {!inventory.server
+              ? "A server comparison is not available"
+              : differences > 0
+                ? `${differences.toLocaleString()} item ${differences === 1 ? "path differs" : "paths differ"}`
+                : countsDiffer
+                  ? "The item counts differ"
+                  : "The same item paths are present in both places"}
+          </strong>
+          <p>
+            {inventory.server
+              ? `${confirmed.toLocaleString()} of ${totalNotes.toLocaleString()} notes have confirmed content on the server.`
+              : "Your local files remain available on this computer."}
+          </p>
+        </div>
+        {inventory.server && (differences > 0 || countsDiffer) && (
+          <div className="health-inventory-actions">
+            {differences > 0 && (
+              <button type="button" className="ghost-pill sm" onClick={() => setOpen((v) => !v)}>
+                {open ? "Hide differences" : "Review differences"}
+              </button>
+            )}
+            <AsyncButton className="primary sm" onClick={() => handlers.actions.syncNow()}>
+              Check again
+            </AsyncButton>
+          </div>
+        )}
+      </div>
+
+      {open && differences > 0 && (
+        <div className="health-differences">
+          <DifferenceList
+            title="Only on this computer"
+            description="These notes have no matching server registry path yet. Open one to review it, or check again to retry sync."
+            paths={inventory.deviceOnlyNotes}
+            details={issueWhy}
+            actionLabel="Open"
+            onAction={handlers.openNote}
+          />
+          <DifferenceList
+            title="Folders only on this computer"
+            description="These folders have no matching server registry path yet. Check again to retry sync."
+            paths={inventory.deviceOnlyFolders}
+            actionLabel="Show"
+            onAction={(path) => void handlers.actions.reveal(path)}
+          />
+          <DifferenceList
+            title="Files only on this computer"
+            description="These standalone files have no matching server registry path yet. Check again to retry sync."
+            paths={inventory.deviceOnlyFiles}
+            actionLabel="Show"
+            onAction={(path) => void handlers.actions.reveal(path)}
+          />
+          <DifferenceList
+            title="Only in the server view"
+            description="Baalda knows these server paths but cannot see a matching local note. Check again to download anything you can access."
+            paths={inventory.serverOnlyNotes}
+            details={issueWhy}
+          />
+          <DifferenceList
+            title="Folders only in the server view"
+            description="Baalda knows these server folders but cannot see matching local folders. Check again to download anything you can access."
+            paths={inventory.serverOnlyFolders}
+          />
+          <DifferenceList
+            title="Files only in the server view"
+            description="Baalda knows these server files but cannot see matching local files. Check again to download anything you can access."
+            paths={inventory.serverOnlyFiles}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function InventoryPlace({
+  icon,
+  title,
+  subtitle,
+  counts,
+}: {
+  icon: "disk" | "database";
+  title: string;
+  subtitle: string;
+  counts: NonNullable<HealthInventory["server"]>;
+}) {
+  return (
+    <div className="health-place">
+      <div className="health-place-title">
+        <span className="health-place-icon"><Glyph name={icon} size={18} /></span>
+        <div><strong>{title}</strong><p>{subtitle}</p></div>
+      </div>
+      <strong className="health-place-total">{counts.total.toLocaleString()}</strong>
+      <span className="health-place-total-label">items Baalda can list</span>
+      <dl>
+        <div><dt>Notes</dt><dd>{counts.notes.toLocaleString()}</dd></div>
+        <div><dt>Folders</dt><dd>{counts.folders.toLocaleString()}</dd></div>
+        <div><dt>Other files</dt><dd>{counts.files.toLocaleString()}</dd></div>
+      </dl>
+    </div>
+  );
+}
+
+function DifferenceList({
+  title,
+  description,
+  paths,
+  details,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  description: string;
+  paths: string[];
+  details?: ReadonlyMap<string, string>;
+  actionLabel?: string;
+  onAction?: (path: string) => void;
+}) {
+  if (paths.length === 0) return null;
+  const shown = paths.slice(0, 20);
+  return (
+    <div className="health-difference-group">
+      <h4>{title} <span>{paths.length.toLocaleString()}</span></h4>
+      <p>{description}</p>
+      <ul>
+        {shown.map((path) => (
+          <li key={path}>
+            <span className="health-difference-rowcopy">
+              <PathText path={path} />
+              {details?.get(path.toLowerCase()) && (
+                <small>{details.get(path.toLowerCase())}</small>
+              )}
+            </span>
+            {actionLabel && onAction && (
+              <button type="button" className="link-btn" onClick={() => onAction(path)}>
+                {actionLabel}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {paths.length > shown.length && (
+        <p className="muted">And {(paths.length - shown.length).toLocaleString()} more.</p>
+      )}
     </div>
   );
 }
@@ -650,4 +924,3 @@ export function Pipeline({ stages }: { stages: HealthStage[] }) {
 }
 
 // ── Sync breakdown ────────────────────────────────────────────────────────────
-

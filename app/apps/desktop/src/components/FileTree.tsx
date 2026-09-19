@@ -20,7 +20,11 @@ import {
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { TreeNode } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
-import { automaticItemColorId, ITEM_COLORS, itemColorValue } from "../lib/appearance";
+import {
+  automaticItemColorAssignments,
+  ITEM_COLORS,
+  itemColorValue,
+} from "../lib/appearance";
 import { readAutomaticItemColors } from "../lib/prefs";
 import {
   applyOrder,
@@ -447,6 +451,44 @@ export function FileTree() {
       itemOrder,
     );
   }, [tree, itemOrder, treeSort, orderPinned]);
+
+  // Assign each sibling group as a unit. Identity hashing keeps colours stable,
+  // while the group pass prevents adjacent rows from landing on the same small
+  // patch of colour. Nested folders restart the adjacency window because their
+  // children are a separate visual list.
+  const automaticColors = useMemo(() => {
+    if (!automaticItemColors) return {};
+    const owner = session?.user.id ?? "local";
+    const vaultIdentity = session?.activeOrganizationId ?? vault?.path ?? "vault";
+    const assigned: Record<string, string> = {};
+    const walk = (siblings: TreeNode[]) => {
+      Object.assign(
+        assigned,
+        automaticItemColorAssignments(
+          owner,
+          vaultIdentity,
+          siblings.map((node) => ({
+            key: node.path,
+            identity: docIdByPath[node.path] ?? node.path,
+            explicitColorId: itemColors[node.path],
+          })),
+        ),
+      );
+      for (const node of siblings) {
+        if (node.children) walk(node.children);
+      }
+    };
+    walk(data);
+    return assigned;
+  }, [
+    automaticItemColors,
+    data,
+    docIdByPath,
+    itemColors,
+    session?.activeOrganizationId,
+    session?.user.id,
+    vault?.path,
+  ]);
 
   // Flatten the (arranged) tree so bulk actions can resolve any path — even a
   // collapsed one — to its node, and so "Select all" knows every path.
@@ -1531,10 +1573,7 @@ export function FileTree() {
       syncIndex,
       presenceByDoc,
       itemColors,
-      automaticItemColors,
-      automaticColorOwner: session?.user.id ?? "local",
-      automaticColorVault: session?.activeOrganizationId ?? vault?.path ?? "vault",
-      docIdByPath,
+      automaticColors,
       onMenu: onRowMenu,
       selectMode,
       selected,
@@ -1549,11 +1588,7 @@ export function FileTree() {
       syncIndex,
       presenceByDoc,
       itemColors,
-      automaticItemColors,
-      session?.user.id,
-      session?.activeOrganizationId,
-      vault?.path,
-      docIdByPath,
+      automaticColors,
       onRowMenu,
       selectMode,
       selected,
@@ -1964,10 +1999,13 @@ export function FileTree() {
               </li>
             ))}
           {menu.node && (
+            <li className="menu-heading menu-sep-item">Color</li>
+          )}
+          {menu.node && (
             <li className="menu-swatches" onClick={(e) => e.stopPropagation()}>
               <span
-                className="swatch clear"
-                title="Default color"
+                className={`swatch clear${itemColors[menu.node.data.path] == null ? " on" : ""}`}
+                title="Use automatic color"
                 onClick={() => {
                   useStore.getState().setItemColor(menu.node!.data.path, null);
                   setMenu(null);
@@ -1987,6 +2025,19 @@ export function FileTree() {
                   }}
                 />
               ))}
+            </li>
+          )}
+          {menu.node && (
+            <li
+              className="menu-note menu-link"
+              onClick={() => {
+                setMenu(null);
+                useStore.getState().requestAccountSettings("appearance");
+              }}
+            >
+              {automaticItemColors
+                ? "Automatic colors are on. Turn them off in Account Settings → Appearance."
+                : "Automatic colors are off. Turn them on in Account Settings → Appearance."}
             </li>
           )}
           {menu.node && (
@@ -2041,10 +2092,8 @@ interface RowShared {
   presenceByDoc: Map<string, VaultPeer[]>;
   /** Item color ids (vault-local preference) — tint the type glyph. */
   itemColors: Record<string, string | undefined>;
-  automaticItemColors: boolean;
-  automaticColorOwner: string;
-  automaticColorVault: string;
-  docIdByPath: Record<string, string>;
+  /** Personal automatic fallbacks, already assigned in sibling order. */
+  automaticColors: Record<string, string | undefined>;
   onMenu: (
     x: number,
     y: number,
@@ -2078,14 +2127,7 @@ function TreeRow(props: NodeRendererProps<TreeNode>) {
       syncIndex={shared.syncIndex}
       presenceByDoc={shared.presenceByDoc}
       color={
-        shared.itemColors[path] ??
-        (shared.automaticItemColors
-          ? automaticItemColorId(
-              shared.automaticColorOwner,
-              shared.automaticColorVault,
-              shared.docIdByPath[path] ?? path,
-            )
-          : undefined)
+        shared.itemColors[path] ?? shared.automaticColors[path]
       }
       onMenu={shared.onMenu}
       selectMode={shared.selectMode}

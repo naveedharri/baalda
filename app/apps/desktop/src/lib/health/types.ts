@@ -317,6 +317,23 @@ export interface HealthReport {
   serverHost: string | null;
 }
 
+// ── Device ↔ server inventory ───────────────────────────────────────────────
+
+/** The user-facing inventory comparison on Health. The server half is the
+ * registry's last reconciled view, so it is nullable and carries freshness. */
+export interface HealthInventory {
+  local: { notes: number; folders: number; files: number; total: number };
+  server: { notes: number; folders: number; files: number; total: number } | null;
+  serverState: "current" | "last-known" | "unavailable";
+  /** Paths present on only one side, separated by transport kind. */
+  deviceOnlyNotes: string[];
+  serverOnlyNotes: string[];
+  deviceOnlyFolders: string[];
+  serverOnlyFolders: string[];
+  deviceOnlyFiles: string[];
+  serverOnlyFiles: string[];
+}
+
 // ── Sync timeline ──────────────────────────────────────────────────────────────
 
 export type SyncLogLevel = "info" | "warn" | "error";
@@ -425,6 +442,7 @@ export interface HealthActions {
 /** What `useVaultHealth()` hands the tab. */
 export interface VaultHealthSnapshot {
   report: HealthReport;
+  inventory: HealthInventory;
   stats: VaultStats | null;
   statsError: string | null;
   /** The integrity checks; null until the first pass lands or when it failed. */

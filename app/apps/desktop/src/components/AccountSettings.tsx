@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
+import type { AccountSettingsTab } from "../lib/settingsTabs";
 import { authManager } from "../lib/auth/authManager";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
@@ -43,7 +44,7 @@ import { ThemeToggle } from "./ThemeToggle";
  * preferences.
  */
 
-type AccountTab = "profile" | "status" | "appearance" | "notifications" | "connection" | "about";
+type AccountTab = AccountSettingsTab;
 
 const ACCOUNT_TABS: Array<{ id: AccountTab; label: string; icon: React.ReactNode }> = [
   {
@@ -109,9 +110,15 @@ const ACCOUNT_TABS: Array<{ id: AccountTab; label: string; icon: React.ReactNode
   },
 ];
 
-export function AccountSettings({ onClose }: { onClose: () => void }) {
+export function AccountSettings({
+  onClose,
+  initialTab,
+}: {
+  onClose: () => void;
+  initialTab?: AccountSettingsTab;
+}) {
   const session = useStore((s) => s.session);
-  const [tab, setTab] = useState<AccountTab>("profile");
+  const [tab, setTab] = useState<AccountTab>(initialTab ?? "profile");
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
   if (!session) return null;

@@ -23,6 +23,7 @@ import {
 import { MODE_LABEL, buildOrgRowsByPath, effectiveTeamMode, effectiveVaultMode } from "../lib/accessMode";
 import { readTeamAccessCache, writeTeamAccessCache } from "../lib/teamAccessCache";
 import { itemLockRows, resourceIdsByPath } from "../lib/locks";
+import { scrollPaneIntoContainer } from "../lib/scrollPlan";
 import { syncManager } from "../lib/sync/docSession";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
@@ -35,6 +36,18 @@ import { Spinner } from "./Spinner";
 type Mode = TeamAccessMode;
 type AudienceType = "org" | "users";
 type Resource = AccessRow;
+
+/** Wait for conditional controls to render, then scroll only their nearest
+ * scrollable ancestor. The shared helper keeps an already-visible step still,
+ * preserves keyboard focus, and respects reduced-motion preferences. */
+function scrollToAccessStepAfterRender(
+  target: () => HTMLElement | null,
+  anchor: () => HTMLElement | null = () => null,
+) {
+  window.requestAnimationFrame(() =>
+    scrollPaneIntoContainer(target(), anchor(), 20),
+  );
+}
 
 const MODE_OPTIONS: MenuSelectOption<Mode>[] = [
   { value: "private", label: "Private", hint: "New members see nothing until access is granted" },
@@ -127,6 +140,10 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     apply: () => Promise<void>;
   } | null>(null);
   const loadGen = useRef(0);
+  const resourcesRef = useRef<HTMLDivElement | null>(null);
+  const bulkRef = useRef<HTMLElement | null>(null);
+  const memberPickerRef = useRef<HTMLDivElement | null>(null);
+  const accessChoicesRef = useRef<HTMLDivElement | null>(null);
 
   const reloadVault = async () => {
     const mine = ++loadGen.current;
@@ -235,11 +252,37 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
   const toggleResource = (key: string) => {
     if (!canManage || !vaultKey) return;
-    setSelectedKeys((current) => toggleAccessSelection(current, key, vaultKey));
+    const next = toggleAccessSelection(selectedKeys, key, vaultKey);
+    setSelectedKeys(next);
+    if (selectedBulkResources(next, entries, orgId ?? "").length > 0) {
+      scrollToAccessStepAfterRender(() => bulkRef.current, () => accessChoicesRef.current);
+    }
+  };
+
+  const selectEveryResource = () => {
+    const next = allItemsSelected ? new Set<string>() : selectAllAccessEntries(entries);
+    setSelectedKeys(next);
+    if (next.size > 0) {
+      scrollToAccessStepAfterRender(() => bulkRef.current, () => accessChoicesRef.current);
+    }
+  };
+
+  const selectAudience = (audience: AudienceType) => {
+    setAudienceType(audience);
+    scrollToAccessStepAfterRender(() => audience === "users" ? memberPickerRef.current : accessChoicesRef.current);
+  };
+
+  const toggleMember = (userId: string) => {
+    const next = new Set(selectedUsers);
+    if (next.has(userId)) next.delete(userId);
+    else next.add(userId);
+    setSelectedUsers(next);
+    if (next.size > 0) scrollToAccessStepAfterRender(() => accessChoicesRef.current);
   };
 
   const setJoiningDefault = async (mode: Mode) => {
     if (!orgId || defaultBusy || accessDefault?.mode === mode) return;
+    scrollToAccessStepAfterRender(() => resourcesRef.current);
     setDefaultBusy(true);
     setError(null);
     try {
@@ -364,14 +407,14 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
         <div className="muted">Only owners and admins can update access settings.</div>
       )}
 
-      <div className="access-master">
+      <div className="access-master" ref={resourcesRef}>
         <div className="access-listhead">
           <div><div className="access-listlabel">Folders &amp; files</div>{canManage && <span>{selectionLabel}</span>}</div>
           {canManage && entries.length > 0 && (
             <button
               type="button"
               className="access-select-all"
-              onClick={() => setSelectedKeys(allItemsSelected ? new Set() : selectAllAccessEntries(entries))}
+              onClick={selectEveryResource}
             >
               {allItemsSelected ? "Clear selection" : "Select all items"}
             </button>
@@ -425,15 +468,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       </div>
 
       {canManage && selectedResources.length > 0 && (
-        <section className="access-bulk-card" aria-busy={busy}>
+        <section className="access-bulk-card" aria-busy={busy} ref={bulkRef}>
           <div className="access-bulk-heading">
             <div><div className="access-seclabel">Set access</div><strong>{selectionLabel}</strong></div>
             {busy && <span className="access-applying"><Spinner size="xs" /> Applying…</span>}
           </div>
 
           <div className="access-audience-tabs" role="group" aria-label="Who this change applies to">
-            <button type="button" className={audienceType === "org" ? "active" : ""} onClick={() => setAudienceType("org")} disabled={busy}>Everyone</button>
-            <button type="button" className={audienceType === "users" ? "active" : ""} onClick={() => setAudienceType("users")} disabled={busy}>Specific people</button>
+            <button type="button" className={audienceType === "org" ? "active" : ""} onClick={() => selectAudience("org")} disabled={busy}>Everyone</button>
+            <button type="button" className={audienceType === "users" ? "active" : ""} onClick={() => selectAudience("users")} disabled={busy}>Specific people</button>
           </div>
 
           {audienceType === "org" ? (
@@ -441,7 +484,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
           ) : (
             <>
               <p className="access-bulk-note">Changes only the people you choose. Everyone else's access stays unchanged.</p>
-              <div className="access-member-grid">
+              <div className="access-member-grid" ref={memberPickerRef}>
                 {members.map((member) => {
                   const checked = selectedUsers.has(member.userId);
                   const label = member.user?.name || member.user?.email || member.userId;
@@ -451,12 +494,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                         type="checkbox"
                         checked={checked}
                         disabled={busy}
-                        onChange={() => setSelectedUsers((current) => {
-                          const next = new Set(current);
-                          if (next.has(member.userId)) next.delete(member.userId);
-                          else next.add(member.userId);
-                          return next;
-                        })}
+                        onChange={() => toggleMember(member.userId)}
                       />
                       <Avatar label={label} />
                       <span>{label}{member.userId === session?.user.id ? " (you)" : ""}</span>
@@ -467,7 +505,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
             </>
           )}
 
-          <div className={`access-seg${busy ? " busy" : ""}`}>
+          <div className={`access-seg${busy ? " busy" : ""}`} ref={accessChoicesRef}>
             {(["open", "readonly", "private"] as Mode[]).map((mode) => (
               <button
                 key={mode}

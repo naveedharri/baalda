@@ -65,7 +65,7 @@ import {
 } from "./lib/prefs";
 import type { PropertiesMode } from "./lib/editor/frontmatter";
 import type { TreeSort } from "./lib/tree/sort";
-import type { SettingsTab } from "./lib/settingsTabs";
+import type { AccountSettingsTab, SettingsTab } from "./lib/settingsTabs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { planTurnOnSync } from "./lib/vault/turnOnSync";
@@ -512,6 +512,10 @@ interface AppStore {
    */
   settingsRequest: { tab: SettingsTab; token: number } | null;
   requestSettings: (tab: SettingsTab) => void;
+  /** Open Account Settings on a particular page (for links such as the
+   * sidebar colour explanation). Owned and consumed by `AccountMenu`. */
+  accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
+  requestAccountSettings: (tab: AccountSettingsTab) => void;
   /**
    * "The next time this note's editor mounts, put the cursor in its inline
    * title." Set by `createNoteIn`, consumed once by `InlineTitle` on mount.
@@ -1595,6 +1599,7 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemovedByTeammate: null,
   revealRequest: null,
   settingsRequest: null,
+  accountSettingsRequest: null,
   revealedPath: null,
   backlinks: [],
   titles: [],
@@ -2082,6 +2087,15 @@ export const useStore = create<AppStore>((set, get) => ({
   requestSettings: (tab) => {
     set((s) => ({
       settingsRequest: { tab, token: (s.settingsRequest?.token ?? 0) + 1 },
+    }));
+  },
+
+  requestAccountSettings: (tab) => {
+    set((s) => ({
+      accountSettingsRequest: {
+        tab,
+        token: (s.accountSettingsRequest?.token ?? 0) + 1,
+      },
     }));
   },
 

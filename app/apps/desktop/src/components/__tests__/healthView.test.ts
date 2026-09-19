@@ -159,6 +159,17 @@ const stats: VaultStats = {
 function snapshot(over: Partial<VaultHealthSnapshot> = {}): VaultHealthSnapshot {
   return {
     report: localReport,
+    inventory: {
+      local: { notes: 12, folders: 3, files: 4, total: 19 },
+      server: null,
+      serverState: "unavailable",
+      deviceOnlyNotes: [],
+      serverOnlyNotes: [],
+      deviceOnlyFolders: [],
+      serverOnlyFolders: [],
+      deviceOnlyFiles: [],
+      serverOnlyFiles: [],
+    },
     stats,
     statsError: null,
     checks: null,
@@ -218,10 +229,68 @@ describe("HealthView", () => {
     expect(html).toContain("12.0 MB");
   });
 
-  it("offers a reclaim button while orphan history exists", () => {
+  it("keeps the overview to four useful metrics", () => {
     const html = render(snapshot());
-    expect(html).toContain("reclaimable");
-    expect(html).toContain("Reclaim");
+    expect((html.match(/class="health-metric"/g) ?? []).length).toBe(4);
+    expect(html).toContain("Total items");
+    expect(html).toContain("Stored locally");
+    expect(html.indexOf("health-metrics")).toBeLessThan(html.indexOf("health-verdict"));
+  });
+
+  it("separates inventory differences from content confirmation", () => {
+    const html = render(
+      snapshot({
+        report: {
+          ...localReport,
+          verdict: "attention",
+          counts: {
+            total: 12,
+            synced: 9,
+            pending: 1,
+            failed: 0,
+            unsynced: 2,
+            unreported: 0,
+          },
+          serverHost: "api.baalda.com",
+        },
+        inventory: {
+          local: { notes: 12, folders: 3, files: 4, total: 19 },
+          server: { notes: 13, folders: 3, files: 4, total: 20 },
+          serverState: "current",
+          deviceOnlyNotes: ["Draft.md"],
+          serverOnlyNotes: ["Team plan.md", "Archive.md"],
+          deviceOnlyFolders: ["Local drafts"],
+          serverOnlyFolders: [],
+          deviceOnlyFiles: ["diagram.pdf"],
+          serverOnlyFiles: ["brief.docx"],
+        },
+      }),
+    );
+    expect(html).toContain("6 item paths differ");
+    expect(html).toContain("Review differences");
+    expect(html).toContain("9 of 12 notes have confirmed content on the server");
+    expect(html).toContain("Current server view");
+  });
+
+  it("labels an offline server inventory as cached", () => {
+    const html = render(
+      snapshot({
+        report: { ...localReport, verdict: "offline", counts: { total: 12, synced: 12, pending: 0, failed: 0, unsynced: 0, unreported: 0 } },
+        inventory: {
+          local: { notes: 12, folders: 3, files: 4, total: 19 },
+          server: { notes: 12, folders: 3, files: 4, total: 19 },
+          serverState: "last-known",
+          deviceOnlyNotes: [],
+          serverOnlyNotes: [],
+          deviceOnlyFolders: [],
+          serverOnlyFolders: [],
+          deviceOnlyFiles: [],
+          serverOnlyFiles: [],
+        },
+      }),
+    );
+    expect(html).toContain("Last known server view");
+    expect(html).toContain("The same item paths are present in both places");
   });
 
   it("renders the issue list for a synced vault", () => {

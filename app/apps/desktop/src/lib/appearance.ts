@@ -11,17 +11,33 @@ export interface ItemColor {
   label: string;
   /** Glyph tint — reads on both themes against the sidebar surfaces. */
   value: string;
+  /** Nearby hues that should not form an adjacent automatic-colour batch. */
+  family: string;
 }
 
 export const ITEM_COLORS: ItemColor[] = [
-  { id: "violet", label: "Violet", value: "#7c5cff" },
-  { id: "blue", label: "Blue", value: "#2f7de1" },
-  { id: "teal", label: "Teal", value: "#0d9488" },
-  { id: "green", label: "Green", value: "#3f9d54" },
-  { id: "amber", label: "Amber", value: "#d99114" },
-  { id: "orange", label: "Orange", value: "#e0702f" },
-  { id: "rose", label: "Rose", value: "#d94f77" },
-  { id: "slate", label: "Slate", value: "#64748b" },
+  { id: "violet", label: "Violet", value: "#7c5cff", family: "purple" },
+  { id: "purple", label: "Purple", value: "#9b51d0", family: "purple" },
+  { id: "plum", label: "Plum", value: "#b44aa1", family: "purple" },
+  { id: "magenta", label: "Magenta", value: "#d13b8f", family: "pink" },
+  { id: "pink", label: "Pink", value: "#e35f9b", family: "pink" },
+  { id: "rose", label: "Rose", value: "#d94f77", family: "pink" },
+  { id: "red", label: "Red", value: "#d84a4a", family: "red" },
+  { id: "coral", label: "Coral", value: "#e26755", family: "red" },
+  { id: "orange", label: "Orange", value: "#e0702f", family: "warm" },
+  { id: "amber", label: "Amber", value: "#d99114", family: "warm" },
+  { id: "gold", label: "Gold", value: "#bfa01d", family: "warm" },
+  { id: "lime", label: "Lime", value: "#79a83b", family: "green" },
+  { id: "green", label: "Green", value: "#3f9d54", family: "green" },
+  { id: "mint", label: "Mint", value: "#2eaa78", family: "green" },
+  { id: "teal", label: "Teal", value: "#0d9488", family: "teal" },
+  { id: "cyan", label: "Cyan", value: "#1599b8", family: "teal" },
+  { id: "sky", label: "Sky", value: "#398fcf", family: "blue" },
+  { id: "blue", label: "Blue", value: "#2f7de1", family: "blue" },
+  { id: "indigo", label: "Indigo", value: "#5868d9", family: "indigo" },
+  { id: "periwinkle", label: "Periwinkle", value: "#747bd8", family: "indigo" },
+  { id: "brown", label: "Brown", value: "#9a6b4f", family: "brown" },
+  { id: "slate", label: "Slate", value: "#64748b", family: "slate" },
 ];
 
 export function itemColorValue(id: string | undefined): string | undefined {
@@ -48,6 +64,54 @@ export function automaticItemColorId(
   itemIdentity: string,
 ): string {
   return ITEM_COLORS[colorHash(`${userId}\0${vaultIdentity}\0${itemIdentity}`) % ITEM_COLORS.length].id;
+}
+
+export interface AutomaticColorItem {
+  /** Stable lookup key, normally the vault-relative path. */
+  key: string;
+  /** Stable item identity: doc id where one exists, otherwise the path. */
+  identity: string;
+  /** A shared/manual colour. It always wins and informs its neighbours. */
+  explicitColorId?: string;
+}
+
+/**
+ * Assign one ordered group of siblings. Most rows retain their identity hash;
+ * only a collision with either of the two rows immediately before it advances
+ * through the palette. That prevents visible same-colour batches without
+ * turning colour into a fragile function of the row's numeric position.
+ */
+export function automaticItemColorAssignments(
+  userId: string,
+  vaultIdentity: string,
+  items: ReadonlyArray<AutomaticColorItem>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  const recentFamilies: string[] = [];
+
+  for (const item of items) {
+    let colorId = item.explicitColorId;
+    if (!itemColorValue(colorId)) {
+      const preferred = automaticItemColorId(userId, vaultIdentity, item.identity);
+      const start = ITEM_COLORS.findIndex((color) => color.id === preferred);
+      colorId = preferred;
+      for (let offset = 0; offset < ITEM_COLORS.length; offset++) {
+        // Seven is coprime with the 22-entry palette and jumps between hue
+        // families instead of resolving a pink collision with another pink.
+        const index = (start + 7 * offset) % ITEM_COLORS.length;
+        const candidate = ITEM_COLORS[index].id;
+        if (!recentFamilies.includes(ITEM_COLORS[index].family)) {
+          colorId = candidate;
+          break;
+        }
+      }
+    }
+    result[item.key] = colorId!;
+    recentFamilies.push(ITEM_COLORS.find((color) => color.id === colorId)!.family);
+    if (recentFamilies.length > 2) recentFamilies.shift();
+  }
+
+  return result;
 }
 
 const STORE_PREFIX = "context.itemColors:";

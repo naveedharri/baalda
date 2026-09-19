@@ -20,3 +20,13 @@ export type SettingsTab =
   | "import-export"
   | "appearance"
   | "updates";
+
+/** Account settings stay separate from vault settings but use the same
+ * request-token pattern when another surface links to a particular page. */
+export type AccountSettingsTab =
+  | "profile"
+  | "status"
+  | "appearance"
+  | "notifications"
+  | "connection"
+  | "about";

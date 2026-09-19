@@ -280,8 +280,15 @@ per-member overrides in the selected subtrees, while a named audience replaces o
 `readonly` is the item-level combined grant+cap (the vault posture still stores `view`).
 
 Automatic sidebar colours are a deterministic, account-personal fallback for files/folders without
-an explicit manual colour. They are stable across restarts and can be hidden in Account Settings;
-manual colours keep their existing synced-vault behaviour and always win over the fallback.
+an explicit manual colour. A broad palette hashes stable item identities, then resolves collisions
+within each ordered sibling group so the two preceding rows do not repeat; explicit synced colours
+always win and participate in that neighbour check. Automatic colours are stable across restarts and
+can be hidden in Account Settings → Appearance.
+
+Vault Health keeps its local census separate from its server inventory. Local totals come from Rust's
+disk/index pass; the server comparison reads the registry's last reconciled note, folder and file paths.
+That server view is explicitly last-known while offline, signed out, reconnecting or denied, and matching
+paths/counts never imply matching content — per-note pushed/sync state remains the content authority.
 
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
