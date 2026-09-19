@@ -43,6 +43,7 @@ import { onOpenFileRequest } from "./lib/openFileRequest";
 import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
+import { AttachmentSyncNotice } from "./components/AttachmentSyncNotice";
 import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
 import { requestOpenVault, useStore } from "./store";
@@ -668,7 +669,13 @@ function WhatsNewModal() {
   );
 }
 
-function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
+function SyncIndicator({
+  noteOpen,
+  attachmentLocalOnly = false,
+}: {
+  noteOpen: boolean;
+  attachmentLocalOnly?: boolean;
+}) {
   // Per-note sync status (offline / connecting / synced / read-only) PLUS the
   // vault's bulk-run progress, so a vault that is still uploading 380 of its 500
   // notes says so instead of claiming "Synced · just now" off a live socket.
@@ -680,6 +687,9 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   const pending = useStore((s) => s.syncPending);
   const progress = useStore((s) => s.syncProgress);
+  if (attachmentLocalOnly) {
+    return <SyncBadge status="offline" enabled={false} noteOpen />;
+  }
   // "idle" is the reporter's pre-start value — nothing to report yet.
   if (!noteOpen && (progress == null || progress.phase === "idle")) return null;
   return (
@@ -770,6 +780,12 @@ export default function App() {
   // note — hide the save/sync chrome. The registry decides, so this cannot
   // disagree with what `FilePreview` actually rendered.
   const isPreview = openNote != null && viewerFor(openNote.path) !== "editor";
+  const attachmentLocalOnly = useStore(
+    (s) =>
+      s.attachmentSyncBlocked &&
+      s.openNote != null &&
+      routesToAttachmentSync(s.openNote.path),
+  );
   // Covers the LAST VAULT'S OPEN and nothing else. It used to cover the whole
   // session restore + sync reconcile too, which is why launch showed "Loading…"
   // for seconds on a big vault: the sidebar was ready long before auth was.
@@ -1226,7 +1242,10 @@ export default function App() {
                 title, which for a legacy note whose H1 and filename disagree said
                 something different from its own tab. */}
             <TabBar />
-            <SyncIndicator noteOpen={openNote != null && !isPreview} />
+            <SyncIndicator
+              noteOpen={openNote != null && !isPreview}
+              attachmentLocalOnly={attachmentLocalOnly}
+            />
             {/* Vault-wide, so it sits in the header regardless of the open note. */}
             <TalkButton />
             {/* Same gate as history: a link is a doc_id, so it only exists for a
@@ -1306,6 +1325,7 @@ export default function App() {
           <SyncIssuesBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
+          {attachmentLocalOnly && <AttachmentSyncNotice />}
           <div className="editor-wrap">
             {openNote ? (
               <Suspense

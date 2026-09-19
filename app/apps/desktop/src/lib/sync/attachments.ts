@@ -569,6 +569,13 @@ export interface AttachmentSyncDeps {
    */
   onFileStates?: (states: Record<string, DocSyncState>) => void;
   /**
+   * Publish the server's attachment-plan verdict for this vault. This is set
+   * only from the explicit 402 contract response — never inferred from a Free
+   * label, because grandfathered accounts and billing-disabled self-hosts may
+   * sync attachments without a Pro subscription.
+   */
+  onEntitlementBlocked?: (blocked: boolean) => void;
+  /**
    * This pass is about to pull `count` files DOWN — a teammate's drop, or a
    * file whose access just came back.
    *
@@ -812,7 +819,9 @@ export class AttachmentSync {
 
   /** Clear a plan refusal after billing refresh has confirmed an upgrade. */
   resetEntitlement(): void {
+    const wasBlocked = this.attachmentSyncBlocked;
     this.attachmentSyncBlocked = false;
+    if (wasBlocked) this.deps.onEntitlementBlocked?.(false);
   }
 
   private async pass(): Promise<ReconcileResult> {
@@ -1313,6 +1322,7 @@ export class AttachmentSync {
       this.attachmentSyncBlocked = true;
       this.fileStates.clear();
       this.publishFileStates();
+      this.deps.onEntitlementBlocked?.(true);
       this.deps.notify?.(
         "Attachments stay on this device in free vaults. Upgrade this vault to Pro to sync them.",
         "neutral",
