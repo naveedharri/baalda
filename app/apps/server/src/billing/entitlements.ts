@@ -186,6 +186,49 @@ export async function storageLimitBytes(
   return config.freeMaxStorageMb * 1024 * 1024;
 }
 
+interface AccountEntitlementRow {
+  free_vault_limit: number;
+  attachment_sync: boolean;
+}
+
+/** Durable benefits granted to accounts that existed at the rollout boundary. */
+async function accountEntitlement(
+  userId: string,
+  db: Queryable,
+): Promise<AccountEntitlementRow | null> {
+  const { rows } = await db.query<AccountEntitlementRow>(
+    `SELECT free_vault_limit, attachment_sync
+       FROM account_entitlements
+      WHERE user_id = $1`,
+    [userId],
+  );
+  return rows[0] ?? null;
+}
+
+/** The account-specific free-vault cap, including a persisted legacy grant. */
+export async function freeVaultLimitForUser(
+  userId: string,
+  db: Queryable = defaultPool,
+): Promise<number> {
+  if (!billingEnabled()) return config.freeMaxVaults;
+  return (await accountEntitlement(userId, db))?.free_vault_limit ?? config.freeMaxVaults;
+}
+
+/**
+ * Whether this account may mirror binary files in this vault. An active Pro
+ * subscription unlocks every member; the legacy grant follows its user into
+ * free vaults they join later. Billing-disabled self-hosts remain unlimited.
+ */
+export async function canSyncAttachments(
+  userId: string,
+  orgId: string,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
+  if (!billingEnabled()) return true;
+  if (await orgHasActiveSubscription(orgId, db)) return true;
+  return (await accountEntitlement(userId, db))?.attachment_sync === true;
+}
+
 /**
  * Can this user create another vault? Allowed when billing is off, or when
  * they own fewer than the cap in UNSUBSCRIBED vaults.
@@ -194,8 +237,9 @@ export async function canCreateOrganization(
   userId: string,
   db: Queryable = defaultPool,
 ): Promise<{ allowed: boolean; limit: number }> {
-  const limit = config.freeMaxVaults;
+  let limit = config.freeMaxVaults;
   if (!billingEnabled()) return { allowed: true, limit };
+  limit = await freeVaultLimitForUser(userId, db);
   const owned = await countOwnedUnsubscribedOrgs(userId, db);
   return { allowed: owned < limit, limit };
 }

@@ -185,12 +185,13 @@ export const config = {
    *  to this many UNSUBSCRIBED vaults; each unsubscribed vault may hold
    *  up to this many members (incl. pending invitations).
    *
-   *  3 × 3 since 2026-09-09 (members were 10 from 2026-08-07 to then). The
+   *  New accounts get 2 vaults; migration 031 records the previous allowance
+   *  for every account that existed at rollout. Members remain capped at 3.
    *  member cap gates only NEW seats — invitations and join-code redemptions
    *  (`canAddMember`) — so a free vault that already holds more than the cap
    *  keeps every existing member and simply cannot add another until it goes
    *  Pro; nobody is removed or locked out by lowering this number. */
-  freeMaxVaults: int("FREE_MAX_VAULTS", 3),
+  freeMaxVaults: int("FREE_MAX_VAULTS", 2),
   freeMaxMembers: int("FREE_MAX_MEMBERS", 3),
   /** Free-tier attachment storage per unsubscribed vault, in MB. Enforced on
    *  the same terms as the two caps above — only when billing is enabled, and

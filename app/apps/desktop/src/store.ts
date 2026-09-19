@@ -49,12 +49,14 @@ import {
   type ActivityStatus,
   type EditorMeasure,
   readActivityStatus,
+  readAutomaticItemColors,
   readMentionSound,
   readEditorMeasure,
   readLineNumbers,
   readPropertiesMode,
   readTreeSort,
   writeActivityStatus,
+  writeAutomaticItemColors,
   writeMentionSound,
   writeEditorMeasure,
   writeLineNumbers,
@@ -425,6 +427,8 @@ interface AppStore {
   activityStatus: ActivityStatus;
   /** Whether the mention chime plays when someone pings you. */
   mentionSound: boolean;
+  /** Add stable personal colours to items without an explicit vault colour. */
+  automaticItemColors: boolean;
   /** How the editor draws YAML frontmatter: a Properties panel, nothing, or
    *  plain source. Device-local (Settings → Appearance), not per-vault. */
   propertiesMode: PropertiesMode;
@@ -450,6 +454,7 @@ interface AppStore {
   setRootFrozen: (frozen: boolean) => Promise<void>;
   setItemOrder: (order: ItemOrder) => void;
   setTreeSort: (sort: TreeSort) => void;
+  setAutomaticItemColors: (enabled: boolean) => void;
   /**
    * Re-list the sidebar. With `folders`, ONLY those folder listings are re-read
    * (the watcher batch said nothing else changed); without it, the root and
@@ -1632,6 +1637,7 @@ export const useStore = create<AppStore>((set, get) => ({
   myBilling: null,
   activityStatus: readActivityStatus(),
   mentionSound: readMentionSound(),
+  automaticItemColors: readAutomaticItemColors(null),
   propertiesMode: readPropertiesMode(),
   editorMeasure: readEditorMeasure(),
   lineNumbers: readLineNumbers(),
@@ -1716,6 +1722,11 @@ export const useStore = create<AppStore>((set, get) => ({
     // vault — it's a device preference.
     writeTreeSort(sort);
     set({ treeSort: sort });
+  },
+
+  setAutomaticItemColors: (enabled) => {
+    writeAutomaticItemColors(get().session?.user.id, enabled);
+    set({ automaticItemColors: enabled });
   },
 
   refreshTree: async (folders) => {
@@ -3823,7 +3834,9 @@ export const useStore = create<AppStore>((set, get) => ({
       // Split on `permission`, not on absence, so a kind this build has never
       // heard of lands in none of the three rather than in the wrong one.
       set({
-        locks: overlay.filter((s) => s.permission === "locked"),
+        locks: overlay
+          .filter((s) => s.permission === "locked" || s.permission === "readonly")
+          .map((s) => (s.permission === "readonly" ? { ...s, permission: "locked" as const } : s)),
         denies: overlay.filter((s) => s.permission === "denied"),
         lifts: overlay.filter((s) => s.permission === "edit"),
       });
@@ -3999,8 +4012,19 @@ export const useStore = create<AppStore>((set, get) => ({
       return;
     }
     try {
+      const activeOrgId = get().session?.activeOrganizationId ?? null;
+      const wasPro = !!get().myBilling?.vaults.some(
+        (vault) => vault.orgId === activeOrgId && vault.plan === "pro",
+      );
       const myBilling = await authManager.api.getMyBilling();
       set({ myBilling });
+      const isPro = !!myBilling.vaults.some(
+        (vault) => vault.orgId === activeOrgId && vault.plan === "pro",
+      );
+      // A free attachment plan is memoised after the first 402 so watcher
+      // retries cannot loop. Only a confirmed Free -> Pro transition clears
+      // that refusal and schedules a fresh attachment comparison.
+      if (!wasPro && isPro) syncManager.recheckAttachmentEntitlement();
     } catch (e) {
       console.warn("[billing] mine refresh failed", e);
       set({ myBilling: null });

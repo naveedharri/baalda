@@ -28,6 +28,28 @@ export function itemColorValue(id: string | undefined): string | undefined {
   return ITEM_COLORS.find((c) => c.id === id)?.value;
 }
 
+/** Stable FNV-1a hash: random-looking palette choices without persisted rows. */
+function colorHash(seed: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * The personal automatic colour for an item. Existing explicit colours stay
+ * authoritative; callers use this only as the fallback for an uncoloured row.
+ */
+export function automaticItemColorId(
+  userId: string,
+  vaultIdentity: string,
+  itemIdentity: string,
+): string {
+  return ITEM_COLORS[colorHash(`${userId}\0${vaultIdentity}\0${itemIdentity}`) % ITEM_COLORS.length].id;
+}
+
 const STORE_PREFIX = "context.itemColors:";
 
 export function readItemColors(vaultPath: string | undefined): Record<string, string> {

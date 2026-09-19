@@ -15,6 +15,7 @@ import {
   normalizeIntervalForApi,
   seatCount,
   countOwnedUnsubscribedOrgs,
+  freeVaultLimitForUser,
   type Entitlement,
 } from "../../billing/entitlements.js";
 import {
@@ -532,7 +533,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
       orphaned,
       freeLimits: {
         // Frozen wire field names, as in /config.
-        vaultsPerUser: config.freeMaxVaults,
+        vaultsPerUser: await freeVaultLimitForUser(userId),
         membersPerVault: config.freeMaxMembers,
         freeVaultsUsed: await countOwnedUnsubscribedOrgs(userId),
       },

@@ -10,11 +10,9 @@ import { effectivePermission } from "../src/permissions/resolver.js";
 /**
  * The access a vault has the moment it is created.
  *
- * A vault is created SHARED with its team: someone you invite can read and
- * write its notes as soon as they join. This replaced a private-by-default
- * posture that was right about solo vaults and wrong about invitations — a
- * teammate would accept, sync, and land on an empty sidebar with no way to ask
- * for access.
+ * A vault is created SHARED for its creator and current team, while the
+ * future-member default starts Private. Joining later therefore does not expose
+ * content that predates the membership until an owner/admin shares it.
  *
  * The tests below pin both halves of that: the default is applied at creation,
  * and it is applied ONLY at creation, so an owner who later chooses Private
@@ -73,15 +71,14 @@ describe("a new vault's default access", () => {
     expect(rows[0].permission).toBe("edit");
   });
 
-  it("lets someone who joins later read and write an existing note", async () => {
-    // The reported bug: invite a teammate, they see nothing.
+  it("keeps the default-Private future member from an existing note", async () => {
     const vault = await createVault(owner, org, "Notes");
     const note = await seedNote(vault.id, null, "owners-note.md", owner.userId);
 
     const joiner = await signUp("joiner@default-access.test");
     await seedMember(org, joiner.userId, "member");
 
-    expect(await effectivePermission(joiner.userId, note)).toBe("edit");
+    expect(await effectivePermission(joiner.userId, note)).toBe("none");
   });
 
   it("does not re-grant when a second collection is added", async () => {

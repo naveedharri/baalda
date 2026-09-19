@@ -274,6 +274,14 @@ and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mo
 waits for the real GET) — falling back to Private flashed the opposite of the truth on every open of
 a shared vault. `lib/accessMode.ts` `effectiveTeamMode` is the single authority for both the row
 badges and the detail pane's tri-state, mirroring `permissions/resolver.ts` at the org level.
+The panel now edits one or many folder/file rows through the atomic bulk-access API; its synthetic
+Entire vault row is mutually exclusive with item selections. **Everyone** replaces both org and
+per-member overrides in the selected subtrees, while a named audience replaces only those members.
+`readonly` is the item-level combined grant+cap (the vault posture still stores `view`).
+
+Automatic sidebar colours are a deterministic, account-personal fallback for files/folders without
+an explicit manual colour. They are stable across restarts and can be hidden in Account Settings;
+manual colours keep their existing synced-vault behaviour and always win over the fallback.
 
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
@@ -294,6 +302,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   no renderer deps).
 - `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
+  Managed billing gives new accounts two free unsubscribed vaults and reserves attachment sync for
+  Pro vaults. Migration 031 snapshots the prior benefits per user: existing accounts keep three free
+  vaults and may sync attachments in free vaults they join later. An active Pro vault unlocks
+  attachment sync for all its members; billing-disabled self-hosts remain unlimited.
   Deleting a vault cancels **at period end first** and aborts the delete if the provider refuses (502
   `subscription_cancel_failed`; Better Auth's own org-delete is off via `disableOrganizationDeletion`).
   The row then outlives the org as a **tombstone** — migration 024 dropped the cascade and added
@@ -352,6 +364,13 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   carry `code: "no_write_access"` and are checked BEFORE the `root_frozen` latch. `onAuthenticate`
   re-resolves `effectivePermission` at connect, so a pre-revocation edit token cannot be replayed for the
   rest of its TTL.
+  Future-member access is separate from the live vault posture. Migration 032 adds an org
+  `join_default` (Private by default), per-membership snapshots and an ordered ACL revision. Only
+  content that already existed when someone joined uses that snapshot; a team grant written before
+  a Private join stays hidden, while a later Everyone action has a newer revision and deliberately
+  opens the selected subtree. Existing memberships have no snapshot and are unchanged. The default
+  and atomic bulk mutation live in `permissions/access-management.ts`, shared by HTTP and MCP, and
+  management remains owner/admin-only even when the manager cannot read the selected content.
   `POST /vaults/:vaultId/access-check` (member-gated, `ACCESS_CHECK_MAX` 2000, `runPool` at
   `config.backfillConcurrency`) answers per-doc `effectivePermission` so the desktop can cross-check a
   revocation against the resolver rather than against the listing that announced it; an id with no row

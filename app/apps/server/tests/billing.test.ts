@@ -5,6 +5,7 @@ import { PolarBillingProvider, verifyWebhookSignature } from "../src/billing/pol
 import {
   canAddMember,
   canCreateOrganization,
+  canSyncAttachments,
   countOwnedUnsubscribedOrgs,
   getEntitlement,
   seatCount,
@@ -15,6 +16,7 @@ import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { createOrg, signUp } from "./helpers/auth.js";
+import { seedVault } from "./helpers/seed.js";
 
 // The seat cap is a product decision that moves (3 → 10 on 2026-08-07, back to 3 on 2026-09-09, when free vaults were
 // opened up to real teams). These suites assert that it is ENFORCED, so they
@@ -167,6 +169,13 @@ describe("billing", () => {
   describe("entitlements", () => {
     it("countOwnedUnsubscribedOrgs excludes orgs with an active subscription", async () => {
       const user = await signUp("count@billing.com");
+      // This counting test needs three free rows; model an account that retained
+      // the previous three-vault allowance so creation itself is not the gate.
+      await pool.query(
+        `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
+         VALUES ($1, 3, true)`,
+        [user.userId],
+      );
       const a = await createOrg(user, "A", "count-a");
       const b = await createOrg(user, "B", "count-b");
       await createOrg(user, "C", "count-c");
@@ -184,13 +193,42 @@ describe("billing", () => {
 
     it("canCreateOrganization blocks at the vault cap (unsubscribed only)", async () => {
       const user = await signUp("cap@billing.com");
-      await createOrg(user, "W1", "cap-w1");
-      await createOrg(user, "W2", "cap-w2");
-      const third = await createOrg(user, "W3", "cap-w3");
+      const orgs = [];
+      for (let i = 1; i <= config.freeMaxVaults; i++) {
+        orgs.push(await createOrg(user, `W${i}`, `cap-w${i}`));
+      }
       expect((await canCreateOrganization(user.userId)).allowed).toBe(false);
       // Upgrading one paid frees a slot.
-      await seedSubscription(third.id, "active");
+      await seedSubscription(orgs.at(-1)!.id, "active");
       expect((await canCreateOrganization(user.userId)).allowed).toBe(true);
+    });
+
+    it("grandfathers old accounts for vault count and attachment sync", async () => {
+      const user = await signUp("legacy@billing.com");
+      const org = await createOrg(user, "Legacy", "legacy-entitlements");
+      expect(await canSyncAttachments(user.userId, org.id)).toBe(false);
+
+      await pool.query(
+        `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
+         VALUES ($1, 3, true)`,
+        [user.userId],
+      );
+      expect(await canSyncAttachments(user.userId, org.id)).toBe(true);
+      expect((await canCreateOrganization(user.userId)).limit).toBe(3);
+    });
+
+    it("an active Pro vault unlocks attachment sync for every member", async () => {
+      const owner = await signUp("pro-owner@billing.com");
+      const member = await signUp("pro-member@billing.com");
+      const org = await createOrg(owner, "Pro files", "pro-files");
+      await pool.query(
+        `INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
+         VALUES ('pro-files-member', $1, $2, 'member', now())`,
+        [org.id, member.userId],
+      );
+      expect(await canSyncAttachments(member.userId, org.id)).toBe(false);
+      await seedSubscription(org.id, "active");
+      expect(await canSyncAttachments(member.userId, org.id)).toBe(true);
     });
 
     it("seatCount / canAddMember count members + pending invitations", async () => {
@@ -453,14 +491,37 @@ describe("billing", () => {
 
   // ── limit enforcement (402 + contract token) ───────────────────────────────
   describe("402 enforcement", () => {
+    it("blob sync returns a stable Pro error while preserving legacy and Pro access", async () => {
+      const user = await signUp("blob-plan@billing.com");
+      const org = await createOrg(user, "Blob plan", "blob-plan");
+      const vaultId = await seedVault(org.id);
+      const list = () =>
+        req(app, "GET", `/api/vaults/${vaultId}/blobs`, { token: user.token });
+
+      const blocked = await list();
+      expect(blocked.status).toBe(402);
+      expect(await blocked.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+
+      await pool.query(
+        `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
+         VALUES ($1, 3, true)`,
+        [user.userId],
+      );
+      expect((await list()).status).toBe(200);
+
+      await pool.query("DELETE FROM account_entitlements WHERE user_id = $1", [user.userId]);
+      await seedSubscription(org.id, "active");
+      expect((await list()).status).toBe(200);
+    });
+
     it("org create → 402 vault_limit_reached at the cap (via Better Auth)", async () => {
       const user = await signUp("oc@billing.com");
-      await createOrg(user, "O1", "oc-1");
-      await createOrg(user, "O2", "oc-2");
-      await createOrg(user, "O3", "oc-3");
+      for (let i = 1; i <= config.freeMaxVaults; i++) {
+        await createOrg(user, `O${i}`, `oc-${i}`);
+      }
       const res = await req(app, "POST", "/api/auth/organization/create", {
         token: user.token,
-        body: { name: "O4", slug: "oc-4" },
+        body: { name: "Over cap", slug: "oc-over-cap" },
       });
       expect(res.status).toBe(402);
       const text = await res.text();

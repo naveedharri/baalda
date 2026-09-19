@@ -783,6 +783,19 @@ describe("subscription lifecycle", () => {
       expect(body.freeLimits.membersPerVault).toBe(config.freeMaxMembers);
     });
 
+    it("reports a grandfathered account's actual free-vault cap", async () => {
+      const owner = await signUp("mine-legacy@billing.com");
+      await pool.query(
+        `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
+         VALUES ($1, 3, true)`,
+        [owner.userId],
+      );
+      const res = await req("GET", "/api/billing/mine", { token: owner.token });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { freeLimits: { vaultsPerUser: number } };
+      expect(body.freeLimits.vaultsPerUser).toBe(3);
+    });
+
     it("shows a teammate their role and hides someone else's orphans", async () => {
       const owner = await signUp("m2a@billing.com");
       const mate = await signUp("m2b@billing.com");

@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { vaultBaseline } from "./resolver.js";
+import { memberAccessSnapshot, vaultBaseline } from "./resolver.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -62,7 +62,7 @@ export async function vaultAccess(
   const grant = await db.query(
     `SELECT 1 FROM shares
       WHERE resource_type = 'vault' AND resource_id = $1
-        AND permission IN ('view', 'edit')
+        AND permission IN ('view', 'edit', 'readonly')
         AND (${orgClause} (principal_type = 'user' AND principal_id = $2))
       LIMIT 1`,
     [row.organization_id, userId],
@@ -277,7 +277,7 @@ async function listDocsInVault(
     const { rows } = await db.query<{ id: string }>(
       `WITH RECURSIVE shared_folders AS (
           SELECT resource_id AS id FROM shares
-           WHERE resource_type = 'folder' AND permission IN ('view', 'edit')
+           WHERE resource_type = 'folder' AND permission IN ('view', 'edit', 'readonly')
              AND (
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
@@ -290,7 +290,7 @@ async function listDocsInVault(
        ),
        shared_files AS (
           SELECT resource_id AS id FROM shares
-           WHERE resource_type = 'file' AND permission IN ('view', 'edit')
+           WHERE resource_type = 'file' AND permission IN ('view', 'edit', 'readonly')
              AND (
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
@@ -308,7 +308,7 @@ async function listDocsInVault(
        user_vault_grant AS (
           SELECT 1 FROM shares
            WHERE resource_type = 'vault' AND resource_id = $3
-             AND permission IN ('view', 'edit')
+             AND permission IN ('view', 'edit', 'readonly')
              AND principal_type = 'user' AND principal_id = $1
        )${deadFolderCte}
        SELECT n.id FROM notes n
@@ -357,6 +357,74 @@ async function listDocsInVault(
     reachable = new Set(rows.map((r) => r.id));
   } else {
     reachable = await scopedDocs(true, !sealed);
+  }
+
+  const snapshot = await memberAccessSnapshot(db, organizationId, userId);
+  if (snapshot) {
+    const existingRows = await db.query<{ id: string }>(
+      opts.deleted
+        ? `SELECT id FROM notes
+            WHERE vault_id = $1 AND ${livePredicate} AND created_at <= $2`
+        : `SELECT id FROM notes
+            WHERE vault_id = $1 AND ${livePredicate} AND created_at <= $2
+           UNION
+           SELECT id FROM files WHERE vault_id = $1 AND created_at <= $2`,
+      [vaultId, snapshot.snapshotAt],
+    );
+    const existing = new Set(existingRows.rows.map((row) => row.id));
+    if (snapshot.mode === "private") {
+      for (const id of existing) reachable.delete(id);
+
+      // Personal grants always survive the initial snapshot. Team grants only
+      // survive when their ACL revision is newer than the one captured at join.
+      const allowed = await db.query<{ id: string }>(
+        `WITH RECURSIVE allowed_folders AS (
+           SELECT resource_id AS id FROM shares
+            WHERE resource_type = 'folder'
+              AND permission IN ('view', 'edit', 'readonly')
+              AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'org' AND principal_id = $3
+                    AND access_revision > $4))
+         ), subtree AS (
+           SELECT id FROM folders WHERE id IN (SELECT id FROM allowed_folders)
+           UNION
+           SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+         ), allowed_files AS (
+           SELECT resource_id AS id FROM shares
+            WHERE resource_type = 'file'
+              AND permission IN ('view', 'edit', 'readonly')
+              AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'org' AND principal_id = $3
+                    AND access_revision > $4))
+         ), vault_grant AS (
+           SELECT 1 FROM shares
+            WHERE resource_type = 'vault' AND resource_id = $3
+              AND permission IN ('view', 'edit', 'readonly')
+              AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'org' AND principal_id = $3
+                    AND access_revision > $4))
+         )
+         SELECT n.id FROM notes n
+          WHERE n.vault_id = $2 AND n.${livePredicate} AND n.created_at <= $5
+            AND (n.folder_id IN (SELECT id FROM subtree)
+              OR n.id IN (SELECT id FROM allowed_files)
+              OR EXISTS (SELECT 1 FROM vault_grant))
+         ${
+           opts.deleted
+             ? ""
+             : `UNION
+                SELECT f.id FROM files f
+                 WHERE f.vault_id = $2 AND f.created_at <= $5
+                   AND (f.folder_id IN (SELECT id FROM subtree)
+                     OR f.id IN (SELECT id FROM allowed_files)
+                     OR EXISTS (SELECT 1 FROM vault_grant))`
+         }`,
+        [userId, vaultId, organizationId, snapshot.accessRevision, snapshot.snapshotAt],
+      );
+      for (const row of allowed.rows) reachable.add(row.id);
+    } else {
+      for (const id of existing) reachable.add(id);
+    }
   }
 
   if (orgDenied.size > 0) {
@@ -424,6 +492,7 @@ export interface VaultFolderRow {
   path: string;
   sort: number;
   created_by: string | null;
+  created_at: Date;
   /** Palette id from the client's `lib/appearance`, or null. Vault-wide, so a
    *  folder tinted on one machine is tinted for the whole team. */
   color: string | null;
@@ -446,7 +515,7 @@ export async function listVisibleFolders(
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return [];
   const all = await db.query<VaultFolderRow>(
-    "SELECT id, vault_id, parent_id, name, path, sort, created_by, color FROM folders WHERE vault_id = $1 ORDER BY sort, path",
+    "SELECT id, vault_id, parent_id, name, path, sort, created_by, created_at, color FROM folders WHERE vault_id = $1 ORDER BY sort, path",
     [vaultId],
   );
   // A per-member deny hides the folder from that person outright. An org deny
@@ -457,7 +526,10 @@ export async function listVisibleFolders(
   const orgDenied = await deniedFolderIds(db, "org", access.organizationId);
   // Neither deny is undone by authorship — see `listDocsInVault`.
   const hidden = (id: string) => userDenied.has(id) || orgDenied.has(id);
-  if (access.vaultWide) return all.rows.filter((f) => !hidden(f.id));
+  const snapshot = await memberAccessSnapshot(db, access.organizationId, userId);
+  if (access.vaultWide && snapshot?.mode !== "private") {
+    return all.rows.filter((f) => !hidden(f.id));
+  }
 
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   const isMember = access.role !== null;
@@ -471,7 +543,7 @@ export async function listVisibleFolders(
         SELECT id FROM folders WHERE vault_id = $2 AND $6 AND created_by = $1
         UNION
         SELECT resource_id AS id FROM shares
-         WHERE resource_type = 'folder' AND permission IN ('view', 'edit')
+         WHERE resource_type = 'folder' AND permission IN ('view', 'edit', 'readonly')
            AND (
              (principal_type = 'user' AND principal_id = $1)
              OR ($4 AND principal_type = 'org' AND principal_id = $3)
@@ -498,5 +570,43 @@ export async function listVisibleFolders(
     [userId, vaultId, access.organizationId, isMember, [...readable], authorSeeds],
   );
   const visible = new Set(visibleIds.map((r) => r.id));
+  if (snapshot?.mode === "private") {
+    const { rows: snapshotVisible } = await db.query<{ id: string }>(
+      `WITH RECURSIVE granted AS (
+         SELECT resource_id AS id FROM shares
+          WHERE resource_type = 'folder'
+            AND permission IN ('view', 'edit', 'readonly')
+            AND ((principal_type = 'user' AND principal_id = $1)
+              OR (principal_type = 'org' AND principal_id = $3
+                  AND access_revision > $4))
+       ), down AS (
+         SELECT id, parent_id FROM folders
+          WHERE vault_id = $2 AND id IN (SELECT id FROM granted)
+         UNION
+         SELECT f.id, f.parent_id FROM folders f JOIN down d ON f.parent_id = d.id
+       ), note_folders AS (
+         SELECT DISTINCT folder_id AS id FROM notes
+          WHERE vault_id = $2 AND deleted_at IS NULL AND folder_id IS NOT NULL
+            AND id = ANY($5::text[])
+         UNION
+         SELECT DISTINCT folder_id AS id FROM files
+          WHERE vault_id = $2 AND folder_id IS NOT NULL AND id = ANY($5::text[])
+       ), up AS (
+         SELECT id, parent_id FROM folders
+          WHERE vault_id = $2
+            AND id IN (SELECT id FROM down UNION SELECT id FROM note_folders)
+         UNION
+         SELECT f.id, f.parent_id FROM folders f JOIN up u ON f.id = u.parent_id
+       )
+       SELECT id FROM up`,
+      [userId, vaultId, access.organizationId, snapshot.accessRevision, [...readable]],
+    );
+    const admitted = new Set(snapshotVisible.map((row) => row.id));
+    for (const folder of all.rows) {
+      if (folder.created_at <= snapshot.snapshotAt && !admitted.has(folder.id)) {
+        visible.delete(folder.id);
+      }
+    }
+  }
   return all.rows.filter((f) => visible.has(f.id) && !hidden(f.id));
 }

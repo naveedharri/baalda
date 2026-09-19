@@ -668,6 +668,8 @@ export interface ReconcileResult {
 export class AttachmentSync {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  /** A 402 contract response is stable for this session; do not poll it. */
+  private attachmentSyncBlocked = false;
   private rerun = false;
   /**
    * Does this server speak the intent flow? `null` = not asked, `false` = it
@@ -789,6 +791,7 @@ export class AttachmentSync {
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
   async reconcile(): Promise<ReconcileResult> {
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
+    if (this.attachmentSyncBlocked) return { uploaded: 0, downloaded: 0 };
     if (this.running) {
       // Ensure the in-flight pass runs again to pick up whatever changed.
       this.rerun = true;
@@ -807,6 +810,11 @@ export class AttachmentSync {
     return result;
   }
 
+  /** Clear a plan refusal after billing refresh has confirmed an upgrade. */
+  resetEntitlement(): void {
+    this.attachmentSyncBlocked = false;
+  }
+
   private async pass(): Promise<ReconcileResult> {
     // Listing is the one step outside a per-file try/catch, and it is the step
     // that fails routinely: the local read is epoch-pinned (so Rust REJECTS it the
@@ -818,6 +826,7 @@ export class AttachmentSync {
     try {
       [local, server] = await Promise.all([this.deps.listLocal(), this.deps.listServer()]);
     } catch (e) {
+      if (this.handleAttachmentSyncRequired(e)) return { uploaded: 0, downloaded: 0 };
       console.warn("[attachments] listing failed — skipping this pass", e);
       return { uploaded: 0, downloaded: 0 };
     }
@@ -1070,6 +1079,10 @@ export class AttachmentSync {
         return true;
       }
       if (status === 402) {
+        if (errCode(e) === "attachment_sync_requires_pro") {
+          this.handleAttachmentSyncRequired(e);
+          throw new AbortPass("attachment_sync_requires_pro");
+        }
         this.notifyStorageLimit();
         throw new AbortPass(errCode(e) ?? "storage_limit_reached");
       }
@@ -1287,6 +1300,25 @@ export class AttachmentSync {
       "This vault is out of attachment storage — new files won't sync until you free space or upgrade.",
       "error",
     );
+  }
+
+  /**
+   * Remember a plan refusal for this sync instance. Watcher bursts continue to
+   * call `reconcile`, so memoizing it is what turns a stable 402 into one clear
+   * local-only state instead of a retry loop and a stream of identical toasts.
+   */
+  private handleAttachmentSyncRequired(e: unknown): boolean {
+    if (errStatus(e) !== 402 || errCode(e) !== "attachment_sync_requires_pro") return false;
+    if (!this.attachmentSyncBlocked) {
+      this.attachmentSyncBlocked = true;
+      this.fileStates.clear();
+      this.publishFileStates();
+      this.deps.notify?.(
+        "Attachments stay on this device in free vaults. Upgrade this vault to Pro to sync them.",
+        "neutral",
+      );
+    }
+    return true;
   }
 
   // ---- Download ----------------------------------------------------------

@@ -191,6 +191,33 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(res).toEqual({ uploaded: 0, downloaded: 0 });
   });
 
+  it("stops retrying when the server says attachment sync requires Pro", async () => {
+    const { deps } = makeDeps([{ relPath: "attachments/local.png", bytes: new Uint8Array([1]) }]);
+    let pro = false;
+    const listServer = vi.fn(async () => {
+      if (!pro) throw serverError(402, "attachment_sync_requires_pro");
+      return [];
+    });
+    const notify = vi.fn();
+    const onFileStates = vi.fn();
+    const sync = new AttachmentSync({ ...deps, listServer, notify, onFileStates });
+
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(listServer).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify.mock.calls[0]?.[0]).toMatch(/stay on this device/i);
+    expect(notify.mock.calls[0]?.[0]).toMatch(/upgrade.*Pro/i);
+    expect(onFileStates).toHaveBeenLastCalledWith({});
+
+    // A confirmed billing refresh explicitly re-enables the probe; successful
+    // entitlement recovery resumes the ordinary mirror in this same session.
+    pro = true;
+    sync.resetEntitlement();
+    expect(await sync.reconcile()).toEqual({ uploaded: 1, downloaded: 0 });
+    expect(listServer).toHaveBeenCalledTimes(2);
+  });
+
   it("scheduleReconcile debounces a burst into a single pass", () => {
     const { deps } = makeDeps();
     const reconcile = vi.spyOn(AttachmentSync.prototype, "reconcile").mockResolvedValue({

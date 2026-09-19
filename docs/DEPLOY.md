@@ -344,7 +344,7 @@ confirm `/health` and a real sync round-trip, then promote.
 | `POLAR_PRODUCT_MONTHLY_ID` | with billing | unset | Polar product id for the monthly plan. |
 | `POLAR_PRODUCT_YEARLY_ID` | with billing | unset | Polar product id for the yearly plan. |
 | `POLAR_SERVER` | no | `sandbox` | `sandbox` or `production` Polar environment. |
-| `FREE_MAX_VAULTS` | no | `3` | Free-tier cap on unsubscribed vaults per user (only enforced when billing is enabled). |
+| `FREE_MAX_VAULTS` | no | `2` | Free-tier cap on unsubscribed vaults for new accounts (only enforced when billing is enabled). Migration 031 records the previous three-vault allowance for accounts that already exist. |
 | `FREE_MAX_MEMBERS` | no | `3` | Free-tier cap on members + pending invitations per unsubscribed vault (only enforced when billing is enabled). Gates new invitations and join-code redemptions only; lowering it never removes existing members. |
 | `BLOB_STORAGE` | no | `postgres` | Where attachment BYTES live: `postgres` (zero config) or `s3`. See [Attachments storage](#attachments-storage). An unrecognised value, or `s3` with an incomplete bucket config, is a fatal startup error. |
 | `MAX_BLOB_BYTES` | no | `26214400` | Hard ceiling for one attachment on the Postgres provider, in bytes (25 MB). A heap bound, not a taste one — that provider buffers the whole value, ~3.7x, in a 512 MB heap. Raise it only alongside the container's memory. |
@@ -353,6 +353,7 @@ confirm `/health` and a real sync round-trip, then promote.
 | `BLOB_MIME_ENFORCE` | no | `reject` | `reject` answers 415 for a Content-Type Baalda does not know; `warn` logs and stores it. Use `warn` first on an existing server to see what enforcement would refuse. |
 | `BLOB_PENDING_TTL_MINUTES` | no | `60` | How long an abandoned upload holds its content's dedupe slot before the sweep removes it. Always on, every 15 minutes, serialized across instances by an advisory lock. |
 | `FREE_MAX_STORAGE_MB` | no | `1024` | Free-tier attachment storage per unsubscribed vault (only enforced when billing is enabled; a vault with an active subscription is unlimited). Over it, `intent` answers 402 `storage_limit_reached`. Lowering it never deletes anything. |
+
 | `BLOB_GC_ENABLED` | no | `false` | Delete stored attachments no note references any more. **Off by default** — see [Attachment garbage collection](#attachment-garbage-collection). The deletion *queue* (objects whose row a vault or org delete already removed) is always on and is not affected by this. |
 | `BLOB_GC_ORPHAN_DAYS` | no | `30` | How long an unreferenced attachment must have existed before it is collectable. An attachment is uploaded before the note embedding it is written, and that note may arrive days later from a device that was offline. |
 | `BLOB_GC_INTERVAL_MS` | no | `21600000` | Minimum gap between orphan sweeps (6 h). The GC ticks every 15 minutes for the always-on sweeps; this rate-limits the orphan pass on top of that. |
@@ -367,6 +368,12 @@ confirm `/health` and a real sync round-trip, then promote.
 | `S3_PRESIGN_UPLOAD_TTL_SECONDS` | no | `900` | Lifetime of an upload URL. Also the lifetime of the Postgres provider's signed same-origin PUT. |
 | `S3_PRESIGN_DOWNLOAD_TTL_SECONDS` | no | `300` | Lifetime of a download URL. |
 | `S3_PROXY_DOWNLOADS` | no | `false` | `true` streams downloads through this server instead of redirecting to the bucket. Needed when clients cannot reach the bucket (a MinIO on a private subnet); costs egress twice. |
+
+When billing is enabled, attachment sync requires an active Pro subscription on
+the vault. Migration 031 preserves attachment sync and the previous three-vault
+allowance for accounts that already exist when it runs. Existing blobs are not
+deleted, and blob deletion remains available after a downgrade so stored data
+can still be cleaned up. Billing-disabled self-hosts remain unlimited.
 | `S3_CHECKSUM_MODE` | no | `auto` | `auto` \| `sha256` \| `md5` \| `none`. `auto` = sha256 on real AWS, md5 against any custom endpoint (R2 implements only `Content-MD5`). |
 | `S3_MULTIPART_THRESHOLD_BYTES` | no | `104857600` | Where a single PUT becomes a presigned multipart upload (100 MB, AWS's own threshold). |
 | `S3_MULTIPART_PART_BYTES` | no | `16777216` | Bytes per multipart part (16 MB). Raised automatically if an object would need more than 10 000 parts. |

@@ -125,6 +125,26 @@ describe("effectiveTeamMode — locked caps at read-only", () => {
   });
 });
 
+describe("effectiveTeamMode — readonly grants and caps", () => {
+  it("is read-only under both private and shared vault baselines", () => {
+    expect(resolve("private", "Docs/Spec.md", { Docs: ["readonly"] })).toEqual({
+      mode: "readonly",
+      source: "ancestor",
+      sourcePath: "Docs",
+    });
+    expect(resolve("open", "Docs/Spec.md", { Docs: ["readonly"] }).mode).toBe("readonly");
+  });
+
+  it("inherits through folders and still loses to Private", () => {
+    expect(resolve("private", "Docs/Deep/Spec.md", { Docs: ["readonly"] }).mode).toBe(
+      "readonly",
+    );
+    expect(resolve("open", "Docs/Spec.md", { Docs: ["readonly", "denied"] }).mode).toBe(
+      "private",
+    );
+  });
+});
+
 describe("effectiveTeamMode — grants lift a restricted vault", () => {
   it("an edit grant opens an item in a private vault", () => {
     expect(resolve("private", "Team/Plan.md", { Team: ["edit"] })).toEqual({

@@ -1074,6 +1074,12 @@ export class SyncManager implements InboundHost {
     if (cb) this.publishRegistryMap();
   }
 
+  /** Billing refresh confirmed a plan change; let the binary mirror ask again. */
+  recheckAttachmentEntitlement(): void {
+    this.attachments?.resetEntitlement();
+    this.attachments?.scheduleReconcile();
+  }
+
   /** Coalesce a burst of per-note mapping changes into one publish. */
   private scheduleRegistryMapPublish(): void {
     if (!this.onRegistryMap || this.mapPublishTimer) return;

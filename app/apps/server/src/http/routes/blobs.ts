@@ -24,7 +24,7 @@ import {
 } from "../../blobs/config.js";
 import { objectKey } from "../../blobs/keys.js";
 import { docsReferencing } from "../../blobs/refs.js";
-import { storageLimitBytes } from "../../billing/entitlements.js";
+import { canSyncAttachments, storageLimitBytes } from "../../billing/entitlements.js";
 import { verifyUploadToken } from "../../blobs/upload-token.js";
 import {
   categoryForMime,
@@ -49,10 +49,11 @@ import {
  * `src/blobs/` — the store adapter, its Postgres provider, the format
  * allow-list and the upload admission budget.
  *
- * Authorization mirrors the registry routes: any member of the vault (the
- * note collection's owning organization) is edit-capable for its attachments
- * (owner/admin/member). Downloads require the same membership (view is enough —
- * membership *is* the view grant at the vault level).
+ * Authorization mirrors the registry routes and then applies the attachment
+ * sync entitlement: billing-disabled self-hosts, active Pro vaults, and users
+ * carrying migration 031's legacy grant may transfer bytes. A plan refusal is
+ * always 402 `attachment_sync_requires_pro`; deletion stays available so a
+ * downgrade never prevents cleanup of bytes already stored.
  *
  *   POST /api/vaults/:vaultId/blobs          raw binary body → store (legacy, dedupe by sha256)
  *   POST /api/vaults/:vaultId/blobs/intent   declare a file → dedupe answer or an upload URL
@@ -84,6 +85,21 @@ import {
 export const blobRoutes = new Hono();
 
 const uploadBudget = new ByteBudget(MAX_INFLIGHT_UPLOAD_BYTES);
+
+/** One stable contract for every authenticated attachment-sync surface. */
+async function attachmentSyncDenied(userId: string, orgId: string): Promise<boolean> {
+  return !(await canSyncAttachments(userId, orgId));
+}
+
+function attachmentSyncRequired(c: Context): Response {
+  return c.json(
+    {
+      error: "Attachment sync requires a Pro vault",
+      code: "attachment_sync_requires_pro",
+    },
+    402,
+  );
+}
 
 /** Bytes handed to the magic-byte sniff. 64 KB, not 4, because the zip family
  *  (docx/xlsx/pptx/zip) is told apart by an entry name in the archive's
@@ -241,6 +257,7 @@ blobRoutes.post(
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
+    if (await attachmentSyncDenied(session.userId, org)) return attachmentSyncRequired(c);
     // ── validation, all of it before a single byte of body is read ──────────
     const filename = c.req.header("x-file-name") ?? c.req.query("filename") ?? null;
     // `x-doc-id`: these bytes are a registered tree file, not an anonymous
@@ -698,6 +715,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   if (!(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  if (await attachmentSyncDenied(session.userId, org)) return attachmentSyncRequired(c);
 
   let body: Record<string, unknown>;
   try {
@@ -1129,6 +1147,7 @@ blobRoutes.post("/blobs/:id/complete", async (c) => {
   if (!org || !(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  if (await attachmentSyncDenied(session.userId, org)) return attachmentSyncRequired(c);
   if (row.vault_id && !(await canWriteBlob(session.userId, row))) {
     return c.json({ error: "This vault is read-only for you" }, 403);
   }
@@ -1289,6 +1308,7 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
   if (!(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  if (await attachmentSyncDenied(session.userId, org)) return attachmentSyncRequired(c);
 
   const row = await uploadRow(c.req.param("blobId"));
   // One 404 for "no such blob", "not this vault's blob" and "not ready": all
@@ -1397,6 +1417,7 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
   if (!(await orgRole(org, session.userId))) {
     return c.json({ error: "Not a member of this vault" }, 403);
   }
+  if (await attachmentSyncDenied(session.userId, org)) return attachmentSyncRequired(c);
 
   // `status = 'ready'` only: a pending row is an upload in flight (or an
   // abandoned one), and listing it would tell the desktop's attachment diff a
@@ -1475,6 +1496,9 @@ async function authorizeDownload(
   const org = blob.vault_id ? await vaultOrg(blob.vault_id) : blob.org_id;
   if (!org || !(await orgRole(org, session.userId))) {
     return { deny: c.json({ error: "Not a member of this vault" }, 403) };
+  }
+  if (await attachmentSyncDenied(session.userId, org)) {
+    return { deny: attachmentSyncRequired(c) };
   }
   // Per-attachment ACL: a scoped member may only download a blob referenced by
   // a note they can read (owner/admin + Open vaults are allowed everything).

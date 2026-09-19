@@ -183,6 +183,15 @@ Six changes that together make a vault something a team can actually govern.
   take; owner-only left a team whose owner was away able to take checkpoints and not use them.
 - [x] **Item colors sync.** `folders.color` / `notes.color` ride the registry pull, keyed by id so a
   rename keeps the tint. Colors set before a vault gained sync are adopted upward once.
+- [x] **Future-member access defaults and bulk access.** Owners/admins choose what future joiners
+  initially see (Private by default) without changing existing memberships. The Folder and File
+  list supports multi-selection, Everyone or named-member audiences, and atomic subtree replacement;
+  the same owner/admin operations are available through MCP.
+- [x] **Personal automatic colours.** Every otherwise-uncoloured folder/file gets a stable,
+  account-personal colour, including existing items; Account Settings can hide the automatic layer
+  without deleting manual colours.
+- [x] **Open an existing vault from Vault Settings.** The Vaults tab exposes the same direct folder
+  chooser as the welcome flow, with safe sync teardown before switching.
 
 ### Google sign-in on an existing password account ✔ (v0.1.30)
 - [x] `account_not_linked` on the Google callback for anyone who first signed up with a password —

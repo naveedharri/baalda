@@ -1141,6 +1141,25 @@ function VaultsTab() {
     }
   };
 
+  const openExisting = async () => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      // Pick only. `openLocalVault` retires the current sync scope before Rust
+      // swaps its one global vault slot; `pickVault` opens during the dialog and
+      // cannot provide that ordering guarantee.
+      const path = await ipc.pickFolder();
+      if (path) await useStore.getState().openLocalVault(path);
+      setBound(readOrgVaults());
+      setLocalsNonce((n) => n + 1);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const changeRoot = async () => {
     try {
       const picked = await ipc.pickVaultsRoot();
@@ -1366,6 +1385,13 @@ function VaultsTab() {
               </svg>
               <span>Join with code</span>
             </button>
+            <AsyncButton
+              className="ghost-pill vault-tab-add"
+              disabled={busy}
+              onClick={openExisting}
+            >
+              <span>Open existing</span>
+            </AsyncButton>
           </>
         )}
       </div>

@@ -6,6 +6,7 @@ import {
   ACTIVITY_STATUSES,
   type ActivityStatus,
   PROPERTIES_MODES,
+  readAutomaticItemColors,
   writeServerChoice,
 } from "../lib/prefs";
 import {
@@ -350,15 +351,33 @@ function StatusTab() {
 }
 
 function AppearanceTab() {
+  const session = useStore((s) => s.session);
+  const automaticItemColors = useStore((s) => s.automaticItemColors);
   const propertiesMode = useStore((s) => s.propertiesMode);
   const editorMeasure = useStore((s) => s.editorMeasure);
   const lineNumbers = useStore((s) => s.lineNumbers);
+  useEffect(() => {
+    useStore.setState({ automaticItemColors: readAutomaticItemColors(session?.user.id) });
+  }, [session?.user.id]);
   return (
     <>
       <div className="menu-row">
         <span className="menu-row-label">Theme</span>
         <ThemeToggle />
       </div>
+      <label className="menu-row toggle-row">
+        <span className="menu-row-label">
+          Automatic file colors
+          <span className="field-hint">
+            Give every uncoloured file and folder a personal, stable colour.
+          </span>
+        </span>
+        <Switch
+          checked={automaticItemColors}
+          ariaLabel="Automatic file colors"
+          onChange={(next) => useStore.getState().setAutomaticItemColors(next)}
+        />
+      </label>
       {/* The slider applies on every change rather than on release: the
           preview under it — and the note behind the card — are the answer to
           "how wide is that?", and they have to move with the thumb. */}
