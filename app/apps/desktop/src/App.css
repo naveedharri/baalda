@@ -3902,9 +3902,9 @@ body:has(.sidebar-resizer.dragging) {
 /* Text fields and selects — NOT ranges. A slider is `.range-input` (0,1,0) and
    this rule is (0,1,1), so without the exemption the settings card repainted
    every track as a 10px-radius padded box: the shared look survived in the
-   graph panel and nowhere else. Same shape as the checkbox exemption further
-   down. */
-.settings-page input:not([type="range"]),
+   graph panel and nowhere else. Checkboxes and radios keep their own compact
+   controls instead of inheriting text-field dimensions. */
+.settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
 .settings-page select {
   background: var(--bg-subtle);
   border: 1px solid transparent;
@@ -3922,14 +3922,14 @@ body:has(.sidebar-resizer.dragging) {
 .settings-page input::placeholder {
   color: var(--text-tertiary);
 }
-.settings-page input:not([type="range"]):hover,
+.settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):hover,
 .settings-page select:hover {
   border-color: var(--border-strong);
 }
 /* A focused range keeps the browser's own ring — the box-shadow + surface
    background below are a text field's focus, and the background would repaint
    the track out of existence. */
-.settings-page input:not([type="range"]):focus,
+.settings-page input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
 .settings-page select:focus {
   outline: none;
   border-color: var(--accent);
@@ -6312,6 +6312,84 @@ button.secondary:disabled {
   color: var(--text-tertiary);
   font-weight: 400;
   margin-top: 2px;
+}
+
+/* The General tab's destructive sync exit is a contained decision, with the
+   consequence and the action kept in separate columns. A plain `.menu-row`
+   made the long server-removal copy compete with a wrapping red text link. */
+.vault-local-only-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--danger-soft) 48%, var(--bg-surface));
+}
+.vault-local-only-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: var(--radius-md);
+}
+.vault-local-only-icon svg {
+  width: 17px;
+  height: 17px;
+}
+.vault-local-only-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.vault-local-only-copy > strong {
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.vault-local-only-copy .field-hint {
+  margin: 0;
+  max-width: 76ch;
+  line-height: var(--lh-body);
+  color: var(--text-secondary);
+}
+.vault-local-only-action {
+  align-self: center;
+  white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--danger);
+  padding: 8px var(--sp-3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease);
+}
+.vault-local-only-action:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.vault-local-only-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+@media (max-width: 760px) {
+  .vault-local-only-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .vault-local-only-action {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 .settings-page input:disabled {
   opacity: 0.6;
