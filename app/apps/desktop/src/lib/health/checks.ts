@@ -254,7 +254,7 @@ export const CHECK_DEFINITIONS: CheckDefinition[] = [
     id: "oversized-notes",
     group: "files",
     label: "Notes over the size limit",
-    looksFor: "Notes at or above 10 MB, the most the server accepts for one note.",
+    looksFor: "Notes at or above 10 MB, the most the Remote Vault accepts for one note.",
     whyItMatters:
       "A note this size cannot be uploaded, so its only copy is on this device. Large notes " +
       "are almost always pasted images or data tables.",
@@ -293,7 +293,7 @@ export const CHECK_DEFINITIONS: CheckDefinition[] = [
       "that was copied in while Baalda was not running.",
     howToFix: [
       "Heal rebuilds the index so these files become notes.",
-      "Sync now then registers them with the server.",
+      "Sync now then registers them with the Remote Vault.",
     ],
     severity: "warn",
     itemActions: ["reveal"],
@@ -308,7 +308,7 @@ export const CHECK_DEFINITIONS: CheckDefinition[] = [
     label: "Names that differ only by case",
     looksFor: "Two paths that are the same once you ignore upper and lower case.",
     whyItMatters:
-      "On a Mac or Windows these are ONE file; on the server and on Linux they are two. " +
+      "On a Mac or Windows these are ONE file; on the Remote Vault and on Linux they are two. " +
       "That mismatch is the single most common cause of a note that keeps re-syncing forever.",
     howToFix: [
       "Rename one of the pair so the names differ by more than case.",
@@ -408,7 +408,7 @@ export const CHECK_DEFINITIONS: CheckDefinition[] = [
     label: "Notes with heavy edit history",
     looksFor: "Notes whose local edit history is many times the size of the note itself.",
     whyItMatters:
-      "History this large slows opening and syncing the note and can push it over the server's " +
+      "History this large slows opening and syncing the note and can push it over the Remote Vault's " +
       "limit even when the text is small.",
     howToFix: [
       "Reset the note's history — it keeps the text and starts a fresh history on every device.",

@@ -370,10 +370,11 @@ confirm `/health` and a real sync round-trip, then promote.
 | `S3_PROXY_DOWNLOADS` | no | `false` | `true` streams downloads through this server instead of redirecting to the bucket. Needed when clients cannot reach the bucket (a MinIO on a private subnet); costs egress twice. |
 
 When billing is enabled, attachment sync requires an active Pro subscription on
-the vault. Migration 031 preserves attachment sync and the previous three-vault
-allowance for accounts that already exist when it runs. Existing blobs are not
-deleted, and blob deletion remains available after a downgrade so stored data
-can still be cleaned up. Billing-disabled self-hosts remain unlimited.
+the vault (including the `past_due` grace period). Migration 031 preserves only
+the previous three-vault allowance for accounts that already exist when it runs;
+its legacy `attachment_sync` column does not grant blob transfer. Existing blobs
+are not deleted, and blob deletion remains available after a downgrade so stored
+data can still be cleaned up. Billing-disabled self-hosts remain unlimited.
 | `S3_CHECKSUM_MODE` | no | `auto` | `auto` \| `sha256` \| `md5` \| `none`. `auto` = sha256 on real AWS, md5 against any custom endpoint (R2 implements only `Content-MD5`). |
 | `S3_MULTIPART_THRESHOLD_BYTES` | no | `104857600` | Where a single PUT becomes a presigned multipart upload (100 MB, AWS's own threshold). |
 | `S3_MULTIPART_PART_BYTES` | no | `16777216` | Bytes per multipart part (16 MB). Raised automatically if an object would need more than 10 000 parts. |

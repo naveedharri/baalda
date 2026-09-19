@@ -55,7 +55,7 @@ import { iconKeyForPath, type TreeIconKey } from "../lib/treeIcons";
 import { toast } from "../lib/toast";
 import { deletePaths } from "../lib/vault/mutatePaths";
 import { AsyncButton } from "./AsyncButton";
-import { Spinner } from "./Spinner";
+import { OpeningGlyph } from "./OpeningGlyph";
 import {
   activeNoteEditable,
   insertIntoActiveNote,
@@ -2005,7 +2005,7 @@ export function FileTree() {
             <li className="menu-swatches" onClick={(e) => e.stopPropagation()}>
               <span
                 className={`swatch clear${itemColors[menu.node.data.path] == null ? " on" : ""}`}
-                title="Use automatic color"
+                title="Clear color"
                 onClick={() => {
                   useStore.getState().setItemColor(menu.node!.data.path, null);
                   setMenu(null);
@@ -2025,19 +2025,6 @@ export function FileTree() {
                   }}
                 />
               ))}
-            </li>
-          )}
-          {menu.node && (
-            <li
-              className="menu-note menu-link"
-              onClick={() => {
-                setMenu(null);
-                useStore.getState().requestAccountSettings("appearance");
-              }}
-            >
-              {automaticItemColors
-                ? "Automatic colors are on. Turn them off in Account Settings → Appearance."
-                : "Automatic colors are off. Turn them on in Account Settings → Appearance."}
             </li>
           )}
           {menu.node && (
@@ -2556,20 +2543,16 @@ function Node({
         style={colorValue ? { color: colorValue } : undefined}
         aria-hidden="true"
       >
-        {/* The glyph slot is the row's own status light: while a note is being
-            opened it becomes the spinner. Reusing the slot rather than adding one
-            keeps the label from shifting sideways as the state changes. */}
-        {isOpening ? (
-          <Spinner size="xs" tone="accent" />
-        ) : isDir ? (
-          node.isOpen && !isEmpty ? (
-            ICON_FOLDER_OPEN
-          ) : (
-            ICON_FOLDER
-          )
-        ) : (
-          iconForPath(node.data.path)
-        )}
+        {/* Opening must not replace this glyph: the unmount/remount was visible
+            as a blink, especially now that every glyph may carry a colour. Slow
+            opens get a delayed ring around the stable icon instead. */}
+        <OpeningGlyph opening={isOpening}>
+          {isDir
+            ? node.isOpen && !isEmpty
+              ? ICON_FOLDER_OPEN
+              : ICON_FOLDER
+            : iconForPath(node.data.path)}
+        </OpeningGlyph>
       </span>
       {node.isEditing ? (
         <input

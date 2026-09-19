@@ -4044,10 +4044,11 @@ export const useStore = create<AppStore>((set, get) => ({
       const isPro = !!myBilling.vaults.some(
         (vault) => vault.orgId === activeOrgId && vault.plan === "pro",
       );
-      // A free attachment plan is memoised after the first 402 so watcher
+      // An attachment-plan refusal is memoised after the first 402 so watcher
       // retries cannot loop. Only a confirmed Free -> Pro transition clears
       // that refusal and schedules a fresh attachment comparison.
       if (!wasPro && isPro) syncManager.recheckAttachmentEntitlement();
+      else syncManager.checkAttachmentEntitlement?.();
     } catch (e) {
       console.warn("[billing] mine refresh failed", e);
       set({ myBilling: null });

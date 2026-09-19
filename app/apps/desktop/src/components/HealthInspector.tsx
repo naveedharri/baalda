@@ -151,7 +151,7 @@ export function InspectionCard({
 
   const facts: Array<[string, string, boolean?]> = [
     ["State", stateLabel(result)],
-    ["On server", yesNo(result.pushed)],
+    ["On Remote Vault", yesNo(result.pushed)],
     ["Waiting to push", yesNo(result.queued)],
     ["Has unsent edits", yesNo(result.diverged)],
     ["Size", result.bytes != null ? formatBytes(result.bytes) : "Not measured"],
@@ -249,8 +249,8 @@ function stateLabel(r: NoteInspection): string {
     case "error":
       return "Failed";
     case "unsynced":
-      return "Not on the server";
+      return "Not on the Remote Vault";
     default:
-      return r.emptyEverywhere ? "Empty here and on the server" : "Nothing reported yet";
+      return r.emptyEverywhere ? "Empty here and on the Remote Vault" : "Nothing reported yet";
   }
 }

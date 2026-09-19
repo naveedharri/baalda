@@ -188,8 +188,8 @@ Six changes that together make a vault something a team can actually govern.
   list supports multi-selection, Everyone or named-member audiences, and atomic subtree replacement;
   the same owner/admin operations are available through MCP.
 - [x] **Personal automatic colours.** Every otherwise-uncoloured folder/file gets a stable,
-  account-personal colour, including existing items; Account Settings can hide the automatic layer
-  without deleting manual colours.
+  account-personal colour when enabled in Account Settings; the optional automatic layer is off by
+  default and never deletes manual colours.
 - [x] **Open an existing vault from Vault Settings.** The Vaults tab exposes the same direct folder
   chooser as the welcome flow, with safe sync teardown before switching.
 

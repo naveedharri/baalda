@@ -571,8 +571,8 @@ export interface AttachmentSyncDeps {
   /**
    * Publish the server's attachment-plan verdict for this vault. This is set
    * only from the explicit 402 contract response — never inferred from a Free
-   * label, because grandfathered accounts and billing-disabled self-hosts may
-   * sync attachments without a Pro subscription.
+   * label, because Pro status may be stale locally and billing-disabled
+   * self-hosts may sync attachments without a subscription.
    */
   onEntitlementBlocked?: (blocked: boolean) => void;
   /**
@@ -832,10 +832,21 @@ export class AttachmentSync {
     // matters because every call site is fire-and-forget.
     let local: LocalAttachment[];
     let server: ServerBlob[];
+    const localListing = this.deps.listLocal();
     try {
-      [local, server] = await Promise.all([this.deps.listLocal(), this.deps.listServer()]);
+      [local, server] = await Promise.all([localListing, this.deps.listServer()]);
     } catch (e) {
-      if (this.handleAttachmentSyncRequired(e)) return { uploaded: 0, downloaded: 0 };
+      if (errStatus(e) === 402 && errCode(e) === "attachment_sync_requires_pro") {
+        let hasLocalAttachments = false;
+        try {
+          hasLocalAttachments = (await localListing).length > 0;
+        } catch {
+          // The plan verdict remains authoritative; only its announcement waits
+          // for positive local evidence.
+        }
+        this.handleAttachmentSyncRequired(e, hasLocalAttachments);
+        return { uploaded: 0, downloaded: 0 };
+      }
       console.warn("[attachments] listing failed — skipping this pass", e);
       return { uploaded: 0, downloaded: 0 };
     }
@@ -1316,17 +1327,19 @@ export class AttachmentSync {
    * call `reconcile`, so memoizing it is what turns a stable 402 into one clear
    * local-only state instead of a retry loop and a stream of identical toasts.
    */
-  private handleAttachmentSyncRequired(e: unknown): boolean {
+  private handleAttachmentSyncRequired(e: unknown, announce = true): boolean {
     if (errStatus(e) !== 402 || errCode(e) !== "attachment_sync_requires_pro") return false;
     if (!this.attachmentSyncBlocked) {
       this.attachmentSyncBlocked = true;
       this.fileStates.clear();
       this.publishFileStates();
       this.deps.onEntitlementBlocked?.(true);
-      this.deps.notify?.(
-        "Attachments stay on this device in free vaults. Upgrade this vault to Pro to sync them.",
-        "neutral",
-      );
+      if (announce) {
+        this.deps.notify?.(
+          "Attachments stay on this device in free vaults. Upgrade this vault to Pro to sync them.",
+          "neutral",
+        );
+      }
     }
     return true;
   }

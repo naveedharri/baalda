@@ -12,6 +12,19 @@ import { ApiError } from "./api";
 
 export type LimitKind = "vault_limit" | "member_limit";
 
+/** One product promise, shared by every Pro card so checkout and Settings do
+ * not drift. Note sync and local previews are deliberately absent: both are
+ * Free features, while cross-device attachment sync is the paid boundary. */
+export const PRO_BENEFITS = [
+  "Sync attachments across devices and with your team",
+  "Unlimited team members",
+  "Doesn't count toward your free vaults",
+  "Priority support",
+] as const;
+
+export const FREE_PLAN_EXPLANATION =
+  "Notes sync on Free, and every supported file can be previewed locally. Pro adds attachment sync across devices and with your team.";
+
 /** Every place the contract token might surface on a rejected request. */
 function haystack(e: ApiError): string {
   let bodyText = "";

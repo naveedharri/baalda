@@ -152,7 +152,7 @@ describe("billing", () => {
       const fourth = await createOrg(user, "U4", "unl-w4");
       expect(fourth.id).toBeTruthy();
       expect((await canCreateOrganization(user.userId)).allowed).toBe(true);
-      expect(await canSyncAttachments(user.userId, fourth.id)).toBe(true);
+      expect(await canSyncAttachments(fourth.id)).toBe(true);
 
       // Pending invitations that would matter under a cap — still unblocked here.
       await pool.query(
@@ -204,17 +204,17 @@ describe("billing", () => {
       expect((await canCreateOrganization(user.userId)).allowed).toBe(true);
     });
 
-    it("grandfathers old accounts for vault count and attachment sync", async () => {
+    it("grandfathers old accounts for vault count but still requires Pro for attachments", async () => {
       const user = await signUp("legacy@billing.com");
       const org = await createOrg(user, "Legacy", "legacy-entitlements");
-      expect(await canSyncAttachments(user.userId, org.id)).toBe(false);
+      expect(await canSyncAttachments(org.id)).toBe(false);
 
       await pool.query(
         `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
          VALUES ($1, 3, true)`,
         [user.userId],
       );
-      expect(await canSyncAttachments(user.userId, org.id)).toBe(true);
+      expect(await canSyncAttachments(org.id)).toBe(false);
       expect((await canCreateOrganization(user.userId)).limit).toBe(3);
     });
 
@@ -227,13 +227,13 @@ describe("billing", () => {
          VALUES ('pro-files-member', $1, $2, 'member', now())`,
         [org.id, member.userId],
       );
-      expect(await canSyncAttachments(member.userId, org.id)).toBe(false);
+      expect(await canSyncAttachments(org.id)).toBe(false);
       await seedSubscription(org.id, "active");
-      expect(await canSyncAttachments(member.userId, org.id)).toBe(true);
+      expect(await canSyncAttachments(org.id)).toBe(true);
       await seedSubscription(org.id, "past_due");
-      expect(await canSyncAttachments(member.userId, org.id)).toBe(true);
+      expect(await canSyncAttachments(org.id)).toBe(true);
       await seedSubscription(org.id, "canceled");
-      expect(await canSyncAttachments(member.userId, org.id)).toBe(false);
+      expect(await canSyncAttachments(org.id)).toBe(false);
     });
 
     it("seatCount / canAddMember count members + pending invitations", async () => {
@@ -496,7 +496,7 @@ describe("billing", () => {
 
   // ── limit enforcement (402 + contract token) ───────────────────────────────
   describe("402 enforcement", () => {
-    it("blob sync returns a stable Pro error while preserving legacy and Pro access", async () => {
+    it("blob sync returns a stable Pro error until the vault is Pro", async () => {
       const user = await signUp("blob-plan@billing.com");
       const org = await createOrg(user, "Blob plan", "blob-plan");
       const vaultId = await seedVault(org.id);
@@ -512,7 +512,9 @@ describe("billing", () => {
          VALUES ($1, 3, true)`,
         [user.userId],
       );
-      expect((await list()).status).toBe(200);
+      const stillBlocked = await list();
+      expect(stillBlocked.status).toBe(402);
+      expect(await stillBlocked.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
 
       await pool.query("DELETE FROM account_entitlements WHERE user_id = $1", [user.userId]);
       await seedSubscription(org.id, "active");

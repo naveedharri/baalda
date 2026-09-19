@@ -283,7 +283,7 @@ Automatic sidebar colours are a deterministic, account-personal fallback for fil
 an explicit manual colour. A broad palette hashes stable item identities, then resolves collisions
 within each ordered sibling group so the two preceding rows do not repeat; explicit synced colours
 always win and participate in that neighbour check. Automatic colours are stable across restarts and
-can be hidden in Account Settings → Appearance.
+can be enabled in Account Settings → Appearance; they are off by default.
 
 Vault Health keeps its local census separate from its server inventory. Local totals come from Rust's
 disk/index pass; the server comparison reads the registry's last reconciled note, folder and file paths.
@@ -291,7 +291,7 @@ That server view is explicitly last-known while offline, signed out, reconnectin
 paths/counts never imply matching content — per-note pushed/sync state remains the content authority.
 An attachment-local-only notice is driven only by the server's explicit
 `attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
-grandfathered users and billing-disabled self-hosts may still sync attachments.
+the vault may be Pro, and billing-disabled self-hosts may still sync attachments.
 The notice persists in file previews and Vault Health while notes continue to
 report their own sync state.
 
@@ -316,8 +316,8 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
   Managed billing gives new accounts two free unsubscribed vaults and reserves attachment sync for
   Pro vaults. Migration 031 snapshots the prior benefits per user: existing accounts keep three free
-  vaults and may sync attachments in free vaults they join later. An active Pro vault unlocks
-  attachment sync for all its members; billing-disabled self-hosts remain unlimited.
+  vaults, but attachment sync still requires Pro. An active or past-due Pro vault unlocks attachment
+  sync for all its members; billing-disabled self-hosts remain unlimited.
   Deleting a vault cancels **at period end first** and aborts the delete if the provider refuses (502
   `subscription_cancel_failed`; Better Auth's own org-delete is off via `disableOrganizationDeletion`).
   The row then outlives the org as a **tombstone** — migration 024 dropped the cascade and added

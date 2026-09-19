@@ -37,6 +37,60 @@ type Mode = TeamAccessMode;
 type AudienceType = "org" | "users";
 type Resource = AccessRow;
 
+export interface AccessSelectionPresentation {
+  checked: boolean;
+  /** The compact scope that supplies this row's visual selection. */
+  inheritedFrom: { key: string; label: string } | null;
+}
+
+/**
+ * A folder or vault selection already includes its descendants on the server.
+ * Reflect that scope in the tree without copying descendant ids into the
+ * submitted selection. The nearest selected folder wins the explanation.
+ */
+export function accessSelectionPresentations(
+  entries: readonly AccessEntry[],
+  selected: ReadonlySet<string>,
+  vaultKey: string,
+): Map<string, AccessSelectionPresentation> {
+  const selectedFoldersByPath = new Map(
+    entries
+      .filter((candidate) => candidate.kind === "folder" && selected.has(accessEntryKey(candidate)))
+      .map((folder) => [folder.path, folder] as const),
+  );
+  const vaultSource = vaultKey && selected.has(vaultKey)
+    ? { key: vaultKey, label: "Entire vault" }
+    : null;
+
+  const presentations = new Map<string, AccessSelectionPresentation>();
+  for (const entry of entries) {
+    const key = accessEntryKey(entry);
+    if (selected.has(key)) {
+      presentations.set(key, { checked: true, inheritedFrom: null });
+      continue;
+    }
+    if (vaultSource) {
+      presentations.set(key, { checked: true, inheritedFrom: vaultSource });
+      continue;
+    }
+
+    const inheritedFolder = ancestorPaths(entry.path)
+      .reverse()
+      .map((path) => selectedFoldersByPath.get(path))
+      .find((folder) => folder !== undefined);
+    presentations.set(key, inheritedFolder
+      ? {
+          checked: true,
+          inheritedFrom: {
+            key: accessEntryKey(inheritedFolder),
+            label: inheritedFolder.path.split("/").pop() ?? inheritedFolder.path,
+          },
+        }
+      : { checked: false, inheritedFrom: null });
+  }
+  return presentations;
+}
+
 /** Wait for conditional controls to render, then scroll only their nearest
  * scrollable ancestor. The shared helper keeps an already-visible step still,
  * preserves keyboard focus, and respects reduced-motion preferences. */
@@ -205,9 +259,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     [entries, selectedKeys],
   );
   const selectedUserIds = [...selectedUsers];
-  const allItemsSelected = entries.length > 0 && entries.every((entry) => selectedKeys.has(accessEntryKey(entry)));
   const vaultKey = orgId ? vaultAccessKey(orgId) : "";
   const vaultSelected = !!vaultKey && selectedKeys.has(vaultKey);
+  const selectionPresentations = useMemo(
+    () => accessSelectionPresentations(entries, selectedKeys, vaultKey),
+    [entries, selectedKeys, vaultKey],
+  );
+  const allItemsSelected = entries.length > 0 && entries.every(
+    (entry) => selectionPresentations.get(accessEntryKey(entry))?.checked,
+  );
 
   const vaultMode = teamAccess?.mode ?? cachedMode;
   const orgRowsByPath = useMemo(
@@ -436,7 +496,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
           <ul className="access-list">
             {resources.map((resource) => {
               const key = accessEntryKey(resource);
-              const selected = selectedKeys.has(key);
+              const selection = selectionPresentations.get(key) ?? { checked: false, inheritedFrom: null };
+              const selected = selection.checked;
+              const inheritedSelection = selection.inheritedFrom;
               const mode = teamModeFor(resource.path);
               const itemLock = lockMap.get(resource.path);
               const restricted = !!itemLock && !itemLock.org && itemLock.users.size > 0;
@@ -454,10 +516,29 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                       {expanding.has(resource.path) ? <Spinner size="xs" /> : ICON.chevron}
                     </button>
                   ) : <span className="access-twisty spacer" aria-hidden="true" />}
-                  <label className={`access-row${selected ? " sel" : ""}`}>
-                    <input className="access-check" type="checkbox" checked={selected} disabled={!canManage} onChange={() => toggleResource(key)} />
+                  <label
+                    className={`access-row${selected ? " sel" : ""}${inheritedSelection ? " inherited" : ""}`}
+                    title={inheritedSelection
+                      ? `Selected through ${inheritedSelection.label}; change the ${inheritedSelection.label} selection to adjust this item.`
+                      : undefined}
+                  >
+                    <input
+                      className="access-check"
+                      type="checkbox"
+                      checked={selected}
+                      disabled={!canManage || !!inheritedSelection}
+                      aria-label={inheritedSelection
+                        ? `${resource.name}, selected through ${inheritedSelection.label}. Change the ${inheritedSelection.label} selection to adjust this item.`
+                        : resource.name}
+                      onChange={() => toggleResource(key)}
+                    />
                     <span className="access-glyph">{rowGlyph(resource)}</span>
                     <span className="access-rname">{resource.name}</span>
+                    {inheritedSelection && (
+                      <span className="access-selection-source" aria-hidden="true">
+                        Selected through {inheritedSelection.label}
+                      </span>
+                    )}
                     <span className="access-rright">{mode ? <AccessBadge mode={mode} restricted={restricted} /> : <LoadingBadge />}</span>
                   </label>
                 </li>

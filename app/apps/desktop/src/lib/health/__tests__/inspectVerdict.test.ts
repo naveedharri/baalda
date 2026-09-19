@@ -71,12 +71,12 @@ describe("composeInspectionVerdict", () => {
 
   it("prefers 'queued' over 'diverged' — the queue is the thing about to act", () => {
     expect(v({ queued: true, diverged: true })).toContain("Waiting to be pushed");
-    expect(v({ diverged: true })).toContain("edits the server may not have");
+    expect(v({ diverged: true })).toContain("edits the Remote Vault may not have");
   });
 
   it("only claims a confirmation when BOTH the report and the checkpoint agree", () => {
     expect(v({ state: "synced", pushed: true })).toBe(
-      "Synced — the server confirmed this note's content.",
+      "Synced — the Remote Vault confirmed this note's content.",
     );
     // A `synced` report with no durable checkpoint is not a confirmation, and
     // a checkpoint with a live `unsynced` state is not one either.
@@ -85,7 +85,7 @@ describe("composeInspectionVerdict", () => {
       v({ state: "unsynced", pushed: true }),
     ]) {
       expect(weak).toContain("Not confirmed yet");
-      expect(weak).not.toContain("the server confirmed");
+      expect(weak).not.toContain("the Remote Vault confirmed");
     }
   });
 
@@ -93,8 +93,8 @@ describe("composeInspectionVerdict", () => {
     expect(v({ pushed: true, state: null })).toContain("nothing about it has changed");
   });
 
-  it("says the server doesn't know an unmapped note", () => {
-    expect(v({ docId: null })).toBe("The server does not know this note yet.");
+  it("says the Remote Vault doesn't know an unmapped note", () => {
+    expect(v({ docId: null })).toBe("The Remote Vault does not know this note yet.");
   });
 
   it("falls back to 'not confirmed', never to something reassuring", () => {

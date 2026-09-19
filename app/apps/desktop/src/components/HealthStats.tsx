@@ -312,7 +312,7 @@ function FileTable({
           <th scope="col" className="health-num">
             Size
           </th>
-          <th scope="col" className="health-num">
+          <th scope="col" className="health-num health-modified">
             Modified
           </th>
           <th scope="col" aria-label="Actions" />
@@ -335,7 +335,9 @@ function FileTable({
                   </span>
                 )}
               </td>
-              <td className="health-num">{relativeTime(row.mtime, handlers.now)}</td>
+              <td className="health-num health-modified">
+                {relativeTime(row.mtime, handlers.now)}
+              </td>
               <td className="health-row-actions">
                 {openable && (
                   <button

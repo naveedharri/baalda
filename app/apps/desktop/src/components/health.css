@@ -176,182 +176,6 @@
   flex-wrap: wrap;
 }
 
-/* ── Pipeline strip ───────────────────────────────────────────────────────── */
-
-.health-pipeline-wrap {
-  margin-top: var(--sp-5);
-  container-type: inline-size;
-}
-.health-pipeline {
-  display: flex;
-  align-items: stretch;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.health-stage-cell {
-  display: flex;
-  align-items: center;
-  flex: 1 1 0;
-  min-width: 0;
-}
-/* A status strip, not a diagram poster: two lines of text, ~64px tall. */
-.health-node {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  text-align: left;
-  cursor: pointer;
-  transition:
-    border-color var(--t-fast) var(--ease),
-    background var(--t-fast) var(--ease);
-}
-.health-node:hover {
-  background: var(--bg-hover);
-}
-.health-node:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-.health-node[data-focus],
-.health-node[data-picked] {
-  border-color: var(--tone);
-}
-.health-node[data-focus] {
-  background: var(--tone-soft);
-}
-/* A stage that is only here because it is broken says so, and is inset a step
-   so the three permanent cards still read as the shape of the pipeline. */
-.health-node[data-conditional] {
-  border-style: dashed;
-  border-color: var(--tone);
-  background: var(--tone-soft);
-}
-.health-node-top {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  max-width: 100%;
-  min-width: 0;
-}
-.health-node-dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-pill);
-  background: var(--tone);
-}
-.health-node[data-state="off"] .health-node-dot {
-  background: transparent;
-  border: 1px solid var(--tone);
-}
-.health-node-label {
-  font-size: var(--fs-xs);
-  color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-.health-node-headline {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-.health-node-note {
-  font-size: var(--fs-xs);
-  color: var(--tone);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-/* The edge into a node. Solid hairline by default; the one into the first
-   unsettled stage turns dashed and takes that stage's colour, which is the
-   whole diagnosis in one mark. */
-.health-edge {
-  flex: 0 0 20px;
-  height: 2px;
-  border-radius: var(--radius-pill);
-  background: var(--border-strong);
-}
-.health-edge[data-broken] {
-  background-image: repeating-linear-gradient(
-    90deg,
-    var(--tone) 0 6px,
-    transparent 6px 12px
-  );
-  background-color: transparent;
-  background-size: 12px 2px;
-}
-.health-edge[data-broken][data-state="busy"] {
-  animation: health-dash 700ms linear infinite;
-}
-@keyframes health-dash {
-  to {
-    background-position-x: 12px;
-  }
-}
-
-.health-legend {
-  margin: var(--sp-3) 0 0;
-  padding-left: var(--sp-3);
-  border-left: 2px solid var(--tone);
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-body);
-}
-.health-legend strong {
-  color: var(--text-primary);
-  margin-right: var(--sp-1);
-}
-
-/* Narrow card: the stages become a column and the edges turn vertical. */
-@container (max-width: 520px) {
-  .health-pipeline {
-    flex-direction: column;
-  }
-  .health-stage-cell {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .health-edge {
-    flex: 0 0 16px;
-    width: 2px;
-    height: 16px;
-    margin-left: var(--sp-5);
-  }
-  .health-edge[data-broken] {
-    background-image: repeating-linear-gradient(
-      180deg,
-      var(--tone) 0 6px,
-      transparent 6px 12px
-    );
-    background-size: 2px 12px;
-  }
-  .health-edge[data-broken][data-state="busy"] {
-    animation-name: health-dash-y;
-  }
-}
-@keyframes health-dash-y {
-  to {
-    background-position-y: 12px;
-  }
-}
-
 /* ── Sync breakdown ───────────────────────────────────────────────────────── */
 
 .health-local-row {
@@ -1043,11 +867,11 @@
   color: var(--text-tertiary);
   pointer-events: none;
 }
-/* Outranks App.css's `.settings-page input:not([type="range"])` (0,2,1), which
-   otherwise re-applies its own padding and leaves the search glyph sitting on
-   top of the placeholder text. */
-.settings-page .health-inspector-field input.health-inspector-input {
-  padding-left: calc(var(--sp-3) + 22px);
+/* App.css's text-field rule contains three `:not()` selectors, so it has more
+   specificity than it first appears to. Keep the complete inset here: the
+   icon ends around 28px and the text starts a comfortable gap after it. */
+.settings-page .health-tab .health-inspector-field > input.health-inspector-input[type="text"] {
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) calc(var(--sp-3) + 28px);
   border-radius: var(--radius-pill);
 }
 .health-suggest {
@@ -1437,10 +1261,8 @@
 
 /* ── Largest ──────────────────────────────────────────────────────────────── */
 
-/* A floor under the pane, so switching Notes → Files → History does not jump
-   the rest of the page up and down under the cursor. */
 .health-largest {
-  min-height: 240px;
+  min-width: 0;
 }
 .health-segmented {
   display: inline-flex;
@@ -1452,6 +1274,7 @@
 }
 .health-table {
   width: 100%;
+  min-width: 0;
   border-collapse: collapse;
   font-size: var(--fs-sm);
   table-layout: fixed;
@@ -1470,13 +1293,26 @@
   color: var(--text-secondary);
   vertical-align: top;
 }
+.health-table th:first-child,
+.health-table td:first-child {
+  min-width: 0;
+  overflow: hidden;
+  padding-right: var(--sp-3);
+}
+.health-table td:first-child .health-path {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .health-table tr:last-child td {
   border-bottom: none;
 }
 .health-table .health-num {
   text-align: right;
   white-space: nowrap;
-  width: 7.5rem;
+  width: 6.5rem;
 }
 .health-file-name {
   display: block;
@@ -1486,9 +1322,13 @@
   white-space: nowrap;
 }
 .health-row-actions {
-  width: 9.5rem;
+  width: 7.5rem;
+  padding-left: var(--sp-2);
   text-align: right;
   white-space: nowrap;
+}
+.health-row-actions .link-btn {
+  padding-inline: var(--sp-1);
 }
 .health-size-badge {
   display: block;
@@ -1496,10 +1336,8 @@
   color: var(--tone);
 }
 
-/* Motion is decoration everywhere on this page: the dashes say where the
-   pipeline stops, and the colour already said it. */
+/* Motion is decoration everywhere on this page. */
 @media (prefers-reduced-motion: reduce) {
-  .health-edge,
   .health-check.is-skeleton .health-check-glyph,
   .health-check.is-skeleton .health-check-label,
   .health-tile.is-skeleton .health-tile-value,
@@ -2058,25 +1896,148 @@ button.health-metric-flag:hover {
 .health-advanced > summary::-webkit-details-marker {
   display: none;
 }
-.health-advanced > summary span {
+.health-advanced > summary > span:first-child {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.health-advanced > summary small {
+.health-advanced > summary > span:first-child small {
   color: var(--text-tertiary);
   font-size: var(--fs-xs);
   font-weight: 400;
+}
+.health-advanced-summary-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  color: var(--text-tertiary);
+}
+.health-advanced-summary-meta > svg {
+  flex: 0 0 auto;
+  transition: transform var(--t-fast) var(--ease);
+}
+.health-advanced-summary-pill {
+  padding: 3px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.health-advanced-summary-pill[data-tone="good"] {
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+  color: var(--success);
+}
+.health-advanced-summary-pill[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--warning) 30%, var(--border));
+  color: var(--warning);
 }
 .health-advanced[open] > summary {
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
 }
-.health-advanced[open] > summary > svg {
+.health-advanced[open] > summary .health-advanced-summary-meta > svg {
   transform: rotate(90deg);
 }
 .health-advanced-body {
-  padding: 0 var(--sp-5) var(--sp-5);
+  display: grid;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5) var(--sp-5);
+}
+.health-diagnostics-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--sp-3) var(--sp-5);
+  align-items: center;
+  padding: var(--sp-4);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, var(--accent-soft), var(--bg-surface) 68%);
+}
+.health-diagnostics-toolbar-copy h3,
+.health-diagnostic-heading h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+}
+.health-diagnostics-toolbar-copy p,
+.health-diagnostic-heading p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
+}
+.health-diagnostics-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.health-diagnostics-hint,
+.health-diagnostics-feedback {
+  grid-column: 1 / -1;
+  margin: calc(var(--sp-2) * -1) 0 0;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
+}
+.health-diagnostics-hint {
+  color: var(--text-tertiary);
+}
+.health-diagnostics-feedback {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--tone);
+}
+.health-diagnostics-feedback[data-tone="good"] {
+  --tone: var(--success);
+}
+.health-diagnostics-feedback[data-tone="bad"] {
+  --tone: var(--danger);
+}
+.health-diagnostic-card {
+  min-width: 0;
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+.health-diagnostic-heading {
+  margin-bottom: var(--sp-4);
+}
+.health-diagnostic-heading .health-kicker {
+  margin-bottom: 2px;
+}
+.health-diagnostic-inspector .health-inspector-field {
+  max-width: 100%;
+}
+.health-diagnostic-checks .health-checks-head {
+  margin-top: 0;
+}
+.health-diagnostic-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-4);
+}
+
+/* The activity and storage cards only sit side by side when each has enough
+   room for a useful file name plus every action. Settings dialogs normally
+   stay below this threshold, so their contents stack at full width. */
+@container health (min-width: 1040px) {
+  .health-diagnostic-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container health (max-width: 600px) {
+  .health-table .health-modified {
+    display: none;
+  }
 }
 
 @container health (max-width: 720px) {
@@ -2107,5 +2068,20 @@ button.health-metric-flag:hover {
   }
   .health-differences {
     grid-template-columns: 1fr;
+  }
+  .health-diagnostics-toolbar {
+    grid-template-columns: 1fr;
+  }
+  .health-diagnostics-actions {
+    justify-content: flex-start;
+  }
+  .health-advanced-summary-pill {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .health-advanced-summary-meta > svg {
+    transition: none;
   }
 }

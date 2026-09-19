@@ -188,7 +188,6 @@ export async function storageLimitBytes(
 
 interface AccountEntitlementRow {
   free_vault_limit: number;
-  attachment_sync: boolean;
 }
 
 /** Durable benefits granted to accounts that existed at the rollout boundary. */
@@ -197,7 +196,7 @@ async function accountEntitlement(
   db: Queryable,
 ): Promise<AccountEntitlementRow | null> {
   const { rows } = await db.query<AccountEntitlementRow>(
-    `SELECT free_vault_limit, attachment_sync
+    `SELECT free_vault_limit
        FROM account_entitlements
       WHERE user_id = $1`,
     [userId],
@@ -215,18 +214,16 @@ export async function freeVaultLimitForUser(
 }
 
 /**
- * Whether this account may mirror binary files in this vault. An active Pro
- * subscription unlocks every member; the legacy grant follows its user into
- * free vaults they join later. Billing-disabled self-hosts remain unlimited.
+ * Whether this vault may mirror binary files. An active or past-due Pro
+ * subscription unlocks every member. Billing-disabled self-hosts remain
+ * unlimited. Account-level legacy grants affect only the free-vault count.
  */
 export async function canSyncAttachments(
-  userId: string,
   orgId: string,
   db: Queryable = defaultPool,
 ): Promise<boolean> {
   if (!billingEnabled()) return true;
-  if (await orgHasActiveSubscription(orgId, db)) return true;
-  return (await accountEntitlement(userId, db))?.attachment_sync === true;
+  return orgHasActiveSubscription(orgId, db);
 }
 
 /**

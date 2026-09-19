@@ -3,9 +3,17 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { AttachmentLocalOnlyNoticeView } from "../AttachmentSyncNotice";
+import {
+  AttachmentLocalOnlyNoticeView,
+  attachmentNoticeVisible,
+} from "../AttachmentSyncNotice";
 
 describe("AttachmentLocalOnlyNoticeView", () => {
+  it("requires both a server refusal and a detected local attachment", () => {
+    expect(attachmentNoticeVisible(true, true)).toBe(true);
+    expect(attachmentNoticeVisible(true, false)).toBe(false);
+    expect(attachmentNoticeVisible(false, true)).toBe(false);
+  });
   it("explains that files remain previewable while notes keep syncing", () => {
     const html = renderToStaticMarkup(
       createElement(AttachmentLocalOnlyNoticeView, {
@@ -16,10 +24,10 @@ describe("AttachmentLocalOnlyNoticeView", () => {
       }),
     );
 
-    expect(html).toContain("Attachments are local only in this vault");
+    expect(html).toContain("Attachment sync requires Pro");
     expect(html).toContain("Notes still sync");
-    expect(html).toContain("preview every supported file on this device");
-    expect(html).toContain("Upgrade to sync attachments");
+    expect(html).toContain("remain available to preview locally");
+    expect(html).toContain("Upgrade to Pro");
     expect(html).toContain("Open Health");
   });
 
@@ -33,7 +41,7 @@ describe("AttachmentLocalOnlyNoticeView", () => {
       }),
     );
 
-    expect(html).toContain("Attachments are local only in this vault");
+    expect(html).toContain("Attachment sync requires Pro");
     expect(html).not.toContain("Upgrade");
   });
 

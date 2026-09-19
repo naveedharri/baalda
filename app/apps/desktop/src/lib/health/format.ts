@@ -139,7 +139,7 @@ export function kindLabel(kind: HealthIssueKind): string {
     case "limit":
       return "Plan limit";
     case "unregistered":
-      return "Not on server yet";
+      return "Not uploaded yet";
     case "no-access":
       return "No access";
     case "left-behind":

@@ -11,10 +11,9 @@ import { config } from "../src/config.js";
 /**
  * Per-vault attachment storage quota.
  *
- * Gated exactly like the seat and vault caps: only when billing is ON, and
- * never against a vault with an active subscription. A self-hosted server must
- * never meet it — which is the assertion that matters most here, because the
- * check runs on the upload path of every deployment.
+ * The accounting remains available to members, while uploads on a
+ * billing-enabled server first require a Pro vault. A self-hosted server must
+ * never meet a quota, and a Pro vault is unlimited.
  */
 const app = createApp(testAppDeps());
 
@@ -74,13 +73,6 @@ describe("storage quota", () => {
   beforeEach(async () => {
     await resetDb();
     owner = await signUp(`owner-${randomUUID().slice(0, 8)}@quota.com`);
-    // Quota behavior remains relevant for grandfathered free accounts, which
-    // keep attachment sync but still retain the existing storage ceiling.
-    await pool.query(
-      `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
-       VALUES ($1, 3, true)`,
-      [owner.userId],
-    );
     orgId = await seedOrg("Quota Co", `quota-${randomUUID().slice(0, 8)}`);
     await seedMember(orgId, owner.userId, "owner");
     vaultId = await seedVault(orgId);
@@ -91,26 +83,24 @@ describe("storage quota", () => {
     delete process.env.POLAR_ACCESS_TOKEN;
   });
 
-  it("402s at the limit when billing is on and the vault is unsubscribed", async () => {
+  it("requires Pro before evaluating storage for an unsubscribed vault", async () => {
     process.env.POLAR_ACCESS_TOKEN = "test-token";
     await occupy(LIMIT_BYTES);
 
     const res = await intent(owner, newUpload());
     expect(res.status).toBe(402);
-    const body = (await res.json()) as {
-      code: string;
-      limitBytes: number;
-      usedBytes: number;
-    };
-    expect(body.code).toBe("storage_limit_reached");
-    expect(body.limitBytes).toBe(LIMIT_BYTES);
-    expect(body.usedBytes).toBe(LIMIT_BYTES);
+    expect(await res.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
   });
 
-  it("counts pending rows — an unfinished upload still occupies the bucket", async () => {
+  it("counts pending rows in reported storage", async () => {
     process.env.POLAR_ACCESS_TOKEN = "test-token";
     await occupy(LIMIT_BYTES, "pending");
-    expect((await intent(owner, newUpload())).status).toBe(402);
+    const body = (await (await storage(owner)).json()) as {
+      usedBytes: number;
+      pendingBytes: number;
+    };
+    expect(body.usedBytes).toBe(LIMIT_BYTES);
+    expect(body.pendingBytes).toBe(LIMIT_BYTES);
   });
 
   it("never 402s with billing off, however full the vault is", async () => {
@@ -129,10 +119,16 @@ describe("storage quota", () => {
     expect((await intent(owner, newUpload())).status).toBe(200);
   });
 
-  it("lets an upload that still fits through", async () => {
+  it("does not let legacy account flags bypass the Pro requirement", async () => {
     process.env.POLAR_ACCESS_TOKEN = "test-token";
-    await occupy(LIMIT_BYTES - 1024);
-    expect((await intent(owner, newUpload())).status).toBe(200);
+    await pool.query(
+      `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
+       VALUES ($1, 3, true)`,
+      [owner.userId],
+    );
+    const res = await intent(owner, newUpload());
+    expect(res.status).toBe(402);
+    expect(await res.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
   });
 
   describe("GET /api/vaults/:vaultId/storage", () => {

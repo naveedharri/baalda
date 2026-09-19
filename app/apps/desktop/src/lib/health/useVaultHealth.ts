@@ -47,6 +47,16 @@ export interface UseVaultHealthOptions {
   onRequestSignIn?: () => void;
 }
 
+/** Merge the hidden attachment store and surfaced binary-file census without
+ * treating an unfinished read as evidence that the vault is note-only. */
+export function localAttachmentPresence(
+  hiddenCount: number | null,
+  surfacedCount: number | null,
+): boolean | null {
+  if ((hiddenCount ?? 0) > 0 || (surfacedCount ?? 0) > 0) return true;
+  return hiddenCount != null && surfacedCount != null ? false : null;
+}
+
 /** Empty failure set — what the sync layer reports when it isn't running. */
 const NO_FAILURES: HealthFailures = { registry: [], content: [], limitCode: null };
 
@@ -80,6 +90,18 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
 
   const vaultPath = vault?.path ?? null;
   const vaultEpoch = vault?.epoch;
+
+  // Census state belongs to one vault. Clear it when that identity changes so
+  // the new vault's attachment-plan verdict can never combine with the prior
+  // vault's attachment count while replacement reads are still in flight. A
+  // same-vault refresh keeps the last result visible until its update lands.
+  useEffect(() => {
+    setStats(null);
+    setChecks(null);
+    setLocalInventoryPaths(null);
+    setStatsError(null);
+    setLoading(vaultPath != null);
+  }, [vaultPath, vaultEpoch]);
 
   // ── The Rust census ────────────────────────────────────────────────────────
   // Re-run on vault change and on every `refresh()`. A response that lands after
@@ -324,6 +346,16 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     };
   }, [localNotePaths, localInventoryPaths, stats, syncEnabled, report.verdict, docIdByPath]);
 
+  // Two homes feed attachment sync: the hidden content-addressed store (only
+  // the census sees it) and surfaced standalone binaries (only listTree gives
+  // the exact supported-file set). A negative verdict is safe only after both
+  // reads land; until then Health stays quiet rather than accusing a note-only
+  // vault from the server's plan-level 402 alone.
+  const hasLocalAttachments = localAttachmentPresence(
+    stats?.attachments.count ?? null,
+    localInventoryPaths?.files.length ?? null,
+  );
+
   // ── Actions ────────────────────────────────────────────────────────────────
   // Kept in a ref-backed object so the identity is stable across renders: the
   // tab passes these straight to row buttons, and a fresh object every render
@@ -424,7 +456,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         if (!mapping) {
           throw new Error(
             "This note couldn't be registered: the vault isn't reconciled with the " +
-              "server yet. Try again once the connection is back.",
+              "Remote Vault yet. Try again once the connection is back.",
           );
         }
         // Registering creates the row; the content still has to be pushed, and
@@ -441,7 +473,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         const message =
           `Hi${owner ? ` ${owner.name}` : ""},\n\n` +
           `Could you give me access to the Baalda vault "${vaultName}"? ` +
-          `Right now the server refuses to sync it for me.` +
+          `Right now the Remote Vault refuses to sync it for me.` +
           (me ? ` My account email is ${me}.` : "") +
           `\n\nThanks!`;
         await copyText(message);
@@ -603,6 +635,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   return {
     report,
     inventory,
+    hasLocalAttachments,
     stats,
     checks,
     statsError,
@@ -701,7 +734,7 @@ export async function buildIssueReport(
     for (const f of issue.facts) lines.push(`${f.label}: ${f.value}`);
   }
   lines.push("");
-  lines.push(`app ${version} · server ${serverHost ?? "(local only)"}`);
+  lines.push(`app ${version} · Remote Vault ${serverHost ?? "(local only)"}`);
   return lines.join("\n");
 }
 
@@ -733,7 +766,7 @@ export async function buildDiagnostics(
   lines.push("Baalda vault health");
   lines.push(`app: ${version}`);
   lines.push(`platform: ${platform}`);
-  lines.push(`server: ${report.serverHost ?? "(local only)"}`);
+  lines.push(`Remote Vault: ${report.serverHost ?? "(local only)"}`);
   lines.push(`vault: ${st.vault?.name ?? "(none)"}`);
   lines.push(`org id: ${st.session?.activeOrganizationId ?? "(none)"}`);
   lines.push(`collection id: ${syncManager.registry.vaultId ?? "(none)"}`);

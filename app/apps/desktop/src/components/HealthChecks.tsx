@@ -122,8 +122,14 @@ export function HealthChecks({
           {summary.headline}
           {notRun > 0 && ` · ${notRun} not run`}
         </span>
-        <button type="button" className="ghost-pill sm" onClick={onRefresh}>
-          Run again
+        <button
+          type="button"
+          className="ghost-pill sm"
+          disabled={loading}
+          aria-busy={loading || undefined}
+          onClick={onRefresh}
+        >
+          {loading ? "Checking…" : "Re-run file checks"}
         </button>
       </div>
       {groups.map(({ group, rows: inGroup }) =>

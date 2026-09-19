@@ -1086,6 +1086,13 @@ export class SyncManager implements InboundHost {
     this.attachments?.scheduleReconcile();
   }
 
+  /** Ask the server again without clearing an existing refusal. Billing
+   * refreshes use this to learn a policy change in a running client; a blocked
+   * mirror remains blocked until a confirmed Pro transition resets it. */
+  checkAttachmentEntitlement(): void {
+    this.attachments?.scheduleReconcile();
+  }
+
   /** Coalesce a burst of per-note mapping changes into one publish. */
   private scheduleRegistryMapPublish(): void {
     if (!this.onRegistryMap || this.mapPublishTimer) return;
