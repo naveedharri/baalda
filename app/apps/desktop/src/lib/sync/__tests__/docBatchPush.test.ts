@@ -470,10 +470,14 @@ describe("packing", () => {
 });
 
 describe("failures", () => {
-  it("records `denied` as PERMANENT and never retries it", async () => {
+  it("defers `denied` to the pull-first per-doc path", async () => {
     const { io, fs } = harness({ "a.md": "file text" });
+    const discarded: string[] = [];
     const h = pusher(io, [{ docId: "a", relPath: "a.md", serverEmpty: true }], {
       readFile: (p) => fs.readFile(p),
+      discard: async (docId) => {
+        discarded.push(docId);
+      },
       answer: (items) =>
         items.map((i) => ({
           docId: i.docId,
@@ -485,8 +489,49 @@ describe("failures", () => {
     const out = await h.p.run();
 
     expect(h.requests).toHaveLength(1); // one attempt, not three
-    expect(out.failures[0]).toMatchObject({ docId: "a", permanent: true });
+    expect(out.failures).toEqual([]);
+    expect(out.deferred).toEqual([
+      { docId: "a", relPath: "a.md", serverEmpty: false },
+    ]);
+    expect(out.denied).toEqual(["a"]);
+    expect(discarded).toEqual(["a"]);
     expect(h.pushed).toEqual([]);
+  });
+
+  it("keeps local history when the durable file cannot be read before a denied rebase", async () => {
+    const { io } = harness({ "a.md": "file text" });
+    const discarded: string[] = [];
+    const h = pusher(io, [{ docId: "a", relPath: "a.md", serverEmpty: true }], {
+      readFile: async () => {
+        throw new Error("disk unavailable");
+      },
+      discard: async (docId) => {
+        discarded.push(docId);
+      },
+      answer: (items) =>
+        items.map((i) => ({ docId: i.docId, status: "denied", code: null, error: null })),
+    });
+    const out = await h.p.run();
+    expect(discarded).toEqual([]);
+    expect(out.deferred).toEqual([]);
+    expect(out.failures[0].reason).toContain("could not read the local file");
+  });
+
+  it("does not follow up or overwrite when clearing local history fails", async () => {
+    const { io, fs } = harness({ "a.md": "durable local text" });
+    const h = pusher(io, [{ docId: "a", relPath: "a.md", serverEmpty: true }], {
+      readFile: (p) => fs.readFile(p),
+      discard: async () => {
+        throw new Error("sqlite busy");
+      },
+      answer: (items) =>
+        items.map((i) => ({ docId: i.docId, status: "denied", code: null, error: null })),
+    });
+    const out = await h.p.run();
+    expect(out.deferred).toEqual([]);
+    expect(out.denied).toEqual([]);
+    expect(out.failures[0].reason).toContain("could not reset local history");
+    expect(fs.get("a.md")).toBe("durable local text");
   });
 
   it("keeps going after a failed chunk — no streak abort", async () => {

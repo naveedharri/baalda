@@ -33,9 +33,7 @@ const empty = {
   // Tree binaries: doc_id → path, the registry's `files` map inverted. Empty by
   // default — a vault of pure notes plans exactly as it always did.
   localFiles: new Map<string, string>(),
-  // Docs THIS user wrote — the author exemption on a revoked removal. Empty by
-  // default, so "removed outright" stays the case under test unless a case says
-  // otherwise.
+  // Legacy authorship metadata. Empty by default; compatibility cases opt in.
   authoredByMe: new Set<string>() as ReadonlySet<string>,
 };
 
@@ -325,16 +323,14 @@ describe("planInbound — renames", () => {
 });
 
 describe("planInbound — deletes", () => {
-  it("trashes a note the server tombstoned", () => {
+  it("removes a note the server tombstoned", () => {
     const p = plan({
       baseline: new Map([["d1", "bye.md"]]),
       local: new Map([["d1", "bye.md"]]),
       tombstones: new Set(["d1"]),
     });
-    expect(p.trash).toEqual([
-      { docId: "d1", path: "bye.md", reason: "deleted", recoverable: true },
-    ]);
-    // Suppressed as well, so even if the trash step is skipped the note is not
+    expect(p.trash).toEqual([{ docId: "d1", path: "bye.md", reason: "deleted" }]);
+    // Suppressed as well, so even if the removal is skipped the note is not
     // re-registered as an unsyncable ghost.
     expect([...p.suppress]).toEqual(["bye.md"]);
   });
@@ -342,19 +338,16 @@ describe("planInbound — deletes", () => {
   it("removes the file when a note left the listing (access revoked)", () => {
     // `GET /api/notes` is ACL-filtered, so losing access looks like a delete —
     // hence the tombstone set, which says which of the two it was. Both end in
-    // the vault's trash, but they are tagged differently because they carry
+    // a final local removal, but they are tagged differently because they carry
     // different risk and get different safety caps.
     const p = plan({
       baseline: new Map([["d1", "shared.md"]]),
       local: new Map([["d1", "shared.md"]]),
       tombstones: new Set(),
     });
-    // Not recoverable: a trash copy would hand the ex-reader back the readable
-    // `.md` the revocation exists to take away. The one exception is a note this
-    // user wrote themselves (`authoredByMe`).
-    expect(p.trash).toEqual([
-      { docId: "d1", path: "shared.md", reason: "revoked", recoverable: false },
-    ]);
+    // A trash copy would hand the ex-reader back the readable `.md` the
+    // revocation exists to take away.
+    expect(p.trash).toEqual([{ docId: "d1", path: "shared.md", reason: "revoked" }]);
     // Suppressed too, so the outbound half can't re-register it on the way out.
     expect([...p.suppress]).toEqual(["shared.md"]);
   });
@@ -498,7 +491,7 @@ describe("planInbound — circuit breakers", () => {
 
     // 99 revocations against a cap of 50 → the whole revoked group is refused…
     expect(p.trash).toEqual([
-      { docId: "d0", path: "n0.md", reason: "deleted", recoverable: true },
+      { docId: "d0", path: "n0.md", reason: "deleted" },
     ]);
     expect(p.rejected).toHaveLength(98);
     expect(p.rejected[0].reason).toContain("access removals");
@@ -803,7 +796,7 @@ describe("planInbound — tree binaries", () => {
       authoritativeRevoked: new Set(["file-1"]),
     });
     expect(p.trash).toEqual([
-      { docId: "file-1", path: "Team/report.pdf", reason: "revoked", recoverable: false, binary: true },
+      { docId: "file-1", path: "Team/report.pdf", reason: "revoked", binary: true },
     ]);
   });
 
@@ -823,14 +816,19 @@ describe("planInbound — tree binaries", () => {
     ).toEqual([]);
   });
 
-  it("gives the uploader a recoverable copy", () => {
+  it("does not retain the uploader's revoked binary", () => {
     const p = plan({
       ...authoritative,
       localFiles: files(),
       authoritativeRevoked: new Set(["file-1"]),
       authoredByMe: new Set(["file-1"]),
     });
-    expect(p.trash[0].recoverable).toBe(true);
+    expect(p.trash[0]).toEqual({
+      docId: "file-1",
+      path: "Team/report.pdf",
+      reason: "revoked",
+      binary: true,
+    });
   });
 
   it("refuses an unsafe binary path, and a note that reached the files map", () => {

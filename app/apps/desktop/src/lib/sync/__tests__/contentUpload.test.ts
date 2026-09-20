@@ -135,12 +135,14 @@ interface RigOptions {
   priority?: (docId: string) => boolean;
   ingestFromFile?: boolean;
   mustConnect?: (docId: string) => boolean;
+  isUnhydratedPlaceholder?: (docId: string, relPath: string, fileText: string) => boolean;
   /** Reuse a previous rig's CRDT store, to model a SECOND run on one device. */
   harness?: ReturnType<typeof makeHarness>;
   onAcquire?: (docId: string, store: VaultDocStore) => void;
   /** Wire the production `readFile` dep (the pre-network checks need it). */
   readFile?: boolean;
   lazyPhase?: boolean;
+  failTrash?: boolean;
 }
 
 function rig(opts: RigOptions) {
@@ -172,6 +174,7 @@ function rig(opts: RigOptions) {
       connect,
       ...(opts.readFile ? { readFile: (relPath: string) => harness.io.readFile(relPath) } : {}),
       writeTrashCopy: async (relPath: string, stamp: string, content: string) => {
+        if (opts.failTrash) throw new Error("disk full");
         trashed.push({ relPath, content });
         return `.context/trash/${stamp}/${relPath}`;
       },
@@ -187,6 +190,7 @@ function rig(opts: RigOptions) {
     priority: opts.priority,
     ingestFromFile: opts.ingestFromFile,
     mustConnect: opts.mustConnect,
+    isUnhydratedPlaceholder: opts.isUnhydratedPlaceholder,
     shouldStop: opts.shouldStop,
     lazyPhase: opts.lazyPhase,
     progress: sink.sink,
@@ -349,6 +353,7 @@ describe("ContentUploader — pushing local content", () => {
       notes: [{ docId: "d1", relPath: "Note.md" }],
       server,
       behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
     });
     await r.uploader.run();
 
@@ -379,6 +384,7 @@ describe("ContentUploader — pushing local content", () => {
     expect(failure?.reason).toContain("no write access");
     expect(failure?.reason).toContain(".context/trash/");
     expect(failure?.permanent).toBe(true);
+    expect(failure?.kind).toBe("no-write-access");
     // The server's copy still lands on disk, and the doc still settles: there is
     // nothing more this device can do for it.
     expect(r.harness.fs.get("Note.md")).toBe("theirs");
@@ -398,6 +404,63 @@ describe("ContentUploader — pushing local content", () => {
     await r.uploader.run();
     expect(r.trashed).toEqual([]);
     expect(r.uploader.failedDocs()).toEqual([]);
+  });
+
+  it("hydrates a proven 0-byte materialized placeholder in read-only mode", async () => {
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const r = rig({
+      files: { "Note.md": "" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
+      isUnhydratedPlaceholder: (docId, _relPath, fileText) =>
+        docId === "d1" && fileText.length === 0,
+    });
+    await r.uploader.run();
+
+    expect(r.trashed).toEqual([]);
+    expect(r.uploader.failedDocs()).toEqual([]);
+    expect(r.harness.fs.get("Note.md")).toBe("theirs");
+    expect(r.marked).toEqual(["d1"]);
+  });
+
+  it("still protects an unmarked 0-byte file as a possible local deletion", async () => {
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const r = rig({
+      files: { "Note.md": "" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
+    });
+    await r.uploader.run();
+
+    expect(r.trashed).toEqual([{ relPath: "Note.md", content: "" }]);
+    expect(r.uploader.failedDocs()[0]).toMatchObject({ kind: "no-write-access" });
+  });
+
+  it("never overwrites a divergent read-only file when its recovery copy fails", async () => {
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const r = rig({
+      files: { "Note.md": "mine" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
+      failTrash: true,
+    });
+    const out = await r.uploader.run();
+    expect(out.failed).toBe(1);
+    expect(r.harness.fs.get("Note.md")).toBe("mine");
+    expect(r.marked).toEqual([]);
+    expect(r.uploader.failedDocs()[0]).toMatchObject({
+      kind: "no-write-access",
+      permanent: true,
+    });
   });
 });
 

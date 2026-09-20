@@ -217,8 +217,8 @@ describe("reconcile — the index's title rows are read on demand", () => {
       treeWith(["a.md", "b.md"]),
     );
 
-    // Once, not twice: the inbound pass and the create-missing pass share the
-    // memoized read.
+    // Once, not twice: the inbound pass and the registry creation pass share
+    // the memoized read.
     expect(ipc.listNoteTitles).toHaveBeenCalledTimes(1);
   });
 });

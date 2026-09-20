@@ -56,6 +56,16 @@ function put(user: TestUser, path: string, body: unknown) {
   );
 }
 
+function post(user: TestUser, path: string, body: unknown) {
+  return app.fetch(
+    new Request(`http://local${path}`, {
+      method: "POST",
+      headers: authHeaders(user),
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
 /** An ORG-scoped grant on a folder/file — "Shared with team" (edit) or
  *  "Read-only for the team" (view). The seed helpers cover `locked`/`denied`
  *  only, and the vault control has to clear all four. */
@@ -226,6 +236,27 @@ describe("team-access — GET and PUT", () => {
     body = await readTeamAccess();
     expect(body.mode).toBe("readonly");
     expect(body.grantId).toBe(grant);
+  });
+
+  it("summarizes selected people across folder descendants in one request", async () => {
+    const nested = await seedFolder(vaultA, sharedFolder, "Nested", "Shared/Nested");
+    await seedNote(vaultA, nested, "Shared/Nested/N.md", owner.userId);
+    await seedItemPrivate(orgId, "folder", nested);
+
+    const res = await post(owner, `/api/orgs/${orgId}/access/summary`, {
+      resources: [{ resourceType: "folder", resourceId: sharedFolder }],
+      userIds: [member.userId],
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ mode: "mixed" });
+  });
+
+  it("refuses an access summary for a person outside the vault", async () => {
+    const res = await post(owner, `/api/orgs/${orgId}/access/summary`, {
+      resources: [{ resourceType: "file", resourceId: rootNote }],
+      userIds: [outsider.userId],
+    });
+    expect(res.status).toBe(400);
   });
 
   // ── PUT ────────────────────────────────────────────────────────────────────

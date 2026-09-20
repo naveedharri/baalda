@@ -276,7 +276,8 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   ]);
 
   const inventory = useMemo<HealthInventory>(() => {
-    const localNotes = localInventoryPaths?.notes ?? [...localNotePaths];
+    const localReady = localInventoryPaths != null;
+    const localNotes = localInventoryPaths?.notes ?? [];
     const localFolders = localInventoryPaths?.folders ?? [];
     const localFilesPaths = localInventoryPaths?.files ?? [];
     const folded = (paths: string[]) => new Set(paths.map((path) => path.toLowerCase()));
@@ -297,14 +298,14 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     const remoteNotesFolded = folded(remoteNotes);
     const remoteFoldersFolded = folded(remoteFolders);
     const remoteFilesFolded = folded(remoteFiles);
-    // Attachments use their own content-addressed transport and do not have a
-    // registry row, so comparing them with `fileByPath` would invent a gap.
-    const localFiles = stats?.otherFiles.count ?? 0;
+    // Use the surfaced tree for every displayed count. The disk census's
+    // `otherFiles` also includes unsupported files that the app never lists,
+    // while embedded attachments use their own content-addressed transport.
     const local = {
-      notes: stats?.notes.count ?? localNotes.length,
-      folders: stats?.folders ?? 0,
-      files: localFiles,
-      total: (stats?.notes.count ?? localNotes.length) + (stats?.folders ?? 0) + localFiles,
+      notes: localNotes.length,
+      folders: localFolders.length,
+      files: localFilesPaths.length,
+      total: localNotes.length + localFolders.length + localFilesPaths.length,
     };
     const server = remoteView
       ? {
@@ -327,10 +328,15 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
 
     return {
       local,
+      localReady,
       server,
       serverState,
-      deviceOnlyNotes: localNotes.filter((path) => !remoteNotesFolded.has(path.toLowerCase())).sort(),
-      serverOnlyNotes: remoteNotes.filter((path) => !localNotesFolded.has(path.toLowerCase())).sort(),
+      deviceOnlyNotes: localInventoryPaths
+        ? localNotes.filter((path) => !remoteNotesFolded.has(path.toLowerCase())).sort()
+        : [],
+      serverOnlyNotes: localInventoryPaths
+        ? remoteNotes.filter((path) => !localNotesFolded.has(path.toLowerCase())).sort()
+        : [],
       deviceOnlyFolders: localInventoryPaths
         ? localFolders.filter((path) => !remoteFoldersFolded.has(path.toLowerCase())).sort()
         : [],
@@ -344,7 +350,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         ? remoteFiles.filter((path) => !localFilesFolded.has(path.toLowerCase())).sort()
         : [],
     };
-  }, [localNotePaths, localInventoryPaths, stats, syncEnabled, report.verdict, docIdByPath]);
+  }, [localInventoryPaths, syncEnabled, report.verdict, docIdByPath]);
 
   // Two homes feed attachment sync: the hidden content-addressed store (only
   // the census sees it) and surfaced standalone binaries (only listTree gives
@@ -582,8 +588,8 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
 
       applyCheckAction(plan, onProgress) {
         // Every dep is an EXISTING path: the sidebar's delete, the sync layer's
-        // history reset, the startup sweep, `ipc.createNote`, and the store's
-        // rename — which is the one that keeps `doc_id` stable across a move.
+        // history reset, the startup sweep, and the store's rename — which is
+        // the one that keeps `doc_id` stable across a move.
         // A heal that wrote to disk by itself would fork notes the moment two
         // devices ran it.
         const epoch = () => useStore.getState().vault?.epoch;
@@ -596,17 +602,6 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
           syncNow: () => api.syncNow(),
           pickFolder: () => ipc.pickFolder(),
           exportTo: (path, dest) => ipc.exportPath(path, dest, epoch()),
-          readNote: (path) => ipc.readNote(path, epoch()),
-          resolveLink: (target) => ipc.resolveWikilink(target).then((r) => r != null),
-          async createNote(dir, name) {
-            // The root-freeze latch is the sidebar's rule and it applies here
-            // too: a vault whose root is frozen does not get notes dropped into
-            // it by a heal either.
-            if (dir === "" && useStore.getState().rootFrozen) {
-              throw new Error("this vault's root is frozen — create it inside a folder");
-            }
-            return ipc.createNote(dir, name, epoch());
-          },
           isFile: (path) => ipc.noteExists(path, epoch()),
           async rename(from, to) {
             await useStore.getState().renameNoteFileExact(from, to);

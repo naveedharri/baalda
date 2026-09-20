@@ -226,7 +226,7 @@ function fakeApi(state: ServerState) {
   } as unknown as ApiClient;
 }
 
-/** The signed-in user, for the author exemption on a revoked removal. */
+/** The signed-in user, for account-scoped legacy authorship metadata. */
 const ME = "user-me";
 
 function recordingHost(authority = false, named: ReadonlySet<string> | null = null) {
@@ -456,7 +456,7 @@ describe("inbound rename", () => {
 });
 
 describe("inbound delete", () => {
-  it("trashes a tombstoned note and reports where it went", async () => {
+  it("permanently removes a tombstoned note", async () => {
     const disk = new FakeDisk();
     disk.notes.set("bye.md", "d1");
     const r = await twoPasses({
@@ -466,17 +466,18 @@ describe("inbound delete", () => {
     });
 
     expect(disk.notes.has("bye.md")).toBe(false);
-    // Recoverable, never a hard delete: this reconciler once destroyed 428 notes.
+    // Final, but only after the reconciler's identity, tombstone and cap guards.
     expect(ipc.deletePath).not.toHaveBeenCalled();
-    expect(ipc.deleteFile).not.toHaveBeenCalled();
-    expect(disk.trashed[0].to).toContain(".context/trash/");
+    expect(ipc.deleteFile).toHaveBeenCalledWith("bye.md", null);
+    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toEqual(["bye.md"]);
     expect(r.released).toEqual(["d1"]);
     expect(r.removed[0]?.path).toBe("bye.md");
     // Crucially it is NOT pushed back up, which is what produced the ghost note.
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
   });
 
-  it("trashes a MATERIALIZED note the server deleted, while the path→docId join is live", async () => {
+  it("removes a MATERIALIZED note the server deleted, while the path→docId join is live", async () => {
     // The undeletable-note bug. Nothing is on disk to begin with: the file
     // arrives via `writeNoteIfMissing`, and Rust's indexer mints a local id for
     // it that is NOT the server's docId (the mock mirrors that). `registry.byPath`
@@ -508,12 +509,13 @@ describe("inbound delete", () => {
     state.tombstones = ["srv-1"];
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
-    expect(disk.trashed[0]?.from).toBe("naveed-test.md");
+    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toEqual(["naveed-test.md"]);
     expect(disk.notes.has("naveed-test.md")).toBe(false);
     expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
   });
 
-  it("trashes it across a relaunch too, from the persisted path→docId join", async () => {
+  it("removes it across a relaunch too, from the persisted path→docId join", async () => {
     // The common MCP shape: the note is deleted while the app isn't running, so
     // the in-memory join is gone by the time anyone reconciles. `config.json`'s
     // `docs` map was being written every pass and read by nobody, which left the
@@ -525,7 +527,8 @@ describe("inbound delete", () => {
       then: { notes: [], tombstones: ["srv-1"] },
     });
 
-    expect(disk.trashed[0]?.from).toBe("naveed-test.md");
+    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toEqual(["naveed-test.md"]);
     expect(disk.notes.has("naveed-test.md")).toBe(false);
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
   });
@@ -676,7 +679,8 @@ describe("inbound folder deletion", () => {
     });
 
     // The note left via its own tombstone first, then the emptied folder.
-    expect(disk.trashed.map((t) => t.from)).toEqual(["Team/plan.md"]);
+    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toEqual(["Team/plan.md"]);
     expect(disk.folders.has("Team")).toBe(false);
     expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
   });
@@ -827,7 +831,7 @@ describe("inbound folder deletion", () => {
     expect(reg.failures()).toEqual([]);
   });
 
-  it("trashes an EMPTY leftover of a deleted note that the plan could only suppress", async () => {
+  it("removes an EMPTY leftover of a deleted note that the plan could only suppress", async () => {
     // The file at the deleted note's path is still on disk, but the local index
     // keys it under a different id (a re-indexed placeholder). The plan can't
     // prove it is the same note, so it only suppresses re-registration; for an
@@ -844,7 +848,7 @@ describe("inbound folder deletion", () => {
       },
       then: { notes: [], tombstones: ["d1"], folders: [{ id: "f1", path: "Team" }] },
     });
-    // twoPasses already trashed the file under its ORIGINAL id (the plain path,
+    // twoPasses already removed the file under its ORIGINAL id (the plain path,
     // covered elsewhere). Re-run the deleted state with the file re-keyed and
     // present again, as the production stubs were.
     disk.notes.set("Team/stub.md", "local-rekeyed");
@@ -854,7 +858,8 @@ describe("inbound folder deletion", () => {
     reg.setInboundHost(recordingHost().host);
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
-    expect(disk.trashed.map((t) => t.from)).toEqual(["Team/stub.md"]);
+    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toContain("Team/stub.md");
     expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
   });
 
@@ -1113,11 +1118,7 @@ describe("whole-vault Private reaches the member's disk", () => {
     expect(orphans[0].reason).toContain("never confirmed its content upstream");
   });
 
-  it("gives the author of a revoked note a recoverable copy", async () => {
-    // Authorship does not survive an item set to Private (spec 04: a restriction
-    // its author is exempt from is not a restriction), so a member's own notes
-    // genuinely can be revoked. What must not happen is that a permission change
-    // destroys the only local copy of something this person wrote.
+  it("permanently removes an author's revoked note too", async () => {
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.bodies.set("mine.md", "my own words");
@@ -1150,9 +1151,8 @@ describe("whole-vault Private reaches the member's disk", () => {
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
     expect(disk.notes.size).toBe(0);
-    // The note they wrote is recoverable; the one they were merely shown is not.
-    expect(disk.trashed.map((t) => t.from)).toEqual(["mine.md"]);
-    expect(disk.deleted).toEqual(["theirs.md"]);
+    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted.sort()).toEqual(["mine.md", "theirs.md"]);
   });
 
   it("corroborates the named survivors even when the unnamed half is refused", async () => {
@@ -1445,11 +1445,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(disk.binaries.has("Team/report.pdf")).toBe(true);
   });
 
-  it("gives the uploader of a revoked binary a recoverable copy", async () => {
-    // The same exemption a note's author gets: an item set to Private beats
-    // authorship server-side, so this file genuinely can be revoked — but taking
-    // someone's own upload off their disk with no undo is a different act from
-    // taking back something they were merely shown.
+  it("permanently removes the uploader's revoked binary too", async () => {
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1474,20 +1470,17 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
     expect(disk.binaries.has("Team/report.pdf")).toBe(false);
-    expect(disk.trashed.map((t) => t.from)).toEqual(["Team/report.pdf"]);
-    expect(disk.deleted).toEqual([]);
-    expect(host.filesRemoved).toEqual([
-      { path: "Team/report.pdf", trashedTo: disk.trashed[0].to },
-    ]);
+    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toEqual(["Team/report.pdf"]);
+    expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
   });
 });
 
 describe("a revoked binary that is already off disk", () => {
   it("forgets the mapping instead of failing this pass and every pass after it", async () => {
     // The user deleted the file in the same window the revocation landed in.
-    // `trash_note` renames, so it refuses a missing source — and the mapping is
-    // what keeps re-planning the removal, so a recorded failure here would
-    // repeat on every pull forever.
+    // `delete_file` is idempotent for a missing source, so the mapping can be
+    // forgotten instead of re-planning the removal forever.
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     install(disk);
@@ -1538,13 +1531,13 @@ describe("inbound removals are pooled", () => {
       first: { notes },
       then: { notes: notes.slice(20), tombstones: gone.map((n) => n.id) },
       patch: () => {
-        const trash = vi.mocked(ipc.trashNote).getMockImplementation()!;
-        vi.mocked(ipc.trashNote).mockImplementation((async (...args: unknown[]) => {
+        const remove = vi.mocked(ipc.deleteFile).getMockImplementation()!;
+        vi.mocked(ipc.deleteFile).mockImplementation((async (...args: unknown[]) => {
           inflight++;
           maxInflight = Math.max(maxInflight, inflight);
           await new Promise((r) => setTimeout(r, 1));
           inflight--;
-          return (trash as (...a: unknown[]) => unknown)(...args);
+          return (remove as (...a: unknown[]) => unknown)(...args);
         }) as never);
       },
     });
@@ -1565,11 +1558,11 @@ describe("inbound removals are pooled", () => {
       first: { notes },
       then: { notes: notes.slice(20), tombstones: gone.map((n) => n.id) },
       patch: () => {
-        const trash = vi.mocked(ipc.trashNote).getMockImplementation()!;
-        vi.mocked(ipc.trashNote).mockImplementation((async (...args: unknown[]) => {
+        const remove = vi.mocked(ipc.deleteFile).getMockImplementation()!;
+        vi.mocked(ipc.deleteFile).mockImplementation((async (...args: unknown[]) => {
           // The one file the OS refuses (locked by another process, say).
           if (args[0] === "n7.md") throw new Error("permission denied");
-          return (trash as (...a: unknown[]) => unknown)(...args);
+          return (remove as (...a: unknown[]) => unknown)(...args);
         }) as never);
       },
     });

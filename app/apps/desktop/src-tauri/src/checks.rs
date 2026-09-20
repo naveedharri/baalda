@@ -825,9 +825,9 @@ fn doc_path(doc_id: &str, census: &Census, live_docs: &HashMap<String, String>) 
         .cloned()
 }
 
-/// Recovery copies under `.context/trash`, newest stamp first. `count` is files,
-/// `bytes` their total; each item is one stamp directory, because that is the
-/// unit a person deleted something in and the unit Empty Trash frees.
+/// Recovery copies under `.context/trash`, newest stamp first. These are
+/// unsendable local edits plus deleted-note copies retained by older versions.
+/// `count` is files, `bytes` their total; each item is one timestamp directory.
 fn trash(vault: &Path) -> VaultCheckResult {
     let root = vault.join(TRASH_DIR);
     let mut items: Vec<(i64, VaultCheckItem)> = Vec::new(); // (mtime, item)

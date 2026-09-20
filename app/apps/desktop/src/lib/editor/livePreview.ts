@@ -464,16 +464,58 @@ interface BlockDecorations {
   blocks: Array<[number, number]>;
 }
 
+/**
+ * A legacy first H1 that says exactly the same thing as the filename title.
+ *
+ * The inline title is deliberately metadata (renaming it renames the file), so
+ * this never rewrites the heading out of the Markdown. It only identifies the
+ * narrow presentation duplicate: the first non-blank body line, an ATX H1,
+ * with plain text equal to the filename stem. A different/cased/formatted H1
+ * remains authored body content and stays visible.
+ */
+function redundantInlineTitleRange(
+  state: EditorState,
+  inlineTitle?: string,
+): [number, number] | null {
+  // Callers without an inline title omit this value, leaving the authored H1
+  // untouched.
+  if (!inlineTitle) return null;
+  const fm = state.field(frontmatterField, false) ?? null;
+  let line = state.doc.lineAt(fm ? Math.min(state.doc.length, fm.to + 1) : 0);
+  while (line.text.trim() === "" && line.number < state.doc.lines) {
+    line = state.doc.line(line.number + 1);
+  }
+  // CommonMark permits up to three leading spaces. Requiring whitespace after
+  // `#` avoids treating a hashtag as a heading. A closing hash sequence only
+  // closes when whitespace precedes it.
+  const match = /^ {0,3}#[\t ]+(.+?)[\t ]*$/.exec(line.text);
+  if (!match) return null;
+  const heading = match[1].replace(/[\t ]+#+[\t ]*$/, "");
+  if (heading !== inlineTitle) return null;
+  return [line.from, line.to];
+}
+
 function buildBlockDecorations(
   state: EditorState,
   resolveAsset: ResolveAsset,
   onNavigate?: (target: string) => void,
+  inlineTitle?: string,
 ): BlockDecorations {
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const blocks: Array<[number, number]> = [];
   const isActive = activeLineChecker(state);
   const inFrontmatter = frontmatterChecker(state);
+  const duplicateTitle = redundantInlineTitleRange(state, inlineTitle);
+
+  if (duplicateTitle) {
+    // Keep it in `blocks` even while revealed so a caret/focus move can switch
+    // the presentation without reparsing on unrelated arrow-key movement.
+    blocks.push(duplicateTitle);
+    if (state.readOnly || !isActive(...duplicateTitle)) {
+      decos.push(Decoration.replace({ block: true }).range(...duplicateTitle));
+    }
+  }
 
   // Force-parse the whole doc if the background parse hasn't caught up yet —
   // notes are small, and a partially-parsed tree would silently drop widgets.
@@ -559,13 +601,21 @@ function blocksTouched(blocks: Array<[number, number]>, state: EditorState): boo
   return blocks.some(([from, to]) => onLine(from, to));
 }
 
-function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): DecorationSet {
+function buildDecorations(
+  view: EditorView,
+  resolveAsset: ResolveAsset,
+  inlineTitle?: string,
+): DecorationSet {
   const { state } = view;
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const isActive = activeLineChecker(state);
   const touches = selectionTouches(state);
   const inFrontmatter = frontmatterChecker(state);
+  const duplicateTitle = redundantInlineTitleRange(state, inlineTitle);
+  const titleIsHidden =
+    duplicateTitle != null &&
+    (state.readOnly || !isActive(duplicateTitle[0], duplicateTitle[1]));
 
   /**
    * TOKEN scope: is the inline construct this marker belongs to being edited?
@@ -616,6 +666,15 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
       from,
       to,
       enter: (node) => {
+        // The StateField owns the whole redundant heading while it is hidden;
+        // do not also emit marker decorations inside its block replacement.
+        if (
+          titleIsHidden &&
+          node.from >= duplicateTitle![0] &&
+          node.to <= duplicateTitle![1]
+        ) {
+          return false;
+        }
         // Frontmatter owns its own look: without this, lezer's reading of
         // `key: v\n---` as a SetextHeading2 would hide the region's HeaderMark
         // and render the YAML as a giant bold heading (see frontmatter.ts).
@@ -762,16 +821,22 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
  *    cursor moves.
  */
 export function livePreview(
-  opts: { resolveAsset?: ResolveAsset; onNavigate?: (target: string) => void } = {}
+  opts: {
+    resolveAsset?: ResolveAsset;
+    onNavigate?: (target: string) => void;
+    inlineTitle?: string;
+  } = {}
 ) {
   const resolveAsset = opts.resolveAsset ?? identityAsset;
   const onNavigate = opts.onNavigate;
+  const inlineTitle = opts.inlineTitle;
 
   const blockWidgets = StateField.define<BlockDecorations>({
-    create: (state) => buildBlockDecorations(state, resolveAsset, onNavigate),
+    create: (state) =>
+      buildBlockDecorations(state, resolveAsset, onNavigate, inlineTitle),
     update(value, tr) {
       if (tr.docChanged || tr.startState.readOnly !== tr.state.readOnly) {
-        return buildBlockDecorations(tr.state, resolveAsset, onNavigate);
+        return buildBlockDecorations(tr.state, resolveAsset, onNavigate, inlineTitle);
       }
       const selectionMoved = !tr.startState.selection.eq(tr.state.selection);
       const focusMovedHere = tr.effects.some((e) => e.is(setFocused));
@@ -785,7 +850,7 @@ export function livePreview(
       ) {
         return value;
       }
-      return buildBlockDecorations(tr.state, resolveAsset, onNavigate);
+      return buildBlockDecorations(tr.state, resolveAsset, onNavigate, inlineTitle);
     },
     provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
   });
@@ -794,13 +859,13 @@ export function livePreview(
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
-        this.decorations = buildDecorations(view, resolveAsset);
+        this.decorations = buildDecorations(view, resolveAsset, inlineTitle);
       }
       update(u: ViewUpdate) {
         // `focusMoved`: blurring hides every marker, so the set goes stale the
         // moment focus moves even though neither doc nor selection did.
         if (u.docChanged || u.viewportChanged || u.selectionSet || focusMoved(u)) {
-          this.decorations = buildDecorations(u.view, resolveAsset);
+          this.decorations = buildDecorations(u.view, resolveAsset, inlineTitle);
         }
       }
     },

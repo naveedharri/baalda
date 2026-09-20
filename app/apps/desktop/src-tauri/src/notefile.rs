@@ -274,8 +274,8 @@ pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<bool> {
     Ok(true)
 }
 
-/// Move a note OUT of the note pipeline into `.context/trash/<stamp>/<rel>`
-/// rather than deleting it. Returns the trash-relative destination.
+/// Legacy helper that moves a note OUT of the note pipeline into
+/// `.context/trash/<stamp>/<rel>`. Returns the trash-relative destination.
 ///
 /// Why `.context` and not the OS trash: `vault::IGNORED_DIRS` keeps `.context` out
 /// of the tree walk, the watcher and the index, so a trashed note is recoverable
@@ -315,16 +315,11 @@ pub fn trash_note(vault: &Path, rel: &str, stamp: &str) -> AppResult<String> {
     Ok(dest_rel)
 }
 
-/// Write `content` into `.context/trash/<stamp>/<rel>` — the recovery copy for a
-/// note whose FILE IS ALREADY GONE.
+/// Write unsendable local `content` into `.context/trash/<stamp>/<rel>`.
 ///
-/// [`trash_note`] cannot serve this case: it renames the source file, and refuses
-/// outright when the source does not exist. A disk-observed delete (someone
-/// removed the `.md` in Finder, a script, `git checkout`) is propagated to the
-/// server as a real delete, and the only surviving copy of the text at that
-/// moment is the doc the caller holds in memory — so it is written here first,
-/// under the same `.context/trash/<stamp>/` layout an inbound delete uses, and
-/// with the same suffixing when a name inside the stamp is taken.
+/// Used when a read-only server state is about to replace divergent local bytes
+/// that could not be uploaded. The stamped layout and collision suffix keep
+/// repeated recoveries separate.
 ///
 /// Returns the trash-relative destination that was written.
 pub fn write_trash_copy(vault: &Path, rel: &str, stamp: &str, content: &str) -> AppResult<String> {
@@ -444,10 +439,8 @@ pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
 
 /// Delete a single FILE. Refuses a directory outright.
 ///
-/// This is the delete the inbound reconciler uses for a revoked note — the one
-/// code path that removes something from disk with no recoverable copy anywhere
-/// (a revocation is deliberately not trashed; a trash copy would hand the
-/// ex-reader back the readable `.md` the revocation exists to take away).
+/// This is the delete the inbound reconciler uses for confirmed deleted and
+/// revoked notes. Neither creates a retained recovery copy.
 ///
 /// Today the paths reaching it come from the local note listing and have already
 /// passed `isSafeNotePath`, so none of them is a directory and none of them is
@@ -777,9 +770,8 @@ mod tests {
 
     // ---- trash / ensure_folder --------------------------------------------
     //
-    // `trash_note` is how a remote delete is applied locally, so it is the only
-    // inbound operation that takes a file away from the user. It has to be
-    // recoverable, and it must never be talked into touching anything else.
+    // `trash_note` remains as a legacy recovery primitive. Its path guards stay
+    // pinned even though confirmed sync removals now use `delete_file`.
 
     #[test]
     fn trash_moves_the_note_into_context_and_leaves_no_source() {
@@ -858,10 +850,8 @@ mod tests {
 
     // ---- write_trash_copy -------------------------------------------------
     //
-    // The recovery copy for a note whose file is ALREADY gone (someone deleted
-    // the `.md` outside the app). `trash_note` refuses that case by design — it
-    // renames a source file — so this is the only way those bytes survive the
-    // delete we are about to propagate to the server.
+    // The recovery copy for local bytes that cannot be synced. `trash_note`
+    // renames a source file; this helper writes an explicit snapshot instead.
 
     #[test]
     fn write_trash_copy_saves_content_for_a_file_that_is_already_gone() {
@@ -875,8 +865,8 @@ mod tests {
             std::fs::read_to_string(tmp.path().join(".context/trash/s1/Notes/bye.md")).unwrap(),
             "# Bye\n\ntext"
         );
-        // Nothing appeared back at the note's own path — a recovery copy must
-        // never resurrect the file the user deleted.
+        // Nothing appeared back at the note's own path — a recovery copy stays
+        // outside the live note pipeline.
         assert!(!tmp.path().join("Notes/bye.md").exists());
     }
 

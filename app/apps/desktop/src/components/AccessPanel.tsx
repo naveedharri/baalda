@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { authManager } from "../lib/auth/authManager";
-import type { AccessDefault, AccessTreeResponse, Share, TeamAccess, TeamAccessMode } from "../lib/api";
+import type { AccessDefault, AccessTreeResponse, BulkAccessResource, Share, TeamAccess, TeamAccessMode } from "../lib/api";
 import type { TreeNode } from "../lib/ipc";
 import {
   accessEntryKey,
@@ -20,7 +20,7 @@ import {
   type AccessEntry,
   type AccessRow,
 } from "../lib/accessTree";
-import { MODE_LABEL, buildOrgRowsByPath, effectiveTeamMode, effectiveVaultMode } from "../lib/accessMode";
+import { MODE_LABEL, buildOrgRowsByPath, effectiveTeamMode, effectiveVaultMode, type OrgRow } from "../lib/accessMode";
 import { readTeamAccessCache, writeTeamAccessCache } from "../lib/teamAccessCache";
 import { itemLockRows, resourceIdsByPath } from "../lib/locks";
 import { scrollPaneIntoContainer } from "../lib/scrollPlan";
@@ -36,6 +36,66 @@ import { Spinner } from "./Spinner";
 type Mode = TeamAccessMode;
 type AudienceType = "org" | "users";
 type Resource = AccessRow;
+export type CurrentAccessMode = Mode | "mixed" | null;
+
+/**
+ * Collapse the effective modes for the selected scopes into the one value the
+ * action cards may honestly call current. An empty list means the server state
+ * is not authoritative yet; disagreement is surfaced instead of choosing one
+ * scope's answer for all of them.
+ */
+export function currentAccessMode(modes: readonly Mode[]): CurrentAccessMode {
+  if (modes.length === 0) return null;
+  const first = modes[0];
+  return modes.every((mode) => mode === first) ? first : "mixed";
+}
+
+/** Compact selected UI rows into the roots the server must resolve. */
+export function accessSummaryResources(input: {
+  resources: readonly BulkAccessResource[];
+  entries: readonly AccessEntry[];
+  allItemsSelected: boolean;
+  orgId: string;
+}): BulkAccessResource[] {
+  if (input.allItemsSelected || input.resources.some((resource) => resource.resourceType === "vault")) {
+    return [{ resourceType: "vault", resourceId: input.orgId }];
+  }
+  const pathById = new Map(input.entries.map((entry) => [entry.id, entry.path] as const));
+  const selectedFolders = input.resources
+    .filter((resource) => resource.resourceType === "folder")
+    .map((resource) => pathById.get(resource.resourceId))
+    .filter((path): path is string => !!path);
+  return input.resources.filter((resource) => {
+    const path = pathById.get(resource.resourceId);
+    if (!path) return true;
+    return !selectedFolders.some((folder) => path !== folder && path.startsWith(`${folder}/`));
+  });
+}
+
+export function selectedOrgAccessMode(input: {
+  teamAccess: TeamAccess | null;
+  serverTreeKnown: boolean;
+  vaultSelected: boolean;
+  shownVaultMode: Mode | null;
+  entries: readonly AccessEntry[];
+  selectedKeys: ReadonlySet<string>;
+  orgRowsByPath: ReadonlyMap<string, ReadonlySet<OrgRow>>;
+}): CurrentAccessMode {
+  if (!input.teamAccess) return null;
+  if (input.vaultSelected) {
+    return input.serverTreeKnown ? input.shownVaultMode : null;
+  }
+  return currentAccessMode(
+    input.entries
+      .filter((entry) => input.selectedKeys.has(accessEntryKey(entry)))
+      .map((entry) => effectiveTeamMode({
+        vaultMode: input.teamAccess!.mode,
+        path: entry.path,
+        ancestors: ancestorPaths(entry.path),
+        orgRowsByPath: input.orgRowsByPath,
+      }).mode),
+  );
+}
 
 export interface AccessSelectionPresentation {
   checked: boolean;
@@ -183,6 +243,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
   const [audienceType, setAudienceType] = useState<AudienceType>("org");
   const [selectedUsers, setSelectedUsers] = useState<Set<string>>(() => new Set());
+  const [peopleCurrentMode, setPeopleCurrentMode] = useState<CurrentAccessMode>(null);
+  const [peopleAccessState, setPeopleAccessState] = useState<"idle" | "loading" | "ready" | "unavailable">("idle");
   const [busy, setBusy] = useState(false);
   const [defaultBusy, setDefaultBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -194,6 +256,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     apply: () => Promise<void>;
   } | null>(null);
   const loadGen = useRef(0);
+  const peopleLoadGen = useRef(0);
   const resourcesRef = useRef<HTMLDivElement | null>(null);
   const bulkRef = useRef<HTMLElement | null>(null);
   const memberPickerRef = useRef<HTMLDivElement | null>(null);
@@ -232,6 +295,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     setServerTree(null);
     setSelectedKeys(new Set());
     setSelectedUsers(new Set());
+    setPeopleCurrentMode(null);
+    setPeopleAccessState("idle");
     setAudienceType("org");
     setConfirm(null);
     setCachedMode(orgId ? readTeamAccessCache(authManager.getServerUrl(), orgId) : null);
@@ -287,6 +352,72 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   const teamModeFor = (path: string): Mode | null => vaultMode
     ? effectiveTeamMode({ vaultMode, path, ancestors: ancestorPaths(path), orgRowsByPath }).mode
     : null;
+  const orgCurrentMode = useMemo<CurrentAccessMode>(() => {
+    // `cachedMode` is good enough to prevent badge flicker, but it cannot prove
+    // the current selection: item overrides may have changed since it was
+    // written. Likewise, per-person edit/view rows are not part of TeamAccess,
+    // so the Specific people view must stay unresolved rather than borrowing
+    // Everyone's answer.
+    return selectedOrgAccessMode({
+      teamAccess,
+      serverTreeKnown: serverTree !== null,
+      vaultSelected,
+      shownVaultMode: shownVaultMode ?? null,
+      entries,
+      selectedKeys,
+      orgRowsByPath,
+    });
+  }, [teamAccess, vaultSelected, serverTree, shownVaultMode, entries, selectedKeys, orgRowsByPath]);
+  const peopleTargets = useMemo<BulkAccessResource[]>(
+    () => orgId ? accessSummaryResources({
+      resources: selectedResources,
+      entries,
+      allItemsSelected,
+      orgId,
+    }) : [],
+    [selectedResources, entries, allItemsSelected, orgId],
+  );
+
+  useEffect(() => {
+    const mine = ++peopleLoadGen.current;
+    if (audienceType !== "users" || selectedUsers.size === 0 || selectedResources.length === 0) {
+      setPeopleCurrentMode(null);
+      setPeopleAccessState("idle");
+      return;
+    }
+    if (peopleTargets.length === 0) {
+      setPeopleCurrentMode(null);
+      setPeopleAccessState("unavailable");
+      return;
+    }
+    const userIds = [...selectedUsers];
+    setPeopleCurrentMode(null);
+    setPeopleAccessState("loading");
+    void authManager.api.resolveAccessSummary(orgId!, peopleTargets, userIds).then((summary) => {
+      if (mine !== peopleLoadGen.current) return;
+      setPeopleCurrentMode(summary.mode);
+      setPeopleAccessState("ready");
+    }).catch(() => {
+      if (mine !== peopleLoadGen.current) return;
+      setPeopleCurrentMode(null);
+      setPeopleAccessState("unavailable");
+    });
+  }, [audienceType, selectedUsers, selectedResources.length, peopleTargets, teamAccess]);
+
+  const selectedCurrentMode = audienceType === "org" ? orgCurrentMode : peopleCurrentMode;
+  const currentAccessMessage = audienceType === "users"
+    ? selectedUsers.size === 0
+      ? "Select a person to view their access."
+      : peopleAccessState === "loading"
+        ? "Loading current access…"
+        : peopleAccessState === "unavailable"
+          ? "Current access is unavailable."
+          : selectedCurrentMode === "mixed"
+            ? "Selected people or items currently have mixed access."
+            : null
+    : selectedCurrentMode === "mixed"
+      ? "Selected items currently have mixed access."
+      : null;
 
   const toggleFolder = async (path: string, loaded: boolean) => {
     const next = new Set(expanded);
@@ -586,24 +717,57 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
             </>
           )}
 
-          <div className={`access-seg${busy ? " busy" : ""}`} ref={accessChoicesRef}>
-            {(["open", "readonly", "private"] as Mode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className="access-segbtn"
-                data-mode={mode}
-                disabled={busy || (audienceType === "users" && selectedUsers.size === 0)}
-                onClick={() => requestBulk(mode)}
-              >
-                <span className="access-st-top">{mode === "open" ? ICON.open : mode === "readonly" ? ICON.lock : ICON.shield}{MODE_LABEL[mode]}</span>
-                <span className="access-st-sub">{mode === "open" ? "Can read and edit" : mode === "readonly" ? "Can read, cannot edit" : "Cannot see this content"}</span>
-              </button>
-            ))}
-          </div>
+          <AccessModeChoices
+            currentMode={selectedCurrentMode}
+            busy={busy}
+            disabled={audienceType === "users" && selectedUsers.size === 0}
+            containerRef={accessChoicesRef}
+            statusMessage={currentAccessMessage}
+            onSelect={requestBulk}
+          />
         </section>
       )}
     </div>
+  );
+}
+
+export function AccessModeChoices({
+  currentMode,
+  busy,
+  disabled,
+  containerRef,
+  statusMessage,
+  onSelect,
+}: {
+  currentMode: CurrentAccessMode;
+  busy: boolean;
+  disabled: boolean;
+  containerRef?: React.Ref<HTMLDivElement>;
+  statusMessage?: string | null;
+  onSelect: (mode: Mode) => void;
+}) {
+  return (
+    <>
+      <div className={`access-seg${busy ? " busy" : ""}`} ref={containerRef}>
+        {(["open", "readonly", "private"] as Mode[]).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            className={`access-segbtn${currentMode === mode ? " active" : ""}`}
+            data-mode={mode}
+            aria-pressed={currentMode === mode}
+            disabled={busy || disabled}
+            onClick={() => onSelect(mode)}
+          >
+            <span className="access-st-top">{mode === "open" ? ICON.open : mode === "readonly" ? ICON.lock : ICON.shield}{MODE_LABEL[mode]}</span>
+            <span className="access-st-sub">{mode === "open" ? "Can read and edit" : mode === "readonly" ? "Can read, cannot edit" : "Cannot see this content"}</span>
+          </button>
+        ))}
+      </div>
+      {statusMessage && (
+        <p className="access-current-state" role="status">{statusMessage}</p>
+      )}
+    </>
   );
 }
 

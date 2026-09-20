@@ -1266,7 +1266,7 @@ pub async fn note_exists(
     Ok(abs.is_file())
 }
 
-/// Save a recovery copy of a deleted note's text into the vault's local trash
+/// Save a recovery copy of local text that could not be synced
 /// (see `notefile::write_trash_copy`). The file itself is already gone.
 #[tauri::command]
 pub async fn write_trash_copy(
@@ -1387,7 +1387,7 @@ pub async fn ensure_folder(
     notefile::ensure_folder(&vault, &path)
 }
 
-/// Move a note into the vault's recoverable trash (see `notefile::trash_note`).
+/// Legacy helper: move a note into the vault's recovery area.
 #[tauri::command]
 pub async fn trash_note(
     state: State<'_, AppState>,

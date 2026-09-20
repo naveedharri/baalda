@@ -17,7 +17,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   CHECK_GROUP_LABELS,
   checkRows,
-  summarizeChecks,
   type CheckAction,
   type CheckRow,
 } from "../lib/health/checks";
@@ -61,7 +60,6 @@ export function HealthChecks({
   checks,
   loading,
   handlers,
-  onRefresh,
   ignored = NO_IGNORES,
   onIgnore,
   onRestore,
@@ -70,7 +68,6 @@ export function HealthChecks({
   checks: VaultChecks | null;
   loading: boolean;
   handlers: HealthHandlers;
-  onRefresh: () => void;
   /** Checks the reader has chosen to live with (per vault, this device). They
    *  leave the groups and the headline and wait in an "Ignored" drawer. */
   ignored?: ReadonlySet<VaultCheckId>;
@@ -101,7 +98,6 @@ export function HealthChecks({
   // there is nothing to ignore, and its tick is still information.
   const ignoredRows = allRows.filter((r) => !r.passed && ignored.has(r.def.id));
   const rows = allRows.filter((r) => r.passed || !ignored.has(r.def.id));
-  const summary = summarizeChecks(rows);
   // Rust sends all fifteen ids in union order, count 0 when a check passes, so
   // this set is normally complete. It is tracked anyway: an OLDER core sends
   // fewer, and `checkRows` fills the gap with a zero result. A zero Rust never
@@ -109,7 +105,6 @@ export function HealthChecks({
   // green — the one thing this section must never do is claim a check it did
   // not run.
   const reported = new Set(checks.results.map((r) => r.id));
-  const notRun = rows.filter((r) => !reported.has(r.def.id)).length;
   const groups = (["files", "names", "links", "storage"] as const).map((group) => ({
     group,
     rows: rows.filter((r) => r.def.group === group),
@@ -117,21 +112,6 @@ export function HealthChecks({
 
   return (
     <>
-      <div className="health-checks-head" data-tone={summaryTone(summary)}>
-        <span className="health-checks-headline">
-          {summary.headline}
-          {notRun > 0 && ` · ${notRun} not run`}
-        </span>
-        <button
-          type="button"
-          className="ghost-pill sm"
-          disabled={loading}
-          aria-busy={loading || undefined}
-          onClick={onRefresh}
-        >
-          {loading ? "Checking…" : "Re-run file checks"}
-        </button>
-      </div>
       {groups.map(({ group, rows: inGroup }) =>
         inGroup.length === 0 ? null : (
           <div className="health-check-group" key={group}>
@@ -199,12 +179,6 @@ function IgnoredChecks({
       )}
     </div>
   );
-}
-
-function summaryTone(s: { errors: number; warnings: number }): "bad" | "warn" | "good" {
-  if (s.errors > 0) return "bad";
-  if (s.warnings > 0) return "warn";
-  return "good";
 }
 
 /** What a row is actually saying. `unknown` exists so a check that never ran

@@ -10,6 +10,7 @@ import {
 } from "../../permissions/lookup.js";
 import {
   buildAccessContext,
+  createResolverCache,
   resolveAccessForUser,
 } from "../../permissions/resolver.js";
 import { getSession } from "../session.js";
@@ -32,6 +33,56 @@ import {
  */
 
 type Queryable = Pick<pg.Pool, "query">;
+
+type SummaryResource = { resourceType: "folder" | "file" | "vault"; resourceId: string };
+type SummaryTarget = { resourceType: "folder" | "file"; resourceId: string };
+
+/** Expand compact access roots in one query. A vault root subsumes everything
+ * else, and folder roots include their descendant folders and documents. */
+async function summaryTargets(
+  orgId: string,
+  resources: SummaryResource[],
+): Promise<SummaryTarget[]> {
+  if (resources.some((resource) => resource.resourceType === "vault")) {
+    const { rows } = await pool.query<{ resource_type: "folder" | "file"; resource_id: string }>(
+      `SELECT 'folder'::text AS resource_type, f.id AS resource_id
+         FROM folders f JOIN vaults v ON v.id = f.vault_id
+        WHERE v.organization_id = $1
+       UNION
+       SELECT 'file'::text, n.id FROM notes n JOIN vaults v ON v.id = n.vault_id
+        WHERE v.organization_id = $1 AND n.deleted_at IS NULL
+       UNION
+       SELECT 'file'::text, fi.id FROM files fi JOIN vaults v ON v.id = fi.vault_id
+        WHERE v.organization_id = $1`,
+      [orgId],
+    );
+    return rows.map((row) => ({ resourceType: row.resource_type, resourceId: row.resource_id }));
+  }
+
+  const folderIds = [...new Set(resources.filter((r) => r.resourceType === "folder").map((r) => r.resourceId))];
+  const fileIds = [...new Set(resources.filter((r) => r.resourceType === "file").map((r) => r.resourceId))];
+  const { rows } = await pool.query<{ resource_type: "folder" | "file"; resource_id: string }>(
+    `WITH RECURSIVE subtree AS (
+       SELECT id, vault_id FROM folders WHERE id = ANY($1::text[])
+       UNION
+       SELECT f.id, f.vault_id FROM folders f JOIN subtree s ON f.parent_id = s.id
+     )
+     SELECT 'folder'::text AS resource_type, id AS resource_id FROM subtree
+     UNION
+     SELECT 'file'::text, n.id FROM notes n JOIN subtree s ON s.id = n.folder_id
+      WHERE n.deleted_at IS NULL
+     UNION
+     SELECT 'file'::text, fi.id FROM files fi JOIN subtree s ON s.id = fi.folder_id
+     UNION
+     SELECT 'file'::text, n.id FROM notes n JOIN vaults v ON v.id = n.vault_id
+      WHERE n.id = ANY($2::text[]) AND n.deleted_at IS NULL AND v.organization_id = $3
+     UNION
+     SELECT 'file'::text, fi.id FROM files fi JOIN vaults v ON v.id = fi.vault_id
+      WHERE fi.id = ANY($2::text[]) AND v.organization_id = $3`,
+    [folderIds, fileIds, orgId],
+  );
+  return rows.map((row) => ({ resourceType: row.resource_type, resourceId: row.resource_id }));
+}
 
 /** The three postures the vault-level control offers. */
 type TeamAccessMode = "open" | "readonly" | "private";
@@ -337,6 +388,95 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     } catch (error) {
       return accessError(c, error);
     }
+  });
+
+  /** Resolve selected people's current mode across compact resource roots.
+   * Folder and vault descendants are expanded on the server, so selecting a
+   * 7,000-note vault remains one HTTP request and cannot create a client-side
+   * request burst. Resolver work is pooled and shares one request cache. */
+  app.post("/orgs/:orgId/access/summary", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+    const body = await c.req.json().catch(() => ({}));
+    if (!Array.isArray(body.resources) || !Array.isArray(body.userIds)) {
+      return c.json({ error: "invalid_request", message: "resources and userIds are required" }, 400);
+    }
+    const resources = body.resources as SummaryResource[];
+    const userIds: string[] = [...new Set(
+      (body.userIds as unknown[]).filter((id): id is string => typeof id === "string" && !!id),
+    )];
+    if (
+      resources.length === 0 || resources.length > 10_000 ||
+      userIds.length === 0 || userIds.length > 100 ||
+      resources.some((resource) =>
+        !resource ||
+        (resource.resourceType !== "folder" && resource.resourceType !== "file" && resource.resourceType !== "vault") ||
+        typeof resource.resourceId !== "string" || !resource.resourceId
+      )
+    ) {
+      return c.json({ error: "invalid_request", message: "Invalid access summary scope" }, 400);
+    }
+
+    // Every compact root must be manageable by this actor and belong to the
+    // organization named by the route. This also prevents a foreign id from
+    // seeding the recursive subtree query below.
+    for (const resource of resources) {
+      const gate = await canManage(session.userId, resource.resourceType, resource.resourceId);
+      if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
+      if (gate.organizationId !== orgId) return c.json({ error: "Resource is outside this vault" }, 400);
+    }
+
+    const { rows: members } = await pool.query<{ user_id: string; role: string }>(
+      `SELECT "userId" AS user_id, role FROM member
+        WHERE "organizationId" = $1 AND "userId" = ANY($2::text[])`,
+      [orgId, userIds],
+    );
+    if (members.length !== userIds.length) {
+      return c.json({ error: "invalid_request", message: "Every selected person must be a vault member" }, 400);
+    }
+    const roles = new Map(members.map((member) => [member.user_id, member.role] as const));
+    const targets = await summaryTargets(orgId, resources);
+    const cache = createResolverCache();
+    let agreed: "open" | "readonly" | "private" | null = null;
+    let mixed = false;
+    let cursor = 0;
+    const note = (permission: "edit" | "view" | "none") => {
+      const mode = permission === "edit" ? "open" : permission === "view" ? "readonly" : "private";
+      if (agreed === null) agreed = mode;
+      else if (agreed !== mode) mixed = true;
+    };
+    const worker = async () => {
+      while (!mixed) {
+        const index = cursor++;
+        if (index >= targets.length) return;
+        const target = targets[index];
+        const ctx = await buildAccessContext(target.resourceType, target.resourceId, pool, cache);
+        if (!ctx) continue; // deleted between expansion and resolution
+        for (const userId of userIds) {
+          note((await resolveAccessForUser(ctx, userId, roles.get(userId)!, pool, cache)).permission);
+          if (mixed) return;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
+
+    if (agreed === null) {
+      // An empty vault still has an authoritative posture and personal vault
+      // grants. A synthetic root has no creator/folder/item overlay, exactly the
+      // facts available for content that does not exist yet.
+      const emptyCtx = {
+        organizationId: orgId,
+        docId: null,
+        folderIds: [],
+        createdBy: null,
+        createdAt: new Date(),
+      };
+      for (const userId of userIds) {
+        note((await resolveAccessForUser(emptyCtx, userId, roles.get(userId)!, pool, cache)).permission);
+      }
+    }
+    return c.json({ mode: mixed ? "mixed" : agreed ?? "private" });
   });
 
   // Create or update a share (upsert on the unique resource+principal key).

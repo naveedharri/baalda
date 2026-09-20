@@ -635,22 +635,6 @@
 
 /* ── Checks ───────────────────────────────────────────────────────────────── */
 
-.health-checks-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-  margin-bottom: var(--sp-4);
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--radius-md);
-  background: var(--tone-soft);
-}
-.health-checks-headline {
-  font-size: var(--fs-md);
-  font-weight: 600;
-  color: var(--tone);
-}
 .health-check-panel .health-fixes {
   margin-bottom: var(--sp-3);
 }
@@ -1610,7 +1594,7 @@ button.health-metric-flag:hover {
 /* ── Health overview redesign ─────────────────────────────────────────────── */
 
 .health-metrics {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--sp-3);
   margin: 0;
   padding: 0;
@@ -1628,6 +1612,10 @@ button.health-metric-flag:hover {
 }
 .health-metric:first-child {
   border-left: 1px solid var(--border);
+}
+.health-metric[data-primary] {
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
+  background: linear-gradient(145deg, var(--accent-soft), var(--bg-surface) 72%);
 }
 .health-metric-value {
   font-size: clamp(var(--fs-lg), 3cqi, 1.65rem);
@@ -1729,7 +1717,7 @@ button.health-metric-flag:hover {
   background: var(--bg-active);
   color: var(--text-secondary);
 }
-.health-place-total {
+.health-place-primary {
   display: block;
   margin-top: var(--sp-4);
   color: var(--text-primary);
@@ -1737,7 +1725,7 @@ button.health-metric-flag:hover {
   font-size: 1.8rem;
   line-height: 1;
 }
-.health-place-total-label {
+.health-place-primary-label {
   color: var(--text-tertiary);
   font-size: var(--fs-xs);
 }
@@ -1811,6 +1799,52 @@ button.health-metric-flag:hover {
   display: flex;
   flex: 0 0 auto;
   gap: var(--sp-2);
+}
+.health-difference-breakdown {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+.health-difference-side {
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.health-difference-side:only-child {
+  grid-column: 1 / -1;
+}
+.health-difference-side > strong {
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+}
+.health-difference-side dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+}
+.health-difference-side dl div {
+  min-width: 0;
+}
+.health-difference-side dt {
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+}
+.health-difference-side dd {
+  margin: 2px 0 0;
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.health-difference-side p {
+  margin: var(--sp-2) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
 }
 .health-differences {
   display: grid;
@@ -2015,9 +2049,6 @@ button.health-metric-flag:hover {
 .health-diagnostic-inspector .health-inspector-field {
   max-width: 100%;
 }
-.health-diagnostic-checks .health-checks-head {
-  margin-top: 0;
-}
 .health-diagnostic-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -2067,6 +2098,9 @@ button.health-metric-flag:hover {
     padding-left: 42px;
   }
   .health-differences {
+    grid-template-columns: 1fr;
+  }
+  .health-difference-breakdown {
     grid-template-columns: 1fr;
   }
   .health-diagnostics-toolbar {

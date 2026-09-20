@@ -157,10 +157,10 @@ export interface DocBatchPushResult {
   /** Docs too big for one batch item — also for `DocSync`, unchanged semantics. */
   oversized: DocPushWork[];
   /**
-   * Docs this path may not settle: the local doc is EMPTY and the server never
-   * said it is. Nothing can be sent for them without first pulling (their text,
-   * if any, lives only in the `.md`), so they go to the per-doc path exactly as
-   * a conflict does.
+   * Docs this path may not settle without pulling first: either the local doc is
+   * EMPTY and the server never said it is, or the batch write was denied and a
+   * pull must distinguish a clean read-only copy from a real local edit. They
+   * go to the per-doc path exactly as a conflict does.
    *
    * Without this bucket such a doc encodes to a 2-byte "no state" update, which
    * the server accepts and the client then marks pushed — a note claimed synced
@@ -170,6 +170,8 @@ export interface DocBatchPushResult {
    * note) is where it appears.
    */
   deferred: DocPushWork[];
+  /** Docs whose update the server explicitly refused for write access. */
+  denied: string[];
   failures: UploadFailure[];
   cancelled: boolean;
   /** Requests actually sent (tests: packing). */
@@ -201,6 +203,7 @@ export class DocBatchPusher {
   private conflicts: string[] = [];
   private oversized: DocPushWork[] = [];
   private deferred: DocPushWork[] = [];
+  private denied: string[] = [];
   private pushed = 0;
   private requests = 0;
   private transportError: unknown = null;
@@ -233,6 +236,7 @@ export class DocBatchPusher {
     this.conflicts = [];
     this.oversized = [];
     this.deferred = [];
+    this.denied = [];
     this.pushed = 0;
     this.requests = 0;
     this.transportError = null;
@@ -247,6 +251,7 @@ export class DocBatchPusher {
         conflicts: [],
         oversized: [],
         deferred: [],
+        denied: [],
         failures: [],
         cancelled: false,
         requests: 0,
@@ -270,6 +275,7 @@ export class DocBatchPusher {
       conflicts: [...this.conflicts],
       oversized: [...this.oversized],
       deferred: [...this.deferred],
+      denied: [...this.denied],
       failures: [...this.failures],
       cancelled: this.shouldStop(),
       requests: this.requests,
@@ -318,7 +324,10 @@ export class DocBatchPusher {
       // file, which is how four production notes strobed the sync badge.
       const stateBytes = crdtBytes(bridge.doc);
       if (stateBytes > MAX_NOTE_BYTES) {
-        this.fail(docId, relPath, sizeReason(stateBytes, "of edit history"), { permanent: true });
+        this.fail(docId, relPath, sizeReason(stateBytes, "of edit history"), {
+          permanent: true,
+          kind: "too-large",
+        });
         return;
       }
 
@@ -354,7 +363,10 @@ export class DocBatchPusher {
         if (fileText != null) {
           const fileBytes = utf8.encode(fileText).byteLength;
           if (fileBytes > MAX_NOTE_BYTES) {
-            this.fail(docId, relPath, sizeReason(fileBytes, ""), { permanent: true });
+            this.fail(docId, relPath, sizeReason(fileBytes, ""), {
+              permanent: true,
+              kind: "too-large",
+            });
             return;
           }
           if (fileBytes > BULK_ITEM_MAX_BYTES) {
@@ -391,6 +403,7 @@ export class DocBatchPusher {
       if (update.byteLength > MAX_NOTE_BYTES) {
         this.fail(docId, relPath, sizeReason(update.byteLength, "of edit history"), {
           permanent: true,
+          kind: "too-large",
         });
         return;
       }
@@ -533,16 +546,41 @@ export class DocBatchPusher {
         return;
       }
       case "denied":
-        // A read-only grant. Retrying cannot help and must not be attempted on
-        // every `ready` — permanent for this session, like the read-only case
-        // `ContentUploader` records.
-        this.fail(p.docId, p.relPath, "edit could not be sent: no write access", {
-          permanent: true,
-        });
+        // The batch endpoint can only answer whether this user may WRITE. It
+        // cannot perform the pull-first comparison that tells a clean
+        // Private→Read-only re-download from a real local edit. Hand the item to
+        // ContentUploader: its per-doc provider pulls the canonical state,
+        // confirms read-only notes without waiting for a write ack, and keeps a
+        // recovery copy only when the file truly differs afterwards.
+        // Rebase onto the canonical read-only doc before comparing text. A
+        // freshly re-shared note may have identical Markdown encoded under a
+        // different Yjs client id; merging those histories would duplicate the
+        // body when edit access later returns. The file is durable truth, so
+        // prove it is readable before clearing local CRDT. If either step fails,
+        // preserve both and report instead of risking an overwrite.
+        if ((await this.readFileQuietly(p.relPath)) == null) {
+          this.fail(p.docId, p.relPath, "could not read the local file before read-only rebase");
+          return;
+        }
+        if (!this.deps.discardLocalCrdt) {
+          this.fail(p.docId, p.relPath, "could not reset local history before read-only rebase");
+          return;
+        }
+        try {
+          await this.deps.discardLocalCrdt(p.docId);
+        } catch (e) {
+          this.fail(p.docId, p.relPath, `could not reset local history: ${msg(e)}`);
+          return;
+        }
+        this.denied.push(p.docId);
+        this.deferred.push({ docId: p.docId, relPath: p.relPath, serverEmpty: false });
+        this.progress.doc(p.docId, "queued");
+        this.progress.item("ok");
         return;
       case "too_large":
         this.fail(p.docId, p.relPath, sizeReason(p.update.byteLength, "of edit history"), {
           permanent: true,
+          kind: "too-large",
         });
         return;
       default:
@@ -572,13 +610,14 @@ export class DocBatchPusher {
     docId: string,
     relPath: string,
     reason: string,
-    opts: { permanent?: boolean } = {},
+    opts: { permanent?: boolean; kind?: UploadFailure["kind"] } = {},
   ): void {
     const failure: UploadFailure = {
       docId,
       relPath,
       reason,
       ...(opts.permanent ? { permanent: true } : {}),
+      ...(opts.kind ? { kind: opts.kind } : {}),
     };
     this.failures.push(failure);
     try {

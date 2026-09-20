@@ -690,7 +690,7 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     const sm = new SyncManager();
     await enable(sm);
 
-    sm.handleLocalFilesChanged([{ path: "Fresh.md", kind: "modified" }]);
+    sm.handleLocalFilesChanged([{ path: "Fresh.md", kind: "modified", unchanged: true }]);
     await vi.advanceTimersByTimeAsync(1000);
     expect(connects.order).toEqual([]); // nothing was pushed for it
 
@@ -700,6 +700,27 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(storeHooks.promoted).toContain("f1");
     fakeRegistry.getMapping.mockReturnValue(null);
+    vi.useRealTimers();
+  });
+
+  it("does not swallow a real edit coalesced with a materialized placeholder echo", async () => {
+    vi.useFakeTimers();
+    fakeRegistry.getMapping.mockImplementation((relPath: string) =>
+      relPath === "Fresh.md" ? { vaultId: "collection-1", docId: "f1" } : null,
+    );
+    fakeRegistry.mappedNotes.mockReturnValue([{ docId: "f1", relPath: "Fresh.md" }]);
+    fakeRegistry.pushed.add("f1");
+    fakeRegistry.materialized = new Set(["Fresh.md"]);
+    const sm = new SyncManager();
+    await enable(sm);
+    sm.handleLocalFilesChanged([{ path: "Fresh.md", kind: "modified", unchanged: false }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    // The local-change fast path may settle without opening a socket, but the
+    // edit must reach the bridge instead of being discarded as an echo.
+    expect(storeHooks.promoted).toContain("f1");
+    expect(fakeRegistry.materialized.size).toBe(0);
+    fakeRegistry.getMapping.mockReturnValue(null);
+    fakeRegistry.mappedNotes.mockReturnValue([]);
     vi.useRealTimers();
   });
 
@@ -994,7 +1015,7 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     vi.useFakeTimers();
   });
 
-  it("propagates a delete after the grace window, keeping a local copy first", async () => {
+  it("propagates a delete after the grace window without retaining a copy", async () => {
     const sm = new SyncManager();
     mapOne("Notes/Gone.md");
     await live(sm);
@@ -1005,8 +1026,7 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
 
     await drain();
-    // The bytes are kept BEFORE the server is told, so a mistake is recoverable.
-    expect(fakeDisk.trashed).toEqual([{ path: "Notes/Gone.md", content: "content" }]);
+    expect(fakeDisk.trashed).toEqual([]);
     expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Notes/Gone.md");
     vi.useRealTimers();
   });
@@ -1306,8 +1326,7 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.deletePaths.mock.calls[0][0]).toEqual(
       notes.slice(0, 30).map((n) => n.relPath),
     );
-    // The bytes were still kept FIRST, for every one of them.
-    expect(fakeDisk.trashed).toHaveLength(30);
+    expect(fakeDisk.trashed).toEqual([]);
     vi.useRealTimers();
   });
 
@@ -1329,19 +1348,11 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     vi.useRealTimers();
   });
 
-  it("never batches a note whose recovery copy failed to write", async () => {
-    // Trash-before-server, per note and absolute: bytes that could not be kept
-    // must not become unrecoverable.
+  it("does not consult the recovery-copy writer for intentional disk deletes", async () => {
     const sm = new SyncManager();
     const notes = mapMany(200);
     await live(sm);
-    vi.mocked(ipc.writeTrashCopy).mockImplementation(
-      async (path: string, stamp: string, content: string) => {
-        if (path === "D7.md") throw new Error("disk full");
-        fakeDisk.trashed.push({ path, content });
-        return `.context/trash/${stamp}/${path}`;
-      },
-    );
+    vi.mocked(ipc.writeTrashCopy).mockRejectedValue(new Error("must not be called"));
 
     sm.handleLocalFilesChanged(
       notes.slice(0, 30).map((n) => ({ path: n.relPath, kind: "removed" as const })),
@@ -1349,14 +1360,11 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     await drain();
 
     const sent = fakeRegistry.deletePaths.mock.calls[0][0] as string[];
-    expect(sent).toHaveLength(29);
-    expect(sent).not.toContain("D7.md");
-    // …and the note that could not be copied is reported, not silently dropped.
-    expect(
-      fakeRegistry.recordFailure.mock.calls.some(
-        (c) => (c[0] as { path: string }).path === "D7.md",
-      ),
-    ).toBe(true);
+    expect(sent).toHaveLength(30);
+    expect(ipc.writeTrashCopy).not.toHaveBeenCalled();
+    expect(fakeRegistry.recordFailure).not.toHaveBeenCalledWith(
+      expect.objectContaining({ path: "D7.md" }),
+    );
     vi.useRealTimers();
   });
 

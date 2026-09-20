@@ -18,7 +18,7 @@ import {
 } from "@codemirror/view";
 import { GFM } from "@lezer/markdown";
 import type { NoteTitle } from "../ipc";
-import { isMarkdownNote } from "../notePath";
+import { isMarkdownNote, stemOf } from "../notePath";
 import { blockDecorations } from "./blocks";
 import { codeFenceFlair } from "./codeFence";
 import { codeLanguages } from "./codeLanguages";
@@ -185,7 +185,14 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     blockDecorations,
     // Live-preview inline rendering: hide markers off the active line, render
     // bullets/links/images/tables, and preview embedded HTML blocks (never run).
-    livePreview({ resolveAsset: opts.resolveAsset, onNavigate: opts.onNavigate }),
+    livePreview({
+      resolveAsset: opts.resolveAsset,
+      onNavigate: opts.onNavigate,
+      // Older notes can carry a first `# Heading` that repeats the filename
+      // title introduced later. Live preview collapses only that exact legacy
+      // duplicate; the Markdown stays in the buffer and reveals for editing.
+      inlineTitle: opts.header && !plain ? stemOf(opts.header.path) : undefined,
+    }),
     // A table is always rendered, so the caret must never walk into one.
     tableAtomicRanges,
     // Clickable `- [ ]` task checkboxes (markdown only — see `plain`).

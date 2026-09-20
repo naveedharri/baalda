@@ -182,13 +182,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   (`ipc.noteExists`), and a pending delete whose doc text hashes equal to an unmapped file that appeared in
   the same window is a RENAME — `registry.renamePath` + `ipc.rebindNoteId` keep the `doc_id` (a batch that
   queued a delete also defers its registry pull, or the new path would register as a second note first).
-  Survivors write the doc's text to `.context/trash/<stamp>/` (`ipc.writeTrashCopy`) and then call
-  `registry.deletePath` — or `registry.deletePaths` → `POST /notes/delete-batch` above `BULK_THRESHOLD_DOCS`,
+  Survivors call `registry.deletePath` — or `registry.deletePaths` → `POST /notes/delete-batch`
+  above `BULK_THRESHOLD_DOCS`,
   both pooled — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
   is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
   startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
-  FIRST, before any trash copy or server call, and abandoning the whole batch, because an unmounted
+  FIRST, before any server call, and abandoning the whole batch, because an unmounted
   volume looks exactly like a bulk delete. The ingest side is guarded too: a 0-byte file never clears a populated doc
   (`allowTruncateFromDisk`, default false).
 - **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
@@ -222,13 +222,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `InboundHost.revocationRefused`). The named set unions across the session
   (`handleServerReauth` never clears it; `onServerDrop` feeds the live path) and a truncated list keeps
   its 2000 as the allow-list. `folderLift` needs an authoritative pass that named nothing, and folder
-  removal is empty-only. Removal is OUTRIGHT via Rust `delete_file` (`rel_path_is_ignored` FIRST, so
+  removal is empty-only. Confirmed deletions and revocations are OUTRIGHT via Rust `delete_file`
+  (`rel_path_is_ignored` FIRST, so
   `.context` AND `.context/config.json` are refused, then a directory refusal; `deletePath` stays the
-  sidebar's recursive one) — unless this user AUTHORED the note, which goes to
-  `.context/trash` (`authored`, learned in `syncStructure`, persisted in `.context/config.json` as
-  `{ userId, docIds }` and honoured only for that user; item-Private still beats authorship). A revoked
-  removal also `docStore.drop`s + `ipc.clearYjsDoc`s, so `ready` stops re-naming it. The deletion cap is
-  never lifted.
+  sidebar's recursive one), regardless of authorship. A revoked removal also `docStore.drop`s +
+  `ipc.clearYjsDoc`s, so `ready` stops re-naming it. The deletion cap is never lifted. Separate
+  read-only reconciliation preserves a divergent local edit in `.context/trash` before replacing it
+  with the server's canonical content; deletion and revocation never create those recovery copies.
 - **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
   the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
   said `Projects/community` while the server said `Projects/Community` (with empty server folders under

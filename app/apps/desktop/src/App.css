@@ -769,10 +769,15 @@ button.primary.hero:hover:not(:disabled) {
   display: grid;
   /* Width is user-set (see SidebarResizer); the fallback is the default so the
      layout is correct for one paint before React sets the variable. */
-  grid-template-columns: var(--sidebar-w, 264px) 1fr;
+  --sidebar-layout-w: var(--sidebar-w, 264px);
+  grid-template-columns: var(--sidebar-layout-w) minmax(0, 1fr);
   height: 100%;
   background: var(--bg-app);
   position: relative;
+  transition: grid-template-columns 220ms var(--ease);
+}
+.app.sidebar-hidden {
+  --sidebar-layout-w: 0px;
 }
 
 /* ---- Window drag regions ----
@@ -797,6 +802,52 @@ button.primary.hero:hover:not(:disabled) {
      covers empty margin. */
   height: 28px;
   z-index: 2;
+}
+
+/* Sidebar visibility lives in the titlebar strip. On macOS it sits immediately
+   after the traffic lights; elsewhere it occupies the leading edge of the main
+   header. It remains outside both drag regions, so the icon clicks while the
+   empty chrome around it still moves the window. */
+.titlebar-tools {
+  position: absolute;
+  top: 8px;
+  left: calc(var(--sidebar-layout-w) + 8px);
+  z-index: 60;
+  display: flex;
+  gap: 2px;
+  transition: left 220ms var(--ease);
+}
+.titlebar-tool {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  transition:
+    color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.titlebar-tool:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.titlebar-tool:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.titlebar-tool svg {
+  width: 18px;
+  height: 18px;
+}
+html[data-platform="macos"] .titlebar-tools {
+  left: 84px;
+  /* Native traffic-light centres sit 16px below the webview's top edge. */
+  top: 2px;
 }
 
 /* ---- Sidebar resize handle ----
@@ -831,6 +882,11 @@ body:has(.sidebar-resizer.dragging) {
 
 /* ---- Sidebar rail (sits on the canvas) ---- */
 .sidebar {
+  position: relative;
+  /* The collapse transform creates a stacking context. Keep that context above
+     the later-painted main pane so account/vault popovers can still extend
+     across the seam instead of the editor covering their right-hand side. */
+  z-index: 1;
   background: transparent;
   display: flex;
   flex-direction: column;
@@ -839,6 +895,17 @@ body:has(.sidebar-resizer.dragging) {
      which would let a long note title override the width the user dragged. */
   min-width: 0;
   padding: 0 var(--sp-1) 0 var(--sp-2);
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    opacity 160ms var(--ease),
+    transform 220ms var(--ease);
+}
+.sidebar-hidden .sidebar {
+  opacity: 0;
+  transform: translateX(-12px);
+  pointer-events: none;
+  overflow: hidden;
 }
 /* The window has no system title bar of its own (`titleBarStyle: "Overlay"`),
    so this row starts at y=0 and the macOS traffic lights float over it — hence
@@ -2561,9 +2628,24 @@ body:has(.sidebar-resizer.dragging) {
   align-items: stretch;
   gap: var(--sp-3);
   min-height: 44px;
-  padding: 0 var(--sp-6) 0 var(--sp-3);
+  padding: 0 var(--sp-6) 0 calc(var(--sp-3) + 68px);
   border-bottom: 1px solid var(--border);
   background: var(--bg-subtle);
+}
+html[data-platform="macos"] .main-header {
+  padding-left: var(--sp-3);
+}
+html[data-platform="macos"] .sidebar-hidden .main-header {
+  /* Traffic lights + both controls remain over the webview after the sidebar leaves. */
+  padding-left: 150px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app,
+  .sidebar,
+  .titlebar-tools {
+    transition-duration: 0ms;
+  }
 }
 /* The controls keep their own box: never shrink, never wrap, sit centred — the
    strip is the flexible child, and it scrolls instead of squeezing the badge. */
@@ -4600,6 +4682,12 @@ body:has(.sidebar-resizer.dragging) {
 }
 .access-bulk-card .access-seg {
   margin: 0;
+}
+.access-current-state {
+  margin: calc(-1 * var(--sp-2)) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
 }
 .access-seg {
   transition: opacity var(--t-fast) var(--ease);

@@ -304,6 +304,7 @@ export function writeLineNumbers(on: boolean): void {
 // ---- Sidebar width ----------------------------------------------------------
 
 const SIDEBAR_WIDTH_KEY = "context.sidebarWidth";
+const SIDEBAR_HIDDEN_KEY = "context.sidebarHidden";
 
 /** The width the sidebar starts at, and what a double-click on the divider
  *  restores. */
@@ -340,5 +341,22 @@ export function writeSidebarWidth(px: number): void {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(px)));
   } catch {
     /* localStorage unavailable — the width stays in-memory only */
+  }
+}
+
+/** Whether the window chrome last left the vault sidebar hidden. */
+export function readSidebarHidden(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_HIDDEN_KEY) === "hidden";
+  } catch {
+    return false;
+  }
+}
+
+export function writeSidebarHidden(hidden: boolean): void {
+  try {
+    localStorage.setItem(SIDEBAR_HIDDEN_KEY, hidden ? "hidden" : "shown");
+  } catch {
+    /* localStorage unavailable — the choice stays in-memory only */
   }
 }

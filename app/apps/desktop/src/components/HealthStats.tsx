@@ -21,6 +21,8 @@ interface Metric {
   icon: GlyphName;
   label: string;
   value: string;
+  /** The lead figure in this overview. */
+  primary?: boolean;
   /** Tooltip detail; kept off the strip so it stays one quiet row. */
   sub?: string;
   /** Short inline note when something is off ("1 broken"), amber. */
@@ -30,16 +32,22 @@ interface Metric {
   action?: "reclaim";
 }
 
-/** The four numbers people use to understand the size of a vault. Detailed
+/** The three numbers people use to understand the size of a vault. Detailed
  * index/history/link figures live in Advanced diagnostics below. */
 export function HealthStats({
   stats,
+  noteCount,
+  folderCount,
   loading,
   statsError,
   handlers,
   onFlag,
 }: {
   stats: VaultStats | null;
+  /** Supported standalone files in the surfaced tree; null while that tree loads. */
+  noteCount: number | null;
+  /** Surfaced folders in the supported-file tree; null while that tree loads. */
+  folderCount: number | null;
   loading: boolean;
   statsError: string | null;
   handlers: HealthHandlers;
@@ -52,7 +60,7 @@ export function HealthStats({
       <>
         {statsError && <div className="auth-error">{statsError}</div>}
         <ul className="health-metrics" aria-busy={loading || undefined}>
-          {Array.from({ length: 4 }, (_, i) => (
+          {Array.from({ length: 3 }, (_, i) => (
             <li key={i} className="health-metric is-skeleton" aria-hidden="true">
               <span className="health-metric-value" />
               <span className="health-metric-label" />
@@ -67,35 +75,30 @@ export function HealthStats({
   }
 
   const totalBytes = stats.notes.bytes + stats.attachments.bytes + stats.otherFiles.bytes;
-  const totalFiles = stats.notes.count + stats.attachments.count + stats.otherFiles.count;
-  const totalItems = totalFiles + stats.folders;
-
   const metrics: Metric[] = [
-    {
-      icon: "database",
-      label: "Total items",
-      value: totalItems.toLocaleString(),
-      sub: `${totalFiles.toLocaleString()} files · ${stats.folders.toLocaleString()} folders`,
-    },
     {
       icon: "note",
       label: "Notes",
-      value: stats.notes.count.toLocaleString(),
-      sub: `${formatBytes(stats.notes.bytes)}${stats.notes.empty > 0 ? ` · ${stats.notes.empty.toLocaleString()} empty` : ""}`,
+      value: noteCount?.toLocaleString() ?? "—",
+      primary: true,
+      sub:
+        noteCount == null
+          ? "Counting supported files…"
+          : "Text notes and other supported formats",
       flag: stats.notes.empty > 0 ? `${stats.notes.empty.toLocaleString()} empty` : undefined,
       check: "empty-notes",
     },
     {
       icon: "folder",
       label: "Folders",
-      value: stats.folders.toLocaleString(),
+      value: folderCount?.toLocaleString() ?? "—",
       sub: "Folders on this computer",
     },
     {
       icon: "disk",
       label: "Stored locally",
       value: formatBytes(totalBytes),
-      sub: "Notes, attachments and other files",
+      sub: "Vault files and embedded attachments",
     },
   ];
 
@@ -106,6 +109,7 @@ export function HealthStats({
         {metrics.map((m) => (
           <li
             className="health-metric"
+            data-primary={m.primary ? "" : undefined}
             data-flag={m.flag ? "" : undefined}
             key={m.label}
             title={m.sub ? `${m.label}: ${m.sub}` : undefined}

@@ -10,14 +10,12 @@ import { describe, expect, it, vi } from "vitest";
 import { CHECK_BY_ID, checkRows } from "../checks";
 import {
   checkActionPlans,
-  isCreatableTarget,
   legalSegment,
   outcomeSummary,
   planCheckAction,
   runCheckAction,
   suggestLegalPath,
   uniqueName,
-  wikilinkTargets,
   type CheckActionDeps,
   type CheckActionPlan,
 } from "../checkActions";
@@ -48,9 +46,6 @@ function deps(over: Partial<CheckActionDeps> = {}): CheckActionDeps {
     syncNow: vi.fn(async () => {}),
     pickFolder: vi.fn(async () => "/tmp/out"),
     exportTo: vi.fn(async () => {}),
-    readNote: vi.fn(async () => ""),
-    resolveLink: vi.fn(async () => true),
-    createNote: vi.fn(async (dir: string, name: string) => (dir ? `${dir}/${name}.md` : `${name}.md`)),
     isFile: vi.fn(async () => true),
     rename: vi.fn(async () => {}),
     ...over,
@@ -130,6 +125,14 @@ describe("checkActionPlans", () => {
     expect(p.unlisted).toBe(0);
     expect(p.confirm).toBeNull();
   });
+
+  it("offers no automatic action for links to missing notes", () => {
+    const row = checkRows({
+      computedAt: 1,
+      results: [result("broken-links", [{ path: "source.md", detail: "Missing" }])],
+    }).find((candidate) => candidate.def.id === "broken-links")!;
+    expect(checkActionPlans(row)).toEqual([]);
+  });
 });
 
 // ── Legal names ───────────────────────────────────────────────────────────────
@@ -149,27 +152,6 @@ describe("legal names", () => {
     expect(suggestLegalPath("No:tes/fine.md")).toBeNull();
     expect(suggestLegalPath("Notes/fine.md")).toBeNull();
     expect(suggestLegalPath("...")).toBeNull();
-  });
-});
-
-// ── Wikilinks ─────────────────────────────────────────────────────────────────
-
-describe("wikilink targets", () => {
-  it("strips the alias and the heading and de-duplicates", () => {
-    expect(
-      wikilinkTargets("see [[A|an a]] and [[A#top]] and [[B/C]] and [[A]]"),
-    ).toEqual(["A", "B/C"]);
-  });
-
-  it("creates notes, never files or links out of the vault", () => {
-    expect(isCreatableTarget("Meeting notes")).toBe(true);
-    expect(isCreatableTarget("Projects/Q3")).toBe(true);
-    expect(isCreatableTarget("plan.md")).toBe(true);
-    expect(isCreatableTarget("diagram.png")).toBe(false);
-    expect(isCreatableTarget("report.pdf")).toBe(false);
-    expect(isCreatableTarget("../escape")).toBe(false);
-    expect(isCreatableTarget("/absolute")).toBe(false);
-    expect(isCreatableTarget("https://example.com")).toBe(false);
   });
 });
 
@@ -250,47 +232,6 @@ describe("runCheckAction", () => {
     expect(d.resetHistory).toHaveBeenCalledTimes(2);
     expect(out.done).toBe(2);
     expect(out.note).toBe("2 KB freed");
-  });
-
-  it("creates only the link targets that resolve to nothing, once each", async () => {
-    const d = deps({
-      readNote: vi.fn(async (path: string) =>
-        path === "one.md" ? "[[Missing]] [[Here]] [[Missing]]" : "[[Missing]] [[shot.png]]",
-      ),
-      resolveLink: vi.fn(async (t: string) => t === "Here"),
-    });
-    const p = plan("broken-links", [{ path: "one.md" }, { path: "two.md" }]);
-    const out = await runCheckAction(p, d);
-    expect(d.createNote).toHaveBeenCalledTimes(1);
-    expect(d.createNote).toHaveBeenCalledWith("", "Missing");
-    expect(out.done).toBe(1);
-    expect(out.total).toBe(1);
-    // The embed is left to the missing-embeds check, and says so.
-    expect(out.skipped.map((s) => s.path)).toEqual(["shot.png"]);
-  });
-
-  it("creates a link target inside the folder it names", async () => {
-    const d = deps({
-      readNote: vi.fn(async () => "[[Projects/Q3 plan]]"),
-      resolveLink: vi.fn(async () => false),
-    });
-    const p = plan("broken-links", [{ path: "one.md" }]);
-    await runCheckAction(p, d);
-    expect(d.createNote).toHaveBeenCalledWith("Projects", "Q3 plan");
-  });
-
-  it("keeps going when one source note cannot be read", async () => {
-    const d = deps({
-      readNote: vi.fn(async (path: string) => {
-        if (path === "bad.md") throw new Error("not valid UTF-8");
-        return "[[Missing]]";
-      }),
-      resolveLink: vi.fn(async () => false),
-    });
-    const p = plan("broken-links", [{ path: "bad.md" }, { path: "good.md" }]);
-    const out = await runCheckAction(p, d);
-    expect(out.errors[0]).toEqual({ path: "bad.md", reason: "not valid UTF-8" });
-    expect(out.done).toBe(1);
   });
 
   it("renames an illegal FILE name and leaves a folder and a taken name alone", async () => {

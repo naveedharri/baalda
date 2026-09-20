@@ -3,9 +3,9 @@
 //
 // Two kinds, and the difference is the point:
 //
-//   • a HEAL is Baalda fixing the finding itself — rebuild the index, reclaim
-//     orphan history, create the notes a link points at. Mechanical, defined
-//     for every item, and safe to run without reading the list first.
+//   • a HEAL is Baalda fixing the finding itself — rebuild the index or reclaim
+//     orphan history. Mechanical, defined for every item, and safe to run
+//     without reading the list first.
 //   • a BULK action is the per-item button applied to everything listed —
 //     "Delete all", "Save copies". It is the reader's decision, taken once.
 //
@@ -19,7 +19,6 @@
 // and the execution loop are all unit-tested in Node with no Tauri host, like
 // the bridge suites.
 
-import { isNoteExt } from "../formats";
 import {
   CHECK_ACTIONS,
   WHOLE_VAULT_ACTIONS,
@@ -229,58 +228,6 @@ export function suggestLegalPath(path: string): string | null {
   return segs.join("/");
 }
 
-// ── Wikilinks ─────────────────────────────────────────────────────────────────
-
-/** `[[target]]`, `[[target|alias]]`, `[[target#heading]]` — `parse.rs WIKILINK_RE`. */
-const WIKILINK_RE = /\[\[([^\]\n]+)\]\]/g;
-
-/**
- * Every wikilink target in a note, alias and heading stripped, in order and
- * de-duplicated. The same extraction `parse.rs` indexes with, so the targets
- * this heal creates are exactly the ones the check counted.
- */
-export function wikilinkTargets(text: string): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const m of text.matchAll(WIKILINK_RE)) {
-    const target = (m[1] ?? "")
-      .split("|")[0]!
-      .split("#")[0]!
-      .trim();
-    if (target === "" || seen.has(target)) continue;
-    seen.add(target);
-    out.push(target);
-  }
-  return out;
-}
-
-/**
- * Can this link target become an empty note?
- *
- * No for anything that escapes the vault, and no for a target that names a FILE
- * of another kind (`![[diagram.png]]` is indexed as a link too, and a missing
- * image is the `missing-embeds` check's finding, not a note waiting to be
- * created). A target with no extension at all is a note name — the common case.
- */
-export function isCreatableTarget(target: string): boolean {
-  if (target === "" || target.startsWith("/") || target.startsWith("\\")) return false;
-  if (target.includes("..")) return false;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return false; // http:, mailto:, obsidian:
-  const name = target.split("/").pop() ?? "";
-  if (name === "" || name === "." ) return false;
-  // An extension we do not treat as a note means this is a file link.
-  if (/\.[A-Za-z0-9]+$/.test(name) && !isNoteExt(name)) return false;
-  return true;
-}
-
-/** Split a link target into the folder it names and the note name in it. */
-export function targetLocation(target: string): { dir: string; name: string } {
-  const slash = target.lastIndexOf("/");
-  return slash === -1
-    ? { dir: "", name: target }
-    : { dir: target.slice(0, slash), name: target.slice(slash + 1) };
-}
-
 // ── Export destinations ───────────────────────────────────────────────────────
 
 /** The last path segment — what a copy outside the vault should be called. */
@@ -320,9 +267,9 @@ export function uniqueName(name: string, used: Set<string>): string {
  * Every side effect a heal or bulk action can have, injected.
  *
  * All of them are EXISTING code paths — the sidebar's delete, the sync layer's
- * history reset, the startup CRDT sweep, `ipc.createNote`, the store's rename
- * (which is what keeps `doc_id` stable across a move). Nothing here invents a
- * new way to touch the vault.
+ * history reset, the startup CRDT sweep, and the store's rename (which is what
+ * keeps `doc_id` stable across a move). Nothing here invents a new way to touch
+ * the vault.
  */
 export interface CheckActionDeps {
   /** The sidebar's delete, for many paths: server row first, then disk. */
@@ -339,11 +286,6 @@ export interface CheckActionDeps {
   pickFolder(): Promise<string | null>;
   /** Copy one vault-relative path to an absolute destination. */
   exportTo(path: string, dest: string): Promise<void>;
-  readNote(path: string): Promise<string>;
-  /** True when this wikilink target resolves to a note in the vault. */
-  resolveLink(target: string): Promise<boolean>;
-  /** Create an empty note; resolves to its vault-relative path. */
-  createNote(dir: string, name: string): Promise<string>;
   /** True when a FILE (not a folder) exists at this path. */
   isFile(path: string): Promise<boolean>;
   /** Rename through the path that preserves `doc_id`. */
@@ -465,58 +407,6 @@ export async function runCheckAction(
         onProgress?.(++done, plan.targets.length);
       }
       out.note = freed > 0 ? `${formatBytes(freed)} freed` : null;
-      return out;
-    }
-
-    case "create-missing-notes": {
-      // Scanned per SOURCE note, because that is what the check lists; the
-      // targets are pooled so a name three notes link to is created once.
-      const created = new Set<string>();
-      let scanned = 0;
-      let missing = 0;
-      for (const source of plan.targets) {
-        let text = "";
-        try {
-          text = await deps.readNote(source.path);
-        } catch (e) {
-          out.errors.push({ path: source.path, reason: reason(e) });
-          onProgress?.(++scanned, plan.targets.length);
-          continue;
-        }
-        for (const target of wikilinkTargets(text)) {
-          if (created.has(target)) continue;
-          if (!isCreatableTarget(target)) {
-            out.skipped.push({
-              path: target,
-              reason: "not a note name — a file link, or it leaves the vault",
-            });
-            created.add(target);
-            continue;
-          }
-          let resolves = true;
-          try {
-            resolves = await deps.resolveLink(target);
-          } catch (e) {
-            out.errors.push({ path: target, reason: reason(e) });
-            created.add(target);
-            continue;
-          }
-          if (resolves) continue;
-          missing++;
-          created.add(target);
-          const { dir, name } = targetLocation(target);
-          try {
-            await deps.createNote(dir, name);
-            out.done++;
-          } catch (e) {
-            out.errors.push({ path: target, reason: reason(e) });
-          }
-        }
-        onProgress?.(++scanned, plan.targets.length);
-      }
-      out.total = missing;
-      out.note =
-        missing === 0 ? "Every link resolved — nothing was missing" : null;
       return out;
     }
 

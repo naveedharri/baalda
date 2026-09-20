@@ -14,7 +14,7 @@ describe("AttachmentLocalOnlyNoticeView", () => {
     expect(attachmentNoticeVisible(true, false)).toBe(false);
     expect(attachmentNoticeVisible(false, true)).toBe(false);
   });
-  it("explains that files remain previewable while notes keep syncing", () => {
+  it("explains that other-format notes remain previewable while text notes keep syncing", () => {
     const html = renderToStaticMarkup(
       createElement(AttachmentLocalOnlyNoticeView, {
         show: true,
@@ -24,8 +24,9 @@ describe("AttachmentLocalOnlyNoticeView", () => {
       }),
     );
 
-    expect(html).toContain("Attachment sync requires Pro");
-    expect(html).toContain("Notes still sync");
+    expect(html).toContain("Files beyond text notes require Pro to sync");
+    expect(html).toContain("Text notes still sync");
+    expect(html).toContain("embedded attachments");
     expect(html).toContain("remain available to preview locally");
     expect(html).toContain("Upgrade to Pro");
     expect(html).toContain("Open Health");
@@ -41,7 +42,7 @@ describe("AttachmentLocalOnlyNoticeView", () => {
       }),
     );
 
-    expect(html).toContain("Attachment sync requires Pro");
+    expect(html).toContain("Files beyond text notes require Pro to sync");
     expect(html).not.toContain("Upgrade");
   });
 

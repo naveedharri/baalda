@@ -230,6 +230,7 @@ describe("content failures", () => {
     relPath: "Big.md",
     reason: "too large to sync (12.4 MB; the limit is 10 MB)",
     permanent: true,
+    kind: "too-large" as const,
   };
   const tooLargeHistory = {
     docId: "doc-hist",
@@ -238,9 +239,10 @@ describe("content failures", () => {
       "too large to sync (17.2 MB of edit history; the limit is 10 MB) — " +
       "reset this note's history to sync it again",
     permanent: true,
+    kind: "too-large" as const,
   };
 
-  it("maps a permanent failure to `too-large`, never offering a Retry that cannot work", () => {
+  it("maps a typed size failure to `too-large`, never offering a Retry that cannot work", () => {
     const r = buildHealthReport(
       input({ failures: { registry: [], content: [tooLargeFile], limitCode: null } }),
     );
@@ -272,7 +274,7 @@ describe("content failures", () => {
     expect(r.issues[0].explanation.fixes[0]).toContain("Reset this note's history");
   });
 
-  it("quotes the sync layer verbatim when the reason has an unexpected shape", () => {
+  it("does not guess that an untyped permanent failure is too large", () => {
     const r = buildHealthReport(
       input({
         failures: {
@@ -282,8 +284,33 @@ describe("content failures", () => {
         },
       }),
     );
-    expect(r.issues[0].kind).toBe("too-large");
-    expect(r.issues[0].why).toContain("the server said no");
+    expect(r.issues[0].kind).toBe("upload-failed");
+    expect(r.issues[0].why).toContain("The server said no");
+  });
+
+  it("reports a refused local edit as an access problem, not a size problem", () => {
+    const r = buildHealthReport(
+      input({
+        failures: {
+          registry: [],
+          content: [
+            {
+              docId: "d-readonly",
+              relPath: "Small.md",
+              reason:
+                "edit could not be sent: no write access; copy saved to .context/trash/t/Small.md",
+              permanent: true,
+              kind: "no-write-access",
+            },
+          ],
+          limitCode: null,
+        },
+      }),
+    );
+    expect(r.issues[0].kind).toBe("no-write-access");
+    expect(r.issues[0].title).toBe("Read-only sync needs review");
+    expect(r.issues[0].remedies).toContain("retry");
+    expect(r.issues[0].why).toContain("recovery copy");
   });
 
   it("maps a transient failure to `upload-failed`, with a Retry", () => {

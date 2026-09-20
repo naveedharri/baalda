@@ -121,6 +121,12 @@ interface VaultSyncConfig {
    */
   pushed?: string[];
   /**
+   * docIds whose current file is a registry-created 0-byte placeholder that
+   * has not yet been hydrated. Persisted so a restart between materialization
+   * and the canonical pull cannot turn the placeholder into a fake local edit.
+   */
+  unhydratedPlaceholders?: string[];
+  /**
    * docId → relPath as of the last AGREED reconciliation, for THIS collection.
    *
    * The one piece of memory that makes inbound reconciliation possible: without a
@@ -140,19 +146,14 @@ interface VaultSyncConfig {
    * docIds a NAMED user is recorded as having authored, learned from the
    * listing's `created_by` and accumulated like {@link baseline}.
    *
-   * Persisted for one reason: a revoked doc is absent from the listing by
-   * definition, so at the moment the reconciler decides how to remove it there
-   * is nowhere left to read its author from. Without this, the author exemption
-   * would work only for a revocation that happened while the app was open, and
-   * not at all for the cold-launch case — the very one this whole path exists
-   * for.
+   * Persisted by older clients for the former author-recovery policy. Current
+   * deletion and revocation behavior is final regardless of authorship; the
+   * field remains readable so existing config files stay compatible.
    *
    * The `userId` is not decoration. This file travels with the vault (it is
    * read on any device that opens the folder) and a device can be signed into a
    * different account tomorrow. Honouring a list that belonged to someone else
-   * would mark THEIR notes recoverable for THIS user — and on this path the
-   * recoverable route writes a full readable `.md` into `.context/trash`, which
-   * is exactly the leak the outright removal exists to prevent. A list whose
+   * would attribute THEIR notes to THIS user. A list whose
    * `userId` does not match the session is dropped, not inherited. (An older
    * config's bare `string[]` is unattributable and is dropped for the same
    * reason; the next pass relearns it.)
@@ -216,10 +217,9 @@ export interface InboundHost {
   /** The file moved: re-point anything showing it (e.g. the open editor). */
   notePathChanged(docId: string, from: string, to: string): void;
   /**
-   * The file is gone: close anything showing it. `trashedTo` is the vault-trash
-   * path for a `deleted` note; a `revoked` note is removed outright (the server
-   * still holds it, and an ex-reader must not keep a readable copy), so it is
-   * `null`.
+   * The file is gone: close anything showing it. Confirmed deletions and
+   * revocations now pass `null`; the nullable destination remains in the host
+   * contract for compatibility with older recovery behavior.
    */
   noteRemoved(
     docId: string,
@@ -287,8 +287,7 @@ export interface InboundHost {
   /**
    * The signed-in user's id, or null when there is no session.
    *
-   * Used for one thing: a revoked note this user AUTHORED keeps a recoverable
-   * `.context/trash` copy instead of being removed outright.
+   * Used to keep legacy authorship metadata attributable to one account.
    */
   localUserId?(): string | null;
   /**
@@ -310,8 +309,7 @@ export interface InboundHost {
    *
    * The binary equivalent of {@link noteRemoved}, and deliberately a separate
    * hook — there is no doc to release, no CRDT to clear and no editor to close.
-   * `trashedTo` is the `.context/trash` destination when this user uploaded the
-   * file, `null` when it was removed outright.
+   * `trashedTo` is retained for host compatibility; confirmed removals pass null.
    */
   fileRemoved?(docId: string, path: string, trashedTo: string | null): void;
   /**
@@ -364,8 +362,7 @@ const frozenRootNotified = new Set<string>();
 /**
  * How many inbound REMOVALS run at once.
  *
- * A unit here is a pair of local IPC calls (a read, then one
- * `trashNote`/`deleteFile`), so it takes the shared local width
+ * A unit here includes local disk checks and a `deleteFile` call, so it takes the shared local width
  * ({@link IPC_CONCURRENCY}) rather than the registry's HTTP one. A folder a
  * teammate deleted arrives here as hundreds of independent paths, and serially
  * that was one round trip through the bridge per file with the link and the
@@ -422,16 +419,6 @@ export function flattenTree(root: TreeNode): { folders: TreeNode[]; notes: TreeN
 function parentDir(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? "" : path.slice(0, i);
-}
-
-/**
- * One folder name per inbound pass, so everything a single remote delete removed
- * can be found (and put back) together. Supplied by the caller rather than
- * generated in Rust, which has no date crate and would otherwise scatter a
- * multi-note delete across timestamps.
- */
-function trashStamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 /** Server error `code` field, when the body carried one. */
@@ -557,6 +544,7 @@ export class VaultRegistry {
    * first event that arrives for it.
    */
   private materialized = new Set<string>();
+  private unhydratedPlaceholders = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
   /** Set when the server refused on a plan limit: the rest of the run is
@@ -812,6 +800,7 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving — and a stale entry would
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
+    this.unhydratedPlaceholders.clear();
     // The identical-config memo (see {@link writeConfig}) is only honest while
     // this registry is the last thing that wrote `.context/config.json`. A
     // teardown ends that: `store.clearVaultStamp` writes the same file through
@@ -906,6 +895,20 @@ export class VaultRegistry {
     this.materialized.add(relPath);
   }
 
+  markUnhydratedPlaceholder(docId: string): void {
+    this.unhydratedPlaceholders.add(docId);
+    this.checkpoint?.touch();
+  }
+
+  clearUnhydratedPlaceholder(docId: string): void {
+    if (!this.unhydratedPlaceholders.delete(docId)) return;
+    this.checkpoint?.touch();
+  }
+
+  isUnhydratedPlaceholder(docId: string): boolean {
+    return this.unhydratedPlaceholders.has(docId);
+  }
+
   // ---- Tree binaries (PR3 Stage A) ---------------------------------------
   //
   // A `files` row is NOT a note: no Y.Doc, no bridge, no content upload. The
@@ -922,14 +925,9 @@ export class VaultRegistry {
   /**
    * Remember a registered tree binary and queue the config write.
    *
-   * `authored` means THIS device put the bytes there — the blob mirror's upload
-   * path, which is the only place a `files` row is created. It is the binary's
-   * only authorship signal: `files` has no `created_by` column, and by the time
-   * the answer is needed (a revocation) the doc is absent from every listing
-   * that could carry one. Without it a person's own upload would be deleted
-   * outright by a permission change, where their own note gets a recoverable
-   * copy. A DOWNLOAD calls this too, with `authored` off — those bytes are
-   * somebody else's.
+   * `authored` means THIS device put the bytes there. It is retained in config
+   * for compatibility with older clients; current removal policy does not
+   * exempt the uploader. A DOWNLOAD calls this with `authored` off.
    */
   setFileId(relPath: string, id: string, opts: { authored?: boolean } = {}): void {
     if (this.stale()) return;
@@ -1204,6 +1202,9 @@ export class VaultRegistry {
       folders,
       files,
       pushed: [...this.pushed],
+      ...(this.unhydratedPlaceholders.size > 0
+        ? { unhydratedPlaceholders: [...this.unhydratedPlaceholders] }
+        : {}),
       baseline,
       // Written only when we know whose it is; an unattributed list is worse
       // than none (see `VaultSyncConfig.authored`).
@@ -1218,8 +1219,8 @@ export class VaultRegistry {
 
   /**
    * Bring local disk into line with the server's structure: create folders that
-   * only exist server-side, apply remote renames/moves, and move notes to the
-   * vault's trash when the server says they were deleted OR when they left this
+   * only exist server-side, apply remote renames/moves, and permanently remove
+   * notes when the server says they were deleted OR when they left this
    * user's readable set (access revoked — see `InboundTrash.reason`).
    *
    * Every mutation below is guarded, and the guards are the point:
@@ -1249,10 +1250,8 @@ export class VaultRegistry {
   /**
    * Remember which of these notes THIS user wrote.
    *
-   * Accumulative, like the baseline, and persisted with it: the answer is needed
-   * at the moment a doc has vanished from the listing, so it cannot be read from
-   * the listing then. Used for one decision — whether a revoked file gets a
-   * recoverable `.context/trash` copy or is removed outright.
+   * Accumulative, like the baseline, and persisted for compatibility with older
+   * clients. Current removal policy does not branch on this value.
    */
   private learnAuthorship(serverNotes: RegisteredNote[]): void {
     const me = this.host?.localUserId?.() ?? null;
@@ -1274,9 +1273,8 @@ export class VaultRegistry {
    *
    * Anything else — another account's list, or an older config's unattributed
    * `string[]` — is dropped rather than inherited, and the next `learnAuthorship`
-   * rebuilds it from the listing. The cost of dropping is one pass without the
-   * author exemption; the cost of inheriting is a readable `.md` copy of someone
-   * else's note left in this user's `.context/trash`.
+   * rebuilds it from the listing. Keeping attribution account-scoped prevents
+   * stale ownership metadata from leaking between sign-ins.
    */
   private adoptAuthored(cfg: VaultSyncConfig): void {
     this.authoredDocs = new Set();
@@ -1306,39 +1304,23 @@ export class VaultRegistry {
    *    told this removal was ours, or it propagates it back as a user delete and
    *    the owner loses their copy of a file they only meant to stop sharing.
    *
-   * `trashNote` and `deleteFile` both work on any bytes — the first renames into
-   * `.context/trash/<stamp>/`, the second refuses a directory and an ignored
-   * path — so neither needed a binary twin in Rust.
+   * `deleteFile` works on any bytes and refuses a directory and an ignored path,
+   * so it needs no binary twin in Rust.
    */
-  private async removeRevokedBinary(gone: InboundTrash, stamp: string): Promise<boolean> {
+  private async removeRevokedBinary(gone: InboundTrash): Promise<boolean> {
     // BEFORE the removal, so the claim beats the watcher to the queue.
     this.host?.suppressBinaryDelete?.(gone.path);
     try {
-      // `recoverable` means this user put the file here (see
-      // `InboundTrash.recoverable`): losing read access to your own upload must
-      // not destroy your only local copy of it. Everyone else's goes outright —
-      // a copy in `.context/trash` would leave the ex-reader exactly the
-      // readable file the revocation exists to take away.
-      // `deleteFile` is idempotent on a path that is already gone; `trashNote`
-      // is not (it renames, and refuses a missing source). A file the user
-      // removed themselves in the same window would otherwise fail this pass,
-      // and every pass after it, forever — the mapping is what keeps re-planning
-      // it. So a missing source ends the same way: forget it and move on.
-      const dest = gone.recoverable
-        ? await ipc.trashNote(gone.path, stamp, this.epoch()).catch(async (e) => {
-            if (ipc.isVaultMismatch(e)) throw e;
-            if (await this.existsOnDisk(gone.path)) throw e;
-            return null;
-          })
-        : null;
-      if (!dest) await ipc.deleteFile(gone.path, this.epoch());
+      // Idempotent when the source already disappeared in the same watcher
+      // window, so the mapping can still be retired cleanly.
+      await ipc.deleteFile(gone.path, this.epoch());
       // The row is gone for us, so the mapping goes with it — otherwise the next
       // `hello` re-announces an id whose file is not here, the server names it
       // revoked again, and the ACL-authority clock is re-stamped on every
       // reconnect for a removal that already happened.
       this.forgetFileId(gone.path);
       this.authoredDocs.delete(gone.docId);
-      this.host?.fileRemoved?.(gone.docId, gone.path, dest);
+      this.host?.fileRemoved?.(gone.docId, gone.path, null);
       return true;
     } catch (e) {
       if (ipc.isVaultMismatch(e)) return false;
@@ -1349,19 +1331,6 @@ export class VaultRegistry {
         reason: reasonOf(e),
         code: null,
       });
-      return false;
-    }
-  }
-
-  /** Is anything at this vault path right now? A disk question — `false` when
-   *  the stat refuses for any reason other than a vault switch, which the
-   *  caller re-raises. */
-  private async existsOnDisk(relPath: string): Promise<boolean> {
-    try {
-      await ipc.fileStat(relPath, this.epoch());
-      return true;
-    } catch (e) {
-      if (ipc.isVaultMismatch(e)) throw e;
       return false;
     }
   }
@@ -1525,10 +1494,8 @@ export class VaultRegistry {
       // …and, when the server named the docs rather than only announcing that
       // access moved, the names. The cap then lifts for those docs only.
       authoritativeRevoked: this.host?.authoritativeRevoked?.() ?? undefined,
-      // Notes THIS user wrote, so a revocation of one of them leaves a
-      // recoverable copy rather than deleting the author's own work outright.
-      // Accumulated and persisted, not read from this listing: a revoked doc is
-      // ABSENT from the listing, which is exactly when the answer is needed.
+      // Legacy authorship metadata remains in the plan input for config/API
+      // compatibility. Confirmed removal no longer branches on it.
       authoredByMe: this.authoredDocs,
       // Tree binaries: doc_id → path, the `files` map inverted. Only ever acted
       // on when the server NAMED the id — see the binary pass in `planInbound`.
@@ -1607,14 +1574,11 @@ export class VaultRegistry {
       }
     }
 
-    // One stamp per pass, so everything a single remote delete removed lands in
-    // one recoverable folder.
-    const stamp = trashStamp();
     // Pooled, not serial: each removal is an independent IPC pair (a read, then
-    // one `trashNote`/`deleteFile`) against a different path, and a cascade that
+    // `deleteFile`) against a different path, and a cascade that
     // reaches a peer is hundreds of them. Nothing about WHICH removals happen
     // moves here — every refusal above (the `pushed` orphan rail, the empty-file
-    // check, `recoverable` → trash) is inside the worker and runs per item
+    // check and file removal) is inside the worker and runs per item
     // exactly as it did, and the caps that decided this list ran in `planInbound`
     // long before. `bail` is the one shared verdict: a vault-mismatch or a stale
     // run abandons the whole pass, which is what the loop's early `return` did.
@@ -1623,7 +1587,7 @@ export class VaultRegistry {
       plan.trash,
       async (gone) => {
         if (gone.binary) {
-          if (await this.removeRevokedBinary(gone, stamp)) changedDisk = true;
+          if (await this.removeRevokedBinary(gone)) changedDisk = true;
           return;
         }
         // A note whose content this device never confirmed upstream may hold local
@@ -1664,32 +1628,16 @@ export class VaultRegistry {
           return;
         }
         try {
-          // A DELETED note goes to the vault's recoverable trash: someone chose to
-          // remove it, and the trash is the undo. A REVOKED note is removed
-          // outright: nothing was deleted (the server still holds every byte, and
-          // the note comes straight back if access is restored), while a copy in
-          // `.context/trash` would leave the ex-reader with exactly the readable
-          // `.md` the revocation exists to take away. `deleteFile` is the
-          // epoch-pinned Rust call that refuses a directory outright; the
-          // sidebar's own Delete is the only caller of the recursive `deletePath`.
-          let dest: string | null = null;
-          if (gone.reason === "revoked" && !gone.recoverable) {
-            // `deleteFile`, not `deletePath`: the recursive one is the sidebar's,
-            // where a person picked the folder. This is the one removal with no
-            // recoverable copy, so it is structurally unable to take a tree.
-            await ipc.deleteFile(gone.path, this.epoch());
-          } else {
-            // `recoverable` on a revocation means THIS user wrote the note (see
-            // `InboundTrash.recoverable`): losing read access to your own writing
-            // must not destroy your only local copy of it.
-            dest = await ipc.trashNote(gone.path, stamp, this.epoch());
-          }
+          // A confirmed deletion or revocation is final. `deleteFile`, not the
+          // recursive `deletePath`, makes this path structurally unable to take
+          // a directory even if a later planner regresses.
+          await ipc.deleteFile(gone.path, this.epoch());
           changedDisk = true;
           // The file left, so the baseline entry goes with it — otherwise every
           // later pass would keep trying to remove a path that isn't there.
           this.baselineDocs.delete(gone.docId);
           this.authoredDocs.delete(gone.docId);
-          this.host?.noteRemoved(gone.docId, gone.path, dest, gone.reason);
+          this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason);
         } catch (e) {
           if (ipc.isVaultMismatch(e)) {
             bail = true;
@@ -1715,7 +1663,7 @@ export class VaultRegistry {
     // a file with text in it. An EMPTY file is different: there is no work in it
     // to lose, and left alone it sits unmapped, uncounted and unsyncable forever
     // (21 zero-byte stubs under re-created "… 2/" folders in one vault). So the
-    // empty ones go to the trash like any other tombstoned note.
+    // empty ones can be removed permanently without risking user content.
     // (`plan.stubs` is only ever filled for notes the server confirmed deleted —
     // never for revocations or a listing that didn't report tombstones, where
     // "I don't know" must remove nothing.)
@@ -1760,7 +1708,7 @@ export class VaultRegistry {
       }
       if (this.stale()) return { changedDisk, suppress: plan.suppress };
       try {
-        await ipc.trashNote(path, stamp, this.epoch());
+        await ipc.deleteFile(path, this.epoch());
         changedDisk = true;
         // Nothing is at that path any more, so no baseline entry may keep
         // claiming it (which would suppress a genuinely new file there later).
@@ -2001,6 +1949,7 @@ export class VaultRegistry {
     }
     this.adoptConfigFiles(cfg.files ?? {});
     this.pushed = new Set(cfg.pushed ?? []);
+    this.unhydratedPlaceholders = new Set(cfg.unhydratedPlaceholders ?? []);
     // Same collection guard as `reconcile`'s: the baseline describes the
     // collection the config names, which is the one we just adopted.
     this.baselineDocs = new Map<string, string>();
@@ -2101,6 +2050,10 @@ export class VaultRegistry {
     this.pushed =
       cfg.serverVaultId === vaultId
         ? new Set([...(cfg.pushed ?? []), ...this.pushed])
+        : new Set();
+    this.unhydratedPlaceholders =
+      cfg.serverVaultId === vaultId
+        ? new Set([...(cfg.unhydratedPlaceholders ?? []), ...this.unhydratedPlaceholders])
         : new Set();
     // Adopt the baseline ONLY if the config we just read describes the collection
     // we actually resolved. Anything else (a first run, a config from another
@@ -2318,8 +2271,8 @@ export class VaultRegistry {
     // lock held by the background rebuild (#84), which made it the single worst
     // blocking call on the launch path — and a steady-state relaunch needs it for
     // nothing at all. Both consumers (the inbound fallback identity map and the
-    // create-missing-notes pass) ask for it only when they have an unmapped path
-    // to resolve. Memoized so the two of them share one read when they do.
+    // registry creation pass) ask for it only when they have an unmapped path to
+    // resolve. Memoized so the two of them share one read when they do.
     let titlesCache: ipc.NoteTitle[] | null = null;
     const titles = async (): Promise<ipc.NoteTitle[]> =>
       (titlesCache ??= await (async () => {
@@ -2718,7 +2671,7 @@ export class VaultRegistry {
     // The push checkpoint describes docs we still track OR still remember in the
     // baseline. The baseline part is load-bearing: a note deleted remotely leaves
     // the server listing (and hence `byDocId`) on the pass that LEARNS about the
-    // delete, but its file may only be trashed on a LATER pass — and the trash
+    // delete, but its file may only be removed on a LATER pass — and the removal
     // executor refuses any doc whose content was never confirmed upstream.
     // Pruning `pushed` by `byDocId` alone erased that confirmation in between,
     // which is how already-synced notes turned into permanent "left on disk"

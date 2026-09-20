@@ -16,6 +16,7 @@ import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { Spinner } from "./components/Spinner";
 import { SidebarResizer } from "./components/SidebarResizer";
+import { SidebarToggle } from "./components/SidebarToggle";
 import { TabBar } from "./components/TabBar";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
@@ -46,6 +47,7 @@ import { ShareNoteButton } from "./components/ShareNoteButton";
 import { AttachmentSyncNotice } from "./components/AttachmentSyncNotice";
 import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
+import { readSidebarHidden, writeSidebarHidden } from "./lib/prefs";
 import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
 import { prefetchAfterPaint } from "./lib/prefetch";
@@ -77,8 +79,8 @@ const UPDATE_POLL_MS = 15 * 60 * 1000;
  * The file behind the open note vanished from disk (Finder, `rm`, a script, an
  * AI tidying the vault).
  *
- * In a synced vault that is now a real delete: the sync layer keeps a recovery
- * copy in `.context/trash/` and removes the note for the team, exactly like the
+ * In a synced vault that is now a real delete: the sync layer permanently
+ * removes the note for the team, exactly like the
  * sidebar's Delete (see `SyncManager.drainDiskDeletes`). The banner says so
  * rather than implying the app lost track of the file — and it still only offers
  * to close, because the editor may hold text the user has not saved anywhere.
@@ -93,7 +95,7 @@ function RemovedBanner() {
     <Banner show={!!noteRemoved && !!openNote}>
       <span>
         <strong>{openNote ? noteLabel(openNote.path) : ""}</strong> was deleted on disk
-        {synced ? " and removed for the team. A copy is kept in the vault's trash." : "."}
+        {synced ? " and permanently removed for the team." : "."}
       </span>
       <div className="banner-actions">
         <button
@@ -117,9 +119,8 @@ function RemovedBanner() {
  * A teammate (or an AI) deleted the note that was open, and we applied it here.
  *
  * Separate from `RemovedBanner`: that one means "the file vanished from under us"
- * and can only offer to close the note. This one knows the delete was intentional
- * and — because inbound deletes move the file rather than unlinking it — can say
- * where the local copy went, which is the difference between a scare and a note.
+ * and can only offer to close the note. This one knows the server confirmed a
+ * deliberate deletion or access removal.
  */
 function DeletedByTeammateBanner() {
   const removed = useStore((s) => s.noteRemovedByTeammate);
@@ -129,9 +130,7 @@ function DeletedByTeammateBanner() {
         {removed?.reason === "revoked" ? (
           <>Your access to this note was removed. It is no longer on this device.</>
         ) : (
-          <>
-            A teammate deleted this note. Your copy was moved to <code>{removed?.trashedTo}</code>.
-          </>
+          <>A teammate deleted this note. It was permanently removed from this device.</>
         )}
       </span>
       <div className="banner-actions">
@@ -792,6 +791,7 @@ export default function App() {
   const [openingLastVault, setOpeningLastVault] = useState(true);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
@@ -1202,13 +1202,28 @@ export default function App() {
       <VaultSwitchOverlay />
       <PromptedAuthDialog />
       <div
-        className="app"
+        className={`app${sidebarHidden ? " sidebar-hidden" : ""}`}
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
       >
+        <SidebarToggle
+          hidden={sidebarHidden}
+          onToggle={() => setSidebarHidden((hidden) => {
+            const next = !hidden;
+            writeSidebarHidden(next);
+            return next;
+          })}
+          searchOpen={searchOpen}
+          onSearch={() => setSearchOpen((open) => !open)}
+        />
         {/* Centered overlay, not a sidebar panel — it searches the whole vault
             and its button lives in the main header. */}
         {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
-        <aside className="sidebar">
+        <aside
+          className="sidebar"
+          id="vault-sidebar"
+          aria-hidden={sidebarHidden}
+          inert={sidebarHidden}
+        >
           <SidebarHeader />
           {/* The tree still lists the OUTGOING vault's files until the folder
               swaps, so a switch fades it and stops taking clicks — opening a note
@@ -1226,7 +1241,7 @@ export default function App() {
             </ErrorBoundary>
           </div>
         </aside>
-        <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />
+        {!sidebarHidden && <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />}
   
         <main className="main">
           <MemberJoinedBanner />
@@ -1277,25 +1292,6 @@ export default function App() {
                 </svg>
               </button>
             )}
-            <button
-              className="icon-btn search-btn"
-              title="Search notes (⌘F)"
-              aria-label="Search notes"
-              onClick={() => setSearchOpen((v) => !v)}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-3.5-3.5" />
-              </svg>
-            </button>
             <button
               className="icon-btn graph-btn"
               title="Graph view (⌘G)"

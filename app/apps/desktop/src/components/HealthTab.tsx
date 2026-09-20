@@ -80,6 +80,8 @@ export function HealthTab({
   // tests.
   const notes = useStore((s) => s.titles);
   const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const standaloneFileSyncBlocked = useStore((s) => s.attachmentSyncBlocked);
+  const showAttachmentUpgrade = useStore((s) => s.billingConfig?.enabled === true);
 
   return (
     <>
@@ -91,6 +93,8 @@ export function HealthTab({
         snapshot={snapshot}
         notes={notes}
         vaultPath={vaultPath}
+        standaloneFileSyncBlocked={standaloneFileSyncBlocked}
+        showAttachmentUpgrade={showAttachmentUpgrade}
         onGoToGeneral={onGoToGeneral}
         onClose={onClose}
       />
@@ -105,6 +109,8 @@ export function HealthView({
   snapshot,
   notes = [],
   vaultPath = null,
+  standaloneFileSyncBlocked = false,
+  showAttachmentUpgrade = false,
   onGoToGeneral,
   onClose,
 }: {
@@ -112,6 +118,10 @@ export function HealthView({
   notes?: NoteTitle[];
   /** Keys the per-vault ignore list; null ⇒ nothing is remembered. */
   vaultPath?: string | null;
+  /** The Remote Vault explicitly refused standalone binary sync at the plan boundary. */
+  standaloneFileSyncBlocked?: boolean;
+  /** Whether this server exposes a checkout path for that plan boundary. */
+  showAttachmentUpgrade?: boolean;
   onGoToGeneral?: () => void;
   onClose?: () => void;
 }) {
@@ -202,6 +212,14 @@ export function HealthView({
     <div className="health-tab">
       <HealthStats
         stats={stats}
+        noteCount={
+          snapshot.inventory.localReady
+            ? snapshot.inventory.local.notes + snapshot.inventory.local.files
+            : null
+        }
+        folderCount={
+          snapshot.inventory.localReady ? snapshot.inventory.local.folders : null
+        }
         loading={loading}
         statsError={statsError}
         handlers={handlers}
@@ -213,6 +231,7 @@ export function HealthView({
 
       <VerdictCard
         snapshot={snapshot}
+        standaloneFileSyncBlocked={standaloneFileSyncBlocked}
         onRefresh={refresh}
         loading={loading}
         onGoToGeneral={onGoToGeneral}
@@ -223,6 +242,8 @@ export function HealthView({
         inventory={snapshot.inventory}
         report={report}
         handlers={handlers}
+        standaloneFileSyncBlocked={standaloneFileSyncBlocked}
+        showAttachmentUpgrade={showAttachmentUpgrade}
       />
 
 
@@ -279,7 +300,6 @@ export function HealthView({
               checks={checks}
               loading={loading}
               handlers={handlers}
-              onRefresh={refresh}
               ignored={ignores.checks}
               onIgnore={ignores.ignoreCheck}
               onRestore={ignores.restoreCheck}
@@ -477,10 +497,14 @@ function InventoryComparison({
   inventory,
   report,
   handlers,
+  standaloneFileSyncBlocked,
+  showAttachmentUpgrade,
 }: {
   inventory: HealthInventory;
   report: VaultHealthSnapshot["report"];
   handlers: HealthHandlers;
+  standaloneFileSyncBlocked: boolean;
+  showAttachmentUpgrade: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const differences =
@@ -490,9 +514,41 @@ function InventoryComparison({
     inventory.serverOnlyFolders.length +
     inventory.deviceOnlyFiles.length +
     inventory.serverOnlyFiles.length;
-  const countsDiffer = inventory.server != null && inventory.local.total !== inventory.server.total;
+  const localOnlyFormatNotes = standaloneFileSyncBlocked
+    ? inventory.deviceOnlyFiles.length
+    : 0;
+  const comparisonPending = !inventory.localReady;
+  const unexpectedDifferences = differences - localOnlyFormatNotes;
+  const countsDiffer =
+    inventory.localReady &&
+    inventory.server != null &&
+    (inventory.local.notes !== inventory.server.notes ||
+      inventory.local.folders !== inventory.server.folders ||
+      inventory.local.files !== inventory.server.files + localOnlyFormatNotes);
+  const comparisonWarn = unexpectedDifferences > 0 || countsDiffer;
+  const comparisonStale = inventory.serverState === "last-known";
+  const differenceSummaries = [
+    inventory.deviceOnlyNotes.length > 0
+      ? `${inventory.deviceOnlyNotes.length.toLocaleString()} text ${inventory.deviceOnlyNotes.length === 1 ? "note is" : "notes are"} missing from the Remote Vault`
+      : null,
+    inventory.serverOnlyNotes.length > 0
+      ? `${inventory.serverOnlyNotes.length.toLocaleString()} text ${inventory.serverOnlyNotes.length === 1 ? "note is" : "notes are"} missing from this computer`
+      : null,
+    inventory.deviceOnlyFolders.length > 0
+      ? `${inventory.deviceOnlyFolders.length.toLocaleString()} ${inventory.deviceOnlyFolders.length === 1 ? "folder is" : "folders are"} missing from the Remote Vault`
+      : null,
+    inventory.serverOnlyFolders.length > 0
+      ? `${inventory.serverOnlyFolders.length.toLocaleString()} ${inventory.serverOnlyFolders.length === 1 ? "folder is" : "folders are"} missing from this computer`
+      : null,
+    !standaloneFileSyncBlocked && inventory.deviceOnlyFiles.length > 0
+      ? `${inventory.deviceOnlyFiles.length.toLocaleString()} ${inventory.deviceOnlyFiles.length === 1 ? "note in another format is" : "notes in other formats are"} missing from the Remote Vault`
+      : null,
+    inventory.serverOnlyFiles.length > 0
+      ? `${inventory.serverOnlyFiles.length.toLocaleString()} ${inventory.serverOnlyFiles.length === 1 ? "note in another format is" : "notes in other formats are"} missing from this computer`
+      : null,
+  ].filter((summary): summary is string => summary != null);
   const confirmed = report.counts?.synced ?? 0;
-  const totalNotes = report.counts?.total ?? inventory.local.notes;
+  const totalTextNotes = report.counts?.total ?? inventory.local.notes;
   const stateLabel =
     inventory.serverState === "current"
       ? "Current"
@@ -512,8 +568,9 @@ function InventoryComparison({
           <span className="health-kicker">Your copies</span>
           <h3 id="health-inventory-title">This computer and the Remote Vault</h3>
           <p>
-            Compare notes, folders and standalone files in each place. Matching counts
-            describe the structure; content confirmation is shown separately.
+            Compare your notes in every supported format, with folders shown separately.
+            Matching paths describe the structure. Content confirmation is shown separately for text
+            notes.
           </p>
         </div>
         {inventory.server && (
@@ -529,10 +586,14 @@ function InventoryComparison({
           title="This computer"
           subtitle="Files in the open vault folder"
           counts={inventory.local}
+          countsReady={inventory.localReady}
         />
         <div className="health-inventory-bridge" aria-hidden="true">
           <span className="health-inventory-line" />
-          <Glyph name={differences > 0 || countsDiffer ? "alert" : "check"} size={16} />
+          <Glyph
+            name={comparisonWarn ? "alert" : comparisonStale || comparisonPending ? "info" : "check"}
+            size={16}
+          />
           <span className="health-inventory-line" />
         </div>
         {inventory.server ? (
@@ -560,7 +621,13 @@ function InventoryComparison({
       <div
         className="health-inventory-result"
         data-tone={
-          !inventory.server ? "muted" : differences > 0 || countsDiffer ? "warn" : "good"
+          !inventory.server
+              ? "muted"
+            : comparisonWarn
+              ? "warn"
+              : localOnlyFormatNotes > 0 || comparisonStale || comparisonPending
+                ? "muted"
+                : "good"
         }
       >
         <div className="health-inventory-result-icon" aria-hidden="true">
@@ -568,9 +635,11 @@ function InventoryComparison({
             name={
               !inventory.server
                 ? "database"
-                : differences > 0 || countsDiffer
+                : comparisonWarn
                   ? "alert"
-                  : "check"
+                  : comparisonStale || comparisonPending
+                    ? "info"
+                    : "check"
             }
             size={16}
           />
@@ -579,15 +648,29 @@ function InventoryComparison({
           <strong>
             {!inventory.server
               ? "A Remote Vault comparison is not available"
-              : differences > 0
-                ? `${differences.toLocaleString()} item ${differences === 1 ? "path differs" : "paths differ"}`
+              : comparisonPending
+                ? "Still counting notes on this computer"
+                : differenceSummaries.length > 0
+                ? `${differenceSummaries.join(" · ")}${comparisonStale ? " (based on the last known Remote Vault view)" : ""}`
                 : countsDiffer
-                  ? "The item counts differ"
-                  : "The same item paths are present in both places"}
+                  ? "The latest note and folder counts do not match yet"
+                  : localOnlyFormatNotes > 0
+                    ? `${localOnlyFormatNotes.toLocaleString()} ${localOnlyFormatNotes === 1 ? "note in another format stays" : "notes in other formats stay"} on this computer`
+                  : comparisonStale
+                    ? "The current Remote Vault contents cannot be confirmed"
+                  : "Notes and folders match"}
           </strong>
           <p>
             {inventory.server
-              ? `${confirmed.toLocaleString()} of ${totalNotes.toLocaleString()} notes have confirmed content on the Remote Vault.`
+              ? comparisonPending
+                ? "The comparison will appear when the supported vault file list is ready."
+                : localOnlyFormatNotes > 0
+                ? comparisonStale
+                  ? "Syncing these file types requires Pro. The Remote Vault view is last known and may be out of date."
+                  : "Syncing these file types requires Pro. They remain available to preview locally."
+                : comparisonStale
+                  ? "The Remote Vault is unavailable, so this last-known comparison may be out of date."
+                : `${confirmed.toLocaleString()} of ${totalTextNotes.toLocaleString()} text notes have confirmed content on the Remote Vault.`
               : "Your local files remain available on this computer."}
           </p>
         </div>
@@ -598,17 +681,70 @@ function InventoryComparison({
                 {open ? "Hide differences" : "Review differences"}
               </button>
             )}
-            <AsyncButton className="primary sm" onClick={() => handlers.actions.syncNow()}>
-              Check again
-            </AsyncButton>
+            {comparisonWarn && (
+              <AsyncButton className="primary sm" onClick={() => handlers.actions.syncNow()}>
+                Check again
+              </AsyncButton>
+            )}
+            {localOnlyFormatNotes > 0 && showAttachmentUpgrade && (
+              <button
+                type="button"
+                className="primary sm"
+                onClick={() => handlers.actions.openUpgrade()}
+              >
+                Upgrade to Pro
+              </button>
+            )}
           </div>
         )}
       </div>
 
+      {inventory.server && differences > 0 && (
+        <div className="health-difference-breakdown" aria-label="Difference breakdown">
+          <DifferenceSide
+            title={
+              comparisonStale
+                ? "Missing from the Remote Vault (last known view)"
+                : "Missing from the Remote Vault"
+            }
+            textNotes={inventory.deviceOnlyNotes.length}
+            otherFormats={inventory.deviceOnlyFiles.length}
+            folders={inventory.deviceOnlyFolders.length}
+            note={
+              localOnlyFormatNotes > 0
+                ? showAttachmentUpgrade
+                  ? "Other-format notes stay local on this plan. Preview them here or upgrade to sync them."
+                  : "Other-format notes stay local on this plan and remain available to preview here."
+                : unexpectedDifferences > 0
+                  ? "Check again to retry anything that has not synced yet."
+                  : undefined
+            }
+          />
+          <DifferenceSide
+            title={
+              comparisonStale
+                ? "Missing from this computer (last known view)"
+                : "Missing from this computer"
+            }
+            textNotes={inventory.serverOnlyNotes.length}
+            otherFormats={inventory.serverOnlyFiles.length}
+            folders={inventory.serverOnlyFolders.length}
+            note={
+              inventory.serverOnlyNotes.length +
+                inventory.serverOnlyFiles.length +
+                inventory.serverOnlyFolders.length >
+              0
+                ? "Check again to download anything you can access."
+                : undefined
+            }
+          />
+        </div>
+      )}
+
       {open && differences > 0 && (
         <div className="health-differences">
           <DifferenceList
-            title="Only on this computer"
+            title="Text notes missing from the Remote Vault"
             description="These notes have no matching Remote Vault path yet. Open one to review it, or check again to retry sync."
             paths={inventory.deviceOnlyNotes}
             details={issueWhy}
@@ -616,33 +752,37 @@ function InventoryComparison({
             onAction={handlers.openNote}
           />
           <DifferenceList
-            title="Folders only on this computer"
+            title="Folders missing from the Remote Vault"
             description="These folders have no matching Remote Vault path yet. Check again to retry sync."
             paths={inventory.deviceOnlyFolders}
             actionLabel="Show"
             onAction={(path) => void handlers.actions.reveal(path)}
           />
           <DifferenceList
-            title="Files only on this computer"
-            description="These standalone files have no matching Remote Vault path yet. Check again to retry sync."
+            title="Notes in other formats missing from the Remote Vault"
+            description={
+              standaloneFileSyncBlocked
+                ? "These notes stay on this computer because syncing these file types requires Pro. They remain available to preview locally."
+                : "These notes have no matching Remote Vault path yet. Check again to retry sync."
+            }
             paths={inventory.deviceOnlyFiles}
             actionLabel="Show"
             onAction={(path) => void handlers.actions.reveal(path)}
           />
           <DifferenceList
-            title="Only in the Remote Vault view"
+            title="Text notes missing from this computer"
             description="The Remote Vault knows these paths but this computer has no matching note. Check again to download anything you can access."
             paths={inventory.serverOnlyNotes}
             details={issueWhy}
           />
           <DifferenceList
-            title="Folders only in the Remote Vault view"
+            title="Folders missing from this computer"
             description="The Remote Vault knows these folders but this computer has no matching folders. Check again to download anything you can access."
             paths={inventory.serverOnlyFolders}
           />
           <DifferenceList
-            title="Files only in the Remote Vault view"
-            description="The Remote Vault knows these files but this computer has no matching files. Check again to download anything you can access."
+            title="Notes in other formats missing from this computer"
+            description="The Remote Vault knows these notes but this computer has no matching paths. Check again to download anything you can access."
             paths={inventory.serverOnlyFiles}
           />
         </div>
@@ -651,29 +791,88 @@ function InventoryComparison({
   );
 }
 
+function DifferenceSide({
+  title,
+  textNotes,
+  otherFormats,
+  folders,
+  note,
+}: {
+  title: string;
+  textNotes: number;
+  otherFormats: number;
+  folders: number;
+  note?: string;
+}) {
+  if (textNotes === 0 && otherFormats === 0 && folders === 0) return null;
+
+  return (
+    <div className="health-difference-side">
+      <strong>{title}</strong>
+      <dl>
+        {textNotes > 0 && (
+          <div>
+            <dt>Text notes</dt>
+            <dd>{textNotes.toLocaleString()}</dd>
+          </div>
+        )}
+        {otherFormats > 0 && (
+          <div>
+            <dt title="PDFs, images, data, and other supported files">
+              Notes in other formats
+            </dt>
+            <dd>{otherFormats.toLocaleString()}</dd>
+          </div>
+        )}
+        {folders > 0 && (
+          <div>
+            <dt>Folders</dt>
+            <dd>{folders.toLocaleString()}</dd>
+          </div>
+        )}
+      </dl>
+      {note && <p>{note}</p>}
+    </div>
+  );
+}
+
 function InventoryPlace({
   icon,
   title,
   subtitle,
   counts,
+  countsReady = true,
 }: {
   icon: "disk" | "database";
   title: string;
   subtitle: string;
   counts: NonNullable<HealthInventory["server"]>;
+  countsReady?: boolean;
 }) {
+  const shown = (count: number) => (countsReady ? count.toLocaleString() : "—");
   return (
     <div className="health-place">
       <div className="health-place-title">
         <span className="health-place-icon"><Glyph name={icon} size={18} /></span>
         <div><strong>{title}</strong><p>{subtitle}</p></div>
       </div>
-      <strong className="health-place-total">{counts.total.toLocaleString()}</strong>
-      <span className="health-place-total-label">items Baalda can list</span>
+      <strong className="health-place-primary">
+        {countsReady ? (counts.notes + counts.files).toLocaleString() : "—"}
+      </strong>
+      <span className="health-place-primary-label">Notes</span>
       <dl>
-        <div><dt>Notes</dt><dd>{counts.notes.toLocaleString()}</dd></div>
-        <div><dt>Folders</dt><dd>{counts.folders.toLocaleString()}</dd></div>
-        <div><dt>Other files</dt><dd>{counts.files.toLocaleString()}</dd></div>
+        <div>
+          <dt>Text notes</dt>
+          <dd>{shown(counts.notes)}</dd>
+        </div>
+        <div>
+          <dt>Other formats</dt>
+          <dd>{shown(counts.files)}</dd>
+        </div>
+        <div>
+          <dt>Folders</dt>
+          <dd>{shown(counts.folders)}</dd>
+        </div>
       </dl>
     </div>
   );
@@ -817,9 +1016,8 @@ function Confirms({
           }}
         >
           <p className="muted">
-            Baalda keeps a copy of every note it deletes. Emptying them frees the space and
-            removes your safety net for those deletes. Notes still in the vault are
-            untouched.
+            These files can include unsent local edits and deleted-note copies kept by earlier
+            versions. Emptying permanently removes them. Notes still in the vault are untouched.
           </p>
         </ConfirmDialog>
       );
@@ -904,11 +1102,13 @@ export function splitHost(
 
 function VerdictCard({
   snapshot,
+  standaloneFileSyncBlocked,
   onRefresh,
   loading,
   onGoToGeneral,
 }: {
   snapshot: VaultHealthSnapshot;
+  standaloneFileSyncBlocked: boolean;
   onRefresh: () => void;
   loading: boolean;
   /** Where sync is turned on; a local vault's primary button leads there. */
@@ -916,7 +1116,6 @@ function VerdictCard({
 }) {
   const { report, actions } = snapshot;
   const [copied, setCopied] = useState(false);
-  const tone = verdictTone(report.verdict);
   const syncing = report.verdict === "syncing" || report.verdict === "connecting";
   const local = report.verdict === "local";
   // Signed out is a verdict, not an issue row (the model emits no `sign-in`
@@ -924,6 +1123,25 @@ function VerdictCard({
   // a session exists, and a disabled "Sync now" would say nothing about why.
   const signedOut = report.verdict === "signed-out";
   const { text, host } = splitHost(report.detail, report.serverHost);
+  const localOnlyFormatNotes = standaloneFileSyncBlocked
+    ? snapshot.inventory.deviceOnlyFiles.length
+    : 0;
+  const planPartial = report.verdict === "healthy" && localOnlyFormatNotes > 0;
+  const healthyPending = report.verdict === "healthy" && !snapshot.inventory.localReady;
+  const tone = planPartial || healthyPending ? "muted" : verdictTone(report.verdict);
+  const syncedTextNotes = report.counts?.synced ?? 0;
+  const headline =
+    report.verdict !== "healthy"
+      ? report.headline
+      : healthyPending
+        ? `${syncedTextNotes.toLocaleString()} text notes synced · counting other formats`
+        : localOnlyFormatNotes > 0
+          ? `${syncedTextNotes.toLocaleString()} text notes synced · ${localOnlyFormatNotes.toLocaleString()} ${localOnlyFormatNotes === 1 ? "note in another format" : "notes in other formats"} local only`
+          : report.counts?.total === 0
+            ? snapshot.inventory.local.notes + snapshot.inventory.local.files === 0
+              ? "This vault is empty"
+              : "No text notes need content sync"
+            : `${syncedTextNotes.toLocaleString()} text notes synced`;
 
   const copy = async () => {
     await actions.copyDiagnostics();
@@ -935,9 +1153,13 @@ function VerdictCard({
     <div className="health-verdict" data-tone={tone}>
       <div className="health-verdict-main">
         <span className="health-pill" data-tone={tone}>
-          {verdictLabel(report.verdict)}
+          {healthyPending
+            ? "Checking notes"
+            : planPartial
+              ? "Partially synced"
+              : verdictLabel(report.verdict)}
         </span>
-        <h3 className="health-headline">{report.headline}</h3>
+        <h3 className="health-headline">{headline}</h3>
         {/* The model already folds "Last confirmed …" into `detail` (see
             `model.ts` → `describe`), so the card prints it verbatim rather than
             assembling a second, contradictory version. Only the server host is

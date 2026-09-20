@@ -136,8 +136,8 @@ const stats: VaultStats = {
   computedAt: 1_700_000_000_000,
   notes: { count: 12, bytes: 4096, empty: 1 },
   folders: 3,
-  attachments: { count: 0, bytes: 0 },
-  otherFiles: { count: 0, bytes: 0 },
+  attachments: { count: 2, bytes: 1024 },
+  otherFiles: { count: 4, bytes: 2048 },
   tags: 5,
   links: 9,
   brokenLinks: 2,
@@ -162,6 +162,7 @@ function snapshot(over: Partial<VaultHealthSnapshot> = {}): VaultHealthSnapshot 
     report: localReport,
     inventory: {
       local: { notes: 12, folders: 3, files: 4, total: 19 },
+      localReady: true,
       server: null,
       serverState: "unavailable",
       deviceOnlyNotes: [],
@@ -182,8 +183,10 @@ function snapshot(over: Partial<VaultHealthSnapshot> = {}): VaultHealthSnapshot 
   };
 }
 
-const render = (s: VaultHealthSnapshot) =>
-  renderToStaticMarkup(createElement(HealthView, { snapshot: s }));
+const render = (
+  s: VaultHealthSnapshot,
+  over: Partial<Parameters<typeof HealthView>[0]> = {},
+) => renderToStaticMarkup(createElement(HealthView, { snapshot: s, ...over }));
 
 /** Every check reporting zero, so a test only spells out the one it cares
  *  about. Rust always sends all fifteen. */
@@ -240,11 +243,34 @@ describe("HealthView", () => {
     expect(html).toContain("12.0 MB");
   });
 
-  it("keeps the overview to four useful metrics", () => {
-    const html = render(snapshot());
-    expect((html.match(/class="health-metric"/g) ?? []).length).toBe(4);
-    expect(html).toContain("Total items");
+  it("counts every standalone format as a note but excludes embedded attachments", () => {
+    const html = render(
+      snapshot({
+        // The raw census intentionally disagrees with the surfaced tree: it
+        // also sees unsupported files and folders under hidden attachments/.
+        // Product Notes/Folders must use the supported tree counts below.
+        stats: {
+          ...stats,
+          folders: 9,
+          otherFiles: { count: 99, bytes: stats.otherFiles.bytes },
+        },
+      }),
+    );
+    expect((html.match(/class="health-metric"/g) ?? []).length).toBe(3);
+    expect(html).not.toContain("Total items");
+    expect(html).toContain("data-primary");
+    // 12 text notes + 4 standalone notes in other formats. The 2 embedded
+    // attachments contribute storage bytes, but not another two notes.
+    expect(html).toMatch(
+      /health-metric-value">16<\/span><span class="health-metric-label">.*?Notes/s,
+    );
+    expect(html).toMatch(
+      /health-metric-value">3<\/span><span class="health-metric-label">.*?Folders/s,
+    );
+    expect(html).not.toContain('health-metric-value">111</span>');
+    expect(html).not.toContain('health-metric-value">9</span>');
     expect(html).toContain("Stored locally");
+    expect(html.indexOf("Notes")).toBeLessThan(html.indexOf("Folders"));
     expect(html.indexOf("health-metrics")).toBeLessThan(html.indexOf("health-verdict"));
   });
 
@@ -297,6 +323,7 @@ describe("HealthView", () => {
         },
         inventory: {
           local: { notes: 12, folders: 3, files: 4, total: 19 },
+          localReady: true,
           server: { notes: 13, folders: 3, files: 4, total: 20 },
           serverState: "current",
           deviceOnlyNotes: ["Draft.md"],
@@ -308,11 +335,73 @@ describe("HealthView", () => {
         },
       }),
     );
-    expect(html).toContain("6 item paths differ");
+    expect(html).toContain("1 text note is missing from the Remote Vault");
+    expect(html).toContain("2 text notes are missing from this computer");
+    expect(html).not.toContain("paths differ");
+    expect(html).toContain("Difference breakdown");
+    expect(html).toContain("Missing from the Remote Vault");
+    expect(html).toContain("Missing from this computer");
+    expect(html).toContain("<dt>Text notes</dt><dd>1</dd>");
+    expect(html).toContain(
+      '<dt title="PDFs, images, data, and other supported files">Notes in other formats</dt><dd>1</dd>',
+    );
     expect(html).toContain("Review differences");
-    expect(html).toContain("9 of 12 notes have confirmed content on the Remote Vault");
+    expect(html).toContain("9 of 12 text notes have confirmed content on the Remote Vault");
     expect(html).toContain("Current Remote Vault view");
+    expect(html).toContain('class="health-place-primary">16</strong>');
+    expect(html).toContain('class="health-place-primary">17</strong>');
     expect(html).not.toMatch(/\bserver\b/i);
+  });
+
+  it("explains plan-blocked format notes without presenting them as a failed retry", () => {
+    const html = render(
+      snapshot({
+        report: {
+          ...localReport,
+          verdict: "healthy",
+          headline: "All 6,974 notes are on the Remote Vault",
+          counts: {
+            total: 6_974,
+            synced: 6_974,
+            pending: 0,
+            failed: 0,
+            unsynced: 0,
+            unreported: 0,
+          },
+          serverHost: "api.baalda.com",
+        },
+        stats: {
+          ...stats,
+          notes: { count: 6_974, bytes: stats.notes.bytes, empty: 0 },
+          otherFiles: { count: 160, bytes: stats.otherFiles.bytes },
+        },
+        inventory: {
+          local: { notes: 6_974, folders: 1, files: 160, total: 7_135 },
+          localReady: true,
+          server: { notes: 6_974, folders: 1, files: 0, total: 6_975 },
+          serverState: "current",
+          deviceOnlyNotes: [],
+          serverOnlyNotes: [],
+          deviceOnlyFolders: [],
+          serverOnlyFolders: [],
+          deviceOnlyFiles: Array.from({ length: 160 }, (_, i) => `Media/file-${i}.pdf`),
+          serverOnlyFiles: [],
+        },
+      }),
+      { standaloneFileSyncBlocked: true, showAttachmentUpgrade: true },
+    );
+
+    expect(html).toContain("6,974 text notes synced · 160 notes in other formats local only");
+    expect(html).toContain("Partially synced");
+    expect(html).not.toContain(">Healthy<");
+    expect(html).not.toContain("All 6,974 notes are on the Remote Vault");
+    expect(html).toContain("160 notes in other formats stay on this computer");
+    expect(html).toContain("Syncing these file types requires Pro");
+    expect(html).toContain("Other-format notes stay local on this plan");
+    expect(html).toContain("Upgrade to Pro");
+    expect(html).not.toContain(">Check again<");
+    expect((html.match(/class="health-difference-side"/g) ?? []).length).toBe(1);
+    expect(html).not.toContain("data-zero");
   });
 
   it("labels an offline server inventory as cached", () => {
@@ -321,6 +410,7 @@ describe("HealthView", () => {
         report: { ...localReport, verdict: "offline", counts: { total: 12, synced: 12, pending: 0, failed: 0, unsynced: 0, unreported: 0 } },
         inventory: {
           local: { notes: 12, folders: 3, files: 4, total: 19 },
+          localReady: true,
           server: { notes: 12, folders: 3, files: 4, total: 19 },
           serverState: "last-known",
           deviceOnlyNotes: [],
@@ -333,7 +423,34 @@ describe("HealthView", () => {
       }),
     );
     expect(html).toContain("Last known Remote Vault view");
-    expect(html).toContain("The same item paths are present in both places");
+    expect(html).toContain("The current Remote Vault contents cannot be confirmed");
+    expect(html).toContain("last-known comparison may be out of date");
+    expect(html).not.toContain("Notes and folders match");
+    expect(html).not.toContain("items Baalda can list");
+  });
+
+  it("does not invent local counts while the supported-file tree is loading", () => {
+    const html = render(
+      snapshot({
+        report: {
+          ...localReport,
+          verdict: "healthy",
+          counts: { total: 12, synced: 12, pending: 0, failed: 0, unsynced: 0, unreported: 0 },
+        },
+        inventory: {
+          ...snapshot().inventory,
+          local: { notes: 0, folders: 0, files: 0, total: 0 },
+          localReady: false,
+          server: { notes: 12, folders: 3, files: 4, total: 19 },
+          serverState: "current",
+        },
+      }),
+    );
+
+    expect(html).toContain("Still counting notes on this computer");
+    expect(html).toContain("supported vault file list is ready");
+    expect(html).toContain("12 text notes synced · counting other formats");
+    expect(html).not.toContain("Notes and folders match");
   });
 
   it("renders the issue list for a synced vault", () => {
@@ -405,10 +522,12 @@ describe("HealthView — checks", () => {
     expect(html).toContain("Checks are not available for this vault.");
   });
 
-  it("renders every check and summarises them", () => {
+  it("renders every check without a second summary or rerun control", () => {
     const html = render(snapshot({ checks: allPassing() }));
     for (const def of CHECK_DEFINITIONS) expect(html).toContain(def.label);
-    expect(html).toContain(`All ${CHECK_DEFINITIONS.length} checks passed`);
+    expect(html).not.toContain(`All ${CHECK_DEFINITIONS.length} checks passed`);
+    expect(html).not.toContain("Re-run file checks");
+    expect(html).not.toContain("health-checks-head");
     // A passing row still states what was verified.
     expect(html).toContain("Notes whose file is 0 bytes.");
   });
@@ -424,7 +543,6 @@ describe("HealthView — checks", () => {
     );
     expect(html).toContain("Not run");
     expect(html).toContain('data-state="unknown"');
-    expect(html).toContain("1 not run");
     // Grey and hollow, never the green tick a real pass gets.
     expect(html).toContain("data-hollow");
   });
@@ -442,8 +560,8 @@ describe("HealthView — checks", () => {
     expect(html).toContain("412");
     expect(html).toContain("5.0 MB");
     expect(html).toContain("Empty trash");
-    // One check failing, and it is housekeeping rather than a fault.
-    expect(html).toContain("housekeeping");
+    // The individual finding stays visible without a duplicate summary banner.
+    expect(html).not.toContain("Re-run file checks");
   });
 
   it("offers Delete all on a check whose items can all be deleted", () => {
@@ -496,7 +614,6 @@ describe("HealthChecks — a running action", () => {
         checks: failing,
         loading: false,
         handlers: handlers(over),
-        onRefresh: vi.fn(),
       }),
     );
 

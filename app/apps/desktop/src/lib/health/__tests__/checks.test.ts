@@ -57,6 +57,15 @@ describe("check definitions", () => {
     }
   });
 
+  it("keeps missing-note links manual while preserving source navigation", () => {
+    const def = CHECK_BY_ID.get("broken-links")!;
+    expect(def.heal).toBeUndefined();
+    expect(def.bulkActions).toBeUndefined();
+    expect(def.itemActions).toEqual(["open"]);
+    expect(def.howToFix.join(" ")).toContain("fix the link if it is a typo");
+    expect(def.howToFix.join(" ")).toContain("create the note yourself");
+  });
+
   it("word every action they offer", () => {
     for (const d of CHECK_DEFINITIONS) {
       for (const a of [...d.itemActions, ...(d.bulkActions ?? []), ...(d.heal ? [d.heal] : [])]) {
@@ -73,7 +82,6 @@ describe("check definitions", () => {
     const healable = CHECK_DEFINITIONS.filter((d) => d.heal).map((d) => d.id).sort();
     expect(healable).toEqual(
       [
-        "broken-links",
         "heavy-history",
         "illegal-names",
         "orphan-history",
@@ -89,11 +97,14 @@ describe("check definitions", () => {
       "case-collisions",
       "long-paths",
       "duplicate-titles",
+      "broken-links",
       "missing-embeds",
     ] as const) {
       const def = CHECK_BY_ID.get(id)!;
       expect(def.heal).toBeUndefined();
-      expect(def.howToFix.join(" ")).toMatch(/Baalda (will not|cannot)|Nothing here is broken/);
+      expect(def.howToFix.join(" ")).toMatch(
+        /Baalda (will not|cannot)|Nothing here is broken|create the note yourself/,
+      );
     }
   });
 

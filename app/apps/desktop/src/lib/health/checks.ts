@@ -31,7 +31,6 @@ export type CheckAction =
   | "delete-all"
   | "export-all"
   | "reset-history-all"
-  | "create-missing-notes"
   | "rename-legal"
   | "reclaim"
   | "empty-trash"
@@ -101,20 +100,6 @@ export const CHECK_ACTIONS: Record<CheckAction, CheckActionWording> = {
       tone: "danger",
     },
   },
-  "create-missing-notes": {
-    label: "Create the missing notes",
-    verb: "Created",
-    gerund: "Creating",
-    confirm: {
-      title: "Create the notes these links point at?",
-      body:
-        "Every link that resolves to nothing gets an empty note at exactly the path it " +
-        "names — the same note clicking the link would create. Nothing already in the " +
-        "vault is touched, and an unwanted one can simply be deleted.",
-      confirmLabel: "Create them",
-      tone: "accent",
-    },
-  },
   "rename-legal": {
     label: "Rename to legal names",
     verb: "Renamed",
@@ -138,8 +123,8 @@ export const CHECK_ACTIONS: Record<CheckAction, CheckActionWording> = {
     confirm: {
       title: "Empty the recovery copies?",
       body:
-        "Baalda keeps a copy of every note it deletes. Emptying them frees the space and " +
-        "removes your safety net for those deletes. Notes still in the vault are untouched.",
+        "These files can include local edits that could not be synced and deleted-note copies " +
+        "kept by earlier versions. Emptying permanently deletes them. Notes still in the vault are untouched.",
       confirmLabel: "Empty trash",
       tone: "danger",
     },
@@ -375,14 +360,11 @@ export const CHECK_DEFINITIONS: CheckDefinition[] = [
     looksFor: "[[wikilinks]] that point at no note in the vault.",
     whyItMatters: "Clicking one creates a new empty note instead of opening what you meant.",
     howToFix: [
-      "Open the note and fix the link if it is a typo.",
-      "Heal creates every missing note, empty, at exactly the path its link names — " +
-        "the same note clicking the link would create. Links that resolve to a note " +
-        "are never touched, and no existing file is written to.",
+      "Open the source note and fix the link if it is a typo.",
+      "If the link is intentional, create the note yourself with the name and location you want.",
     ],
     severity: "info",
     itemActions: ["open"],
-    heal: "create-missing-notes",
   },
   {
     id: "missing-embeds",
@@ -434,11 +416,12 @@ export const CHECK_DEFINITIONS: CheckDefinition[] = [
   {
     id: "trash",
     group: "storage",
-    label: "Recovery copies of deleted notes",
-    looksFor: "Copies Baalda keeps in .context/trash when a note is deleted.",
+    label: "Recovery copies",
+    looksFor:
+      "Unsent local edits Baalda preserved, plus deleted-note copies kept by earlier versions.",
     whyItMatters:
-      "They are your safety net for an accidental delete, and they take up space until emptied.",
-    howToFix: ["Empty the trash when you are sure you do not need them."],
+      "They may contain changes that could not be synced, and they take up space until emptied.",
+    howToFix: ["Review the copies, then empty them when you are sure you no longer need them."],
     severity: "info",
     itemActions: ["reveal"],
     bulkActions: ["empty-trash"],
