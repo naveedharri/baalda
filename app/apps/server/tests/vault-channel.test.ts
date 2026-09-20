@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { VaultChannel, type VaultChannelDeps } from "../src/sync/vault-channel.js";
 import { InMemoryPubSub } from "../src/sync/pubsub.js";
 import {
@@ -119,6 +119,58 @@ afterEach(async () => {
 });
 
 describe("VaultChannel relay (spec 05 §3.1)", () => {
+  it.each([true, false])("routes large restored grants through bulk only for capable clients (%s)", async (capable) => {
+    let readable = new Set<string>();
+    const loadDiff = vi.fn(async () => null);
+    const { channel } = channelWith(() => readable, noEmpty, loadDiff);
+    const ws = new FakeWs();
+    channel.handleConnection(ws as never);
+    ws.hello("good", {}, undefined, capable ? ["bulk-regrant"] : []);
+    await waitFor(() => ws.controls().some((c) => c.t === "ready"));
+    readable = new Set(Array.from({ length: 6974 }, (_, i) => `restored-${i}`));
+    await channel.publishAclChanged("v1");
+    await waitFor(() => capable
+      ? ws.controls().some((c) => c.t === "bootstrap")
+      : loadDiff.mock.calls.length === 6974);
+    expect(loadDiff).toHaveBeenCalledTimes(capable ? 0 : 6974);
+    expect(ws.controls().some((c) => c.t === "bootstrap")).toBe(capable);
+    ws.close();
+  });
+
+  it("delivers all cold revocations in bounded frames before ready, including notes without CRDT", async () => {
+    const { channel } = channelWith(() => new Set(["readable"]));
+    const ws = new FakeWs();
+    channel.handleConnection(ws as never);
+    const held = Array.from({ length: 6974 }, (_, i) => `held-${i}`);
+    ws.emit("message", Buffer.from(JSON.stringify({ t: "hello", token: "good", manifest: {},
+      held: [...held, "readable", held[0]], caps: ["revocation-batches"] })), false);
+    await waitFor(() => ws.controls().some((c) => c.t === "ready"));
+    const frames = ws.controls().filter((c) => c.t === "revoked");
+    expect(frames).toHaveLength(4);
+    expect(frames.every((c) => (c.docIds as string[]).length <= 2000)).toBe(true);
+    expect(frames.flatMap((c) => c.docIds)).toEqual(held);
+    expect(ws.controls().at(-1)?.t).toBe("ready");
+    ws.close();
+  });
+
+  it("batches live access removals for capable clients", async () => {
+    const held = Array.from({ length: 4500 }, (_, i) => `held-${i}`);
+    let readable = new Set(held);
+    const { channel } = channelWith(() => readable, noEmpty, async () => null);
+    const ws = new FakeWs();
+    channel.handleConnection(ws as never);
+    ws.hello("good", {}, undefined, ["revocation-batches"]);
+    await waitFor(() => ws.controls().some((c) => c.t === "ready"));
+    readable = new Set();
+    await channel.publishAclChanged("v1");
+    await waitFor(() => ws.controls().some((c) => c.t === "reauth"));
+    const frames = ws.controls().filter((c) => c.t === "revoked");
+    expect(frames.map((c) => (c.docIds as string[]).length)).toEqual([2000, 2000, 500]);
+    expect(frames.flatMap((c) => c.docIds)).toEqual(held);
+    expect(ws.controls().some((c) => c.t === "drop")).toBe(false);
+    ws.close();
+  });
+
   it("backfills the readable set then signals ready", async () => {
     const { channel } = channelWith(() => new Set(["A", "B"]));
     const ws = new FakeWs();

@@ -149,7 +149,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 
 - **Ingest (disk→CRDT):** debounced 150ms; diff current serialization vs file (diff-match-patch), apply as
   `Y.Text` insert/delete under `disk` origin. A large diff ratio (>0.6, e.g. an AI whole-file rewrite)
-  takes a recovery snapshot first.
+  takes a recovery snapshot first. If a transaction races the file read, hash, or snapshot,
+  retain the pre-read CRDT and apply the disk diff on that branch, then merge its operations
+  into the live doc. Never re-diff older file bytes against newly arrived peer content: that
+  turns peer additions into deletions. Ignore repeat reads of the merged disk input until
+  the combined result is written; allocate the branch only when a transaction actually races.
 - **Egest (CRDT→disk):** debounced 300ms; set echo hash, atomic write (Rust re-indexes on write).
 - CRDT persistence: every `doc.on("update")` appends to the SQLite log; compact into a snapshot past ~64 updates.
 
@@ -210,7 +214,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   flip arms the pull the authority is meant to cover; that ordering is what cleans up a member whose app
   was closed when the owner went Private, on their next launch. A revoked file leaves the disk only when
   all seven hold: both listings 200; the server ANSWERED the tombstone question; `isLive()`; an ACL
-  signal ≤60 s old (`ready.revoked` or `reauth`); the group fits `revokeCap = max(20, ceil(mapped*0.5))`
+  signal ≤60 s old (`ready.revoked`, batched `revoked`, or `reauth`); the group fits `revokeCap = max(20, ceil(mapped*0.5))`
   OR the server NAMED this doc; the access-check agrees where the cap lift is what saved it; and the doc
   is `pushed` or the file is empty. The named list is NOT a second opinion — `/api/notes` and
   `revokedFromManifest` both call `listReadableDocsInVault`, so it only catches a racy short answer; the
@@ -221,8 +225,20 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   LEAVES the whole group (a refused id also leaves the named set via
   `InboundHost.revocationRefused`). The named set unions across the session
   (`handleServerReauth` never clears it; `onServerDrop` feeds the live path) and a truncated list keeps
-  its 2000 as the allow-list. `folderLift` needs an authoritative pass that named nothing, and folder
-  removal is empty-only. Confirmed deletions and revocations are OUTRIGHT via Rust `delete_file`
+  its 2000 as the allow-list for older peers. Clients advertising `revocation-batches` receive all
+  named revocations in frames of at most 2000 ids (before `ready` on connect, before `reauth` live).
+  `hello.held` includes mapped notes without a local state vector; `hello.files` carries binaries.
+  Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
+  notes, then pull the registry and use the HTTP bulk downloader. Bootstrap pages are
+  gzip without `Content-Encoding`; the desktop explicitly inflates before decoding.
+  Active backfill retains download progress across buffer pauses, and open read-only
+  notes compare the pre-pull file with confirmed server content before reporting an edit.
+  The named-list and independent access-check guards still apply. Confirmed access changes may
+  remove empty folders even with a named note list; folder removal is always non-recursive, after
+  note checks, and unannounced mass removals retain their cap.
+  Large local note removals use `delete_files_batch` in chunks of at most 64, including revoked CRDT
+  cleanup, and report a throttled `removing` phase with a remaining-item count. Confirmed deletions
+  and revocations are OUTRIGHT via Rust `delete_file`
   (`rel_path_is_ignored` FIRST, so
   `.context` AND `.context/config.json` are refused, then a directory refusal; `deletePath` stays the
   sidebar's recursive one), regardless of authorship. A revoked removal also `docStore.drop`s +
@@ -285,10 +301,18 @@ within each ordered sibling group so the two preceding rows do not repeat; expli
 always win and participate in that neighbour check. Automatic colours are stable across restarts and
 can be enabled in Account Settings → Appearance; they are off by default.
 
+Vault Health reads `vaultSyncStatus` from the vault channel independently of the open note's
+`syncStatus`, which still controls editor permissions. A note-level refusal is not lost vault
+membership. Inbound safety refusals are `inbound-blocked` issues, distinct from disk write failures;
+large issue lists render in pages.
+
 Vault Health keeps its local census separate from its server inventory. Local totals come from Rust's
-disk/index pass; the server comparison reads the registry's last reconciled note, folder and file paths.
-That server view is explicitly last-known while offline, signed out, reconnecting or denied, and matching
-paths/counts never imply matching content — per-note pushed/sync state remains the content authority.
+disk/index pass and refresh during sync and access cleanup. For owners and admins, stored server totals
+and missing-from-server checks use the access tree, including private notes; the registry remains the
+accessible inventory used for download comparisons. Other accounts see their accessible server inventory.
+The server view is explicitly last-known while offline, signed out, reconnecting or denied. Matching
+paths/counts never imply matching content — per-note pushed/sync state remains the content authority,
+and active work takes precedence over a healthy comparison.
 An attachment-local-only notice is driven only by the server's explicit
 `attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
 the vault may be Pro, and billing-disabled self-hosts may still sync attachments.

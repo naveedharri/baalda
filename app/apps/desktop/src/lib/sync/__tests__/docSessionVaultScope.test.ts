@@ -593,6 +593,25 @@ describe("server-stated revocation (ready.revoked)", () => {
     sm.disable();
   });
 
+  it("replays a cold-start revocation after the initial reconcile enables sync", async () => {
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    fakeRegistry.reconcile.mockImplementationOnce(async () => {
+      pinChannelSynced(sm);
+      sm.handleServerRevoked(["d1", "d2"], false, vaultScopes.current()!);
+      expect(sm.revocationAuthority()).toBe(false);
+      expect(sm.hasPendingRegistryPull()).toBe(false);
+      return { seeded: false };
+    });
+    await sm.enable(session(), { orgId: ORG_A, name: "a", path: "/vaults/a", epoch: 1 });
+    expect(sm.revocationAuthority()).toBe(true);
+    expect(sm.hasPendingRegistryPull()).toBe(true);
+    await vi.advanceTimersByTimeAsync(251);
+    expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
+    sm.disable();
+    vi.useRealTimers();
+  });
+
   it("a truncated list still narrows, rather than lifting the cap wholesale", async () => {
     // The server is saying "there are more than I will name". Keeping the ids it
     // DID name is what stops the largest revocations — the only ones that can

@@ -75,7 +75,19 @@ describe("note-doubling: ingest vs. pull", () => {
         await persistence.saveSnapshot(id, s, v, upTo);
         if (!landed) {
           landed = true;
-          applyRemote(bridge, SERVER_TEXT);
+          // A peer sharing this note's history made the same rewrite. The
+          // former fixture inserted a second, unrelated note beside "# one";
+          // expecting FILE_TEXT then required deleting the peer's insertion.
+          const peer = new Y.Doc();
+          Y.applyUpdate(peer, Y.encodeStateAsUpdate(bridge.doc));
+          const sv = Y.encodeStateVector(peer);
+          const text = peer.getText("content");
+          peer.transact(() => {
+            text.delete(0, text.length);
+            text.insert(0, SERVER_TEXT);
+          });
+          bridge.applyRemote(Y.encodeStateAsUpdate(peer, sv));
+          peer.destroy();
         }
       },
     };
@@ -84,8 +96,8 @@ describe("note-doubling: ingest vs. pull", () => {
 
     await bridge.ingestNow();
 
-    // The file is what ingest is merging in, so the file's text is the answer —
-    // once, re-diffed against the doc as the remote left it.
+    // The peer already supplied exactly the file's bytes: do not insert a
+    // second rewrite or diff against the peer's newly changed positions.
     expect(bridge.serialize()).toBe(FILE_TEXT);
   });
 

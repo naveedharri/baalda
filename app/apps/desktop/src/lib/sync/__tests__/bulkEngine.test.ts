@@ -15,6 +15,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import * as ipc from "../../ipc";
 import type { VaultDocStoreOptions } from "../vaultDocStore";
 import type { VaultSyncEngineOptions } from "../vaultSyncEngine";
 
@@ -88,6 +89,7 @@ vi.mock("../../ipc", () => ({
   listNoteTitles: vi.fn(async () => []),
   pruneYjsDocs: vi.fn(async () => ({ docsRemoved: 0, updatesRemoved: 0, bytesReclaimed: 0 })),
   listAttachments: vi.fn(async () => []),
+  listBinaries: vi.fn(async () => []),
   readBinaryFile: vi.fn(async () => new Uint8Array()),
   writeBinaryFile: vi.fn(async () => {}),
   writeTrashCopy: vi.fn(async () => "trash"),
@@ -312,6 +314,8 @@ const flush = async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fakeRegistry.isNoteEmptyOnDisk.mockResolvedValue(false);
+  vi.mocked(ipc.loadYjsState).mockResolvedValue({ snapshot: null, updates: [], updateCount: 0 });
   vaultScopes.end();
   fakeRegistry.vaultId = COLLECTION;
   fakeRegistry.notes = [];
@@ -450,5 +454,42 @@ describe("a server without the bulk routes", () => {
     expect(api.batchPushDocs).not.toHaveBeenCalled();
     expect(docSyncHooks.connected).toEqual([]);
     expect(sm.syncLog().some((e) => e.event === "server-too-old")).toBe(true);
+  });
+});
+
+
+describe("unchanged empty notes on restart", () => {
+  it("settles bootstrap emptyDocs before opening an upload run, even before channel ready", async () => {
+    fakeRegistry.notes = notes(345);
+    apiHooks.emptyDocs = fakeRegistry.notes.map((n) => n.docId);
+    fakeRegistry.isNoteEmptyOnDisk.mockResolvedValue(true);
+    const phases: string[] = [];
+    const sm = new SyncManager();
+    sm.setSyncProgressListener(p => { if (p) phases.push(p.phase); });
+    await enable(sm);
+    expect(apiHooks.pushes).toEqual([]);
+    expect(storeHooks.promoted).toEqual([]);
+    expect(docSyncHooks.connected).toEqual([]);
+    expect(phases).not.toContain("uploading");
+    expect(fakeRegistry.pushedSet.size).toBe(345);
+    sm.disable();
+  });
+
+  it("still queues a blank file whose local CRDT holds unsent text", async () => {
+    fakeRegistry.notes = notes(25);
+    apiHooks.emptyDocs = fakeRegistry.notes.map((n) => n.docId);
+    fakeRegistry.isNoteEmptyOnDisk.mockResolvedValue(true);
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "not written to disk yet");
+    const snapshot = Y.encodeStateAsUpdate(doc);
+    doc.destroy();
+    vi.mocked(ipc.loadYjsState).mockImplementation(async id => ({
+      snapshot: id === "d0" ? snapshot : null, updates: [], updateCount: 0,
+    }));
+    const sm = new SyncManager();
+    await enable(sm);
+    expect(apiHooks.pushes.flat().map(n => n.docId)).toEqual(["d0"]);
+    expect(fakeRegistry.pushedSet.size).toBe(25);
+    sm.disable();
   });
 });

@@ -53,7 +53,7 @@ export interface HealthContentFailure {
  *  `RegistryFailure`. Kept structural so the model needs no value import from
  *  the sync layer. */
 export interface HealthRegistryFailure {
-  kind: "folder" | "note" | "materialize" | "inbound" | "orphan";
+  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan";
   path: string;
   docId: string | null;
   reason: string;
@@ -71,7 +71,7 @@ export interface HealthFailures {
 export interface HealthInput {
   /** `store.syncEnabled` — is the sync layer live for this vault? */
   syncEnabled: boolean;
-  /** `store.syncStatus` — the OPEN doc's socket status (stale when none is open). */
+  /** `store.vaultSyncStatus` — the vault channel, independent of note permissions. */
   syncStatus: SyncStatus;
   /** `store.authStatus`. */
   authStatus: AuthStatus;
@@ -586,6 +586,27 @@ function limitIssue(f: HealthRegistryFailure): HealthIssue {
 function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue {
   const key = f.docId ?? f.path;
   if (isLimitCode(f.code)) return limitIssue(f);
+  if (f.kind === "inbound-blocked") {
+    return {
+      key,
+      docId: f.docId,
+      path: f.path,
+      kind: "inbound-blocked",
+      severity: "error",
+      title: "Local change held for safety",
+      why: `Baalda kept this item on disk because a sync safety check did not pass. ${capitalize(f.reason)}`,
+      remedies: ["retry", "reveal", "copy-details"],
+      code: f.code,
+      explanation: {
+        meaning: "A removal or move requested by the Remote Vault was not applied. This is a safety check, not a failure to write a downloaded note.",
+        next: "Baalda checks again on the next sync pass. Items stay here until the required checks pass.",
+        fixes: ["Retry sync to check the current access and structure.", "If this repeats, copy the details for investigation before removing local files."],
+        safety: "unknown",
+      },
+      facts: [...pathFact(f.path), ...docIdFact(f.docId), { label: "Safety check", value: f.reason, copyable: true }],
+      autoRetries: true,
+    };
+  }
   if (f.kind === "materialize" || f.kind === "inbound") {
     return {
       key,
@@ -1213,9 +1234,13 @@ function describe(
       };
     case "syncing": {
       const p = input.syncProgress;
+      if (p?.phase === "removing") return {
+        headline: `Updating access — ${num(Math.max(0, p.total - p.done))} remaining`,
+        detail: "Removing local copies you can no longer access.",
+      };
       const of = p && p.total > 0 ? `${num(p.done)} of ${num(p.total)}` : num(behind);
       return {
-        headline: `Syncing — ${of}`,
+        headline: `Syncing — ${of} updates`,
         detail:
           `${num(counts.synced)} of ${plural(counts.total, "note")} are confirmed so far` +
           `${where}.${overflow}`,

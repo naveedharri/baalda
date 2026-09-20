@@ -444,6 +444,7 @@ export class SyncManager implements InboundHost {
   // inbound backfill → report a terminal phase. Everything here is allocated in
   // `enable` and released in `teardown`, so a run can never outlive its vault.
   /** Throttled progress mirror for the store (`syncProgress`/`docSyncState`). */
+  private cleanupProgress: SyncProgressReporter | null = null;
   private progress: SyncProgressReporter | null = null;
   private onSyncProgress?: (progress: SyncProgress | null) => void;
   private onDocState?: (patch: Record<string, DocSyncState | null>) => void;
@@ -663,6 +664,7 @@ export class SyncManager implements InboundHost {
   private binaryDownloadPhase = false;
   /** Resolves when the current bulk run finishes (tests). */
   private bulkRun: Promise<void> | null = null;
+  private bulkDownloadPending = false;
 
   // The UI shows ONE connection indicator, but two things can drive it: the
   // open note's provider (authoritative for that doc, incl. read-only grants)
@@ -798,7 +800,9 @@ export class SyncManager implements InboundHost {
         );
         return;
       case "no-access":
-        this.note("error", "no-access", "The server refused access to this vault");
+        this.note("error", "no-access", this.vaultStatus === "no-access"
+          ? "The server refused access to this vault"
+          : "The server refused access to the open note");
         return;
       case "deleted":
         this.note("warn", "deleted", "The open note no longer exists on the server");
@@ -829,6 +833,10 @@ export class SyncManager implements InboundHost {
     const prev = this.loggedPhase;
     this.loggedPhase = phase;
     if (phase == null || phase === "idle") return;
+    if (phase === "removing") {
+      this.note("info", "run-start", "Updating access — checking local copies");
+      return;
+    }
     if (phase === "registering" || phase === "uploading" || phase === "downloading") {
       // One start per run, not one per phase: a run walks registering →
       // downloading → uploading and all three are the same wave of work.
@@ -2458,6 +2466,7 @@ export class SyncManager implements InboundHost {
     path: string,
     trashedTo: string | null,
     reason: "deleted" | "revoked",
+    crdtCleared = false,
   ): void {
     // Every verdict below described the local incarnation that just left the
     // readable set. Keeping a terminal no-write result across revocation makes
@@ -2476,7 +2485,7 @@ export class SyncManager implements InboundHost {
     this.unhydratedPlaceholders.delete(docId);
     this.registry.clearUnhydratedPlaceholder?.(docId);
     this.progress?.forgetDoc(docId);
-    this.progress?.flush();
+
     if (reason === "revoked") {
       // `releaseDoc` only RELEASED this doc, which deliberately keeps its state
       // vector (a rename doesn't change content, so the manifest stays true).
@@ -2494,7 +2503,7 @@ export class SyncManager implements InboundHost {
       // vault-open GC sweep tidies it instead, and nothing here may block the
       // removal loop.
       const epoch = this.scope?.vaultEpoch ?? undefined;
-      void ipc.clearYjsDoc(docId, epoch).catch(() => {});
+      if (!crdtCleared) void ipc.clearYjsDoc(docId, epoch).catch(() => {});
     }
     this.onNoteRemoved?.(docId, path, trashedTo, reason);
   }
@@ -2530,6 +2539,15 @@ export class SyncManager implements InboundHost {
    * the vault channel's backfill if one is still arriving.
    */
   private settleAfterPull(scope: VaultScope): void {
+    if (this.bulkDownloadPending && !this.bulkPhase && !this.contentRunInFlight()) {
+      this.bulkDownloadPending = false;
+      this.vaultEngineLiveOnly = true;
+      this.vaultEngine?.reconnect({ liveOnly: true });
+      this.bulkRun = this.runBulkEngine(scope).catch((e) => {
+        console.warn("[sync] access restore download failed", e);
+      });
+      return;
+    }
     // A live run will reach its own terminal phase and will pick up whatever the
     // pull added, because the queue is rebuilt from `mappedNotes()` minus the
     // pushed set. Restarting it here instead would let a busy team's structural
@@ -2556,6 +2574,10 @@ export class SyncManager implements InboundHost {
    */
   private startContentRunIfNeeded(scope: VaultScope): void {
     if (!this.enabled || !scope.isCurrent()) return;
+    if (this.bulkDownloadPending) {
+      if (!this.contentRunInFlight() && !this.bulkPhase) this.handleRegistryChanged("reauth");
+      return;
+    }
     if (this.contentRunInFlight()) return;
     // The bulk engine owns the vault's content right now. Its channel is
     // live-only, so `ready` arrives with a settled backfill and this edge fires
@@ -2951,8 +2973,10 @@ export class SyncManager implements InboundHost {
     // The progress mirror is created BEFORE the reconcile so the `registering`
     // phase is visible from its first item — that phase alone is minutes of work
     // on a large vault, and it used to report nothing at all.
+    let cleanupActive = false;
     const progress = new SyncProgressReporter({
       onProgress: (p) => {
+        if (cleanupActive) return;
         this.logRunPhase(p);
         this.onSyncProgress?.(p);
       },
@@ -2965,20 +2989,43 @@ export class SyncManager implements InboundHost {
     // uploader keeps ticking `done` against it — which once rendered the header
     // as "Syncing 585/164". Per-doc badge states stay through in all cases:
     // they are keyed by docId, so concurrent writers cannot garble them.
-    const counterOwned = (): boolean =>
-      this.contentRunInFlight() || this.downloadPhase;
+    const cleanup = new SyncProgressReporter({
+      onProgress: (p) => {
+        if (!cleanupActive) return;
+        this.logRunPhase(p);
+        this.onSyncProgress?.(p);
+      },
+      onDocState: () => {},
+    });
+    this.cleanupProgress = cleanup;
+    const counterOwned = (): boolean => this.bulkPhase || this.contentRunInFlight() || this.downloadPhase;
     this.registry.setProgressSink({
       phase: (p, t) => {
+        if (p === "removing") {
+          cleanupActive = true;
+          cleanup.phase(p, t);
+          return;
+        }
+        if (cleanupActive) {
+          cleanup.flush();
+          cleanupActive = false;
+          this.onSyncProgress?.(progress.snapshot());
+        }
         if (!counterOwned()) progress.phase(p, t);
       },
       addTotal: (n) => {
-        if (!counterOwned()) progress.addTotal(n);
+        if (cleanupActive) cleanup.addTotal(n);
+        else if (!counterOwned()) progress.addTotal(n);
       },
       item: (o) => {
-        if (!counterOwned()) progress.item(o);
+        if (cleanupActive) cleanup.item(o);
+        else if (!counterOwned()) progress.item(o);
       },
       doc: (docId, state) => progress.doc(docId, state),
-      flush: () => progress.flush(),
+      flush: () => {
+        if (cleanupActive) cleanup.flush();
+        progress.flush();
+      },
     });
     // ---- PHASE A: local only. One config read; no socket, no HTTP. ----
     //
@@ -3035,6 +3082,10 @@ export class SyncManager implements InboundHost {
       // is news (see `markLive` for the other half of the condition).
       this.pulledOnce = true;
       this.markLive();
+      // The primed channel may name revocations before reconcile completes.
+      // Their pull requests are ignored while disabled, and the first pass
+      // deliberately lacks removal authority. Retry once that gate opens.
+      if (this.revocationAuthority()) this.handleRegistryChanged("acl-revoked");
       // Sweep unreachable CRDT rows HERE and nowhere else: the registry map is
       // complete as of the line above, and the download phase below has not yet
       // begun to create docs. Fire-and-forget — a vault that cannot be tidied
@@ -3282,6 +3333,16 @@ export class SyncManager implements InboundHost {
       // named by now. Both are the SERVER talking; `registry.isPushed` is only
       // this device's optimisation and joins the work list separately.
       const serverEmpty = new Set([...(bootstrap?.emptyDocs ?? []), ...this.serverEmpty]);
+      // Bootstrap can finish before ready.empty's disk probe, or name empty
+      // docs beyond that frame's cap. A server-empty note is not upload work
+      // when its file AND local CRDT are empty too. Settle both sources before
+      // building the batch, just as the ordinary channel path does.
+      while (this.emptyProbe) {
+        await this.emptyProbe;
+        if (!scope.isCurrent()) return;
+      }
+      await this.settleServerEmpty([...serverEmpty], scope);
+      if (!scope.isCurrent()) return;
       const push = await this.runBatchPushPhase(scope, vaultId, store, serverEmpty, conflicts);
       if (!scope.isCurrent()) return;
       for (const docId of push?.conflicts ?? []) conflicts.add(docId);
@@ -3820,7 +3881,11 @@ export class SyncManager implements InboundHost {
 
   /** One backfilled document applied by the vault channel. */
   private handleInboundProgress(done: number, total: number, scope: VaultScope): void {
-    if (!this.downloadPhase || !scope.isCurrent()) return;
+    if (!scope.isCurrent()) return;
+    if (!this.downloadPhase && !this.bulkPhase && !this.contentRunInFlight()) {
+      this.beginDownloadPhase(scope);
+    }
+    if (!this.downloadPhase) return;
     const progress = this.progress;
     if (!progress) return;
     if (total > this.lastInboundTotal) {
@@ -3829,6 +3894,9 @@ export class SyncManager implements InboundHost {
     }
     for (let i = this.lastInboundDone; i < done; i++) progress.item("ok");
     this.lastInboundDone = done;
+    // Buffer draining is useful work even while the socket is paused. A slow
+    // apply must not inherit the original connection's expired watchdog.
+    this.armChannelWatchdog(scope);
     // Completion is NOT decided here. This runs inside the engine's drain loop,
     // where `draining` is true and therefore nothing can ever look settled; the
     // engine signals the real edge through `handleInboundIdle`.
@@ -3856,6 +3924,10 @@ export class SyncManager implements InboundHost {
    */
   private completeRun(scope: VaultScope): void {
     if (!scope.isCurrent()) return;
+    if (!this.bulkPhase && this.vaultEngine && !this.vaultEngine.backfillSettled()) {
+      this.beginDownloadPhase(scope);
+      return;
+    }
     const progress = this.progress;
     if (!progress) return;
     this.downloadPhase = false;
@@ -3995,6 +4067,7 @@ export class SyncManager implements InboundHost {
       this.presenceRepushTimer = null;
     }
     this.vaultStatus = "idle";
+    this.onVaultStatus?.("idle");
     // The timeline describes the vault we are leaving; keeping it would explain
     // the next vault's state with the previous one's history. The SyncLog object
     // itself survives, so a subscriber's unsubscribe stays valid (see the field).
@@ -4063,6 +4136,7 @@ export class SyncManager implements InboundHost {
     this.bulkFailures.clear();
     this.serverTooOld = false;
     this.bulkRun = null;
+    this.bulkDownloadPending = false;
     this.downloadPhase = false;
     this.clearChannelWatchdog();
     this.channelStalled = false;
@@ -4086,6 +4160,8 @@ export class SyncManager implements InboundHost {
     this.registry.reset();
     // Nulls the store's `syncProgress`, so a half-finished count from the vault we
     // just left is never on screen.
+    this.cleanupProgress?.dispose();
+    this.cleanupProgress = null;
     this.progress?.dispose();
     this.progress = null;
     // Retire the scope LAST so anything above that consults `isCurrent()` while
@@ -4308,6 +4384,7 @@ export class SyncManager implements InboundHost {
     // Reflect "connecting" the moment we switch into a vault, so the light
     // moves off a stale value before the socket reports back.
     this.vaultStatus = "connecting";
+    this.onVaultStatus?.("connecting");
     if (!this.current) this.emitStatus();
     const store = new VaultDocStore({
       resolvePath: (docId) => this.registry.pathForDocId(docId),
@@ -4372,6 +4449,12 @@ export class SyncManager implements InboundHost {
       api,
       vaultId,
       sink: store,
+      onBootstrapRequired: () => {
+        if (!scope.isCurrent()) return;
+        this.bulkDownloadPending = true;
+        if (!this.contentRunInFlight() && !this.bulkPhase) this.progress?.phase("downloading", 0);
+        this.handleRegistryChanged("reauth");
+      },
       onStatus: (s) => {
         // A dropped/reconnecting channel means we no longer have a live roster —
         // clear it so the sidebar doesn't show ghosts (the engine re-announces
@@ -4434,6 +4517,7 @@ export class SyncManager implements InboundHost {
       // `ready.revoked` can only name what we say we hold, and a `.pdf` set to
       // Private has to leave this disk exactly as a note does.
       fileDocIds: () => this.registry.fileDocIds(),
+      heldNoteIds: () => this.registry.allDocIds(),
     });
     this.vaultEngine.start();
     // Seed our own presence into the fresh engine (it flushes on `ready`).
@@ -4834,23 +4918,19 @@ export class SyncManager implements InboundHost {
   ): Promise<void> {
     const current = (): boolean =>
       (!scope || scope.isCurrent()) && this.current === sync && this.syncable();
-    // A doc this user may read but not write: the server's copy is the truth,
-    // and the pull about to land is what the editor will egest over the file.
-    // Anything the file holds that the doc does not is unsendable AND about to
-    // be overwritten, so keep a copy first (the uploader's `pushOne` does the
-    // same for a background doc). Checked BEFORE the pull, which is the last
-    // moment the file and the doc can still be compared honestly — and again
-    // after it, because `readOnly` is only authoritative once the socket has
-    // authenticated (the first call is a no-op for a grant this session has not
-    // learned yet, and the once-per-doc guard makes the second one free when it
-    // isn't).
-    if (sync.readOnly) await this.keepUnsendableOpenEdit(bridge, docId, scope);
+    // Capture before the pull can egest over disk, but compare only against a
+    // confirmed server state. A partial/empty Y.Doc is not evidence of an edit.
+    let fileBeforePull: string | undefined;
+    try {
+      fileBeforePull = await ipc.readNote(bridge.path, scope?.vaultEpoch);
+    } catch { /* no readable local content to preserve */ }
     if (!current()) return;
     // Up to 5s of waiting — easily long enough to span a vault switch. Seeding
     // then would read the NEW vault's file at this path into the OLD vault's doc.
     await sync.whenSynced(5000);
     if (!current()) return;
-    if (sync.readOnly) await this.keepUnsendableOpenEdit(bridge, docId, scope);
+    if (!sync.isSynced) return;
+    if (sync.readOnly) await this.keepUnsendableOpenEdit(bridge, docId, scope, fileBeforePull);
     if (!current()) return;
     const decision = decideSeed({
       signedIn: true,
@@ -4886,16 +4966,18 @@ export class SyncManager implements InboundHost {
     bridge: NoteBridge,
     docId: string,
     scope: VaultScope | null,
+    beforePull?: string,
   ): Promise<void> {
     if (this.unsendableReported.has(docId)) return;
     const relPath = bridge.path;
     let fileText: string;
     try {
-      fileText = await ipc.readNote(relPath, scope?.vaultEpoch);
+      fileText = beforePull ?? await ipc.readNote(relPath, scope?.vaultEpoch);
     } catch {
       return; // nothing readable to lose
     }
     if (scope && !scope.isCurrent()) return;
+    if (fileText.length === 0) return; // a download placeholder has no edit to lose
     if (fileText === bridge.serialize()) return; // converged — nothing to keep
     this.unsendableReported.add(docId);
     let dest: string | null = null;

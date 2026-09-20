@@ -890,9 +890,15 @@ export function Editor() {
                 </svg>
               </span>
               <span className="editor-lockbanner-text">
-                <strong>{itemLock ? "This note is locked" : "View-only access"}</strong>
+                <strong>
+                  {syncStatus === "no-access"
+                    ? "Access removed"
+                    : itemLock ? "This note is locked" : "View-only access"}
+                </strong>
                 <span className="editor-lockbanner-sub">
-                  {itemLock
+                  {syncStatus === "no-access"
+                    ? "This local copy is not syncing. Editing is disabled."
+                    : itemLock
                     ? "You can read it, but your changes won’t be saved or synced."
                     : "You can read this note, but you can’t edit it."}
                 </span>

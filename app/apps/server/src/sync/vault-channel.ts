@@ -514,7 +514,13 @@ class VaultConnection {
     // …and the mirror image: docs this client says it HOLDS that it may no
     // longer read. Pure set arithmetic over two things already in hand (the
     // hello manifest and `this.readable`), so it costs no query.
-    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest, hello.files);
+    const batchedRevocations = this.caps.has("revocation-batches");
+    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest, [...(hello.files ?? []), ...(hello.held ?? [])]);
+    if (batchedRevocations) {
+      for (let i = 0; i < revoked.length; i += REVOKED_CAP) {
+        this.send({ t: "revoked", docIds: revoked.slice(i, i + REVOKED_CAP) });
+      }
+    }
     this.send({
       t: "ready",
       // Omitted when nothing is empty, so the common frame is byte-identical to
@@ -523,7 +529,7 @@ class VaultConnection {
       ...(empty.length > 0 && emptyTruncated ? { emptyTruncated: true as const } : {}),
       ...(behind.length > 0 ? { behind } : {}),
       ...(behind.length > 0 && behindTruncated ? { behindTruncated: true as const } : {}),
-      ...(revoked.length > 0 ? { revoked } : {}),
+      ...(!batchedRevocations && revoked.length > 0 ? { revoked } : {}),
       ...(revoked.length > 0 && revokedTruncated ? { revokedTruncated: true as const } : {}),
     });
   }
@@ -578,7 +584,7 @@ class VaultConnection {
     for (const docId of [...Object.keys(manifest), ...(files ?? [])]) {
       if (this.readable.has(docId)) continue;
       if (seen.has(docId)) continue;
-      if (revoked.length >= REVOKED_CAP) {
+      if (!this.caps.has("revocation-batches") && revoked.length >= REVOKED_CAP) {
         revokedTruncated = true;
         break;
       }
@@ -869,12 +875,22 @@ class VaultConnection {
     const prev = this.readable;
     this.readable = next;
     let lost = 0;
+    let revokedBatch: string[] = [];
     for (const docId of prev) {
       if (!next.has(docId)) {
-        this.send({ t: "drop", docId }); // access lost
+        if (this.caps.has("revocation-batches")) {
+          revokedBatch.push(docId);
+          if (revokedBatch.length === REVOKED_CAP) {
+            this.send({ t: "revoked", docIds: revokedBatch });
+            revokedBatch = [];
+          }
+        } else {
+          this.send({ t: "drop", docId });
+        }
         lost++;
       }
     }
+    if (revokedBatch.length > 0) this.send({ t: "revoked", docIds: revokedBatch });
     const added = [...next].filter((d) => !prev.has(d));
     // The set of readable docs only shifts on add/remove — but a view↔edit change
     // (or a lock) leaves the set intact while flipping the OPEN note's editability.
@@ -897,6 +913,12 @@ class VaultConnection {
       // We can now see docs we couldn't before — ask the vault to re-announce
       // presence so viewers of the newly-readable docs light up for us.
       void this.pubsub.publish(vaultTopic(this.vaultId), encodePubsubPresenceQuery());
+    }
+    // Large grants use the client's bounded HTTP bootstrap, with real download
+    // progress. Flooding the live feed here bypasses its backfill counters.
+    if (added.length >= 25 && this.caps.has("bulk-regrant")) {
+      this.send({ t: "bootstrap" });
+      return;
     }
     // Newly-readable docs: full backfill (client holds no state vector for them).
     await runPool(added, this.deps.concurrency, (docId) => this.sendDocBackfill(docId, undefined));

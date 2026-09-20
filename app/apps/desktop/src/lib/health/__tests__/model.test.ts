@@ -6,6 +6,7 @@
 // problem actually is.
 
 import { describe, expect, it } from "vitest";
+import { syncBadgeLabel } from "../../../components/Identity";
 import {
   buildHealthReport,
   classifyUploadReason,
@@ -155,7 +156,7 @@ describe("verdict precedence", () => {
       }),
     );
     expect(r.verdict).toBe("syncing");
-    expect(r.headline).toBe("Syncing — 40 of 100");
+    expect(r.headline).toBe("Syncing — 40 of 100 updates");
     expect(stage(r, "server").state).toBe("busy");
   });
 
@@ -372,6 +373,19 @@ describe("registry failures", () => {
     expect(i).toBeDefined();
     expect(i?.path).toBeNull();
     expect(i?.remedies).toEqual(["upgrade", "copy-details"]);
+  });
+
+  it("reports refused inbound removals as safety checks without claiming a downloaded copy", () => {
+    const r = buildHealthReport(input({ failures: {
+      registry: [{ kind: "inbound-blocked", path: "Campaigns", docId: null,
+        reason: "refused: 1743 folder access removals exceeds the safety limit", code: null }],
+      content: [], limitCode: null,
+    } }));
+    const issue = r.issues.find((i) => i.path === "Campaigns")!;
+    expect(issue.kind).toBe("inbound-blocked");
+    expect(issue.title).toBe("Local change held for safety");
+    expect(issue.explanation.safety).toBe("unknown");
+    expect(issue.why).not.toContain("could not be written");
   });
 
   it("maps note/folder failures to `register-failed` and materialize/inbound to `materialize-failed`", () => {
@@ -1102,4 +1116,21 @@ describe("classifyUploadReason", () => {
     );
     expect(r.issues[0].explanation.meaning).toContain("Wibble.");
   });
+});
+
+
+describe("Health and header agreement during regrant", () => {
+  it.each(["registering", "uploading", "downloading", "removing"] as const)(
+    "keeps %s active even when all note confirmations still say synced", (phase) => {
+      const progress = { phase, done: 6476, total: 6628, failed: 0 };
+      const report = buildHealthReport(input({ ...healthyVault(6974), syncProgress: progress }));
+      expect(report.verdict).toBe("syncing");
+      const badge = syncBadgeLabel({ status: "synced", now: NOW, progress });
+      expect(badge).toContain(phase === "removing" ? "Updating access" : "Syncing");
+      expect(report.headline).toContain(phase === "removing" ? "Updating access" : "Syncing");
+      const settled = buildHealthReport(input({ ...healthyVault(6974),
+        syncProgress: { ...progress, phase: "done", done: 6628 } }));
+      expect(settled.verdict).toBe("healthy");
+    },
+  );
 });

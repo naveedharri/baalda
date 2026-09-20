@@ -14,6 +14,7 @@ vi.mock("../../ipc", () => ({
   trashNote: vi.fn(),
   deletePath: vi.fn(),
   deleteFile: vi.fn(),
+  deleteFilesBatch: vi.fn(),
   deleteFolderIfEmpty: vi.fn(),
   fileStat: vi.fn(),
   isVaultMismatch: vi.fn(() => false),
@@ -88,6 +89,15 @@ class FakeDisk {
 }
 
 function install(disk: FakeDisk) {
+  vi.mocked(ipc.deleteFilesBatch).mockImplementation(async (items) => Promise.all(items.map(async (item) => {
+    try {
+      await ipc.deleteFile(item.path);
+      return { path: item.path, error: null };
+    } catch (e) {
+      return { path: item.path, error: String(e) };
+    }
+  })));
+
   vi.mocked(ipc.listTree).mockImplementation((async () => disk.tree()) as never);
   vi.mocked(ipc.listNoteTitles).mockImplementation((async () => disk.titles()) as never);
   vi.mocked(ipc.readNote).mockImplementation((async (p: string) =>
@@ -437,7 +447,7 @@ describe("inbound rename", () => {
     expect([...disk.notes.keys()].sort()).toEqual(["new.md", "old.md"]);
     // And it is REPORTED, not swallowed: the user is the only one who can say
     // which of the two copies they meant.
-    const refused = reg.failures().find((f) => f.kind === "inbound" && f.path === "new.md");
+    const refused = reg.failures().find((f) => f.kind === "inbound-blocked" && f.path === "new.md");
     expect(refused?.reason).toContain("already occupies that path");
   });
 
@@ -1181,6 +1191,47 @@ describe("whole-vault Private reaches the member's disk", () => {
     expect(disk.deleted.length).toBe(10);
     expect(disk.notes.size).toBe(N - 10);
   });
+
+  it.each(["confirm", "grant", "fail"] as const)(
+    "keeps occupied folders safe during a large named cleanup when access check says %s",
+    async (accessCheck) => {
+      const disk = new FakeDisk();
+      const folders = Array.from({ length: 130 }, (_, i) => ({ id: `f${i}`, path: `F${i}` }));
+      for (const folder of folders) disk.folders.add(folder.path);
+      const notes = folders.map((f, i) => ({ id: `d${i}`, rel_path: `${f.path}/note.md` }));
+      for (const note of notes) {
+        disk.notes.set(note.rel_path, note.id);
+        disk.bodies.set(note.rel_path, "confirmed content");
+      }
+      install(disk);
+      const initial = new VaultRegistry(fakeApi({ notes, folders }));
+      initial.setInboundHost(recordingHost().host);
+      await initial.reconcile({ organizationId: ORG, vaultName: "v" });
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+      const api = fakeApi({ notes: [], folders: [], tombstones: [], folderTombstones: [], accessCheck });
+      const reg = new VaultRegistry(api);
+      reg.setInboundHost(recordingHost(true, new Set(notes.map((n) => n.id))).host);
+      for (const note of notes) reg.markPushed(note.id);
+      const phases: Array<[string, number | undefined]> = [];
+      let done = 0;
+      reg.setProgressSink({ phase: (phase, total) => { phases.push([phase, total]); },
+        item: () => { done++; }, addTotal: () => {}, doc: () => {}, flush: () => {} });
+      await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+      expect(api.accessCheck).toHaveBeenCalled();
+      expect(disk.notes.size).toBe(accessCheck === "confirm" ? 0 : 130);
+      expect(disk.folders.size).toBe(accessCheck === "confirm" ? 0 : 130);
+      expect(reg.failures().some((f) => f.reason.includes("folder access removals"))).toBe(false);
+      if (accessCheck === "confirm") {
+        expect(ipc.deleteFilesBatch).toHaveBeenCalledTimes(3);
+        expect(vi.mocked(ipc.deleteFilesBatch).mock.calls.every(([items]) => items.length <= 64)).toBe(true);
+        expect(phases).toContainEqual(["removing", 260]);
+        expect(done).toBeGreaterThanOrEqual(260);
+      } else {
+        expect(ipc.deleteFilesBatch).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("chunks the access check rather than earning a 400", async () => {
     // A vault larger than `ACCESS_CHECK_MAX` sent one oversized request, got a

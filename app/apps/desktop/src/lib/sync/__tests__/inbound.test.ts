@@ -585,6 +585,18 @@ describe("planInbound — circuit breakers", () => {
       expect(q.rejected).toHaveLength(100);
     });
 
+    it("cleans up large folder sets with named revocations, while retaining the unannounced cap", () => {
+      const localFolders = new Set(Array.from({ length: 1743 }, (_, i) => `F${i}`));
+      const localFolderIds = new Map([...localFolders].map((path, i) => [path, `f${i}`]));
+      const authoritativeRevoked = new Set(["d1"]);
+      const p = plan({ localFolders, localFolderIds, authoritativeRevoked, authoritative: true });
+      expect(p.removeFolders).toHaveLength(1743);
+      expect(p.rejected).toEqual([]);
+      const q = plan({ localFolders, localFolderIds, authoritativeRevoked });
+      expect(q.removeFolders).toEqual([]);
+      expect(q.rejected).toHaveLength(1743);
+    });
+
     it("removes only the docs the server NAMED, when it named any", () => {
       // `ready.revoked` names the docs the vault channel says this client holds
       // and may no longer read. Same resolver as the listing, read at a

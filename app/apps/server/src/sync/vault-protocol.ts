@@ -46,6 +46,8 @@ export interface HelloFrame {
    * Absent on clients that predate this (they simply never have a file named).
    */
   files?: string[];
+  /** Mapped notes held locally, including those with no CRDT state vector yet. */
+  held?: string[];
   /**
    * Opaque per-app-instance id, echoed by the client on its registry HTTP writes
    * (`x-baalda-origin`). It lets the channel skip telling a client about a
@@ -148,6 +150,8 @@ export type ServerControl =
       revoked?: string[];
       revokedTruncated?: true;
     }
+  | { t: "revoked"; docIds: string[] }
+  | { t: "bootstrap" }
   | { t: "drop"; docId: string } // access lost / doc removed -> client evicts
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token
   | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry
@@ -215,6 +219,9 @@ export function parseHello(text: string): HelloFrame | null {
     priority: Array.isArray(f.priority) ? f.priority : undefined,
     files: Array.isArray(f.files)
       ? f.files.filter((d): d is string => typeof d === "string" && d !== "")
+      : undefined,
+    held: Array.isArray(f.held)
+      ? f.held.filter((d): d is string => typeof d === "string" && d !== "")
       : undefined,
     origin: typeof f.origin === "string" && f.origin ? f.origin : undefined,
     caps: Array.isArray(f.caps) ? f.caps.filter((c): c is string => typeof c === "string") : undefined,

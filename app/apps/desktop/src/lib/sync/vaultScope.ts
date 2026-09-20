@@ -201,6 +201,7 @@ export function currentVaultEpoch(): number | null {
  */
 export type SyncProgressPhase =
   | "idle"
+  | "removing"
   | "registering"
   | "uploading"
   | "downloading"
@@ -211,7 +212,7 @@ export type SyncProgressPhase =
  *  failed. The UI uses it to hold still: the sidebar pins its row order for the
  *  length of a wave rather than re-sorting under the pointer as each file lands. */
 export function isBulkPhase(phase: SyncProgressPhase | undefined | null): boolean {
-  return phase === "registering" || phase === "uploading" || phase === "downloading";
+  return phase === "removing" || phase === "registering" || phase === "uploading" || phase === "downloading";
 }
 
 /** Counted progress for the current vault's sync run. `null` when none is running. */

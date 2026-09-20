@@ -42,6 +42,7 @@ export function HealthStats({
   statsError,
   handlers,
   onFlag,
+  syncing = false,
 }: {
   stats: VaultStats | null;
   /** Supported standalone files in the surfaced tree; null while that tree loads. */
@@ -54,6 +55,7 @@ export function HealthStats({
   /** A flag like "1 broken" is a dead end unless it leads somewhere: this opens
    *  the check that lists the files. */
   onFlag?: (check: VaultCheckId) => void;
+  syncing?: boolean;
 }) {
   if (!stats) {
     return (
@@ -85,7 +87,7 @@ export function HealthStats({
         noteCount == null
           ? "Counting supported files…"
           : "Text notes and other supported formats",
-      flag: stats.notes.empty > 0 ? `${stats.notes.empty.toLocaleString()} empty` : undefined,
+      flag: !syncing && stats.notes.empty > 0 ? `${stats.notes.empty.toLocaleString()} empty` : undefined,
       check: "empty-notes",
     },
     {

@@ -289,6 +289,39 @@ describe("VaultRegistry.deletePaths — per-item verdicts", () => {
 });
 
 describe("VaultRegistry.deletePaths — older servers and folders", () => {
+  it.each([false, true])("allows a local-only remainder of a revoked folder (batch=%s)", async (batch) => {
+    const { api } = fakeApi();
+    configFile();
+    const reg = await registryWith(0, api, ["Archive"]);
+    vi.mocked(api.deleteFolder).mockRejectedValue(new ApiError(403, "denied"));
+    if (batch) expect((await reg.deletePaths(["Archive"]))[0].status).toBe("deleted");
+    else await expect(reg.deletePath("Archive")).resolves.toBeUndefined();
+    vi.mocked(api.deleteFolder).mockClear();
+    await reg.deletePath("Archive");
+    expect(api.deleteFolder).not.toHaveBeenCalled();
+  });
+
+  it.each(["readable", "descendant", "unconfirmed", "offline", "mapped-file"])(
+    "keeps a refused folder protected when %s",
+    async (reason) => {
+      const { api } = fakeApi();
+      configFile();
+      const reg = await registryWith(0, api, ["Archive"]);
+      vi.mocked(api.deleteFolder).mockRejectedValue(new ApiError(403, "denied"));
+      if (reason === "readable" || reason === "descendant") {
+        vi.mocked(api.listFolderRegistry).mockResolvedValue({ folders: [{
+          id: reason === "readable" ? "folder-Archive" : "child",
+          name: "Archive", path: reason === "readable" ? "Archive" : "Archive/Child",
+        }], tombstones: [] });
+      }
+      if (reason === "unconfirmed") vi.mocked(api.listFolderRegistry).mockResolvedValue({ folders: [], tombstones: null });
+      if (reason === "offline") vi.mocked(api.listFolderRegistry).mockRejectedValue(new Error("offline"));
+      if (reason === "mapped-file") reg.setFileId("Archive/a.pdf", "file-1");
+      await expect(reg.deletePath("Archive")).rejects.toThrow();
+      expect((await reg.deletePaths(["Archive"]))[0].status).toBe("failed");
+    },
+  );
+
   it("falls back to the per-note route on `server_too_old`", async () => {
     const { api, state } = fakeApi({ serverTooOld: true });
     configFile();

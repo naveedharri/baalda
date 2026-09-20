@@ -180,11 +180,12 @@ vi.mock("../vaultDocStore", () => ({
   },
 }));
 
-const connects = vi.hoisted(() => ({ order: [] as string[] }));
+const connects = vi.hoisted(() => ({ order: [] as string[], readOnly: false,
+  onSynced: (() => {}) as () => void }));
 
 vi.mock("../syncManager", () => ({
   DocSync: class {
-    readonly readOnly = false;
+    readonly readOnly = connects.readOnly;
     isSynced = false;
     readonly status = "connecting";
     readonly docId: string;
@@ -194,6 +195,7 @@ vi.mock("../syncManager", () => ({
       connects.order.push(input.docId);
     }
     async whenSynced() {
+      connects.onSynced();
       this.isSynced = true;
     }
     async whenFlushed() {
@@ -277,6 +279,10 @@ beforeEach(() => {
   storeHooks.opts = null;
   storeHooks.open = null;
   connects.order = [];
+  connects.readOnly = false;
+  connects.onSynced = () => {};
+  fakeRegistry.recordFailure.mockClear();
+  vi.mocked(ipc.writeTrashCopy).mockClear();
   vi.mocked(ipc.loadYjsState).mockResolvedValue({
     snapshot: null,
     updates: [],
@@ -293,6 +299,32 @@ afterEach(async () => {
 });
 
 describe("a note created empty", () => {
+  it.each(["placeholder", "matching", "local-edit"])("checks a read-only %s only after its server content lands", async (kind) => {
+    const sm = manager();
+    await enable(sm);
+    await ready(sm, [DOC]);
+    connects.readOnly = true;
+    const local = kind === "placeholder" ? "" : kind === "matching" ? "server content" : "my local edit";
+    fakeDisk.files.set(REL, local);
+    let remote = "";
+    connects.onSynced = () => {
+      remote = "server content";
+      // The pull may egest before the confirmation callback resumes.
+      fakeDisk.files.set(REL, remote);
+    };
+    const b = bridge();
+    Object.assign(b, { path: REL, serialize: () => remote });
+    await sm.openDoc(b, REL);
+    await flush();
+    if (kind === "local-edit") {
+      expect(ipc.writeTrashCopy).toHaveBeenCalledWith(REL, expect.any(String), local, 1);
+      expect(fakeRegistry.recordFailure).toHaveBeenCalledWith(expect.objectContaining({ docId: DOC }));
+    } else {
+      expect(ipc.writeTrashCopy).not.toHaveBeenCalled();
+      expect(fakeRegistry.recordFailure).not.toHaveBeenCalled();
+    }
+  });
+
   it("is settled from disk and never queued again (the 307-stub guarantee)", async () => {
     const sm = manager();
     const badges: Record<string, string> = {};

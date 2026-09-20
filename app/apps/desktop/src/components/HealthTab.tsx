@@ -212,6 +212,7 @@ export function HealthView({
     <div className="health-tab">
       <HealthStats
         stats={stats}
+        syncing={report.verdict === "syncing" || report.verdict === "connecting"}
         noteCount={
           snapshot.inventory.localReady
             ? snapshot.inventory.local.notes + snapshot.inventory.local.files
@@ -525,8 +526,13 @@ function InventoryComparison({
     (inventory.local.notes !== inventory.server.notes ||
       inventory.local.folders !== inventory.server.folders ||
       inventory.local.files !== inventory.server.files + localOnlyFormatNotes);
+  const stored = inventory.serverStored;
+  const restrictedNotes = stored && inventory.server
+    ? Math.max(0, stored.notes + stored.files - inventory.server.notes - inventory.server.files) : 0;
   const comparisonWarn = unexpectedDifferences > 0 || countsDiffer;
   const comparisonStale = inventory.serverState === "last-known";
+  const comparisonUpdating = inventory.serverState === "updating" ||
+    report.verdict === "syncing" || report.verdict === "connecting";
   const differenceSummaries = [
     inventory.deviceOnlyNotes.length > 0
       ? `${inventory.deviceOnlyNotes.length.toLocaleString()} text ${inventory.deviceOnlyNotes.length === 1 ? "note is" : "notes are"} missing from the Remote Vault`
@@ -550,7 +556,9 @@ function InventoryComparison({
   const confirmed = report.counts?.synced ?? 0;
   const totalTextNotes = report.counts?.total ?? inventory.local.notes;
   const stateLabel =
-    inventory.serverState === "current"
+    comparisonUpdating
+      ? "Updating"
+      : inventory.serverState === "current"
       ? "Current"
       : inventory.serverState === "last-known"
         ? "Last known"
@@ -568,9 +576,7 @@ function InventoryComparison({
           <span className="health-kicker">Your copies</span>
           <h3 id="health-inventory-title">This computer and the Remote Vault</h3>
           <p>
-            Compare your notes in every supported format, with folders shown separately.
-            Matching paths describe the structure. Content confirmation is shown separately for text
-            notes.
+            {stored ? "Server totals include private notes." : "Remote counts include only notes you can access."}
           </p>
         </div>
         {inventory.server && (
@@ -584,14 +590,14 @@ function InventoryComparison({
         <InventoryPlace
           icon="disk"
           title="This computer"
-          subtitle="Files in the open vault folder"
+          subtitle="Stored locally"
           counts={inventory.local}
           countsReady={inventory.localReady}
         />
         <div className="health-inventory-bridge" aria-hidden="true">
           <span className="health-inventory-line" />
           <Glyph
-            name={comparisonWarn ? "alert" : comparisonStale || comparisonPending ? "info" : "check"}
+            name={comparisonUpdating ? "info" : comparisonWarn ? "alert" : comparisonStale || comparisonPending ? "info" : "check"}
             size={16}
           />
           <span className="health-inventory-line" />
@@ -600,8 +606,8 @@ function InventoryComparison({
           <InventoryPlace
             icon="database"
             title="Remote Vault"
-            subtitle={report.serverHost ?? "Connected vault"}
-            counts={inventory.server}
+            subtitle={stored ? "Stored on server" : "Accessible to you"}
+            counts={stored ?? inventory.server}
           />
         ) : (
           <div className="health-place is-unavailable">
@@ -621,7 +627,7 @@ function InventoryComparison({
       <div
         className="health-inventory-result"
         data-tone={
-          !inventory.server
+          !inventory.server || comparisonUpdating
               ? "muted"
             : comparisonWarn
               ? "warn"
@@ -633,11 +639,13 @@ function InventoryComparison({
         <div className="health-inventory-result-icon" aria-hidden="true">
           <Glyph
             name={
-              !inventory.server
+              comparisonUpdating
+                ? "info"
+                : !inventory.server
                 ? "database"
                 : comparisonWarn
                   ? "alert"
-                  : comparisonStale || comparisonPending
+                  : comparisonStale || comparisonPending || restrictedNotes > 0
                     ? "info"
                     : "check"
             }
@@ -646,7 +654,9 @@ function InventoryComparison({
         </div>
         <div className="health-inventory-result-copy">
           <strong>
-            {!inventory.server
+            {comparisonUpdating
+              ? "Sync is still updating your local copy"
+              : !inventory.server
               ? "A Remote Vault comparison is not available"
               : comparisonPending
                 ? "Still counting notes on this computer"
@@ -658,10 +668,14 @@ function InventoryComparison({
                     ? `${localOnlyFormatNotes.toLocaleString()} ${localOnlyFormatNotes === 1 ? "note in another format stays" : "notes in other formats stay"} on this computer`
                   : comparisonStale
                     ? "The current Remote Vault contents cannot be confirmed"
-                  : "Notes and folders match"}
+                  : restrictedNotes > 0
+                    ? `${restrictedNotes.toLocaleString()} notes are private or restricted`
+                    : "Notes and folders match"}
           </strong>
           <p>
-            {inventory.server
+            {comparisonUpdating
+              ? "Counts are provisional until sync finishes."
+              : inventory.server
               ? comparisonPending
                 ? "The comparison will appear when the supported vault file list is ready."
                 : localOnlyFormatNotes > 0
@@ -670,11 +684,13 @@ function InventoryComparison({
                   : "Syncing these file types requires Pro. They remain available to preview locally."
                 : comparisonStale
                   ? "The Remote Vault is unavailable, so this last-known comparison may be out of date."
-                : `${confirmed.toLocaleString()} of ${totalTextNotes.toLocaleString()} text notes have confirmed content on the Remote Vault.`
+                : restrictedNotes > 0
+                  ? `${restrictedNotes.toLocaleString()} private or restricted notes remain on the server.`
+                  : `${confirmed.toLocaleString()} of ${totalTextNotes.toLocaleString()} text notes have confirmed content on the Remote Vault.`
               : "Your local files remain available on this computer."}
           </p>
         </div>
-        {inventory.server && (differences > 0 || countsDiffer) && (
+        {!comparisonUpdating && inventory.server && (differences > 0 || countsDiffer) && (
           <div className="health-inventory-actions">
             {differences > 0 && (
               <button type="button" className="ghost-pill sm" onClick={() => setOpen((v) => !v)}>
@@ -699,7 +715,7 @@ function InventoryComparison({
         )}
       </div>
 
-      {inventory.server && differences > 0 && (
+      {!comparisonUpdating && inventory.server && differences > 0 && (
         <div className="health-difference-breakdown" aria-label="Difference breakdown">
           <DifferenceSide
             title={
@@ -741,7 +757,7 @@ function InventoryComparison({
         </div>
       )}
 
-      {open && differences > 0 && (
+      {!comparisonUpdating && open && differences > 0 && (
         <div className="health-differences">
           <DifferenceList
             title="Text notes missing from the Remote Vault"
@@ -1139,7 +1155,9 @@ function VerdictCard({
           ? `${syncedTextNotes.toLocaleString()} text notes synced · ${localOnlyFormatNotes.toLocaleString()} ${localOnlyFormatNotes === 1 ? "note in another format" : "notes in other formats"} local only`
           : report.counts?.total === 0
             ? snapshot.inventory.local.notes + snapshot.inventory.local.files === 0
-              ? "This vault is empty"
+              ? snapshot.inventory.serverStored && snapshot.inventory.serverStored.notes + snapshot.inventory.serverStored.files > 0
+                ? "No notes accessible to this account"
+                : "No accessible notes to sync"
               : "No text notes need content sync"
             : `${syncedTextNotes.toLocaleString()} text notes synced`;
 

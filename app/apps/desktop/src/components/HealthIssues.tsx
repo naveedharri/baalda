@@ -57,6 +57,8 @@ export function HealthIssues({
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [pageSize, setPageSize] = useState(100);
+  useEffect(() => setPageSize(100), [filter, query]);
   // Seeded from `focusKey` rather than opened by the effect below, so a row
   // asked for at mount is already open in the FIRST render — an effect would
   // leave it shut under `renderToStaticMarkup`, which is how the page is tested.
@@ -79,7 +81,7 @@ export function HealthIssues({
     return [...counts.entries()];
   }, [live]);
 
-  const shown = useMemo(() => {
+  const matching = useMemo(() => {
     const q = query.trim().toLowerCase();
     return live.filter((i) => {
       if (!matches(i, filter)) return false;
@@ -89,6 +91,13 @@ export function HealthIssues({
       );
     });
   }, [live, filter, query]);
+
+  const shown = useMemo(() => {
+    const page = matching.slice(0, pageSize);
+    const focused = focusKey ? matching.find((i) => i.key === focusKey) : undefined;
+    if (focused && !page.includes(focused)) page.push(focused);
+    return page;
+  }, [matching, pageSize, focusKey]);
 
   // A focus request from the inspector opens the row and brings it into view.
   // Deliberately keyed on the request rather than on the row: asking for the
@@ -123,7 +132,7 @@ export function HealthIssues({
               {hidden.length > 0
                 ? `${hidden.length} ${hidden.length === 1 ? "row is" : "rows are"} dismissed below.`
                 : syncEnabled
-                  ? "Every note the Remote Vault knows about is confirmed."
+                  ? "No sync errors reported."
                   : "Sync is off, so there is nothing to report here."}
             </p>
           </div>
@@ -305,6 +314,11 @@ export function HealthIssues({
             />
           ))}
         </ul>
+      )}
+      {shown.length < matching.length && (
+        <button type="button" onClick={() => setPageSize((size) => size + 100)}>
+          {`Show more (${matching.length - shown.length} remaining)`}
+        </button>
       )}
       {hidden.length > 0 && <DismissedIssues rows={hidden} onRestore={onRestore} />}
     </>

@@ -100,13 +100,13 @@ export function entriesFromServer(input: {
     ...input.notes.map((n) => n.relPath),
     ...files.map((f) => f.path),
   ];
-  const hasChildren = (dir: string) => allPaths.some((p) => p.startsWith(`${dir}/`));
+  const parents = new Set(allPaths.flatMap(ancestorPaths));
   return [
     ...input.folders.map((f) => ({
       kind: "folder" as const,
       id: f.id,
       path: f.path,
-      hasChildren: hasChildren(f.path),
+      hasChildren: parents.has(f.path),
     })),
     ...input.notes.map((n) => ({ kind: "note" as const, id: n.id, path: n.relPath })),
     ...files.map((f) => ({ kind: "file" as const, id: f.id, path: f.path })),
@@ -185,10 +185,10 @@ export function rowsFromEntries(
     return ad - bd;
   });
 
-  const collapsed = sorted
+  const collapsed = new Set(sorted
     .filter((e) => e.kind === "folder" && !expanded.has(e.path))
-    .map((e) => `${e.path}/`);
-  const hidden = (path: string) => collapsed.some((prefix) => path.startsWith(prefix));
+    .map((e) => e.path));
+  const hidden = (path: string) => ancestorPaths(path).some((parent) => collapsed.has(parent));
 
   return sorted
     .filter((e) => !hidden(e.path))

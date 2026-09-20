@@ -509,19 +509,13 @@ export function planInbound(input: InboundInput): InboundPlan {
       }
       revoked.push(path);
     }
-    // The folder lift is narrower than the note one: it needs authority that
-    // named NOTHING. A pass carrying a named list has a doc-level cross-check
-    // behind it (`needsAccessCheck`) that folders have no equivalent of — folder
-    // ids are not doc ids, so neither `ready.revoked` nor the access-check route
-    // can speak about them — so a named pass keeps the folder cap.
-    //
-    // What makes the remainder acceptable either way: removal is EMPTY-ONLY.
-    // `plan.removeFolders` reaches `ipc.deleteFolderIfEmpty`, which is
-    // `remove_dir` and never recursive, so the worst a wrong folder revocation
-    // can do is take away directories that hold nothing. Any folder still
-    // holding a note the note pass refused to trash stays on disk.
+    // A confirmed access change may remove empty directories regardless of
+    // whether its notification also named revoked notes. Folder ids cannot be
+    // named in that doc-level list. The executor uses non-recursive remove_dir
+    // AFTER note checks, so any retained note or other local content protects
+    // its directory. Unannounced mass removals still keep their cap.
     const cap = revokeCap(input.localFolderIds.size);
-    const folderLift = input.authoritative === true && input.authoritativeRevoked === undefined;
+    const folderLift = input.authoritative === true;
     if (!folderLift && revoked.length > cap) {
       for (const path of revoked) {
         plan.rejected.push({

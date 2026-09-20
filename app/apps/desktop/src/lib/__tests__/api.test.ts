@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient, ApiError, HEALTH_TIMEOUT_MS } from "../api";
+import { gzipSync } from "node:zlib";
+import { encodeBootstrapPage, decodeBootstrapPage } from "../sync/bootstrapCodec";
 
 interface Call {
   url: string;
@@ -34,6 +36,22 @@ function fakeFetch(
 }
 
 describe("ApiClient against a mocked fetch", () => {
+  it.each([true, false])("decodes bootstrap transport with gzip=%s", async (compressed) => {
+    const docs = [{ docId: "d1", relPath: "A.md", update: new Uint8Array([0, 0]) }];
+    const page = encodeBootstrapPage(docs);
+    const bytes = compressed ? gzipSync(page) : page;
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: async () =>
+      new Response(new Uint8Array(bytes), { headers: {
+        "content-type": "application/vnd.baalda.bootstrap",
+        "x-baalda-cursor": "1", "x-baalda-docs": "1",
+      } }),
+    });
+    const result = await api.fetchBootstrapPage("v1", "s1");
+    expect(decodeBootstrapPage(result.bytes)).toEqual(docs);
+    expect(result.nextCursor).toBe(1);
+    expect(result.docs).toBe(1);
+  });
+
   it("captures the set-auth-token header on sign-in and sends it as Bearer", async () => {
     const { impl, calls } = fakeFetch((call) => {
       if (call.url.endsWith("/api/auth/sign-in/email")) {

@@ -5,6 +5,7 @@ import {
   accessEntryKey,
   buildBulkAccessInput,
   bulkChangeNeedsConfirmation,
+  compactAccessResources,
   selectedBulkResources,
   selectAllAccessEntries,
   toggleAccessSelection,
@@ -17,6 +18,25 @@ const entries = [
 ];
 
 describe("bulk access selection", () => {
+  it("compacts a large selection to covering folders without changing the vault default", () => {
+    const tree = [entries[0], ...Array.from({ length: 7000 }, (_, i) => ({
+      kind: "note" as const, id: `n${i}`, path: `Projects/Note ${i}.md`,
+    })), { kind: "note" as const, id: "root", path: "Root.md" }];
+    const resources = selectedBulkResources(selectAllAccessEntries(tree), tree, "org-1");
+    expect(compactAccessResources(resources, tree)).toEqual([
+      { resourceType: "folder", resourceId: "folder-1" },
+      { resourceType: "file", resourceId: "root" },
+    ]);
+  });
+
+  it("does not fold a similarly named sibling into a selected folder", () => {
+    const tree = [...entries, { kind: "note" as const, id: "other", path: "Projects-old/Plan.md" }];
+    expect(compactAccessResources(selectedBulkResources(selectAllAccessEntries(tree), tree, "org-1"), tree))
+      .toEqual([
+        { resourceType: "folder", resourceId: "folder-1" },
+        { resourceType: "file", resourceId: "other" },
+      ]);
+  });
   it("makes the whole-vault scope exclusive", () => {
     const folder = accessEntryKey(entries[0]);
     const vault = vaultAccessKey("org-1");

@@ -19,6 +19,9 @@ import {
 } from "./types";
 
 export class NoteBridge {
+  /** Disk input already merged with a racing peer edit, until the combined
+   * result reaches disk. A queued watcher read of that same input is no edit. */
+  private pendingMergedFileHash: string | null = null;
   readonly doc: Y.Doc;
   readonly text: Y.Text;
   readonly docId: string;
@@ -418,6 +421,34 @@ export class NoteBridge {
     if (this.destroyed || !this.ingestDirty) return false;
     this.ingestDirty = false;
 
+    // The file read, hash and recovery snapshot cross async boundaries. If a
+    // peer edits during any of them, diffing the older file against the NEW
+    // live text turns the peer's additions into local deletions. Retain the
+    // pre-read CRDT only when a transaction actually races us; ordinary echo
+    // reads allocate no second document. Replay the disk diff on that branch
+    // and merge its operations into the live doc, preserving concurrent edits.
+    let baseline: Y.Doc | null = null;
+    const hadContent = this.everHadContent;
+    const capture = () => {
+      if (baseline) return;
+      baseline = new Y.Doc();
+      Y.applyUpdate(baseline, Y.encodeStateAsUpdate(this.doc));
+    };
+    const stopTracking = () => this.doc.off("beforeTransaction", capture);
+    this.doc.on("beforeTransaction", capture);
+    try {
+      return await this.mergeDiskRead(() => baseline ?? this.doc, stopTracking, hadContent);
+    } finally {
+      stopTracking();
+      (baseline as Y.Doc | null)?.destroy();
+    }
+  }
+
+  private async mergeDiskRead(
+    getBaseline: () => Y.Doc,
+    stopTracking: () => void,
+    hadContent: boolean,
+  ): Promise<boolean> {
     let fileText: string;
     try {
       fileText = await this.io.readFile(this._path);
@@ -446,14 +477,17 @@ export class NoteBridge {
     this.oversizeReported = false;
 
     const fileHash = await this.hash(fileText);
-    if (fileHash === this.lastWrittenHash) return false; // our own write echoing back → DROP
+    if (fileHash === this.lastWrittenHash || fileHash === this.pendingMergedFileHash) {
+      return false; // our own write or an already-merged disk input
+    }
 
-    const current = this.text.toString();
-    if (current === fileText) {
+    if (this.text.toString() === fileText) {
       // Already converged (e.g. we ingested this exact change already).
       this.lastWrittenHash = fileHash;
       return false;
     }
+    const current = getBaseline().getText("content").toString();
+    if (current === fileText) return false;
 
     // The ingest twin of the empty-egest clobber guard. A file that is
     // COMPLETELY empty against a doc that still holds text is not an edit we can
@@ -488,7 +522,7 @@ export class NoteBridge {
     // content this session (`everHadContent`) is past its seed and a genuine
     // clear-all still ingests; a local-only vault seeds on open and never gets
     // here empty.
-    if (current.length === 0 && !this.everHadContent && !this.seedOnOpen) {
+    if (current.length === 0 && !hadContent && !this.seedOnOpen) {
       return false;
     }
 
@@ -496,9 +530,6 @@ export class NoteBridge {
     const ratio = changeRatio(diffs, current.length, fileText.length);
 
     if (ratio > this.cfg.largeDiffRatio) {
-      // What the doc had seen when `current` and `diffs` were taken — the check
-      // after the snapshot below compares against it.
-      const generation = this.observedUpdates;
       // A coarse whole-file rewrite (e.g. an AI edit) can merge badly against a
       // concurrent edit. Snapshot the pre-diff state first so it's recoverable
       // (spec 02 §6, spec 03 §5). The snapshot row IS the recovery point; the
@@ -521,21 +552,30 @@ export class NoteBridge {
       } catch (e) {
         this.reportError(e, "ingest:recoverySnapshot");
       }
-      // That snapshot is the one await between reading `current` and applying
-      // the diff against it, and a remote update landing inside it leaves the
-      // diff describing a document that no longer exists — positions shifted,
-      // and on the empty-doc case every byte of the file inserted on top of the
-      // server's copy of the same note. Re-diff against what the doc says NOW;
-      // the seed refusal above is re-evaluated with it.
-      if (this.observedUpdates !== generation) {
-        this.ingestDirty = true;
-        return this.runIngest();
-      }
     }
 
-    this.doc.transact(() => {
-      applyDiff(this.text, diffs);
+    if (this.destroyed) return false;
+    // A pull may have delivered exactly these file bytes during the snapshot.
+    if (this.text.toString() === fileText) {
+      this.lastWrittenHash = fileHash;
+      return false;
+    }
+    stopTracking();
+    const target = getBaseline();
+    const vector = target === this.doc ? null : Y.encodeStateVector(target);
+    target.transact(() => {
+      applyDiff(target.getText("content"), diffs);
     }, ORIGIN_DISK);
+    if (vector) {
+      Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(target, vector), ORIGIN_DISK);
+      // The peer's previous egest may already have finished while the read was
+      // pending. Persist the merged result and do not re-ingest the same disk
+      // input while that write is pending (including across retries).
+      if (this.text.toString() !== fileText) {
+        this.pendingMergedFileHash = fileHash;
+        this.scheduleEgest();
+      }
+    }
     // The ONLY place disk bytes enter the doc. Every refusal above (echo hash,
     // converged, 0-byte, oversize, unseeded-empty) returns before this, so the
     // no-socket fast path in `ContentUploader.pushOne` keeps firing for our own
@@ -647,6 +687,7 @@ export class NoteBridge {
       return;
     }
     this.lastWrittenHash = hash;
+    if (this.text.toString() === content) this.pendingMergedFileHash = null;
     this.clearWriteFailure();
     // Indexing is derived state: a failure here is worth a log, not a re-write.
     if (this.io.reindex) {
