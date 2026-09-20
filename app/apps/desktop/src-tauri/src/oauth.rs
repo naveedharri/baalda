@@ -22,7 +22,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 /// Ok(code) on a successful redirect, Err(message) on an OAuth error or a
@@ -139,6 +139,32 @@ pub async fn google_oauth_await(state: State<'_, AppState>) -> AppResult<String>
     }
 }
 
+/// Bring the window that started this OAuth flow back to the foreground.
+///
+/// The frontend calls this only after the one-time code has been exchanged and
+/// its session token has been stored. Keeping the return inside this process
+/// avoids a `baalda://` handoff selecting a production/staging/dev install that
+/// did not start the flow. Window-manager focus policy can still refuse the
+/// request, so every operation is best-effort and can never turn a completed
+/// sign-in into an authentication error.
+#[tauri::command]
+pub fn google_oauth_return_to_app(app: tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        log::warn!("[oauth] sign-in completed but the main window was unavailable");
+        return;
+    };
+
+    if let Err(e) = window.unminimize() {
+        log::warn!("[oauth] could not unminimize the app after sign-in: {e}");
+    }
+    if let Err(e) = window.show() {
+        log::warn!("[oauth] could not show the app after sign-in: {e}");
+    }
+    if let Err(e) = window.set_focus() {
+        log::warn!("[oauth] could not focus the app after sign-in: {e}");
+    }
+}
+
 /// The Baalda wordmark (ink version — the "BAALDA" lettering with the neural
 /// connection forming the second A), pre-encoded as a `data:` URI so the loopback
 /// page is fully self-contained. Mirrors `apps/desktop/src/assets/
@@ -196,7 +222,7 @@ fn render_page(ok: bool, title: &str, body: &str) -> String {
 
 /// Read the request line, extract `code`/`error`/`state` from the query,
 /// verify the `state` matches the nonce this sign-in was started with, and
-/// reply with a small "you can close this" page.
+/// reply with a small status page.
 ///
 /// The `state` check is the CSRF guard: only the callback carrying our
 /// single-use nonce is trusted. A local process that races to the loopback
@@ -251,8 +277,8 @@ fn handle_connection(mut stream: std::net::TcpStream, expected_state: &str) -> O
     let (ok, title, body, result) = match (&code, &error) {
         (Some(c), _) => (
             true,
-            "Signed in",
-            "You're all set — close this tab and head back to Baalda.",
+            "Finishing sign-in",
+            "Baalda is completing sign-in and will return to the front automatically. If it doesn't, open Baalda yourself.",
             Ok(c.clone()),
         ),
         (None, Some(e)) => (
@@ -313,7 +339,9 @@ mod tests {
         let _ = stream.read_to_string(&mut buf);
 
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Ok("abc123".into()));
-        assert!(buf.contains("Signed in"));
+        assert!(buf.contains("Finishing sign-in"));
+        assert!(!buf.contains("Signed in"));
+        assert!(!buf.contains("abc123"));
     }
 
     #[test]
@@ -330,6 +358,7 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             Err("access_denied".into())
         );
+        assert!(!buf.contains("Finishing sign-in"));
     }
 
     #[test]

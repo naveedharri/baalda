@@ -132,16 +132,8 @@ export interface InboundInput {
    * Only meaningful when `authoritative` is true; ignored otherwise.
    */
   authoritativeRevoked?: ReadonlySet<string>;
-  /**
-   * doc_ids the LOCAL user created (from the listing's `created_by`).
-   *
-   * Authorship does not survive an item set to Private — that is deliberate
-   * (spec 04: a restriction its author is exempt from is not a restriction), so
-   * these docs genuinely can be revoked. What it does change is HOW the file
-   * leaves: the author gets the recoverable `.context/trash` copy a deleted note
-   * gets, instead of an outright `deletePath`. Losing read access to a note is
-   * not a reason to destroy the only local copy of something this person wrote.
-   */
+  /** Legacy authorship metadata retained for config compatibility. Removal no
+   * longer depends on authorship: a confirmed deletion or revocation is final. */
   authoredByMe?: ReadonlySet<string>;
   /**
    * doc_id → vault-relative path for every TREE BINARY this device has a server
@@ -171,26 +163,13 @@ export interface InboundTrash {
    * `deleted` — the server tombstoned it: someone deleted the note.
    * `revoked` — it left the caller's readable set: access was taken away.
    *
-   * Both release the doc and take the file off disk, but differently: a deleted
-   * note goes to the vault's recoverable trash (the undo for a deliberate
-   * removal), a revoked one is removed outright (the server still holds it, and
-   * a trash copy would keep the readable `.md` the revocation takes away). They
-   * also carry different risk, so they get separate safety caps and separate
+   * Both release the doc and remove the file outright. They carry different
+   * risk, so they get separate safety caps and separate
    * wording when one is refused. A wrong `deleted` is a server bug destroying
    * work; a mass `revoked` is a routine admin action that happens to look the
    * same from here.
    */
   reason: "deleted" | "revoked";
-  /**
-   * Does the file get a copy in `.context/trash` before it goes?
-   *
-   * Always for `deleted` — the trash IS the undo. For `revoked` only when the
-   * LOCAL user authored the note: leaving an ex-reader a readable `.md` would
-   * defeat the revocation, but a person losing access to something they wrote
-   * themselves must not have their only local copy destroyed by a permission
-   * change. See {@link InboundInput.authoredByMe}.
-   */
-  recoverable: boolean;
   /**
    * This entry is a TREE BINARY (a `files` row), not a note.
    *
@@ -390,8 +369,7 @@ function trashCap(mapped: number): number {
  * definition, so nothing is destroyed that cannot be handed back by restoring
  * access. The local file itself IS destroyed — a revoked note is removed
  * outright, with no `.context/trash` copy, because a copy there would leave the
- * ex-reader exactly the readable `.md` the revocation exists to take away (the
- * one exception is a note the local user authored; see `InboundTrash.recoverable`).
+ * ex-reader exactly the readable `.md` the revocation exists to take away.
  * It is still a limit, because a truncated `GET /api/notes` looks exactly like
  * a mass revoke from here — and when it trips we keep the files, which is the
  * safe direction.
@@ -627,10 +605,10 @@ export function planInbound(input: InboundInput): InboundPlan {
         }
         continue;
       }
-      // Belt as well as braces: if the trash step is skipped or fails, this still
+      // Belt as well as braces: if the removal is skipped or fails, this still
       // stops the note being re-registered as a ghost.
       plan.suppress.add(loc);
-      pushTrash(plan, docId, loc, "deleted", true);
+      pushTrash(plan, docId, loc, "deleted");
       continue;
     }
 
@@ -648,17 +626,12 @@ export function planInbound(input: InboundInput): InboundPlan {
     // every byte and restoring access brings it straight back. The executor
     // still refuses any doc whose content this device never confirmed upstream.
     //
-    // The one exception is a note the LOCAL user wrote. Authorship does not
-    // survive an item-Private server-side, so their own note can genuinely be
-    // revoked — but taking someone's own writing off their disk with no undo is
-    // a different act from taking back something they were merely shown.
-    //
     // Gated on the server having actually ANSWERED about deletions. A `null`
     // tombstone list means "I don't know", and absence is then uninformative —
     // it could equally be a truncated response. Removing files on the strength
     // of a maybe is precisely the mistake this module exists to avoid.
     if (loc !== undefined && input.tombstones !== null) {
-      pushTrash(plan, docId, loc, "revoked", input.authoredByMe?.has(docId) === true);
+      pushTrash(plan, docId, loc, "revoked");
     }
   }
 
@@ -689,7 +662,7 @@ export function planInbound(input: InboundInput): InboundPlan {
       // No `suppress` entry, deliberately: that set is read by the OUTBOUND note
       // half, and a binary re-registers through the blob mirror instead — which
       // finds nothing to register once the file is off disk.
-      pushTrash(plan, docId, relPath, "revoked", input.authoredByMe?.has(docId) === true, true);
+      pushTrash(plan, docId, relPath, "revoked", true);
     }
   }
 
@@ -750,14 +723,13 @@ function pushTrash(
   docId: string,
   path: string,
   reason: InboundTrash["reason"],
-  recoverable: boolean,
   binary = false,
 ): void {
   if (!(binary ? isSafeTreeBinaryPath(path) : isSafeNotePath(path))) {
     plan.rejected.push({ kind: "trash", path, docId, reason: "unsafe local path" });
     return;
   }
-  plan.trash.push({ docId, path, reason, recoverable, ...(binary ? { binary: true } : {}) });
+  plan.trash.push({ docId, path, reason, ...(binary ? { binary: true } : {}) });
 }
 
 function applyBreakers(

@@ -185,9 +185,7 @@ export interface RegisteredNote {
   last_edited_at?: string | null;
   /** Palette id (see `lib/appearance`), shared by the whole team. */
   color?: string | null;
-  /** Who created the note. Read by the inbound reconciler: a note the LOCAL user
-   *  authored keeps a recoverable `.context/trash` copy when access to it is
-   *  revoked, instead of being removed outright. */
+  /** Who created the note, retained for attribution and config compatibility. */
   createdBy?: string | null;
   created_by?: string | null;
 }
@@ -345,6 +343,11 @@ export interface ResolvedMemberAccess {
 
 export interface AccessResolution {
   members: ResolvedMemberAccess[];
+}
+
+/** Effective mode across selected resource roots, their descendants, and users. */
+export interface AccessSummary {
+  mode: TeamAccessMode | "mixed";
 }
 
 /** An MCP access token (metadata only; the plaintext is shown once at creation). */
@@ -2478,6 +2481,21 @@ export class ApiClient {
       query: { resourceType, resourceId },
     });
     return { members: data.members ?? [] };
+  }
+
+  /** Resolve selected people's effective access across compact resource roots.
+   * The server expands folder/vault descendants and bounds resolver concurrency. */
+  async resolveAccessSummary(
+    orgId: string,
+    resources: BulkAccessResource[],
+    userIds: string[],
+  ): Promise<AccessSummary> {
+    const { data } = await this.request<AccessSummary>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/access/summary`,
+      { body: { resources, userIds } },
+    );
+    return data;
   }
 
   /** All locks in a vault (readable by any vault member — drives lock badges). */

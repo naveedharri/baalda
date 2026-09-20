@@ -268,6 +268,7 @@ pub fn run() {
             keychain::keychain_delete,
             oauth::google_oauth_listen,
             oauth::google_oauth_await,
+            oauth::google_oauth_return_to_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

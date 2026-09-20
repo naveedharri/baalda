@@ -703,6 +703,18 @@ export class NoteBridge {
     await this.drainEgest();
   }
 
+  /** Cancel a pending CRDT→disk write without changing either surface.
+   *
+   * Used only when a read-only pull found divergent local file bytes and the
+   * recovery copy could not be written. The file remains the durable copy; the
+   * transient bridge may still persist/destroy normally without its retire path
+   * overwriting those bytes with the Remote Vault's text. */
+  cancelEgest(): void {
+    if (this.egestTimer == null) return;
+    this.clearT(this.egestTimer);
+    this.egestTimer = null;
+  }
+
   /**
    * Resolve once every update this doc has produced is in the local CRDT store.
    *

@@ -206,6 +206,8 @@ export interface HealthStage {
 export type HealthIssueKind =
   /** Over the server's per-note cap; retrying cannot help. */
   | "too-large"
+  /** A real local edit was refused after access became read-only. */
+  | "no-write-access"
   /** Content push failed for a reason a retry may fix. */
   | "upload-failed"
   /** The registry could not create/move the server row. */
@@ -323,6 +325,8 @@ export interface HealthReport {
  * registry's last reconciled view, so it is nullable and carries freshness. */
 export interface HealthInventory {
   local: { notes: number; folders: number; files: number; total: number };
+  /** False until the supported-file tree has completed; local counts are placeholders. */
+  localReady: boolean;
   server: { notes: number; folders: number; files: number; total: number } | null;
   serverState: "current" | "last-known" | "unavailable";
   /** Paths present on only one side, separated by transport kind. */

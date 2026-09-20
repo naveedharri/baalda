@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from "vitest";
+import type { TeamAccess } from "../../lib/api";
 import type { AccessEntry } from "../../lib/accessTree";
 import { accessEntryKey, selectedBulkResources, vaultAccessKey } from "../../lib/accessBulk";
-import { accessSelectionPresentations } from "../AccessPanel";
+import {
+  accessSelectionPresentations,
+  accessSummaryResources,
+  currentAccessMode,
+  selectedOrgAccessMode,
+} from "../AccessPanel";
 
 const entries: AccessEntry[] = [
   { kind: "folder", id: "projects", path: "Projects", hasChildren: true },
@@ -62,5 +68,85 @@ describe("AccessPanel inherited selection", () => {
     expect(selectedBulkResources(new Set([vault]), entries, "org-1")).toEqual([
       { resourceType: "vault", resourceId: "org-1" },
     ]);
+  });
+});
+
+describe("AccessPanel current access", () => {
+  const teamAccess: TeamAccess = { mode: "readonly", grantId: "grant", overrides: [] };
+
+  it("does not invent a current mode before authoritative state arrives", () => {
+    expect(currentAccessMode([])).toBeNull();
+    expect(selectedOrgAccessMode({
+      teamAccess: null,
+      serverTreeKnown: true,
+      vaultSelected: true,
+      shownVaultMode: "private",
+      entries,
+      selectedKeys: new Set([vaultAccessKey("org-1")]),
+      orgRowsByPath: new Map(),
+    })).toBeNull();
+    expect(selectedOrgAccessMode({
+      teamAccess,
+      serverTreeKnown: false,
+      vaultSelected: true,
+      shownVaultMode: "readonly",
+      entries,
+      selectedKeys: new Set([vaultAccessKey("org-1")]),
+      orgRowsByPath: new Map(),
+    })).toBeNull();
+  });
+
+  it("uses the effective whole-vault mode once both access and structure are known", () => {
+    expect(selectedOrgAccessMode({
+      teamAccess,
+      serverTreeKnown: true,
+      vaultSelected: true,
+      shownVaultMode: "readonly",
+      entries,
+      selectedKeys: new Set([vaultAccessKey("org-1")]),
+      orgRowsByPath: new Map(),
+    })).toBe("readonly");
+  });
+
+  it("resolves item overrides and reports disagreement across selected scopes", () => {
+    const selectedKeys = new Set([accessEntryKey(entries[0]), accessEntryKey(entries[3])]);
+    const rows = new Map([
+      ["Projects", new Set(["edit"] as const)],
+    ]);
+    expect(selectedOrgAccessMode({
+      teamAccess,
+      serverTreeKnown: true,
+      vaultSelected: false,
+      shownVaultMode: "readonly",
+      entries,
+      selectedKeys,
+      orgRowsByPath: rows,
+    })).toBe("mixed");
+  });
+
+  it("sends compact roots for authoritative selected-people summaries", () => {
+    expect(accessSummaryResources({
+      resources: [
+        { resourceType: "folder", resourceId: "projects" },
+        { resourceType: "folder", resourceId: "plans" },
+        { resourceType: "file", resourceId: "roadmap" },
+        { resourceType: "file", resourceId: "readme" },
+      ],
+      entries,
+      allItemsSelected: false,
+      orgId: "org-1",
+    })).toEqual([
+      { resourceType: "folder", resourceId: "projects" },
+      { resourceType: "file", resourceId: "readme" },
+    ]);
+    expect(accessSummaryResources({
+      resources: entries.map((entry) => ({
+        resourceType: entry.kind === "folder" ? "folder" as const : "file" as const,
+        resourceId: entry.id,
+      })),
+      entries,
+      allItemsSelected: true,
+      orgId: "org-1",
+    })).toEqual([{ resourceType: "vault", resourceId: "org-1" }]);
   });
 });

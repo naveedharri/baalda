@@ -18,6 +18,13 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.63
+
+- Health clearly separates device and Remote Vault state, explains missing files without recreating them, and gives safer actions for retries and cleanup.
+- Access shows effective permissions for people, folders and entire vaults, including mixed inherited access, without slowing down large vaults.
+- Sync recovers more reliably from interrupted uploads and unsent edits, while stronger deletion and revocation checks protect local files and private app data.
+- The sidebar can be collapsed and remembers its state. Sidebar and Search controls sit beside macOS window controls, menus stay visible, and browser sign-in returns cleanly.
+
 ## 0.1.62
 
 - More files now open, embed and search inside Baalda, including Office documents, CSV, audio, video, code and archives. Notes sync on every plan; Pro also syncs attachments, with a clear local-only notice on Free.

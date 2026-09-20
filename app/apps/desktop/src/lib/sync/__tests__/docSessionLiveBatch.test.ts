@@ -83,7 +83,10 @@ vi.mock("../registry", () => ({
   },
 }));
 
-const fakeDisk = vi.hoisted(() => ({ files: new Map<string, string>() }));
+const fakeDisk = vi.hoisted(() => ({
+  files: new Map<string, string>(),
+  trashCopies: [] as Array<{ path: string; content: string }>,
+}));
 vi.mock("../../ipc", () => ({
   isVaultMismatch: () => false,
   noteExists: vi.fn(async () => true),
@@ -98,7 +101,10 @@ vi.mock("../../ipc", () => ({
   listBinaries: vi.fn(async () => []),
   readBinaryFile: vi.fn(async () => new Uint8Array()),
   writeBinaryFile: vi.fn(async () => {}),
-  writeTrashCopy: vi.fn(async () => "trash"),
+  writeTrashCopy: vi.fn(async (path: string, _stamp: string, content: string) => {
+    fakeDisk.trashCopies.push({ path, content });
+    return `.context/trash/stamp/${path}`;
+  }),
   rebindNoteId: vi.fn(async () => true),
   applyBootstrapBatch: vi.fn(async () => []),
 }));
@@ -107,7 +113,7 @@ const apiHooks = vi.hoisted(() => ({
   /** Every `POST …/docs/batch` request that REACHED the server, by item. */
   pushes: [] as Array<Array<{ docId: string; expectEmpty?: boolean }>>,
   /** Per-doc status overrides; everything else is `applied`. */
-  status: new Map<string, "applied" | "conflict" | "denied">(),
+  status: new Map<string, "applied" | "skipped" | "conflict" | "denied">(),
   /** Attempts to fail with a 502 before the route works again — a restarting
    *  server. `withRetry` makes three attempts, so 3 fails the whole chunk. */
   failAttempts: 0,
@@ -177,6 +183,7 @@ const storeHooks = vi.hoisted(() => ({
   promoted: [] as string[],
   /** Docs whose local CRDT already holds text (a doc with history). */
   withContent: new Set<string>(),
+  content: new Map<string, string>(),
   /** What `ingestNow` reports for a doc: did the file change anything? */
   ingestChanges: new Set<string>(),
   ingested: [] as string[],
@@ -192,7 +199,9 @@ vi.mock("../vaultDocStore", () => ({
     async promote(docId: string, relPath: string) {
       storeHooks.promoted.push(docId);
       const doc = new Y.Doc();
-      if (storeHooks.withContent.has(docId)) doc.getText("content").insert(0, "doc text");
+      if (storeHooks.withContent.has(docId)) {
+        doc.getText("content").insert(0, storeHooks.content.get(docId) ?? "doc text");
+      }
       return {
         doc,
         serialize: () => doc.getText("content").toString(),
@@ -207,12 +216,17 @@ vi.mock("../vaultDocStore", () => ({
           doc.getText("content").insert(0, "+");
           return true;
         },
-        flushEgest: async () => {},
+        flushEgest: async () => {
+          fakeDisk.files.set(relPath, doc.getText("content").toString());
+        },
       };
     }
     async demote() {}
     async release() {}
-    drop() {}
+    drop(docId: string) {
+      storeHooks.withContent.delete(docId);
+      storeHooks.content.delete(docId);
+    }
     async applyUpdate() {}
     peekResident() {
       return null;
@@ -227,17 +241,30 @@ vi.mock("../vaultDocStore", () => ({
 }));
 
 /** The per-note provider: one instance == one token mint + one handshake. */
-const connects = vi.hoisted(() => ({ order: [] as string[] }));
+const connects = vi.hoisted(() => ({
+  order: [] as string[],
+  readOnly: new Set<string>(),
+  serverContent: new Map<string, string>(),
+}));
 vi.mock("../syncManager", () => ({
   DocSync: class {
-    readonly readOnly = false;
+    readonly readOnly: boolean;
     isSynced = false;
     readonly status = "connecting";
     readonly awareness = { setLocalStateField() {}, destroy() {} };
-    constructor(input: { docId: string }) {
+    private readonly doc: Y.Doc;
+    private readonly docId: string;
+    constructor(input: { docId: string; doc: Y.Doc }) {
       connects.order.push(input.docId);
+      this.readOnly = connects.readOnly.has(input.docId);
+      this.doc = input.doc;
+      this.docId = input.docId;
     }
     async whenSynced() {
+      const canonical = connects.serverContent.get(this.docId);
+      if (canonical != null && this.doc.getText("content").length === 0) {
+        this.doc.getText("content").insert(0, canonical);
+      }
       this.isSynced = true;
     }
     async whenFlushed() {
@@ -316,6 +343,7 @@ beforeEach(() => {
   fakeRegistry.primeLocal.mockResolvedValue(false);
   fakeRegistry.reconcile.mockResolvedValue({ seeded: false });
   fakeDisk.files.clear();
+  fakeDisk.trashCopies = [];
   apiHooks.pushes = [];
   apiHooks.status = new Map();
   apiHooks.failAttempts = 0;
@@ -325,12 +353,99 @@ beforeEach(() => {
   engineHooks.refreshes = 0;
   storeHooks.promoted = [];
   storeHooks.withContent = new Set();
+  storeHooks.content = new Map();
   storeHooks.ingestChanges = new Set();
   storeHooks.ingested = [];
   connects.order = [];
+  connects.readOnly = new Set();
+  connects.serverContent = new Map();
 });
 
 describe("a live import — the steady-state content run", () => {
+  it("settles a clean Private→Read-only re-download without inventing failures", async () => {
+    const sm = new SyncManager();
+    await liveVault(sm);
+    const restored = notes(30, "restored");
+    // These stable ids existed locally before Private removed them. Exercise the
+    // real lifecycle hook rather than constructing an already-restored vault.
+    fakeRegistry.notes = [...fakeRegistry.notes, ...restored];
+    for (const n of restored) {
+      fakeRegistry.pushedSet.add(n.docId);
+      storeHooks.withContent.add(n.docId);
+      sm.noteRemoved(n.docId, n.relPath, null, "revoked");
+      fakeRegistry.pushedSet.delete(n.docId);
+    }
+    fakeRegistry.notes = fakeRegistry.notes.filter((n) => !n.docId.startsWith("restored"));
+
+    // Read-only restores the same identities with freshly-created local CRDT
+    // histories and matching durable Markdown files.
+    fakeRegistry.notes = [...fakeRegistry.notes, ...restored];
+    for (const n of restored) {
+      storeHooks.withContent.add(n.docId);
+      fakeDisk.files.set(n.relPath, "doc text");
+      apiHooks.status.set(n.docId, "denied");
+      connects.readOnly.add(n.docId);
+      connects.serverContent.set(n.docId, "doc text");
+    }
+
+    // The channel reports that this device has state the server does not cover
+    // (the unrelated pre-revocation history), which is what queues the denied
+    // batch even though the placeholder itself is empty.
+    engineHooks.opts?.onServerBehind?.(restored.map((n) => n.docId));
+    engineHooks.opts?.onServerEmpty?.([], false);
+    engineHooks.opts?.onInboundIdle?.();
+    await sm.whenBulkSyncSettled();
+    await flush();
+
+    expect(apiHooks.pushes).toHaveLength(1);
+    expect(connects.order).toEqual(restored.map((n) => n.docId));
+    expect(fakeDisk.trashCopies).toEqual([]);
+    expect(sm.syncFailures().content).toEqual([]);
+    for (const n of restored) {
+      expect(fakeRegistry.pushedSet.has(n.docId)).toBe(true);
+    }
+  });
+
+  it("keeps and classifies a real local edit during the same read-only transition", async () => {
+    const sm = new SyncManager();
+    await liveVault(sm);
+    const restored = notes(30, "restored");
+    fakeRegistry.notes = [...fakeRegistry.notes, ...restored];
+    for (const n of restored) {
+      storeHooks.withContent.add(n.docId);
+      fakeDisk.files.set(n.relPath, "doc text");
+      apiHooks.status.set(n.docId, "denied");
+      connects.readOnly.add(n.docId);
+      connects.serverContent.set(n.docId, "doc text");
+    }
+    fakeDisk.files.set("restored7.md", "a local edit made while private");
+    // The edit is already in local CRDT history too. A plain file==doc check is
+    // insufficient here: the server's denied verdict is what proves those ops
+    // never landed remotely.
+    storeHooks.content.set("restored7", "a local edit made while private");
+
+    engineHooks.opts?.onInboundIdle?.();
+    await sm.whenBulkSyncSettled();
+    await flush();
+
+    expect(fakeDisk.trashCopies).toEqual([
+      { path: "restored7.md", content: "a local edit made while private" },
+    ]);
+    expect(sm.syncFailures().content).toEqual([
+      expect.objectContaining({
+        docId: "restored7",
+        kind: "no-write-access",
+        permanent: true,
+      }),
+    ]);
+
+    // Private removes this local incarnation. The same stable id may later be
+    // materialized again, but the old terminal verdict must not make it
+    // ineligible for a fresh canonical pull.
+    sm.noteRemoved("restored7", "restored7.md", null, "revoked");
+    expect(sm.syncFailures().content).toEqual([]);
+  });
+
   it("sends 30 pending notes in ONE request, with no token mint and no socket", async () => {
     const sm = new SyncManager();
     await liveVault(sm);
@@ -503,15 +618,14 @@ describe("a live import — the local-change drain", () => {
     vi.useRealTimers();
   });
 
-  it("requeues a note the server skipped, but never one it REFUSED", async () => {
-    // `denied` is a read-only grant: retrying it every drain re-reports the same
-    // refusal forever, so it keeps `recordBulkFailure` alone. An unanswered id is
-    // a different thing — the server said nothing about that note — and it
-    // retries like any other transient miss.
+  it("requeues unanswered notes while a denied item takes one pull-first fallback", async () => {
+    // `denied` leaves the batch and takes one per-doc pull, where read-only
+    // state and disk divergence can be checked. An unanswered id is different:
+    // the server said nothing about that note, so the batch itself retries it.
     vi.useFakeTimers();
     const sm = new SyncManager();
     await liveVault(sm);
-    apiHooks.status.set("edit0", "denied"); // permanent
+    apiHooks.status.set("edit0", "denied");
     // Unanswered ⇒ retryable. 25 of them, so the retry is a BATCH too and the
     // assertion reads the request rather than a pile of per-doc sockets.
     const unanswered = notes(30, "edit")
@@ -524,9 +638,11 @@ describe("a live import — the local-change drain", () => {
     apiHooks.omit.clear(); // the server answers properly from here on
     await settleRetries();
 
-    // Exactly the unanswered notes came back — never the refused one.
+    // Exactly the unanswered notes came back through the batch. The refused one
+    // was settled by its one per-doc fallback instead.
     expect(apiHooks.pushes).toHaveLength(2);
     expect(apiHooks.pushes[1].map((i) => i.docId).sort()).toEqual([...unanswered].sort());
+    expect(connects.order).toContain("edit0");
     vi.useRealTimers();
   });
 });

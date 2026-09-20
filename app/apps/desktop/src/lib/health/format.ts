@@ -132,6 +132,8 @@ export function kindLabel(kind: HealthIssueKind): string {
   switch (kind) {
     case "too-large":
       return "Too large";
+    case "no-write-access":
+      return "Read-only edit";
     case "upload-failed":
       return "Upload failed";
     case "register-failed":

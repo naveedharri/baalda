@@ -17,7 +17,11 @@ import {
 } from "../../registry/batch-ops.js";
 import { dirname, samePath } from "../../registry/tree-ops.js";
 import { purgeNoteIndex } from "../../index/indexer.js";
-import { applyDocPushBatch, type DocApplyItem } from "../../sync/doc-batch.js";
+import {
+  applyDocPushBatch,
+  serverDocCoversUpdate,
+  type DocApplyItem,
+} from "../../sync/doc-batch.js";
 import { getSession } from "../session.js";
 import { ORIGIN_HEADER } from "./registry.js";
 import type {
@@ -561,18 +565,44 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       });
 
       const permitted: Array<{ index: number; item: DocApplyItem }> = [];
+      const readOnly: Array<{ index: number; item: DocApplyItem }> = [];
       for (const p of pending) {
         if (permission.get(p.item.docId) !== "edit") {
-          results[p.index] = {
-            docId: p.item.docId,
-            status: "denied",
-            code: "no_edit_permission",
-            error: null,
-          };
+          if (permission.get(p.item.docId) === "view") readOnly.push(p);
+          else
+            results[p.index] = {
+              docId: p.item.docId,
+              status: "denied",
+              code: "no_edit_permission",
+              error: null,
+            };
           continue;
         }
         permitted.push(p);
       }
+
+      // A view-only client often sends its full state immediately after a
+      // Private→Read-only re-download. Refusing that as an edit invents one
+      // error per note even when the server already holds every operation.
+      // State-vector comparison is read-only: answer `skipped` only when the
+      // server provably covers the submitted state; genuine client-ahead ops
+      // remain denied and the desktop preserves their file as a recovery copy.
+      await runPool(readOnly, config.backfillConcurrency, async (p) => {
+        let covered = false;
+        try {
+          covered = await serverDocCoversUpdate(auth.vaultId, p.item.docId, p.item.update);
+        } catch {
+          covered = false;
+        }
+        results[p.index] = covered
+          ? { docId: p.item.docId, status: "skipped", code: null, error: null }
+          : {
+              docId: p.item.docId,
+              status: "denied",
+              code: "no_edit_permission",
+              error: null,
+            };
+      });
 
       const applied = await applyDocPushBatch(
         auth.vaultId,

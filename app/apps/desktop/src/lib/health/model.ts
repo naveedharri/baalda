@@ -43,8 +43,10 @@ export interface HealthContentFailure {
   docId: string;
   relPath: string;
   reason: string;
-  /** Retrying cannot help (today: over `MAX_NOTE_BYTES`). */
+  /** Retrying cannot help without changing the note or its access. */
   permanent?: boolean;
+  /** User-facing diagnosis. `permanent` is scheduling metadata, not a cause. */
+  kind?: "too-large" | "no-write-access";
 }
 
 /** One row the registry could not create/move. Mirrors `registry.ts`
@@ -448,8 +450,53 @@ function uploadFailedIssue(f: HealthContentFailure): HealthIssue {
   };
 }
 
+function noWriteAccessIssue(f: HealthContentFailure): HealthIssue {
+  const saved = f.reason.includes("copy saved to ");
+  return {
+    key: f.docId,
+    docId: f.docId,
+    path: f.relPath,
+    kind: "no-write-access",
+    severity: "error",
+    title: "Read-only sync needs review",
+    why: saved
+      ? "The Remote Vault refused this note as read-only. Baalda kept a recovery copy before restoring the Remote Vault's version."
+      : "The Remote Vault refused this note as read-only. Check again to verify whether its current local and remote text already match.",
+    remedies: ["retry", "open", "reveal", "export-copy", "copy-details"],
+    code: null,
+    explanation: {
+      meaning:
+        "The Remote Vault still has its confirmed copy, but it did not accept this device's submitted state because you do not have write access.",
+      next:
+        "Check again. If the current text already matches the Remote Vault, the warning clears without changing the note.",
+      fixes: saved
+        ? [
+            "Check again to compare the current read-only copy with the Remote Vault.",
+            "Open the recovery copy named in the details and restore the edit after access returns.",
+          ]
+        : [
+            "Check again to compare the current read-only copy with the Remote Vault.",
+            "If the warning remains, ask the vault owner for edit access before making changes.",
+          ],
+      safety: "only-here",
+    },
+    facts: [
+      ...pathFact(f.relPath),
+      ...docIdFact(f.docId),
+      { label: "Last error", value: f.reason, copyable: true },
+    ],
+    autoRetries: false,
+  };
+}
+
 function contentIssue(f: HealthContentFailure, ctx: IssueContext): HealthIssue {
-  return f.permanent ? tooLargeIssue(f, ctx) : uploadFailedIssue(f);
+  // The reason fallback keeps reports created by an older running session
+  // intelligible across a hot UI update. New producers always set `kind`.
+  if (f.kind === "too-large" || f.reason.toLowerCase().includes("too large")) {
+    return tooLargeIssue(f, ctx);
+  }
+  if (f.kind === "no-write-access") return noWriteAccessIssue(f);
+  return uploadFailedIssue(f);
 }
 
 function capitalize(s: string): string {

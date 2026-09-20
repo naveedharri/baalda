@@ -121,6 +121,23 @@ describe("VaultRegistry.primeLocal", () => {
     expect(api.listFolderRegistry).not.toHaveBeenCalled();
   });
 
+  it("restores and clears durable unhydrated-placeholder provenance", async () => {
+    const api = fakeApi();
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+      config({ unhydratedPlaceholders: ["n2"] }),
+    );
+    const reg = new VaultRegistry(api);
+
+    expect(await reg.primeLocal(ORG)).toBe(true);
+    expect(reg.isUnhydratedPlaceholder("n2")).toBe(true);
+    reg.clearUnhydratedPlaceholder("n2");
+    await reg.flushCheckpoint();
+
+    const calls = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const written = JSON.parse(calls[calls.length - 1]?.[0] ?? "{}");
+    expect(written.unhydratedPlaceholders).toBeUndefined();
+  });
+
   it("heals a config that already carries a duplicate path alias (#129)", async () => {
     // Configs written by builds with the alias bug carry TWO paths for one
     // docId, and `configSnapshot` round-trips whatever it is handed — so without

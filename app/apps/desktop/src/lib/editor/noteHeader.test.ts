@@ -6,11 +6,12 @@
 // compares only {path, readOnly, hasFrontmatter, mode}, never document content,
 // so typing in the body must reuse the SAME DOM node. If that ever regresses,
 // every keystroke — yours or a teammate's — destroys the input under the caret.
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState, StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import { createEditorState } from "./index";
 import type { NoteHeaderOptions } from "./noteHeader";
+import { setFocused } from "./reveal";
 
 function mount(doc: string, header?: Partial<NoteHeaderOptions>, readOnly = false) {
   const parent = document.createElement("div");
@@ -76,6 +77,78 @@ describe("the inline title widget", () => {
     const view = mount("Body text.", {}, true);
     expect(titleInput(view)?.readOnly).toBe(true);
     view.destroy();
+  });
+
+  it("collapses an exact legacy first H1 without changing the Markdown", () => {
+    const doc = "# My Note\n\nBody text.";
+    const view = mount(doc);
+    expect(view.state.doc.toString()).toBe(doc);
+    expect(view.contentDOM.textContent).not.toContain("# My Note");
+    expect(view.contentDOM.textContent).toContain("Body text.");
+
+    // Entering the source line reveals the real heading and its marker so it
+    // remains fully editable. The title input itself still renames the file.
+    view.dispatch({ effects: setFocused.of(true), selection: { anchor: 3 } });
+    expect(view.contentDOM.textContent).toContain("# My Note");
+    expect(view.state.doc.toString()).toBe(doc);
+    view.destroy();
+  });
+
+  it("keeps the duplicate collapsed after a live read-only transition", () => {
+    const editable = new Compartment();
+    const view = mount("# My Note\n\nBody text.", {
+      path: "Notes/My Note.md",
+    });
+    // Install the same compartment shape Editor.tsx uses, then put the caret
+    // on the revealed source before the server's permission verdict arrives.
+    view.dispatch({
+      effects: StateEffect.appendConfig.of(editable.of([])),
+    });
+    view.dispatch({ effects: setFocused.of(true), selection: { anchor: 3 } });
+    expect(view.contentDOM.textContent).toContain("# My Note");
+    view.dispatch({
+      effects: editable.reconfigure([
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+      ]),
+    });
+    expect(titleInput(view)?.readOnly).toBe(true);
+    expect(view.contentDOM.textContent).not.toContain("# My Note");
+    expect(view.state.doc.toString()).toBe("# My Note\n\nBody text.");
+    view.destroy();
+  });
+
+  it("does not collapse a distinct or later H1", () => {
+    const distinct = mount("# A different heading\n\nBody text.");
+    expect(distinct.contentDOM.textContent).toContain("A different heading");
+    distinct.destroy();
+
+    const later = mount("Intro.\n\n# My Note\n\nBody text.");
+    expect(later.contentDOM.textContent).toContain("My Note");
+    later.destroy();
+  });
+
+  it("finds an exact duplicate after frontmatter", () => {
+    const doc = "---\ntags: [legacy]\n---\n\n# My Note\n\nBody text.";
+    const view = mount(doc);
+    expect(view.contentDOM.textContent).not.toContain("# My Note");
+    expect(view.state.doc.toString()).toBe(doc);
+    view.destroy();
+  });
+
+  it("keeps the authored H1 visible without an inline title", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const withoutTitle = new EditorView({
+      state: createEditorState({
+        doc: "# My Note\n\nBody text.",
+        getTitles: () => [],
+        onNavigate: () => {},
+      } as never),
+      parent,
+    });
+    expect(withoutTitle.contentDOM.textContent).toContain("My Note");
+    withoutTitle.destroy();
   });
 
   it("renders on an empty note too — the title is always there", () => {

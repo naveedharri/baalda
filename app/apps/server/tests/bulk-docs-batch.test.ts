@@ -57,6 +57,25 @@ function updateFor(text: string): string {
   return update.toString("base64");
 }
 
+function updateForClient(text: string, clientId: number): string {
+  const doc = new Y.Doc();
+  doc.clientID = clientId;
+  doc.getText("content").insert(0, text);
+  const update = Buffer.from(Y.encodeStateAsUpdate(doc));
+  doc.destroy();
+  return update.toString("base64");
+}
+
+function beforeAndAfterDelete(): { before: string; after: string } {
+  const doc = new Y.Doc();
+  doc.getText("content").insert(0, "abc");
+  const before = Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64");
+  doc.getText("content").delete(1, 1);
+  const after = Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64");
+  doc.destroy();
+  return { before, after };
+}
+
 async function contentOf(docId: string): Promise<string | null> {
   const state = await loadDocState(docId);
   if (!state) return null;
@@ -190,6 +209,125 @@ describe("docs batch push", () => {
     await seedLock(org, "folder", folder, { type: "org" });
     const asOwner = await push(owner, [{ docId: locked, update: updateFor("nope") }]);
     expect(asOwner.body.results[0]).toMatchObject({ status: "denied", code: "no_edit_permission" });
+  });
+
+  it("lets a read-only re-download confirm state the server already covers", async () => {
+    const reader = await signUp("reader-covered@docs.test");
+    await seedMember(org, reader.userId, "member");
+    const folder = await seedFolder(vault, null, "Shared", "Shared");
+    const note = await seedNote(vault, folder, "Shared/same.md", owner.userId);
+    const update = updateFor("canonical server text");
+    await push(owner, [{ docId: note, update }]);
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedShare(org, "folder", folder, reader.userId, "view");
+
+    const same = await push(reader, [{ docId: note, update }]);
+    expect(same.body.results[0]).toMatchObject({ status: "skipped", code: null });
+
+    const localEdit = await push(reader, [{ docId: note, update: updateFor("local-only edit") }]);
+    expect(localEdit.body.results[0]).toMatchObject({
+      status: "denied",
+      code: "no_edit_permission",
+    });
+    expect(await contentOf(note)).toBe("canonical server text");
+  });
+
+  it("requires an equal-text but unrelated CRDT history to rebase pull-first", async () => {
+    const reader = await signUp("reader-rebase@docs.test");
+    await seedMember(org, reader.userId, "member");
+    const note = await seedNote(vault, null, "Shared/rebase.md", owner.userId);
+    const canonical = updateForClient("same Markdown", 1);
+    const recreated = updateForClient("same Markdown", 2);
+    await push(owner, [{ docId: note, update: canonical }]);
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedShare(org, "file", note, reader.userId, "view");
+
+    // Text equality is not enough to mark the client's CRDT durable: keeping
+    // these unrelated insert histories would duplicate the body when Edit
+    // access later reconnects them. `denied` sends the desktop through its
+    // discard-local-history → pull-canonical rebase path.
+    const sameText = await push(reader, [{ docId: note, update: recreated }]);
+    expect(sameText.body.results[0]).toMatchObject({
+      status: "denied",
+      code: "no_edit_permission",
+    });
+    expect(await contentOf(note)).toBe("same Markdown");
+  });
+
+  it("does not call equal state vectors covered when the server has a deletion", async () => {
+    const reader = await signUp("reader-delete@docs.test");
+    await seedMember(org, reader.userId, "member");
+    const note = await seedNote(vault, null, "deleted-text.md", owner.userId);
+    const { before, after } = beforeAndAfterDelete();
+    await push(owner, [{ docId: note, update: after }]);
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedShare(org, "file", note, reader.userId, "view");
+
+    // Deletes do not advance a Yjs state vector, so these two updates have the
+    // same vector even though one renders `abc` and the canonical one renders
+    // `ac`. The read-only acknowledgement must compare the actual content too.
+    expect(
+      Buffer.from(Y.encodeStateVectorFromUpdate(Buffer.from(before, "base64"))).equals(
+        Buffer.from(Y.encodeStateVectorFromUpdate(Buffer.from(after, "base64"))),
+      ),
+    ).toBe(true);
+    const stale = await push(reader, [{ docId: note, update: before }]);
+    expect(stale.body.results[0]).toMatchObject({
+      status: "denied",
+      code: "no_edit_permission",
+    });
+    expect(await contentOf(note)).toBe("ac");
+  });
+
+  it("checks the live canonical document instead of stale detached persistence", async () => {
+    const reader = await signUp("reader-live-covered@docs.test");
+    await seedMember(org, reader.userId, "member");
+    const note = await seedNote(vault, null, "live-canonical.md", owner.userId);
+    const before = updateFor("abc");
+    await push(owner, [{ docId: note, update: before }]);
+
+    // Model an open Hocuspocus doc whose latest deletion has not reached the
+    // detached update log yet. Looking only at persistence would falsely call
+    // the reader's stale `abc` covered; the live source of truth says `ac`.
+    const live = new Y.Doc();
+    Y.applyUpdate(live, Buffer.from(before, "base64"));
+    live.getText("content").delete(1, 1);
+    setDocBatchRuntime({
+      server: {
+        hocuspocus: { documents: new Map([[formatDocName(vault, note), live]]) },
+      } as never,
+      hooks: {},
+    });
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedShare(org, "file", note, reader.userId, "view");
+
+    const stale = await push(reader, [{ docId: note, update: before }]);
+    expect(stale.body.results[0]).toMatchObject({
+      status: "denied",
+      code: "no_edit_permission",
+    });
+    expect(live.getText("content").toString()).toBe("ac");
+    // A read-only comparison never mutates detached persistence either.
+    expect(await contentOf(note)).toBe("abc");
+    live.destroy();
+  });
+
+  it("denies a malformed read-only update without changing canonical content", async () => {
+    const reader = await signUp("reader-malformed@docs.test");
+    await seedMember(org, reader.userId, "member");
+    const note = await seedNote(vault, null, "malformed.md", owner.userId);
+    await push(owner, [{ docId: note, update: updateFor("canonical") }]);
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedShare(org, "file", note, reader.userId, "view");
+
+    const malformed = await push(reader, [
+      { docId: note, update: Buffer.from([1, 2, 3]).toString("base64") },
+    ]);
+    expect(malformed.body.results[0]).toMatchObject({
+      status: "denied",
+      code: "no_edit_permission",
+    });
+    expect(await contentOf(note)).toBe("canonical");
   });
 
   it("denies a doc id that has no live row in THIS vault", async () => {

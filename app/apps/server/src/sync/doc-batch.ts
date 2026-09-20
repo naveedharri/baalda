@@ -2,7 +2,7 @@ import * as Y from "yjs";
 import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
 import { formatDocName } from "./doc-name.js";
 import type { SyncContext } from "./hocuspocus.js";
-import { appendUpdate, loadDocState } from "../yjs/persistence.js";
+import { appendUpdate, compareStateVectors, loadDocState } from "../yjs/persistence.js";
 import { indexDoc, scheduleIndex } from "../index/indexer.js";
 
 /**
@@ -257,6 +257,50 @@ export function setDocBatchRuntime(next: DocBatchRuntime | null): void {
 
 export function docBatchRuntime(): DocBatchRuntime | null {
   return runtime;
+}
+
+/**
+ * Whether the server already covers a submitted update without applying it.
+ *
+ * State vectors alone are insufficient for this question: Yjs deletions live
+ * in the update's delete set and do not advance a client's struct clock. An
+ * older update can therefore have the exact same state vector as the server
+ * while rendering different text. Decode both states and compare the canonical
+ * `content` text as well as proving the client has no structs the server lacks.
+ *
+ * Prefer the live Hocuspocus document when one is open. Its latest transactions
+ * may not have reached detached persistence yet, and acknowledging an older
+ * submission against that stale store would falsely settle the client.
+ */
+export async function serverDocCoversUpdate(
+  vaultId: string,
+  docId: string,
+  update: Uint8Array,
+): Promise<boolean> {
+  return withDocLock(docId, async () => {
+    const submitted = new Y.Doc();
+    const canonical = new Y.Doc();
+    try {
+      Y.applyUpdate(submitted, update);
+      const live = runtime?.server.hocuspocus.documents.get(formatDocName(vaultId, docId));
+      const state = live ? Y.encodeStateAsUpdate(live) : await loadDocState(docId);
+      if (!state) return false;
+      Y.applyUpdate(canonical, state);
+
+      const relation = compareStateVectors(
+        Y.encodeStateVector(submitted),
+        Y.encodeStateVector(canonical),
+      );
+      return (
+        !relation.clientAhead &&
+        submitted.getText(CONTENT_FIELD).toString() ===
+          canonical.getText(CONTENT_FIELD).toString()
+      );
+    } finally {
+      submitted.destroy();
+      canonical.destroy();
+    }
+  });
 }
 
 /** One doc's push, already decoded and already permitted. */

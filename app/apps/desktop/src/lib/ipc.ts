@@ -377,12 +377,8 @@ export const readNote = (path: string, expectedEpoch?: VaultEpoch) =>
 export const noteExists = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("note_exists", { path, expectedEpoch: expectedEpoch ?? null });
 /**
- * Save a deleted note's text into `.context/trash/<stamp>/<rel>` and return the
- * trash-relative destination.
- *
- * The counterpart to {@link trashNote} for a file that is ALREADY gone: nothing
- * can be moved, so the doc's in-memory text is written instead. Same stamped
- * layout, so a disk delete lands in the trash next to a teammate's.
+ * Save local text that could not be synced into `.context/trash/<stamp>/<rel>`
+ * and return the trash-relative destination.
  */
 export const writeTrashCopy = (
   path: string,
@@ -439,9 +435,9 @@ export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch)
 export const ensureFolder = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("ensure_folder", { path, expectedEpoch: expectedEpoch ?? null });
 /**
- * Move a note into `.context/trash/<stamp>/…` instead of deleting it, and return
- * the trash-relative destination. Used for remote deletes, so applying a
- * teammate's delete is recoverable rather than final.
+ * Move a file into `.context/trash/<stamp>/…` and return the destination.
+ * Kept for compatibility with legacy recovery flows; confirmed sync deletions
+ * now use {@link deleteFile}.
  */
 export const trashNote = (path: string, stamp: string, expectedEpoch?: VaultEpoch) =>
   invoke<string>("trash_note", { path, stamp, expectedEpoch: expectedEpoch ?? null });
@@ -451,8 +447,8 @@ export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
 /**
  * Delete a single FILE, refusing a directory.
  *
- * Used by the inbound reconciler for a REVOKED note — the one removal in the app
- * that leaves no recoverable copy anywhere. `deletePath` above is recursive for
+ * Used by the inbound reconciler for confirmed deleted and revoked files.
+ * `deletePath` above is recursive for
  * a directory, deliberately, because the sidebar's Delete means it; nothing
  * driven by the server may reach that. See `notefile.rs delete_file`.
  */
@@ -999,6 +995,8 @@ export interface OauthListen {
 }
 export const googleOauthListen = () => invoke<OauthListen>("google_oauth_listen");
 export const googleOauthAwait = () => invoke<string>("google_oauth_await");
+/** Best-effort restore/show/focus of this exact app process after sign-in. */
+export const googleOauthReturnToApp = () => invoke<void>("google_oauth_return_to_app");
 
 // ---- Sync server URL (app config, next to last-vault) ----------------------
 
