@@ -454,6 +454,15 @@ export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
  */
 export const deleteFile = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_file", { path, expectedEpoch: expectedEpoch ?? null });
+/** Bounded, file-only inbound cleanup; docId also clears revoked CRDT state. */
+export const deleteFilesBatch = (
+  items: Array<{ path: string; docId: string | null }>,
+  expectedEpoch?: VaultEpoch,
+) => invoke<Array<{ path: string; error: string | null }>>("delete_files_batch", {
+  items,
+  expectedEpoch: expectedEpoch ?? null,
+});
+
 /**
  * Remove a folder the server has deleted — only if it is empty by now. Resolves
  * true only when THIS call removed it (the watcher will echo that); false when

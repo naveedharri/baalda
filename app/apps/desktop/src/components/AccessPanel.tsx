@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { authManager } from "../lib/auth/authManager";
 import type { AccessDefault, AccessTreeResponse, BulkAccessResource, Share, TeamAccess, TeamAccessMode } from "../lib/api";
-import type { TreeNode } from "../lib/ipc";
 import {
   accessEntryKey,
   buildBulkAccessInput,
   bulkChangeNeedsConfirmation,
+  compactAccessResources,
   selectAllAccessEntries,
   selectedBulkResources,
   toggleAccessSelection,
@@ -60,16 +60,7 @@ export function accessSummaryResources(input: {
   if (input.allItemsSelected || input.resources.some((resource) => resource.resourceType === "vault")) {
     return [{ resourceType: "vault", resourceId: input.orgId }];
   }
-  const pathById = new Map(input.entries.map((entry) => [entry.id, entry.path] as const));
-  const selectedFolders = input.resources
-    .filter((resource) => resource.resourceType === "folder")
-    .map((resource) => pathById.get(resource.resourceId))
-    .filter((path): path is string => !!path);
-  return input.resources.filter((resource) => {
-    const path = pathById.get(resource.resourceId);
-    if (!path) return true;
-    return !selectedFolders.some((folder) => path !== folder && path.startsWith(`${folder}/`));
-  });
+  return compactAccessResources(input.resources, input.entries);
 }
 
 export function selectedOrgAccessMode(input: {
@@ -193,8 +184,8 @@ const ICON = {
   ),
 };
 
-function buildLockMap(tree: TreeNode | null, locks: Share[]): Map<string, { org: boolean; users: Set<string> }> {
-  const idToPath = resourceIdsByPath(tree);
+function buildLockMap(entries: readonly AccessEntry[], locks: Share[]): Map<string, { org: boolean; users: Set<string> }> {
+  const idToPath = new Map(entries.map((entry) => [entry.id, entry.path]));
   const direct = new Map<string, { org: boolean; users: Set<string> }>();
   for (const lock of itemLockRows(locks)) {
     const path = idToPath.get(lock.resourceId ?? lock.resource_id ?? "");
@@ -204,12 +195,7 @@ function buildLockMap(tree: TreeNode | null, locks: Share[]): Map<string, { org:
     else row.users.add(lock.principalId ?? lock.principal_id ?? "");
     direct.set(path, row);
   }
-  const paths = new Set<string>(direct.keys());
-  const walk = (node: TreeNode) => {
-    paths.add(node.path);
-    node.children?.forEach(walk);
-  };
-  tree?.children?.forEach(walk);
+  const paths = new Set(entries.map((entry) => entry.path));
   const effective = new Map<string, { org: boolean; users: Set<string> }>();
   for (const path of paths) {
     const combined = { org: false, users: new Set<string>() };
@@ -256,13 +242,15 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     apply: () => Promise<void>;
   } | null>(null);
   const loadGen = useRef(0);
+  const scopeGen = useRef(0);
+  const mutationBusy = useRef(false);
   const peopleLoadGen = useRef(0);
   const resourcesRef = useRef<HTMLDivElement | null>(null);
   const bulkRef = useRef<HTMLElement | null>(null);
   const memberPickerRef = useRef<HTMLDivElement | null>(null);
   const accessChoicesRef = useRef<HTMLDivElement | null>(null);
 
-  const reloadVault = async () => {
+  const reloadVault = async (includeTree = true) => {
     const mine = ++loadGen.current;
     if (!canManage || !orgId) {
       setTeamAccess(null);
@@ -273,11 +261,11 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     const vaultId = syncManager.registry.vaultId;
     const [team, structure, joining] = await Promise.all([
       authManager.api.getTeamAccess(orgId).catch(() => null),
-      vaultId ? authManager.api.listAccessTree(vaultId).catch(() => null) : Promise.resolve(null),
+      includeTree && vaultId ? authManager.api.listAccessTree(vaultId).catch(() => null) : Promise.resolve(null),
       authManager.api.getAccessDefault(orgId).catch(() => null),
     ]);
     if (mine !== loadGen.current) return;
-    setServerTree(structure);
+    if (includeTree) setServerTree(structure);
     setAccessDefaultState(joining);
     if (team) {
       setTeamAccess(team);
@@ -299,20 +287,27 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     setPeopleAccessState("idle");
     setAudienceType("org");
     setConfirm(null);
+    setBusy(false);
+    setDefaultBusy(false);
+    mutationBusy.current = false;
     setCachedMode(orgId ? readTeamAccessCache(authManager.getServerUrl(), orgId) : null);
     void reloadVault();
+    return () => { loadGen.current++; peopleLoadGen.current++; scopeGen.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canManage, orgId]);
 
+  // Once the server structure is known, local download/removal batches must
+  // not rebuild it or invalidate the people-summary request dependencies.
+  const localTree = serverTree ? null : tree;
   const entries = useMemo<AccessEntry[]>(
     () => serverTree
       ? entriesFromServer(serverTree)
-      : entriesFromTree(tree, {
+      : entriesFromTree(localTree, {
           folderId: (path) => syncManager.registry.getFolderId(path),
           docId: (path) => syncManager.registry.getMapping(path)?.docId ?? null,
           fileId: (path) => syncManager.registry.getFileId(path),
         }),
-    [serverTree, tree],
+    [serverTree, localTree],
   );
   const resources = useMemo(() => rowsFromEntries(entries, expanded), [entries, expanded]);
   const selectedResources = useMemo(
@@ -336,8 +331,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
   const vaultMode = teamAccess?.mode ?? cachedMode;
   const orgRowsByPath = useMemo(
-    () => buildOrgRowsByPath(entries, resourceIdsByPath(tree), teamAccess?.overrides ?? null, locks, denies),
-    [entries, tree, teamAccess, locks, denies],
+    () => buildOrgRowsByPath(entries, resourceIdsByPath(localTree), teamAccess?.overrides ?? null, locks, denies),
+    [entries, localTree, teamAccess, locks, denies],
   );
   const rootPaths = useMemo(
     () => (serverTree ? entries.map((entry) => entry.path).filter((path) => !path.includes("/")) : []),
@@ -348,7 +343,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     [vaultMode, rootPaths, orgRowsByPath],
   );
   const shownVaultMode = vaultEffective?.mode ?? vaultMode;
-  const lockMap = useMemo(() => buildLockMap(tree, locks), [tree, locks]);
+  const lockMap = useMemo(() => buildLockMap(entries, locks), [entries, locks]);
   const teamModeFor = (path: string): Mode | null => vaultMode
     ? effectiveTeamMode({ vaultMode, path, ancestors: ancestorPaths(path), orgRowsByPath }).mode
     : null;
@@ -476,34 +471,46 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     scrollToAccessStepAfterRender(() => resourcesRef.current);
     setDefaultBusy(true);
     setError(null);
+    const scope = scopeGen.current;
     try {
       const next = await authManager.api.setAccessDefault(orgId, mode);
+      if (scope !== scopeGen.current) return;
       setAccessDefaultState(next);
       toast(`New-member access set to ${MODE_LABEL[next.mode]}`);
     } catch (cause) {
+      if (scope !== scopeGen.current) return;
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setDefaultBusy(false);
+      if (scope === scopeGen.current) setDefaultBusy(false);
     }
   };
 
   const applyBulk = async (mode: Mode) => {
-    if (!orgId || selectedResources.length === 0) return;
+    if (!orgId || selectedResources.length === 0 || mutationBusy.current) return;
     if (audienceType === "users" && selectedUserIds.length === 0) return;
+    mutationBusy.current = true;
     setBusy(true);
     setError(null);
+    const scope = scopeGen.current;
     try {
       const result = await authManager.api.setBulkAccess(
         orgId,
-        buildBulkAccessInput({ resources: selectedResources, audienceType, userIds: selectedUserIds, mode }),
+        buildBulkAccessInput({ resources: compactAccessResources(selectedResources, entries), audienceType, userIds: selectedUserIds, mode }),
       );
-      await useStore.getState().refreshLocks();
-      await reloadVault();
+      if (scope !== scopeGen.current) return;
+      // Permission writes do not change the structure. Refresh the two access
+      // views together instead of re-downloading and re-sorting the whole vault.
+      await Promise.all([useStore.getState().refreshLocks(), reloadVault(false)]);
+      if (scope !== scopeGen.current) return;
       toast(`${MODE_LABEL[result.mode]} applied to ${result.resourcesChanged} ${result.resourcesChanged === 1 ? "resource" : "resources"}${result.overridesCleared > 0 ? ` · ${result.overridesCleared} custom settings replaced` : ""}`);
     } catch (cause) {
+      if (scope !== scopeGen.current) return;
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(false);
+      if (scope === scopeGen.current) {
+        mutationBusy.current = false;
+        setBusy(false);
+      }
     }
   };
 
@@ -605,6 +612,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
             <button
               type="button"
               className="access-select-all"
+              disabled={busy}
               onClick={selectEveryResource}
             >
               {allItemsSelected ? "Clear selection" : "Select all items"}
@@ -614,7 +622,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
         {orgId && (
           <label className={`access-row access-vault-row${vaultSelected ? " sel" : ""}`}>
-            <input className="access-check" type="checkbox" checked={vaultSelected} disabled={!canManage} onChange={() => toggleResource(vaultKey)} />
+            <input className="access-check" type="checkbox" checked={vaultSelected} disabled={!canManage || busy} onChange={() => toggleResource(vaultKey)} />
             <span className="access-glyph">{ICON.vault}</span>
             <span className="access-rname">Entire vault</span>
             <span className="access-rright">{shownVaultMode ? <AccessBadge mode={shownVaultMode} /> : <LoadingBadge />}</span>
@@ -657,7 +665,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                       className="access-check"
                       type="checkbox"
                       checked={selected}
-                      disabled={!canManage || !!inheritedSelection}
+                      disabled={!canManage || busy || !!inheritedSelection}
                       aria-label={inheritedSelection
                         ? `${resource.name}, selected through ${inheritedSelection.label}. Change the ${inheritedSelection.label} selection to adjust this item.`
                         : resource.name}

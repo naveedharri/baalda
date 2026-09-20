@@ -44,10 +44,12 @@ export function AttachmentLocalOnlyNoticeView({
         <strong className="attachment-sync-title">
           Files beyond text notes require Pro to sync
         </strong>
-        <span className="attachment-sync-body">
-          Text notes still sync. Notes in other formats and embedded attachments stay on
-          this device and remain available to preview locally.
-        </span>
+        {surface !== "health" && (
+          <span className="attachment-sync-body">
+            Text notes still sync. Notes in other formats and embedded attachments stay on
+            this device and remain available to preview locally.
+          </span>
+        )}
       </span>
       {(showUpgrade || onOpenHealth) && (
         <div className="banner-actions">

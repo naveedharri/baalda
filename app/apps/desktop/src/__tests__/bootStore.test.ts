@@ -70,6 +70,7 @@ const sync = vi.hoisted(() => ({
   setPresenceStatus: vi.fn(),
   handleRegistryChanged: vi.fn(),
   setStatusListener: vi.fn(),
+  setVaultStatusListener: vi.fn(),
   setSessionRejectedListener: vi.fn(),
   setActivityListeners: vi.fn(),
   setRegistryListener: vi.fn(),
@@ -150,6 +151,7 @@ const flush = async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sync.registry.vaultId = null;
   sync.syncable = false;
   sync.isSyncable.mockImplementation(() => sync.syncable);
   sync.enable.mockImplementation(async (_s, _v, hooks) => {
@@ -170,6 +172,35 @@ beforeEach(() => {
     openingNotePath: null,
     openFolderIsSynced: null,
     tree: null,
+  });
+});
+
+describe("access overlay refresh ordering", () => {
+  it("does not let an older read-only response replace a newer Shared response", async () => {
+    sync.registry.vaultId = "v1";
+    useStore.setState({ vault: vault(), syncEnabled: true, locks: [], denies: [], lifts: [] });
+    const held = gate();
+    api.listVaultLocks.mockImplementationOnce(async () => {
+      await held.waited;
+      return [{ id: "old-lock", permission: "locked", resourceId: "n1" }];
+    });
+    const old = useStore.getState().refreshLocks();
+    api.listVaultLocks.mockResolvedValueOnce([]);
+    await useStore.getState().refreshLocks();
+    held.open();
+    await old;
+    expect(useStore.getState().locks).toEqual([]);
+  });
+
+  it("retains known restrictions when a refresh fails", async () => {
+    sync.registry.vaultId = "v1";
+    useStore.setState({ vault: vault(), syncEnabled: true });
+    api.listVaultLocks.mockResolvedValueOnce([{ id: "lock", permission: "locked", resourceId: "n1" }]);
+    await useStore.getState().refreshLocks();
+    const known = useStore.getState().locks;
+    api.listVaultLocks.mockRejectedValueOnce(new Error("temporarily offline"));
+    await useStore.getState().refreshLocks();
+    expect(useStore.getState().locks).toEqual(known);
   });
 });
 

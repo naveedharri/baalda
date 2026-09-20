@@ -2146,8 +2146,8 @@ export class ApiClient {
    *
    * Bypasses {@link ApiClient.request} on purpose — the body is bytes, not JSON
    * — and is modelled on {@link ApiClient.downloadBlob}/{@link
-   * ApiClient.downloadBytesFrom}. `Content-Encoding: gzip` is handled by the
-   * fetch stack itself, so what lands here is already the plain page.
+   * ApiClient.downloadBytesFrom}. The server sends gzip without Content-Encoding,
+   * so inflate explicitly. Accept already-decoded pages from older transports.
    *
    * Three statuses carry meaning rather than failure: 410 `session_expired`
    * (the caller re-POSTs with a fresh `have`), 503 `bootstrap_busy` with a
@@ -2185,7 +2185,11 @@ export class ApiClient {
       );
     }
     const cursorHeader = res.headers.get("x-baalda-cursor");
-    const body = new Uint8Array(await res.arrayBuffer());
+    let body = new Uint8Array(await res.arrayBuffer());
+    if (body[0] === 0x1f && body[1] === 0x8b) {
+      const inflated = new Blob([body]).stream().pipeThrough(new DecompressionStream("gzip"));
+      body = new Uint8Array(await new Response(inflated).arrayBuffer());
+    }
     return {
       bytes: body,
       // ABSENT means drained. An empty string is not a cursor either.

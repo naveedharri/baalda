@@ -226,6 +226,7 @@ export interface InboundHost {
     path: string,
     trashedTo: string | null,
     reason: "deleted" | "revoked",
+    crdtCleared?: boolean,
   ): void;
   /**
    * A server-only note was just materialized as a 0-byte placeholder at `path`.
@@ -345,7 +346,7 @@ export interface ReconcileInput {
 /** A folder/note that could NOT be registered, after retries. Surfaced so the
  *  vault is never reported fully synced while an arbitrary subset is local-only. */
 export interface RegistryFailure {
-  kind: "folder" | "note" | "materialize" | "inbound" | "orphan";
+  kind: "folder" | "note" | "materialize" | "inbound" | "inbound-blocked" | "orphan";
   /** Vault-relative path. */
   path: string;
   /** Intended docId, when known (notes) — phase 3 keys its badge by this. */
@@ -1158,6 +1159,9 @@ export class VaultRegistry {
       );
     }
     if (f.docId) this.sink.doc(f.docId, "error");
+    // Keep all diagnostics, but cap per-item logging and UI timeline emissions
+    // during a mass refusal. Thousands of synchronous log renders can freeze it.
+    if (this.failed.length > 20) return;
     // Timeline only — a listener must never be able to change what a run does.
     try {
       this.onFailure?.(f);
@@ -1509,6 +1513,8 @@ export class VaultRegistry {
     // exactly the authority needed to clear a member's disk. `access-check`
     // resolves each doc through `effectivePermission` instead, and a
     // disagreement means the file stays.
+    const plannedRemovals = plan.trash.length + plan.removeFolders.length;
+    if (plannedRemovals > 0) this.sink.phase("removing", plannedRemovals);
     if (plan.needsAccessCheck.length > 0) {
       await this.confirmRevocations(vaultId, plan);
       if (this.stale()) return none;
@@ -1516,7 +1522,7 @@ export class VaultRegistry {
 
     for (const r of plan.rejected) {
       this.recordFailure({
-        kind: "inbound",
+        kind: "inbound-blocked",
         path: r.path,
         docId: r.docId,
         reason: r.reason,
@@ -1574,87 +1580,89 @@ export class VaultRegistry {
       }
     }
 
-    // Pooled, not serial: each removal is an independent IPC pair (a read, then
-    // `deleteFile`) against a different path, and a cascade that
-    // reaches a peer is hundreds of them. Nothing about WHICH removals happen
-    // moves here — every refusal above (the `pushed` orphan rail, the empty-file
-    // check and file removal) is inside the worker and runs per item
-    // exactly as it did, and the caps that decided this list ran in `planInbound`
-    // long before. `bail` is the one shared verdict: a vault-mismatch or a stale
-    // run abandons the whole pass, which is what the loop's early `return` did.
-    let bail = false;
-    await runPool(
-      plan.trash,
-      async (gone) => {
-        if (gone.binary) {
-          if (await this.removeRevokedBinary(gone)) changedDisk = true;
-          return;
-        }
-        // A note whose content this device never confirmed upstream may hold local
-        // edits that exist NOWHERE else, so removing it could lose the only copy.
-        // Read `pushed` before the prune below has a chance to drop it. This
-        // matters most for `revoked`: access can be taken away mid-edit, and the
-        // one thing a permission change must never do is destroy work that only
-        // exists here.
-        if (!this.pushed.has(gone.docId) && !(await this.isEmptyOnDisk(gone.path))) {
-          this.recordFailure({
-            kind: "orphan",
-            path: gone.path,
-            docId: gone.docId,
-            reason:
-              gone.reason === "revoked"
+    // Use bounded IPC batches for large revocations. Only one batch is resident
+    // and in flight, and each yields to the UI before preparing the next one.
+    // Authorization and the unconfirmed-content guard still precede every delete.
+    const removalTotal = plan.trash.length + plan.removeFolders.length;
+    if (removalTotal > 0) this.sink.phase("removing", removalTotal);
+    const bulkRemoval = useBulkPath(plan.trash.length);
+    for (const group of chunked(plan.trash, bulkRemoval ? 64 : INBOUND_REMOVE_CONCURRENCY)) {
+      if (this.stopRun()) return { changedDisk, suppress: plan.suppress };
+      const ready: InboundTrash[] = [];
+      let cancelled = false;
+      await runPool(group, async (gone) => {
+        try {
+          if (gone.binary) {
+            const removed = await this.removeRevokedBinary(gone);
+            if (removed) changedDisk = true;
+            this.sink.item(removed ? "ok" : "failed");
+            return;
+          }
+          if (!this.pushed.has(gone.docId) && !(await this.isEmptyOnDisk(gone.path))) {
+            this.recordFailure({
+              kind: "orphan", path: gone.path, docId: gone.docId, code: null,
+              reason: gone.reason === "revoked"
                 ? "access was removed, but this device never confirmed its content upstream — left on disk"
                 : "deleted on the server, but this device never confirmed its content — left on disk",
-            code: null,
-          });
-          // Stop claiming the path, so the file can re-register on a later pass.
-          //
-          // Without this the baseline keeps naming this docId at this path, the
-          // plan suppresses the path on every pass, and the file is stranded:
-          // visible in the sidebar, never counted, never uploaded, while the header
-          // reads "Synced". For a note whose content this device never confirmed
-          // upstream that is the worst possible outcome — the local copy is the ONLY
-          // copy, and we were leaving it unsyncable on purpose. Re-registering it
-          // gets that work onto the server instead.
-          //
-          // NOT for a revocation: there the server still holds the content and the
-          // user has lost write access, so re-registering would only 403 in a loop.
-          if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
-          return;
-        }
-        await this.host?.releaseDoc(gone.docId);
-        if (this.stale()) {
-          bail = true;
-          return;
-        }
-        try {
-          // A confirmed deletion or revocation is final. `deleteFile`, not the
-          // recursive `deletePath`, makes this path structurally unable to take
-          // a directory even if a later planner regresses.
-          await ipc.deleteFile(gone.path, this.epoch());
-          changedDisk = true;
-          // The file left, so the baseline entry goes with it — otherwise every
-          // later pass would keep trying to remove a path that isn't there.
-          this.baselineDocs.delete(gone.docId);
-          this.authoredDocs.delete(gone.docId);
-          this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason);
+            });
+            if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
+            this.sink.item("failed");
+            return;
+          }
+          await this.host?.releaseDoc(gone.docId);
+          if (!this.stopRun()) ready.push(gone);
         } catch (e) {
-          if (ipc.isVaultMismatch(e)) {
-            bail = true;
+          if (ipc.isVaultMismatch(e) || this.stale()) {
+            cancelled = true;
             return;
           }
           this.recordFailure({
-            kind: "inbound",
-            path: gone.path,
-            docId: gone.docId,
-            reason: reasonOf(e),
-            code: null,
+            kind: "inbound", path: gone.path, docId: gone.docId,
+            reason: reasonOf(e), code: null,
           });
+          this.sink.item("failed");
         }
-      },
-      { concurrency: INBOUND_REMOVE_CONCURRENCY, shouldStop: () => bail || this.stopRun() },
-    );
-    if (bail) return { changedDisk, suppress: plan.suppress };
+      }, { concurrency: INBOUND_REMOVE_CONCURRENCY, shouldStop: () => cancelled || this.stopRun() });
+      if (cancelled || this.stopRun()) return { changedDisk, suppress: plan.suppress };
+      let outcomes: Array<{ path: string; error: string | null }>;
+      try {
+        if (bulkRemoval) {
+          outcomes = ready.length === 0 ? [] : await ipc.deleteFilesBatch(ready.map((gone) => ({
+            path: gone.path, docId: gone.reason === "revoked" ? gone.docId : null,
+          })), this.epoch());
+        } else {
+          outcomes = await Promise.all(ready.map(async (gone) => {
+            try {
+              await ipc.deleteFile(gone.path, this.epoch());
+              return { path: gone.path, error: null };
+            } catch (e) {
+              if (ipc.isVaultMismatch(e)) throw e;
+              return { path: gone.path, error: reasonOf(e) };
+            }
+          }));
+        }
+      } catch (e) {
+        if (ipc.isVaultMismatch(e) || this.stale()) return { changedDisk, suppress: plan.suppress };
+        outcomes = ready.map((gone) => ({ path: gone.path, error: reasonOf(e) }));
+      }
+      if (this.stale()) return { changedDisk, suppress: plan.suppress };
+      const byPath = new Map(outcomes.map((out) => [out.path, out]));
+      for (const gone of ready) {
+        const out = byPath.get(gone.path);
+        if (!out || out.error) {
+          this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
+            reason: out?.error ?? "local cleanup did not return a result", code: null });
+          this.sink.item("failed");
+          continue;
+        }
+        changedDisk = true;
+        this.baselineDocs.delete(gone.docId);
+        this.authoredDocs.delete(gone.docId);
+        this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason, bulkRemoval);
+        this.sink.item("ok");
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
 
     // Paths the plan suppressed WITHOUT trashing: a tombstoned note whose file
     // is still on disk under an identity the index no longer ties to the
@@ -1733,12 +1741,14 @@ export class VaultRegistry {
       if (this.stopRun()) break;
       try {
         const removed = await ipc.deleteFolderIfEmpty(path, this.epoch());
+        this.sink.item("ok");
         if (removed) {
           changedDisk = true;
           this.markMaterialized(path); // our removal; one watcher echo to swallow
         }
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+        this.sink.item("failed");
         this.recordFailure({
           kind: "inbound",
           path,
@@ -1748,6 +1758,10 @@ export class VaultRegistry {
         });
       }
       this.folderByPath.delete(path);
+    }
+    if (plannedRemovals > 0) {
+      this.sink.flush();
+      this.sink.phase("registering", 0);
     }
     // Drop EVERY mapping whose id is tombstoned, not just the ones whose dir
     // still existed: a surviving dead entry would make `registerFolder` at the
@@ -3329,7 +3343,25 @@ export class VaultRegistry {
       try {
         await this.api.deleteFolder(folderId);
       } catch (e) {
-        if (!(e instanceof ApiError && e.status === 404)) throw e;
+        if (!(e instanceof ApiError && e.status === 404)) {
+          if (!(e instanceof ApiError && e.status === 403)) throw e;
+          // Revocation can leave a folder around its local-only files. Its
+          // stale/adopted server identity must not prevent deleting that local
+          // remainder, but a readable, read-only folder still stays protected.
+          const beneath = (candidate: string) => {
+            const root = path.toLowerCase();
+            const value = candidate.toLowerCase();
+            return value === root || value.startsWith(root + "/");
+          };
+          const hasMappedContent = () =>
+            [...this.byPath.keys(), ...this.fileByPath.keys()].some(beneath);
+          if (hasMappedContent()) throw e;
+          const listing = await this.api.listFolderRegistry(vaultId);
+          if (this.stale() || this.serverVaultId !== vaultId) throw e;
+          if (listing.tombstones === null || hasMappedContent() || listing.folders.some((folder) =>
+            folder.id === folderId || beneath(folder.path),
+          )) throw e;
+        }
       }
       if (this.stale() || this.serverVaultId !== vaultId) return;
       this.folderByPath = dropPrefix(this.folderByPath, path);

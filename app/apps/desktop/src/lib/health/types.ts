@@ -223,6 +223,8 @@ export type HealthIssueKind =
   | "left-behind"
   /** A server note could not be written to disk. */
   | "materialize-failed"
+  /** An inbound removal or move was withheld by a safety check. */
+  | "inbound-blocked"
   /** Local CRDT history for a doc the vault no longer has. */
   | "orphan-history";
 
@@ -328,7 +330,9 @@ export interface HealthInventory {
   /** False until the supported-file tree has completed; local counts are placeholders. */
   localReady: boolean;
   server: { notes: number; folders: number; files: number; total: number } | null;
-  serverState: "current" | "last-known" | "unavailable";
+  /** Complete stored totals, available only through the owner/admin endpoint. */
+  serverStored?: { notes: number; folders: number; files: number; total: number } | null;
+  serverState: "current" | "updating" | "last-known" | "unavailable";
   /** Paths present on only one side, separated by transport kind. */
   deviceOnlyNotes: string[];
   serverOnlyNotes: string[];

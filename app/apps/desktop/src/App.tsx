@@ -165,12 +165,14 @@ function NotSyncingBanner() {
   const authStatus = useStore((s) => s.authStatus);
   const hasSession = useStore((s) => s.session != null);
   const syncStatus = useStore((s) => s.syncStatus);
+  const vaultSyncStatus = useStore((s) => s.vaultSyncStatus);
   const folderIsSynced = useStore((s) => s.openFolderIsSynced);
   const noteOpen = useStore((s) => s.openNote != null);
   const reason = notSyncingReason({
     authStatus,
     hasSession,
     syncStatus,
+    vaultSyncStatus,
     folderIsSynced,
     noteOpen,
   });

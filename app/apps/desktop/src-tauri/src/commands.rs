@@ -1448,6 +1448,91 @@ pub async fn delete_file(
     Ok(())
 }
 
+/// A bounded local cleanup batch. Every path still goes through the file-only
+/// deletion guard; this command never recursively deletes directories.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboundRemoval {
+    path: String,
+    doc_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboundRemovalOutcome {
+    path: String,
+    error: Option<String>,
+}
+
+#[cfg(test)]
+fn remove_inbound_file(vault: &Path, index: &Mutex<Index>, item: &InboundRemoval) -> AppResult<()> {
+    let outcomes = remove_inbound_files(vault, index, vec![InboundRemoval {
+        path: item.path.clone(), doc_id: item.doc_id.clone(),
+    }], || Ok(()))?;
+    if let Some(error) = &outcomes[0].error {
+        return Err(AppError::new(error));
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn delete_files_batch(
+    state: State<'_, AppState>,
+    items: Vec<InboundRemoval>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<InboundRemovalOutcome>> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    remove_inbound_files(&vault, &index, items, || {
+        require_vault_at(&state, expected_epoch).map(|_| ())
+    })
+}
+
+fn remove_inbound_files(
+    vault: &Path,
+    index: &Mutex<Index>,
+    items: Vec<InboundRemoval>,
+    check_epoch: impl Fn() -> AppResult<()>,
+) -> AppResult<Vec<InboundRemovalOutcome>> {
+    if items.len() > 64 {
+        return Err(AppError::new("inbound removal batch exceeds 64 files"));
+    }
+    let mut outcomes = Vec::with_capacity(items.len());
+    let mut removed = Vec::new();
+    for item in items {
+        // Re-check between files so a vault switch cancels the remaining work.
+        check_epoch()?;
+        let result = vault::resolve_in_vault(&vault, &item.path).and_then(|abs| {
+            notefile::delete_file(&vault, &item.path)?;
+            removed.push((abs, item.doc_id));
+            Ok(())
+        });
+        outcomes.push(InboundRemovalOutcome {
+            path: item.path,
+            error: result.err().map(|e| e.to_string()),
+        });
+    }
+    // One index transaction and one backlink resolution pass per batch,
+    // rather than rescanning the link index after every removed file.
+    let guard = index.lock().unwrap();
+    let paths: Vec<PathBuf> = removed.iter().map(|(path, _)| path.clone()).collect();
+    let failures = guard.remove_notes(&vault, &paths)?;
+    for (abs, doc_id) in removed {
+        let result = if let Some((_, error)) = failures.iter().find(|(path, _)| *path == abs) {
+            Err(error.to_string())
+        } else if let Some(doc_id) = doc_id {
+            guard.clear_yjs_doc(&doc_id).map_err(|error| error.to_string())
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            if let Some(outcome) = outcomes.iter_mut().find(|outcome| vault.join(&outcome.path) == abs) {
+                outcome.error = Some(error);
+            }
+        }
+    }
+    Ok(outcomes)
+}
+
 #[tauri::command]
 pub async fn delete_path(
     state: State<'_, AppState>,
@@ -2579,6 +2664,32 @@ pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_batch_file_removal_preserves_directories_and_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = Mutex::new(Index::open_in_memory().unwrap());
+        std::fs::create_dir(tmp.path().join("Docs")).unwrap();
+        std::fs::create_dir(tmp.path().join(".context")).unwrap();
+        std::fs::write(tmp.path().join("Docs/n.md"), "note").unwrap();
+        std::fs::write(tmp.path().join(".context/config.json"), "{}").unwrap();
+        index.lock().unwrap().append_yjs_update("d1", &[1]).unwrap();
+        for path in ["Docs", ".context/config.json", "../outside.md"] {
+            assert!(remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+                path: path.into(), doc_id: Some("d1".into()),
+            }).is_err());
+        }
+        assert!(tmp.path().join("Docs/n.md").exists());
+        assert!(tmp.path().join(".context/config.json").exists());
+        assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 1);
+        remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+            path: "Docs/n.md".into(), doc_id: Some("d1".into()),
+        }).unwrap();
+        assert!(!tmp.path().join("Docs/n.md").exists());
+        assert!(tmp.path().join("Docs").exists());
+        assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 0);
+    }
+
 
     /// The decision behind `config_path`'s fallback (#128). `config_path` itself
     /// needs an `AppHandle`, so the part that is actually testable is the probe:

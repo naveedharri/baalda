@@ -20,10 +20,10 @@
 
 ## 0.1.63
 
-- Health clearly separates device and Remote Vault state, explains missing files without recreating them, and gives safer actions for retries and cleanup.
-- Access shows effective permissions for people, folders and entire vaults, including mixed inherited access, without slowing down large vaults.
-- Sync recovers more reliably from interrupted uploads and unsent edits, while stronger deletion and revocation checks protect local files and private app data.
-- The sidebar can be collapsed and remembers its state. Sidebar and Search controls sit beside macOS window controls, menus stay visible, and browser sign-in returns cleanly.
+- Health updates local counts during sync and shows stored server totals separately from access restrictions. Progress distinguishes sync updates from notes.
+- Switching access on large vaults uses bulk cleanup with visible progress. Shared, read-only and private states remain stable while files sync.
+- Sync preserves concurrent edits when disk reads race with collaborators, restores large shared vaults in batches, and avoids uploading unchanged empty notes after a restart.
+- The sidebar remembers its collapsed state. Click the vault path to copy its full location; a small check confirms it copied. Menus and browser sign-in remain reliable.
 
 ## 0.1.62
 

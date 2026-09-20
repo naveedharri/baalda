@@ -320,6 +320,7 @@ export function FileTree() {
   // that rate was pure allocation churn on the main thread — the same thread
   // the sidebar's clicks are queued on.
   const localNotePaths = useMemo(() => titles.map((t) => t.path), [titles]);
+  const removingAccess = useStore((s) => s.syncProgress?.phase === "removing");
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {
     const waveKey = syncEnabled ? vaultPath : null;
     if (lastWaveKeyRef.current !== waveKey) {
@@ -327,6 +328,12 @@ export function FileTree() {
       lastWaveKeyRef.current = waveKey;
     }
     if (!syncEnabled) return null;
+    // Removing a revoked copy is not an upload completing. The header owns
+    // cleanup progress; discard the old wave so removal cannot advance it.
+    if (removingAccess) {
+      wavesRef.current.reset();
+      return null;
+    }
     // No server contact yet this session ⇒ no marks (see `sidebarMarksVisible`).
     // The wave tracker is left alone so the counters resume where they were
     // once the channel comes back, rather than restarting at "0/N".
@@ -341,6 +348,7 @@ export function FileTree() {
     return index;
   }, [
     syncEnabled,
+    removingAccess,
     syncStatus,
     docIdByPath,
     docSyncState,

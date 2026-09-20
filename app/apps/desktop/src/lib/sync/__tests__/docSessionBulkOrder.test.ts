@@ -172,6 +172,7 @@ vi.mock("../vaultSyncEngine", () => ({
     refresh() {
       engineHooks.refreshes++;
     }
+    reconnect() { engineHooks.refreshes++; }
     inboundProgress() {
       return { done: 0, total: 0, queued: 0 };
     }
@@ -633,6 +634,46 @@ describe("SyncManager — ready.empty is the authority", () => {
     await vi.advanceTimersByTimeAsync(31_000);
     await flush();
     expect(progress[progress.length - 1]?.phase).not.toBe("error");
+    vi.useRealTimers();
+  });
+
+  it("starts a fresh bulk download after a large live grant and its registry pull", async () => {
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    await enable(sm);
+    engineHooks.settled = true;
+    engineHooks.opts!.onInboundIdle?.();
+    await flush();
+    const bulk = vi.spyOn(sm as unknown as { runBulkEngine(scope: unknown): Promise<void> }, "runBulkEngine")
+      .mockResolvedValue();
+    fakeRegistry.pull.mockClear();
+    engineHooks.opts!.onBootstrapRequired?.();
+    expect(bulk).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(251);
+    await flush();
+    expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
+    expect(bulk).toHaveBeenCalledTimes(1);
+    expect(engineHooks.refreshes).toBeGreaterThan(0);
+    sm.disable();
+    vi.useRealTimers();
+  });
+
+  it("keeps download progress alive while a paused connection is draining content", async () => {
+    vi.useFakeTimers();
+    fakeRegistry.mappedNotes.mockReturnValue([{ docId: "a", relPath: "A.md" }]);
+    fakeRegistry.pushed.add("a");
+    const sm = new SyncManager();
+    const progress: Array<SyncProgress | null> = [];
+    sm.setSyncProgressListener((p) => progress.push(p));
+    await enable(sm);
+    for (let i = 1; i <= 4; i++) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      engineHooks.opts!.onInboundProgress?.(i, 10);
+      await vi.advanceTimersByTimeAsync(150);
+    }
+    expect(progress[progress.length - 1]?.phase).toBe("downloading");
+    expect(progress[progress.length - 1]?.done).toBe(4);
+    sm.disable();
     vi.useRealTimers();
   });
 });

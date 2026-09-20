@@ -429,6 +429,28 @@ describe("HealthView", () => {
     expect(html).not.toContain("items Baalda can list");
   });
 
+  it.each(["syncing", "connecting"] as const)("does not call %s unavailable or flag its placeholders as empty notes", (verdict) => {
+    const html = render(snapshot({
+      report: { ...localReport, verdict },
+      stats: { ...stats, notes: { count: 6974, bytes: 4096, empty: 6667 } },
+      inventory: {
+        local: { notes: 6974, folders: 1743, files: 0, total: 8717 },
+        localReady: true,
+        server: { notes: 6974, folders: 1743, files: 0, total: 8717 },
+        serverState: "updating",
+        deviceOnlyNotes: [], serverOnlyNotes: [], deviceOnlyFolders: [],
+        serverOnlyFolders: [], deviceOnlyFiles: [], serverOnlyFiles: [],
+      },
+    }));
+    expect(html).toContain("Updating Remote Vault view");
+    expect(html).toContain("Sync is still updating your local copy");
+    expect(html).toContain("Counts are provisional until sync finishes");
+    expect(html).toContain("Remote counts include only notes you can access");
+    expect(html).not.toContain("The Remote Vault is unavailable");
+    expect(html).not.toContain("6,667 empty");
+    expect(html).not.toContain("Notes and folders match");
+  });
+
   it("does not invent local counts while the supported-file tree is loading", () => {
     const html = render(
       snapshot({
@@ -677,6 +699,17 @@ describe("HealthIssues", () => {
       }),
     );
 
+  it("limits the initial issue list while keeping counts and a focused issue available", () => {
+    const issues = Array.from({ length: 1950 }, (_, i) => ({ ...issue, key: `item-${i}`, path: `note-${i}.md` }));
+    const html = renderIssues({ issues });
+    expect(html).toContain("note-99.md");
+    expect(html).not.toContain("note-100.md");
+    expect(html).toContain("1850 remaining");
+    const focused = renderIssues({ issues, focusKey: "item-1949" });
+    expect(focused).toContain("note-1949.md");
+    expect(focused).not.toContain("note-100.md");
+  });
+
   it("keeps the reasoning collapsed until the row is opened", () => {
     const html = renderIssues();
     expect(html).toContain("Too large to sync");
@@ -775,7 +808,7 @@ describe("HealthIssues", () => {
   it("calms down to a single card when there is nothing to report", () => {
     const html = renderIssues({ issues: [] });
     expect(html).toContain("Nothing needs attention");
-    expect(html).toContain("Every note the Remote Vault knows about is confirmed");
+    expect(html).toContain("No sync errors reported");
   });
 });
 
@@ -887,4 +920,25 @@ describe("HealthTimeline", () => {
   it("says nothing has happened rather than drawing an empty frame", () => {
     expect(render([])).toContain("Nothing yet this session");
   });
+});
+
+
+it("shows stored private notes without calling the vault empty or missing locally", () => {
+  const base = snapshot();
+  const html = render(snapshot({
+    report: { ...localReport, verdict: "healthy", counts: {
+      total: 0, synced: 0, pending: 0, failed: 0, unsynced: 0, unreported: 0,
+    } },
+    inventory: { ...base.inventory,
+      local: { notes: 0, folders: 0, files: 0, total: 0 },
+      server: { notes: 0, folders: 0, files: 0, total: 0 },
+      serverStored: { notes: 6974, folders: 1743, files: 0, total: 8717 }, serverState: "current",
+    },
+  }));
+  expect(html).toContain("6,974");
+  expect(html).toContain("Stored on server");
+  expect(html).toContain("No notes accessible to this account");
+  expect(html).not.toContain("This vault is empty");
+  expect(html).not.toContain("Notes and folders match");
+  expect(html).not.toContain("missing from this computer");
 });

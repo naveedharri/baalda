@@ -151,6 +151,8 @@ export interface VaultSyncEngineOptions {
    * download phase used to end that way, i.e. never.
    */
   onInboundIdle?: () => void;
+  /** A large live access grant should be downloaded through HTTP bootstrap. */
+  onBootstrapRequired?: () => void;
   /**
    * The server named the readable docs it holds NO CRDT state for (`ready.empty`).
    *
@@ -203,6 +205,7 @@ export interface VaultSyncEngineOptions {
    * to Private must leave this disk exactly as a note does.
    */
   fileDocIds?: () => string[];
+  heldNoteIds?: () => string[];
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
   /**
@@ -302,11 +305,13 @@ export class VaultSyncEngine {
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
   private readonly onInboundIdle?: () => void;
+  private readonly onBootstrapRequired?: () => void;
   private readonly onServerEmpty?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerBehind?: (docIds: string[]) => void;
   private readonly onServerRevoked?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerDrop?: (docId: string) => void;
   private readonly fileDocIds?: () => string[];
+  private readonly heldNoteIds?: () => string[];
   private readonly wsFactory: WsFactory;
   private readonly inboundMaxBytes: number;
   private readonly baseMs: number;
@@ -385,7 +390,9 @@ export class VaultSyncEngine {
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
     this.onInboundIdle = opts.onInboundIdle;
+    this.onBootstrapRequired = opts.onBootstrapRequired;
     this.fileDocIds = opts.fileDocIds;
+    this.heldNoteIds = opts.heldNoteIds;
     this.onServerEmpty = opts.onServerEmpty;
     this.onServerBehind = opts.onServerBehind;
     this.onServerRevoked = opts.onServerRevoked;
@@ -659,6 +666,12 @@ export class VaultSyncEngine {
     } catch {
       files = [];
     }
+    let held: string[] = [];
+    try {
+      held = this.heldNoteIds?.() ?? [];
+    } catch {
+      // A vault switch may retire the registry while hello is being prepared.
+    }
     // The socket may have closed while we were minting/building — guard the send.
     if (!this.ws) return;
     // `origin` is this app instance's id, matching the `x-baalda-origin` header on
@@ -674,6 +687,7 @@ export class VaultSyncEngine {
         // Omitted when empty, so the common frame stays byte-identical to what
         // every shipped server already parses.
         ...(files.length > 0 ? { files } : {}),
+        ...(held.length > 0 ? { held } : {}),
         // …and the same for the mode: absent means "backfill me", exactly as
         // every older client and server already behave.
         ...(this.liveOnly ? { mode: "live-only" as const } : {}),
@@ -738,6 +752,11 @@ export class VaultSyncEngine {
         // (Re)announce our presence now the channel is live — covers first
         // connect and every reconnect so teammates never see us go stale.
         this.sendPresence();
+      } else if (control.t === "bootstrap") {
+        this.onBootstrapRequired?.();
+      } else if (control.t === "revoked") {
+        for (const docId of control.docIds) this.sink.drop(docId);
+        this.onServerRevoked?.(control.docIds, false);
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
         // …and tell the session WHICH doc left, so the live revocation path

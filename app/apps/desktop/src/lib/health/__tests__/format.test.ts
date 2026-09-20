@@ -152,6 +152,7 @@ describe("kindLabel", () => {
     "no-access",
     "left-behind",
     "materialize-failed",
+    "inbound-blocked",
     "orphan-history",
   ];
 

@@ -146,6 +146,8 @@ export function kindLabel(kind: HealthIssueKind): string {
       return "No access";
     case "left-behind":
       return "Left on disk";
+    case "inbound-blocked":
+      return "Safety check";
     case "materialize-failed":
       return "Couldn't write";
     case "orphan-history":

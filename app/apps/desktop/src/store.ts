@@ -295,6 +295,8 @@ interface AppStore {
   userInvitations: Invitation[];
   syncEnabled: boolean;
   syncStatus: SyncStatus;
+  /** Vault channel connectivity, independent of the open note’s permissions. */
+  vaultSyncStatus: SyncStatus;
   /** When the current doc last flushed all changes to the server — drives
    *  "Synced · just now". Bumped on every server ack, not just initial sync. */
   lastSyncedAt: number | null;
@@ -1266,6 +1268,8 @@ let activeBroadcast: { stop: () => Promise<void> } | null = null;
  *  longer matches has been superseded by a newer switch and drops its remaining
  *  work rather than racing it to bind a folder / enable sync. */
 let orgSwitchGen = 0;
+/** A slower overlay response must not undo a newer permission refresh. */
+let locksRefreshGen = 0;
 
 /**
  * Bumped by every flow that establishes or drops a session. `initAuth` now runs
@@ -1489,6 +1493,7 @@ function vaultScopedSyncReset() {
   return {
     syncEnabled: false,
     syncStatus: "offline" as SyncStatus,
+    vaultSyncStatus: "offline" as SyncStatus,
     syncPending: false,
     syncProgress: null,
     failedRunToken: 0,
@@ -2412,6 +2417,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
+    syncManager.setVaultStatusListener((status) =>
+      set({ vaultSyncStatus: status === "idle" ? "offline" : status }),
+    );
     // The server refused our session at token mint and a fresh session check
     // agreed it is gone (`sync/sessionGuard.ts`). Fires at most once per
     // session — this is what makes an expiry mid-run visible NOW instead of at
@@ -3836,6 +3844,7 @@ export const useStore = create<AppStore>((set, get) => ({
   // ---- Locks ----
 
   refreshLocks: async () => {
+    const generation = ++locksRefreshGen;
     const vaultId = syncManager.registry.vaultId;
     if (!vaultId || !get().syncEnabled) {
       set({ locks: [], denies: [], lifts: [] });
@@ -3846,7 +3855,7 @@ export const useStore = create<AppStore>((set, get) => ({
       const overlay = await authManager.api.listVaultLocks(vaultId);
       // Locks are per-vault; publishing another vault's set would badge the
       // wrong rows in the sidebar.
-      if (!sameVault(get, epoch) || syncManager.registry.vaultId !== vaultId) return;
+      if (generation !== locksRefreshGen || !sameVault(get, epoch) || syncManager.registry.vaultId !== vaultId) return;
       // The endpoint returns THREE kinds of row on one response. They MUST stay
       // apart here: everything downstream of `locks` (badges, tooltips, the
       // read-only cap, the row menu's Unlock) assumes every row is a lock. A
@@ -3865,8 +3874,8 @@ export const useStore = create<AppStore>((set, get) => ({
       });
     } catch (e) {
       console.warn("[locks] refresh failed", e);
-      if (!sameVault(get, epoch)) return;
-      set({ locks: [], denies: [], lifts: [] });
+      // A failed read is not evidence that every restriction was removed.
+      // Keep the last confirmed overlay until a successful refresh replaces it.
     }
   },
 

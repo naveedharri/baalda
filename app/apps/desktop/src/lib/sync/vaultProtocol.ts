@@ -23,6 +23,8 @@ export interface HelloFrame {
    * what we tell it we hold. They share the notes' `REVOKED_CAP`.
    */
   files?: string[];
+  /** Mapped notes held locally, including those with no CRDT state vector yet. */
+  held?: string[];
   /**
    * This app instance's id (`ApiClient.getClientId()`), the same value sent as
    * `x-baalda-origin` on registry writes. Lets the server skip telling us to
@@ -53,7 +55,7 @@ export interface HelloFrame {
 }
 
 /** What this build can handle beyond the original protocol. Sent in `hello`. */
-export const CLIENT_CAPS = ["voice"];
+export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant"];
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).
  *  `docId` null means the user isn't viewing anything (or left) — clear them. */
@@ -117,6 +119,8 @@ export type ServerControl =
       /** More than one frame would name (cap 2000). */
       revokedTruncated?: boolean;
     }
+  | { t: "revoked"; docIds: string[] }
+  | { t: "bootstrap" }
   | { t: "drop"; docId: string }
   | { t: "reauth" }
   | { t: "registry" }
@@ -169,6 +173,13 @@ export function parseServerControl(text: string): ServerControl | null {
       ...(revoked && revoked.length > 0 ? { revoked } : {}),
       ...(o.revokedTruncated === true ? { revokedTruncated: true } : {}),
     };
+  }
+  if (t === "bootstrap") return { t: "bootstrap" };
+  if (t === "revoked") {
+    const docIds = (v as { docIds?: unknown }).docIds;
+    if (!Array.isArray(docIds) || docIds.length > 2000 ||
+        !docIds.every((id) => typeof id === "string" && id.length > 0)) return null;
+    return { t: "revoked", docIds };
   }
   if (t === "reauth") return { t: "reauth" };
   if (t === "registry") return { t: "registry" };

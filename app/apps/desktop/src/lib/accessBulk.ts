@@ -2,7 +2,24 @@
 
 import type { BulkAccessAudience, BulkAccessResource, TeamAccessMode } from "./api";
 import type { AccessEntry } from "./accessTree";
-import { accessResourceType } from "./accessTree";
+import { accessResourceType, ancestorPaths } from "./accessTree";
+
+/** Folder writes already cover descendants. Keep item scope (not vault scope)
+ * while avoiding thousands of redundant ACL rows and the request-size limit. */
+export function compactAccessResources(
+  resources: readonly BulkAccessResource[],
+  entries: readonly AccessEntry[],
+): BulkAccessResource[] {
+  const paths = new Map(entries.map((entry) => [entry.id, entry.path]));
+  const folders = new Set(resources
+    .filter((resource) => resource.resourceType === "folder")
+    .map((resource) => paths.get(resource.resourceId))
+    .filter((path): path is string => path !== undefined));
+  return resources.filter((resource) => {
+    const path = paths.get(resource.resourceId);
+    return path === undefined || !ancestorPaths(path).some((parent) => folders.has(parent));
+  });
+}
 
 export const vaultAccessKey = (orgId: string): string => `vault:${orgId}`;
 

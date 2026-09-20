@@ -142,6 +142,7 @@ describe("VaultSyncEngine", () => {
       vaultId: "v1",
       sink,
       fileDocIds: () => ["file-1", "file-2"],
+      heldNoteIds: () => ["A", "unopened-note"],
       wsFactory: () => (ws = new FakeWs()),
     });
     engine.start();
@@ -150,6 +151,7 @@ describe("VaultSyncEngine", () => {
 
     const hello = ws!.helloText()!;
     expect(hello.files).toEqual(["file-1", "file-2"]);
+    expect(hello.held).toEqual(["A", "unopened-note"]);
     expect(Object.keys(hello.manifest as Record<string, string>)).toEqual(["A"]);
   });
 
@@ -849,6 +851,27 @@ describe("VaultSyncEngine — server-empty reporting", () => {
     // no-op call here would stamp the authority clock on every reconnect.
     ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
     expect(events).toHaveLength(1);
+  });
+
+  it("consumes bounded revocation batches before ready and rejects malformed batches", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const received: string[] = [];
+    const engine = new VaultSyncEngine({ api: tokenApi(), vaultId: "v1", sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onServerRevoked: (ids) => received.push(...ids),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+    for (const docIds of [["a", "b"], ["c"]]) {
+      ws!.onmessage?.({ data: JSON.stringify({ t: "revoked", docIds }) });
+    }
+    expect(received).toEqual(["a", "b", "c"]);
+    expect(sink.dropped).toEqual(received);
+    expect(parseServerControl(JSON.stringify({ t: "revoked", docIds: ["a", 7] }))).toBeNull();
+    expect(parseServerControl(JSON.stringify({ t: "revoked", docIds: Array(2001).fill("a") }))).toBeNull();
+    engine.stop();
   });
 
   it("an older server that never sends `revoked` is simply silent", async () => {

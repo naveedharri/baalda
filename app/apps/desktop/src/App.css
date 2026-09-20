@@ -986,6 +986,17 @@ body:has(.sidebar-resizer.dragging) {
   flex: 1;
   min-width: 0;
 }
+.vault-path-copy {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+.vault-path-copy .vault-path { flex: 0 1 auto; }
+.vault-path-copy[aria-disabled="true"] { cursor: default; }
+.vault-path-copied { color: var(--text-secondary); }
 .vault-line svg {
   width: 12px;
   height: 12px;
