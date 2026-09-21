@@ -408,7 +408,10 @@ confirm `/health` and a real sync round-trip, then promote.
 | `S3_PRESIGN_DOWNLOAD_TTL_SECONDS` | no | `300` | Lifetime of a download URL. |
 | `S3_PROXY_DOWNLOADS` | no | `false` | `true` streams downloads through this server instead of redirecting to the bucket. Needed when clients cannot reach the bucket (a MinIO on a private subnet); costs egress twice. |
 
-When billing is enabled, attachment sync requires an active Pro subscription on
+Notes and embedded attachments sync on Free, within the configured storage limit.
+Attachment bytes use the configured blob provider (Postgres or S3-compatible storage,
+including R2); Markdown retains portable attachment links rather than inline binary data.
+When billing is enabled, standalone file sync requires an active Pro subscription on
 the vault (including the `past_due` grace period). Migration 031 preserves only
 the previous three-vault allowance for accounts that already exist when it runs;
 its legacy `attachment_sync` column does not grant blob transfer. Existing blobs

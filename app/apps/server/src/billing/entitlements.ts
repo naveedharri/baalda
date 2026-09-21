@@ -214,7 +214,8 @@ export async function freeVaultLimitForUser(
 }
 
 /**
- * Whether this vault may mirror binary files. An active or past-due Pro
+ * Whether this vault may mirror standalone binary files. Embedded attachments
+ * use the Free note-sync path instead. An active or past-due Pro
  * subscription unlocks every member. Billing-disabled self-hosts remain
  * unlimited. Account-level legacy grants affect only the free-vault count.
  */

@@ -400,7 +400,8 @@ describe("HealthView", () => {
     expect(html).toContain("160 notes in other formats stay on this computer");
     expect(html).toContain("Syncing these file types requires Pro");
     expect(html).toContain("Other-format notes stay local on this plan");
-    expect(html).toContain("Upgrade to Pro");
+    // The container owns the single upgrade CTA in the top attachment banner.
+    expect(html).not.toContain("Upgrade to Pro");
     expect(html).not.toContain(">Check again<");
     expect((html.match(/class="health-difference-side"/g) ?? []).length).toBe(1);
     expect(html).not.toContain("data-zero");

@@ -40,7 +40,7 @@ describe("missing-file controls", () => {
     await render();
     await click("Download");
     expect(downloadFiles).toHaveBeenLastCalledWith(["a.pdf"]);
-    await click("Download all missing files");
+    await click("Download all");
     expect(downloadFiles).toHaveBeenLastCalledWith(["a.pdf", "b.pdf"]);
   });
   it("shows download errors instead of claiming success", async () => {
@@ -60,12 +60,12 @@ describe("missing-file controls", () => {
     expect(removeServerFile).toHaveBeenCalledWith("a.pdf");
     expect(dialog.querySelector('[role="alert"]')?.textContent).toBe("No write access");
   });
-  it("explains the Pro restriction and offers upgrade without a futile download", async () => {
+  it("explains a blocked download without repeating the page upgrade button", async () => {
     await render(true);
-    expect(container.textContent).toContain("including files uploaded before the restriction");
+    expect(container.textContent).toContain("even if they were uploaded earlier");
     await click("Download");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Downloads require Pro");
     expect(downloadFiles).not.toHaveBeenCalled();
-    await click("Upgrade to Pro");
-    expect(openUpgrade).toHaveBeenCalled();
+    expect([...container.querySelectorAll("button")].some(b => b.textContent?.includes("Upgrade"))).toBe(false);
   });
 });

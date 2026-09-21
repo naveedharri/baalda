@@ -30,6 +30,7 @@ import { listKeymap } from "./lists";
 import { livePreview } from "./livePreview";
 import { noteHeader, type NoteHeaderOptions } from "./noteHeader";
 import { ofmDecorations, ofmMarkdown, tagCompletions, type TagSuggestion } from "./ofm";
+import { richNoteCopy, type ReadCopyAttachment } from "./copy";
 import { smartPaste, type SaveAttachment } from "./paste";
 import { tableAtomicRanges } from "./table/atomic";
 import { tripleClickLine } from "./selection";
@@ -62,6 +63,7 @@ export interface CreateEditorOptions {
    * `src` to embed. Omitted → image paste/drop falls back to default handling.
    */
   saveAttachment?: SaveAttachment;
+  copyAttachments?: { notePath: string; read: ReadCopyAttachment };
   /**
    * When true, a Yjs `y-codemirror.next` binding (passed via extraExtensions)
    * owns change propagation and undo history, so we drop CM6's local
@@ -201,6 +203,7 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     codeFenceFlair,
     // Paste a URL over a selection → link; paste/drop an image → attachment.
     smartPaste(opts.saveAttachment),
+    ...(opts.copyAttachments ? [richNoteCopy(opts.copyAttachments.notePath, opts.copyAttachments.read)] : []),
     editorTheme,
     wikilinks({ getTitles: opts.getTitles, onNavigate: opts.onNavigate }),
     // Callout tinting + tag pills. After livePreview, whose QuoteMark rule

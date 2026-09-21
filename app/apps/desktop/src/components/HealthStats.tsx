@@ -30,6 +30,7 @@ interface Metric {
   /** The check that lists the affected files; the flag becomes a link to it. */
   check?: VaultCheckId;
   action?: "reclaim";
+  detail?: string;
 }
 
 /** The three numbers people use to understand the size of a vault. Detailed
@@ -100,7 +101,10 @@ export function HealthStats({
       icon: "disk",
       label: "Stored locally",
       value: formatBytes(totalBytes),
-      sub: "Vault files and embedded attachments",
+      sub: "Vault files and embedded attachments; excludes the local index and edit history",
+      detail: stats.attachments.count > 0
+        ? `${stats.attachments.count.toLocaleString()} ${stats.attachments.count === 1 ? "attachment" : "attachments"} · ${formatBytes(stats.attachments.bytes)}`
+        : undefined,
     },
   ];
 
@@ -121,6 +125,7 @@ export function HealthStats({
               <Glyph name={m.icon} size={12} />
               {m.label}
             </span>
+            {m.detail && <span className="health-metric-detail">{m.detail}</span>}
             {m.flag &&
               (m.check && onFlag ? (
                 <button

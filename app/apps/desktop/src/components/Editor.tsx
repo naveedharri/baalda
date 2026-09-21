@@ -592,7 +592,8 @@ export function Editor() {
           useStore.getState().vault?.path ?? null,
           notePath
         ),
-        saveAttachment,
+        saveAttachment: (bytes, ext) => saveAttachment(bytes, ext, epoch),
+        copyAttachments: { notePath, read: path => ipc.readBinaryFile(path, epoch) },
         extraExtensions: [
           yCollab(bridge.text, awareness, { undoManager: bridge.undoManager }),
           // Our own animated carets + always-on name flags, over yCollab's

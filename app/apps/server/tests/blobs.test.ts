@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
@@ -7,6 +7,8 @@ import { resetDb } from "./helpers/db.js";
 import { authHeaders, signUp } from "./helpers/auth.js";
 import {
   seedMember,
+  seedFile,
+  seedBlob,
   seedNote,
   seedOrg,
   seedVault,
@@ -74,7 +76,61 @@ describe("attachment blob store (spec 02 §2/§5A)", () => {
     await resetDb();
   });
 
-  it("upload → list → download round-trips byte-identical", async () => {
+  afterEach(() => { delete process.env.POLAR_ACCESS_TOKEN; });
+
+  it("keeps standalone bytes Pro-only while exposing readable metadata", async () => {
+    process.env.POLAR_ACCESS_TOKEN = "test-token";
+    const owner = await signUp("owner@standalone.com");
+    const org = await seedOrg("Files", "standalone-plan");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const docId = await seedFile(vault, null, "report.pdf");
+    const blobId = await seedBlob(vault, org, "report.pdf", { docId });
+    expect((await listBlobs(owner.token, vault)).status).toBe(200);
+    const denied = await downloadBlob(owner.token, blobId);
+    expect(denied.status).toBe(402);
+    expect(await denied.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+    const upload = await app.fetch(new Request(`http://local/api/vaults/${vault}/blobs/intent`, {
+      method: "POST", headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ docId, relPath: "attachments/disguised.pdf", sha256: "a".repeat(64), size: 3, mime: "application/pdf" }),
+    }));
+    expect(upload.status).toBe(402);
+  });
+
+  it("keeps pre-update embedded images available to existing Free members without rewriting them", async () => {
+    const owner = await signUp("owner@legacy-images.com");
+    const member = await signUp("member@legacy-images.com");
+    const outsider = await signUp("outsider@legacy-images.com");
+    const org = await seedOrg("Legacy", "legacy-images");
+    await seedMember(org, owner.userId, "owner");
+    await seedMember(org, member.userId, "member");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    // Existing data from the legacy raw-upload route, before the new policy.
+    const original = await uploadBlob(owner.token, vault, bytes, {
+      relPath: "attachments/old-image.png", mime: "image/png",
+    });
+    expect(original.status).toBe(201);
+    const blob = await original.json() as { id: string; sha256: string; relPath: string };
+    const docId = await seedNote(vault, null, "Existing note.md");
+    const markdown = "My original note ![photo](/attachments/old-image.png)";
+    await indexNote(docId, vault, markdown);
+    process.env.POLAR_ACCESS_TOKEN = "test-token";
+    const listed = await listBlobs(member.token, vault);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({ blobs: [expect.objectContaining({ id: blob.id, relPath: blob.relPath, sha256: blob.sha256 })] });
+    const downloaded = await downloadBlob(member.token, blob.id);
+    expect(downloaded.status).toBe(200);
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
+    expect((await downloadBlob(outsider.token, blob.id)).status).toBe(403);
+    const unchanged = await pool.query("SELECT content FROM note_index WHERE doc_id = $1", [docId]);
+    expect(unchanged.rows[0].content).toBe(markdown);
+  });
+
+  it.each([false, true])("embedded upload → list → download round-trips (billing %s)", async (billing) => {
+    if (billing) process.env.POLAR_ACCESS_TOKEN = "test-token";
     const owner = await signUp("owner@blob.com");
     const org = await seedOrg("Acme", "acme-blob1");
     await seedMember(org, owner.userId, "owner");

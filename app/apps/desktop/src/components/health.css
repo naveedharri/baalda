@@ -1903,6 +1903,45 @@ button.health-metric-flag:hover {
   font-size: var(--fs-xs);
   line-height: var(--lh-body);
 }
+/* File names and controls get separate rows, including in narrow cards. */
+.health-missing-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+.health-missing-files li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+}
+.health-missing-files li:last-child {
+  padding-bottom: 0;
+}
+.health-missing-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.health-missing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+}
+.health-missing-actions > button {
+  flex: 0 0 auto;
+  max-width: 100%;
+  font-size: var(--fs-xs);
+}
+.health-missing-files .health-missing-error {
+  color: var(--danger);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .health-tab > .health-section {
   margin-top: var(--sp-5);
   padding: var(--sp-5);
@@ -2118,4 +2157,12 @@ button.health-metric-flag:hover {
   .health-advanced-summary-meta > svg {
     transition: none;
   }
+}
+
+.health-metric-detail {
+  display: block;
+  margin-top: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
 }

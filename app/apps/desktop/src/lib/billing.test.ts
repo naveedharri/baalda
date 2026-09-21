@@ -14,10 +14,10 @@ import {
 
 describe("plan benefits copy", () => {
   it("names attachment sync as Pro while keeping notes and local previews free", () => {
-    expect(PRO_BENEFITS).toContain("Sync attachments across devices and with your team");
+    expect(PRO_BENEFITS).toContain("Sync standalone files across devices and with your team");
     expect(PRO_BENEFITS.join(" ")).not.toMatch(/unlimited notes|AI edits/i);
-    expect(FREE_PLAN_EXPLANATION).toMatch(/Notes sync on Free/i);
-    expect(FREE_PLAN_EXPLANATION).toMatch(/previewed locally/i);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/embedded attachments sync on Free/i);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/standalone file sync/i);
   });
 });
 

@@ -189,7 +189,7 @@ export function UpgradeDialog({
         {phase === "plan" && (
           <>
             <p className="upgrade-lead">
-              <strong>{selected?.label ?? "Pro"}</strong> syncs attachments across
+              <strong>{selected?.label ?? "Pro"}</strong> syncs standalone files across
               devices and with your team. Pick how you'd like to pay.
             </p>
             <p className="muted">{FREE_PLAN_EXPLANATION}</p>

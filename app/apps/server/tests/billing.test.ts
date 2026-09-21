@@ -504,8 +504,8 @@ describe("billing", () => {
         req(app, "GET", `/api/vaults/${vaultId}/blobs`, { token: user.token });
 
       const blocked = await list();
-      expect(blocked.status).toBe(402);
-      expect(await blocked.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+      expect(blocked.status).toBe(200);
+      expect(await blocked.json()).toMatchObject({ blobs: [] });
 
       await pool.query(
         `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
@@ -513,8 +513,8 @@ describe("billing", () => {
         [user.userId],
       );
       const stillBlocked = await list();
-      expect(stillBlocked.status).toBe(402);
-      expect(await stillBlocked.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+      expect(stillBlocked.status).toBe(200);
+      expect(await stillBlocked.json()).toMatchObject({ blobs: [] });
 
       await pool.query("DELETE FROM account_entitlements WHERE user_id = $1", [user.userId]);
       await seedSubscription(org.id, "active");

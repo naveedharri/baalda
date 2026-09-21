@@ -11,6 +11,7 @@
 //
 // Everything else falls through to CodeMirror's normal paste/drop handling.
 
+import { toast } from "../toast";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { embedMarkdown, extForMime, formatFor } from "../formats";
@@ -120,11 +121,53 @@ function attachableFile(data: DataTransfer | null): File | null {
   return null;
 }
 
+/** Re-home embedded clipboard bytes so pasted notes own portable vault attachments. */
+export async function importClipboardAttachments(html: string, save: SaveAttachment): Promise<string> {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const saved = new Map<string, string>();
+  let total = 0;
+  for (const el of doc.querySelectorAll("img[src], a[href]")) {
+    const attr = el.tagName === "IMG" ? "src" : "href";
+    const src = el.getAttribute(attr) ?? "";
+    if (!src.startsWith("data:")) continue;
+    const cached = saved.get(src);
+    if (cached) { el.setAttribute(attr, cached); continue; }
+    const match = /^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i.exec(src);
+    const ext = match ? extForMime(match[1]) : null;
+    if (!match || !ext) throw new Error("This embedded clipboard file type is not supported.");
+    if (match[2].length > 45 * 1024 * 1024) throw new Error("Clipboard attachments are too large.");
+    const binary = atob(match[2]);
+    total += binary.length;
+    if (total > 32 * 1024 * 1024) throw new Error("Clipboard attachments exceed 32 MB. Paste a smaller selection.");
+    const path = await save(Uint8Array.from(binary, c => c.charCodeAt(0)), ext);
+    saved.set(src, path);
+    el.setAttribute(attr, path);
+  }
+  return htmlClipboardToMarkdown(doc.body.innerHTML);
+}
+
 export function smartPaste(save: SaveAttachment | undefined) {
   return EditorView.domEventHandlers({
     paste(event, view) {
       if (view.state.readOnly) return false;
       const data = event.clipboardData;
+
+      // Rich note copies can include both HTML and an image File. Preserve the
+      // entire note instead of letting the image-only branch discard its text.
+      const rich = data?.getData("text/html") ?? "";
+      if (save && /(?:src|href)=["']data:/i.test(rich)) {
+        event.preventDefault();
+        const before = view.state.doc;
+        const selection = view.state.selection;
+        void importClipboardAttachments(rich, save).then(insert => {
+          if (!view.dom.isConnected || view.state.doc !== before || !view.state.selection.eq(selection)) {
+            toast("The note changed while preparing the paste. Paste again at the desired position.", "neutral");
+            return;
+          }
+          view.dispatch(view.state.replaceSelection(insert), { userEvent: "input.paste" });
+        }).catch(error => toast(`Could not paste attachments: ${error instanceof Error ? error.message : String(error)}`, "error"));
+        return true;
+      }
 
       // 1) A file the registry knows on the clipboard → save + embed.
       const file = save ? attachableFile(data) : null;

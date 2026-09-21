@@ -88,7 +88,7 @@ export function HealthTab({
     <>
       <AttachmentSyncNotice
         surface="health"
-        detected={snapshot.hasLocalAttachments === true || snapshot.inventory.serverOnlyFiles.length > 0}
+        detected={snapshot.inventory.local.files > 0 || snapshot.inventory.serverOnlyFiles.length > 0}
       />
       <HealthView
         key={vaultPath}
@@ -708,15 +708,7 @@ function InventoryComparison({
                 Check again
               </AsyncButton>
             )}
-            {standaloneFileSyncBlocked && (localOnlyFormatNotes > 0 || inventory.serverOnlyFiles.length > 0) && showAttachmentUpgrade && (
-              <button
-                type="button"
-                className="primary sm"
-                onClick={() => handlers.actions.openUpgrade()}
-              >
-                Upgrade to Pro
-              </button>
-            )}
+
           </div>
         )}
       </div>

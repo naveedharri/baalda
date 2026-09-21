@@ -24,12 +24,12 @@ describe("diffAttachments (content-hash diff)", () => {
     expect(toDownload.map((b) => b.id)).toEqual(["2"]);
   });
 
-  it("treats identical content at different paths as already synced (dedupe)", () => {
+  it("restores the original embedded path even when identical bytes exist elsewhere", () => {
     const local: LocalAttachment[] = [{ relPath: "attachments/renamed.png", sha256: "xyz" }];
     const server: ServerBlob[] = [{ id: "1", relPath: "attachments/original.png", sha256: "xyz" }];
     const { toUpload, toDownload } = diffAttachments(local, server);
     expect(toUpload).toHaveLength(0);
-    expect(toDownload).toHaveLength(0);
+    expect(toDownload.map(blob => blob.relPath)).toEqual(["attachments/original.png"]);
   });
 
   it("skips server blobs missing a sha or rel_path (can't place on disk)", () => {
@@ -181,6 +181,24 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(local.has("Team/guide.pdf")).toBe(true);
   });
 
+  it("keeps syncing embeds after a standalone-file plan refusal", async () => {
+    const { deps, local, server } = makeDeps(
+      [{ relPath: "standalone.pdf", bytes: new Uint8Array([1]) },
+       { relPath: "attachments/local.png", bytes: new Uint8Array([2]) }],
+      [{ id: "remote", relPath: "attachments/remote.png", bytes: new Uint8Array([3]) }],
+    );
+    const upload = deps.uploadServer!;
+    deps.uploadServer = async (path, ...args) => {
+      if (path === "standalone.pdf") throw serverError(402, "attachment_sync_requires_pro");
+      return upload(path, ...args);
+    };
+    const sync = new AttachmentSync(deps);
+    expect(await sync.reconcile()).toEqual({ uploaded: 1, downloaded: 1 });
+    local.set("attachments/later.png", new Uint8Array([4]));
+    expect(await sync.reconcile()).toEqual({ uploaded: 1, downloaded: 0 });
+    expect([...server.values()].some(row => row.relPath === "attachments/later.png")).toBe(true);
+  });
+
   it("is a no-op when both sides already match", async () => {
     const bytes = new Uint8Array([5, 5, 5]);
     const { deps } = makeDeps(
@@ -189,6 +207,27 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     );
     const res = await new AttachmentSync(deps).reconcile();
     expect(res).toEqual({ uploaded: 0, downloaded: 0 });
+  });
+
+  it("recovers existing Free images when an older server is upgraded during the session", async () => {
+    const { deps, local } = makeDeps([], [
+      { id: "legacy", relPath: "attachments/old.png", bytes: new Uint8Array([7, 8]) },
+    ]);
+    const list = deps.listServer;
+    let upgraded = false;
+    deps.listServer = async () => {
+      if (!upgraded) throw serverError(402, "attachment_sync_requires_pro");
+      return list();
+    };
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const sync = new AttachmentSync(deps);
+      expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+      upgraded = true;
+      now.mockReturnValue(61_001);
+      expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+      expect(local.get("attachments/old.png")).toEqual(new Uint8Array([7, 8]));
+    } finally { now.mockRestore(); }
   });
 
   it("stops retrying when the server says attachment sync requires Pro", async () => {
@@ -213,7 +252,7 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
     expect(listServer).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledOnce();
-    expect(notify.mock.calls[0]?.[0]).toMatch(/stay on this device/i);
+    expect(notify.mock.calls[0]?.[0]).toMatch(/standalone files/i);
     expect(notify.mock.calls[0]?.[0]).toMatch(/upgrade.*Pro/i);
     expect(onFileStates).toHaveBeenLastCalledWith({});
     expect(onEntitlementBlocked).toHaveBeenCalledTimes(1);

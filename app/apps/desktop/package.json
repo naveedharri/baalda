@@ -52,6 +52,7 @@
     "d3-force": "^3.0.0",
     "diff-match-patch": "^1.0.5",
     "mammoth": "^1.12.3",
+    "marked": "16.4.2",
     "mermaid": "^11.17.2",
     "motion": "^12.42.2",
     "react": "^19.1.0",

@@ -350,9 +350,9 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   no renderer deps).
 - `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
-  Managed billing gives new accounts two free unsubscribed vaults and reserves attachment sync for
+  Managed billing gives new accounts two free unsubscribed vaults and reserves standalone-file sync for
   Pro vaults. Migration 031 snapshots the prior benefits per user: existing accounts keep three free
-  vaults, but attachment sync still requires Pro. An active or past-due Pro vault unlocks attachment
+  vaults, but standalone-file sync still requires Pro. An active or past-due Pro vault unlocks standalone-file
   sync for all its members; billing-disabled self-hosts remain unlimited.
   Deleting a vault cancels **at period end first** and aborts the delete if the provider refuses (502
   `subscription_cancel_failed`; Better Auth's own org-delete is off via `disableOrganizationDeletion`).
@@ -505,3 +505,16 @@ Phases 0–3 are complete and wired end-to-end: local Obsidian-lite → local CR
 (multi-device) → team collaboration (orgs, folder ACL, presence, attachments) — plus MCP, locks, join
 codes, semantic search, and a graph view. Deferred to Phase 4: structural WYSIWYG CRDT, richer vector
 search, AI-as-CRDT-peer, at-rest encryption, OAuth, and an iOS app.
+
+Embedded attachments under `attachments/` without a standalone `files` identity sync on Free,
+subject to storage quotas and existing blob ACLs. Bytes remain in the configured blob store,
+not in Yjs. A standalone-file Pro refusal must not stop embedded transfers. Rich note copy
+embeds attachment bytes in sanitized clipboard HTML; paste imports them into the destination
+vault. Plain-text clipboard fallback remains Markdown.
+
+Existing embedded links and blob IDs are retained across the Free attachment-policy
+update; no note rewrite or blob migration is required. Missing embedded paths are
+restored even if identical bytes already exist at another local path, without
+overwriting occupied paths. Legacy whole-list Pro refusals can be re-probed on
+a sync pass after a one-minute cooldown, allowing a running updated desktop to
+recover when its server is upgraded.

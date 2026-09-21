@@ -42,11 +42,11 @@ export function AttachmentLocalOnlyNoticeView({
       </span>
       <span className="attachment-sync-copy">
         <strong className="attachment-sync-title">
-          Files beyond text notes require Pro to sync
+          Standalone files require Pro to sync
         </strong>
         {surface !== "health" && (
           <span className="attachment-sync-body">
-            Text notes still sync. Notes in other formats and embedded attachments stay on
+            Notes and their embedded attachments still sync. Standalone files stay on
             this device and remain available to preview locally.
           </span>
         )}

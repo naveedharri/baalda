@@ -72,7 +72,7 @@ async function transcodeToPng(bytes: Uint8Array, mime: string): Promise<Uint8Arr
  * do not auto-dismiss) plus an {@link AttachmentTooLargeError}, so a caller
  * attaching several files can skip this one and keep the rest.
  */
-export async function saveAttachment(bytes: Uint8Array, ext: string): Promise<string> {
+export async function saveAttachment(bytes: Uint8Array, ext: string, epoch?: ipc.VaultEpoch): Promise<string> {
   // Non-portable image formats (HEIC/TIFF) → PNG so they render everywhere. If
   // the decode fails, fall back to storing the original untouched.
   const sourceMime = formatFor(`x.${ext}`)?.transcodeTo === "png"
@@ -102,7 +102,7 @@ export async function saveAttachment(bytes: Uint8Array, ext: string): Promise<st
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
   const rel = `attachments/${hash}.${ext}`;
-  await ipc.writeBinaryFile(rel, bytes);
+  await ipc.writeBinaryFile(rel, bytes, epoch);
   return `/${rel}`;
 }
 

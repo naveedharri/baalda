@@ -83,13 +83,13 @@ describe("storage quota", () => {
     delete process.env.POLAR_ACCESS_TOKEN;
   });
 
-  it("requires Pro before evaluating storage for an unsubscribed vault", async () => {
+  it("enforces the free storage limit for embedded attachments", async () => {
     process.env.POLAR_ACCESS_TOKEN = "test-token";
     await occupy(LIMIT_BYTES);
 
     const res = await intent(owner, newUpload());
     expect(res.status).toBe(402);
-    expect(await res.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+    expect(await res.json()).toMatchObject({ code: "storage_limit_reached" });
   });
 
   it("counts pending rows in reported storage", async () => {
@@ -119,16 +119,9 @@ describe("storage quota", () => {
     expect((await intent(owner, newUpload())).status).toBe(200);
   });
 
-  it("does not let legacy account flags bypass the Pro requirement", async () => {
+  it("allows embedded uploads in a Free vault without legacy account flags", async () => {
     process.env.POLAR_ACCESS_TOKEN = "test-token";
-    await pool.query(
-      `INSERT INTO account_entitlements (user_id, free_vault_limit, attachment_sync)
-       VALUES ($1, 3, true)`,
-      [owner.userId],
-    );
-    const res = await intent(owner, newUpload());
-    expect(res.status).toBe(402);
-    expect(await res.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+    expect((await intent(owner, newUpload())).status).toBe(200);
   });
 
   describe("GET /api/vaults/:vaultId/storage", () => {

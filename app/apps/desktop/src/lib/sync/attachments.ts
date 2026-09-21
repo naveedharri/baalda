@@ -188,7 +188,7 @@ export function routesToAttachmentSync(path: string): boolean {
 /**
  * Pure content-hash diff. A file is "the same" iff its sha256 matches; rel_path
  * is not part of identity (dedupe is by content), so a rename with unchanged
- * bytes is a no-op — see the module header for why that is Stage A's known
+ * bytes is a no-op for tree files — see the module header for why that is Stage A's known
  * limit rather than a decision. Server blobs without a sha or a rel_path — or
  * with a relPath neither guard accepts (see {@link isSafeBlobRelPath}) — can't
  * be placed on disk, so they're skipped from the download set.
@@ -223,7 +223,9 @@ export function diffAttachments(
       !!b.sha256 &&
       !!b.relPath &&
       isSafeBlobRelPath(b.relPath) &&
-      !localShas.has(b.sha256) &&
+      // An embedded image must exist at the path the note references, even
+      // when another local file happens to contain identical bytes.
+      (isUnderAttachments(b.relPath) || !localShas.has(b.sha256)) &&
       !localPaths.has(b.relPath.toLowerCase()),
   );
   return { toUpload, toDownload };
@@ -677,6 +679,8 @@ export class AttachmentSync {
   private running = false;
   /** A 402 contract response is stable for this session; do not poll it. */
   private attachmentSyncBlocked = false;
+  private legacyListingBlocked = false;
+  private legacyListingRetryAt = 0;
   private rerun = false;
   /**
    * Does this server speak the intent flow? `null` = not asked, `false` = it
@@ -797,8 +801,10 @@ export class AttachmentSync {
 
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
   async reconcile(): Promise<ReconcileResult> {
+    // A server can be upgraded while this desktop stays open. Re-probe old
+    // whole-list refusals occasionally so existing Free members recover too.
+    if (this.legacyListingBlocked && Date.now() < this.legacyListingRetryAt) return { uploaded: 0, downloaded: 0 };
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
-    if (this.attachmentSyncBlocked) return { uploaded: 0, downloaded: 0 };
     if (this.running) {
       // Ensure the in-flight pass runs again to pick up whatever changed.
       this.rerun = true;
@@ -886,6 +892,7 @@ export class AttachmentSync {
 
   /** Clear a plan refusal after billing refresh has confirmed an upgrade. */
   resetEntitlement(): void {
+    this.legacyListingBlocked = false;
     const wasBlocked = this.attachmentSyncBlocked;
     this.attachmentSyncBlocked = false;
     if (wasBlocked) this.deps.onEntitlementBlocked?.(false);
@@ -904,6 +911,8 @@ export class AttachmentSync {
       [local, server] = await Promise.all([localListing, this.deps.listServer()]);
     } catch (e) {
       if (errStatus(e) === 402 && errCode(e) === "attachment_sync_requires_pro") {
+        this.legacyListingBlocked = true;
+        this.legacyListingRetryAt = Date.now() + 60_000;
         let hasLocalAttachments = false;
         try {
           hasLocalAttachments = (await localListing).length > 0;
@@ -918,6 +927,7 @@ export class AttachmentSync {
       return { uploaded: 0, downloaded: 0 };
     }
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
+    this.legacyListingBlocked = false;
     // Re-read per pass: a file dropped a second ago has no `files` row yet, and
     // the next pass is when it does.
     this.localIds = null;
@@ -935,6 +945,7 @@ export class AttachmentSync {
     // missing, and it must not be counted or badged as one.
     const downloads: ServerBlob[] = [];
     for (const b of toDownload) {
+      if (this.attachmentSyncBlocked && b.relPath && !isUnderAttachments(b.relPath)) continue;
       if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
         console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
         continue;
@@ -994,6 +1005,7 @@ export class AttachmentSync {
       async (a) => {
         // A file the server has already refused for good (too large, wrong type)
         // is skipped without a round trip — see `permanentSkips`.
+        if (this.attachmentSyncBlocked && !isUnderAttachments(a.relPath)) return;
         if (this.permanentSkips.has(a.sha256)) return;
         // An unregistered path while the delete queue is still trying to settle a
         // window is very likely the arrival half of a rename it is about to pair.
@@ -1015,6 +1027,8 @@ export class AttachmentSync {
             this.setFileState(a.relPath, "error");
           }
         } catch (e) {
+          if (this.handleAttachmentSyncRequired(e)) return;
+          if (e instanceof AbortPass && e.reason === "attachment_sync_requires_pro") return;
           if (e instanceof AbortPass) {
             // Nothing else in this pass can succeed either. Downloads are skipped
             // too: the vault is full, and the next pass will find the same state.
@@ -1065,6 +1079,7 @@ export class AttachmentSync {
           settled++;
           this.deps.onDownloadSettled?.("ok");
         } catch (e) {
+          this.handleAttachmentSyncRequired(e);
           console.error("[attachments] download failed", b.relPath, e);
           // The dot stays `syncing` — like a failed upload, `error` is reserved
           // for a refusal retrying cannot fix, and the next pass tries again.
@@ -1403,7 +1418,7 @@ export class AttachmentSync {
       this.deps.onEntitlementBlocked?.(true);
       if (announce) {
         this.deps.notify?.(
-          "Attachments stay on this device in free vaults. Upgrade this vault to Pro to sync them.",
+          "Upgrade to Pro to sync standalone files. Embedded attachments sync with notes on supported servers.",
           "neutral",
         );
       }
