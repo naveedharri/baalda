@@ -1,3 +1,4 @@
+import type { StewardProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
 // wire contract, and importing the TYPES keeps this module a runtime leaf.
 import type {
@@ -565,7 +566,7 @@ export interface BillingPlan {
 export interface BillingConfig {
   enabled: boolean;
   plans?: BillingPlan[];
-  freeLimits?: { vaultsPerUser: number; membersPerVault: number };
+  freeLimits?: { vaultsPerUser: number; membersPerVault: number; notesPerVault?: number };
 }
 
 /** A single vault's subscription state + seat usage. */
@@ -635,6 +636,7 @@ export interface MyBilling {
   freeLimits: {
     vaultsPerUser: number;
     membersPerVault: number;
+    notesPerVault?: number;
     /** Owned vaults with no subscription — what counts against the cap. */
     freeVaultsUsed: number;
   };
@@ -938,6 +940,38 @@ function newClientId(): string {
  * manager owns persistence (keychain) and calls `setToken`.
  */
 export class ApiClient {
+  async housekeeperDiagnose(vaultId: string, diagnostics: DiagnosticInput, provider?: StewardProvider): Promise<DiagnosticReview> {
+    return (await this.request<DiagnosticReview>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/diagnose`, {
+      body: { diagnostics, consent: true, provider }, timeoutMs: 20_000,
+    })).data;
+  }
+
+  async housekeeperStatus(vaultId: string): Promise<HousekeeperStatus> {
+    return (await this.request<HousekeeperStatus>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/status`, { timeoutMs: 15_000 })).data;
+  }
+
+  async housekeeperSuggest(vaultId: string, docId: string, offset = 0, provider?: StewardProvider): Promise<HousekeeperScan> {
+    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/suggest`, {
+      body: { docId, consent: true, offset, provider }, timeoutMs: 60_000,
+    })).data;
+  }
+
+  async housekeeperRepair(vaultId: string, docId: string, finding: string, provider?: StewardProvider): Promise<HousekeeperScan> {
+    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/repair`, {
+      body: { docId, finding, consent: true, provider }, timeoutMs: 30_000,
+    })).data;
+  }
+
+  async housekeeperAuthorize(vaultId: string, docId: string, path: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/authorize`, { body: { docId, path } });
+  }
+
+  async housekeeperEdit(vaultId: string, action: "apply" | "undo", id: string): Promise<HousekeeperEdit> {
+    return (await this.request<HousekeeperEdit>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/${action}`, {
+      body: { id }, timeoutMs: 20_000,
+    })).data;
+  }
+
   private baseUrl: string;
   private token: string | null;
   private readonly fetchImpl: FetchLike;

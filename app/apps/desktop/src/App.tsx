@@ -251,7 +251,8 @@ function SyncIssuesBanner() {
     <SyncIssuesBannerView
       show={show}
       failed={failed}
-      onOpenHealth={() => useStore.getState().requestSettings("health")}
+      noteLimit={syncManager.registry.limitCode() === "note_limit_reached"}
+      onOpenHealth={() => useStore.getState().requestSettings(syncManager.registry.limitCode() === "note_limit_reached" ? "billing" : "health")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
   );

@@ -130,6 +130,7 @@ describe("billing", () => {
       expect(body.freeLimits).toEqual({
         vaultsPerUser: config.freeMaxVaults,
         membersPerVault: SEAT_CAP,
+        notesPerVault: 20000,
       });
     });
 

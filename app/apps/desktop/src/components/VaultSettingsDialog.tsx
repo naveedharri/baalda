@@ -39,6 +39,7 @@ import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { AiSettingsTab } from "./AiSettingsTab";
 import { HealthTab } from "./HealthTab";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
@@ -95,6 +96,10 @@ const HEALTH_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
       <path d="M3 12h4l2-6 4 12 2-6h6" />
     </MenuIcon>
   ),
+};
+
+const AI_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
+  id: "ai", label: "AI", icon: <MenuIcon><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></MenuIcon>,
 };
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
@@ -220,6 +225,7 @@ export function VaultSettingsDialog({
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locals = useLocalVaults();
 
+  const [diagnosticFocus, setDiagnosticFocus] = useState<import("./HealthChecks").CheckFocus | null>(null);
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
@@ -235,7 +241,7 @@ export function VaultSettingsDialog({
   // are local folders to list — that's what "View all" opens into.
   const showVaults = !!session || locals.length > 0;
   const tabs = useMemo(() => {
-    const out = [GENERAL_TAB, HEALTH_TAB];
+    const out = [GENERAL_TAB, HEALTH_TAB, AI_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
@@ -280,12 +286,12 @@ export function VaultSettingsDialog({
               <button
                 key={t.id}
                 type="button"
-                className={`menu-item${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
+                className={`menu-item${t.id === "ai" ? " settings-ai-item" : ""}${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
                 onClick={() => setTab(t.id)}
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
-                <span className="menu-item-label">{t.label}</span>
+                <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -318,10 +324,13 @@ export function VaultSettingsDialog({
             />
           ) : tab === "health" ? (
             <HealthTab
+              onOpenDiagnostics={id => { setDiagnosticFocus(id ? { id, n: Date.now() } : null); setTab("ai"); }}
               onRequestSignIn={onRequestSignIn}
               onGoToGeneral={() => setTab("general")}
               onClose={onClose}
             />
+          ) : tab === "ai" ? (
+            <AiSettingsTab onClose={onClose} requestedCheck={diagnosticFocus} onOpenHealth={() => setTab("health")} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onGoToSync={() => setTab("general")} />
           ) : tab === "vaults" ? (
@@ -2469,11 +2478,11 @@ function LimitNudge({
   // independently (members were 10 for a while; both are 3 since 2026-09-09).
   const n =
     limit ??
-    (kind === "member_limit"
+    (kind === "note_limit" ? 20000 : kind === "member_limit"
       ? (freeLimits?.membersPerVault ?? 3)
       : (freeLimits?.vaultsPerUser ?? 3));
   const message =
-    kind === "member_limit"
+    kind === "note_limit" ? `This Free vault has reached ${n.toLocaleString()} synced notes. Upgrade to Pro to sync more; additional notes stay on this device.` : kind === "member_limit"
       ? `Free plan limit reached — this vault allows ${n} member${n === 1 ? "" : "s"}.`
       : // The cap counts FREE vaults only: a Pro vault leaves the count, so
         // upgrading one of them opens a slot for another free vault.

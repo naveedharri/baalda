@@ -20,7 +20,7 @@
     "demo": "tsx scripts/demo/seed-demo-org.ts --reset && tsx scripts/demo/simulate-activity.ts",
     "set-password": "tsx src/scripts/set-password.ts",
     "blobs:migrate": "tsx src/scripts/migrate-blobs.ts",
-    "test": "vitest run"
+    "test": "vitest run && node --test housekeeper/*.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1134.0",
@@ -29,6 +29,7 @@
     "@hocuspocus/server": "^4.4.0",
     "@hono/node-server": "^2.0.10",
     "@node-rs/argon2": "^2.0.2",
+    "@openrouter/sdk": "1.3.10",
     "@polar-sh/sdk": "^0.48.1",
     "better-auth": "^1.6.23",
     "dotenv": "^17.2.3",

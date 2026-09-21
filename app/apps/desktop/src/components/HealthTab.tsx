@@ -59,6 +59,7 @@ export interface HealthTabProps {
   onGoToGeneral?: () => void;
   /** Close settings — opening a note has to get the dialog out of the way. */
   onClose?: () => void;
+  onOpenDiagnostics?: (id?: VaultCheckId) => void;
 }
 
 export function HealthTab({
@@ -66,6 +67,7 @@ export function HealthTab({
   onRequestSignIn,
   onGoToGeneral,
   onClose,
+  onOpenDiagnostics,
 }: HealthTabProps) {
   // Same shape as the Billing and Members tabs: the dialog is rendered by the
   // tab that needs it rather than hoisted into VaultSettingsDialog, so the
@@ -92,6 +94,8 @@ export function HealthTab({
       />
       <HealthView
         key={vaultPath}
+        mode="overview"
+        onOpenDiagnostics={onOpenDiagnostics}
         snapshot={snapshot}
         notes={notes}
         vaultPath={vaultPath}
@@ -108,6 +112,10 @@ export function HealthTab({
 // ── The page ──────────────────────────────────────────────────────────────────
 
 export function HealthView({
+  mode = "all",
+  findingId,
+  requestedCheck,
+  onOpenDiagnostics,
   snapshot,
   notes = [],
   vaultPath = null,
@@ -116,6 +124,10 @@ export function HealthView({
   onGoToGeneral,
   onClose,
 }: {
+  mode?: "all" | "overview" | "diagnostics" | "finding";
+  findingId?: string;
+  requestedCheck?: CheckFocus | null;
+  onOpenDiagnostics?: (id?: VaultCheckId) => void;
   snapshot: VaultHealthSnapshot;
   notes?: NoteTitle[];
   /** Keys the per-vault ignore list; null ⇒ nothing is remembered. */
@@ -140,6 +152,9 @@ export function HealthView({
   const [focusIssue, setFocusIssue] = useState<string | null>(null);
   const [focusCheck, setFocusCheck] = useState<CheckFocus | null>(null);
   const ignores = useHealthIgnores(vaultPath);
+  useEffect(() => {
+    if (requestedCheck) { ignores.restoreCheck(requestedCheck.id); setFocusCheck(requestedCheck); }
+  }, [requestedCheck]);
   const [inspectRequest, setInspectRequest] = useState<{ path: string; n: number } | null>(
     null,
   );
@@ -210,8 +225,23 @@ export function HealthView({
     },
   };
 
+  if (mode === "finding" && findingId) {
+    const check = checks?.results.find(c => c.id === findingId);
+    const issues = findingId.startsWith("issue-") ? report.issues.filter(i => i.kind === findingId.slice(6)) : report.issues;
+    return <div className="health-tab steward-finding-tools">
+      {check ? <HealthChecks checks={checks} loading={loading} handlers={handlers} onlyIds={[findingId]} focus={{ id: check.id, n: 1 }} /> :
+        findingId === "vault-storage" ? stats && <HealthLargest stats={stats} handlers={handlers} /> :
+        ["remote-files", "local-files"].includes(findingId) ? <InventoryComparison inventory={snapshot.inventory} report={report} handlers={handlers} standaloneFileSyncBlocked={standaloneFileSyncBlocked} showAttachmentUpgrade={showAttachmentUpgrade} /> :
+        issues.length ? <HealthIssues issues={issues} handlers={handlers} syncEnabled={report.counts != null} focusKey={issues.length === 1 ? issues[0].key : undefined} /> :
+        <><p>{report.detail}</p><HealthTimeline log={log} now={now} onInspect={path => setInspectRequest({ path, n: Date.now() })} /></>}
+      {inspectRequest && <HealthInspector notes={notes} handlers={handlers} request={inspectRequest} onShowIssue={setFocusIssue} />}
+      <Confirms confirming={confirming} onDone={() => setConfirming(null)} actions={actions} onRunCheckAction={startCheckAction} />
+    </div>;
+  }
+
   return (
     <div className="health-tab">
+      {mode !== "diagnostics" && <>
       <HealthStats
         stats={stats}
         syncing={report.verdict === "syncing" || report.verdict === "connecting"}
@@ -227,6 +257,7 @@ export function HealthView({
         statsError={statsError}
         handlers={handlers}
         onFlag={(id) => {
+          if (mode === "overview" && onOpenDiagnostics) { onOpenDiagnostics(id); return; }
           ignores.restoreCheck(id);
           setFocusCheck((f) => ({ id, n: (f?.n ?? 0) + 1 }));
         }}
@@ -267,10 +298,11 @@ export function HealthView({
         />}
       </Section>
 
-      <details className="health-advanced">
+      </>}
+      {mode !== "overview" && <details className="health-advanced" open={mode === "diagnostics" ? true : undefined}>
         <summary>
           <span>
-            <strong>Advanced diagnostics</strong>
+            <strong>{mode === "diagnostics" ? "Checks & repair tools" : "Advanced diagnostics"}</strong>
             <small>Inspect one note, verify local files, and review sync history</small>
           </span>
           <span className="health-advanced-summary-meta">
@@ -280,6 +312,10 @@ export function HealthView({
         </summary>
         <div className="health-advanced-body">
           <DiagnosticsToolbar snapshot={snapshot} />
+          {mode === "diagnostics" && report.issues.length > 0 && <Section title="Sync findings">
+            <HealthIssues issues={report.issues} handlers={handlers} syncEnabled={report.counts != null} focusKey={focusIssue}
+              dismissed={ignores.issues} onDismiss={ignores.dismissIssue} onRestore={ignores.restoreIssue} />
+          </Section>}
 
           <div className="health-diagnostic-card health-diagnostic-inspector">
             <DiagnosticHeading
@@ -348,7 +384,7 @@ export function HealthView({
             />
           </div>
         </div>
-      </details>
+      </details>}
 
       <Confirms
         confirming={confirming}

@@ -19,6 +19,7 @@ import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { desktopOauthRoutes } from "./routes/desktop-oauth.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
+import { createHousekeeperRoutes } from "./routes/housekeeper.js";
 import { graphRoutes } from "./routes/graph.js";
 import { createMcpRoutes } from "./routes/mcp.js";
 import { createRepairRoutes } from "./routes/repair.js";
@@ -267,6 +268,7 @@ export function createApp(deps: AppDeps): Hono {
   );
   app.route("/api", createBillingRoutes({ provider: billingProvider }));
   app.route("/api", graphRoutes);
+  app.route("/api", createHousekeeperRoutes(deps.docWriter));
   app.route(
     "/api",
     createMcpRoutes({

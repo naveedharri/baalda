@@ -41,15 +41,88 @@ pub struct ParsedNote {
 // The leading rule is written as "a character that is not one of those" rather
 // than as a lookbehind because the `regex` crate has none; the capture group is
 // the tag body, so the extra character is discarded either way.
-static TAG_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?:^|[^\p{L}\p{N}_/])#(\d*[\p{L}_/-][\p{L}\p{N}_/-]*)").unwrap()
-});
+static TAG_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?:^|[^\p{L}\p{N}_/])#(\d*[\p{L}_/-][\p{L}\p{N}_/-]*)").unwrap());
 
 // `[[target]]`, `[[target|alias]]`, `[[target#heading]]`.
 static WIKILINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]\n]+)\]\]").unwrap());
 
 // First ATX H1 (`# Title`) on its own line.
 static H1_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#\s+(.+?)\s*$").unwrap());
+
+/// Byte mask for literal Markdown code and comments. Link offsets remain unchanged.
+fn literal_mask(text: &str) -> Vec<bool> {
+    let bytes = text.as_bytes();
+    let mut mask = vec![false; bytes.len()];
+    let mut fence: Option<(u8, usize)> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches(' ');
+        let indent = line.len() - trimmed.len();
+        let first = trimmed.as_bytes().first().copied().unwrap_or(0);
+        let run = trimmed.bytes().take_while(|b| *b == first).count();
+        let delimiter = indent <= 3 && (first == b'`' || first == b'~') && run >= 3;
+        if let Some((ch, len)) = fence {
+            mask[offset..offset + line.len()].fill(true);
+            if delimiter && ch == first && run >= len && trimmed[run..].trim().is_empty() {
+                fence = None;
+            }
+        } else if delimiter {
+            fence = Some((first, run));
+            mask[offset..offset + line.len()].fill(true);
+        } else if line.starts_with("    ") || line.starts_with('\t') {
+            mask[offset..offset + line.len()].fill(true);
+        }
+        offset += line.len();
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        if mask[i] {
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"<!--") {
+            let end = text[i + 4..]
+                .find("-->")
+                .map(|n| i + 4 + n + 3)
+                .unwrap_or(bytes.len());
+            mask[i..end].fill(true);
+            i = end;
+            continue;
+        }
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let escaped = bytes[..i].iter().rev().take_while(|b| **b == b'\\').count() % 2 == 1;
+        if escaped {
+            i += 1;
+            continue;
+        }
+        let run = bytes[i..].iter().take_while(|b| **b == b'`').count();
+        let mut j = i + run;
+        let mut end = None;
+        while j < bytes.len() && !mask[j] {
+            if bytes[j] != b'`' {
+                j += 1;
+                continue;
+            }
+            let closing = bytes[j..].iter().take_while(|b| **b == b'`').count();
+            if closing == run {
+                end = Some(j + closing);
+                break;
+            }
+            j += closing;
+        }
+        if let Some(end) = end {
+            mask[i..end].fill(true);
+            i = end;
+        } else {
+            i += run;
+        }
+    }
+    mask
+}
 
 /// Split leading YAML frontmatter (`---\n … \n---`) from the body.
 /// Returns `(Some(yaml), body)` or `(None, whole_content)`.
@@ -189,8 +262,12 @@ pub fn parse_note(content: &str, stem: &str) -> ParsedNote {
     // Wiki-links — positions are offsets into the *full* content.
     let offset = content.len() - body.len();
     let mut links = Vec::new();
+    let literals = literal_mask(body);
     for cap in WIKILINK_RE.captures_iter(body) {
         let m = cap.get(0).unwrap();
+        if literals[m.start()..m.end()].iter().any(|literal| *literal) {
+            continue;
+        }
         let raw = cap[1].trim().to_string();
         // target = strip alias (`|`) and heading (`#`).
         let target = raw
@@ -306,7 +383,8 @@ mod tests {
 
     #[test]
     fn parses_frontmatter_title_and_tags() {
-        let content = "---\ntitle: My Note\ntags: [alpha, beta]\n---\n# Ignored H1\n\nbody #gamma here";
+        let content =
+            "---\ntitle: My Note\ntags: [alpha, beta]\n---\n# Ignored H1\n\nbody #gamma here";
         let p = parse_note(content, "file-stem");
         assert_eq!(p.title, "My Note");
         assert!(p.tags.contains(&"alpha".to_string()));
@@ -336,9 +414,26 @@ mod tests {
 
     #[test]
     fn extracts_wikilinks_with_alias_and_heading() {
-        let p = parse_note("see [[Target Note]] and [[Other|alias]] and [[Third#sec]]", "s");
+        let p = parse_note(
+            "see [[Target Note]] and [[Other|alias]] and [[Third#sec]]",
+            "s",
+        );
         let targets: Vec<_> = p.links.iter().map(|l| l.target.as_str()).collect();
         assert_eq!(targets, vec!["Target Note", "Other", "Third"]);
+    }
+
+    #[test]
+    fn code_examples_are_not_links_and_real_offsets_survive() {
+        let source = "é `[[Example]]` ``[[Other]]``\n```md\n[[Fenced]]\n````\n<!-- [[Comment]] -->\n[[Real|alias]]";
+        let parsed = parse_note(source, "s");
+        assert_eq!(parsed.links.len(), 1);
+        assert_eq!(parsed.links[0].target, "Real");
+        assert_eq!(
+            parsed.links[0].position as usize,
+            source.find("[[Real").unwrap()
+        );
+        assert!(parse_note("~~~\n[[Unclosed]]", "s").links.is_empty());
+        assert_eq!(parse_note("`unclosed [[Real]]", "s").links.len(), 1);
     }
 
     #[test]

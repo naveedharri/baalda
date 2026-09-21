@@ -173,6 +173,7 @@ export type BulkErrorCode =
   | "invalid_body"
   | "doc_id_conflict"
   | "path_folder_mismatch"
+  | "note_limit_reached"
   | "root_frozen"
   | "no_write_access"
   | "no_edit_permission"

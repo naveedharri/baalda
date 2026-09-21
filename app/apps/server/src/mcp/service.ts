@@ -1,3 +1,4 @@
+import { withNoteQuota, NoteQuotaError } from "../billing/note-quota.js";
 import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole, resolveResource } from "../permissions/lookup.js";
@@ -650,11 +651,14 @@ export async function createNote(
   await assertRootNotFrozen(input.vaultId, folderId);
 
   const docId = randomUUID();
-  await pool.query(
+  await withNoteQuota(input.vaultId, pool, async (db, remaining) => {
+    if (remaining !== null && remaining <= 0) throw new NoteQuotaError();
+    await db.query(
     `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by)
      VALUES ($1, $2, $3, $4, $5, $1, $6)`,
-    [docId, input.vaultId, folderId, input.title ?? null, storedRelPath, ctx.auth.userId],
-  );
+      [docId, input.vaultId, folderId, input.title ?? null, storedRelPath, ctx.auth.userId],
+    );
+  });
   if (input.content) {
     await ctx.docWriter.setContent(input.vaultId, docId, input.content, {
       userId: ctx.auth.userId,

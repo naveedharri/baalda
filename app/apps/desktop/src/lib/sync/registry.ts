@@ -1132,7 +1132,7 @@ export class VaultRegistry {
 
   /** The plan-limit code that stopped the run, if one did. */
   limitCode(): string | null {
-    return this.limitReached;
+    return this.limitReached ?? this.failed.find(f => f.code === "note_limit_reached")?.code ?? null;
   }
 
   /**

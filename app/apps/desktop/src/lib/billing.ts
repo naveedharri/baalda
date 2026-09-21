@@ -10,20 +10,22 @@
 
 import { ApiError } from "./api";
 
-export type LimitKind = "vault_limit" | "member_limit";
+export type LimitKind = "vault_limit" | "member_limit" | "note_limit";
 
 /** One product promise, shared by every Pro card so checkout and Settings do
  * not drift. Note sync and local previews are deliberately absent: both are
  * Free features, while cross-device standalone-file sync is the paid boundary. */
 export const PRO_BENEFITS = [
   "Sync standalone files across devices and with your team",
+  "Sync more than 20,000 notes per vault",
+  "Baalda Steward AI agent with your own model key",
   "Unlimited team members",
   "Doesn't count toward your free vaults",
   "Priority support",
 ] as const;
 
 export const FREE_PLAN_EXPLANATION =
-  "Notes and their embedded attachments sync on Free. Pro adds standalone file sync across devices and with your team.";
+  "Free syncs up to 20,000 notes per vault and their embedded attachments. Pro adds more notes, standalone file sync, and Baalda Steward.";
 
 /** Every place the contract token might surface on a rejected request. */
 function haystack(e: ApiError): string {
@@ -44,6 +46,7 @@ function haystack(e: ApiError): string {
 export function classifyLimitError(e: unknown): LimitKind | null {
   if (!(e instanceof ApiError) || e.status !== 402) return null;
   const hay = haystack(e);
+  if (hay.includes("note_limit_reached")) return "note_limit";
   if (hay.includes("vault_limit_reached")) return "vault_limit";
   if (hay.includes("member_limit_reached")) return "member_limit";
   return null;

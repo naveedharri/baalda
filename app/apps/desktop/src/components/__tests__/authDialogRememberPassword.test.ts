@@ -32,7 +32,7 @@ const render = async (initialMode: "sign-in" | "sign-up" = "sign-in") => {
   await act(async () => root.render(createElement(AuthDialog, { onClose: closed, initialMode })));
 };
 const submit = async () => {
-  await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => document.body.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
 };
 it("saves after successful sign-in and waits for the keychain before closing", async () => {
   signIn.mockImplementation(async () => patch({ authStatus: "signed-in" }));
@@ -61,9 +61,15 @@ it("reports keychain save failure without treating authentication as failed", as
   signIn.mockImplementation(async () => patch({ authStatus: "signed-in" }));
   vi.mocked(saveRememberedPassword).mockRejectedValue(new Error("locked"));
   await render(); await submit();
-  expect(host.querySelector('[role="alert"]')?.textContent).toContain("You're signed in");
+  expect(document.body.querySelector('[role="alert"]')?.textContent).toContain("You're signed in");
   expect(closed).not.toHaveBeenCalled();
-  const button = [...host.querySelectorAll("button")].find((b) => b.textContent === "Continue")!;
+  const button = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Continue")!;
   await act(async () => button.click());
   expect(closed).toHaveBeenCalled();
+});
+
+it("portals the sign-in modal outside a constrained sidebar", async () => {
+  await render();
+  expect(host.querySelector(".modal-backdrop")).toBeNull();
+  expect(document.body.querySelector(".modal-backdrop")?.parentElement).toBe(document.body);
 });

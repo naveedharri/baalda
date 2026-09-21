@@ -52,6 +52,7 @@ export function MenuSelect<T extends string>({
   menuClassName,
   triggerContent,
   caret = true,
+  direction = "auto",
 }: {
   value: T;
   options: ReadonlyArray<MenuSelectOption<T>>;
@@ -69,6 +70,7 @@ export function MenuSelect<T extends string>({
   triggerContent?: React.ReactNode;
   /** Icon triggers have no room for the caret. */
   caret?: boolean;
+  direction?: "auto" | "down";
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<Placement | null>(null);
@@ -91,7 +93,10 @@ export function MenuSelect<T extends string>({
     // The menu is fixed to the viewport, so anything that moves the trigger
     // underneath it (a scroll, a resize) would leave it stranded. Closing is the
     // honest response — re-anchoring mid-scroll makes the menu chase the cursor.
-    const dismiss = () => setOpen(false);
+    const dismiss = (event: Event) => {
+      if (event.type === "scroll" && event.target instanceof Node && menuRef.current?.contains(event.target)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", dismiss);
@@ -117,6 +122,11 @@ export function MenuSelect<T extends string>({
     if (!menu || !trigger) return;
     const anchor = trigger.getBoundingClientRect();
     const size = { width: menu.offsetWidth, height: menu.offsetHeight };
+    if (direction === "down") {
+      setPos({ left: Math.max(8, Math.min(anchor.left, window.innerWidth - size.width - 8)), top: anchor.bottom + OFFSET,
+        maxHeight: Math.max(0, window.innerHeight - anchor.bottom - OFFSET - 8) });
+      return;
+    }
     setPos(
       placeMenu(
         {
@@ -129,7 +139,7 @@ export function MenuSelect<T extends string>({
         { width: window.innerWidth, height: window.innerHeight },
       ),
     );
-  }, [open, options.length]);
+  }, [open, options.length, direction]);
 
   // A value with no matching option still has to render something — falling
   // back to the raw value beats an empty trigger that looks broken.
