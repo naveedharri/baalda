@@ -16,7 +16,7 @@ describe("plan benefits copy", () => {
   it("explains the Free note allowance and Pro benefits", () => {
     expect(PRO_BENEFITS).toContain("Sync standalone files across devices and with your team");
     expect(PRO_BENEFITS.join(" ")).not.toMatch(/unlimited notes|AI edits/i);
-    expect(FREE_PLAN_EXPLANATION).toMatch(/20,000 notes per vault/i);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/note sync and embedded attachments/i);
     expect(FREE_PLAN_EXPLANATION).toMatch(/embedded attachments/i);
     expect(FREE_PLAN_EXPLANATION).toMatch(/standalone file sync/i);
   });

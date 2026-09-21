@@ -21,7 +21,7 @@
 ## 0.1.63
 
 - AI (Beta) adds Baalda Steward: scan your vault, review prioritized findings, and approve suggested repairs using your own OpenRouter key. Pro on Baalda Cloud; included for self-hosters.
-- Free Cloud vaults sync up to 20,000 notes. Extra notes stay local with an upgrade prompt; existing notes keep syncing. Embedded attachments remain Free, with standalone file sync on Pro.
+- Upgrade messaging highlights Jev from TypeSafe, now available on Baalda. Embedded attachments remain Free, with standalone file sync on Pro.
 - Sign-in is centred over the whole window, and Remember password uses the OS keychain. Copying notes includes images in rich paste.
 - Health updates local counts during sync and separates stored server totals from access restrictions. Bulk access cleanup shows progress while preserving shared and private states.
 - Sync preserves concurrent disk and collaborator edits, restores large shared vaults in batches, and avoids uploading unchanged empty notes after a restart.
