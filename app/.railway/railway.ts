@@ -34,6 +34,8 @@ const SERVER_ENV = [
   "JWT_SECRET",
   "BETTER_AUTH_URL",
   "PORT",
+  // Template Dockerfile detection; preserve when applying IaC to a template deployment.
+  "RAILWAY_DOCKERFILE_PATH",
   "HOCUSPOCUS_PORT",
   "NODE_ENV",
   "NODE_OPTIONS",

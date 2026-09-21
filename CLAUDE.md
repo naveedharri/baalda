@@ -331,6 +331,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `organization` plugins (org = **vault**, the user-facing unified entity — Local / Synced / Remote states;
   roles owner/admin/member; 48h invitations). Session token is
   opaque (instant revocation), stored client-side only in the OS keychain.
+  Desktop "Remember password" is a separate explicit opt-in: `rememberedPassword.ts`
+  keeps only the last successfully authenticated password in the OS keychain,
+  bound to server URL and email. Logout clears the session but retains this saved
+  login; turning the switch off deletes it. The old email-only preference does
+  not opt existing users into password storage. No password enters localStorage.
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
   `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`

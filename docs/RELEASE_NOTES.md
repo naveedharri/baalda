@@ -20,6 +20,7 @@
 
 ## 0.1.63
 
+- Remember password securely saves your last login in the OS keychain, so you can sign back in after logging out. Turn it off to forget the saved password.
 - Health updates local counts during sync and shows stored server totals separately from access restrictions. Progress distinguishes sync updates from notes.
 - Switching access on large vaults uses bulk cleanup with visible progress. Shared, read-only and private states remain stable while files sync.
 - Sync preserves concurrent edits when disk reads race with collaborators, restores large shared vaults in batches, and avoids uploading unchanged empty notes after a restart.

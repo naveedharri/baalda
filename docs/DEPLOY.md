@@ -126,6 +126,8 @@ configuration:
    - `JWT_SECRET`: generate one with `openssl rand -base64 32`.
    - `BETTER_AUTH_URL`: the server's public HTTPS URL (Railway gives you a
      `*.up.railway.app` domain, or attach your own).
+   - `PORT`: explicitly set `8080`, and use **8080** as the public domain's
+     target port under Settings → Networking.
 3. Apply the checked-in settings from a clone. Needs the Railway CLI 5.42 or
    newer and a `pnpm install` in `app/` (which brings the `railway` SDK):
 
@@ -145,8 +147,9 @@ configuration:
 4. Deploy (`apply` triggers one). `preDeployCommand` runs `node dist/db/migrate.js`
    before every deploy and the health check is `/health`, so Railway won't cut
    over traffic until migrations have run and the server is answering.
-5. Expose only the one HTTP port (Railway does this automatically from
-   `PORT`); nothing else needs to be public.
+5. Expose only the one HTTP port. Check the public domain's target port is
+   **8080**, matching `PORT`, then open `https://<your-domain>/health`.
+   A successful deployment healthcheck alone does not verify public routing.
 
 > **`railway.json` is legacy.** The repo-root `railway.json` is Railway's older
 > "Config as Code" form of the same settings. Only services created before
@@ -171,13 +174,17 @@ services, no manual configuration:
 | `Postgres` | Railway's Postgres, volume at `/var/lib/postgresql/data` |
 | `baalda` | Builds `app/apps/server/Dockerfile` from this repo, gets an HTTPS domain |
 
-Its three variables are Railway template expressions, so **every deployment gets
-its own values** rather than inheriting the publisher's:
+The template must explicitly set `PORT=8080` and its public domain's target port
+to **8080**, and pin `RAILWAY_DOCKERFILE_PATH`. The three instance-specific
+variables are Railway template expressions, so
+**every deployment gets its own values** rather than inheriting the publisher's:
 
 ```
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 JWT_SECRET=${{secret(32)}}
 BETTER_AUTH_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}
+PORT=8080
+RAILWAY_DOCKERFILE_PATH=app/apps/server/Dockerfile
 ```
 
 Paste that into the template's **Raw Editor** exactly as written — unquoted, and
@@ -185,11 +192,11 @@ with no spaces around `=`. Railway's ENV parser keeps what it is given: padding
 around `=` can land a **leading space inside the value** (a `BETTER_AUTH_URL` of
 ` https://…` breaks every invitation link), and `JWT_SECRET="…"` can bake literal
 quote characters into the signing secret. Reopen the Raw Editor after saving and
-check it shows three lines — pasting twice silently leaves duplicates.
+check it shows five lines — pasting twice silently leaves duplicates.
 
 `${{secret(32)}}` is what makes the template safe to publish at all — a literal
 secret baked into a public template would let anyone mint a sync token for any
-note on every instance deployed from it. Nothing else is set: billing stays off
+note on every instance deployed from it. Billing stays off
 (so there are **no** vault or member limits), Google sign-in stays hidden until
 you add OAuth credentials, and Redis is only needed to run several instances.
 
@@ -197,6 +204,27 @@ Once it's up, open the desktop app: its first-run step asks whether your notes
 live on the managed service or **your own server**, and the generated
 `*.up.railway.app` URL goes there. You can also send your team
 `https://<that URL>/open/connect` and let them click it.
+
+**Password recovery:** outbound email is optional and is not configured by the
+template. To enable **Forgot password?**, add `EMAIL_FROM` and either
+`SMTP_URL` or `RESEND_API_KEY`; see [Outbound email](#outbound-email-password-reset-invitations).
+That section also covers administrator password recovery without email.
+
+### Existing Railway deployment returns 502
+
+The earlier template fixed the domain target at **3010** but omitted `PORT`
+and the Dockerfile builder. A Railpack deployment could therefore listen on
+**8080** while its domain still forwarded to **3010**. This can show as Online
+with a passing healthcheck while the desktop reports it cannot reach the server.
+
+Set `PORT=8080` in the **baalda** service's Variables and change the existing
+domain's target port to **8080** under Settings → Networking, then redeploy.
+Keep the existing domain so `BETTER_AUTH_URL` and clients' saved URLs stay valid.
+Confirm `https://<your-domain>/health` responds successfully. An existing setup
+using **3010** for both values is also valid; the two values must agree.
+
+The server and Docker image retain their `3010` default for local and Compose
+deployments. Railway's explicit service variable overrides that default.
 
 ### Maintaining the template
 
@@ -206,10 +234,21 @@ pre-deploy migration, healthcheck) and the Dockerfile. Changing the required env
 editing the template in the dashboard too, or one-click deploys will boot
 misconfigured.
 
-There is no API or CLI path to publishing: `railway deploy` *consumes* a template
-by code, the `railway mcp` server exposes only `deploy_template`/`search_templates`,
-and `backboard.railway.com/graphql/v2` rejects non-browser clients (403). It is a
-dashboard-only operation.
+For the `baalda` template service, set
+`RAILWAY_DOCKERFILE_PATH=app/apps/server/Dockerfile` and keep the build context
+at the repository root. Railway uses this variable to detect the Dockerfile
+([Railway Dockerfile documentation](https://docs.railway.com/builds/dockerfiles)).
+Set the pre-deploy command to `node dist/db/migrate.js`, the healthcheck
+to `/health`, `PORT=8080`, and the public domain target to **8080**. The checked-in
+IaC is not automatically applied when someone clicks the template button.
+After saving, inspect the published template again and verify those settings;
+repository changes alone do not repair the marketplace template or existing
+deployments.
+
+Use the dashboard to edit the template's service configuration and apply its
+staged changes. Current Railway CLI versions also support
+`railway templates publish` / `update` for marketplace metadata; those commands do not expose the
+service configuration. See [Railway template CLI documentation](https://docs.railway.com/cli/templates).
 
 ⚠️ **Publishing changes the URL.** An unpublished template is reachable at a random
 code (`/deploy/CZ25Mu`); publishing moves it to the vanity slug (`/deploy/baalda-server`)

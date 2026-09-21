@@ -5562,7 +5562,7 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   font-weight: 600;
 }
 
-/* The row under the password field: "Remember email address" on the left,
+/* The row under the password field: "Remember password" on the left,
    "Forgot password?" right-aligned, so the link still reads as belonging to the
    field above it rather than as a second submit action. The row keeps its right
    edge when the switch is the only thing in it. */
