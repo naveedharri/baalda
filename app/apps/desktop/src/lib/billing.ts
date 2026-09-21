@@ -17,15 +17,14 @@ export type LimitKind = "vault_limit" | "member_limit" | "note_limit";
  * Free features, while cross-device standalone-file sync is the paid boundary. */
 export const PRO_BENEFITS = [
   "Sync standalone files across devices and with your team",
-  "Sync more than 20,000 notes per vault",
-  "Baalda Steward AI agent with your own model key",
+  "Jev from TypeSafe is available on Baalda",
   "Unlimited team members",
   "Doesn't count toward your free vaults",
   "Priority support",
 ] as const;
 
 export const FREE_PLAN_EXPLANATION =
-  "Free syncs up to 20,000 notes per vault and their embedded attachments. Pro adds more notes, standalone file sync, and Baalda Steward.";
+  "Free includes note sync and embedded attachments. Pro adds standalone file sync and Baalda Steward.";
 
 /** Every place the contract token might surface on a rejected request. */
 function haystack(e: ApiError): string {
