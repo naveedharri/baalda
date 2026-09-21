@@ -1200,6 +1200,7 @@ function VaultsTab() {
       {session && (
         <>
       <div className="subhead">In this account ({organizations.length})</div>
+      <p className="muted">These are the vaults in your signed-in account. Other folders may still exist on disk, including vaults opened in another Baalda app. Use Open existing to reopen one. Removing a vault from the device list keeps its files.</p>
       <ul className="member-list vault-list">
         {ordered.map((o) => {
           const isActive = isOpenOrg(o.id);

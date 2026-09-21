@@ -817,6 +817,73 @@ export class AttachmentSync {
     return result;
   }
 
+  /** Serialize explicit removal against downloads so a late write cannot restore it. */
+  async removeMissingFile(path: string, id: string): Promise<void> {
+    if (!this.current()) throw new Error("The open vault changed.");
+    if (this.running) throw new Error("Files are syncing. Wait for this pass to finish, then try again.");
+    if (!this.deps.deleteFile) throw new Error("Server file removal is unavailable.");
+    this.running = true;
+    try {
+      const local = await this.deps.listLocal();
+      if (!this.current()) throw new Error("The open vault changed.");
+      if (local.some((file) => file.relPath.toLowerCase() === path.toLowerCase())) {
+        throw new Error("This file is now on this computer. Use its normal Delete action instead.");
+      }
+      await this.deps.deleteFile(id);
+      if (this.current()) this.forgetFile(path);
+    } finally {
+      this.running = false;
+      if (this.rerun && this.current()) this.scheduleReconcile();
+    }
+  }
+
+  /** Explicit recovery uses the same readable listing and create-only transport. */
+  async downloadMissing(paths: readonly string[]): Promise<void> {
+    if (!this.current()) throw new Error("The open vault changed. Reopen Health and try again.");
+    if (this.running) throw new Error("Files are syncing. Wait for this pass to finish, then try again.");
+    this.running = true;
+    try {
+      const [local, server] = await Promise.all([this.deps.listLocal(), this.deps.listServer()]);
+      if (!this.current()) throw new Error("The open vault changed.");
+      this.localPathKeys = new Set(local.map((a) => a.relPath.toLowerCase()));
+      // Explicit recovery is path-based: identical bytes at another local
+      // path must not suppress a requested missing file. Keep the same server
+      // path validation; the occupied-path check below still prevents overwrite.
+      const candidates = diffAttachments([], server).toDownload;
+      const failures: string[] = [];
+      for (const path of new Set(paths)) {
+        if (!this.current()) throw new Error("The open vault changed.");
+        if (this.localPathKeys.has(path.toLowerCase())) continue;
+        const blob = candidates.find((b) => b.relPath === path);
+        if (!blob || this.deps.isDeletePending?.(path)) {
+          failures.push(`${path}: no downloadable copy is available. Check access or ask the owner to upload it again.`);
+          continue;
+        }
+        try {
+          await this.downloadOne(blob);
+          if (!this.current()) throw new Error("The open vault changed.");
+          if (blob.docId) {
+            this.fileIds.set(path, blob.docId);
+            this.deps.rememberFileId?.(path, blob.docId);
+          }
+          this.setFileState(path, "synced");
+        } catch (e) {
+          if (this.handleAttachmentSyncRequired(e, false)) throw e;
+          failures.push(`${path}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      if (failures.length) throw new Error(failures.join("\n"));
+    } catch (e) {
+      if (this.handleAttachmentSyncRequired(e, false)) {
+        throw new Error("This server requires Pro to download files in this vault, including files uploaded before the restriction. Upgrade this vault or contact its owner.");
+      }
+      throw e;
+    } finally {
+      this.running = false;
+      if (this.rerun && this.current()) this.scheduleReconcile();
+    }
+  }
+
   /** Clear a plan refusal after billing refresh has confirmed an upgrade. */
   resetEntitlement(): void {
     const wasBlocked = this.attachmentSyncBlocked;

@@ -41,6 +41,8 @@ import { localAttachmentPresence } from "../../lib/health/useVaultHealth";
 
 function actions(): HealthActions {
   return {
+    downloadFiles: vi.fn(async () => {}),
+    removeServerFile: vi.fn(async () => {}),
     syncNow: vi.fn(async () => {}),
     retryDoc: vi.fn(async () => {}),
     resetHistory: vi.fn(async () => ({ bytesFreed: 0 })),

@@ -1099,6 +1099,28 @@ export class SyncManager implements InboundHost {
     if (cb) this.publishRegistryMap();
   }
 
+  async downloadMissingFiles(paths: readonly string[], epoch: number): Promise<void> {
+    const scope = this.scope;
+    if (!scope?.isCurrent() || scope.vaultEpoch !== epoch || !this.attachments) {
+      throw new Error("Connect this vault to the server before downloading files.");
+    }
+    await this.attachments.downloadMissing(paths);
+  }
+
+  async removeMissingServerFile(path: string, epoch: number): Promise<void> {
+    const scope = this.scope;
+    if (!scope?.isCurrent() || scope.vaultEpoch !== epoch) throw new Error("The open vault changed.");
+    const id = this.registry.getFileId(path);
+    if (!id) throw new Error("This file is no longer in the accessible server inventory. Check again.");
+    if (!this.attachments) throw new Error("Connect this vault before removing a server file.");
+    await this.attachments.removeMissingFile(path, id);
+    if (!scope.isCurrent()) return;
+    this.registry.forgetFileId(path);
+    this.attachments?.forgetFile(path);
+    await this.registry.pull();
+    if (scope.isCurrent()) this.onRegistryChanged?.();
+  }
+
   /** Billing refresh confirmed a plan change; let the binary mirror ask again. */
   recheckAttachmentEntitlement(): void {
     this.attachments?.resetEntitlement();

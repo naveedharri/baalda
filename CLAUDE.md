@@ -317,7 +317,14 @@ An attachment-local-only notice is driven only by the server's explicit
 `attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
 the vault may be Pro, and billing-disabled self-hosts may still sync attachments.
 The notice persists in file previews and Vault Health while notes continue to
-report their own sync state.
+report their own sync state. Health includes server-only files when deciding
+whether to show the refusal. Missing binary files offer explicit single/all
+file downloads through the attachment mirror's readable listing and guarded
+transport; errors remain visible. Confirmed server removal uses the existing
+file-delete authorization and is serialized against the mirror's transfers.
+The vault Settings list shows account memberships and this app profile's recent
+local folders, not a scan of the managed root. Production and staging have
+separate recents even when they share a root; Open existing reopens a folder.
 
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same

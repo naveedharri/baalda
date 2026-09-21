@@ -1124,3 +1124,67 @@ describe("AttachmentSync bounded concurrency", () => {
     expect(log.toasts).toHaveLength(1); // one fact about the vault, not per file
   });
 });
+
+describe("explicit missing-file recovery", () => {
+  const seed = [
+    { id: "a", relPath: "a.pdf", bytes: new Uint8Array([1]) },
+    { id: "b", relPath: "b.pdf", bytes: new Uint8Array([2]) },
+  ];
+  it("downloads only the selected file through the tree transport, without uploading", async () => {
+    const { deps, local, server } = makeDeps([], seed);
+    const upload = vi.fn(deps.uploadServer);
+    await new AttachmentSync({ ...deps, writeTreeLocal: deps.writeLocal, uploadServer: upload }).downloadMissing(["b.pdf"]);
+    expect([...local.keys()]).toEqual(["b.pdf"]);
+    expect(local.get("b.pdf")).toEqual(seed[1].bytes);
+    expect(server.size).toBe(2);
+    expect(upload).not.toHaveBeenCalled();
+  });
+  it("does not overwrite a local path even when its case differs", async () => {
+    const { deps, local } = makeDeps([{ relPath: "A.PDF", bytes: new Uint8Array([9]) }], seed);
+    await new AttachmentSync({ ...deps, writeTreeLocal: deps.writeLocal }).downloadMissing(["a.pdf"]);
+    expect([...local.keys()]).toEqual(["A.PDF"]);
+    expect(local.get("A.PDF")).toEqual(new Uint8Array([9]));
+  });
+  it("recovers a missing path even when another file has identical bytes", async () => {
+    const { deps, local } = makeDeps([{ relPath: "copy.pdf", bytes: seed[0].bytes }], seed);
+    await new AttachmentSync({ ...deps, writeTreeLocal: deps.writeLocal }).downloadMissing(["a.pdf"]);
+    expect(local.get("a.pdf")).toEqual(seed[0].bytes);
+    expect(local.has("copy.pdf")).toBe(true);
+  });
+  it("reports missing blobs and still downloads other requested files", async () => {
+    const { deps, local } = makeDeps([], seed);
+    await expect(new AttachmentSync({ ...deps, writeTreeLocal: deps.writeLocal }).downloadMissing(["missing.pdf", "a.pdf"]))
+      .rejects.toThrow("missing.pdf: no downloadable copy");
+    expect(local.has("a.pdf")).toBe(true);
+  });
+  it("explains an explicit Pro refusal even with no local files", async () => {
+    const { deps } = makeDeps();
+    const onEntitlementBlocked = vi.fn();
+    const error = Object.assign(new Error("Payment required"), { status: 402, code: "attachment_sync_requires_pro" });
+    await expect(new AttachmentSync({ ...deps, onEntitlementBlocked, listServer: async () => { throw error; } }).downloadMissing(["a.pdf"]))
+      .rejects.toThrow("including files uploaded before the restriction");
+    expect(onEntitlementBlocked).toHaveBeenCalledWith(true);
+  });
+  it("does not write after the vault changes during listing", async () => {
+    const { deps, local } = makeDeps([], seed);
+    let current = true;
+    await expect(new AttachmentSync({ ...deps, writeTreeLocal: deps.writeLocal, isCurrent: () => current,
+      listServer: async () => { current = false; return deps.listServer(); },
+    }).downloadMissing(["a.pdf"])).rejects.toThrow("vault changed");
+    expect(local.size).toBe(0);
+  });
+  it("refuses removal when a file has appeared locally", async () => {
+    const { deps } = makeDeps([seed[0]], seed);
+    const deleteFile = vi.fn();
+    await expect(new AttachmentSync({ ...deps, deleteFile }).removeMissingFile("a.pdf", "a"))
+      .rejects.toThrow("now on this computer");
+    expect(deleteFile).not.toHaveBeenCalled();
+  });
+  it("propagates server permission refusals on removal", async () => {
+    const { deps } = makeDeps([], seed);
+    const deleteFile = vi.fn(async () => { throw new Error("No write access"); });
+    await expect(new AttachmentSync({ ...deps, deleteFile }).removeMissingFile("a.pdf", "a"))
+      .rejects.toThrow("No write access");
+    expect(deleteFile).toHaveBeenCalledWith("a");
+  });
+});

@@ -422,6 +422,16 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   // button beside it can never drift apart.
   const actions = useMemo<HealthActions>(() => {
     const api: HealthActions = {
+      async downloadFiles(paths) {
+        if (vaultEpoch == null) throw new Error("No vault is open.");
+        try { await syncManager.downloadMissingFiles(paths, vaultEpoch); }
+        finally { refresh(); }
+      },
+      async removeServerFile(path) {
+        if (vaultEpoch == null) throw new Error("No vault is open.");
+        await syncManager.removeMissingServerFile(path, vaultEpoch);
+        refresh();
+      },
       syncNow: () => syncManager.retrySync(),
 
       retryDoc: (docId: string) => syncManager.retryDoc(docId),
@@ -655,7 +665,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       },
     };
     return api;
-  }, [refresh]);
+  }, [refresh, vaultEpoch]);
 
   // A reset discards history on both sides, so the census it produced is stale.
   // Wrapping here (rather than inside the memo) keeps `actions` stable.

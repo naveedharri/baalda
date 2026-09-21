@@ -401,6 +401,8 @@ export interface NoteInspection {
 // ── Actions the page can take ──────────────────────────────────────────────────
 
 export interface HealthActions {
+  downloadFiles(paths: readonly string[]): Promise<void>;
+  removeServerFile(path: string): Promise<void>;
   /** Re-pull the registry and re-run the content pass for everything unconfirmed. */
   syncNow(): Promise<void>;
   /** Re-queue ONE note's content, clearing any remembered permanent failure. */

@@ -31,6 +31,7 @@ import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { UpgradeDialog } from "./UpgradeDialog";
+import { MissingFileActions } from "./MissingFileActions";
 import { HealthIssues } from "./HealthIssues";
 import { HealthChecks, type CheckFocus } from "./HealthChecks";
 import { useHealthIgnores } from "../lib/health/useHealthIgnores";
@@ -87,9 +88,10 @@ export function HealthTab({
     <>
       <AttachmentSyncNotice
         surface="health"
-        detected={snapshot.hasLocalAttachments === true}
+        detected={snapshot.hasLocalAttachments === true || snapshot.inventory.serverOnlyFiles.length > 0}
       />
       <HealthView
+        key={vaultPath}
         snapshot={snapshot}
         notes={notes}
         vaultPath={vaultPath}
@@ -252,7 +254,9 @@ export function HealthView({
         title="Needs attention"
         description="Open a row for the full reasoning."
       >
-        <HealthIssues
+        {report.issues.length === 0 && snapshot.inventory.serverOnlyFiles.length > 0 ? (
+          <p>Files are missing from this computer. Review the differences above to download them or see what is blocking them.</p>
+        ) : <HealthIssues
           issues={report.issues}
           handlers={handlers}
           syncEnabled={report.counts != null}
@@ -260,7 +264,7 @@ export function HealthView({
           dismissed={ignores.issues}
           onDismiss={ignores.dismissIssue}
           onRestore={ignores.restoreIssue}
-        />
+        />}
       </Section>
 
       <details className="health-advanced">
@@ -678,6 +682,8 @@ function InventoryComparison({
               : inventory.server
               ? comparisonPending
                 ? "The comparison will appear when the supported vault file list is ready."
+                : standaloneFileSyncBlocked && inventory.serverOnlyFiles.length > 0
+                ? "This server requires Pro to download files, including previously uploaded files. Review differences for available actions."
                 : localOnlyFormatNotes > 0
                 ? comparisonStale
                   ? "Syncing these file types requires Pro. The Remote Vault view is last known and may be out of date."
@@ -702,7 +708,7 @@ function InventoryComparison({
                 Check again
               </AsyncButton>
             )}
-            {localOnlyFormatNotes > 0 && showAttachmentUpgrade && (
+            {standaloneFileSyncBlocked && (localOnlyFormatNotes > 0 || inventory.serverOnlyFiles.length > 0) && showAttachmentUpgrade && (
               <button
                 type="button"
                 className="primary sm"
@@ -750,7 +756,9 @@ function InventoryComparison({
                 inventory.serverOnlyFiles.length +
                 inventory.serverOnlyFolders.length >
               0
-                ? "Check again to download anything you can access."
+                ? standaloneFileSyncBlocked && inventory.serverOnlyFiles.length > 0
+                  ? "File downloads are blocked by this vault’s Pro requirement. Review differences for options."
+                  : "Review differences to download missing files. Check again refreshes text notes and folders."
                 : undefined
             }
           />
@@ -796,11 +804,12 @@ function InventoryComparison({
             description="The Remote Vault knows these folders but this computer has no matching folders. Check again to download anything you can access."
             paths={inventory.serverOnlyFolders}
           />
-          <DifferenceList
-            title="Notes in other formats missing from this computer"
-            description="The Remote Vault knows these notes but this computer has no matching paths. Check again to download anything you can access."
+          {inventory.serverOnlyFiles.length > 0 && <MissingFileActions
             paths={inventory.serverOnlyFiles}
-          />
+            actions={handlers.actions}
+            blocked={standaloneFileSyncBlocked}
+            showUpgrade={showAttachmentUpgrade}
+          />}
         </div>
       )}
     </section>
