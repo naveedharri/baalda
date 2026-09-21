@@ -64,23 +64,25 @@ export function SyncIssuesBannerView({
   failed,
   onOpenHealth,
   onDismiss,
+  noteLimit = false,
 }: {
   show: boolean;
+  noteLimit?: boolean;
   failed: number;
   onOpenHealth: () => void;
   onDismiss: () => void;
 }) {
   return (
     <Banner show={show} className="sync-issues-banner" role="alert">
-      <span>
+      {noteLimit ? <span><strong>20,000-note Free sync limit reached.</strong> Additional notes stay on this device. Upgrade to Pro to sync more notes and use Baalda Steward.</span> : <span>
         <strong>
           {failed} {failed === 1 ? "note didn't" : "notes didn't"} sync
         </strong>{" "}
         — open the Health page for each note's reason and a fix.
-      </span>
+      </span>}
       <div className="banner-actions">
         <button className="primary" onClick={onOpenHealth}>
-          Open Health
+          {noteLimit ? "Upgrade to Pro" : "Open Health"}
         </button>
         <button onClick={onDismiss}>Dismiss</button>
       </div>

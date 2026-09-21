@@ -518,3 +518,28 @@ restored even if identical bytes already exist at another local path, without
 overwriting occupied paths. Legacy whole-list Pro refusals can be re-probed on
 a sync pass after a one-minute cooldown, allowing a running updated desktop to
 recover when its server is upgraded.
+
+### Baalda Steward engine
+
+AI’s Baalda Steward provides user-reviewed agent repairs. `http/routes/housekeeper.ts` hosts the optional
+`app/apps/server/housekeeper/index.mjs` module (override with `HOUSEKEEPER_MODULE`) without a
+static build dependency. Every request checks vault membership and a non-deleted
+`pro` subscription in `active`/`past_due` on Cloud. Self-hosters with
+`BAALDA_DEPLOYMENT=self-hosted` have access. The Apache-2.0 module uses the server-side
+OpenRouter SDK through swappable Decisions/chat adapters. Personal provider keys live in the desktop OS keychain and are supplied per inference request; the server does not persist them. Candidate reads use per-note permissions and apply/undo use
+`DocWriter.editContent` with revision/span guards under its lock. Preview tokens
+are scoped to user/vault, expire, and live in bounded process memory. No sync wire
+format or bridge timing changes. Setup, limits and isolated tests:
+[Baalda Steward](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI; Health retains its basic overview.
+
+Baalda Agents follow observe → investigate → propose → approve → execute → verify.
+Finding cards are data-driven; models choose allowlisted capabilities, while
+existing permission-checked tools own changes. Link and filename changes require
+concrete previews. Never interpret generated text as executable tool authority.
+
+On Cloud servers Free vaults can register 20,000 live notes. New note
+registration and MCP creation serialize quota checks with the same per-vault
+session advisory lock (`billing/note-quota.ts`). Existing notes remain adoptable
+at/above the cap; no data is deleted. `note_limit_reached` prompts an upgrade but
+does not stop reconciliation of existing notes. Self-hosters and
+active paid subscriptions bypass this note cap.

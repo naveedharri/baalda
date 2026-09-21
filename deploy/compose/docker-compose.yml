@@ -22,6 +22,7 @@ x-server-image: &server-image
 
 x-server-env: &server-env
   NODE_ENV: production
+  BAALDA_DEPLOYMENT: self-hosted
   # Compose resolves this against the postgres service below, on the internal
   # network — Postgres is never published to the host.
   DATABASE_URL: postgres://baalda:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/baalda

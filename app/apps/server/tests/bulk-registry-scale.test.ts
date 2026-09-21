@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { createOrg, signUp, type TestUser } from "./helpers/auth.js";
@@ -45,7 +45,9 @@ describe("registration batch query count", () => {
   let org: string;
   let vault: string;
 
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(async () => {
+    vi.stubEnv("BAALDA_DEPLOYMENT", "self-hosted");
     await resetDb();
     owner = await signUp("owner@scale-reg.test");
     org = (await createOrg(owner, "Reg Co", "reg-co")).id;

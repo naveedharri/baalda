@@ -11,6 +11,7 @@
 export type SettingsTab =
   | "general"
   | "health"
+  | "ai"
   | "vaults"
   | "members"
   | "billing"

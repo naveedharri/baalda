@@ -1,3 +1,4 @@
+import { withNoteQuota, NOTE_LIMIT_MESSAGE } from "../billing/note-quota.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
@@ -72,6 +73,7 @@ export function normalizeColor(value: unknown): string | null | undefined {
 export type RegisterCode =
   | "path_folder_mismatch"
   | "no_write_access"
+  | "note_limit_reached"
   | "root_frozen"
   | "doc_id_conflict";
 
@@ -511,6 +513,17 @@ export async function registerNotes(
   ctx: RegisterCtx,
   inputs: NoteInput[],
 ): Promise<Array<RegisterResult<NoteRow>>> {
+  return withNoteQuota(ctx.vaultId, ctx.db, (db, remaining) => {
+    // Permission reads must use the pinned session too; otherwise requests
+    // waiting on this lock could exhaust the pool while its holder needs a slot.
+    const locked = registerCtx(ctx.vaultId, ctx.userId, db, {
+      resolverCache: ctx.resolverCache,
+      cache: { ...ctx.cache, notes: new Map() },
+    });
+    return registerNotesWithinQuota(locked, inputs, remaining);
+  });
+}
+async function registerNotesWithinQuota(ctx: RegisterCtx, inputs: NoteInput[], remaining: number | null): Promise<Array<RegisterResult<NoteRow>>> {
   const results = new Array<RegisterResult<NoteRow> | undefined>(inputs.length);
   const plans: NoteInsertPlan[] = [];
   // Ids this batch has already claimed. Seeds the frozen-root latch's existence
@@ -532,6 +545,7 @@ export async function registerNotes(
     return new Set(rows.map((r) => r.id));
   };
 
+  const alreadyRegistered = remaining === null ? new Set<string>() : await probeIds(inputs.flatMap(i => i.docId ? [i.docId] : []));
   for (let index = 0; index < inputs.length; index++) {
     const input = inputs[index];
     // Client may supply a stable doc_id (generated locally); else we mint one.
@@ -607,6 +621,13 @@ export async function registerNotes(
       }
     }
 
+    if (remaining !== null && !alreadyRegistered.has(id) && !known.has(id)) {
+      if (remaining <= 0) {
+        results[index] = { status: "error", code: "note_limit_reached", message: NOTE_LIMIT_MESSAGE };
+        continue;
+      }
+      remaining--;
+    }
     plans.push({
       index,
       id,

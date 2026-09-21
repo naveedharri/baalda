@@ -7763,3 +7763,14 @@ button.secondary:active:not(:disabled),
     transform: none;
   }
 }
+
+/* Keep the agent entry recognisable even when another settings tab is active. */
+.settings-nav .settings-ai-item .menu-icon {
+  color: var(--accent);
+  fill: color-mix(in srgb, var(--accent) 22%, transparent);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 35%, transparent));
+}
+
+.settings-nav .settings-ai-item .menu-icon svg {
+  fill: color-mix(in srgb, var(--accent) 22%, transparent);
+}

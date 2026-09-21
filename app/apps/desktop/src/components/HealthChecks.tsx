@@ -64,6 +64,7 @@ export function HealthChecks({
   onIgnore,
   onRestore,
   focus = null,
+  onlyIds,
 }: {
   checks: VaultChecks | null;
   loading: boolean;
@@ -75,6 +76,7 @@ export function HealthChecks({
   onRestore?: (id: VaultCheckId) => void;
   /** From a metric flag ("1 broken"): open that check and bring it into view. */
   focus?: CheckFocus | null;
+  onlyIds?: readonly string[];
 }) {
   if (checks == null) {
     if (loading) {
@@ -92,7 +94,7 @@ export function HealthChecks({
     return <p className="muted">Checks are not available for this vault.</p>;
   }
 
-  const allRows = checkRows(checks);
+  const allRows = checkRows(checks).filter(row => !onlyIds || onlyIds.includes(row.def.id));
   // An ignored check that currently FAILS steps out of the groups and out of the
   // headline — that is what ignoring means. One that passes is shown normally;
   // there is nothing to ignore, and its tick is still information.

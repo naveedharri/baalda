@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
@@ -402,7 +403,7 @@ export function AuthDialog({
             ? "Welcome back"
             : "Create your account";
 
-  return (
+  return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal auth-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
@@ -817,6 +818,7 @@ export function AuthDialog({
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

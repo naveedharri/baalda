@@ -91,8 +91,7 @@ const ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
 // embed. Same bracket rule as `parse.rs`'s `WIKILINK_RE`, with the leading `!`.
 static EMBED_WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[\[([^\]\n]+)\]\]").unwrap());
 // `![alt](path)` / `![alt](path "title")` — the markdown embed.
-static EMBED_MD_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"!\[[^\]\n]*\]\(([^)\n]+)\)").unwrap());
+static EMBED_MD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]\n]*\]\(([^)\n]+)\)").unwrap());
 
 /// One affected file. `path` is vault-relative; for `orphan-history` there is no
 /// file, so it carries the doc id, and for `trash` it is the path under
@@ -192,7 +191,7 @@ pub fn collect(
     put(illegal_names(&census));
     put(long_paths(&census));
     put(stale_index(&census));
-    put(broken_links(index, &census)?);
+    put(broken_links(index, &census, &scans)?);
     put(missing_embeds(&census, &scans));
     put(duplicate_titles(&census));
     put(unindexed_markdown(&census));
@@ -286,7 +285,9 @@ fn scan_notes(vault: &Path, census: &Census) -> Vec<NoteScan> {
         let Ok(abs) = resolve_in_vault(vault, &note.path) else {
             continue;
         };
-        let Ok(raw) = std::fs::read(&abs) else { continue };
+        let Ok(raw) = std::fs::read(&abs) else {
+            continue;
+        };
         let (text, unreadable) = match String::from_utf8(raw) {
             Err(_) => (None, Some("not valid UTF-8".to_string())),
             // A NUL is legal UTF-8 and completely fatal downstream: SQLite
@@ -470,11 +471,8 @@ fn long_paths(census: &Census) -> VaultCheckResult {
 /// changed file always carries a changed mtime (the indexer keys on the same
 /// signal — see `Index::rebuild`).
 fn stale_index(census: &Census) -> VaultCheckResult {
-    let on_disk: HashMap<&str, &SizedFile> = census
-        .notes
-        .iter()
-        .map(|f| (f.path.as_str(), f))
-        .collect();
+    let on_disk: HashMap<&str, &SizedFile> =
+        census.notes.iter().map(|f| (f.path.as_str(), f)).collect();
     tally(
         "stale-index",
         census
@@ -498,9 +496,33 @@ fn stale_index(census: &Census) -> VaultCheckResult {
 /// Dangling `[[wikilinks]]`, rolled up per SOURCE note — `count` is how many
 /// notes have at least one, not how many links dangle (`VaultStats.brokenLinks`
 /// already carries that total).
-fn broken_links(index: &Index, census: &Census) -> AppResult<VaultCheckResult> {
+fn broken_links(index: &Index, census: &Census, scans: &[NoteScan]) -> AppResult<VaultCheckResult> {
     let mut by_source: Vec<(String, String, i64)> = Vec::new();
+    // Validate old index rows against current bytes, including indexes built before
+    // literal code examples were excluded from link extraction.
+    let live: HashMap<&str, Vec<String>> = scans
+        .iter()
+        .filter_map(|scan| {
+            scan.text.as_ref().map(|text| {
+                (
+                    scan.rel.as_str(),
+                    parse::parse_note(text, "")
+                        .links
+                        .into_iter()
+                        .map(|link| link.raw)
+                        .collect(),
+                )
+            })
+        })
+        .collect();
     for (src, raw) in index.unresolved_links()? {
+        if let Some(path) = census.path_by_id.get(&src) {
+            if let Some(targets) = live.get(path.as_str()) {
+                if !targets.contains(&raw) {
+                    continue;
+                }
+            }
+        }
         match by_source.last_mut() {
             Some((last_src, _, n)) if *last_src == src => *n += 1,
             _ => by_source.push((src, raw, 1)),
@@ -637,11 +659,7 @@ impl EmbedResolver {
         let mut note_names = HashSet::new();
         for row in &census.note_rows {
             let lower = row.path.to_lowercase();
-            note_names.insert(
-                basename(&lower)
-                    .trim_end_matches(".md")
-                    .to_string(),
-            );
+            note_names.insert(basename(&lower).trim_end_matches(".md").to_string());
             if !row.title.is_empty() {
                 note_names.insert(row.title.to_lowercase());
             }
@@ -957,7 +975,6 @@ fn ellipsis(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,6 +1018,21 @@ mod tests {
             id_by_path: HashMap::new(),
             path_by_id: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn broken_links_ignore_literal_examples_even_with_old_index_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("Example.md"), "[[wikilink]]").unwrap();
+        let index = Index::open(tmp.path()).unwrap();
+        index.rebuild(tmp.path()).unwrap();
+        assert_eq!(run(&tmp, &index).count_of("broken-links"), 1);
+        fs::write(
+            tmp.path().join("Example.md"),
+            "Type `[[wikilink]]` to insert a link.",
+        )
+        .unwrap();
+        assert_eq!(run(&tmp, &index).count_of("broken-links"), 0);
     }
 
     /// One vault that trips most checks at once, so each is tested against the
@@ -1089,7 +1121,10 @@ mod tests {
 
         let unreadable = result(&checks, "unreadable-notes");
         assert_eq!(paths(unreadable), vec!["Latin1.md"]);
-        assert_eq!(unreadable.items[0].detail.as_deref(), Some("not valid UTF-8"));
+        assert_eq!(
+            unreadable.items[0].detail.as_deref(),
+            Some("not valid UTF-8")
+        );
     }
 
     #[test]
@@ -1101,7 +1136,10 @@ mod tests {
         let checks = collect(tmp.path(), &index, &HashMap::new()).unwrap();
         let unreadable = result(&checks, "unreadable-notes");
         assert_eq!(paths(unreadable), vec!["Nul.md"]);
-        assert_eq!(unreadable.items[0].detail.as_deref(), Some("contains NUL bytes"));
+        assert_eq!(
+            unreadable.items[0].detail.as_deref(),
+            Some("contains NUL bytes")
+        );
     }
 
     #[test]
@@ -1113,7 +1151,11 @@ mod tests {
         let unclosed = fm.items.iter().find(|i| i.path == "Unclosed.md").unwrap();
         assert_eq!(unclosed.detail.as_deref(), Some("no closing `---` line"));
         let not_yaml = fm.items.iter().find(|i| i.path == "NotYaml.md").unwrap();
-        assert!(not_yaml.detail.as_deref().unwrap().contains("not `key: value`"));
+        assert!(not_yaml
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("not `key: value`"));
     }
 
     #[test]
@@ -1172,11 +1214,19 @@ mod tests {
         assert_eq!(illegal_reason("a<b.md").as_deref(), Some("contains `<`"));
         assert_eq!(illegal_reason("a|b.md").as_deref(), Some("contains `|`"));
         assert_eq!(illegal_reason("a:b.md").as_deref(), Some("contains `:`"));
-        assert_eq!(illegal_reason("trailing.").as_deref(), Some("ends with `.`"));
-        assert_eq!(illegal_reason("trailing ").as_deref(), Some("ends with a space"));
+        assert_eq!(
+            illegal_reason("trailing.").as_deref(),
+            Some("ends with `.`")
+        );
+        assert_eq!(
+            illegal_reason("trailing ").as_deref(),
+            Some("ends with a space")
+        );
         assert!(illegal_reason("CON.md").unwrap().contains("reserved"));
         assert!(illegal_reason("com9.txt").unwrap().contains("reserved"));
-        assert!(illegal_reason("a\u{1}b").unwrap().contains("control character"));
+        assert!(illegal_reason("a\u{1}b")
+            .unwrap()
+            .contains("control character"));
         // Not reserved: a longer stem that merely starts with one.
         assert_eq!(illegal_reason("CONTENTS.md"), None);
     }
@@ -1187,13 +1237,20 @@ mod tests {
         let census = census_of(&["CON.md", "ok.md", &format!("{long}.md")], &["a<b"]);
         let illegal = illegal_names(&census);
         assert_eq!(paths(&illegal), vec!["CON.md", "a<b"]);
-        assert!(illegal.items[0].detail.as_deref().unwrap().contains("reserved"));
+        assert!(illegal.items[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("reserved"));
 
         let long = long_paths(&census);
         assert_eq!(long.count, 1);
         assert_eq!(long.items[0].detail.as_deref(), Some("201 characters"));
         // 200 exactly is fine; the rule is strictly greater.
-        assert_eq!(long_paths(&census_of(&["x".repeat(200).as_str()], &[])).count, 0);
+        assert_eq!(
+            long_paths(&census_of(&["x".repeat(200).as_str()], &[])).count,
+            0
+        );
     }
 
     /// Only on a filesystem that will hold such a name — Windows refuses them,
@@ -1232,7 +1289,10 @@ mod tests {
         assert_eq!(missing.detail.as_deref(), Some("file missing"));
         assert!(missing.doc_id.is_some(), "the remedy needs the doc id");
         let changed = stale.items.iter().find(|i| i.path == "NotYaml.md").unwrap();
-        assert_eq!(changed.detail.as_deref(), Some("file changed since indexed"));
+        assert_eq!(
+            changed.detail.as_deref(),
+            Some("file changed since indexed")
+        );
     }
 
     #[test]
@@ -1243,7 +1303,10 @@ mod tests {
         assert_eq!(broken.count, 1, "one SOURCE note, not three links");
         assert_eq!(broken.items[0].path, "Links.md");
         // In document order: `[[Nowhere]]`, `[[AlsoNowhere]]`, `![[missing.png]]`.
-        assert_eq!(broken.items[0].detail.as_deref(), Some("`Nowhere` and 2 more"));
+        assert_eq!(
+            broken.items[0].detail.as_deref(),
+            Some("`Nowhere` and 2 more")
+        );
         assert!(broken.items[0].doc_id.is_some());
     }
 
@@ -1284,7 +1347,10 @@ mod tests {
         assert!(r.resolves(from, "local.png"), "next to the note");
         assert!(r.resolves(from, "./local.png"), "explicit ./");
         assert!(r.resolves(from, "../../attachments/pic.png"), "via ..");
-        assert!(r.resolves(from, "attachments/pic.png"), "vault-root relative");
+        assert!(
+            r.resolves(from, "attachments/pic.png"),
+            "vault-root relative"
+        );
         assert!(r.resolves(from, "pic.png"), "basename anywhere");
         assert!(r.resolves(from, "PIC.PNG"), "case-insensitive");
         assert!(r.resolves(from, "Target"), "an embedded note by name");
@@ -1337,9 +1403,21 @@ mod tests {
     #[test]
     fn oversized_notes_use_the_server_cap_and_sum_their_bytes() {
         let notes = vec![
-            SizedFile { path: "small.md".into(), bytes: 10, mtime: 0 },
-            SizedFile { path: "big.md".into(), bytes: 500, mtime: 0 },
-            SizedFile { path: "huge.md".into(), bytes: 900, mtime: 0 },
+            SizedFile {
+                path: "small.md".into(),
+                bytes: 10,
+                mtime: 0,
+            },
+            SizedFile {
+                path: "big.md".into(),
+                bytes: 500,
+                mtime: 0,
+            },
+            SizedFile {
+                path: "huge.md".into(),
+                bytes: 900,
+                mtime: 0,
+            },
         ];
         // The cap is a parameter only so this can run without writing 10 MB twice.
         let r = oversized_notes(&notes, 100);
@@ -1372,7 +1450,11 @@ mod tests {
         assert_eq!(heavy.count, 1);
         assert_eq!(heavy.items[0].path, "Good.md");
         assert_eq!(heavy.items[0].doc_id.as_deref(), Some(doc.as_str()));
-        assert!(heavy.items[0].detail.as_deref().unwrap().starts_with("257 updates"));
+        assert!(heavy.items[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .starts_with("257 updates"));
         assert_eq!(heavy.bytes, Some(257 * 4));
     }
 
@@ -1405,7 +1487,9 @@ mod tests {
     #[test]
     fn orphan_history_matches_the_stats_rule_including_registry_ids() {
         let (tmp, index) = fixture();
-        index.append_yjs_update("registry-only", &[0u8; 64]).unwrap();
+        index
+            .append_yjs_update("registry-only", &[0u8; 64])
+            .unwrap();
         index.append_yjs_update("truly-orphan", &[0u8; 32]).unwrap();
 
         // With no registry map, both are orphans.
@@ -1457,7 +1541,10 @@ mod tests {
 
         // The check agrees afterwards, and a second pass is a no-op.
         assert_eq!(run(&tmp, &index).count_of("trash"), 0);
-        assert_eq!(empty_trash(tmp.path()).unwrap(), EmptyTrashReport::default());
+        assert_eq!(
+            empty_trash(tmp.path()).unwrap(),
+            EmptyTrashReport::default()
+        );
 
         // Notes and the index itself are untouched — this only ever reaches
         // `.context/trash`.
@@ -1468,7 +1555,10 @@ mod tests {
     #[test]
     fn empty_trash_on_a_vault_that_never_deleted_anything_is_not_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(empty_trash(tmp.path()).unwrap(), EmptyTrashReport::default());
+        assert_eq!(
+            empty_trash(tmp.path()).unwrap(),
+            EmptyTrashReport::default()
+        );
     }
 
     #[cfg(unix)]
@@ -1529,7 +1619,10 @@ mod tests {
         assert_eq!(item.as_object().unwrap().len(), 4);
 
         // An orphan carries its doc id in BOTH fields, since it has no path.
-        let orphans = results.iter().find(|r| r["id"] == "orphan-history").unwrap();
+        let orphans = results
+            .iter()
+            .find(|r| r["id"] == "orphan-history")
+            .unwrap();
         assert_eq!(orphans["items"][0]["path"], "orphan");
         assert_eq!(orphans["items"][0]["docId"], "orphan");
     }

@@ -945,3 +945,15 @@ it("shows stored private notes without calling the vault empty or missing locall
   expect(html).not.toContain("Notes and folders match");
   expect(html).not.toContain("missing from this computer");
 });
+it("keeps basic Health separate from the relocated diagnostic tools", () => {
+  const overview = renderToStaticMarkup(createElement(HealthView, { snapshot: snapshot(), mode: "overview", onOpenDiagnostics: () => {} }));
+  expect(overview).not.toContain("Open Smart diagnostics");
+  expect(overview).not.toContain("Integrity checks");
+  expect(overview).not.toContain("Inspect a note");
+  const diagnostics = renderToStaticMarkup(createElement(HealthView, { snapshot: snapshot(), mode: "diagnostics" }));
+  expect(diagnostics).toContain("Checks &amp; repair tools");
+  expect(diagnostics).toContain("Integrity checks");
+  expect(diagnostics).toContain("Inspect a note");
+  expect(diagnostics).toContain("Recent sync activity");
+  expect(diagnostics).not.toContain("Needs attention");
+});
