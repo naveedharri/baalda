@@ -1003,26 +1003,14 @@ function buildIssues(
       path: null,
       kind: "orphan-history",
       severity: "warn",
-      title: "Reclaimable edit history",
-      why:
-        `This vault's local index still holds edit history for ${plural(orphanDocs, "note")} ` +
-        `it no longer has. Reclaiming it frees the space and changes nothing you can see.`,
+      title: "Unused edit history",
+      why: `${formatBytes(orphanBytes)} can be freed. Your notes stay unchanged.`,
       remedies: ["reclaim"],
       code: null,
       explanation: {
-        meaning:
-          "Baalda stores the edit history of each note so offline changes merge " +
-          "instead of overwriting each other. When a note leaves the vault, its " +
-          "history can be left behind. This is leftover storage and nothing else: " +
-          "no note is missing, nothing is at risk, and nothing is waiting to sync.",
-        next: "Nothing. It sits there taking up space until you reclaim it.",
-        fixes: [
-          "Reclaim it to free the space. Notes you still have are untouched.",
-          "Or leave it — it does no harm beyond the disk space.",
-        ],
-        // Nothing is at risk here, so neither "only-here" nor "on-server" is
-        // the honest word: this issue is about storage, not about a copy of
-        // anyone's work.
+        meaning: "Old history from notes no longer in this vault. Safe to reclaim or ignore.",
+        next: "Kept until you reclaim it.",
+        fixes: ["Reclaim to free space."],
         safety: "both",
       },
       facts: [

@@ -451,6 +451,9 @@ function IssueRow({
 
       {open && (
         <div className="health-issue-panel" id={panelId}>
+          {issue.kind === "orphan-history" ? (
+            <p>{issue.explanation.meaning}</p>
+          ) : <>
           <div className="health-reasoning">
             <div className="health-block">
               <Eyebrow>What this means</Eyebrow>
@@ -501,6 +504,7 @@ function IssueRow({
               ) : null,
             )}
           </div>
+          </>}
         </div>
       )}
     </li>

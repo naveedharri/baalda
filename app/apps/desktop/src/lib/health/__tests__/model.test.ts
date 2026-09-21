@@ -568,7 +568,7 @@ describe("stats-derived issues and stages", () => {
     const i = r.issues.find((x) => x.kind === "orphan-history");
     expect(i?.severity).toBe("warn");
     expect(i?.remedies).toEqual(["reclaim"]);
-    expect(i?.why).toContain("953 notes");
+    expect(i?.facts).toContainEqual({ label: "Leftover notes", value: "953" });
     expect(stage(r, "history").state).toBe("warn");
     // A warning is not a reason to stop calling the vault healthy.
     expect(r.verdict).toBe("healthy");
@@ -918,7 +918,7 @@ describe("explanations", () => {
       "orphan-history",
     );
     expect(i.explanation.safety).toBe("both");
-    expect(i.explanation.meaning).toContain("nothing is at risk");
+    expect(i.explanation.meaning).toContain("Safe to reclaim or ignore");
     expect(i.remedies).toEqual(["reclaim"]);
     expect(i.facts.find((f) => f.label === "Space used")?.value).toBe("2 KB");
   });
