@@ -319,6 +319,18 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     [entries, selectedKeys],
   );
   const selectedUserIds = [...selectedUsers];
+  const viewedUsers = audienceType === "users" ? JSON.stringify([...selectedUsers].sort()) : "[]";
+  const viewOptions: MenuSelectOption<string>[] = [
+    { value: "everyone", label: "Everyone" },
+    ...members.map((member) => ({
+      value: `user:${member.userId}`,
+      label: member.user?.name || member.user?.email || member.userId,
+      hint: member.user?.name ? member.user?.email : undefined,
+    })),
+    ...(audienceType === "users" && selectedUsers.size !== 1
+      ? [{ value: "selected", label: selectedUsers.size ? `${selectedUsers.size} selected people` : "Choose people" }]
+      : []),
+  ];
   const vaultKey = orgId ? vaultAccessKey(orgId) : "";
   const vaultSelected = !!vaultKey && selectedKeys.has(vaultKey);
   const selectionPresentations = useMemo(
@@ -560,8 +572,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
   return (
     <div className="access-panel">
       <p className="access-intro">
-        Select the entire vault, one item, or several folders and files, then choose who gets
-        <strong> Shared</strong>, <strong>Read-only</strong>, or <strong>Private</strong> access.
+        Choose a person to see their access. Select files or folders to change it.
         Folder changes include everything inside them.
       </p>
 
@@ -606,6 +617,24 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       )}
 
       <div className="access-master" ref={resourcesRef}>
+        {canManage && (
+          <div className="access-view-toolbar">
+            <span>View access for</span>
+            <MenuSelect
+              value={audienceType === "org" ? "everyone" : selectedUsers.size === 1 ? `user:${selectedUserIds[0]}` : "selected"}
+              options={viewOptions}
+              ariaLabel="View access for"
+              triggerClassName="access-default-trigger"
+              menuClassName="access-choice-menu"
+              disabled={busy}
+              onSelect={(value) => {
+                if (value === "selected") return;
+                setAudienceType(value === "everyone" ? "org" : "users");
+                setSelectedUsers(value === "everyone" ? new Set() : new Set([value.slice(5)]));
+              }}
+            />
+          </div>
+        )}
         <div className="access-listhead">
           <div><div className="access-listlabel">Folders &amp; files</div>{canManage && <span>{selectionLabel}</span>}</div>
           {canManage && entries.length > 0 && (
@@ -625,7 +654,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
             <input className="access-check" type="checkbox" checked={vaultSelected} disabled={!canManage || busy} onChange={() => toggleResource(vaultKey)} />
             <span className="access-glyph">{ICON.vault}</span>
             <span className="access-rname">Entire vault</span>
-            <span className="access-rright">{shownVaultMode ? <AccessBadge mode={shownVaultMode} /> : <LoadingBadge />}</span>
+            <span className="access-rright">{audienceType === "users"
+              ? <PersonAccessBadge orgId={orgId} resourceType="vault" resourceId={orgId} users={viewedUsers} revision={teamAccess} />
+              : shownVaultMode ? <AccessBadge mode={shownVaultMode} /> : <LoadingBadge />}</span>
           </label>
         )}
 
@@ -678,7 +709,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                         Selected through {inheritedSelection.label}
                       </span>
                     )}
-                    <span className="access-rright">{mode ? <AccessBadge mode={mode} restricted={restricted} /> : <LoadingBadge />}</span>
+                    <span className="access-rright">{audienceType === "users" && orgId
+                      ? <PersonAccessBadge orgId={orgId} resourceType={resource.kind === "folder" ? "folder" : "file"} resourceId={resource.id} users={viewedUsers} revision={teamAccess} />
+                      : mode ? <AccessBadge mode={mode} restricted={restricted} /> : <LoadingBadge />}</span>
                   </label>
                 </li>
               );
@@ -796,4 +829,75 @@ function AccessBadge({ mode, restricted = false }: { mode: Mode; restricted?: bo
 
 function LoadingBadge() {
   return <span className="access-badge loading" aria-label="Loading access"><Spinner size="xs" /></span>;
+}
+
+// Resolve only rows near the viewport, with bounded requests even for very
+// large expanded folders. Each read still uses the server's full resolver.
+const accessReadQueue: Array<() => Promise<void>> = [];
+let activeAccessReads = 0;
+function drainAccessReads() {
+  while (activeAccessReads < 4 && accessReadQueue.length) {
+    const read = accessReadQueue.shift()!;
+    activeAccessReads++;
+    void read().finally(() => {
+      activeAccessReads--;
+      drainAccessReads();
+    });
+  }
+}
+
+function PersonAccessBadge({ orgId, resourceType, resourceId, users, revision }: {
+  orgId: string;
+  resourceType: BulkAccessResource["resourceType"];
+  resourceId: string;
+  users: string;
+  revision: TeamAccess | null;
+}) {
+  const anchor = useRef<HTMLSpanElement>(null);
+  const scope = JSON.stringify([orgId, resourceType, resourceId, users]);
+  const [result, setResult] = useState<{
+    scope: string;
+    revision: TeamAccess | null;
+    mode: Mode | "mixed" | "unavailable";
+  } | null>(null);
+  useEffect(() => {
+    const userIds = JSON.parse(users) as string[];
+    if (!userIds.length) return;
+    let cancelled = false;
+    let started = false;
+    const start = () => {
+      if (started || cancelled) return;
+      started = true;
+      accessReadQueue.push(async () => {
+        if (cancelled) return;
+        try {
+          const summary = await authManager.api.resolveAccessSummary(orgId, [{ resourceType, resourceId }], userIds);
+          if (!cancelled) setResult({ scope, revision, mode: summary.mode });
+        } catch {
+          if (!cancelled) setResult({ scope, revision, mode: "unavailable" });
+        }
+      });
+      drainAccessReads();
+    };
+    const observer = typeof IntersectionObserver !== "undefined"
+      ? new IntersectionObserver((observations) => {
+          if (observations.some((entry) => entry.isIntersecting)) {
+            start();
+            observer?.disconnect();
+          }
+        }, { rootMargin: "200px" })
+      : null;
+    if (observer && anchor.current) observer.observe(anchor.current);
+    else start();
+    return () => { cancelled = true; observer?.disconnect(); };
+  }, [orgId, resourceType, resourceId, users, revision, scope]);
+  const mode = result?.scope === scope && result.revision === revision ? result.mode : null;
+  return (
+    <span ref={anchor} aria-live="polite">
+      {users === "[]" ? <span className="access-badge">Choose a person</span>
+        : mode === "mixed" ? <span className="access-badge ro" title="Access differs between people or items in this folder">Mixed</span>
+          : mode === "unavailable" ? <span className="access-badge" title="Could not load this person's access">Unavailable</span>
+            : mode ? <AccessBadge mode={mode} /> : <LoadingBadge />}
+    </span>
+  );
 }

@@ -4440,6 +4440,21 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   padding: var(--sp-3);
   scroll-margin-top: var(--sp-5);
 }
+.access-view-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) 0 var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+.access-view-toolbar .access-default-trigger {
+  max-width: min(320px, 65vw);
+}
 .access-listhead {
   display: flex;
   align-items: center;
