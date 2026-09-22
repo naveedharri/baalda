@@ -107,6 +107,25 @@ interface VaultSyncConfig {
    */
   files?: Record<string, string>;
   /**
+   * The subset of {@link files} whose BYTES this device has confirmed the
+   * server holds: an upload that completed, a download, an intent that deduped
+   * onto an existing row, or a listing whose sha matched the local file.
+   *
+   * Unlike {@link pushed} this IS a correctness gate, and it exists because
+   * `files` is not one. A row is minted BEFORE its bytes move
+   * (`attachments.ts ensureFileRow` / `preregisterFiles`), and the bytes can
+   * then never follow — a Free vault's standalone file, one over the blob size
+   * ceiling, one behind a full storage quota. Treating the row as proof of
+   * possession is what would let a revocation take the only copy of that file
+   * off the disk of the person who made it.
+   *
+   * Ids, not paths, so a rename carries the confirmation. ABSENT means
+   * unconfirmed, which is how every config written before this key loads — the
+   * safe direction, and one the next successful pass repairs by listing match
+   * rather than by re-uploading anything.
+   */
+  filesConfirmed?: string[];
+  /**
    * docIds whose CONTENT this device has confirmed on the server (the bulk
    * upload's resume point — see `ContentUploader`).
    *
@@ -495,6 +514,10 @@ export class VaultRegistry {
    *  Deliberately NOT part of `byPath`/`byDocId`: those two are the CRDT note
    *  join, and a binary has no Y.Doc, no bridge and no content upload. */
   private fileByPath = new Map<string, string>();
+  /** `files` ids whose BYTES this device has confirmed on the server — the
+   *  binary counterpart of {@link pushed}, and unlike it a correctness gate.
+   *  See {@link confirmFileBytes} and `VaultSyncConfig.filesConfirmed`. */
+  private filesConfirmed = new Set<string>();
   /** docIds whose content this device has confirmed on the server. See
    *  `VaultSyncConfig.pushed` for why this is an optimization, not a guarantee. */
   private pushed = new Set<string>();
@@ -789,6 +812,7 @@ export class VaultRegistry {
     this.folderByPath.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
+    this.filesConfirmed.clear();
     this.pushed.clear();
     // A surviving baseline is exactly the cross-vault confusion this method
     // exists to prevent — it would tell vault B that vault A's notes moved.
@@ -957,7 +981,12 @@ export class VaultRegistry {
    *  a path re-used later registers afresh instead of adopting a dead id. */
   forgetFileId(relPath: string): void {
     if (this.stale()) return;
+    const id = this.fileByPath.get(relPath);
     if (!this.fileByPath.delete(relPath)) return;
+    // The row is gone, so the claim about its bytes goes with it. Leaving it
+    // behind would let a path re-used later inherit a confirmation that was
+    // made about a different file's content.
+    if (id) this.filesConfirmed.delete(id);
     this.persist();
   }
 
@@ -969,30 +998,83 @@ export class VaultRegistry {
     if (!id) return;
     this.fileByPath.delete(from);
     this.fileByPath.set(to, id);
+    // `filesConfirmed` is keyed by doc_id precisely so a move needs no entry of
+    // its own: the row travelled, and so did what we know about its bytes.
     this.persist();
+  }
+
+  /**
+   * THIS device has confirmed the server holds this path's bytes.
+   *
+   * The one signal that makes a tree binary removable — see
+   * {@link removeRevokedBinary}. Only the blob mirror may call it, and only
+   * from a position where the server's possession is a fact rather than an
+   * inference: a completed upload, a download (the bytes came FROM there), an
+   * intent that deduped onto an existing row, or a listing whose sha matches
+   * this file's. Registering a row is NOT one of those positions.
+   *
+   * Keyed by doc_id, not path, so a rename carries it (see {@link moveFileId}).
+   */
+  confirmFileBytes(relPath: string): void {
+    if (this.stale()) return;
+    const id = this.fileByPath.get(relPath);
+    if (!id || this.filesConfirmed.has(id)) return;
+    this.filesConfirmed.add(id);
+    this.persist();
+  }
+
+  /** Has this device confirmed the server holds this doc's bytes? */
+  fileBytesConfirmed(docId: string): boolean {
+    return this.filesConfirmed.has(docId);
   }
 
   /**
    * Every tree binary's server `files` id — what the vault channel's `hello`
    * announces so `ready.revoked` can name a revoked binary.
+   *
+   * CONFIRMED rows only. The server names a revocation by intersecting this
+   * claim with its readable set, so announcing a row whose bytes never left
+   * this device would invite an answer we must refuse anyway — and refusing it
+   * is not free: every `ready.revoked` re-stamps the ACL-authority clock
+   * (`docSession.aclChangedAt`), so a permanently unconfirmable file (a Free
+   * vault's standalone binary, one over the blob ceiling, one behind a full
+   * quota) would hold the wholesale-removal window open for every OTHER doc on
+   * every reconnect. Not claiming it ends the loop at the source; the guard in
+   * {@link removeRevokedBinary} is the belt to this pair of braces.
    */
   fileDocIds(): string[] {
-    return [...this.fileByPath.values()];
+    return [...this.fileByPath.values()].filter((id) => this.filesConfirmed.has(id));
   }
 
-  /** The same map inverted, doc_id → path, for the inbound plan's binary pass.
-   *  Last one wins on the (impossible-by-construction) duplicate id. */
+  /**
+   * The same map inverted, doc_id → path, for the inbound plan's binary pass.
+   * Last one wins on the (impossible-by-construction) duplicate id.
+   *
+   * Deliberately NOT filtered by {@link filesConfirmed}, unlike
+   * {@link fileDocIds}. The two rails do different jobs: not claiming a row
+   * stops the server asking, while planning one and REFUSING it is what makes
+   * the refusal visible (`removeRevokedBinary` records it, so Vault Health can
+   * say a file stayed and why). Filtering here as well would silently drop a
+   * doc the server named some other way — a live `drop`, or a name that
+   * outlived the confirmation — and silence is the one thing this path must
+   * not produce.
+   */
   localFiles(): Map<string, string> {
     const byDocId = new Map<string, string>();
     for (const [rp, id] of this.fileByPath) byDocId.set(id, rp);
     return byDocId;
   }
 
-  /** Adopt a `files` map read from `.context/config.json`. */
-  private adoptConfigFiles(files: Record<string, string>): void {
+  /** Adopt a `files` map read from `.context/config.json`, plus the subset of
+   *  its ids whose bytes this device once confirmed. An older config has no
+   *  such key and every row loads UNCONFIRMED — the safe direction: the next
+   *  pass whose listing matches the file's sha confirms it without moving a
+   *  byte (`AttachmentSync.pass`). */
+  private adoptConfigFiles(files: Record<string, string>, confirmed: readonly string[]): void {
     for (const [rp, id] of Object.entries(files)) {
       if (typeof id === "string" && id) this.fileByPath.set(rp, id);
     }
+    for (const id of confirmed) if (typeof id === "string" && id) this.filesConfirmed.add(id);
   }
 
   /** Adopt a bootstrap cursor read from `.context/config.json`, under the same
@@ -1205,6 +1287,9 @@ export class VaultRegistry {
       docs,
       folders,
       files,
+      // Omitted while empty, so a vault with no tree binaries writes the same
+      // bytes it always did and the identical-config memo keeps working.
+      ...(this.filesConfirmed.size > 0 ? { filesConfirmed: [...this.filesConfirmed] } : {}),
       pushed: [...this.pushed],
       ...(this.unhydratedPlaceholders.size > 0
         ? { unhydratedPlaceholders: [...this.unhydratedPlaceholders] }
@@ -1299,11 +1384,17 @@ export class VaultRegistry {
    *
    *  - nothing to `releaseDoc`: no bridge, no provider, no editor session;
    *  - nothing to `clearYjsDoc`: the bytes never entered the CRDT pipeline;
-   *  - no `pushed` checkpoint to consult. Its stand-in is the `files` row
-   *    itself: a path is only in this map because this device (or a `files` id
-   *    the blob listing handed back) registered it, which is the binary way of
-   *    saying the server holds the bytes. A binary with no row is not in
-   *    `localFiles` and so was never planned;
+   *  - a `pushed` checkpoint it cannot use, and a stand-in that had to be built.
+   *    The `files` row is NOT that stand-in, though it was read as one: the row
+   *    is minted before the bytes move (`attachments.ts ensureFileRow`,
+   *    `preregisterFiles`), and on a Free vault, above the blob size ceiling or
+   *    behind a full quota the bytes never follow it. Removing such a file on a
+   *    revocation destroys the only copy there is — exactly what `isPushed`
+   *    refuses to do for a note. So the real stand-in is
+   *    {@link confirmFileBytes}: an upload that completed, a download, an
+   *    intent that deduped, or a listing whose sha matched. Unconfirmed rows
+   *    are not announced in `hello.files` either, so the server cannot name
+   *    them and the plan never reaches here — this check is the belt;
    *  - and one thing a note does NOT need: the binary delete queue has to be
    *    told this removal was ours, or it propagates it back as a user delete and
    *    the owner loses their copy of a file they only meant to stop sharing.
@@ -1312,6 +1403,22 @@ export class VaultRegistry {
    * so it needs no binary twin in Rust.
    */
   private async removeRevokedBinary(gone: InboundTrash): Promise<boolean> {
+    // The one refusal, and the same shape the note rail's `isPushed` makes: the
+    // mapping is LEFT in place, so a pass that later confirms these bytes can
+    // remove the file properly. It stays out of `hello.files` meanwhile
+    // (`fileDocIds`), so nothing re-announces it and the ACL-authority clock is
+    // not re-stamped on every reconnect.
+    if (!this.filesConfirmed.has(gone.docId)) {
+      this.recordFailure({
+        kind: "orphan",
+        path: gone.path,
+        docId: gone.docId,
+        code: null,
+        reason:
+          "access was removed, but this device never confirmed its bytes upstream — left on disk",
+      });
+      return false;
+    }
     // BEFORE the removal, so the claim beats the watcher to the queue.
     this.host?.suppressBinaryDelete?.(gone.path);
     try {
@@ -1961,7 +2068,7 @@ export class VaultRegistry {
     for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
       if (typeof id === "string" && id) this.folderByPath.set(rp, id);
     }
-    this.adoptConfigFiles(cfg.files ?? {});
+    this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? []);
     this.pushed = new Set(cfg.pushed ?? []);
     this.unhydratedPlaceholders = new Set(cfg.unhydratedPlaceholders ?? []);
     // Same collection guard as `reconcile`'s: the baseline describes the
@@ -2115,7 +2222,9 @@ export class VaultRegistry {
     }
     // Same guard for the tree-binary map: an id minted against another
     // collection names nothing here.
-    if (cfg.serverVaultId === vaultId && cfg.files) this.adoptConfigFiles(cfg.files);
+    if (cfg.serverVaultId === vaultId && cfg.files) {
+      this.adoptConfigFiles(cfg.files, cfg.filesConfirmed ?? []);
+    }
     this.adoptBootstrap(cfg, vaultId);
 
     // 1b. First-run seeding. A vault the user JUST created (`seedIfEmpty`) —
