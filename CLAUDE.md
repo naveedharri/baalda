@@ -413,7 +413,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   re-resolves `effectivePermission` at connect, so a pre-revocation edit token cannot be replayed for the
   rest of its TTL.
   Future-member access is separate from the live vault posture. Migration 032 adds an org
-  `join_default` (Private by default), per-membership snapshots and an ordered ACL revision. Only
+  `join_default` (Private by default), per-membership snapshots and an ordered ACL revision, and
+  migration 033 seeds that default ONCE from each existing vault's posture (org-wide vault grant
+  `edit` → `open`, `view` → `readonly`, sealed or ungranted → `private`) so a Shared team sees no
+  change; vaults created later keep the Private default. Only
   content that already existed when someone joined uses that snapshot; a team grant written before
   a Private join stays hidden, while a later Everyone action has a newer revision and deliberately
   opens the selected subtree. Existing memberships have no snapshot and are unchanged. The default
