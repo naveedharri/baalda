@@ -105,6 +105,158 @@ export function createResolverCache(): ResolverCache {
   };
 }
 
+/**
+ * One organization's share rows and structure, loaded ONCE for a bulk read (the
+ * Access panel's summaries resolve every note in a vault for several people).
+ *
+ * This is the same idea as {@link ResolverCache} one step further: it preloads
+ * the rows `isDenied` / `isLocked` / `sharePermission` would each have SELECTed
+ * and answers them with the same predicates in memory. Every branch of the
+ * verdict still runs through {@link resolveAccessForUser}; only where the rows
+ * come from changes. `accessIndexMatchesQueries` in `tests/access-index.test.ts`
+ * is the drift test.
+ *
+ * Scoped to one request for the same reason the cache is.
+ */
+export interface ShareRow {
+  resource_type: string;
+  resource_id: string;
+  principal_type: string;
+  principal_id: string;
+  permission: string;
+  access_revision: string | number;
+}
+
+export interface AccessIndex {
+  organizationId: string;
+  /** `${resource_type}\u0000${resource_id}` → share rows on that resource. */
+  shares: Map<string, ShareRow[]>;
+  folders: Map<string, { parentId: string | null; vaultId: string; createdAt: Date }>;
+  /** Live notes (deleted ones are absent, as `locateDoc` never sees them). */
+  notes: Map<string, { vaultId: string; folderId: string | null; createdBy: string | null; createdAt: Date }>;
+  files: Map<string, { vaultId: string; folderId: string | null; createdAt: Date }>;
+}
+
+const shareKey = (type: string, id: string) => `${type}\u0000${id}`;
+
+export async function loadAccessIndex(db: Queryable, organizationId: string): Promise<AccessIndex> {
+  const [folders, notes, files, shares] = await Promise.all([
+    db.query<{ id: string; parent_id: string | null; vault_id: string; created_at: Date }>(
+      `SELECT f.id, f.parent_id, f.vault_id, f.created_at
+         FROM folders f JOIN vaults v ON v.id = f.vault_id
+        WHERE v.organization_id = $1`,
+      [organizationId],
+    ),
+    db.query<{ id: string; folder_id: string | null; vault_id: string; created_by: string | null; created_at: Date }>(
+      `SELECT n.id, n.folder_id, n.vault_id, n.created_by, n.created_at
+         FROM notes n JOIN vaults v ON v.id = n.vault_id
+        WHERE v.organization_id = $1 AND n.deleted_at IS NULL`,
+      [organizationId],
+    ),
+    db.query<{ id: string; folder_id: string | null; vault_id: string; created_at: Date }>(
+      `SELECT fi.id, fi.folder_id, fi.vault_id, fi.created_at
+         FROM files fi JOIN vaults v ON v.id = fi.vault_id
+        WHERE v.organization_id = $1`,
+      [organizationId],
+    ),
+    // Keyed by RESOURCE, not by shares.org_id: the per-doc queries match on
+    // resource ids alone, so the index must hold exactly those rows.
+    db.query<ShareRow>(
+      `SELECT s.resource_type, s.resource_id, s.principal_type, s.principal_id,
+              s.permission, s.access_revision
+         FROM shares s
+        WHERE (s.resource_type = 'vault' AND s.resource_id = $1)
+           OR (s.resource_type = 'folder' AND s.resource_id IN (
+                 SELECT f.id FROM folders f JOIN vaults v ON v.id = f.vault_id
+                  WHERE v.organization_id = $1))
+           OR (s.resource_type = 'file' AND s.resource_id IN (
+                 SELECT n.id FROM notes n JOIN vaults v ON v.id = n.vault_id
+                  WHERE v.organization_id = $1
+                 UNION
+                 SELECT fi.id FROM files fi JOIN vaults v ON v.id = fi.vault_id
+                  WHERE v.organization_id = $1))`,
+      [organizationId],
+    ),
+  ]);
+  const index: AccessIndex = {
+    organizationId,
+    shares: new Map(),
+    folders: new Map(folders.rows.map((r) => [r.id, { parentId: r.parent_id, vaultId: r.vault_id, createdAt: r.created_at }])),
+    notes: new Map(notes.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdBy: r.created_by, createdAt: r.created_at }])),
+    files: new Map(files.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdAt: r.created_at }])),
+  };
+  for (const row of shares.rows) {
+    const key = shareKey(row.resource_type, row.resource_id);
+    const list = index.shares.get(key);
+    if (list) list.push(row);
+    else index.shares.set(key, [row]);
+  }
+  return index;
+}
+
+/** The folder itself and its ancestors, like {@link ancestorFolderIds}; null
+ *  when the chain leaves the index (the caller then asks the database). */
+export function indexedAncestors(index: AccessIndex, folderId: string | null): string[] | null {
+  if (!folderId) return [];
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let id: string | null = folderId;
+  while (id !== null) {
+    const folder = index.folders.get(id);
+    if (!folder || seen.has(id)) return null;
+    seen.add(id);
+    chain.push(id);
+    id = folder.parentId;
+  }
+  return chain;
+}
+
+/** Share rows on a doc (as a file resource) and on each folder in the chain. */
+function indexedRows(index: AccessIndex, docId: string | null, folderIds: string[], vault?: string): ShareRow[] {
+  const rows: ShareRow[] = [];
+  if (docId !== null) rows.push(...(index.shares.get(shareKey("file", docId)) ?? []));
+  for (const folderId of folderIds) rows.push(...(index.shares.get(shareKey("folder", folderId)) ?? []));
+  if (vault !== undefined) rows.push(...(index.shares.get(shareKey("vault", vault)) ?? []));
+  return rows;
+}
+
+/** In-memory {@link isDenied}. The file branch matches `resource_type = 'file'`. */
+function indexedIsDenied(
+  index: AccessIndex,
+  principalType: "user" | "org",
+  principalId: string,
+  docId: string | null,
+  folderIds: string[],
+): boolean {
+  return indexedRows(index, docId, folderIds).some((r) =>
+    r.permission === "denied" && r.principal_type === principalType && r.principal_id === principalId,
+  );
+}
+
+/** In-memory {@link isLocked}: an org row matches whatever its principal id. */
+function indexedIsLocked(index: AccessIndex, userId: string, docId: string | null, folderIds: string[]): boolean {
+  return indexedRows(index, docId, folderIds).some((r) =>
+    (r.permission === "locked" || r.permission === "readonly") &&
+    (r.principal_type === "org" || (r.principal_type === "user" && r.principal_id === userId)),
+  );
+}
+
+/** In-memory row set of {@link sharePermission}'s SELECT. */
+function indexedGrantRows(
+  index: AccessIndex,
+  userId: string,
+  docId: string | null,
+  folderIds: string[],
+  organizationId: string,
+  orgClause: boolean,
+): ShareRow[] {
+  return indexedRows(index, docId, folderIds, organizationId).filter((r) =>
+    (r.permission === "view" || r.permission === "edit" || r.permission === "readonly") &&
+    ((r.principal_type === "user" && r.principal_id === userId) ||
+      (orgClause && r.principal_type === "org" && r.principal_id === organizationId)),
+  );
+}
+
 interface DocLocation {
   vaultId: string;
   folderId: string | null;
@@ -241,6 +393,7 @@ async function sharePermission(
   orgGrantsApply = true,
   snapshot?: MemberAccessSnapshot | null,
   resourceCreatedAt?: Date,
+  index?: AccessIndex,
 ): Promise<Permission> {
   // Team (org-wide) grants apply ONLY to actual vault members — never to
   // outsiders who merely know a doc id. They can target a specific folder/file
@@ -260,9 +413,11 @@ async function sharePermission(
   // $2 (the doc id) is always referenced with an explicit cast + null guard so
   // Postgres can infer its type even for a folder resource, where docId is null
   // and the file branch is inert.
-  const { rows } = await db.query<{
+  const { rows } = index
+    ? { rows: indexedGrantRows(index, userId, docId, folderIds, organizationId, isMember && orgGrantsApply) }
+    : await db.query<{
     permission: string;
-    principal_type: "user" | "org";
+    principal_type: string;
     access_revision: string | number;
   }>(
     `SELECT permission, principal_type, access_revision FROM shares
@@ -644,6 +799,44 @@ export async function buildAccessContext(
   };
 }
 
+/**
+ * {@link buildAccessContext} for many resources of one organization, from the
+ * index: the same rows (`locateDoc` prefers a live note over a files row) and
+ * the same ancestor chain. A resource the index does not hold falls back to
+ * the per-resource read, so an answer never silently changes shape.
+ */
+export async function buildAccessContextFromIndex(
+  index: AccessIndex,
+  resourceType: "folder" | "file",
+  resourceId: string,
+  db: Queryable = defaultPool,
+  cache?: ResolverCache,
+): Promise<AccessContext | null> {
+  if (resourceType === "file") {
+    const note = index.notes.get(resourceId);
+    const loc = note ?? index.files.get(resourceId);
+    const chain = loc ? indexedAncestors(index, loc.folderId) : null;
+    if (!loc || !chain) return buildAccessContext(resourceType, resourceId, db, cache);
+    return {
+      organizationId: index.organizationId,
+      docId: resourceId,
+      folderIds: chain,
+      createdBy: note?.createdBy ?? null,
+      createdAt: loc.createdAt,
+    };
+  }
+  const folder = index.folders.get(resourceId);
+  const chain = folder ? indexedAncestors(index, resourceId) : null;
+  if (!folder || !chain) return buildAccessContext(resourceType, resourceId, db, cache);
+  return {
+    organizationId: index.organizationId,
+    docId: null,
+    folderIds: chain,
+    createdBy: null,
+    createdAt: folder.createdAt,
+  };
+}
+
 /** Resolve one user's effective access against a prebuilt {@link AccessContext}. */
 export async function resolveAccessForUser(
   ctx: AccessContext,
@@ -651,11 +844,22 @@ export async function resolveAccessForUser(
   role: string | null,
   db: Queryable = defaultPool,
   cache?: ResolverCache,
+  /** Preloaded rows for `ctx.organizationId` — see {@link AccessIndex}. */
+  accessIndex?: AccessIndex,
 ): Promise<ResolvedAccess> {
-  if (await isDenied(db, "user", userId, ctx.docId, ctx.folderIds)) {
+  const index = accessIndex?.organizationId === ctx.organizationId ? accessIndex : undefined;
+  const denied = (principalType: "user" | "org", principalId: string) =>
+    index
+      ? Promise.resolve(indexedIsDenied(index, principalType, principalId, ctx.docId, ctx.folderIds))
+      : isDenied(db, principalType, principalId, ctx.docId, ctx.folderIds);
+  const lockedFor = () =>
+    index
+      ? Promise.resolve(indexedIsLocked(index, userId, ctx.docId, ctx.folderIds))
+      : isLocked(db, userId, ctx.docId, ctx.folderIds);
+  if (await denied("user", userId)) {
     return { permission: "none", capped: false, denied: true };
   }
-  const itemPrivate = await isDenied(db, "org", ctx.organizationId, ctx.docId, ctx.folderIds);
+  const itemPrivate = await denied("org", ctx.organizationId);
   const snapshot = cache
     ? await cache.snapshot(db, ctx.organizationId, userId)
     : await memberAccessSnapshot(db, ctx.organizationId, userId);
@@ -671,6 +875,7 @@ export async function resolveAccessForUser(
       !itemPrivate,
       snapshot,
       ctx.createdAt,
+      index,
     );
     let permission: Permission = itemPrivate
       ? "none"
@@ -681,7 +886,7 @@ export async function resolveAccessForUser(
           : "none";
     permission = maxPermission(permission, direct);
     if (permission === "none") return { permission, capped: false, denied: itemPrivate };
-    const locked = await isLocked(db, userId, ctx.docId, ctx.folderIds);
+    const locked = await lockedFor();
     if (locked && permission === "edit") return { permission: "view", capped: true };
     if (locked) return { permission: "view", capped: false };
     return { permission, capped: false };
@@ -698,7 +903,7 @@ export async function resolveAccessForUser(
   const isCreator = role !== null && !!ctx.createdBy && ctx.createdBy === userId;
   const granted: Permission = itemPrivate
     ? // Private: only explicit per-user grants survive — authorship included.
-      await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false)
+      await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false, undefined, undefined, index)
     : readOnlyVault || sealedVault
       ? // Both postures skip the role AND authorship; only a grant reaches
         // through. Mirrors `effectivePermission` branch for branch.
@@ -709,6 +914,10 @@ export async function resolveAccessForUser(
           ctx.folderIds,
           ctx.organizationId,
           role !== null,
+          true,
+          undefined,
+          undefined,
+          index,
         )
       : !ungrantedVault && (role === "owner" || role === "admin")
         ? "edit"
@@ -721,11 +930,15 @@ export async function resolveAccessForUser(
               ctx.folderIds,
               ctx.organizationId,
               role !== null, // isMember — gates the org-wide grant
+              true,
+              undefined,
+              undefined,
+              index,
             );
 
   if (granted === "none") return { permission: "none", capped: false, denied: itemPrivate };
 
-  const locked = await isLocked(db, userId, ctx.docId, ctx.folderIds);
+  const locked = await lockedFor();
   if (locked && granted === "edit") return { permission: "view", capped: true };
   if (locked) return { permission: "view", capped: false };
   return { permission: granted, capped: false };
