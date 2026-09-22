@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useRef, useState } from "react";
 import { useVaultHealth } from "../lib/health/useVaultHealth";
-import { stewardObservations } from "../lib/stewardObservations";
+import { assistantObservations } from "../lib/assistantObservations";
 import type { DiagnosticInput } from "../lib/housekeeper";
 import { HousekeeperPanel } from "./HousekeeperPanel";
 import { HealthView } from "./HealthTab";
 import { useStore } from "../store";
 import type { CheckFocus } from "./HealthChecks";
 import type { VaultCheckId } from "../lib/health/types";
-import { StewardLocalRepair } from "./StewardLocalRepair";
+import { AssistantLocalRepair } from "./AssistantLocalRepair";
 import { UpgradeDialog } from "./UpgradeDialog";
 
 export function AiSettingsTab({ onOpenHealth, onGoToGeneral, onClose, requestedCheck }: { onOpenHealth: () => void; onGoToGeneral: () => void; onClose: () => void; requestedCheck?: CheckFocus | null }) {
@@ -25,13 +25,13 @@ export function AiSettingsTab({ onOpenHealth, onGoToGeneral, onClose, requestedC
   const [upgrade, setUpgrade] = useState(false);
   const snapshot = useVaultHealth({ onOpenUpgrade: () => setUpgrade(true) });
   const counts = snapshot.report.counts;
-  const diagnostics = stewardObservations(snapshot);
+  const diagnostics = assistantObservations(snapshot);
   const waiting = useRef<{ resolve: (value: DiagnosticInput) => void; reject: (error: Error) => void; at: number | undefined; timeout: ReturnType<typeof setTimeout> } | null>(null);
   useEffect(() => {
     const pending = waiting.current;
     if (pending && !snapshot.loading && snapshot.checks?.computedAt !== pending.at) {
       clearTimeout(pending.timeout); waiting.current = null;
-      const input = stewardObservations(snapshot);
+      const input = assistantObservations(snapshot);
       if (input) pending.resolve(input); else pending.reject(new Error("Some checks could not finish. Retry the scan."));
     }
   }, [snapshot]);
@@ -44,7 +44,7 @@ export function AiSettingsTab({ onOpenHealth, onGoToGeneral, onClose, requestedC
   const brokenLinkNotes = snapshot.checks?.results.find(c => c.id === "broken-links")?.items ?? [];
   const localIds = [...(snapshot.checks?.results.filter(check => check.count > 0).map(check => check.id) ?? []), ...new Set(snapshot.report.issues.map(issue => `issue-${issue.kind}`))];
   return <>
-    <HousekeeperPanel repairNotes={Object.fromEntries((snapshot.checks?.results ?? []).map(c => [c.id, c.items]))} onPrepareFix={async id => { setProposal(id); }} localFindings={<details className="steward-local-findings"><summary>{localIds.length} local findings · Manual tools</summary>{localIds.map(id => <HealthView key={`${path}:${id}`} mode="finding" findingId={id} snapshot={snapshot} notes={notes} vaultPath={path} onGoToGeneral={onGoToGeneral} onClose={onClose} />)}</details>} collectDiagnostics={collect} renderFindingDetails={id => <HealthView key={`${path}:${id}`} mode="finding" findingId={id} snapshot={snapshot} notes={notes} vaultPath={path} onGoToGeneral={onGoToGeneral} onClose={onClose} />}
+    <HousekeeperPanel repairNotes={Object.fromEntries((snapshot.checks?.results ?? []).map(c => [c.id, c.items]))} onPrepareFix={async id => { setProposal(id); }} localFindings={<details className="assistant-local-findings"><summary>{localIds.length} local findings · Manual tools</summary>{localIds.map(id => <HealthView key={`${path}:${id}`} mode="finding" findingId={id} snapshot={snapshot} notes={notes} vaultPath={path} onGoToGeneral={onGoToGeneral} onClose={onClose} />)}</details>} collectDiagnostics={collect} renderFindingDetails={id => <HealthView key={`${path}:${id}`} mode="finding" findingId={id} snapshot={snapshot} notes={notes} vaultPath={path} onGoToGeneral={onGoToGeneral} onClose={onClose} />}
       onInspectFinding={inspect} onDiagnosticAction={async (id, action) => {
       // Revalidate the capability against the latest local observation, never model text.
       if (["stale-index", "unindexed-markdown"].includes(id) && action === "rebuild-index" && snapshot.checks?.results.some(c => c.id === id && c.count > 0)) {
@@ -64,7 +64,7 @@ export function AiSettingsTab({ onOpenHealth, onGoToGeneral, onClose, requestedC
       throw new Error("This finding changed. Run diagnostics again.");
     }} brokenLinkNotes={brokenLinkNotes} diagnostics={diagnostics} onUpgrade={() => setUpgrade(true)} onOpenHealth={onOpenHealth} onGoToGeneral={onGoToGeneral} />
     {focus && <div ref={tools}><button className="secondary" onClick={() => setFocus(null)}>Close finding</button><HealthView key={`${path}:${focus.id}`} mode="finding" findingId={focus.id} snapshot={snapshot} notes={notes} vaultPath={path} onGoToGeneral={onGoToGeneral} onClose={onClose} /></div>}
-    {proposal && <StewardLocalRepair key={`${path}:${proposal}`} id={proposal} snapshot={snapshot} onClose={() => setProposal(null)} />}
+    {proposal && <AssistantLocalRepair key={`${path}:${proposal}`} id={proposal} snapshot={snapshot} onClose={() => setProposal(null)} />}
     {upgrade && <UpgradeDialog onClose={() => setUpgrade(false)} />}
   </>;
 }

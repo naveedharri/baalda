@@ -268,29 +268,29 @@ Six changes that together make a vault something a team can actually govern.
   credentials and a Pro vault are required for live use. See [setup and preview
   limits](HOUSEKEEPER.md). Real-provider quality evaluation remains outstanding.
 
-Steward now lives in **AI** with a compact provider card, user-owned
+The Assistant now lives in **AI** with a compact provider card, user-owned
 OpenRouter keys in the OS keychain, Jev 1.13 as default, and a custom model picker.
 Diagnostic review prioritizes all 15 local checks using counts only. Local preview
 has an explicit development + loopback-database override; production remains Pro.
 
 Advanced diagnostics moved into AI’s Smart diagnostics centre. Existing manual
-checks and repair confirmations remain Free; Pro Steward chooses priorities and
+checks and repair confirmations remain Free; the Pro Assistant chooses priorities and
 allowlisted next steps in one batched call. Suggested index rebuilds and sync
 retries recheck access and current findings before using existing actions.
 
-Steward’s AI page now uses Diagnostics/Settings subtabs, selecting setup when no
+The Assistant’s AI page now uses Diagnostics/Settings subtabs, selecting setup when no
 key is saved. The default scan refreshes whole-vault measurements and displays
 only dynamic, model-prioritized findings and relevant tools. The permanent
 advanced-tool sections and link-repair panel are replaced by finding details.
 
-Steward repair expansion: bounded model-reviewed property/title edits and empty-note
+Assistant repair expansion: bounded model-reviewed property/title edits and empty-note
 version recovery now share guarded apply/undo. Local action previews cover distinct
 file names, backups, history cleanup, recovery downloads and re-registration, plus
 copying an access request. Previews recheck scope, findings and rename authority.
 Oversized-note backups do not split content or resolve size limits; permission
 requests do not grant access. These distinctions are explicit in the action UI.
 
-Steward now ships under Apache-2.0 in the standard server package rather than
+The Assistant now ships under Apache-2.0 in the standard server package rather than
 `ee/`. Billing-disabled self-hosters have access with their own model key;
 billing-enabled vaults retain the Pro gate. Free synced vaults on billing-enabled
 servers accept up to 20,000 live notes; extra registrations return
@@ -301,7 +301,7 @@ Sign-in uses a body portal. The sidebar alone says AI (Beta), with an accented
 sparkle; provider settings use a warm amber card and a key-ready indicator.
 
 Deployment access policy is now independent of billing. `BAALDA_DEPLOYMENT=self-hosted`
-keeps Steward available when operator billing is enabled, disabled, or configured
+keeps the Assistant available when operator billing is enabled, disabled, or configured
 later. `cloud` (the fail-closed default) requires Pro even without payment
 credentials and enforces the Free note cap. Self-hosting `.env.example` opts in
 explicitly; no managed configuration is stored in this repository.

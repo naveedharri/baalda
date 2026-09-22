@@ -4,7 +4,7 @@ import type { VaultHealthSnapshot } from "./health/types";
 
 /** Whole-vault measurements; opaque categories and numeric evidence leave the device.
  * Paths, raw error messages and note content remain local until a specific repair. */
-export function stewardObservations(snapshot: VaultHealthSnapshot): DiagnosticInput | null {
+export function assistantObservations(snapshot: VaultHealthSnapshot): DiagnosticInput | null {
   if (!snapshot.checks || snapshot.loading) return null;
   const { report, stats, inventory } = snapshot;
   const kinds = [...new Set(report.issues.map(issue => issue.kind))].sort();

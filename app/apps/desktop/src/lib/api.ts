@@ -1,4 +1,4 @@
-import type { StewardProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
+import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
 // wire contract, and importing the TYPES keeps this module a runtime leaf.
 import type {
@@ -940,7 +940,7 @@ function newClientId(): string {
  * manager owns persistence (keychain) and calls `setToken`.
  */
 export class ApiClient {
-  async housekeeperDiagnose(vaultId: string, diagnostics: DiagnosticInput, provider?: StewardProvider): Promise<DiagnosticReview> {
+  async housekeeperDiagnose(vaultId: string, diagnostics: DiagnosticInput, provider?: AssistantProvider): Promise<DiagnosticReview> {
     return (await this.request<DiagnosticReview>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/diagnose`, {
       body: { diagnostics, consent: true, provider }, timeoutMs: 20_000,
     })).data;
@@ -950,13 +950,13 @@ export class ApiClient {
     return (await this.request<HousekeeperStatus>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/status`, { timeoutMs: 15_000 })).data;
   }
 
-  async housekeeperSuggest(vaultId: string, docId: string, offset = 0, provider?: StewardProvider): Promise<HousekeeperScan> {
+  async housekeeperSuggest(vaultId: string, docId: string, offset = 0, provider?: AssistantProvider): Promise<HousekeeperScan> {
     return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/suggest`, {
       body: { docId, consent: true, offset, provider }, timeoutMs: 60_000,
     })).data;
   }
 
-  async housekeeperRepair(vaultId: string, docId: string, finding: string, provider?: StewardProvider): Promise<HousekeeperScan> {
+  async housekeeperRepair(vaultId: string, docId: string, finding: string, provider?: AssistantProvider): Promise<HousekeeperScan> {
     return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/repair`, {
       body: { docId, finding, consent: true, provider }, timeoutMs: 30_000,
     })).data;

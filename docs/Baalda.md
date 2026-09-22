@@ -143,7 +143,7 @@ See [[STATUS]] for the live build checklist.
 5. **Reuse patterns, not code.** Study the OSS references, own our implementation.
 6. **Self-hostable, no vendor lock-in.** Everything runs on our infra (Tauri + Node + Postgres).
 
-## Baalda Steward
+## Baalda Assistant
 
 - [Agent diagnostics and repairs](HOUSEKEEPER.md): included for billing-disabled
   self-hosters; Pro on billing-enabled servers. BYOK model setup, reviewed actions

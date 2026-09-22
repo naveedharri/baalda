@@ -74,7 +74,7 @@ export function SyncIssuesBannerView({
 }) {
   return (
     <Banner show={show} className="sync-issues-banner" role="alert">
-      {noteLimit ? <span><strong>20,000-note Free sync limit reached.</strong> Additional notes stay on this device. Upgrade to Pro to sync more notes and use Baalda Steward.</span> : <span>
+      {noteLimit ? <span><strong>20,000-note Free sync limit reached.</strong> Additional notes stay on this device. Upgrade to Pro to sync more notes and use Baalda Assistant.</span> : <span>
         <strong>
           {failed} {failed === 1 ? "note didn't" : "notes didn't"} sync
         </strong>{" "}

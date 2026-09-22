@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { MenuSelect } from "./MenuSelect";
 import { keychainDelete, keychainGet, keychainSet } from "../lib/ipc";
-import type { StewardProvider } from "../lib/housekeeper";
+import type { AssistantProvider } from "../lib/housekeeper";
 
 // OpenRouter catalog verified 2026-09-21; these chat models advertise structured output.
 const MODEL_OPTIONS = [
@@ -16,10 +16,11 @@ const MODEL_OPTIONS = [
   { value: "custom", label: "Other model", hint: "Use an OpenRouter model ID" },
 ];
 
-export function StewardProviderSettings({ identity, onChange, onReady, onSaved }: { identity: string; onChange: (provider: StewardProvider | null) => void; onReady?: (hasKey: boolean) => void; onSaved?: () => void }) {
+export function AssistantProviderSettings({ identity, onChange, onReady, onSaved }: { identity: string; onChange: (provider: AssistantProvider | null) => void; onReady?: (hasKey: boolean) => void; onSaved?: () => void }) {
   const [editing, setEditing] = useState(false);
   const [key, setKey] = useState("");
   const [saved, setSaved] = useState<string | null>(null);
+  // Stored key keeps the legacy "steward" name so saved preferences survive the Assistant rename.
   const preferencesKey = `steward:preferences:${identity}`;
   const [preferences] = useState(() => {
     try { return JSON.parse(localStorage.getItem(preferencesKey) ?? "null") as { enabled?: boolean; model?: string; custom?: boolean } | null; }
@@ -34,6 +35,7 @@ export function StewardProviderSettings({ identity, onChange, onReady, onSaved }
     // Preferences contain no credentials. The API key is only kept in the OS keychain.
     try { localStorage.setItem(preferencesKey, JSON.stringify({ enabled, model, custom })); } catch { /* Storage may be unavailable. */ }
   }, [preferencesKey, enabled, model, custom]);
+  // Keychain service keeps the legacy "steward" name so saved keys survive the Assistant rename.
   const service = `steward:openrouter:${identity}`;
   useEffect(() => {
     let live = true;
@@ -44,10 +46,10 @@ export function StewardProviderSettings({ identity, onChange, onReady, onSaved }
     onChange(enabled && saved && model.trim() ? { name: "openrouter", apiKey: saved, model: model.trim(), mode: model.trim() === "typesafe/jev-1.13" ? "decisions" : "chat" } : null);
   }, [enabled, saved, model, custom, onChange]);
   const selected = MODEL_OPTIONS.find(option => option.value === model);
-  return <div className="housekeeper-card steward-provider">
-    <div className="steward-provider-heading"><div className="steward-provider-brand"><span className="steward-router-mark" aria-hidden="true">↗</span><div><h4>OpenRouter</h4>{!saved && <span className="housekeeper-detail">Connect your account</span>}</div></div>
-    <label className="steward-toggle"><input type="checkbox" role="switch" aria-label="Enable OpenRouter" checked={enabled} onChange={e => setEnabled(e.target.checked)} /><span aria-hidden="true" /></label></div>
-    {(!saved || editing) && <div className="steward-key-row"><label className="housekeeper-field"><span className="steward-sr-only">OpenRouter API key</span><input type="password" autoComplete="off" spellCheck={false} value={key} placeholder={saved ? "Key saved securely" : "sk-or-…"} onChange={e => setKey(e.target.value)} /></label>
+  return <div className="housekeeper-card assistant-provider">
+    <div className="assistant-provider-heading"><div className="assistant-provider-brand"><span className="assistant-router-mark" aria-hidden="true">↗</span><div><h4>OpenRouter</h4>{!saved && <span className="housekeeper-detail">Connect your account</span>}</div></div>
+    <label className="assistant-toggle"><input type="checkbox" role="switch" aria-label="Enable OpenRouter" checked={enabled} onChange={e => setEnabled(e.target.checked)} /><span aria-hidden="true" /></label></div>
+    {(!saved || editing) && <div className="assistant-key-row"><label className="housekeeper-field"><span className="assistant-sr-only">OpenRouter API key</span><input type="password" autoComplete="off" spellCheck={false} value={key} placeholder={saved ? "Key saved securely" : "sk-or-…"} onChange={e => setKey(e.target.value)} /></label>
     <div className="housekeeper-actions">
       <button className="secondary" disabled={busy || !/^sk-or-[A-Za-z0-9_-]{10,250}$/.test(key.trim())} onClick={async () => {
         setBusy(true); setMessage("");
@@ -58,7 +60,7 @@ export function StewardProviderSettings({ identity, onChange, onReady, onSaved }
       <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer">Get a key ↗</a>
     </div>
     </div>}
-    {saved && <div className="steward-key-status"><span className={`steward-connection-state${enabled ? " ready" : ""}`}><span aria-hidden="true" />{enabled ? "Key ready" : "Disabled"}</span><div><button className="secondary" onClick={() => setEditing(!editing)}>{editing ? "Cancel" : "Change key"}</button>
+    {saved && <div className="assistant-key-status"><span className={`assistant-connection-state${enabled ? " ready" : ""}`}><span aria-hidden="true" />{enabled ? "Key ready" : "Disabled"}</span><div><button className="secondary" onClick={() => setEditing(!editing)}>{editing ? "Cancel" : "Change key"}</button>
       {saved && <button className="secondary" disabled={busy} onClick={async () => {
         setBusy(true);
         try { await keychainDelete(service); setSaved(null); setKey(""); setMessage("Key removed."); onReady?.(false); }
@@ -68,9 +70,9 @@ export function StewardProviderSettings({ identity, onChange, onReady, onSaved }
 </div></div>}
     {message && <p role="status">{message}</p>}
     <div className="housekeeper-field"><span>Model</span>
-      <MenuSelect direction="down" value={custom ? "custom" : model} ariaLabel="Model" triggerClassName="steward-model-trigger" menuClassName="steward-model-menu"
+      <MenuSelect direction="down" value={custom ? "custom" : model} ariaLabel="Model" triggerClassName="assistant-model-trigger" menuClassName="assistant-model-menu"
         options={MODEL_OPTIONS}
-        triggerContent={<><span className="steward-model-icon" aria-hidden="true">✦</span><span className="steward-model-label"><strong>{custom ? model || "Other model" : selected?.label ?? model}</strong><small>{custom ? "OpenRouter" : selected?.hint.replace(" · Default", "")}</small></span>{model === "typesafe/jev-1.13" && <span className="housekeeper-badge">Default</span>}</>}
+        triggerContent={<><span className="assistant-model-icon" aria-hidden="true">✦</span><span className="assistant-model-label"><strong>{custom ? model || "Other model" : selected?.label ?? model}</strong><small>{custom ? "OpenRouter" : selected?.hint.replace(" · Default", "")}</small></span>{model === "typesafe/jev-1.13" && <span className="housekeeper-badge">Default</span>}</>}
         onSelect={value => { setCustom(value === "custom"); setModel(value === "custom" ? "" : value); }} />
     </div>
     {custom && <label className="housekeeper-field">OpenRouter model ID<input value={model} placeholder="provider/model" onChange={e => setModel(e.target.value)} /><span className="housekeeper-detail">Choose a chat model supporting structured JSON output.</span></label>}

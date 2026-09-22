@@ -24,7 +24,7 @@ export const PRO_BENEFITS = [
 ] as const;
 
 export const FREE_PLAN_EXPLANATION =
-  "Free includes note sync and embedded attachments. Pro adds standalone file sync and Baalda Steward.";
+  "Free includes note sync and embedded attachments. Pro adds standalone file sync and Baalda Assistant.";
 
 /** Every place the contract token might surface on a rejected request. */
 function haystack(e: ApiError): string {

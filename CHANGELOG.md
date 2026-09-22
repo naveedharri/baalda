@@ -120,6 +120,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Changed
+- **"Baalda Steward" is now "Baalda Assistant".** UI copy, docs and the `Steward*`
+  components/identifiers were renamed; the `housekeeper` engine names, API paths, env
+  vars and stored keychain/localStorage keys are unchanged.
 - **The Health page's activity strip looks forward.** The heat-map ran GitHub's
   trailing twelve months, so a young vault was 52 columns of grey with two coloured
   cells in the far right. It now spans the 1st of last month through the end of the
