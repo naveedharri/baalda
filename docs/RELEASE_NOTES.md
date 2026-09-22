@@ -18,6 +18,12 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.64
+
+- Access is much faster on large vaults and teams: seeing a person's access, ticking several people and viewing the whole vault now load in one quick step instead of one folder at a time.
+- When only some people are read-only on a folder, Access keeps showing the team's setting and names who is held back, instead of calling the folder restricted for everyone.
+- Baalda Assistant shows one clear "Connect a provider" step when no AI key is added yet.
+
 ## 0.1.63
 
 - More files open, embed and search: Office docs, CSV, audio, video, code and archives. Notes sync on every plan, embedded attachments stay free, and standalone file sync is Pro. On first launch Baalda scans your vault and uploads what your plan allows.
