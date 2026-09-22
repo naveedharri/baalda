@@ -137,6 +137,38 @@ describe("planTurnOnSync", () => {
     ).toEqual({ kind: "switch", orgId: "org-a" });
   });
 
+  it("creates a vault when the stamped one is confirmed GONE from the server", () => {
+    // The unsync recovery path: the stamp names a vault the owner made local
+    // only, so there is no other account's folder left to protect. Refusing
+    // here is what left the folder permanently unsyncable.
+    expect(
+      planTurnOnSync({
+        openPath: "/vaults/a",
+        activeOrganizationId: null,
+        orgIds: [],
+        orgVaults: {},
+        stampedOrgId: "org-dead",
+        stampedOrgGone: true,
+      }),
+    ).toEqual({ kind: "create-vault" });
+  });
+
+  it("keeps refusing a foreign folder when the vault still exists", () => {
+    // `stampedOrgGone` is only ever set from a definite 404. Anything else —
+    // including a network error — must leave today's refusal exactly as it was,
+    // or a flaky connection hands a teammate's folder to the wrong account.
+    expect(
+      planTurnOnSync({
+        openPath: "/vaults/a",
+        activeOrganizationId: null,
+        orgIds: [],
+        orgVaults: {},
+        stampedOrgId: "org-theirs",
+        stampedOrgGone: false,
+      }),
+    ).toEqual({ kind: "blocked-foreign", orgId: "org-theirs" });
+  });
+
   it("still retries after a failed sync on the vault just created", () => {
     // Immediately after the create above: same folder, now bound and active.
     expect(

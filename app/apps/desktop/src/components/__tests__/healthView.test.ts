@@ -21,7 +21,10 @@ import { HealthView } from "../HealthTab";
 import { HealthIssues } from "../HealthIssues";
 import { InspectionCard } from "../HealthInspector";
 import { HealthTimeline } from "../HealthTimeline";
+import { HealthChecks } from "../HealthChecks";
 import type { HealthHandlers } from "../HealthShared";
+import { checkActionPlans } from "../../lib/health/checkActions";
+import { checkRows } from "../../lib/health/checks";
 import type {
   HealthActions,
   HealthExplanation,
@@ -34,9 +37,12 @@ import type {
   VaultStats,
 } from "../../lib/health/types";
 import { CHECK_DEFINITIONS } from "../../lib/health/checks";
+import { localAttachmentPresence } from "../../lib/health/useVaultHealth";
 
 function actions(): HealthActions {
   return {
+    downloadFiles: vi.fn(async () => {}),
+    removeServerFile: vi.fn(async () => {}),
     syncNow: vi.fn(async () => {}),
     retryDoc: vi.fn(async () => {}),
     resetHistory: vi.fn(async () => ({ bytesFreed: 0 })),
@@ -71,21 +77,33 @@ function actions(): HealthActions {
     ),
     emptyTrash: vi.fn(async () => ({ filesRemoved: 0, bytesFreed: 0 })),
     rebuildIndex: vi.fn(async () => {}),
+    applyCheckAction: vi.fn(async (plan) => ({
+      action: plan.action,
+      done: 0,
+      total: 0,
+      note: null,
+      errors: [],
+      skipped: [],
+      cancelled: false,
+    })),
   };
 }
 
-function handlers(): HealthHandlers {
+function handlers(over: Partial<HealthHandlers> = {}): HealthHandlers {
   return {
     actions: actions(),
     openNote: vi.fn(),
     confirm: vi.fn(),
     reclaim: vi.fn(async () => {}),
+    runCheck: vi.fn(),
+    checkRuns: {},
     now: 1_700_000_000_000,
+    ...over,
   };
 }
 
 const explanation: HealthExplanation = {
-  meaning: "The server refused this note because of its size.",
+  meaning: "The Remote Vault refused this note because of its size.",
   next: "Nothing — it will not retry until the note is smaller.",
   fixes: ["Split the note in two.", "Move the images into attachments."],
   safety: "only-here",
@@ -108,7 +126,7 @@ const localReport: HealthReport = {
     { id: "index", label: "Local index", state: "ok", headline: "12", detail: "i" },
     { id: "history", label: "Local history", state: "ok", headline: "3", detail: "h" },
     { id: "connection", label: "Connection", state: "off", headline: "Off", detail: "c" },
-    { id: "server", label: "Server", state: "off", headline: "Off", detail: "s" },
+    { id: "server", label: "Remote Vault", state: "off", headline: "Off", detail: "s" },
   ],
   counts: null,
   issues: [],
@@ -120,12 +138,12 @@ const stats: VaultStats = {
   computedAt: 1_700_000_000_000,
   notes: { count: 12, bytes: 4096, empty: 1 },
   folders: 3,
-  attachments: { count: 0, bytes: 0 },
-  otherFiles: { count: 0, bytes: 0 },
+  attachments: { count: 2, bytes: 1024 },
+  otherFiles: { count: 4, bytes: 2048 },
   tags: 5,
   links: 9,
   brokenLinks: 2,
-  index: { bytes: 65_536 },
+  index: { bytes: 65_536, files: 0, extractedTextBytes: 0 },
   history: { docs: 3, updates: 40, bytes: 2048, orphanDocs: 2, orphanBytes: 1024 },
   largestNotes: [{ path: "a/b/big.md", bytes: 12 * 1024 * 1024, mtime: 1_699_000_000_000 }],
   largestFiles: [],
@@ -144,6 +162,18 @@ const stats: VaultStats = {
 function snapshot(over: Partial<VaultHealthSnapshot> = {}): VaultHealthSnapshot {
   return {
     report: localReport,
+    inventory: {
+      local: { notes: 12, folders: 3, files: 4, total: 19 },
+      localReady: true,
+      server: null,
+      serverState: "unavailable",
+      deviceOnlyNotes: [],
+      serverOnlyNotes: [],
+      deviceOnlyFolders: [],
+      serverOnlyFolders: [],
+      deviceOnlyFiles: [],
+      serverOnlyFiles: [],
+    },
     stats,
     statsError: null,
     checks: null,
@@ -155,8 +185,10 @@ function snapshot(over: Partial<VaultHealthSnapshot> = {}): VaultHealthSnapshot 
   };
 }
 
-const render = (s: VaultHealthSnapshot) =>
-  renderToStaticMarkup(createElement(HealthView, { snapshot: s }));
+const render = (
+  s: VaultHealthSnapshot,
+  over: Partial<Parameters<typeof HealthView>[0]> = {},
+) => renderToStaticMarkup(createElement(HealthView, { snapshot: s, ...over }));
 
 /** Every check reporting zero, so a test only spells out the one it cares
  *  about. Rust always sends all fifteen. */
@@ -170,6 +202,16 @@ function allPassing(
     ),
   };
 }
+
+describe("local attachment detection", () => {
+  it("distinguishes hidden attachments, surfaced files, note-only vaults, and unknown reads", () => {
+    expect(localAttachmentPresence(1, 0)).toBe(true);
+    expect(localAttachmentPresence(0, 1)).toBe(true);
+    expect(localAttachmentPresence(0, 0)).toBe(false);
+    expect(localAttachmentPresence(null, 0)).toBeNull();
+    expect(localAttachmentPresence(0, null)).toBeNull();
+  });
+});
 
 describe("HealthView", () => {
   it("renders a local vault without a sync breakdown", () => {
@@ -203,10 +245,237 @@ describe("HealthView", () => {
     expect(html).toContain("12.0 MB");
   });
 
-  it("offers a reclaim button while orphan history exists", () => {
-    const html = render(snapshot());
-    expect(html).toContain("reclaimable");
-    expect(html).toContain("Reclaim");
+  it("counts every standalone format as a note but excludes embedded attachments", () => {
+    const html = render(
+      snapshot({
+        // The raw census intentionally disagrees with the surfaced tree: it
+        // also sees unsupported files and folders under hidden attachments/.
+        // Product Notes/Folders must use the supported tree counts below.
+        stats: {
+          ...stats,
+          folders: 9,
+          otherFiles: { count: 99, bytes: stats.otherFiles.bytes },
+        },
+      }),
+    );
+    expect((html.match(/class="health-metric"/g) ?? []).length).toBe(3);
+    expect(html).not.toContain("Total items");
+    expect(html).toContain("data-primary");
+    // 12 text notes + 4 standalone notes in other formats. The 2 embedded
+    // attachments contribute storage bytes, but not another two notes.
+    expect(html).toMatch(
+      /health-metric-value">16<\/span><span class="health-metric-label">.*?Notes/s,
+    );
+    expect(html).toMatch(
+      /health-metric-value">3<\/span><span class="health-metric-label">.*?Folders/s,
+    );
+    expect(html).not.toContain('health-metric-value">111</span>');
+    expect(html).not.toContain('health-metric-value">9</span>');
+    expect(html).toContain("Stored locally");
+    expect(html.indexOf("Notes")).toBeLessThan(html.indexOf("Folders"));
+    expect(html.indexOf("health-metrics")).toBeLessThan(html.indexOf("health-verdict"));
+  });
+
+  it("organises advanced diagnostics around clear tools and safe actions", () => {
+    const html = render(snapshot({ checks: allPassing() }));
+    expect(html).toContain("Advanced diagnostics");
+    expect(html).toContain("Run all checks");
+    expect(html).toContain("Retry sync");
+    expect(html).toContain("Copy report");
+    expect(html).toContain("Inspect a note");
+    expect(html).toContain("Integrity checks");
+    expect(html).toContain("Recent sync activity");
+    expect(html).not.toContain("Sync path");
+    expect(html).not.toContain("health-pipeline");
+    expect(html).toContain(`${CHECK_DEFINITIONS.length} checks passed`);
+    expect(html).toContain("Sync retry is unavailable because this vault is local only.");
+  });
+
+  it("summarises the number of findings rather than the number of affected checks", () => {
+    const html = render(
+      snapshot({
+        checks: allPassing({
+          trash: {
+            id: "trash",
+            count: 412,
+            items: [{ path: "2026-09-16T10-00-00/note.md" }],
+          },
+        }),
+      }),
+    );
+    expect(html).toContain("412 findings");
+    expect(html).not.toContain("1 finding");
+  });
+
+  it("separates inventory differences from content confirmation", () => {
+    const html = render(
+      snapshot({
+        report: {
+          ...localReport,
+          verdict: "attention",
+          counts: {
+            total: 12,
+            synced: 9,
+            pending: 1,
+            failed: 0,
+            unsynced: 2,
+            unreported: 0,
+          },
+          serverHost: "api.baalda.com",
+        },
+        inventory: {
+          local: { notes: 12, folders: 3, files: 4, total: 19 },
+          localReady: true,
+          server: { notes: 13, folders: 3, files: 4, total: 20 },
+          serverState: "current",
+          deviceOnlyNotes: ["Draft.md"],
+          serverOnlyNotes: ["Team plan.md", "Archive.md"],
+          deviceOnlyFolders: ["Local drafts"],
+          serverOnlyFolders: [],
+          deviceOnlyFiles: ["diagram.pdf"],
+          serverOnlyFiles: ["brief.docx"],
+        },
+      }),
+    );
+    expect(html).toContain("1 text note is missing from the Remote Vault");
+    expect(html).toContain("2 text notes are missing from this computer");
+    expect(html).not.toContain("paths differ");
+    expect(html).toContain("Difference breakdown");
+    expect(html).toContain("Missing from the Remote Vault");
+    expect(html).toContain("Missing from this computer");
+    expect(html).toContain("<dt>Text notes</dt><dd>1</dd>");
+    expect(html).toContain(
+      '<dt title="PDFs, images, data, and other supported files">Notes in other formats</dt><dd>1</dd>',
+    );
+    expect(html).toContain("Review differences");
+    expect(html).toContain("9 of 12 text notes have confirmed content on the Remote Vault");
+    expect(html).toContain("Current Remote Vault view");
+    expect(html).toContain('class="health-place-primary">16</strong>');
+    expect(html).toContain('class="health-place-primary">17</strong>');
+    expect(html).not.toMatch(/\bserver\b/i);
+  });
+
+  it("explains plan-blocked format notes without presenting them as a failed retry", () => {
+    const html = render(
+      snapshot({
+        report: {
+          ...localReport,
+          verdict: "healthy",
+          headline: "All 6,974 notes are on the Remote Vault",
+          counts: {
+            total: 6_974,
+            synced: 6_974,
+            pending: 0,
+            failed: 0,
+            unsynced: 0,
+            unreported: 0,
+          },
+          serverHost: "api.baalda.com",
+        },
+        stats: {
+          ...stats,
+          notes: { count: 6_974, bytes: stats.notes.bytes, empty: 0 },
+          otherFiles: { count: 160, bytes: stats.otherFiles.bytes },
+        },
+        inventory: {
+          local: { notes: 6_974, folders: 1, files: 160, total: 7_135 },
+          localReady: true,
+          server: { notes: 6_974, folders: 1, files: 0, total: 6_975 },
+          serverState: "current",
+          deviceOnlyNotes: [],
+          serverOnlyNotes: [],
+          deviceOnlyFolders: [],
+          serverOnlyFolders: [],
+          deviceOnlyFiles: Array.from({ length: 160 }, (_, i) => `Media/file-${i}.pdf`),
+          serverOnlyFiles: [],
+        },
+      }),
+      { standaloneFileSyncBlocked: true, showAttachmentUpgrade: true },
+    );
+
+    expect(html).toContain("6,974 text notes synced · 160 notes in other formats local only");
+    expect(html).toContain("Partially synced");
+    expect(html).not.toContain(">Healthy<");
+    expect(html).not.toContain("All 6,974 notes are on the Remote Vault");
+    expect(html).toContain("160 notes in other formats stay on this computer");
+    expect(html).toContain("Syncing these file types requires Pro");
+    expect(html).toContain("Other-format notes stay local on this plan");
+    // The container owns the single upgrade CTA in the top attachment banner.
+    expect(html).not.toContain("Upgrade to Pro");
+    expect(html).not.toContain(">Check again<");
+    expect((html.match(/class="health-difference-side"/g) ?? []).length).toBe(1);
+    expect(html).not.toContain("data-zero");
+  });
+
+  it("labels an offline server inventory as cached", () => {
+    const html = render(
+      snapshot({
+        report: { ...localReport, verdict: "offline", counts: { total: 12, synced: 12, pending: 0, failed: 0, unsynced: 0, unreported: 0 } },
+        inventory: {
+          local: { notes: 12, folders: 3, files: 4, total: 19 },
+          localReady: true,
+          server: { notes: 12, folders: 3, files: 4, total: 19 },
+          serverState: "last-known",
+          deviceOnlyNotes: [],
+          serverOnlyNotes: [],
+          deviceOnlyFolders: [],
+          serverOnlyFolders: [],
+          deviceOnlyFiles: [],
+          serverOnlyFiles: [],
+        },
+      }),
+    );
+    expect(html).toContain("Last known Remote Vault view");
+    expect(html).toContain("The current Remote Vault contents cannot be confirmed");
+    expect(html).toContain("last-known comparison may be out of date");
+    expect(html).not.toContain("Notes and folders match");
+    expect(html).not.toContain("items Baalda can list");
+  });
+
+  it.each(["syncing", "connecting"] as const)("does not call %s unavailable or flag its placeholders as empty notes", (verdict) => {
+    const html = render(snapshot({
+      report: { ...localReport, verdict },
+      stats: { ...stats, notes: { count: 6974, bytes: 4096, empty: 6667 } },
+      inventory: {
+        local: { notes: 6974, folders: 1743, files: 0, total: 8717 },
+        localReady: true,
+        server: { notes: 6974, folders: 1743, files: 0, total: 8717 },
+        serverState: "updating",
+        deviceOnlyNotes: [], serverOnlyNotes: [], deviceOnlyFolders: [],
+        serverOnlyFolders: [], deviceOnlyFiles: [], serverOnlyFiles: [],
+      },
+    }));
+    expect(html).toContain("Updating Remote Vault view");
+    expect(html).toContain("Sync is still updating your local copy");
+    expect(html).toContain("Counts are provisional until sync finishes");
+    expect(html).toContain("Remote counts include only notes you can access");
+    expect(html).not.toContain("The Remote Vault is unavailable");
+    expect(html).not.toContain("6,667 empty");
+    expect(html).not.toContain("Notes and folders match");
+  });
+
+  it("does not invent local counts while the supported-file tree is loading", () => {
+    const html = render(
+      snapshot({
+        report: {
+          ...localReport,
+          verdict: "healthy",
+          counts: { total: 12, synced: 12, pending: 0, failed: 0, unsynced: 0, unreported: 0 },
+        },
+        inventory: {
+          ...snapshot().inventory,
+          local: { notes: 0, folders: 0, files: 0, total: 0 },
+          localReady: false,
+          server: { notes: 12, folders: 3, files: 4, total: 19 },
+          serverState: "current",
+        },
+      }),
+    );
+
+    expect(html).toContain("Still counting notes on this computer");
+    expect(html).toContain("supported vault file list is ready");
+    expect(html).toContain("12 text notes synced · counting other formats");
+    expect(html).not.toContain("Notes and folders match");
   });
 
   it("renders the issue list for a synced vault", () => {
@@ -232,7 +501,7 @@ describe("HealthView", () => {
               kind: "too-large",
               severity: "error",
               title: "Too large to sync",
-              why: "This note is 12.4 MB; the server accepts up to 10 MB.",
+              why: "This note is 12.4 MB; the Remote Vault accepts up to 10 MB.",
               remedies: ["open", "reveal", "delete"],
               code: null,
               ...issueBase,
@@ -254,45 +523,7 @@ describe("HealthView", () => {
   });
 });
 
-describe("HealthView — the pipeline", () => {
-  const count = (html: string) => (html.match(/class="health-node"/g) ?? []).length;
-
-  it("shows three cards while the local stages are fine", () => {
-    // Nobody opens this page to be told the index has twelve rows. The index
-    // and history stages stay out of the way until they are the problem.
-    const html = render(snapshot());
-    expect(count(html)).toBe(3);
-    expect(html).toContain("Files on disk");
-    expect(html).toContain("Connection");
-    // The model's word is "Server"; the page's is the reader's own vault.
-    expect(html).toContain("Remote vault");
-    expect(html).not.toContain(">Local index<");
-    expect(html).not.toContain(">Local history<");
-  });
-
-  it("expands to five, in order, when a local stage needs attention", () => {
-    const html = render(
-      snapshot({
-        report: {
-          ...localReport,
-          stages: localReport.stages.map((s) =>
-            s.id === "index" || s.id === "history" ? { ...s, state: "warn" as const } : s,
-          ),
-        },
-      }),
-    );
-    expect(count(html)).toBe(5);
-    expect(html).toContain("Local index");
-    expect(html).toContain("Local history");
-    // Surfaced deliberately, and it says so.
-    expect(html).toContain("shown because it needs attention");
-    expect(html).toContain("data-conditional");
-    // Natural position: disk, then index, then history, then connection.
-    expect(html.indexOf("Files on disk")).toBeLessThan(html.indexOf("Local index"));
-    expect(html.indexOf("Local index")).toBeLessThan(html.indexOf("Local history"));
-    expect(html.indexOf("Local history")).toBeLessThan(html.indexOf(">Connection<"));
-  });
-
+describe("HealthView — verdict details", () => {
   it("sets the server host as a chip instead of ending a sentence in it", () => {
     const html = render(
       snapshot({
@@ -316,10 +547,12 @@ describe("HealthView — checks", () => {
     expect(html).toContain("Checks are not available for this vault.");
   });
 
-  it("renders every check and summarises them", () => {
+  it("renders every check without a second summary or rerun control", () => {
     const html = render(snapshot({ checks: allPassing() }));
     for (const def of CHECK_DEFINITIONS) expect(html).toContain(def.label);
-    expect(html).toContain(`All ${CHECK_DEFINITIONS.length} checks passed`);
+    expect(html).not.toContain(`All ${CHECK_DEFINITIONS.length} checks passed`);
+    expect(html).not.toContain("Re-run file checks");
+    expect(html).not.toContain("health-checks-head");
     // A passing row still states what was verified.
     expect(html).toContain("Notes whose file is 0 bytes.");
   });
@@ -335,7 +568,6 @@ describe("HealthView — checks", () => {
     );
     expect(html).toContain("Not run");
     expect(html).toContain('data-state="unknown"');
-    expect(html).toContain("1 not run");
     // Grey and hollow, never the green tick a real pass gets.
     expect(html).toContain("data-hollow");
   });
@@ -353,8 +585,96 @@ describe("HealthView — checks", () => {
     expect(html).toContain("412");
     expect(html).toContain("5.0 MB");
     expect(html).toContain("Empty trash");
-    // One check failing, and it is housekeeping rather than a fault.
-    expect(html).toContain("housekeeping");
+    // The individual finding stays visible without a duplicate summary banner.
+    expect(html).not.toContain("Re-run file checks");
+  });
+
+  it("offers Delete all on a check whose items can all be deleted", () => {
+    const checks = allPassing({
+      "empty-notes": {
+        id: "empty-notes",
+        count: 2,
+        items: [{ path: "a.md" }, { path: "b.md" }],
+      },
+    });
+    const html = render(snapshot({ checks }));
+    expect(html).toContain("Delete all");
+    // It is destructive, and it looks it.
+    expect(html).toContain("ghost-pill sm danger");
+  });
+
+  it("marks a healable check with the heal button and leaves the others alone", () => {
+    const checks = allPassing({
+      "stale-index": {
+        id: "stale-index",
+        count: 1,
+        items: [{ path: "a.md", docId: "doc-a" }],
+      },
+      "case-collisions": {
+        id: "case-collisions",
+        count: 2,
+        items: [{ path: "A.md" }, { path: "a.md" }],
+      },
+    });
+    const html = render(snapshot({ checks }));
+    expect(html).toContain("health-heal");
+    expect(html).toContain("Rebuild index");
+    // Case collisions are a judgement call: instructions, no button.
+    expect(html).not.toContain("Rename one of the pair</button>");
+  });
+});
+
+describe("HealthChecks — a running action", () => {
+  const failing = {
+    computedAt: 1,
+    results: [
+      { id: "empty-notes" as const, count: 2, items: [{ path: "a.md" }, { path: "b.md" }] },
+    ],
+  };
+  const row = () => checkRows(failing).find((r) => r.def.id === "empty-notes")!;
+
+  const renderChecks = (over: Partial<HealthHandlers>) =>
+    renderToStaticMarkup(
+      createElement(HealthChecks, {
+        checks: failing,
+        loading: false,
+        handlers: handlers(over),
+      }),
+    );
+
+  it("says what it is doing while it runs, and disables the buttons", () => {
+    const plan = checkActionPlans(row())[0]!;
+    const html = renderChecks({
+      checkRuns: { "empty-notes": { plan, running: true, done: 1, total: 2, outcome: null } },
+    });
+    expect(html).toContain("Deleting 1 of 2…");
+    expect(html).toContain("disabled");
+  });
+
+  it("reports the result on the row, errors and all", () => {
+    const plan = checkActionPlans(row())[0]!;
+    const html = renderChecks({
+      checkRuns: {
+        "empty-notes": {
+          plan,
+          running: false,
+          done: 1,
+          total: 2,
+          outcome: {
+            action: "delete-all",
+            done: 1,
+            total: 2,
+            note: null,
+            errors: [{ path: "b.md", reason: "no permission" }],
+            skipped: [],
+            cancelled: false,
+          },
+        },
+      },
+    });
+    expect(html).toContain("Deleted 1 of 2 · 1 failed");
+    expect(html).toContain("no permission");
+    expect(html).toContain('data-state="bad"');
   });
 });
 
@@ -381,6 +701,17 @@ describe("HealthIssues", () => {
         ...over,
       }),
     );
+
+  it("limits the initial issue list while keeping counts and a focused issue available", () => {
+    const issues = Array.from({ length: 1950 }, (_, i) => ({ ...issue, key: `item-${i}`, path: `note-${i}.md` }));
+    const html = renderIssues({ issues });
+    expect(html).toContain("note-99.md");
+    expect(html).not.toContain("note-100.md");
+    expect(html).toContain("1850 remaining");
+    const focused = renderIssues({ issues, focusKey: "item-1949" });
+    expect(focused).toContain("note-1949.md");
+    expect(focused).not.toContain("note-100.md");
+  });
 
   it("keeps the reasoning collapsed until the row is opened", () => {
     const html = renderIssues();
@@ -467,12 +798,12 @@ describe("HealthIssues", () => {
           key: "doc-10",
           kind: "unregistered",
           severity: "warn",
-          title: "Not on the server yet",
+          title: "Not on the Remote Vault yet",
         },
       ],
     });
     expect(html).toContain("Too large");
-    expect(html).toContain("Not on server yet");
+    expect(html).toContain("Not uploaded yet");
     expect(html).toContain("Errors");
     expect(html).toContain("Warnings");
   });
@@ -480,7 +811,7 @@ describe("HealthIssues", () => {
   it("calms down to a single card when there is nothing to report", () => {
     const html = renderIssues({ issues: [] });
     expect(html).toContain("Nothing needs attention");
-    expect(html).toContain("Every note the server knows about is confirmed");
+    expect(html).toContain("No sync errors reported");
   });
 });
 
@@ -498,7 +829,7 @@ describe("InspectionCard", () => {
     bytes: 4096,
     mtime: 1_699_999_000_000,
     historyBytes: 2048,
-    verdict: "Synced — the server confirmed this note's content.",
+    verdict: "Synced — the Remote Vault confirmed this note's content.",
     issue: null,
   };
   const card = (over: Partial<NoteInspection> = {}) =>
@@ -512,8 +843,8 @@ describe("InspectionCard", () => {
 
   it("leads with the verdict and lays the facts out underneath", () => {
     const html = card();
-    expect(html).toContain("Synced — the server confirmed this note&#x27;s content.");
-    expect(html).toContain("On server");
+    expect(html).toContain("Synced — the Remote Vault confirmed this note&#x27;s content.");
+    expect(html).toContain("On Remote Vault");
     expect(html).toContain("Waiting to push");
     expect(html).toContain("Has unsent edits");
     expect(html).toContain("History size");
@@ -525,7 +856,7 @@ describe("InspectionCard", () => {
   it("says there is no file rather than reporting a state for one", () => {
     const html = card({ exists: false });
     expect(html).toContain("There is no file at this path.");
-    expect(html).not.toContain("On server");
+    expect(html).not.toContain("On Remote Vault");
   });
 
   it("points at the issue row when this note has one", () => {
@@ -537,7 +868,7 @@ describe("InspectionCard", () => {
         kind: "upload-failed",
         severity: "error",
         title: "Couldn't upload",
-        why: "It did not reach the server.",
+        why: "It did not reach the Remote Vault.",
         remedies: ["retry"],
         code: null,
         ...issueBase,
@@ -592,4 +923,37 @@ describe("HealthTimeline", () => {
   it("says nothing has happened rather than drawing an empty frame", () => {
     expect(render([])).toContain("Nothing yet this session");
   });
+});
+
+
+it("shows stored private notes without calling the vault empty or missing locally", () => {
+  const base = snapshot();
+  const html = render(snapshot({
+    report: { ...localReport, verdict: "healthy", counts: {
+      total: 0, synced: 0, pending: 0, failed: 0, unsynced: 0, unreported: 0,
+    } },
+    inventory: { ...base.inventory,
+      local: { notes: 0, folders: 0, files: 0, total: 0 },
+      server: { notes: 0, folders: 0, files: 0, total: 0 },
+      serverStored: { notes: 6974, folders: 1743, files: 0, total: 8717 }, serverState: "current",
+    },
+  }));
+  expect(html).toContain("6,974");
+  expect(html).toContain("Stored on server");
+  expect(html).toContain("No notes accessible to this account");
+  expect(html).not.toContain("This vault is empty");
+  expect(html).not.toContain("Notes and folders match");
+  expect(html).not.toContain("missing from this computer");
+});
+it("keeps basic Health separate from the relocated diagnostic tools", () => {
+  const overview = renderToStaticMarkup(createElement(HealthView, { snapshot: snapshot(), mode: "overview", onOpenDiagnostics: () => {} }));
+  expect(overview).not.toContain("Open Smart diagnostics");
+  expect(overview).not.toContain("Integrity checks");
+  expect(overview).not.toContain("Inspect a note");
+  const diagnostics = renderToStaticMarkup(createElement(HealthView, { snapshot: snapshot(), mode: "diagnostics" }));
+  expect(diagnostics).toContain("Checks &amp; repair tools");
+  expect(diagnostics).toContain("Integrity checks");
+  expect(diagnostics).toContain("Inspect a note");
+  expect(diagnostics).toContain("Recent sync activity");
+  expect(diagnostics).not.toContain("Needs attention");
 });

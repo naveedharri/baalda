@@ -139,6 +139,15 @@ export class AuthManager {
     const code = await ipc.googleOauthAwait();
     const { user, token } = await this.api.exchangeDesktopCode(code);
     if (token) await ipc.keychainSet(this.keychainKey(), token);
+    // Return only after the exchange and keychain write have succeeded. This
+    // invokes the running native process directly, so dev/staging/production
+    // installs cannot steal the handoff through a shared URL scheme. Focus is
+    // a courtesy: an OS refusal must not turn a valid session into an error.
+    try {
+      await ipc.googleOauthReturnToApp();
+    } catch (e) {
+      console.warn("[oauth] sign-in completed but the app could not be focused", e);
+    }
     return user;
   }
 

@@ -7,7 +7,11 @@
 //   - `components/HealthTab.tsx` renders both and drives `HealthActions`.
 //
 // Pure types only. No imports from React, Tauri or the store, so the model and
-// its tests stay dependency-free like `syncRollup.ts`.
+// its tests stay dependency-free like `syncRollup.ts`. (The two check-action
+// types below are a TYPE-only import from `checkActions.ts`, which imports this
+// file back — erased at compile time, so nothing circular survives to runtime.)
+
+import type { CheckActionOutcome, CheckActionPlan } from "./checkActions";
 
 // ── Vault analytics (Rust) ─────────────────────────────────────────────────────
 
@@ -58,8 +62,16 @@ export interface VaultStats {
   links: number;
   /** Wikilinks that point at no note. */
   brokenLinks: number;
-  /** `index.sqlite` (+ its WAL) on disk. */
-  index: { bytes: number };
+  /** `index.sqlite` (+ its WAL) on disk, and what the FILE index costs inside
+   *  it. The two are not additive: `bytes` is the whole file,
+   *  `extractedTextBytes` the part of it the binaries account for. */
+  index: {
+    bytes: number;
+    /** Tree binaries with a `files` row (a .docx, a .mp4, a .csv). */
+    files: number;
+    /** Extracted text: the `file_text` cache plus the `files_fts` bodies. */
+    extractedTextBytes: number;
+  };
   /** The local CRDT store, in aggregate. */
   history: {
     /** Distinct doc ids with any update or snapshot. */
@@ -194,6 +206,8 @@ export interface HealthStage {
 export type HealthIssueKind =
   /** Over the server's per-note cap; retrying cannot help. */
   | "too-large"
+  /** A real local edit was refused after access became read-only. */
+  | "no-write-access"
   /** Content push failed for a reason a retry may fix. */
   | "upload-failed"
   /** The registry could not create/move the server row. */
@@ -209,6 +223,8 @@ export type HealthIssueKind =
   | "left-behind"
   /** A server note could not be written to disk. */
   | "materialize-failed"
+  /** An inbound removal or move was withheld by a safety check. */
+  | "inbound-blocked"
   /** Local CRDT history for a doc the vault no longer has. */
   | "orphan-history";
 
@@ -305,6 +321,27 @@ export interface HealthReport {
   serverHost: string | null;
 }
 
+// ── Device ↔ server inventory ───────────────────────────────────────────────
+
+/** The user-facing inventory comparison on Health. The server half is the
+ * registry's last reconciled view, so it is nullable and carries freshness. */
+export interface HealthInventory {
+  local: { notes: number; folders: number; files: number; total: number };
+  /** False until the supported-file tree has completed; local counts are placeholders. */
+  localReady: boolean;
+  server: { notes: number; folders: number; files: number; total: number } | null;
+  /** Complete stored totals, available only through the owner/admin endpoint. */
+  serverStored?: { notes: number; folders: number; files: number; total: number } | null;
+  serverState: "current" | "updating" | "last-known" | "unavailable";
+  /** Paths present on only one side, separated by transport kind. */
+  deviceOnlyNotes: string[];
+  serverOnlyNotes: string[];
+  deviceOnlyFolders: string[];
+  serverOnlyFolders: string[];
+  deviceOnlyFiles: string[];
+  serverOnlyFiles: string[];
+}
+
 // ── Sync timeline ──────────────────────────────────────────────────────────────
 
 export type SyncLogLevel = "info" | "warn" | "error";
@@ -364,6 +401,8 @@ export interface NoteInspection {
 // ── Actions the page can take ──────────────────────────────────────────────────
 
 export interface HealthActions {
+  downloadFiles(paths: readonly string[]): Promise<void>;
+  removeServerFile(path: string): Promise<void>;
   /** Re-pull the registry and re-run the content pass for everything unconfirmed. */
   syncNow(): Promise<void>;
   /** Re-queue ONE note's content, clearing any remembered permanent failure. */
@@ -397,11 +436,26 @@ export interface HealthActions {
   emptyTrash(): Promise<{ filesRemoved: number; bytesFreed: number }>;
   /** Drop and rebuild the local search index from the files (fixes stale rows). */
   rebuildIndex(): Promise<void>;
+  /**
+   * Run one planned check-level action — a heal or a bulk form of a per-item
+   * button. The plan (and every word it says) comes from
+   * `lib/health/checkActions.ts`; this only supplies the I/O. It never throws:
+   * a failure is a line in the outcome, so a partial run still reports what it
+   * managed to do.
+   */
+  applyCheckAction(
+    plan: CheckActionPlan,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<CheckActionOutcome>;
 }
 
 /** What `useVaultHealth()` hands the tab. */
 export interface VaultHealthSnapshot {
   report: HealthReport;
+  inventory: HealthInventory;
+  /** Local attachment evidence from both the hidden store and surfaced binary
+   * files. Null while either census is still unknown. */
+  hasLocalAttachments?: boolean | null;
   stats: VaultStats | null;
   statsError: string | null;
   /** The integrity checks; null until the first pass lands or when it failed. */

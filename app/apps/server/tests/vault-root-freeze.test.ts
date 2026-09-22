@@ -3,8 +3,9 @@ import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { freezeVaultRoot, seedMember, seedVault } from "./helpers/seed.js";
+import { freezeVaultRoot, seedMember, seedVault, seedVaultGrant } from "./helpers/seed.js";
 import { recordingAppDeps } from "./helpers/app.js";
+import { effectivePermission } from "../src/permissions/resolver.js";
 
 /**
  * "Freeze vault root" — the General-settings latch that closes a vault's top
@@ -223,13 +224,15 @@ describe("frozen vault root", () => {
     });
     expect(nested.status).toBe(201);
 
-    // Second device re-registering the pre-freeze root file still syncs.
+    // Second device re-registering the pre-freeze root file still syncs. 200,
+    // not 201: re-registering the same id at the same path is idempotent now
+    // (PR3), and answers with the row rather than pretending to create it.
     const readopt = await req(owner, "POST", "/api/files", {
       vaultId: vault,
       path: "logo.svg",
       docId,
     });
-    expect(readopt.status).toBe(201);
+    expect(readopt.status).toBe(200);
   });
 });
 
@@ -312,5 +315,126 @@ describe("access-tree listing", () => {
   it("is owner/admin only", async () => {
     expect((await req(member, "GET", `/api/vaults/${vault}/access-tree`)).status).toBe(403);
     expect((await req(owner, "GET", "/api/vaults/nope/access-tree")).status).toBe(404);
+  });
+
+  /**
+   * `files` rows — the tree binaries.
+   *
+   * They are docs on exactly the terms notes are: one `resource_type = 'file'`
+   * namespace in `shares`, one `effectivePermission`, one `locateDoc` union. So
+   * their access was already enforceable while the panel had no row to set it
+   * from — the one gap these cover.
+   */
+  it("lists the vault's files beside its notes", async () => {
+    const folderId = (
+      await (
+        await req(owner, "POST", "/api/folders", { vaultId: vault, name: "Team", path: "Team" })
+      ).json()
+    ).id as string;
+    await req(owner, "POST", "/api/notes", {
+      vaultId: vault,
+      relPath: "Team/brief.md",
+      folderId,
+    });
+    const fileId = (
+      await (
+        await req(owner, "POST", "/api/files", {
+          vaultId: vault,
+          path: "Team/q3.xlsx",
+          folderId,
+        })
+      ).json()
+    ).id as string;
+
+    const body = (await (
+      await req(owner, "GET", `/api/vaults/${vault}/access-tree`)
+    ).json()) as {
+      notes: Array<{ relPath: string }>;
+      files: Array<{ id: string; path: string }>;
+    };
+    expect(body.files).toEqual([{ id: fileId, path: "Team/q3.xlsx" }]);
+    // Its own array, not folded into `notes`: two tables, two path columns.
+    expect(body.notes.map((n) => n.relPath)).toEqual(["Team/brief.md"]);
+  });
+
+  it("still lists a file the caller has shut themselves out of", async () => {
+    const fileId = (
+      await (
+        await req(owner, "POST", "/api/files", { vaultId: vault, path: "deck.pdf" })
+      ).json()
+    ).id as string;
+    expect(
+      (
+        await req(owner, "POST", "/api/shares", {
+          resourceType: "file",
+          resourceId: fileId,
+          principalType: "org",
+          permission: "denied",
+        })
+      ).status,
+    ).toBe(201);
+
+    const body = (await (
+      await req(owner, "GET", `/api/vaults/${vault}/access-tree`)
+    ).json()) as { files: Array<{ id: string }> };
+    expect(body.files.map((f) => f.id)).toContain(fileId);
+  });
+
+  it("takes a per-user share on a file exactly as on a note", async () => {
+    const fileId = (
+      await (
+        await req(owner, "POST", "/api/files", { vaultId: vault, path: "deck.pdf" })
+      ).json()
+    ).id as string;
+    // Private vault, so the member reaches nothing until named.
+    expect(await effectivePermission(member.userId, fileId)).toBe("none");
+
+    expect(
+      (
+        await req(owner, "POST", "/api/shares", {
+          resourceType: "file",
+          resourceId: fileId,
+          principalType: "user",
+          principalId: member.userId,
+          permission: "edit",
+        })
+      ).status,
+    ).toBe(201);
+    expect(await effectivePermission(member.userId, fileId)).toBe("edit");
+
+    // And the panel can read that row back to render the detail pane.
+    const shares = (await (
+      await req(owner, "GET", `/api/shares?resourceType=file&resourceId=${fileId}`)
+    ).json()) as { shares: Array<{ principal_id: string; permission: string }> };
+    expect(shares.shares).toHaveLength(1);
+    expect(shares.shares[0].permission).toBe("edit");
+    const resolved = (await (
+      await req(owner, "GET", `/api/resolve-access?resourceType=file&resourceId=${fileId}`)
+    ).json()) as { members: Array<{ userId: string; permission: string }> };
+    expect(resolved.members.find((m) => m.userId === member.userId)?.permission).toBe("edit");
+  });
+
+  it("caps a file at view through an org lock, like a note", async () => {
+    // Read-only on an item inside a SHARED vault is a lock, not a view grant —
+    // a grant only ever raises, and the vault's edit already reached the file.
+    await seedVaultGrant(org, "edit");
+    const fileId = (
+      await (
+        await req(owner, "POST", "/api/files", { vaultId: vault, path: "deck.pdf" })
+      ).json()
+    ).id as string;
+    expect(await effectivePermission(member.userId, fileId)).toBe("edit");
+
+    expect(
+      (
+        await req(owner, "POST", "/api/shares", {
+          resourceType: "file",
+          resourceId: fileId,
+          principalType: "org",
+          permission: "locked",
+        })
+      ).status,
+    ).toBe(201);
+    expect(await effectivePermission(member.userId, fileId)).toBe("view");
   });
 });

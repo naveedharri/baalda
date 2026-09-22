@@ -10,9 +10,20 @@ import {
 } from "../../permissions/lookup.js";
 import {
   buildAccessContext,
+  createResolverCache,
   resolveAccessForUser,
 } from "../../permissions/resolver.js";
 import { getSession } from "../session.js";
+import {
+  AccessManagementError,
+  applyBulkAccess,
+  getJoinDefault,
+  nextAccessRevision,
+  setJoinDefault,
+  type AccessAudience,
+  type AccessMode,
+  type AccessResource,
+} from "../../permissions/access-management.js";
 
 /**
  * Share management API (session-authenticated) — spec 04 §3/§4.
@@ -22,6 +33,56 @@ import { getSession } from "../session.js";
  */
 
 type Queryable = Pick<pg.Pool, "query">;
+
+type SummaryResource = { resourceType: "folder" | "file" | "vault"; resourceId: string };
+type SummaryTarget = { resourceType: "folder" | "file"; resourceId: string };
+
+/** Expand compact access roots in one query. A vault root subsumes everything
+ * else, and folder roots include their descendant folders and documents. */
+async function summaryTargets(
+  orgId: string,
+  resources: SummaryResource[],
+): Promise<SummaryTarget[]> {
+  if (resources.some((resource) => resource.resourceType === "vault")) {
+    const { rows } = await pool.query<{ resource_type: "folder" | "file"; resource_id: string }>(
+      `SELECT 'folder'::text AS resource_type, f.id AS resource_id
+         FROM folders f JOIN vaults v ON v.id = f.vault_id
+        WHERE v.organization_id = $1
+       UNION
+       SELECT 'file'::text, n.id FROM notes n JOIN vaults v ON v.id = n.vault_id
+        WHERE v.organization_id = $1 AND n.deleted_at IS NULL
+       UNION
+       SELECT 'file'::text, fi.id FROM files fi JOIN vaults v ON v.id = fi.vault_id
+        WHERE v.organization_id = $1`,
+      [orgId],
+    );
+    return rows.map((row) => ({ resourceType: row.resource_type, resourceId: row.resource_id }));
+  }
+
+  const folderIds = [...new Set(resources.filter((r) => r.resourceType === "folder").map((r) => r.resourceId))];
+  const fileIds = [...new Set(resources.filter((r) => r.resourceType === "file").map((r) => r.resourceId))];
+  const { rows } = await pool.query<{ resource_type: "folder" | "file"; resource_id: string }>(
+    `WITH RECURSIVE subtree AS (
+       SELECT id, vault_id FROM folders WHERE id = ANY($1::text[])
+       UNION
+       SELECT f.id, f.vault_id FROM folders f JOIN subtree s ON f.parent_id = s.id
+     )
+     SELECT 'folder'::text AS resource_type, id AS resource_id FROM subtree
+     UNION
+     SELECT 'file'::text, n.id FROM notes n JOIN subtree s ON s.id = n.folder_id
+      WHERE n.deleted_at IS NULL
+     UNION
+     SELECT 'file'::text, fi.id FROM files fi JOIN subtree s ON s.id = fi.folder_id
+     UNION
+     SELECT 'file'::text, n.id FROM notes n JOIN vaults v ON v.id = n.vault_id
+      WHERE n.id = ANY($2::text[]) AND n.deleted_at IS NULL AND v.organization_id = $3
+     UNION
+     SELECT 'file'::text, fi.id FROM files fi JOIN vaults v ON v.id = fi.vault_id
+      WHERE fi.id = ANY($2::text[]) AND v.organization_id = $3`,
+    [folderIds, fileIds, orgId],
+  );
+  return rows.map((row) => ({ resourceType: row.resource_type, resourceId: row.resource_id }));
+}
 
 /** The three postures the vault-level control offers. */
 type TeamAccessMode = "open" | "readonly" | "private";
@@ -53,7 +114,7 @@ const MODE_PERMISSION: Record<TeamAccessMode, "edit" | "view" | "denied"> = {
  * already follows when it kicks on view/locked/denied and never on edit.
  */
 function grantRank(permission: string | null | undefined): number {
-  return permission === "edit" ? 2 : permission === "view" ? 1 : 0;
+  return permission === "edit" ? 2 : permission === "view" || permission === "readonly" ? 1 : 0;
 }
 
 /**
@@ -73,7 +134,7 @@ export interface TeamAccessOverride {
   vaultId: string;
   resourceType: "folder" | "file";
   resourceId: string;
-  permission: "edit" | "view" | "locked" | "denied";
+  permission: "edit" | "view" | "locked" | "denied" | "readonly";
 }
 
 /**
@@ -103,7 +164,7 @@ async function teamOverrides(
     vault_id: string;
     resource_type: "folder" | "file";
     resource_id: string;
-    permission: "edit" | "view" | "locked" | "denied";
+    permission: "edit" | "view" | "locked" | "denied" | "readonly";
   }>(
     `SELECT s.id, loc.vault_id, s.resource_type, s.resource_id, s.permission
        FROM shares s
@@ -211,6 +272,13 @@ export interface ShareDeps {
 export function createShareRoutes(deps: ShareDeps): Hono {
   const app = new Hono();
 
+  const accessError = (c: { json: (body: unknown, status: 400 | 403 | 404) => Response }, error: unknown) => {
+    if (error instanceof AccessManagementError) {
+      return c.json({ error: error.code, message: error.message }, error.status);
+    }
+    throw error;
+  };
+
   async function canManage(
     userId: string,
     // 'vault' = the vault-wide grant (resourceId is the organization id).
@@ -250,6 +318,166 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         : [info.vaultId];
     return { ok: true, organizationId: info.organizationId, vaultIds };
   }
+
+  app.get("/orgs/:orgId/access-default", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    try {
+      return c.json({ mode: await getJoinDefault(c.req.param("orgId"), session.userId) });
+    } catch (error) {
+      return accessError(c, error);
+    }
+  });
+
+  app.put("/orgs/:orgId/access-default", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const body = await c.req.json().catch(() => ({}));
+    const mode = body.mode as AccessMode;
+    if (mode !== "private" && mode !== "readonly" && mode !== "open") {
+      return c.json({ error: "invalid_mode", message: "mode must be private, readonly, or open" }, 400);
+    }
+    try {
+      return c.json({ mode: await setJoinDefault(c.req.param("orgId"), session.userId, mode) });
+    } catch (error) {
+      return accessError(c, error);
+    }
+  });
+
+  app.post("/orgs/:orgId/access/bulk", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const body = await c.req.json().catch(() => ({}));
+    const mode = body.mode as AccessMode;
+    if (mode !== "private" && mode !== "readonly" && mode !== "open") {
+      return c.json({ error: "invalid_mode", message: "mode must be private, readonly, or open" }, 400);
+    }
+    if (!Array.isArray(body.resources) || !body.audience || typeof body.audience !== "object") {
+      return c.json({ error: "invalid_request", message: "resources and audience are required" }, 400);
+    }
+    const resources: AccessResource[] = body.resources;
+    const audience: AccessAudience = body.audience;
+    if (
+      resources.some(
+        (resource) =>
+          !resource ||
+          (resource.resourceType !== "folder" &&
+            resource.resourceType !== "file" &&
+            resource.resourceType !== "vault") ||
+          typeof resource.resourceId !== "string" ||
+          !resource.resourceId,
+      ) ||
+      (audience.type !== "org" &&
+        (audience.type !== "users" || !Array.isArray(audience.userIds)))
+    ) {
+      return c.json({ error: "invalid_request", message: "Invalid resources or audience" }, 400);
+    }
+    try {
+      return c.json(
+        await applyBulkAccess(
+          {
+            organizationId: c.req.param("orgId"),
+            actorUserId: session.userId,
+            resources,
+            audience,
+            mode,
+          },
+          deps,
+        ),
+      );
+    } catch (error) {
+      return accessError(c, error);
+    }
+  });
+
+  /** Resolve selected people's current mode across compact resource roots.
+   * Folder and vault descendants are expanded on the server, so selecting a
+   * 7,000-note vault remains one HTTP request and cannot create a client-side
+   * request burst. Resolver work is pooled and shares one request cache. */
+  app.post("/orgs/:orgId/access/summary", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+    const body = await c.req.json().catch(() => ({}));
+    if (!Array.isArray(body.resources) || !Array.isArray(body.userIds)) {
+      return c.json({ error: "invalid_request", message: "resources and userIds are required" }, 400);
+    }
+    const resources = body.resources as SummaryResource[];
+    const userIds: string[] = [...new Set(
+      (body.userIds as unknown[]).filter((id): id is string => typeof id === "string" && !!id),
+    )];
+    if (
+      resources.length === 0 || resources.length > 10_000 ||
+      userIds.length === 0 || userIds.length > 100 ||
+      resources.some((resource) =>
+        !resource ||
+        (resource.resourceType !== "folder" && resource.resourceType !== "file" && resource.resourceType !== "vault") ||
+        typeof resource.resourceId !== "string" || !resource.resourceId
+      )
+    ) {
+      return c.json({ error: "invalid_request", message: "Invalid access summary scope" }, 400);
+    }
+
+    // Every compact root must be manageable by this actor and belong to the
+    // organization named by the route. This also prevents a foreign id from
+    // seeding the recursive subtree query below.
+    for (const resource of resources) {
+      const gate = await canManage(session.userId, resource.resourceType, resource.resourceId);
+      if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
+      if (gate.organizationId !== orgId) return c.json({ error: "Resource is outside this vault" }, 400);
+    }
+
+    const { rows: members } = await pool.query<{ user_id: string; role: string }>(
+      `SELECT "userId" AS user_id, role FROM member
+        WHERE "organizationId" = $1 AND "userId" = ANY($2::text[])`,
+      [orgId, userIds],
+    );
+    if (members.length !== userIds.length) {
+      return c.json({ error: "invalid_request", message: "Every selected person must be a vault member" }, 400);
+    }
+    const roles = new Map(members.map((member) => [member.user_id, member.role] as const));
+    const targets = await summaryTargets(orgId, resources);
+    const cache = createResolverCache();
+    let agreed: "open" | "readonly" | "private" | null = null;
+    let mixed = false;
+    let cursor = 0;
+    const note = (permission: "edit" | "view" | "none") => {
+      const mode = permission === "edit" ? "open" : permission === "view" ? "readonly" : "private";
+      if (agreed === null) agreed = mode;
+      else if (agreed !== mode) mixed = true;
+    };
+    const worker = async () => {
+      while (!mixed) {
+        const index = cursor++;
+        if (index >= targets.length) return;
+        const target = targets[index];
+        const ctx = await buildAccessContext(target.resourceType, target.resourceId, pool, cache);
+        if (!ctx) continue; // deleted between expansion and resolution
+        for (const userId of userIds) {
+          note((await resolveAccessForUser(ctx, userId, roles.get(userId)!, pool, cache)).permission);
+          if (mixed) return;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
+
+    if (agreed === null) {
+      // An empty vault still has an authoritative posture and personal vault
+      // grants. A synthetic root has no creator/folder/item overlay, exactly the
+      // facts available for content that does not exist yet.
+      const emptyCtx = {
+        organizationId: orgId,
+        docId: null,
+        folderIds: [],
+        createdBy: null,
+        createdAt: new Date(),
+      };
+      for (const userId of userIds) {
+        note((await resolveAccessForUser(emptyCtx, userId, roles.get(userId)!, pool, cache)).permission);
+      }
+    }
+    return c.json({ mode: mixed ? "mixed" : agreed ?? "private" });
+  });
 
   // Create or update a share (upsert on the unique resource+principal key).
   // permission 'locked' is the deny overlay (spec 04 §3 extension): it caps
@@ -346,12 +574,13 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     }
 
     const id = randomUUID();
+    const accessRevision = await nextAccessRevision(pool, gate.organizationId!);
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO shares
-         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by, access_revision)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
-       DO UPDATE SET permission = EXCLUDED.permission
+       DO UPDATE SET permission = EXCLUDED.permission, access_revision = EXCLUDED.access_revision
        RETURNING id`,
       [
         id,
@@ -362,6 +591,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
         principalId,
         permission,
         session.userId,
+        accessRevision,
       ],
     );
 
@@ -462,7 +692,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       `SELECT s.id, s.resource_type, s.resource_id, s.principal_type, s.principal_id,
               s.permission, s.created_by, s.created_at
          FROM shares s
-        WHERE s.permission IN ('locked', 'denied')
+        WHERE s.permission IN ('locked', 'denied', 'readonly')
           AND (
             (s.resource_type = 'folder' AND s.resource_id IN
                (SELECT id FROM folders WHERE vault_id = $1))
@@ -596,6 +826,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      const accessRevision = await nextAccessRevision(client, orgId);
 
       const overrides = await teamOverrides(client, orgId, vaultIds);
       const dead = await deadNoteOverrideIds(client, orgId, vaultIds);
@@ -629,11 +860,11 @@ export function createShareRoutes(deps: ShareDeps): Hono {
 
       await client.query(
         `INSERT INTO shares
-           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
-         VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6)
+           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by, access_revision)
+         VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6, $7)
          ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
-         DO UPDATE SET permission = EXCLUDED.permission`,
-        [randomUUID(), orgId, orgId, orgId, permission, session.userId],
+         DO UPDATE SET permission = EXCLUDED.permission, access_revision = EXCLUDED.access_revision`,
+        [randomUUID(), orgId, orgId, orgId, permission, session.userId, accessRevision],
       );
 
       await client.query("COMMIT");

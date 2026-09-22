@@ -85,6 +85,9 @@ export type DocEditedHook = (
   vaultId: string,
   docId: string,
   userId: string | null,
+  /** The transaction origin's `source` tag (`bulk`, `mcp`, …) when the write came
+   *  from the server itself; undefined for an ordinary client edit. */
+  source?: string | null,
 ) => void;
 
 /**
@@ -99,18 +102,24 @@ export type DocEditedHook = (
  * always accepts one more message, a doc over it accepts none and is a repair
  * job (`POST /api/notes/:id/reset-crdt`).
  *
- * The doc length is `Y.Text`'s own counter, so asking costs nothing.
+ * BOTH ceilings are in BYTES, and the doc side has to be MEASURED in bytes —
+ * `Y.Text.length` counts UTF-16 code units, which is not the same number the cap
+ * is written in. A vault of CJK or emoji notes is 2-4 bytes per unit, so a doc
+ * comparing its unit count against a byte cap is admitted well past the limit
+ * this is meant to be a wall at. The caller passes the text; `Buffer.byteLength`
+ * is the honest size of what would be written to disk.
  */
 export function noteSizeRefusal(
   updateBytes: number,
-  docChars: number,
+  docText: string,
   capBytes: number = config.maxNoteMb * 1024 * 1024,
 ): string | null {
   if (updateBytes > capBytes) {
     return `Rejecting oversized sync message: ${updateBytes} bytes (cap ${capBytes})`;
   }
-  if (docChars > capBytes) {
-    return `Refusing writes to oversized doc: ${docChars} chars (cap ${capBytes}) — needs /reset-crdt`;
+  const docBytes = Buffer.byteLength(docText, "utf8");
+  if (docBytes > capBytes) {
+    return `Refusing writes to oversized doc: ${docBytes} bytes (cap ${capBytes}) — needs /reset-crdt`;
   }
   return null;
 }
@@ -147,7 +156,7 @@ export function createSyncServer(
     async beforeHandleMessage(data) {
       const refusal = noteSizeRefusal(
         data.update.byteLength,
-        data.document.getText("content").length,
+        data.document.getText("content").toString(),
       );
       if (refusal) {
         console.error(`${refusal} for ${data.documentName}`);
@@ -282,7 +291,27 @@ export function createSyncServer(
       if (data.transactionOrigin === LOAD_ORIGIN) return;
       const parsed = parseDocName(data.documentName);
       if (!parsed) return;
-      await appendUpdate(parsed.docId, data.update);
+      // NEVER let this reject. Hocuspocus calls `onChange` unawaited AND
+      // uncaught (`handleDocumentUpdate` → `this.hooks("onChange", …)`), so a
+      // rejection here is an unhandled rejection, which Node 22 turns into a
+      // process exit — a pool-exhaustion blip or a slow compact would take the
+      // whole server down and drop every in-memory doc whose updates had not
+      // been appended yet.
+      //
+      // Swallowing it is also the SAFE direction for the client: the update
+      // never reached the log, so the client keeps a clock the server lacks and
+      // `loadDocDiff` reports `clientAhead` on its next connect — the doc is
+      // named on `ready.behind` and re-pushed. A crash loses that signal for
+      // every other doc too.
+      try {
+        await appendUpdate(parsed.docId, data.update);
+      } catch (err) {
+        console.error(
+          `[sync] failed to persist an update for ${data.documentName}; the client stays ahead and will re-push:`,
+          err,
+        );
+        return;
+      }
       // Re-derive links + embedding for this note (debounced, best-effort).
       // Also covers lazy indexing: a doc missing from note_index gets a row on
       // its next store.
@@ -304,8 +333,9 @@ export function createSyncServer(
       // update) lands as `{}`, i.e. anonymous.
       if (onDocEdited) {
         try {
-          const editorId = (data.context as Partial<SyncContext> | undefined)?.userId ?? null;
-          onDocEdited(parsed.vaultId, parsed.docId, editorId);
+          const ctx = data.context as (Partial<SyncContext> & { source?: string }) | undefined;
+          const editorId = ctx?.userId ?? null;
+          onDocEdited(parsed.vaultId, parsed.docId, editorId, ctx?.source ?? null);
         } catch (err) {
           console.error("onDocEdited hook failed:", err);
         }

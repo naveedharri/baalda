@@ -67,6 +67,18 @@ export interface ContentUploadDeps {
    * short-circuit and the size ceiling.
    */
   readFile?(relPath: string): Promise<string>;
+  /**
+   * Keep a recoverable copy of a note's text under `.context/trash/<stamp>/`
+   * (`ipc.writeTrashCopy`, epoch-pinned), answering where it landed.
+   *
+   * Used for exactly one case: a doc this user may READ but not write, whose
+   * file on disk holds bytes the CRDT does not. The pull's `flushEgest` is about
+   * to put the server's copy there, and the server is the truth for a doc you
+   * cannot write — but destroying the local bytes without a copy is not
+   * something an app may do. Optional, like {@link readFile}: a host that can't
+   * make a copy reports the problem and leaves the durable file untouched.
+   */
+  writeTrashCopy?(relPath: string, stamp: string, content: string): Promise<string>;
 }
 
 /**
@@ -115,11 +127,13 @@ export interface UploadFailure {
   docId: string;
   relPath: string;
   reason: string;
+  /** Machine-readable cause for a terminal refusal. `permanent` only controls
+   * retry scheduling; it must never be used as the user-facing diagnosis. */
+  kind?: "too-large" | "no-write-access";
   /**
-   * The failure is a property of the FILE, not of the network: retrying on the
-   * next `ready` cannot fix it (today: the note is over {@link MAX_NOTE_BYTES}).
-   * The session remembers these so they are not re-queued every connect, and
-   * they never count toward the failure streak that pauses a run.
+   * Retrying the same bytes under the same access cannot fix this. The session
+   * remembers these so they are not re-queued every connect, and they never
+   * count toward the failure streak that pauses a run.
    */
   permanent?: boolean;
 }
@@ -177,6 +191,13 @@ export interface ContentUploaderOptions {
    *  apply already folded the external edit in), so "the file matches the doc"
    *  does not mean "nothing to send" — connect and flush regardless. */
   mustConnect?: (docId: string) => boolean;
+  /**
+   * True only when the file is a 0-byte placeholder this session created for a
+   * server note and could not hydrate yet. A read-only pull may replace that
+   * placeholder with canonical server text without making a recovery copy; an
+   * arbitrary empty file is still treated as a possible local deletion.
+   */
+  isUnhydratedPlaceholder?: (docId: string, relPath: string, fileText: string) => boolean;
   progress?: SyncProgressSink;
   /**
    * Called once per doc that could not be pushed, as it happens.
@@ -406,7 +427,7 @@ export class ContentUploader {
         relPath,
         `too large to sync (${mb} MB of edit history; the limit is ${cap} MB) — ` +
           `reset this note's history to sync it again`,
-        { permanent: true },
+        { permanent: true, kind: "too-large" },
       );
       return false;
     }
@@ -434,6 +455,7 @@ export class ContentUploader {
           const cap = Math.round(MAX_NOTE_BYTES / (1024 * 1024));
           this.fail(docId, relPath, `too large to sync (${mb} MB; the limit is ${cap} MB)`, {
             permanent: true,
+            kind: "too-large",
           });
           return false;
         }
@@ -529,6 +551,20 @@ export class ContentUploader {
       // so a doc whose grant was downgraded while it still held local-only ops
       // failed here on every pass, never reached `markPushed`, and came straight
       // back on the next `ready.behind` — a re-sync that could never finish.
+      // A read-only doc skipped both the seed and the ingest, so anything the
+      // file holds that the doc does not is about to be overwritten by the
+      // flush below and is unsendable besides. Keep a copy and say so.
+      if (push.readOnly) {
+        const safeToReplace = await this.keepUnsendableEdit(docId, relPath, bridge);
+        if (!safeToReplace) {
+          // The file is still the durable copy. Do not flush the Remote Vault's
+          // state over it unless the differing bytes were preserved first.
+          bridge.cancelEgest();
+          this.progress.doc(docId, "error");
+          this.progress.item("failed");
+          return false;
+        }
+      }
       const flushed = push.readOnly || (await push.whenFlushed(this.flushTimeoutMs));
       // Whatever the server had for this doc has landed in the Y.Doc by now;
       // write it out so the .md on disk matches. (The watcher will see this
@@ -586,11 +622,73 @@ export class ContentUploader {
     this.progress.item("ok");
   }
 
+  /**
+   * The file diverges from a doc this user cannot write: save it, report it.
+   *
+   * `flushEgest` (right after this) writes the server's state over the file.
+   * That is the right answer for a view-only grant — the server's copy IS the
+   * content — but the bytes on disk were somebody's work, and the read-only
+   * path deliberately skips the ingest that would have merged them, so they
+   * exist nowhere else. A failed read or recovery copy stops the replacement:
+   * the durable file stays in place and the doc remains unconfirmed so Retry
+   * can attempt the preservation step again.
+   */
+  private async keepUnsendableEdit(
+    docId: string,
+    relPath: string,
+    bridge: NoteBridge,
+  ): Promise<boolean> {
+    const read = this.opts.deps.readFile;
+    if (!read) return false;
+    let fileText: string;
+    try {
+      fileText = await read(relPath);
+    } catch {
+      return false; // nothing readable to compare or safely replace
+    }
+    if (fileText === bridge.serialize()) return true; // converged — nothing to keep
+    // The registry created this file as an empty landing place for a remote
+    // note. It is not a local delete/edit, and keeping a copy of zero bytes both
+    // invents a warning and prevents the canonical pull from ever reaching
+    // disk. The caller's provenance callback is deliberately stricter than
+    // `fileText.length === 0`: a real user truncation must still be recovered.
+    if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return true;
+    let dest: string | null = null;
+    try {
+      dest =
+        (await this.opts.deps.writeTrashCopy?.(relPath, trashStamp(), fileText)) ?? null;
+    } catch (e) {
+      console.warn(`[upload] couldn't keep a copy of ${relPath}`, e);
+    }
+    this.report({
+      docId,
+      relPath,
+      reason:
+        "edit could not be sent: no write access" +
+        (dest ? `; copy saved to ${dest}` : "; the local copy could not be saved either"),
+      permanent: true,
+      kind: "no-write-access",
+    });
+    return dest != null;
+  }
+
+  /** Record a failure WITHOUT touching the progress counters or the streak —
+   *  for a doc that still settles (a read-only push is confirmed by the
+   *  server's own copy) but whose local bytes had nowhere to go. */
+  private report(failure: UploadFailure): void {
+    this.failures.push(failure);
+    try {
+      this.opts.onFailure?.(failure);
+    } catch (e) {
+      console.warn("[upload] failure listener threw", e);
+    }
+  }
+
   private fail(
     docId: string,
     relPath: string,
     reason: string,
-    opts: { permanent?: boolean } = {},
+    opts: { permanent?: boolean; kind?: UploadFailure["kind"] } = {},
   ): void {
     // A failure is always news, so a lazy run announces itself before reporting it.
     this.announce();
@@ -599,6 +697,7 @@ export class ContentUploader {
       relPath,
       reason,
       ...(opts.permanent ? { permanent: true } : {}),
+      ...(opts.kind ? { kind: opts.kind } : {}),
     };
     this.failures.push(failure);
     // A listener must never be able to change what the run does next.
@@ -620,6 +719,12 @@ export class ContentUploader {
       );
     }
   }
+}
+
+/** One `.context/trash/<stamp>/` folder per save, the same shape the disk-delete
+ *  drain and the inbound trash executor use. */
+function trashStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 function msg(e: unknown): string {

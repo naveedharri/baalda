@@ -1,9 +1,13 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clampSidebarWidth,
   SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
+  readSidebarHidden,
+  writeSidebarHidden,
 } from "./prefs";
 
 // The sidebar width is dragged by the user and restored from localStorage, so
@@ -61,5 +65,29 @@ describe("clampSidebarWidth", () => {
       const once = clampSidebarWidth(w, 1400);
       expect(clampSidebarWidth(once, 1400)).toBe(once);
     }
+  });
+});
+
+describe("sidebar visibility preference", () => {
+  const values = new Map<string, string>();
+
+  beforeEach(() => {
+    values.clear();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("defaults to shown and persists either explicit state", () => {
+    localStorage.removeItem("context.sidebarHidden");
+    expect(readSidebarHidden()).toBe(false);
+    writeSidebarHidden(true);
+    expect(readSidebarHidden()).toBe(true);
+    writeSidebarHidden(false);
+    expect(readSidebarHidden()).toBe(false);
   });
 });

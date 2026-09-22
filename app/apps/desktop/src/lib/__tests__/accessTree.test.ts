@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  accessResourceType,
   accessRowName,
   ancestorPaths,
   entriesFromServer,
@@ -38,6 +39,7 @@ const root = (children: TreeNode[]): TreeNode => ({
 const allRegistered = {
   folderId: (p: string) => `folder-${p}`,
   docId: (p: string) => `doc-${p}`,
+  fileId: (p: string) => `file-${p}`,
 };
 
 /** The server's structure listing for the tree used across these tests. */
@@ -111,7 +113,7 @@ describe("Access panel item tree", () => {
     const rows = rowsFromEntries(entries, new Set(["Docs"]));
     expect(rows.find((r) => r.path === "Docs")?.key).toBe("folder:f-docs");
     const note = rows.find((r) => r.path === "Docs/spec.md");
-    expect(note?.key).toBe("file:d-spec");
+    expect(note?.key).toBe("note:d-spec");
     expect(note?.name).toBe("spec");
   });
 
@@ -123,6 +125,87 @@ describe("Access panel item tree", () => {
 
   it("returns nothing for an empty vault", () => {
     expect(rowsFromEntries([], new Set())).toEqual([]);
+  });
+});
+
+describe("Access panel file rows", () => {
+  // A `files` row is a doc like a note — same `shares.resource_type`, same
+  // resolver — so the panel administers it on the same footing. These hold the
+  // three places that could quietly drop it again.
+  const withFiles = {
+    folders: [{ id: "f-docs", path: "Docs" }],
+    notes: [{ id: "d-spec", relPath: "Docs/spec.md" }],
+    files: [{ id: "x-deck", path: "Docs/deck.pdf" }],
+  };
+
+  it("keeps the server's file rows, with their extension and their own key", () => {
+    const rows = rowsFromEntries(entriesFromServer(withFiles), new Set(["Docs"]));
+    const deck = rows.find((r) => r.path === "Docs/deck.pdf");
+    expect(deck?.kind).toBe("file");
+    expect(deck?.id).toBe("x-deck");
+    // The `.md` strip is a NOTE rule: a file whose name lost its extension
+    // would be a different file to everyone reading the row.
+    expect(deck?.name).toBe("deck.pdf");
+    expect(deck?.key).toBe("file:x-deck");
+    expect(deck?.expandable).toBe(false);
+  });
+
+  it("sorts files in with notes, alphabetically, under the folders", () => {
+    const rows = rowsFromEntries(
+      entriesFromServer({
+        folders: [{ id: "f", path: "Zebra" }],
+        notes: [{ id: "d", relPath: "beta.md" }],
+        files: [
+          { id: "x1", path: "alpha.pdf" },
+          { id: "x2", path: "gamma.xlsx" },
+        ],
+      }),
+      new Set(),
+    );
+    expect(rows.map((r) => r.path)).toEqual(["Zebra", "alpha.pdf", "beta.md", "gamma.xlsx"]);
+  });
+
+  it("makes a folder holding only files expandable", () => {
+    const rows = rowsFromEntries(
+      entriesFromServer({
+        folders: [{ id: "f", path: "Assets" }],
+        notes: [],
+        files: [{ id: "x", path: "Assets/logo.png" }],
+      }),
+      new Set(),
+    );
+    expect(rows[0].expandable).toBe(true);
+  });
+
+  it("lists no file rows against a server too old to send them", () => {
+    const rows = rowsFromEntries(entriesFromServer(serverTree), new Set());
+    expect(rows.every((r) => r.kind !== "file")).toBe(true);
+  });
+
+  it("emits file rows from the local tree, skipping the unregistered ones", () => {
+    // The fallback resolves a binary through the `files` map, never the doc
+    // map: with no `files` row there is no id for a share to name, so the row
+    // is left out rather than offered and refused.
+    const local = root([
+      dir("Docs", [file("Docs/deck.pdf"), file("Docs/spec.md"), file("Docs/raw.mp4")]),
+    ]);
+    const rows = rowsFromEntries(
+      entriesFromTree(local, {
+        folderId: (p) => `folder-${p}`,
+        docId: (p) => `doc-${p}`,
+        fileId: (p) => (p === "Docs/raw.mp4" ? null : `file-${p}`),
+      }),
+      new Set(["Docs"]),
+    );
+    expect(rows.map((r) => r.path)).toEqual(["Docs", "Docs/deck.pdf", "Docs/spec.md"]);
+    expect(rows.find((r) => r.path === "Docs/deck.pdf")?.kind).toBe("file");
+    expect(rows.find((r) => r.path === "Docs/spec.md")?.kind).toBe("note");
+  });
+
+  it("maps both kinds onto the one share resource type", () => {
+    expect(accessResourceType("folder")).toBe("folder");
+    expect(accessResourceType("note")).toBe("file");
+    expect(accessResourceType("file")).toBe("file");
   });
 });
 
@@ -158,6 +241,7 @@ describe("Access panel fallback to the local tree", () => {
       entriesFromTree(tree, {
         folderId: (p) => (p === "Docs" ? null : `folder-${p}`),
         docId: (p) => `doc-${p}`,
+        fileId: (p) => `file-${p}`,
       }),
       new Set(["Docs"]),
     );

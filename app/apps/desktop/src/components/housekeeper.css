@@ -1,0 +1,135 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+.housekeeper-panel { margin: 20px 0; padding: 18px; border: 1px solid var(--border); border-radius: 10px; }
+.housekeeper-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.housekeeper-heading h3 { margin: 0; }
+.housekeeper-badge { font-size: 11px; border: 1px solid var(--border); border-radius: 12px; padding: 2px 8px; }
+.housekeeper-panel p { font-size: 13px; line-height: 1.5; }
+.housekeeper-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; margin: 14px 0; }
+.housekeeper-field select { max-width: 100%; padding: 8px; color: inherit; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px; }
+.housekeeper-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.5; }
+.housekeeper-consent input { margin-top: 3px; }
+.housekeeper-detail { color: var(--text-secondary); overflow-wrap: anywhere; }
+.housekeeper-suggestions { list-style: none; padding: 0; }
+.housekeeper-suggestions li { border-top: 1px solid var(--border); padding: 14px 0; }
+.housekeeper-diff { display: grid; gap: 6px; font-family: monospace; overflow-wrap: anywhere; font-size: 13px; }
+.housekeeper-diff del { opacity: .7; }
+.housekeeper-diff ins { text-decoration: none; font-weight: 600; }
+.housekeeper-actions { display: flex; gap: 8px; }
+.housekeeper-panel { margin: 0; padding: 28px; border-radius: 16px; background: var(--bg-surface); }
+.housekeeper-panel .housekeeper-eyebrow { font-size: 10px; letter-spacing: .12em; font-weight: 600; color: var(--text-secondary); margin: 0 0 12px; }
+.housekeeper-heading h3 { font-size: 24px; letter-spacing: -.03em; }
+.housekeeper-panel .housekeeper-intro { max-width: 640px; font-size: 14px; color: var(--text-secondary); margin-bottom: 24px; }
+.housekeeper-callout { background: var(--bg-secondary); border: 1px solid var(--border); padding: 20px; border-radius: 12px; }
+.housekeeper-callout p { margin-top: 0; }
+.housekeeper-card { padding: 22px 0; border-top: 1px solid var(--border); }
+.housekeeper-card:last-of-type { padding-bottom: 0; }
+.housekeeper-card h4 { font-size: 16px; margin: 0; }
+.housekeeper-actions { align-items: center; flex-wrap: wrap; margin-top: 16px; gap: 10px; }
+.housekeeper-panel button { min-height: 36px; border-radius: 9px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+.housekeeper-panel button:disabled { opacity: .45; cursor: default; }
+.housekeeper-panel button:focus-visible, .housekeeper-panel select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.housekeeper-priority { font-size: 11px; padding: 4px 8px; border-radius: 6px; background: var(--bg-secondary); color: var(--text-secondary); }
+.housekeeper-priority-now { color: var(--text-primary); font-weight: 600; border: 1px solid var(--border); }
+.housekeeper-consent { margin: 16px 0; max-width: 640px; }
+@media (max-width: 600px) { .housekeeper-panel { padding: 18px; } }
+.housekeeper-announcement { padding: 16px 18px; margin: 20px 0; border-radius: 12px; background: color-mix(in srgb, var(--accent) 9%, var(--bg-surface)); border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); font-size: 14px; }
+.housekeeper-announcement p { color: var(--text-secondary); margin-bottom: 0; }
+.housekeeper-field input { padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); color: inherit; }
+.housekeeper-actions a { font-size: 12px; color: var(--accent); }
+/* Compact settings layout: connection first, review tools below. */
+.housekeeper-panel { border: 0; padding: 0; background: transparent; }
+.housekeeper-heading h3 { font-size: 20px; }
+.housekeeper-panel .housekeeper-intro { font-size: 13px; margin: 6px 0 18px; }
+.housekeeper-announcement { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin: 0 0 20px; font-size: 12px; border-radius: 8px; }
+.housekeeper-announcement .housekeeper-badge { font-size: 9px; font-weight: 700; border: 0; color: var(--accent); padding: 0; }
+.housekeeper-card { border: 1px solid var(--border); border-radius: 12px; margin: 12px 0; padding: 18px; }
+.housekeeper-card:last-of-type { padding-bottom: 18px; }
+.assistant-provider-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.assistant-provider-heading .housekeeper-detail { display: block; font-size: 11px; margin-top: 3px; }
+.assistant-key-row { display: flex; align-items: center; gap: 8px; }
+.assistant-key-row .housekeeper-field { flex: 1; min-width: 80px; margin: 0; }
+.assistant-key-row .housekeeper-actions { margin: 0; flex-wrap: nowrap; gap: 8px; }
+.assistant-key-row button { white-space: nowrap; }
+.assistant-key-row a { white-space: nowrap; text-decoration: none; }
+.housekeeper-panel .housekeeper-field select { appearance: none; min-height: 38px; border-radius: 8px; padding: 9px 32px 9px 12px; background: var(--bg-secondary); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23888888' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; }
+.assistant-privacy { font-size: 11px; color: var(--text-secondary); }
+.assistant-privacy summary { cursor: pointer; }
+.housekeeper-panel .assistant-privacy p { font-size: 11px; max-width: 520px; }
+.assistant-toggle { position: relative; display: inline-flex; cursor: pointer; }
+.assistant-toggle input { position: absolute; opacity: 0; width: 36px; height: 22px; margin: 0; }
+.assistant-toggle span { display: block; width: 36px; height: 22px; border-radius: 12px; background: var(--border); transition: background .15s; }
+.assistant-toggle span::after { content: ''; display: block; width: 16px; height: 16px; border-radius: 50%; background: white; margin: 3px; transition: transform .15s; box-shadow: 0 1px 3px #0002; }
+.assistant-toggle input:checked + span { background: var(--accent); }
+.assistant-toggle input:checked + span::after { transform: translateX(14px); }
+.assistant-toggle input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3px; }
+.assistant-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.housekeeper-consent { font-size: 12px; margin: 12px 0; }
+@media (max-width: 600px) { .assistant-key-row { flex-wrap: wrap; } .assistant-key-row .housekeeper-field { flex-basis: 100%; } }
+.housekeeper-panel .assistant-model-trigger { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 54px; text-align: left; border: 1px solid var(--border); background: var(--bg-surface); color: var(--text-primary); padding: 9px 12px; }
+.assistant-model-trigger:hover, .assistant-model-trigger[aria-expanded="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 4%, var(--bg-surface)); }
+.assistant-model-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-surface)); font-size: 20px; }
+.assistant-model-label { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.assistant-model-label strong { font-size: 13px; overflow-wrap: anywhere; }
+.assistant-model-label small { font-size: 11px; color: var(--text-secondary); }
+.assistant-model-menu { min-width: 260px; border-radius: 12px; padding: 6px; }
+.assistant-model-menu li { padding: 10px; border-radius: 7px; }
+.assistant-model-menu .menu-option-hint { display: block; font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.assistant-affected-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; margin-top: 8px; background: var(--bg-secondary); border-radius: 8px; }
+.assistant-affected-note > div { min-width: 0; display: grid; gap: 4px; font-size: 12px; overflow-wrap: anywhere; }
+.assistant-affected-note button { flex-shrink: 0; }
+.housekeeper-card[tabindex="-1"]:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.assistant-finding-details { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.assistant-finding-tools .health-check-group { margin-top: 0; }
+.assistant-finding-tools .health-check { border-radius: 8px; }
+.assistant-local-findings { margin-top: 18px; font-size: 13px; }
+.assistant-local-findings summary { cursor: pointer; color: var(--text-secondary); }
+.housekeeper-suggestions > li > button { margin-right: 8px; }
+.assistant-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 16px 0; }
+.housekeeper-panel .assistant-tabs button { background: transparent; color: var(--text-secondary); border: 0; border-radius: 0; padding: 9px 14px; border-bottom: 2px solid transparent; }
+.housekeeper-panel .assistant-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.housekeeper-panel .assistant-provider { background: color-mix(in srgb, var(--accent) 4%, var(--bg-surface)); }
+.assistant-key-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; margin: 8px 0 16px; }
+.assistant-key-status > span { color: var(--text-secondary); }
+.assistant-key-status > div { display: flex; gap: 6px; }
+.housekeeper-panel .assistant-key-status button { min-height: 28px; padding: 4px 9px; font-size: 11px; }
+.housekeeper-panel .assistant-model-trigger { min-height: 36px; padding: 6px 10px; gap: 8px; }
+.assistant-model-icon { width: 24px; height: 24px; font-size: 15px; border-radius: 6px; }
+.assistant-model-label { flex-direction: row; align-items: baseline; gap: 8px; }
+.assistant-model-label strong { font-size: 12px; }
+.assistant-model-label small { font-size: 11px; }
+.assistant-model-menu { min-width: 240px; padding: 4px; overflow-y: auto; }
+.assistant-model-menu li { padding: 7px 9px; min-height: 30px; font-size: 12px; }
+.assistant-model-menu .role-option-label { display: flex; align-items: baseline; gap: 10px; }
+.assistant-model-menu .menu-option-hint { margin-top: 0; font-size: 10px; }
+.assistant-finding-heading { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.assistant-finding-heading .housekeeper-priority { margin-left: auto; padding-right: 0; }
+.housekeeper-panel .housekeeper-suggestions > li { padding: 16px 0; }
+.housekeeper-panel .housekeeper-suggestions > li > button { margin-top: 12px; }
+.housekeeper-suggestions > .assistant-finding { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; }
+.assistant-finding-marker { display: flex; flex-direction: column; align-items: center; gap: 10px; padding-top: 2px; color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.assistant-severity-icon { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; font-size: 13px; font-weight: 700; }
+.severity-error .assistant-severity-icon { background: #dc45451a; color: #cf3434; }
+.severity-warning .assistant-severity-icon { background: #d48b171c; color: #b37816; }
+.severity-info .assistant-severity-icon { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.assistant-finding-content > button { margin-top: 12px; margin-right: 8px; }
+.assistant-progress { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); }
+.assistant-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: assistant-spin .7s linear infinite; }
+@keyframes assistant-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .assistant-spinner { animation: none; } }
+
+.assistant-preview-paths { max-height: 260px; overflow: auto; padding-left: 20px; }
+.assistant-preview-paths code { overflow-wrap: anywhere; white-space: normal; }
+.housekeeper-diff { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A warm provider surface, distinct from the purple agent actions. */
+.housekeeper-panel .assistant-provider {
+  background: linear-gradient(125deg, color-mix(in srgb, #eeaa55 13%, var(--bg-surface)), color-mix(in srgb, #eeaa55 5%, var(--bg-surface)));
+  border-color: color-mix(in srgb, #c68c43 32%, var(--border));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, #d69237 70%, var(--bg-surface));
+}
+.assistant-provider-brand { display: flex; align-items: center; gap: 10px; }
+.assistant-router-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: color-mix(in srgb, #d69237 18%, var(--bg-surface)); color: var(--text-primary); font-size: 24px; font-weight: 600; }
+.assistant-connection-state { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-secondary); }
+.assistant-connection-state > span { width: 7px; height: 7px; border-radius: 50%; background: var(--text-tertiary); }
+.assistant-connection-state.ready > span { background: #2aa574; box-shadow: 0 0 0 3px color-mix(in srgb, #2aa574 12%, transparent); }
+.assistant-provider .assistant-key-status .secondary { border: 1px solid color-mix(in srgb, #c68c43 20%, var(--border)); background: var(--bg-surface); }

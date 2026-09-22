@@ -4,8 +4,14 @@
 
 pub mod attachments;
 pub mod checks;
-mod commands;
+// `pub` so the integration tests can drive the batch appliers
+// (`apply_bootstrap_entries`, `materialize_notes`) directly: they are the whole
+// policy of the bulk sync path — the eligibility table, the path allowlist —
+// and the `#[tauri::command]` wrappers around them are only frame decoding.
+pub mod commands;
 mod error;
+pub mod extract;
+pub mod extract_worker;
 pub mod import_export;
 pub mod index;
 pub mod keychain;
@@ -194,15 +200,20 @@ pub fn run() {
             commands::rebind_note_id,
             commands::write_note,
             commands::write_note_if_missing,
+            commands::materialize_notes_batch,
+            commands::apply_bootstrap_batch,
             commands::create_note,
             commands::create_folder,
             commands::ensure_folder,
             commands::rename_path,
             commands::delete_path,
             commands::delete_file,
+            commands::delete_files_batch,
             commands::delete_folder_if_empty,
             commands::trash_note,
             commands::search_notes,
+            commands::get_file_text,
+            commands::list_file_rows,
             commands::get_backlinks,
             commands::graph_edges,
             commands::graph_edges_for,
@@ -217,8 +228,13 @@ pub fn run() {
             commands::prune_yjs_docs,
             commands::clear_yjs_doc,
             commands::read_binary_file,
+            commands::file_stat,
             commands::write_binary_file,
+            commands::write_tree_binary,
             commands::list_attachments,
+            commands::list_binaries,
+            commands::upload_attachment,
+            commands::download_attachment,
             commands::vault_stats,
             commands::vault_checks,
             commands::empty_trash,
@@ -253,6 +269,7 @@ pub fn run() {
             keychain::keychain_delete,
             oauth::google_oauth_listen,
             oauth::google_oauth_await,
+            oauth::google_oauth_return_to_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

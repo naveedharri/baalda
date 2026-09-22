@@ -3,6 +3,7 @@ import { pgText } from "../db/text.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
+import { BULK_ORIGIN, BULK_SEED_ORIGIN } from "../sync/doc-batch.js";
 
 /**
  * Automatic version capture + "last edited by" stamping.
@@ -39,6 +40,30 @@ export const MAX_VERSIONS_PER_NOTE = 50;
 /** Re-broadcast a stamp to the vault at most this often for the same editor.
  *  (The row itself is written every time — see the module comment.) */
 const STAMP_THROTTLE_MS = 60_000;
+/**
+ * Writes whose origin means "a client is uploading content it already has", not
+ * "a person is editing". A bulk SEED arms no idle-capture timer: the doc is
+ * being seeded from the `.md` the client is the source of truth for, so there is
+ * no PRIOR server state a version could preserve — and a 5,000-note import used
+ * to leave 5,000 live ten-minute timers and 5,000 `Session` objects that then
+ * all fired at once, each a SELECT plus a full `loadDocState` + `Y.Doc` rebuild.
+ * Attribution is unaffected: the row is still stamped.
+ *
+ * Only the SEED qualifies, never "arrived through the batch route": the desktop
+ * routes its live local-change drain through `docs/batch` too once enough notes
+ * changed at once (`expectEmpty: false`), and those are real merges into docs
+ * with prior state. Gating on the route instead of on the fact meant an AI
+ * rewriting 40 existing notes captured ZERO versions while 24 captured 24 —
+ * history that depended on how many files a tool touched at once.
+ */
+const NO_VERSION_SOURCES = new Set<string>([BULK_SEED_ORIGIN]);
+/**
+ * Sources whose `registry-changed` broadcast coalesces per VAULT instead of per
+ * DOC. A batch push is one editor touching one vault inside one second, so the
+ * whole push is one fan-out; a person editing is per note, and keying THAT by
+ * vault let an import suppress the human's very next edit for up to a minute.
+ */
+const VAULT_STAMP_SOURCES = new Set<string>([BULK_ORIGIN, BULK_SEED_ORIGIN]);
 /** Per-vault ceiling on how often the lazy daily-checkpoint check runs. */
 const CHECKPOINT_CHECK_INTERVAL_MS = 5 * 60_000;
 
@@ -135,8 +160,10 @@ export interface VersionCaptureDeps {
 }
 
 export interface VersionCapture {
-  /** A doc was just edited by `userId` (null = unattributed). */
-  touch(vaultId: string, docId: string, userId: string | null): void;
+  /** A doc was just edited by `userId` (null = unattributed). `source` is the
+   *  write's origin tag when the server itself wrote it — see
+   *  {@link NO_VERSION_SOURCES}. */
+  touch(vaultId: string, docId: string, userId: string | null, source?: string | null): void;
   /** Run a doc's pending idle capture NOW (test hook / shutdown). */
   flush(docId: string): Promise<void>;
   /** Drop every pending timer. */
@@ -148,8 +175,20 @@ interface Session {
   /** Last editor seen in this session — the version's author. */
   userId: string | null;
   timer?: ReturnType<typeof setTimeout>;
-  stampedUserId?: string | null;
-  stampedAt: number;
+}
+
+/** The last `registry-changed` this process announced for a scope, and who it
+ *  was about. For a BULK source the scope is the vault, because the broadcast
+ *  is vault-wide: every subscriber re-resolves its whole readable set and
+ *  re-pulls the registry, so firing one per doc during a 100-doc batch cost ~8
+ *  whole-vault ACL recomputes a second per peer and defeated the channel's
+ *  120 ms coalescer (a null origin marks that window anonymous, which sends the
+ *  frame to everyone including the pusher). For a LIVE edit the scope is the
+ *  doc, which is the original rule: a person's first edit to any given note
+ *  announces at once, however recently an import touched the same vault. */
+interface Notice {
+  userId: string;
+  at: number;
 }
 
 export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
@@ -157,6 +196,11 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
   const idleMs = deps.idleMs ?? IDLE_CAPTURE_MS;
   const sessions = new Map<string, Session>();
   const vaultChecked = new Map<string, number>();
+  /** Bulk sources, keyed by vaultId. */
+  const vaultNotices = new Map<string, Notice>();
+  /** Live sources, keyed by docId. Cleared with the doc's session, exactly as
+   *  the throttle state did when it lived ON the session. */
+  const docNotices = new Map<string, Notice>();
 
   async function captureIdle(docId: string): Promise<void> {
     const session = sessions.get(docId);
@@ -164,6 +208,7 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
     // The session is over the moment we capture it: a later edit starts a new
     // one (and re-stamps last_edited, since the throttle state goes with it).
     sessions.delete(docId);
+    docNotices.delete(docId);
     if (session.timer) clearTimeout(session.timer);
     try {
       // Only live notes get versions — a soft-deleted one has nothing to show
@@ -199,35 +244,41 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
    * soft-deleted (or unknown) doc still broadcasts nothing.
    */
   async function stamp(
-    session: Session,
+    vaultId: string,
     docId: string,
     userId: string,
     notify: boolean,
   ): Promise<void> {
     try {
       const stamped = await stampLastEdited(docId, userId, db);
-      if (stamped && notify) deps.onRegistryChanged?.(session.vaultId, null);
+      if (stamped && notify) deps.onRegistryChanged?.(vaultId, null);
     } catch (err) {
       console.error(`[versions] last-edited stamp failed for ${docId}:`, err);
     }
   }
 
   return {
-    touch(vaultId, docId, userId) {
+    touch(vaultId, docId, userId, source) {
       const now = Date.now();
-      let session = sessions.get(docId);
-      if (!session) {
-        session = { vaultId, userId, stampedAt: 0 };
-        sessions.set(docId, session);
-      }
-      session.vaultId = vaultId;
-      session.userId = userId;
 
-      if (session.timer) clearTimeout(session.timer);
-      const timer = setTimeout(() => void captureIdle(docId), idleMs);
-      // A pending capture must never hold the process open (mirrors scheduleIndex).
-      if (typeof timer.unref === "function") timer.unref();
-      session.timer = timer;
+      // A bulk seed arms nothing: no session, no ten-minute timer, and an
+      // existing session (someone really was editing this note) is left exactly
+      // as it was rather than being re-armed by an upload.
+      if (!NO_VERSION_SOURCES.has(source ?? "")) {
+        let session = sessions.get(docId);
+        if (!session) {
+          session = { vaultId, userId };
+          sessions.set(docId, session);
+        }
+        session.vaultId = vaultId;
+        session.userId = userId;
+
+        if (session.timer) clearTimeout(session.timer);
+        const timer = setTimeout(() => void captureIdle(docId), idleMs);
+        // A pending capture must never hold the process open (mirrors scheduleIndex).
+        if (typeof timer.unref === "function") timer.unref();
+        session.timer = timer;
+      }
 
       // Stamp the row on every edit — `notes.updated_at` is how a script or an
       // agent asks "did my write land", and it has to be true (#104). The
@@ -235,14 +286,22 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       // immediately when the editor changes hands, else at most once a minute.
       // The sidebar's "edited by X, <time>" is therefore up to 60 s behind the
       // row, exactly as it already was.
+      //
+      // The KEY depends on the source. A bulk push is keyed by VAULT — one
+      // editor touching one vault inside one second is one fan-out instead of
+      // 100, which is what the 120 ms coalescer could never fix, because a null
+      // origin marks its window anonymous and sends it to everyone. A live edit
+      // keeps the original per-DOC key, so a person's first edit to a note still
+      // announces immediately even if an import just stamped the same vault
+      // (keying that by vault swallowed the human's edit for up to 60 s).
       if (userId) {
-        const notify =
-          session.stampedUserId !== userId || now - session.stampedAt > STAMP_THROTTLE_MS;
-        if (notify) {
-          session.stampedUserId = userId;
-          session.stampedAt = now;
-        }
-        void stamp(session, docId, userId, notify);
+        const perVault = VAULT_STAMP_SOURCES.has(source ?? "");
+        const notices = perVault ? vaultNotices : docNotices;
+        const key = perVault ? vaultId : docId;
+        const last = notices.get(key);
+        const notify = !last || last.userId !== userId || now - last.at > STAMP_THROTTLE_MS;
+        if (notify) notices.set(key, { userId, at: now });
+        void stamp(vaultId, docId, userId, notify);
       }
 
       // Lazy daily checkpoint: activity-triggered, no scheduler. The real
@@ -269,6 +328,8 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       }
       sessions.clear();
       vaultChecked.clear();
+      vaultNotices.clear();
+      docNotices.clear();
     },
   };
 }

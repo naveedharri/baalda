@@ -93,6 +93,7 @@ beforeEach(() => {
     openingNotePath: null,
     openFolderIsSynced: null,
     revealRequest: null,
+    accountSettingsRequest: null,
     revealedPath: null,
     rootFrozen: false,
     syncEnabled: false,
@@ -205,6 +206,19 @@ describe("requestReveal", () => {
       path: "Deep/Folder/note.md",
       edit: false,
     });
+  });
+});
+
+describe("requestAccountSettings", () => {
+  it("opens a requested account page and bumps a token for repeat links", () => {
+    useStore.getState().requestAccountSettings("appearance");
+    const first = useStore.getState().accountSettingsRequest!;
+    expect(first).toMatchObject({ tab: "appearance" });
+
+    useStore.getState().requestAccountSettings("appearance");
+    const second = useStore.getState().accountSettingsRequest!;
+    expect(second.token).toBeGreaterThan(first.token);
+    expect(second).not.toBe(first);
   });
 });
 

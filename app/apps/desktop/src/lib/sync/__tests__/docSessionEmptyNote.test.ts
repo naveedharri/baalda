@@ -180,11 +180,12 @@ vi.mock("../vaultDocStore", () => ({
   },
 }));
 
-const connects = vi.hoisted(() => ({ order: [] as string[] }));
+const connects = vi.hoisted(() => ({ order: [] as string[], readOnly: false,
+  onSynced: (() => {}) as () => void }));
 
 vi.mock("../syncManager", () => ({
   DocSync: class {
-    readonly readOnly = false;
+    readonly readOnly = connects.readOnly;
     isSynced = false;
     readonly status = "connecting";
     readonly docId: string;
@@ -194,6 +195,7 @@ vi.mock("../syncManager", () => ({
       connects.order.push(input.docId);
     }
     async whenSynced() {
+      connects.onSynced();
       this.isSynced = true;
     }
     async whenFlushed() {
@@ -205,6 +207,7 @@ vi.mock("../syncManager", () => ({
 }));
 
 import type { NoteBridge } from "../../bridge/noteBridge";
+import * as ipc from "../../ipc";
 import type { SessionInfo } from "../../api";
 import { SyncManager } from "../docSession";
 import { vaultScopes } from "../vaultScope";
@@ -276,6 +279,15 @@ beforeEach(() => {
   storeHooks.opts = null;
   storeHooks.open = null;
   connects.order = [];
+  connects.readOnly = false;
+  connects.onSynced = () => {};
+  fakeRegistry.recordFailure.mockClear();
+  vi.mocked(ipc.writeTrashCopy).mockClear();
+  vi.mocked(ipc.loadYjsState).mockResolvedValue({
+    snapshot: null,
+    updates: [],
+    updateCount: 0,
+  });
 });
 
 afterEach(async () => {
@@ -287,6 +299,32 @@ afterEach(async () => {
 });
 
 describe("a note created empty", () => {
+  it.each(["placeholder", "matching", "local-edit"])("checks a read-only %s only after its server content lands", async (kind) => {
+    const sm = manager();
+    await enable(sm);
+    await ready(sm, [DOC]);
+    connects.readOnly = true;
+    const local = kind === "placeholder" ? "" : kind === "matching" ? "server content" : "my local edit";
+    fakeDisk.files.set(REL, local);
+    let remote = "";
+    connects.onSynced = () => {
+      remote = "server content";
+      // The pull may egest before the confirmation callback resumes.
+      fakeDisk.files.set(REL, remote);
+    };
+    const b = bridge();
+    Object.assign(b, { path: REL, serialize: () => remote });
+    await sm.openDoc(b, REL);
+    await flush();
+    if (kind === "local-edit") {
+      expect(ipc.writeTrashCopy).toHaveBeenCalledWith(REL, expect.any(String), local, 1);
+      expect(fakeRegistry.recordFailure).toHaveBeenCalledWith(expect.objectContaining({ docId: DOC }));
+    } else {
+      expect(ipc.writeTrashCopy).not.toHaveBeenCalled();
+      expect(fakeRegistry.recordFailure).not.toHaveBeenCalled();
+    }
+  });
+
   it("is settled from disk and never queued again (the 307-stub guarantee)", async () => {
     const sm = manager();
     const badges: Record<string, string> = {};
@@ -353,5 +391,33 @@ describe("a note created empty", () => {
 
     expect(fakeRegistry.isNoteEmptyOnDisk).toHaveBeenCalledWith(REL);
     expect(connects.order).toEqual([]);
+  });
+
+  it("refuses to settle a 0-byte file whose local CRDT still holds the note", async () => {
+    // `materializeContent` created the placeholder and then FAILED to write the
+    // local CRDT's text into it (disk full, permission, an epoch switch). The
+    // server holds nothing, the file is 0 bytes — and the note is alive in
+    // `index.sqlite`. Settling here marked it pushed and badged it synced, so it
+    // was never queued again and the text was stranded forever.
+    const held = new Y.Doc();
+    held.getText("content").insert(0, "the text only index.sqlite has");
+    vi.mocked(ipc.loadYjsState).mockResolvedValue({
+      snapshot: null,
+      updates: [Y.encodeStateAsUpdate(held)],
+      updateCount: 1,
+    });
+
+    const sm = manager();
+    await enable(sm);
+    await ready(sm, [DOC]);
+
+    // Queued for the push path instead: a socket carried the text up, and the
+    // doc got no "empty everywhere" verdict — the next connect probes it again
+    // rather than skipping it forever.
+    expect(connects.order).toEqual([DOC]);
+    connects.order = [];
+    fakeRegistry.isNoteEmptyOnDisk.mockClear();
+    await ready(sm, [DOC]);
+    expect(fakeRegistry.isNoteEmptyOnDisk).toHaveBeenCalledWith(REL);
   });
 });

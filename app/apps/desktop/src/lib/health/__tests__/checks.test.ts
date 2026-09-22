@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHECK_ACTIONS,
   CHECK_BY_ID,
   CHECK_DEFINITIONS,
+  WHOLE_VAULT_ACTIONS,
   checkRows,
   summarizeChecks,
+  type CheckAction,
 } from "../checks";
 import type { VaultCheckId, VaultChecks } from "../types";
 
@@ -47,10 +50,81 @@ describe("check definitions", () => {
 
   it("only offer reset-history and reclaim where a doc id or orphan set exists", () => {
     expect(CHECK_BY_ID.get("heavy-history")?.itemActions).toContain("reset-history");
-    expect(CHECK_BY_ID.get("orphan-history")?.bulkAction).toBe("reclaim");
-    expect(CHECK_BY_ID.get("trash")?.bulkAction).toBe("empty-trash");
+    expect(CHECK_BY_ID.get("orphan-history")?.heal).toBe("reclaim");
+    expect(CHECK_BY_ID.get("trash")?.bulkActions).toEqual(["empty-trash"]);
     for (const d of CHECK_DEFINITIONS) {
       if (d.id !== "heavy-history") expect(d.itemActions).not.toContain("reset-history");
+    }
+  });
+
+  it("keeps missing-note links manual while preserving source navigation", () => {
+    const def = CHECK_BY_ID.get("broken-links")!;
+    expect(def.heal).toBeUndefined();
+    expect(def.bulkActions).toBeUndefined();
+    expect(def.itemActions).toEqual(["open"]);
+    expect(def.howToFix.join(" ")).toContain("fix the link if it is a typo");
+    expect(def.howToFix.join(" ")).toContain("create the note yourself");
+  });
+
+  it("word every action they offer", () => {
+    for (const d of CHECK_DEFINITIONS) {
+      for (const a of [...d.itemActions, ...(d.bulkActions ?? []), ...(d.heal ? [d.heal] : [])]) {
+        const wording = CHECK_ACTIONS[a];
+        expect(wording, `${d.id} → ${a}`).toBeDefined();
+        expect(wording.label.length).toBeGreaterThan(2);
+        expect(wording.verb.length).toBeGreaterThan(2);
+        expect(wording.gerund.endsWith("ing")).toBe(true);
+      }
+    }
+  });
+
+  it("heal only the checks whose fix cannot be wrong", () => {
+    const healable = CHECK_DEFINITIONS.filter((d) => d.heal).map((d) => d.id).sort();
+    expect(healable).toEqual(
+      [
+        "heavy-history",
+        "illegal-names",
+        "orphan-history",
+        "stale-index",
+        "unindexed-markdown",
+      ].sort(),
+    );
+    // The judgement calls stay manual, and each one SAYS it does — a row that
+    // offers no heal must explain the refusal, not leave the reader waiting for
+    // a button that never comes.
+    for (const id of [
+      "bad-frontmatter",
+      "case-collisions",
+      "long-paths",
+      "duplicate-titles",
+      "broken-links",
+      "missing-embeds",
+    ] as const) {
+      const def = CHECK_BY_ID.get(id)!;
+      expect(def.heal).toBeUndefined();
+      expect(def.howToFix.join(" ")).toMatch(
+        /Baalda (will not|cannot)|Nothing here is broken|create the note yourself/,
+      );
+    }
+  });
+
+  it("confirm every destructive whole-check action and no additive one", () => {
+    const destructive: CheckAction[] = ["delete-all", "reset-history-all", "empty-trash"];
+    for (const a of destructive) {
+      expect(CHECK_ACTIONS[a].confirm, a).toBeDefined();
+      expect(CHECK_ACTIONS[a].confirm?.tone).toBe("danger");
+    }
+    // Reading the vault, or adding to it, is not worth a dialog.
+    for (const a of ["rebuild-index", "reclaim", "sync-now", "export-all"] as CheckAction[]) {
+      expect(CHECK_ACTIONS[a].confirm, a).toBeUndefined();
+    }
+    // A bulk rename is reversible but wide, so it asks — quietly.
+    expect(CHECK_ACTIONS["rename-legal"].confirm?.tone).toBe("accent");
+  });
+
+  it("keep the whole-vault actions out of the per-item lists", () => {
+    for (const d of CHECK_DEFINITIONS) {
+      for (const a of d.itemActions) expect(WHOLE_VAULT_ACTIONS.has(a)).toBe(false);
     }
   });
 });

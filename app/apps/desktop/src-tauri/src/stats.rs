@@ -94,11 +94,19 @@ pub struct FileGroup {
     pub bytes: i64,
 }
 
-/// `index.sqlite` itself, WAL and shared-memory files included.
+/// `index.sqlite` itself, WAL and shared-memory files included — plus what
+/// tier 2 (the extracted text of the vault's binaries) costs inside it. The
+/// two numbers are not additive: `bytes` is the whole file, `extractedTextBytes`
+/// is the part of it the file index accounts for. Both are shown because "the
+/// index grew by 40 MB" after dropping a folder of documents needs an answer.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStats {
     pub bytes: i64,
+    /// Rows in `files`: tree binaries the index has text (or a name) for.
+    pub files: i64,
+    /// `file_text` bodies + what `files_fts` stores verbatim.
+    pub extracted_text_bytes: i64,
 }
 
 /// The local CRDT store in aggregate.
@@ -323,8 +331,13 @@ pub fn collect(
         tags: index.tag_count()?,
         links: link_counts.resolved,
         broken_links: link_counts.broken,
-        index: IndexStats {
-            bytes: index_file_bytes(vault),
+        index: {
+            let files = index.file_text_footprint()?;
+            IndexStats {
+                bytes: index_file_bytes(vault),
+                files: files.files,
+                extracted_text_bytes: files.bytes,
+            }
         },
         history,
         largest_notes,
@@ -574,8 +587,10 @@ mod tests {
     fn snapshot_bytes_count_toward_a_docs_footprint() {
         let (tmp, index) = fixture();
         let alpha = doc_id_of(&index, "Alpha.md");
-        index.append_yjs_update(&alpha, &[0u8; 10]).unwrap();
-        index.save_yjs_snapshot(&alpha, &[0u8; 100], &[0u8; 4]).unwrap();
+        let mark = index.append_yjs_update(&alpha, &[0u8; 10]).unwrap();
+        index
+            .save_yjs_snapshot(&alpha, &[0u8; 100], &[0u8; 4], Some(mark))
+            .unwrap();
         // A manifest-only row (snapshot NULL) is not history and must not count.
         index
             .save_yjs_state_vectors(&[("sv-only".to_string(), vec![0u8; 16])])

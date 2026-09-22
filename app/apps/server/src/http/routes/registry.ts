@@ -3,7 +3,8 @@ import { Hono } from "hono";
 import { config } from "../../config.js";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
-import { canCreateIn, canEditDoc, canEditFolder } from "../../permissions/http-gates.js";
+import { canCreateIn, canEditDoc, canEditFolder, canWriteBlob } from "../../permissions/http-gates.js";
+import { deleteDocBlobs } from "./blobs.js";
 import { effectivePermission } from "../../permissions/resolver.js";
 import {
   listDeletedReadableDocsInVault,
@@ -11,6 +12,14 @@ import {
   listVisibleFolders,
 } from "../../permissions/vault-docs.js";
 import { purgeNoteIndex } from "../../index/indexer.js";
+import {
+  isRootFrozen,
+  normalizeColor,
+  registerCtx,
+  registerFile,
+  registerFolder,
+  registerNote,
+} from "../../registry/batch-ops.js";
 import {
   TreeOpError,
   deleteFolderCascade,
@@ -22,6 +31,7 @@ import {
   planNoteMove,
   resolveFolderParent,
   resolveParentFolder,
+  samePath,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 
@@ -50,6 +60,10 @@ export interface RegistryDeps {
   /** Force-close live sync sockets for a doc, so an editor open on a note that
    *  just got deleted out from under it reconnects and learns it's gone. */
   disconnectDoc?: (vaultId: string, docId: string) => void;
+  /** Stronger than {@link disconnectDoc}: also drops the server's cached
+   *  `Y.Doc`, so the next connect reloads from Postgres instead of being handed
+   *  the state we just deleted. Used by the folder cascade. */
+  evictDoc?: (vaultId: string, docId: string) => Promise<void> | void;
   /**
    * Called after any change to a vault's folder/note structure (create, rename,
    * move, delete). The vault channel broadcasts a `registry` control frame so
@@ -69,23 +83,11 @@ export interface RegistryDeps {
 export const ORIGIN_HEADER = "x-baalda-origin";
 
 /**
- * Is this vault's ROOT closed to new folders/notes?
- *
- * "Freeze root" is a structural latch, not a permission: once a team has agreed
- * the top-level shape, nothing new lands beside it — by anyone, owners and
- * admins included. Making it role-scoped would defeat the point, because the
- * accidental root folder is nearly always created by someone who *does* have
- * permission. An owner/admin lifts the latch first, then creates.
- *
- * Only the root is affected. Everything nested keeps its normal ACL.
+ * Re-exported from `registry/batch-ops.ts`, where it now lives so the batch
+ * routes can apply the latch without importing a route module. Kept exported
+ * here because several call sites (and tests) import it from this path.
  */
-export async function isRootFrozen(vaultId: string): Promise<boolean> {
-  const { rows } = await pool.query<{ root_frozen: boolean }>(
-    "SELECT root_frozen FROM vaults WHERE id = $1",
-    [vaultId],
-  );
-  return rows[0]?.root_frozen === true;
-}
+export { isRootFrozen };
 
 /** The 403 body every frozen-root refusal shares, so clients can match on a code. */
 const ROOT_FROZEN_ERROR = {
@@ -122,13 +124,41 @@ function pathFolderMismatch(err: TreeOpError) {
   return { error: err.message, code: "path_folder_mismatch" } as const;
 }
 
-/** Colors are a short id from the client's palette (`lib/appearance`), or null
- *  to clear. Anything else is ignored rather than stored. */
-function normalizeColor(value: unknown): string | null | undefined {
-  if (value === undefined) return undefined;
-  if (value === null || value === "") return null;
-  if (typeof value !== "string" || value.length > 32) return undefined;
-  return value;
+/** Ceiling on one keyset page. Bigger than any client asks for and small
+ *  enough that a page is bounded work; a caller wanting more asks again. */
+export const PAGE_LIMIT_MAX = 5000;
+
+interface PageRequest {
+  limit: number;
+  /** Exclusive lower bound on the ordering column; null starts at the top. */
+  after: string | null;
+}
+
+/**
+ * Read `?limit=&after=` off a registry listing.
+ *
+ * `null` (no `limit`) means **today's exact behaviour**: one unpaginated
+ * snapshot with its tombstones. That default is load-bearing rather than
+ * politeness — every shipped client reads these listings as the complete truth
+ * and subtracts what is missing, so silently capping an un-paginated request
+ * would have an old client delete every note past the cap.
+ */
+function readPage(c: { req: { query: (k: string) => string | undefined } }): PageRequest | null | "invalid" {
+  const raw = c.req.query("limit");
+  if (raw === undefined || raw === "") return null;
+  const limit = Number.parseInt(raw, 10);
+  if (!Number.isFinite(limit) || limit < 1 || limit > PAGE_LIMIT_MAX) return "invalid";
+  const after = c.req.query("after");
+  return { limit, after: after === undefined || after === "" ? null : after };
+}
+
+/** Byte-wise string order — the JS twin of `COLLATE "C"`, used where a page is
+ *  cut in memory (folders) so it matches the SQL-side cut (notes, files). A
+ *  locale collation is not a stable total order across libc versions, and a
+ *  cursor that means something different after a base-image bump silently skips
+ *  or repeats rows. */
+function compareC(a: string, b: string): number {
+  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
 }
 
 /**
@@ -254,8 +284,8 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
   });
 
   /**
-   * The vault's WHOLE structure, unfiltered — folders and notes, ids and paths,
-   * no content. Owner/admin only.
+   * The vault's WHOLE structure, unfiltered — folders, notes and files, ids and
+   * paths, no content. Owner/admin only.
    *
    * Every other listing here is ACL-filtered, which is right for sync and fatal
    * for administration: the moment an item is set to Private it leaves
@@ -279,7 +309,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
     }
-    const [folders, notes] = await Promise.all([
+    const [folders, notes, files] = await Promise.all([
       pool.query<{ id: string; path: string; color: string | null }>(
         "SELECT id, path, color FROM folders WHERE vault_id = $1 ORDER BY path",
         [vaultId],
@@ -291,10 +321,21 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
         "SELECT id, rel_path FROM notes WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY rel_path",
         [vaultId],
       ),
+      // `files` rows — the tree binaries. They are docs like any note (one
+      // `shares.resource_type = 'file'` namespace, one `effectivePermission`),
+      // so leaving them out made a `.pdf` in a shared folder the one thing in
+      // the vault whose access could be enforced but never seen or set.
+      // A hidden root `attachments/` blob has no `files` row at all — its bytes
+      // carry a null `doc_id` — so nothing here has to filter it out.
+      pool.query<{ id: string; path: string }>(
+        "SELECT id, path FROM files WHERE vault_id = $1 ORDER BY path",
+        [vaultId],
+      ),
     ]);
     return c.json({
       folders: folders.rows.map((f) => ({ id: f.id, path: f.path, color: f.color })),
       notes: notes.rows.map((n) => ({ id: n.id, relPath: n.rel_path })),
+      files: files.rows.map((f) => ({ id: f.id, path: f.path })),
     });
   });
 
@@ -352,8 +393,16 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // doc comment) rather than reported as unreadable. No `deleted_at` filter:
     // a soft-deleted note does have a row, and it should reach the resolver,
     // which answers `none` for it through `locateDoc`.
+    //
+    // `files` as well as `notes`, and for the same reason `locateDoc` unions the
+    // two: a tree binary's id IS a doc id. Leaving it out made a revoked `.pdf`
+    // permanently UNANSWERED, which the desktop reads as "no second opinion" and
+    // so leaves the whole group on disk — the file stayed readable on the disk of
+    // someone who had just been shut out of it.
     const { rows } = await pool.query<{ id: string }>(
-      "SELECT id FROM notes WHERE vault_id = $1 AND id = ANY($2::text[])",
+      `SELECT id FROM notes WHERE vault_id = $1 AND id = ANY($2::text[])
+       UNION
+       SELECT id FROM files WHERE vault_id = $1 AND id = ANY($2::text[])`,
       [vaultId, ids],
     );
     const present = new Set(rows.map((r) => r.id));
@@ -388,85 +437,33 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
 
-    // A given path maps to one folder per vault — adopt an existing row rather
-    // than duplicating it (reconcile and on-demand create can race).
-    //
-    // Matched case-insensitively, and the response echoes the row's CANONICAL
-    // path/name rather than what was asked for. A Mac and a Windows box see one
-    // directory where Postgres would store two rows, and the desktop that then
-    // maps its file to the twin's doc_id is the 2026-09-04 ping-pong (see
-    // `samePath`). Echoing canonical is what lets the caller converge instead of
-    // re-asking with its own spelling on every pass.
-    const existing = await pool.query<{ id: string; parent_id: string | null; name: string; path: string }>(
-      `SELECT id, parent_id, name, path FROM folders
-        WHERE vault_id = $1 AND lower(path) = lower($2)
-        ORDER BY created_at ASC, id ASC LIMIT 1`,
-      [vaultId, path],
-    );
-    if (existing.rows[0]) {
-      const e = existing.rows[0];
-      return c.json({ id: e.id, vaultId, parentId: e.parent_id, name: e.name, path: e.path }, 200);
-    }
-
-    // `path` is authoritative; `parentId` must be the folder at its dirname (or
-    // is resolved from it when absent). See `resolveParentFolder` for the
-    // incident this closes. `storedPath` is `path` rewritten onto the parent's
-    // own spelling, so a subtree never mixes cases across levels.
-    let resolvedParent: string | null;
-    let storedPath: string;
-    try {
-      const loc = await resolveFolderParent(pool, vaultId, path, parentId ?? null);
-      resolvedParent = loc.folderId;
-      storedPath = loc.relPath;
-    } catch (err) {
-      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
-      throw err;
-    }
-
-    // Write permission on the RESOLVED parent, not bare membership: a lock, a
-    // `view` grant or the vault-wide Read-only posture has to stop new folders
-    // landing, or read-only would mean "cannot change what exists" only. Checked
-    // after the adopt path above, so re-registering an existing folder from any
-    // device keeps working.
-    if (!(await canCreateIn(session.userId, vaultId, resolvedParent))) {
+    // Everything below the auth gate is `registry/batch-ops.ts registerFolder`
+    // — the same adopt-by-path → resolve-parent → write-gate → frozen-root →
+    // insert → 23505-adopt sequence the `/folders/batch` route runs, so the two
+    // surfaces cannot drift. This route decides only the HTTP shape.
+    const ctx = registerCtx(vaultId, session.userId);
+    const out = await registerFolder(ctx, {
+      path,
+      name,
+      parentId: parentId ?? null,
+      color: body.color,
+      sort: body.sort,
+    });
+    if (out.status === "error") {
+      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+      if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
+      if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       return c.json(NO_WRITE_ACCESS_ERROR("folder"), 403);
     }
-
-    // Frozen root: only NEW root folders are refused. The adopt path above
-    // already returned, so an existing folder still reconciles from every
-    // device after the latch goes on. Judged on the RESOLVED parent, so a nested
-    // path with no parentId is not mistaken for a root creation.
-    if (resolvedParent === null && (await isRootFrozen(vaultId))) {
-      return c.json(ROOT_FROZEN_ERROR, 403);
-    }
-
-    const id = randomUUID();
-    const color = normalizeColor(body.color) ?? null;
-    try {
-      await pool.query(
-        `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by, color)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [id, vaultId, resolvedParent, name, storedPath, body.sort ?? 0, session.userId, color],
-      );
-    } catch (err) {
-      // Lost the race against another device registering the same path: the
-      // unique indexes `folders_vault_path_uq` (m022) / `folders_vault_path_ci_uq`
-      // (m023) refused the twin. Adopt the winner — before those, this race
-      // produced 2–5 rows per path and split a folder's notes across them.
-      if ((err as { code?: string }).code === "23505") {
-        const winner = await pool.query<{ id: string; parent_id: string | null; name: string; path: string }>(
-          `SELECT id, parent_id, name, path FROM folders
-            WHERE vault_id = $1 AND lower(path) = lower($2)
-            ORDER BY created_at ASC, id ASC LIMIT 1`,
-          [vaultId, storedPath],
-        );
-        const w = winner.rows[0];
-        if (w) return c.json({ id: w.id, vaultId, parentId: w.parent_id, name: w.name, path: w.path }, 200);
-      }
-      throw err;
+    const f = out.row;
+    if (out.status === "adopted") {
+      return c.json({ id: f.id, vaultId, parentId: f.parentId, name: f.name, path: f.path }, 200);
     }
     changed(c, vaultId);
-    return c.json({ id, vaultId, parentId: resolvedParent, name, path: storedPath, color }, 201);
+    return c.json(
+      { id: f.id, vaultId, parentId: f.parentId, name: f.name, path: f.path, color: f.color },
+      201,
+    );
   });
 
   registryRoutes.get("/folders", async (c) => {
@@ -475,22 +472,98 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const vaultId = c.req.query("vaultId");
     if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
     const org = await vaultOrg(vaultId);
-    if (!org || !(await orgRole(org, session.userId))) {
+    // A vault row that is GONE answers 404, never `200 []`. This is the only
+    // thing standing between a teammate's disk and a mass delete: after a vault
+    // is deleted or unsynced, every client's readable set is empty, and an
+    // empty 200 here reads as "everything you hold was revoked" — the inbound
+    // planner would then remove the lot. The listing has to THROW (R1).
+    if (!org) return c.json({ error: "vault_not_found" }, 404);
+    if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    const page = readPage(c);
+    if (page === "invalid") {
+      return c.json({ error: `limit must be an integer 1..${PAGE_LIMIT_MAX}` }, 400);
     }
     // Private-by-default: only folders the caller may see (created / shared /
     // path-to-a-shared-note). Owner/admin + Open vaults see everything.
-    const folders = await listVisibleFolders(session.userId, vaultId);
-    // Folder tombstones ride the same response as note tombstones do on
-    // GET /api/notes, and for the same reason: the client subtracts one set
-    // from the other, so both must come from one snapshot. Ids only — an id is
-    // the minimum that lets a client stop re-registering (and remove) a local
-    // folder, and it leaks nothing about what the folder was called.
+    const all = await listVisibleFolders(session.userId, vaultId);
+    if (!page) {
+      // Folder tombstones ride the same response as note tombstones do on
+      // GET /api/notes, and for the same reason: the client subtracts one set
+      // from the other, so both must come from one snapshot. Ids only — an id is
+      // the minimum that lets a client stop re-registering (and remove) a local
+      // folder, and it leaks nothing about what the folder was called.
+      const { rows: tombstones } = await pool.query<{ id: string }>(
+        "SELECT id FROM folder_tombstones WHERE vault_id = $1",
+        [vaultId],
+      );
+      return c.json({ folders: all, tombstones: tombstones.map((t) => t.id) });
+    }
+    // Cut in memory rather than in SQL: `listVisibleFolders` already resolves the
+    // whole visible set through several recursive CTEs and returns it, so a
+    // SQL-side LIMIT would page the folders table and then discard most of it
+    // anyway. A vault has orders of magnitude fewer folders than notes, which is
+    // why this one can afford to be honest about that. `compareC` matches the
+    // notes' `COLLATE "C"` so one cursor convention covers all three listings.
+    const sorted = [...all].sort((a, b) => compareC(a.path, b.path));
+    const from = page.after === null ? sorted : sorted.filter((f) => compareC(f.path, page.after!) > 0);
+    const window = from.slice(0, page.limit);
+    const more = from.length > page.limit;
+    if (more) return c.json({ folders: window, nextAfter: window[window.length - 1].path });
     const { rows: tombstones } = await pool.query<{ id: string }>(
       "SELECT id FROM folder_tombstones WHERE vault_id = $1",
       [vaultId],
     );
-    return c.json({ folders, tombstones: tombstones.map((t) => t.id) });
+    return c.json({ folders: window, tombstones: tombstones.map((t) => t.id), nextAfter: null });
+  });
+
+  /**
+   * The vault's tree BINARIES, ACL-filtered — the listing `files` never had.
+   *
+   * Until now a client learned about them only from the owner/admin
+   * `GET /vaults/:id/access-tree` or from the unpaginated whole-vault
+   * `GET /vaults/:id/blobs`, neither of which a scoped member can page through.
+   * Same shape and same cursor convention as `/notes`, minus tombstones: a
+   * `files` row is hard-deleted (see `DELETE /files/:id`), so there is no
+   * tombstone to carry and absence already means gone.
+   */
+  registryRoutes.get("/files", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.query("vaultId");
+    if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
+    const org = await vaultOrg(vaultId);
+    // A vault row that is GONE answers 404, never `200 []`. This is the only
+    // thing standing between a teammate's disk and a mass delete: after a vault
+    // is deleted or unsynced, every client's readable set is empty, and an
+    // empty 200 here reads as "everything you hold was revoked" — the inbound
+    // planner would then remove the lot. The listing has to THROW (R1).
+    if (!org) return c.json({ error: "vault_not_found" }, 404);
+    if (!(await orgRole(org, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    const page = readPage(c);
+    if (page === "invalid") {
+      return c.json({ error: `limit must be an integer 1..${PAGE_LIMIT_MAX}` }, 400);
+    }
+    const SELECT = `SELECT id, vault_id, folder_id, path, created_at
+         FROM files WHERE vault_id = $1`;
+    const { rows } = page
+      ? await pool.query(
+          `${SELECT} AND ($3::text IS NULL OR path COLLATE "C" > $3::text)
+            ORDER BY path COLLATE "C" LIMIT $2`,
+          [vaultId, page.limit + 1, page.after],
+        )
+      : await pool.query(`${SELECT} ORDER BY path`, [vaultId]);
+    const more = page !== null && rows.length > page.limit;
+    const window = more ? rows.slice(0, page!.limit) : rows;
+    // The SAME readable set the notes listing uses: a `files` id IS a doc id, so
+    // a folder share reaches the binaries in it exactly as it reaches the notes.
+    const readable = await listReadableDocsInVault(session.userId, vaultId);
+    const files = window.filter((f) => readable.has(f.id));
+    if (more) return c.json({ files, nextAfter: window[window.length - 1].path as string });
+    return c.json({ files, ...(page ? { nextAfter: null } : {}) });
   });
 
   // Rename / move a folder. Rewrites the folder's own row AND every descendant
@@ -584,12 +657,32 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const { deletedNoteIds } = await deleteFolderCascade(pool, id);
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
+    changed(c, row.vault_id);
     // …and anyone with one of them open is kicked off the now-gone doc. Without
     // this a folder delete left live editors happily typing into notes that no
     // longer exist anywhere in the tree — the single-note delete has always done
     // it, and there's no reason a cascade should be gentler.
-    for (const docId of deletedNoteIds) deps.disconnectDoc?.(row.vault_id, docId);
-    changed(c, row.vault_id);
+    //
+    // Moved OFF the response path: a 500-note cascade ran 500 of these in one
+    // un-yielded tick, on the event loop the HTTP and WebSocket listeners share,
+    // while the caller waited. `evictDoc` where it exists, because the rows are
+    // gone and a cached `Y.Doc` handed to the next connect would re-materialise
+    // the very state we just deleted; `disconnectDoc` remains the fallback.
+    if (deletedNoteIds.length > 0) {
+      const vaultId = row.vault_id;
+      setImmediate(() => {
+        void (async () => {
+          for (const docId of deletedNoteIds) {
+            try {
+              if (deps.evictDoc) await deps.evictDoc(vaultId, docId);
+              else deps.disconnectDoc?.(vaultId, docId);
+            } catch (err) {
+              console.warn(`[registry] evicting ${docId} after a folder delete failed:`, err);
+            }
+          }
+        })();
+      });
+    }
     return c.json({ ok: true }, 200);
   });
 
@@ -609,188 +702,37 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
 
-    // Client may supply a stable doc_id (generated locally); else we mint one.
-    const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
-
-    // A live note already at this path IS this note — return it so the caller
-    // adopts its doc_id. Registering the same path under a DIFFERENT id used to
-    // create a second live row, forking the note's identity: two devices then
-    // map one file to two docs, and every external write bounces between them,
-    // duplicating the content each cycle (the 2026-08-25 runaway-daily-notes
-    // incident). The unique index `notes_live_path_uq` backstops the race below.
-    // Matched case-insensitively, because a case-variant of a live note's path is
-    // the SAME FILE on macOS and Windows. Storing both forked one file across two
-    // doc_ids and the two docs then wrote over each other through the disk
-    // forever — the 2026-09-04 BenAI OS runaway (`samePath` in tree-ops carries
-    // the full account). `notes_live_path_uq` (m021) could not see it: a
-    // case-only difference satisfies an exact-path unique index.
-    //
-    // The response echoes the row's CANONICAL `rel_path`, not the caller's, so a
-    // desktop whose disk spells it differently adopts this doc_id and stops
-    // re-registering its own spelling on every reconcile pass.
-    const { rows: samePathRows } = await pool.query<{
-      id: string;
-      folder_id: string | null;
-      title: string | null;
-      rel_path: string;
-    }>(
-      `SELECT id, folder_id, title, rel_path FROM notes
-        WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
-        ORDER BY created_at ASC, id ASC LIMIT 1`,
-      [vaultId, relPath],
-    );
-    if (samePathRows.length > 0) {
-      const row = samePathRows[0];
-      return c.json(
-        {
-          id: row.id,
-          docId: row.id,
-          vaultId,
-          folderId: row.folder_id,
-          title: row.title,
-          relPath: row.rel_path,
-        },
-        200,
-      );
+    // Shared with `/notes/batch` — see `registry/batch-ops.ts registerNote` for
+    // the sequence and the incidents each step closes.
+    const ctx = registerCtx(vaultId, session.userId);
+    const out = await registerNote(ctx, {
+      relPath,
+      docId: typeof body.docId === "string" ? body.docId : undefined,
+      folderId: folderId ?? null,
+      title: title ?? null,
+      color: body.color,
+    });
+    if (out.status === "conflict") {
+      return c.json({ error: out.message, code: out.code, docId: out.id }, 409);
     }
-
-    // `relPath` is authoritative; `folderId` must be the folder at its dirname
-    // (or is resolved from it when the client sent none). A desktop whose
-    // folder map missed a parent, or an assistant that computed the two
-    // inconsistently, otherwise writes a row every client renders in one place
-    // and every ACL walk reads in another (2026-08-27 phantom-root-folder).
-    let resolvedFolder: string | null;
-    let storedRelPath: string;
-    try {
-      const loc = await resolveParentFolder(pool, vaultId, relPath, folderId ?? null);
-      resolvedFolder = loc.folderId;
-      storedRelPath = loc.relPath;
-    } catch (err) {
-      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
-      throw err;
-    }
-
-    // Write permission on the RESOLVED folder, not bare membership — the same
-    // gate MCP's `create_note` applies. Without it a user who is read-only on
-    // every note in a folder could still fill it with new ones.
-    if (!(await canCreateIn(session.userId, vaultId, resolvedFolder))) {
+    if (out.status === "error") {
+      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+      if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
+      if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       return c.json(NO_WRITE_ACCESS_ERROR("note"), 403);
     }
-
-    // Frozen root: refuse only notes that do not exist yet. Re-registering a
-    // root note that predates the latch (a second device, a repeat reconcile)
-    // has to keep working, or freezing the root would break sync for the very
-    // notes the team froze it to protect. Judged on the RESOLVED parent.
-    if (resolvedFolder === null && (await isRootFrozen(vaultId))) {
-      const { rowCount } = await pool.query("SELECT 1 FROM notes WHERE id = $1", [id]);
-      if (!rowCount) return c.json(ROOT_FROZEN_ERROR, 403);
-    }
-    // RETURNING tells us whether the row is actually ours. `DO NOTHING` alone is
-    // silent about *why* nothing happened, and answering 201 regardless told the
-    // client "doc `id` now belongs to `vaultId`" even when that id was already a
-    // note in a DIFFERENT vault. The client persisted that mapping and then synced
-    // against a doc it has no grant on: /api/sync-token 403s forever, the provider
-    // reconnects on every rejection, and the note never loads. A doc_id is global,
-    // so a collision across vaults has to be reported, not swallowed.
-    let inserted;
-    try {
-      inserted = await pool.query(
-        `INSERT INTO notes (id, vault_id, folder_id, title, rel_path, doc_id, created_by, color)
-         VALUES ($1, $2, $3, $4, $5, $1, $6, $7)
-         ON CONFLICT (id) DO NOTHING
-         RETURNING id`,
-        [
-          id,
-          vaultId,
-          resolvedFolder,
-          title ?? null,
-          storedRelPath,
-          session.userId,
-          normalizeColor(body.color) ?? null,
-        ],
-      );
-    } catch (err) {
-      // Lost the race against a concurrent register of the same path
-      // (notes_live_path_uq m021, or notes_live_path_ci_uq m023 for a
-      // case-variant). The winner's row is this note — adopt it, canonical path
-      // and all.
-      if ((err as { code?: string }).code === "23505") {
-        const { rows } = await pool.query<{
-          id: string;
-          folder_id: string | null;
-          title: string | null;
-          rel_path: string;
-        }>(
-          `SELECT id, folder_id, title, rel_path FROM notes
-            WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
-            ORDER BY created_at ASC, id ASC LIMIT 1`,
-          [vaultId, storedRelPath],
-        );
-        const row = rows[0];
-        if (row) {
-          return c.json(
-            {
-              id: row.id,
-              docId: row.id,
-              vaultId,
-              folderId: row.folder_id,
-              title: row.title,
-              relPath: row.rel_path,
-            },
-            200,
-          );
-        }
-      }
-      throw err;
-    }
-    if (inserted.rowCount === 0) {
-      const { rows: existing } = await pool.query<{
-        vault_id: string;
-        rel_path: string;
-        folder_id: string | null;
-        title: string | null;
-      }>("SELECT vault_id, rel_path, folder_id, title FROM notes WHERE id = $1", [id]);
-      const row = existing[0];
-      if (row && row.vault_id !== vaultId) {
-        return c.json(
-          {
-            error: "doc_id already belongs to another vault",
-            code: "doc_id_conflict",
-            docId: id,
-          },
-          409,
-        );
-      }
-      // Re-registering the same note in the same vault is the ordinary adopt
-      // path (a second device, or a repeat reconcile) — still a success. But
-      // `ON CONFLICT DO NOTHING` wrote nothing, so when the caller asked for a
-      // DIFFERENT path than the row holds, answering 201 with the requested
-      // path told the client "this note now lives at `relPath`" about a move
-      // that never happened. The client then mapped its file to a path the
-      // server disagrees with and re-sent it on every reconcile — and at a
-      // frozen root it reported a root note that does not exist. Echo the row's
-      // CANONICAL path/folder instead, exactly as the two adopt paths above do,
-      // and let the client converge quietly. Moving a note is `PATCH
-      // /api/notes/:id`, which is permission- and latch-checked properly.
-      if (row && row.rel_path !== storedRelPath) {
-        return c.json(
-          {
-            id,
-            docId: id,
-            vaultId,
-            folderId: row.folder_id,
-            title: row.title,
-            relPath: row.rel_path,
-          },
-          200,
-        );
-      }
-    }
+    const n = out.row;
+    const payload = {
+      id: n.id,
+      docId: n.id,
+      vaultId,
+      folderId: n.folderId,
+      title: n.title,
+      relPath: n.relPath,
+    };
+    if (out.status === "adopted") return c.json(payload, 200);
     changed(c, vaultId);
-    return c.json(
-      { id, docId: id, vaultId, folderId: resolvedFolder, title: title ?? null, relPath: storedRelPath },
-      201,
-    );
+    return c.json(payload, 201);
   });
 
   registryRoutes.get("/notes", async (c) => {
@@ -799,39 +741,67 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const vaultId = c.req.query("vaultId");
     if (!vaultId) return c.json({ error: "vaultId query param required" }, 400);
     const org = await vaultOrg(vaultId);
-    if (!org || !(await orgRole(org, session.userId))) {
+    // A vault row that is GONE answers 404, never `200 []`. This is the only
+    // thing standing between a teammate's disk and a mass delete: after a vault
+    // is deleted or unsynced, every client's readable set is empty, and an
+    // empty 200 here reads as "everything you hold was revoked" — the inbound
+    // planner would then remove the lot. The listing has to THROW (R1).
+    if (!org) return c.json({ error: "vault_not_found" }, 404);
+    if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    const page = readPage(c);
+    if (page === "invalid") {
+      return c.json({ error: `limit must be an integer 1..${PAGE_LIMIT_MAX}` }, 400);
     }
     // last_edited_* rides this pull deliberately: the file rows that show
     // "edited by X" are already re-fetched on every `registry` frame, so
     // attribution stays live without a second endpoint or a new wire frame.
-    const { rows } = await pool.query(
-      `SELECT n.id, n.vault_id, n.folder_id, n.title, n.rel_path, n.doc_id, n.created_by,
+    const SELECT = `SELECT n.id, n.vault_id, n.folder_id, n.title, n.rel_path, n.doc_id, n.created_by,
               n.created_at, n.updated_at, n.color,
               n.last_edited_by, u.name AS last_edited_by_name, n.last_edited_at
          FROM notes n
          LEFT JOIN "user" u ON u.id = n.last_edited_by
-        WHERE n.vault_id = $1 AND n.deleted_at IS NULL
-        ORDER BY n.rel_path`,
-      [vaultId],
-    );
+        WHERE n.vault_id = $1 AND n.deleted_at IS NULL`;
+    // One row past the limit is read, never returned: it is the only honest
+    // proof that another page exists. Ordered by `rel_path COLLATE "C"` against
+    // the m030 index, so the cursor is an index seek rather than an offset scan.
+    const { rows } = page
+      ? await pool.query(
+          `${SELECT} AND ($3::text IS NULL OR n.rel_path COLLATE "C" > $3::text)
+            ORDER BY n.rel_path COLLATE "C" LIMIT $2`,
+          [vaultId, page.limit + 1, page.after],
+        )
+      : await pool.query(`${SELECT} ORDER BY n.rel_path`, [vaultId]);
+    const more = page !== null && rows.length > page.limit;
+    const window = more ? rows.slice(0, page!.limit) : rows;
     // Private-by-default: hide notes the caller can't read (leaks title/path and
     // would make the client materialize a note it can't sync). Owner/admin +
     // Open vaults get the full set from the readable-docs resolver.
+    //
+    // Applied AFTER the page is cut, so the cursor advances over rows the caller
+    // may not see instead of stalling on them. A page may therefore come back
+    // shorter than `limit` — or empty — while `nextAfter` is still set; that is
+    // correct, and the client's stop condition is `nextAfter`, never the count.
     const readable = await listReadableDocsInVault(session.userId, vaultId);
-    // Tombstones ride along in the SAME response, deliberately. The client's
+    const notes = window.filter((n) => readable.has(n.id));
+    const nextAfter = more ? (window[window.length - 1].rel_path as string) : null;
+    // Tombstones ride the SAME response as the notes, deliberately. The client's
     // whole reason for asking is to subtract one set from the other, and two
     // requests would let a note deleted in between land in neither list (or, on
     // the other ordering, in both) — forcing the client to invent a precedence
     // rule. One request, one snapshot, no rule needed.
     //
+    // Which is exactly why a paginated read carries them on the LAST page only:
+    // the subtraction is meaningful against the whole listing, never against a
+    // page of it, and a client that saw tombstones mid-scan would delete files
+    // whose live rows it had not reached yet.
+    //
     // Ids only, no path or title: this is the signal that lets a client delete a
     // local file, so it carries the minimum that can justify that.
+    if (more) return c.json({ notes, nextAfter });
     const tombstones = await listDeletedReadableDocsInVault(session.userId, vaultId);
-    return c.json({
-      notes: rows.filter((n) => readable.has(n.id)),
-      tombstones: [...tombstones],
-    });
+    return c.json({ notes, tombstones: [...tombstones], ...(page ? { nextAfter: null } : {}) });
   });
 
   // Rename / move a single note (rel_path / folder / title). doc_id unchanged.
@@ -953,39 +923,89 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await orgRole(org, session.userId))) {
       return c.json({ error: "Not a member of this vault" }, 403);
     }
-    const id = typeof body.docId === "string" && body.docId ? body.docId : randomUUID();
-    let resolvedFolder: string | null;
-    let storedPath: string;
-    try {
-      const loc = await resolveParentFolder(pool, vaultId, path, folderId ?? null);
-      resolvedFolder = loc.folderId;
-      storedPath = loc.relPath;
-    } catch (err) {
-      if (err instanceof TreeOpError) return c.json(pathFolderMismatch(err), 400);
-      throw err;
+    // Client-supplied stable id, under either spelling: notes call it `docId`,
+    // and the desktop's local `files.id` is sometimes sent as `id`. Both mean
+    // the same thing — this doc's identity was minted on the device.
+    const docId =
+      (typeof body.docId === "string" && body.docId) ||
+      (typeof body.id === "string" && body.id) ||
+      undefined;
+    // Shared with `/files/batch` — see `registry/batch-ops.ts registerFile`.
+    const ctx = registerCtx(vaultId, session.userId);
+    const out = await registerFile(ctx, { path, docId, folderId: folderId ?? null });
+    if (out.status === "error") {
+      if (out.code === "note_limit_reached") return c.json({ error: out.message, code: out.code, limit: 20000 }, 402);
+      if (out.code === "path_folder_mismatch") return c.json({ error: out.message, code: out.code }, 400);
+      if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
+      return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
     }
-    // Same create gate as notes and folders. A `files` row is a syncable doc
-    // like any other, so a read-only user must not be able to add one.
-    // Re-registering an existing file is an `ON CONFLICT DO NOTHING` below, but
-    // it still has to get past this; a file that already exists is one the
-    // caller could read, so the check is on the folder, not the row.
-    if (!(await canCreateIn(session.userId, vaultId, resolvedFolder))) {
+    const fileRow = out.row;
+    if (out.wrote) changed(c, vaultId);
+    return c.json(
+      {
+        id: fileRow.id,
+        docId: fileRow.id,
+        vaultId,
+        folderId: fileRow.folderId,
+        path: fileRow.path,
+      },
+      out.status === "created" ? 201 : 200,
+    );
+  });
+
+  /**
+   * Delete a tree file — the row AND the bytes behind it.
+   *
+   * The binary counterpart of `DELETE /notes/:id`, and deliberately not its
+   * twin. A note is SOFT-deleted because its doc_id, its Yjs history and its
+   * tombstone all have work left to do: the tombstone is how a teammate's
+   * device tells a deletion from a revocation (`vault-docs.ts`). A file has
+   * none of that. It owns no CRDT, `files` has no `deleted_at` column (see
+   * migration 023's note), and no client removes a local binary on the strength
+   * of a missing server row — so a hard delete costs nobody their bytes and
+   * leaves nothing to reconcile. What it DOES do is make the file stop existing
+   * for every listing at once: the readable set, `listDocsInVault`, the folder
+   * tree, and — because the blobs go with it — `GET /vaults/:id/blobs`, which is
+   * the one the desktop's attachment diff reads. Without that last part a file
+   * deleted on one device came straight back down on the next pass, which is
+   * the bug this route exists for.
+   *
+   * Idempotent: an id with no row answers 204, not 404. The goal state is "this
+   * file is gone", a retried delete (an offline queue draining twice) has
+   * reached it, and there is no membership to check on a row that isn't there —
+   * so the answer is the same for an id that never existed, which tells a prober
+   * nothing.
+   */
+  registryRoutes.delete("/files/:id", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const id = c.req.param("id");
+    const { rows } = await pool.query<{ vault_id: string; path: string }>(
+      "SELECT vault_id, path FROM files WHERE id = $1",
+      [id],
+    );
+    const row = rows[0];
+    if (!row) return c.body(null, 204);
+    const org = await vaultOrg(row.vault_id);
+    if (!org || !(await orgRole(org, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    // The SAME gate that let these bytes be uploaded decides who may take them
+    // away (`canWriteBlob` → `canCreateIn` on the file's folder): a Read-only
+    // vault, a locked share or a sealed posture refuses both ends.
+    if (!(await canWriteBlob(session.userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
       return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
     }
 
-    // Frozen root: same rule as notes — refuse only files that do not exist
-    // yet, so a device re-registering a root file that predates the latch
-    // still syncs.
-    if (resolvedFolder === null && (await isRootFrozen(vaultId))) {
-      const { rowCount } = await pool.query("SELECT 1 FROM files WHERE id = $1", [id]);
-      if (!rowCount) return c.json(ROOT_FROZEN_ERROR, 403);
-    }
-    await pool.query(
-      "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
-      [id, vaultId, resolvedFolder, storedPath],
-    );
-    changed(c, vaultId);
-    return c.json({ id, docId: id, vaultId, folderId: resolvedFolder, path: storedPath }, 201);
+    // Bytes first, row second. The other order would leave blobs whose `doc_id`
+    // resolves to nothing if the process died between the two — and that is
+    // exactly the shape `canReadAttachment` falls back to the path heuristic
+    // for, i.e. bytes nobody can see and nothing will collect.
+    const blobs = await deleteDocBlobs(id, row.vault_id);
+    await pool.query("DELETE FROM files WHERE id = $1", [id]);
+    console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
+    changed(c, row.vault_id);
+    return c.body(null, 204);
   });
 
   return registryRoutes;

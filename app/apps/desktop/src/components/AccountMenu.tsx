@@ -18,7 +18,7 @@ import { MenuIcon } from "./MenuIcon";
    access) and nothing in it is on the first screen, so all three dialogs load
    on demand. `null` is the right fallback for a modal: the popover stays put
    and the sheet arrives a beat later. */
-import type { SettingsTab } from "../lib/settingsTabs";
+import type { AccountSettingsTab, SettingsTab } from "../lib/settingsTabs";
 const VaultSettingsDialog = lazy(() =>
   import("./VaultSettingsDialog").then((m) => ({ default: m.VaultSettingsDialog })),
 );
@@ -52,6 +52,7 @@ export function AccountMenu() {
   // sync banner and the sync pill both point at Health). This component owns the
   // only settings dialog, so it is the only place that can answer.
   const settingsRequest = useStore((s) => s.settingsRequest);
+  const accountSettingsRequest = useStore((s) => s.accountSettingsRequest);
 
   const [open, setOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
@@ -59,6 +60,9 @@ export function AccountMenu() {
   // Which settings tab the vault page should open on (View all → Vaults).
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [accountSettingsTab, setAccountSettingsTab] = useState<
+    AccountSettingsTab | undefined
+  >(undefined);
   // Signed out with a folder open: is that folder actually a SYNCED vault
   // (its `.context/config.json` is stamped with a vault id)? Labeling it
   // "Local · not synced" is factually wrong — the edits made here will merge
@@ -109,6 +113,13 @@ export function AccountMenu() {
     setSettingsTab(settingsRequest.tab);
     setMembersOpen(true);
   }, [settingsRequest]);
+
+  useEffect(() => {
+    if (!accountSettingsRequest) return;
+    setOpen(false);
+    setAccountSettingsTab(accountSettingsRequest.tab);
+    setAccountOpen(true);
+  }, [accountSettingsRequest]);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
@@ -302,6 +313,7 @@ export function AccountMenu() {
           }}
           onOpenAccount={() => {
             setOpen(false);
+            setAccountSettingsTab(undefined);
             setAccountOpen(true);
           }}
         />
@@ -317,7 +329,11 @@ export function AccountMenu() {
       )}
       {accountOpen && (
         <Suspense fallback={null}>
-          <AccountSettings onClose={() => setAccountOpen(false)} />
+          <AccountSettings
+            key={accountSettingsRequest?.token ?? 0}
+            onClose={() => setAccountOpen(false)}
+            initialTab={accountSettingsTab}
+          />
         </Suspense>
       )}
     </div>
@@ -754,5 +770,4 @@ function HomeButton({ onClose }: { onClose: () => void }) {
     </button>
   );
 }
-
 

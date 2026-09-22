@@ -12,13 +12,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import * as ipc from "../ipc";
+import { authManager } from "../auth/authManager";
+import type { AccessTreeResponse } from "../api";
 import { useStore } from "../../store";
 import { syncManager } from "../sync/docSession";
+import { isBulkPhase } from "../sync/vaultScope";
 import { collectCrdtGarbage } from "../sync/crdtGc";
 import { deletePaths } from "../vault/mutatePaths";
 import { removeFromOrder } from "../ordering";
 import { copyText } from "../clipboard";
+import { isNoteExt } from "../formats";
 import { toast } from "../toast";
+import { runCheckAction, type CheckActionDeps } from "./checkActions";
 import {
   buildHealthReport,
   composeInspectionVerdict,
@@ -29,6 +34,7 @@ import {
 } from "./model";
 import type {
   HealthActions,
+  HealthInventory,
   HealthIssue,
   NoteInspection,
   SyncLogEntry,
@@ -44,13 +50,23 @@ export interface UseVaultHealthOptions {
   onRequestSignIn?: () => void;
 }
 
+/** Merge the hidden attachment store and surfaced binary-file census without
+ * treating an unfinished read as evidence that the vault is note-only. */
+export function localAttachmentPresence(
+  hiddenCount: number | null,
+  surfacedCount: number | null,
+): boolean | null {
+  if ((hiddenCount ?? 0) > 0 || (surfacedCount ?? 0) > 0) return true;
+  return hiddenCount != null && surfacedCount != null ? false : null;
+}
+
 /** Empty failure set — what the sync layer reports when it isn't running. */
 const NO_FAILURES: HealthFailures = { registry: [], content: [], limitCode: null };
 
 export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealthSnapshot {
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
-  const syncStatus = useStore((s) => s.syncStatus);
+  const syncStatus = useStore((s) => s.vaultSyncStatus);
   const authStatus = useStore((s) => s.authStatus);
   const hasSession = useStore((s) => s.session != null);
   const openFolderIsSynced = useStore((s) => s.openFolderIsSynced);
@@ -61,17 +77,61 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const docSyncState = useStore((s) => s.docSyncState);
   const titles = useStore((s) => s.titles);
   const members = useStore((s) => s.members);
+  const userId = useStore((s) => s.session?.user.id);
+  const myRole = members.find((m) => m.userId === userId)?.role;
+  const canManage = myRole === "owner" || myRole === "admin";
+  const [serverTree, setServerTree] = useState<AccessTreeResponse | null>(null);
 
   const [stats, setStats] = useState<VaultStats | null>(null);
   const [checks, setChecks] = useState<VaultChecks | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [localInventoryPaths, setLocalInventoryPaths] = useState<{
+    notes: string[];
+    folders: string[];
+    files: string[];
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   /** Bumped by `refresh()` and by any action that changes what a census would
    *  say (reclaim, reset-history). */
   const [nonce, setNonce] = useState(0);
+  const syncActive = isBulkPhase(syncProgress?.phase) || syncStatus === "connecting";
+  const syncActiveRef = useRef(syncActive);
+  syncActiveRef.current = syncActive;
 
   const vaultPath = vault?.path ?? null;
   const vaultEpoch = vault?.epoch;
+
+  // Census state belongs to one vault. Clear it when that identity changes so
+  // the new vault's attachment-plan verdict can never combine with the prior
+  // vault's attachment count while replacement reads are still in flight. A
+  // same-vault refresh keeps the last result visible until its update lands.
+  useEffect(() => {
+    setStats(null);
+    setServerTree(null);
+    setChecks(null);
+    setLocalInventoryPaths(null);
+    setStatsError(null);
+    setLoading(vaultPath != null);
+  }, [vaultPath, vaultEpoch]);
+
+  // Read server-wide metadata only through the existing owner/admin route.
+  // Never feed these unfiltered paths into reconciliation or local downloads.
+  const serverVaultId = syncManager.registry.vaultId;
+  useEffect(() => {
+    if (!canManage || !syncEnabled || !serverVaultId) {
+      setServerTree(null);
+      return;
+    }
+    let live = true;
+    // Coalesce registry batches instead of fetching the complete admin tree
+    // for every mapped file. Keep the previous totals until the read completes.
+    const timer = setTimeout(() => {
+      void authManager.api.listAccessTree(serverVaultId).then((tree) => {
+        if (live) setServerTree(tree);
+      }).catch(() => { if (live) setServerTree(null); });
+    }, 500);
+    return () => { live = false; clearTimeout(timer); };
+  }, [canManage, syncEnabled, serverVaultId, vaultPath, vaultEpoch, nonce, syncActive, docIdByPath]);
 
   // ── The Rust census ────────────────────────────────────────────────────────
   // Re-run on vault change and on every `refresh()`. A response that lands after
@@ -81,50 +141,86 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     if (!vaultPath) {
       setStats(null);
       setChecks(null);
+      setLocalInventoryPaths(null);
       setStatsError(null);
       setLoading(false);
       return;
     }
     let live = true;
     setLoading(true);
+    // Keep the previous sample visible while the next one is read.
     // The registry's ids are the second live id space (see `crdtGc.ts`): without
     // them a server-pulled note's history reads as an orphan the sweep then
     // refuses to remove — "18 reclaimable" beside a Reclaim that frees nothing.
-    const liveDocs: Record<string, string> = {};
-    for (const [path, docId] of Object.entries(useStore.getState().docIdByPath)) {
-      liveDocs[docId] = path;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const sample = async () => {
+      const liveDocs: Record<string, string> = {};
+      for (const [path, docId] of Object.entries(useStore.getState().docIdByPath)) {
+        liveDocs[docId] = path;
+      }
+      const statsRead = ipc
+        .vaultStats(liveDocs, vaultEpoch, new Date().setHours(0, 0, 0, 0))
+        .then((s) => {
+          if (!live) return;
+          setStats(s);
+          setStatsError(null);
+        })
+        .catch((e: unknown) => {
+          if (!live) return;
+          setStats(null);
+          setStatsError(e instanceof Error ? e.message : String(e));
+        })
+        .finally(() => {
+          if (live) setLoading(false);
+        });
+      // The census gives totals; the full tree gives the paths needed to explain
+      // a folder/file mismatch. `listTree` is the complete Rust walk (not the
+      // sidebar's lazy tree), and carries the same vault-epoch race guard.
+      const treeRead = ipc
+        .listTree(vaultEpoch)
+        .then((tree) => {
+          if (!live) return;
+          const paths = { notes: [] as string[], folders: [] as string[], files: [] as string[] };
+          const walk = (node: ipc.TreeNode): void => {
+            if (node.isDir) {
+              if (node.path) paths.folders.push(node.path);
+              for (const child of node.children ?? []) walk(child);
+            } else if (isNoteExt(node.path)) {
+              paths.notes.push(node.path);
+            } else {
+              paths.files.push(node.path);
+            }
+          };
+          walk(tree);
+          paths.notes.sort();
+          paths.folders.sort();
+          paths.files.sort();
+          setLocalInventoryPaths(paths);
+        })
+        .catch(() => {
+          if (live) setLocalInventoryPaths(null);
+        });
+      // Serialize samples: a slow disk never accumulates overlapping walks.
+      await Promise.allSettled([statsRead, treeRead]);
+      if (live && syncActiveRef.current) timer = setTimeout(() => void sample(), 2000);
+    };
+    void sample();
+    // Content-reading checks wait until bulk work settles. Never scan every
+    // note on a progress tick while sync is already busy writing those files.
+    if (!syncActive) {
+      const liveDocs: Record<string, string> = {};
+      for (const [path, docId] of Object.entries(useStore.getState().docIdByPath)) {
+        liveDocs[docId] = path;
+      }
+      void ipc.vaultChecks(liveDocs, vaultEpoch)
+        .then((c) => { if (live) setChecks(c); })
+        .catch(() => { if (live) setChecks(null); });
     }
-    void ipc
-      .vaultStats(liveDocs, vaultEpoch, new Date().setHours(0, 0, 0, 0))
-      .then((s) => {
-        if (!live) return;
-        setStats(s);
-        setStatsError(null);
-      })
-      .catch((e: unknown) => {
-        if (!live) return;
-        setStats(null);
-        setStatsError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (live) setLoading(false);
-      });
-    // The integrity checks are a SECOND pass, run alongside the census rather
-    // than after it: they are slower (they read every file) and the page's
-    // headline never waits on them. A failure blanks the checks card only — the
-    // census, the verdict and every remedy stay on screen.
-    void ipc
-      .vaultChecks(liveDocs, vaultEpoch)
-      .then((c) => {
-        if (live) setChecks(c);
-      })
-      .catch(() => {
-        if (live) setChecks(null);
-      });
     return () => {
       live = false;
+      clearTimeout(timer);
     };
-  }, [vaultPath, vaultEpoch, nonce, docIdByPath]);
+  }, [vaultPath, vaultEpoch, nonce, syncActive]);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -216,6 +312,100 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     members,
   ]);
 
+  const inventory = useMemo<HealthInventory>(() => {
+    const localReady = localInventoryPaths != null;
+    const localNotes = localInventoryPaths?.notes ?? [];
+    const localFolders = localInventoryPaths?.folders ?? [];
+    const localFilesPaths = localInventoryPaths?.files ?? [];
+    const folded = (paths: string[]) => new Set(paths.map((path) => path.toLowerCase()));
+    const localNotesFolded = folded(localNotes);
+    const localFoldersFolded = folded(localFolders);
+    const localFilesFolded = folded(localFilesPaths);
+    let remote: ReturnType<typeof syncManager.registry.healthInventory> | null = null;
+    try {
+      remote = syncManager.registry.healthInventory();
+    } catch {
+      /* The registry may not be available during the first paint in a test host. */
+    }
+
+    const remoteView = syncEnabled && remote?.hasServerVault === true ? remote : null;
+    const remoteNotes = remoteView?.notePaths ?? [];
+    const remoteFolders = remoteView?.folderPaths ?? [];
+    const remoteFiles = remoteView?.filePaths ?? [];
+    // Missing from storage and inaccessible to this account are different.
+    // Only the admin listing can establish absence from the whole server.
+    const remoteNotesFolded = folded(serverTree?.notes.map((n) => n.relPath) ?? remoteNotes);
+    const remoteFoldersFolded = folded(serverTree?.folders.map((f) => f.path) ?? remoteFolders);
+    const remoteFilesFolded = folded(serverTree?.files.map((f) => f.path) ?? remoteFiles);
+    const serverStored = serverTree ? {
+      notes: serverTree.notes.length, folders: serverTree.folders.length, files: serverTree.files.length,
+      total: serverTree.notes.length + serverTree.folders.length + serverTree.files.length,
+    } : null;
+    // Use the surfaced tree for every displayed count. The disk census's
+    // `otherFiles` also includes unsupported files that the app never lists,
+    // while embedded attachments use their own content-addressed transport.
+    const local = {
+      notes: localNotes.length,
+      folders: localFolders.length,
+      files: localFilesPaths.length,
+      total: localNotes.length + localFolders.length + localFilesPaths.length,
+    };
+    const server = remoteView
+      ? {
+          notes: remoteNotes.length,
+          folders: remoteView.folderPaths.length,
+          files: remoteView.filePaths.length,
+          total:
+            remoteNotes.length + remoteView.folderPaths.length + remoteView.filePaths.length,
+        }
+      : null;
+    const serverState: HealthInventory["serverState"] = !server
+      ? "unavailable"
+      : report.verdict === "syncing" || report.verdict === "connecting"
+        ? "updating"
+      : report.verdict === "offline" ||
+          report.verdict === "signed-out" ||
+          report.verdict === "no-access"
+        ? "last-known"
+        : "current";
+
+    return {
+      local,
+      localReady,
+      serverStored,
+      server,
+      serverState,
+      deviceOnlyNotes: localInventoryPaths
+        ? localNotes.filter((path) => !remoteNotesFolded.has(path.toLowerCase())).sort()
+        : [],
+      serverOnlyNotes: localInventoryPaths
+        ? remoteNotes.filter((path) => !localNotesFolded.has(path.toLowerCase())).sort()
+        : [],
+      deviceOnlyFolders: localInventoryPaths
+        ? localFolders.filter((path) => !remoteFoldersFolded.has(path.toLowerCase())).sort()
+        : [],
+      serverOnlyFolders: localInventoryPaths
+        ? remoteFolders.filter((path) => !localFoldersFolded.has(path.toLowerCase())).sort()
+        : [],
+      deviceOnlyFiles: localInventoryPaths
+        ? localFilesPaths.filter((path) => !remoteFilesFolded.has(path.toLowerCase())).sort()
+        : [],
+      serverOnlyFiles: localInventoryPaths
+        ? remoteFiles.filter((path) => !localFilesFolded.has(path.toLowerCase())).sort()
+        : [],
+    };
+  }, [localInventoryPaths, syncEnabled, report.verdict, docIdByPath, syncProgress, serverTree]);
+
+  // Two homes feed attachment sync: the hidden content-addressed store (only
+  // the census sees it) and surfaced standalone binaries (only listTree gives
+  // the exact supported-file set). A negative verdict is safe only after both
+  // reads land; until then Health stays quiet rather than accusing a note-only
+  // vault from the server's plan-level 402 alone.
+  const hasLocalAttachments = localAttachmentPresence(
+    stats?.attachments.count ?? null,
+    localInventoryPaths?.files.length ?? null,
+  );
+
   // ── Actions ────────────────────────────────────────────────────────────────
   // Kept in a ref-backed object so the identity is stable across renders: the
   // tab passes these straight to row buttons, and a fresh object every render
@@ -227,8 +417,21 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const actions = useMemo<HealthActions>(
-    () => ({
+  // Self-referential on purpose: `applyCheckAction` runs the OTHER actions in
+  // this object rather than a second copy of them, so a heal and the per-item
+  // button beside it can never drift apart.
+  const actions = useMemo<HealthActions>(() => {
+    const api: HealthActions = {
+      async downloadFiles(paths) {
+        if (vaultEpoch == null) throw new Error("No vault is open.");
+        try { await syncManager.downloadMissingFiles(paths, vaultEpoch); }
+        finally { refresh(); }
+      },
+      async removeServerFile(path) {
+        if (vaultEpoch == null) throw new Error("No vault is open.");
+        await syncManager.removeMissingServerFile(path, vaultEpoch);
+        refresh();
+      },
       syncNow: () => syncManager.retrySync(),
 
       retryDoc: (docId: string) => syncManager.retryDoc(docId),
@@ -266,18 +469,8 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       },
 
       async deleteNote(path: string) {
-        // The sidebar's delete, verbatim: server row first (so a refusal leaves
-        // the file alone instead of producing a reappearing ghost), then disk.
-        const st = useStore.getState();
-        const { deleted, failed } = await deletePaths([path], {
-          epoch: st.vault?.epoch,
-          deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
-          unregister: (p) => syncManager.registry.deletePath(p),
-        });
+        const { failed } = await deleteVaultPaths([path]);
         if (failed.length > 0) throw new Error(failed[0].reason);
-        if (deleted.length === 0) return;
-        st.setItemOrder(removeFromOrder(st.itemOrder, path));
-        st.pruneTabs([path]);
         refresh();
       },
 
@@ -323,7 +516,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         if (!mapping) {
           throw new Error(
             "This note couldn't be registered: the vault isn't reconciled with the " +
-              "server yet. Try again once the connection is back.",
+              "Remote Vault yet. Try again once the connection is back.",
           );
         }
         // Registering creates the row; the content still has to be pushed, and
@@ -340,7 +533,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         const message =
           `Hi${owner ? ` ${owner.name}` : ""},\n\n` +
           `Could you give me access to the Baalda vault "${vaultName}"? ` +
-          `Right now the server refuses to sync it for me.` +
+          `Right now the Remote Vault refuses to sync it for me.` +
           (me ? ` My account email is ${me}.` : "") +
           `\n\nThanks!`;
         await copyText(message);
@@ -446,9 +639,33 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         await st.refreshTree();
         refresh();
       },
-    }),
-    [refresh],
-  );
+
+      applyCheckAction(plan, onProgress) {
+        // Every dep is an EXISTING path: the sidebar's delete, the sync layer's
+        // history reset, the startup sweep, and the store's rename — which is
+        // the one that keeps `doc_id` stable across a move.
+        // A heal that wrote to disk by itself would fork notes the moment two
+        // devices ran it.
+        const epoch = () => useStore.getState().vault?.epoch;
+        const deps: CheckActionDeps = {
+          deleteNotes: (paths, onStep) => deleteVaultPaths(paths, onStep),
+          resetHistory: (docId) => api.resetHistory(docId),
+          reclaim: () => api.reclaimOrphans(),
+          emptyTrash: () => api.emptyTrash(),
+          rebuildIndex: () => api.rebuildIndex(),
+          syncNow: () => api.syncNow(),
+          pickFolder: () => ipc.pickFolder(),
+          exportTo: (path, dest) => ipc.exportPath(path, dest, epoch()),
+          isFile: (path) => ipc.noteExists(path, epoch()),
+          async rename(from, to) {
+            await useStore.getState().renameNoteFileExact(from, to);
+          },
+        };
+        return runCheckAction(plan, deps, onProgress);
+      },
+    };
+    return api;
+  }, [refresh, vaultEpoch]);
 
   // A reset discards history on both sides, so the census it produced is stale.
   // Wrapping here (rather than inside the memo) keeps `actions` stable.
@@ -464,7 +681,55 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     [actions, refresh],
   );
 
-  return { report, stats, checks, statsError, loading, log, refresh, actions: wrapped };
+  return {
+    report,
+    inventory,
+    hasLocalAttachments,
+    stats,
+    checks,
+    statsError,
+    loading,
+    log,
+    refresh,
+    actions: wrapped,
+  };
+}
+
+/**
+ * The sidebar's delete, for one path or twenty: server row first (so a refusal
+ * leaves the file alone instead of producing a reappearing ghost), then disk,
+ * then the view state that named the gone paths.
+ *
+ * One function because the single Delete on a check row and its Delete all are
+ * the same operation at two sizes — the bug this whole helper exists to prevent
+ * (`vault/mutatePaths.ts`) was two hand-copied deletes drifting apart.
+ */
+async function deleteVaultPaths(
+  paths: string[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ deleted: string[]; failed: Array<{ path: string; reason: string }> }> {
+  const st = useStore.getState();
+  const { deleted, failed } = await deletePaths(paths, {
+    epoch: st.vault?.epoch,
+    deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
+    unregister: (p) => syncManager.registry.deletePath(p),
+    // "Delete all" on a check row is the size this exists for — see the same
+    // dep on the sidebar's bulk delete. Below the threshold nothing changes.
+    unregisterMany: async (ps) =>
+      (await syncManager.registry.deletePaths(ps)).map((o) => ({
+        path: o.path,
+        ok: o.status === "deleted",
+        reason: o.reason,
+      })),
+    onProgress,
+  });
+  if (deleted.length > 0) {
+    let order = st.itemOrder;
+    for (const path of deleted) order = removeFromOrder(order, path);
+    st.setItemOrder(order);
+    st.pruneTabs(deleted);
+  }
+  return { deleted, failed };
 }
 
 /** The last path segment — what the save dialog should offer as a filename. */
@@ -518,7 +783,7 @@ export async function buildIssueReport(
     for (const f of issue.facts) lines.push(`${f.label}: ${f.value}`);
   }
   lines.push("");
-  lines.push(`app ${version} · server ${serverHost ?? "(local only)"}`);
+  lines.push(`app ${version} · Remote Vault ${serverHost ?? "(local only)"}`);
   return lines.join("\n");
 }
 
@@ -550,7 +815,7 @@ export async function buildDiagnostics(
   lines.push("Baalda vault health");
   lines.push(`app: ${version}`);
   lines.push(`platform: ${platform}`);
-  lines.push(`server: ${report.serverHost ?? "(local only)"}`);
+  lines.push(`Remote Vault: ${report.serverHost ?? "(local only)"}`);
   lines.push(`vault: ${st.vault?.name ?? "(none)"}`);
   lines.push(`org id: ${st.session?.activeOrganizationId ?? "(none)"}`);
   lines.push(`collection id: ${syncManager.registry.vaultId ?? "(none)"}`);

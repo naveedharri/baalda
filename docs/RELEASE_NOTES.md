@@ -18,6 +18,14 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.63
+
+- More files open, embed and search: Office docs, CSV, audio, video, code and archives. Notes sync on every plan, embedded attachments stay free, and standalone file sync is Pro. On first launch Baalda scans your vault and uploads what your plan allows.
+- Large vaults join and sync much faster in batches, edits from disk and from collaborators are both kept, and unchanged empty notes stop re-uploading after a restart. Self-hosters: update the server before the desktop.
+- Access shows each person's permissions in the file tree, and selecting a folder includes its contents. People who join a vault from now on start with no access until you share or change the new-member default in Access.
+- Vault Health leads with vault totals, a device-versus-server comparison and advanced diagnostics. AI (Beta) adds Baalda Assistant, which proposes repairs you approve with your own OpenRouter key: Pro on Cloud, free for self-hosters.
+- Dark mode is a neutral charcoal, sign-in is centred, and Remember password lives in your OS keychain. Copying a note carries its images, a vault can be made local only while keeping its files, and icons, tabs and previews are tidier.
+
 ## 0.1.61
 
 - Baalda now updates itself: it checks, downloads, installs and restarts at a quiet moment, and only shows the "Update required" screen if that fails. After a restart, What's New lists just the handful of things that changed in the version you got.

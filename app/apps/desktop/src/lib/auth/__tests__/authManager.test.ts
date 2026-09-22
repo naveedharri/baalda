@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Replace the whole ipc module so importing authManager doesn't drag in
 // `@tauri-apps/api` (unavailable in the Node test env). These fakes stand in for
@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../../ipc", () => ({
   googleOauthListen: vi.fn(async () => ({ port: 5123, state: "test-nonce" })),
   googleOauthAwait: vi.fn(async () => "code-xyz"),
+  googleOauthReturnToApp: vi.fn(async () => {}),
   openExternal: vi.fn(async () => {}),
   keychainSet: vi.fn(async () => {}),
   keychainGet: vi.fn(async () => null),
@@ -31,6 +32,10 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 describe("AuthManager.signInWithGoogle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("drives loopback → authorize → browser → exchange → keychain", async () => {
     const api = fakeApi();
     const mgr = new AuthManager(api);
@@ -66,6 +71,11 @@ describe("AuthManager.signInWithGoogle", () => {
     expect(value).toBe("sess-1");
     expect(key).toBe("session-v2:http://localhost:3010");
     expect(key.startsWith("session:")).toBe(false);
+    expect(ipc.googleOauthReturnToApp).toHaveBeenCalledOnce();
+    const keychainOrder = vi.mocked(ipc.keychainSet).mock.invocationCallOrder;
+    expect(vi.mocked(ipc.googleOauthReturnToApp).mock.invocationCallOrder[0]).toBeGreaterThan(
+      keychainOrder[keychainOrder.length - 1],
+    );
   });
 
   it("propagates a failure from the loopback wait (no token stored)", async () => {
@@ -75,6 +85,29 @@ describe("AuthManager.signInWithGoogle", () => {
 
     await expect(mgr.signInWithGoogle()).rejects.toThrow("timed out");
     expect(ipc.keychainSet).not.toHaveBeenCalled();
+    expect(ipc.googleOauthReturnToApp).not.toHaveBeenCalled();
+  });
+
+  it("does not focus the app when session persistence fails", async () => {
+    vi.mocked(ipc.keychainSet).mockRejectedValueOnce(new Error("keychain locked"));
+    const mgr = new AuthManager(fakeApi());
+
+    await expect(mgr.signInWithGoogle()).rejects.toThrow("keychain locked");
+    expect(ipc.googleOauthReturnToApp).not.toHaveBeenCalled();
+  });
+
+  it("keeps a completed sign-in successful when the window manager refuses focus", async () => {
+    vi.mocked(ipc.googleOauthReturnToApp).mockRejectedValueOnce(new Error("focus denied"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mgr = new AuthManager(fakeApi());
+
+    await expect(mgr.signInWithGoogle()).resolves.toMatchObject({ id: "u1" });
+    expect(ipc.keychainSet).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "[oauth] sign-in completed but the app could not be focused",
+      expect.any(Error),
+    );
+    warn.mockRestore();
   });
 });
 

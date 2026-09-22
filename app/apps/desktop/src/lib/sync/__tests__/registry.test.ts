@@ -48,6 +48,8 @@ function fakeApi(opts: {
     createFolder: vi.fn(async (input: { path: string }) => ({ id: `folder-${input.path}` })),
     listNotes: vi.fn(async () => opts.notes ?? []),
     listNoteRegistry: vi.fn(async () => ({ notes: opts.notes ?? [], tombstones: [] })),
+    // The paged twin the reconciler actually calls; identical answer.
+    listNoteRegistryPaged: vi.fn(async () => ({ notes: opts.notes ?? [], tombstones: [] })),
     createNote,
   } as unknown as ApiClient;
   return { api, createVault, createNote };
@@ -80,6 +82,12 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     // test); in the app it is what makes Rust refuse the write after a switch.
     expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Team/hello.md", "", null);
     expect(reg.getMapping("Team/hello.md")).toEqual({ vaultId: "v-owner", docId: "n1" });
+    expect(reg.healthInventory()).toEqual({
+      hasServerVault: true,
+      notePaths: ["Team/hello.md"],
+      folderPaths: [],
+      filePaths: [],
+    });
   });
 
   it("resolves a mapped note through a case-different disk spelling", async () => {
@@ -183,6 +191,29 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     // Mapping rebuilt from the live vault, not the dead config.
     expect(reg.getMapping("old.md")).toBeNull();
     expect(reg.getMapping("Welcome.md")).toEqual({ vaultId: "v-live", docId: "n1" });
+  });
+
+  it("treats the config a vault UNSYNC leaves behind as no config at all", async () => {
+    // "Make this vault local only" rewrites `.context/config.json` to a bare
+    // tombstone — no `serverVaultId`, no `docs`, no `pushed`, no `baseline`, no
+    // `authored`. That file is the whole feature: with the old one in place the
+    // folder stays stamped for a vault that no longer exists and can never sync
+    // again. This pins the other half — that the cleared file is INERT, so the
+    // folder reconciles exactly as a never-synced one would.
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+      JSON.stringify({ unsyncedAt: "2026-09-18T10:00:00.000Z", unsyncedFrom: "org-dead" }),
+    );
+    const { api, createVault } = fakeApi({ vaults: [] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(
+      reg,
+      { organizationId: ORG, vaultName: "acme" },
+      emptyTree(),
+    );
+    // Nothing was adopted from the file, so this is a brand-new vault.
+    expect(createVault).toHaveBeenCalledWith({ name: "acme", organizationId: ORG });
+    expect(reg.vaultId).toBe("created-acme");
+    expect(reg.getMapping("Welcome.md")).toBeNull();
   });
 });
 
@@ -562,6 +593,153 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
     expect(reg.consumeMaterialized("Echo.md")).toBe(true);
     expect(reg.consumeMaterialized("Echo.md")).toBe(false);
     expect(reg.consumeMaterialized("Never-written.md")).toBe(false);
+  });
+
+  it("claims an echo for a binary the blob mirror materialized too", async () => {
+    // A tree binary lands on disk the same way and owes the same one echo —
+    // the sync layer marks it (`AttachmentSync.downloadOne`) through this.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    reg.markMaterialized("Team/report.docx");
+    expect(reg.consumeMaterialized("Team/report.docx")).toBe(true);
+    expect(reg.consumeMaterialized("Team/report.docx")).toBe(false);
+  });
+});
+
+describe("VaultRegistry tree-binary `files` map", () => {
+  it("persists registered binaries under their own config key, never into `docs`", async () => {
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Welcome.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    expect(reg.getFileId("Team/report.docx")).toBeNull();
+    reg.setFileId("Team/report.docx", "file-1");
+    expect(reg.getFileId("Team/report.docx")).toBe("file-1");
+
+    // The write is checkpointed, never a synchronous read-modify-write — the
+    // next pass's flush is what puts it on disk.
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const written = writes[writes.length - 1][0] as string;
+    const cfg = JSON.parse(written) as { files?: Record<string, string>; docs?: Record<string, string> };
+    expect(cfg.files).toEqual({ "Team/report.docx": "file-1" });
+    // The note map is the CRDT join and a binary must never appear in it: it
+    // feeds `registerNote`, the bridge and the content uploader.
+    expect(Object.keys(cfg.docs ?? {})).not.toContain("Team/report.docx");
+  });
+
+  it("re-writes config.json after a reset, even when the contents are identical", async () => {
+    // `writeConfig`'s no-op memo is only honest while this registry is the LAST
+    // thing that wrote the file. A teardown ends that — `store.clearVaultStamp`
+    // writes the same `.context/config.json` through `ipc.setVaultConfig`, and
+    // deleting `.context/` by hand (the documented dev habit) empties it — so a
+    // memo that survives `reset()` would leave the doc-id map unpersisted for
+    // the rest of the session.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+    const lastWrite = (): string | undefined => {
+      const calls = vi.mocked(ipc.setVaultConfig).mock.calls;
+      return calls.length > 0 ? (calls[calls.length - 1][0] as string) : undefined;
+    };
+    const first = lastWrite() as string;
+    expect(first).toBeTruthy();
+    // The memo holds while this registry is still the writer: an identical flush
+    // costs nothing (a 5,000-note config is ~500 KB, rewritten on a timer).
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls.length;
+    await reg.flushCheckpoint();
+    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBe(writes);
+
+    // …and it does NOT hold across a teardown, even though the bytes are the same.
+    reg.reset();
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+
+    expect(vi.mocked(ipc.setVaultConfig).mock.calls.length).toBeGreaterThan(writes);
+    expect(lastWrite()).toEqual(first);
+  });
+
+  it("round-trips the bytes confirmation, and an older config loads unconfirmed", async () => {
+    // `files` says a ROW exists; `filesConfirmed` says the SERVER HAS THE BYTES.
+    // Only the second may license a revocation to take the file off this disk,
+    // so it has to survive a restart on its own — and a config written before
+    // the key existed must load as unconfirmed rather than as permission.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    reg.setFileId("Team/report.docx", "file-1");
+    reg.setFileId("Team/slides.pptx", "file-2");
+    // Registered is not uploaded: neither is announced yet.
+    expect(reg.fileDocIds()).toEqual([]);
+    reg.confirmFileBytes("Team/report.docx");
+    expect(reg.fileBytesConfirmed("file-1")).toBe(true);
+    expect(reg.fileBytesConfirmed("file-2")).toBe(false);
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1][0] as string) as {
+      files?: Record<string, string>;
+      filesConfirmed?: string[];
+    };
+    expect(cfg.files).toEqual({ "Team/report.docx": "file-1", "Team/slides.pptx": "file-2" });
+    expect(cfg.filesConfirmed).toEqual(["file-1"]);
+
+    // Reload it as a fresh session: the claim survives.
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(cfg) as never);
+    const reloaded = new VaultRegistry(api);
+    await reconcileWithTree(reloaded, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(reloaded.fileBytesConfirmed("file-1")).toBe(true);
+    expect(reloaded.fileBytesConfirmed("file-2")).toBe(false);
+
+    // …and the same config WITHOUT the key — everything an older client wrote —
+    // loads with nothing confirmed.
+    const legacy = { ...cfg };
+    delete legacy.filesConfirmed;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(legacy) as never);
+    const older = new VaultRegistry(api);
+    await reconcileWithTree(older, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(older.getFileId("Team/report.docx")).toBe("file-1");
+    expect(older.fileBytesConfirmed("file-1")).toBe(false);
+    expect(older.fileDocIds()).toEqual([]);
+  });
+
+  it("drops the confirmation with the row it was made about", async () => {
+    // A path re-used by a different file must not inherit a claim made about
+    // the bytes that used to live there.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    reg.setFileId("Team/report.docx", "file-1");
+    reg.confirmFileBytes("Team/report.docx");
+    reg.forgetFileId("Team/report.docx");
+    reg.setFileId("Team/report.docx", "file-1");
+    expect(reg.fileBytesConfirmed("file-1")).toBe(false);
+
+    // A RENAME is the opposite case: same bytes, same row, so the claim rides
+    // along (it is keyed by id, not path).
+    reg.confirmFileBytes("Team/report.docx");
+    reg.moveFileId("Team/report.docx", "Archive/report.docx");
+    expect(reg.fileBytesConfirmed("file-1")).toBe(true);
+    expect(reg.fileDocIds()).toEqual(["file-1"]);
+  });
+
+  it("forgets binary ids on a vault switch — an id from vault A names nothing in B", async () => {
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    reg.setFileId("Team/report.docx", "file-1");
+
+    reg.reset();
+    expect(reg.getFileId("Team/report.docx")).toBeNull();
   });
 });
 

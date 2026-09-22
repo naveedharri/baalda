@@ -4,6 +4,7 @@ import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
+import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { SyncIssuesBannerView, syncIssuesBanner } from "./components/SyncIssuesBanner";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
@@ -15,6 +16,7 @@ import { SearchPanel } from "./components/SearchPanel";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { Spinner } from "./components/Spinner";
 import { SidebarResizer } from "./components/SidebarResizer";
+import { SidebarToggle } from "./components/SidebarToggle";
 import { TabBar } from "./components/TabBar";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
@@ -23,8 +25,9 @@ import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
 import * as perf from "./lib/perf";
-import { implicatedFolders } from "./lib/tree/lazyTree";
+import { implicatedFolders, refreshWorthy } from "./lib/tree/lazyTree";
 import { syncManager } from "./lib/sync/docSession";
+import { routesToAttachmentSync } from "./lib/sync/attachments";
 import {
   backgroundUpdateCheck,
   checkForUpdate,
@@ -36,12 +39,15 @@ import {
 } from "./lib/updater";
 import { notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
-import { previewKind } from "./lib/preview";
+import { viewerFor } from "./lib/formats";
+import { onOpenFileRequest } from "./lib/openFileRequest";
 import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
 import { ShareNoteButton } from "./components/ShareNoteButton";
+import { AttachmentSyncNotice } from "./components/AttachmentSyncNotice";
 import { listenForNoteLinks } from "./lib/deepLink";
 import { useSidebarWidth } from "./lib/useSidebarWidth";
+import { readSidebarHidden, writeSidebarHidden } from "./lib/prefs";
 import { requestOpenVault, useStore } from "./store";
 import { clearPendingNoteLink } from "./lib/noteLinkFlow";
 import { prefetchAfterPaint } from "./lib/prefetch";
@@ -73,8 +79,8 @@ const UPDATE_POLL_MS = 15 * 60 * 1000;
  * The file behind the open note vanished from disk (Finder, `rm`, a script, an
  * AI tidying the vault).
  *
- * In a synced vault that is now a real delete: the sync layer keeps a recovery
- * copy in `.context/trash/` and removes the note for the team, exactly like the
+ * In a synced vault that is now a real delete: the sync layer permanently
+ * removes the note for the team, exactly like the
  * sidebar's Delete (see `SyncManager.drainDiskDeletes`). The banner says so
  * rather than implying the app lost track of the file — and it still only offers
  * to close, because the editor may hold text the user has not saved anywhere.
@@ -89,7 +95,7 @@ function RemovedBanner() {
     <Banner show={!!noteRemoved && !!openNote}>
       <span>
         <strong>{openNote ? noteLabel(openNote.path) : ""}</strong> was deleted on disk
-        {synced ? " and removed for the team. A copy is kept in the vault's trash." : "."}
+        {synced ? " and permanently removed for the team." : "."}
       </span>
       <div className="banner-actions">
         <button
@@ -113,9 +119,8 @@ function RemovedBanner() {
  * A teammate (or an AI) deleted the note that was open, and we applied it here.
  *
  * Separate from `RemovedBanner`: that one means "the file vanished from under us"
- * and can only offer to close the note. This one knows the delete was intentional
- * and — because inbound deletes move the file rather than unlinking it — can say
- * where the local copy went, which is the difference between a scare and a note.
+ * and can only offer to close the note. This one knows the server confirmed a
+ * deliberate deletion or access removal.
  */
 function DeletedByTeammateBanner() {
   const removed = useStore((s) => s.noteRemovedByTeammate);
@@ -125,9 +130,7 @@ function DeletedByTeammateBanner() {
         {removed?.reason === "revoked" ? (
           <>Your access to this note was removed. It is no longer on this device.</>
         ) : (
-          <>
-            A teammate deleted this note. Your copy was moved to <code>{removed?.trashedTo}</code>.
-          </>
+          <>A teammate deleted this note. It was permanently removed from this device.</>
         )}
       </span>
       <div className="banner-actions">
@@ -162,12 +165,14 @@ function NotSyncingBanner() {
   const authStatus = useStore((s) => s.authStatus);
   const hasSession = useStore((s) => s.session != null);
   const syncStatus = useStore((s) => s.syncStatus);
+  const vaultSyncStatus = useStore((s) => s.vaultSyncStatus);
   const folderIsSynced = useStore((s) => s.openFolderIsSynced);
   const noteOpen = useStore((s) => s.openNote != null);
   const reason = notSyncingReason({
     authStatus,
     hasSession,
     syncStatus,
+    vaultSyncStatus,
     folderIsSynced,
     noteOpen,
   });
@@ -176,6 +181,47 @@ function NotSyncingBanner() {
       reason={reason}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
       onOpenHealth={() => useStore.getState().requestSettings("health")}
+    />
+  );
+}
+
+/**
+ * The strip for a vault whose owner made it **local only** from somewhere else.
+ *
+ * The probe is here rather than in the launch chain because its two inputs land
+ * at different times: the folder's stamp is peeked during the auto-reopen, but
+ * `organizations` only arrives with the detached `initAuth`, and asking before
+ * that would accuse every vault of being deleted for the first second of every
+ * launch. Re-running it whenever the folder, the session or the vault list
+ * changes costs one `peekVaultStamp` for a healthy vault — `checkUnsyncedVaultStamp`
+ * answers those locally and never reaches the network.
+ *
+ * Wired here, alongside the other banners, so `VaultUnsyncedBannerView` stays a
+ * pure component and its one decision (`planUnsyncStamp`) stays unit-testable.
+ */
+function VaultUnsyncedBanner() {
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const authStatus = useStore((s) => s.authStatus);
+  // The IDS, not the count: swapping one vault for another (left one, joined
+  // one) leaves `organizations.length` identical, and the probe's whole question
+  // is whether THIS folder's org is still in that list. A joined string is exact
+  // and just as cheap as reading the length.
+  const orgIds = useStore((s) => s.organizations.map((o) => o.id).join(","));
+  const pending = useStore((s) => s.vaultUnsynced);
+
+  useEffect(() => {
+    if (!vaultPath || authStatus !== "signed-in") return;
+    void useStore
+      .getState()
+      .checkUnsyncedVaultStamp()
+      .catch((e) => console.warn("[vault] unsynced-stamp check failed", e));
+  }, [vaultPath, authStatus, orgIds]);
+
+  return (
+    <VaultUnsyncedBannerView
+      show={pending != null && pending.path === vaultPath}
+      onKeepLocal={() => useStore.getState().keepUnsyncedVaultLocal()}
+      onTurnOnSync={() => useStore.getState().resyncUnsyncedVault()}
     />
   );
 }
@@ -205,7 +251,8 @@ function SyncIssuesBanner() {
     <SyncIssuesBannerView
       show={show}
       failed={failed}
-      onOpenHealth={() => useStore.getState().requestSettings("health")}
+      noteLimit={syncManager.registry.limitCode() === "note_limit_reached"}
+      onOpenHealth={() => useStore.getState().requestSettings(syncManager.registry.limitCode() === "note_limit_reached" ? "billing" : "health")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
   );
@@ -624,7 +671,13 @@ function WhatsNewModal() {
   );
 }
 
-function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
+function SyncIndicator({
+  noteOpen,
+  attachmentLocalOnly = false,
+}: {
+  noteOpen: boolean;
+  attachmentLocalOnly?: boolean;
+}) {
   // Per-note sync status (offline / connecting / synced / read-only) PLUS the
   // vault's bulk-run progress, so a vault that is still uploading 380 of its 500
   // notes says so instead of claiming "Synced · just now" off a live socket.
@@ -636,6 +689,9 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   const pending = useStore((s) => s.syncPending);
   const progress = useStore((s) => s.syncProgress);
+  if (attachmentLocalOnly) {
+    return <SyncBadge status="offline" enabled={false} noteOpen />;
+  }
   // "idle" is the reporter's pre-start value — nothing to report yet.
   if (!noteOpen && (progress == null || progress.phase === "idle")) return null;
   return (
@@ -722,14 +778,23 @@ export default function App() {
   });
   const versionPanelOpen = useStore((s) => s.versionPanelDocId != null);
   const editorMeasure = useStore((s) => s.editorMeasure);
-  // An open image/PDF preview isn't a synced note — hide the save/sync chrome.
-  const isPreview = openNote != null && previewKind(openNote.path) != null;
+  // An open preview (image, PDF, video, spreadsheet, code…) isn't a synced
+  // note — hide the save/sync chrome. The registry decides, so this cannot
+  // disagree with what `FilePreview` actually rendered.
+  const isPreview = openNote != null && viewerFor(openNote.path) !== "editor";
+  const attachmentLocalOnly = useStore(
+    (s) =>
+      s.attachmentSyncBlocked &&
+      s.openNote != null &&
+      routesToAttachmentSync(s.openNote.path),
+  );
   // Covers the LAST VAULT'S OPEN and nothing else. It used to cover the whole
   // session restore + sync reconcile too, which is why launch showed "Loading…"
   // for seconds on a big vault: the sidebar was ready long before auth was.
   const [openingLastVault, setOpeningLastVault] = useState(true);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
@@ -846,11 +911,19 @@ export default function App() {
     })();
   }, []);
 
+  // An in-note file chip was clicked (`lib/editor/livePreview.ts` →
+  // `requestOpenFile`). The editor extensions are store-free on purpose, so the
+  // widget asks and the app — which owns the store — opens the pane.
+  useEffect(() => onOpenFileRequest((rel) => {
+    void useStore.getState().openNoteByPath(rel);
+  }), []);
+
   // Subscribe to Rust events: tree refresh + open-note reconciliation.
   useEffect(() => {
     let unlistenFile: (() => void) | undefined;
     let unlistenVault: (() => void) | undefined;
     let unlistenIndex: (() => void) | undefined;
+    let unlistenIndexed: (() => void) | undefined;
     // Coalesce sidebar refreshes: a bulk change (e.g. importing a folder) emits
     // many `file-changed` batches in quick succession; refreshing the tree on
     // each one re-renders the whole sidebar repeatedly and flickers hover state.
@@ -862,7 +935,13 @@ export default function App() {
     let pendingFolders: Set<string> | null = new Set();
     // The file changes themselves (last kind per path), for the titles patch.
     let pendingChanges = new Map<string, "modified" | "removed">();
-    const scheduleRefresh = (changes: ipc.FileChanged[]) => {
+    const scheduleRefresh = (batch: ipc.FileChanged[]) => {
+      // Entries whose bytes did not move (#155) change nothing the sidebar, the
+      // titles or the backlinks render, so they neither implicate a folder nor
+      // arm the timer. An all-unchanged batch — an idle vault under a cloud-sync
+      // agent, or Linux's read events — must cost exactly one `filter`.
+      const changes = refreshWorthy(batch);
+      if (changes.length === 0) return;
       if (pendingFolders) {
         const dirs = implicatedFolders(changes);
         if (dirs) for (const d of dirs) pendingFolders.add(d);
@@ -893,10 +972,23 @@ export default function App() {
         const open = useStore.getState().openNote;
         const forSync: ipc.FileChanged[] = [];
         for (const e of changes) {
-          // Attachments are content-synced, not indexed/CRDT-bridged. A change
-          // under `attachments/` triggers a debounced two-way blob reconcile.
-          if (e.path === "attachments" || e.path.startsWith("attachments/")) {
-            syncManager.handleAttachmentChanged();
+          // Binaries are content-synced, not CRDT-bridged: a change to one
+          // triggers a debounced two-way blob reconcile and nothing else.
+          //
+          // The test is the FORMAT, not the folder. It used to be "does this
+          // path start with `attachments/`", which was the same question back
+          // when the hidden store was the only home a binary had — a `.docx`
+          // dropped into a folder fell through to the note path below, where an
+          // unmapped file means "register it as a note" (`routesToAttachmentSync`).
+          //
+          // The PATH goes with it now: a binary that disappears is reported as
+          // a `tree` change like any other non-note file, and the blob mirror's
+          // diff reads a missing local file as "content the server has and we
+          // don't" — i.e. as a download. Deleting a synced PDF therefore
+          // brought it straight back. The sync layer's delete queue takes the
+          // path, waits out its grace window and asks the disk.
+          if (routesToAttachmentSync(e.path)) {
+            syncManager.handleAttachmentChanged(e.path);
             continue;
           }
           // Open-note reconciliation runs immediately (per event); the sidebar
@@ -907,6 +999,15 @@ export default function App() {
             } else {
               // Route the edit into the bridge; it debounces, drops our own echo,
               // and merges genuine external edits live into the open Y.Text.
+              //
+              // `unchanged` entries go in too, deliberately. This is the one
+              // consumer that reconciles the open doc against the FILE rather
+              // than against the index, and those two can disagree while the
+              // bytes sit still (a cold-applied update, a hydrate that lost a
+              // race). It is 150ms-debounced, echo-guarded by `lastWrittenHash`
+              // and scoped to the single open note, so the worst an idle vault's
+              // read-event storm costs here is one `readNote` — nothing like the
+              // tree re-list, title re-read and graph rebuild below.
               bridgeManager.handleFileChanged(e.path);
             }
             // …and the sync layer sees it either way. Deleting the note you have
@@ -934,6 +1035,12 @@ export default function App() {
       unlistenVault = await ipc.onVaultOpened((v) => {
         useStore.getState().setVault(v);
       });
+      // Rust finished pulling the words out of these binaries. The sync layer
+      // offers them to the server as search fuel (never as content) — already
+      // coalesced in Rust, and debounced again there.
+      unlistenIndexed = await ipc.onFilesIndexed((paths) => {
+        syncManager.handleFilesIndexed(paths);
+      });
       // The background index rebuild committed: everything derived from the
       // index catches up. Stale epochs (a vault switched during a long rebuild)
       // are dropped — the open that replaced it gets its own event.
@@ -950,6 +1057,7 @@ export default function App() {
       unlistenFile?.();
       unlistenVault?.();
       unlistenIndex?.();
+      unlistenIndexed?.();
       if (refreshTimer) clearTimeout(refreshTimer);
     };
   }, []);
@@ -1097,13 +1205,28 @@ export default function App() {
       <VaultSwitchOverlay />
       <PromptedAuthDialog />
       <div
-        className="app"
+        className={`app${sidebarHidden ? " sidebar-hidden" : ""}`}
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
       >
+        <SidebarToggle
+          hidden={sidebarHidden}
+          onToggle={() => setSidebarHidden((hidden) => {
+            const next = !hidden;
+            writeSidebarHidden(next);
+            return next;
+          })}
+          searchOpen={searchOpen}
+          onSearch={() => setSearchOpen((open) => !open)}
+        />
         {/* Centered overlay, not a sidebar panel — it searches the whole vault
             and its button lives in the main header. */}
         {searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} />}
-        <aside className="sidebar">
+        <aside
+          className="sidebar"
+          id="vault-sidebar"
+          aria-hidden={sidebarHidden}
+          inert={sidebarHidden}
+        >
           <SidebarHeader />
           {/* The tree still lists the OUTGOING vault's files until the folder
               swaps, so a switch fades it and stops taking clicks — opening a note
@@ -1121,7 +1244,7 @@ export default function App() {
             </ErrorBoundary>
           </div>
         </aside>
-        <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />
+        {!sidebarHidden && <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />}
   
         <main className="main">
           <MemberJoinedBanner />
@@ -1137,7 +1260,10 @@ export default function App() {
                 title, which for a legacy note whose H1 and filename disagree said
                 something different from its own tab. */}
             <TabBar />
-            <SyncIndicator noteOpen={openNote != null && !isPreview} />
+            <SyncIndicator
+              noteOpen={openNote != null && !isPreview}
+              attachmentLocalOnly={attachmentLocalOnly}
+            />
             {/* Vault-wide, so it sits in the header regardless of the open note. */}
             <TalkButton />
             {/* Same gate as history: a link is a doc_id, so it only exists for a
@@ -1170,25 +1296,6 @@ export default function App() {
               </button>
             )}
             <button
-              className="icon-btn search-btn"
-              title="Search notes (⌘F)"
-              aria-label="Search notes"
-              onClick={() => setSearchOpen((v) => !v)}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-3.5-3.5" />
-              </svg>
-            </button>
-            <button
               className="icon-btn graph-btn"
               title="Graph view (⌘G)"
               aria-label="Open graph view"
@@ -1212,10 +1319,12 @@ export default function App() {
               </svg>
             </button>
           </header>
+          <VaultUnsyncedBanner />
           <NotSyncingBanner />
           <SyncIssuesBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
+          {attachmentLocalOnly && <AttachmentSyncNotice />}
           <div className="editor-wrap">
             {openNote ? (
               <Suspense

@@ -2,13 +2,25 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "./api";
 import {
   classifyLimitError,
+  FREE_PLAN_EXPLANATION,
   limitFromError,
   planPillLabel,
+  PRO_BENEFITS,
   subscriptionStatusLine,
   transferTargets,
   type SubscriptionFacts,
   type SubscriptionLineFormat,
 } from "./billing";
+
+describe("plan benefits copy", () => {
+  it("explains the Free note allowance and Pro benefits", () => {
+    expect(PRO_BENEFITS).toContain("Sync standalone files across devices and with your team");
+    expect(PRO_BENEFITS.join(" ")).not.toMatch(/unlimited notes|AI edits/i);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/note sync and embedded attachments/i);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/embedded attachments/i);
+    expect(FREE_PLAN_EXPLANATION).toMatch(/standalone file sync/i);
+  });
+});
 
 describe("classifyLimitError", () => {
   it("returns null for non-ApiError values", () => {
@@ -215,4 +227,8 @@ describe("transferTargets", () => {
     expect(transferTargets([v("src", "owner", "pro")], "src")).toEqual([]);
     expect(transferTargets([], "src")).toEqual([]);
   });
+});
+
+it("recognizes the note sync quota upgrade error", () => {
+  expect(classifyLimitError(new ApiError(402, "Upgrade", { code: "note_limit_reached", limit: 20000 }))).toBe("note_limit");
 });

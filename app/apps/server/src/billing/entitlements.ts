@@ -167,6 +167,67 @@ export async function seatCount(
 }
 
 /**
+ * Attachment-storage ceiling for one vault's org, in bytes — or `null` for "no
+ * limit", which is what self-host and every paid vault get.
+ *
+ * Returns a number rather than an allow/deny the way `canCreateOrganization` /
+ * `canAddMember` do, because the caller needs the figure twice over: once to
+ * decide, and once to put in the 402 body so a client can say how much room is
+ * left. Summing the vault's bytes is the CALLER's job and happens only after
+ * this returns non-null — a query nobody with an unlimited vault should pay
+ * for.
+ */
+export async function storageLimitBytes(
+  orgId: string,
+  db: Queryable = defaultPool,
+): Promise<number | null> {
+  if (!billingEnabled()) return null;
+  if (await orgHasActiveSubscription(orgId, db)) return null;
+  return config.freeMaxStorageMb * 1024 * 1024;
+}
+
+interface AccountEntitlementRow {
+  free_vault_limit: number;
+}
+
+/** Durable benefits granted to accounts that existed at the rollout boundary. */
+async function accountEntitlement(
+  userId: string,
+  db: Queryable,
+): Promise<AccountEntitlementRow | null> {
+  const { rows } = await db.query<AccountEntitlementRow>(
+    `SELECT free_vault_limit
+       FROM account_entitlements
+      WHERE user_id = $1`,
+    [userId],
+  );
+  return rows[0] ?? null;
+}
+
+/** The account-specific free-vault cap, including a persisted legacy grant. */
+export async function freeVaultLimitForUser(
+  userId: string,
+  db: Queryable = defaultPool,
+): Promise<number> {
+  if (!billingEnabled()) return config.freeMaxVaults;
+  return (await accountEntitlement(userId, db))?.free_vault_limit ?? config.freeMaxVaults;
+}
+
+/**
+ * Whether this vault may mirror standalone binary files. Embedded attachments
+ * use the Free note-sync path instead. An active or past-due Pro
+ * subscription unlocks every member. Billing-disabled self-hosts remain
+ * unlimited. Account-level legacy grants affect only the free-vault count.
+ */
+export async function canSyncAttachments(
+  orgId: string,
+  db: Queryable = defaultPool,
+): Promise<boolean> {
+  if (!billingEnabled()) return true;
+  return orgHasActiveSubscription(orgId, db);
+}
+
+/**
  * Can this user create another vault? Allowed when billing is off, or when
  * they own fewer than the cap in UNSUBSCRIBED vaults.
  */
@@ -174,8 +235,9 @@ export async function canCreateOrganization(
   userId: string,
   db: Queryable = defaultPool,
 ): Promise<{ allowed: boolean; limit: number }> {
-  const limit = config.freeMaxVaults;
+  let limit = config.freeMaxVaults;
   if (!billingEnabled()) return { allowed: true, limit };
+  limit = await freeVaultLimitForUser(userId, db);
   const owned = await countOwnedUnsubscribedOrgs(userId, db);
   return { allowed: owned < limit, limit };
 }

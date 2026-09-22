@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { authManager } from "../lib/auth/authManager";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
+import { FREE_PLAN_EXPLANATION, PRO_BENEFITS } from "../lib/billing";
 
 /** Poll cadence + budget while waiting for the checkout webhook to land. */
 const POLL_INTERVAL_MS = 3_000;
@@ -188,10 +189,10 @@ export function UpgradeDialog({
         {phase === "plan" && (
           <>
             <p className="upgrade-lead">
-              Unlock unlimited collaboration for the{" "}
-              <strong>{selected?.label ?? "Pro"}</strong> plan — pick how you'd like
-              to pay.
+              <strong>{selected?.label ?? "Pro"}</strong> syncs standalone files across
+              devices and with your team. Pick how you'd like to pay.
             </p>
+            <p className="muted">{FREE_PLAN_EXPLANATION}</p>
 
             <div
               className="upgrade-plans"
@@ -240,10 +241,9 @@ export function UpgradeDialog({
             </div>
 
             <ul className="upgrade-features">
-              <li>Unlimited team members</li>
-              <li>Unlimited notes, devices &amp; AI edits</li>
-              <li>Doesn't count toward your free vaults</li>
-              <li>Priority support</li>
+              {PRO_BENEFITS.map((benefit) => (
+                <li key={benefit}>{benefit}</li>
+              ))}
             </ul>
 
             {error && <div className="auth-error">{error}</div>}
@@ -300,7 +300,7 @@ export function UpgradeDialog({
             </div>
             <div className="subhead">You're on Pro</div>
             <div className="muted">
-              This vault is now unlimited — invite your whole team.
+              Attachments in this vault now sync across devices and with your team.
             </div>
             <button className="primary sm" onClick={onClose}>
               Done

@@ -16,7 +16,7 @@ import { type Share, sharePrincipalType, shareResourceId, shareResourceType } fr
 export type TeamMode = "open" | "readonly" | "private";
 
 /** The org-principal share rows that can sit on a folder or note. */
-export type OrgRow = "edit" | "view" | "locked" | "denied";
+export type OrgRow = "edit" | "view" | "readonly" | "locked" | "denied";
 
 /**
  * The label every control on the Access page shows for a mode.
@@ -59,16 +59,18 @@ export interface EffectiveTeamMode {
  * Precedence, matching the server resolver:
  *  1. a `denied` on the item or any ancestor  → **private** (the org deny drops
  *     every org-scoped grant, vault-wide one included);
- *  2. a `locked` on the item or any ancestor  → **readonly**, but only if some
+ *  2. a `readonly` row → **readonly**. It combines a view grant with a cap, so
+ *     it works under either a Shared or Private vault baseline;
+ *  3. a `locked` on the item or any ancestor  → **readonly**, but only if some
  *     grant actually reaches the item. A lock is a *cap*, never a grant: the
  *     server consults `isLocked` only once a permission has resolved above
  *     `none`, so a bare lock in a Private vault leaves the team with nothing,
  *     and calling that Read-only would be the panel disagreeing with the
  *     enforcer — the one thing this function exists to prevent;
- *  3. the vault is open, or an `edit` sits on the item/an ancestor → **open**;
- *  4. the vault is readonly, or a `view` sits on the item/an ancestor →
+ *  4. the vault is open, or an `edit` sits on the item/an ancestor → **open**;
+ *  5. the vault is readonly, or a `view` sits on the item/an ancestor →
  *     **readonly**;
- *  5. otherwise **private** — no grant reaches it.
+ *  6. otherwise **private** — no grant reaches it.
  */
 export function effectiveTeamMode(input: EffectiveTeamModeInput): EffectiveTeamMode {
   // Nearest first: the item itself, then its folders from the inside out.
@@ -89,6 +91,9 @@ export function effectiveTeamMode(input: EffectiveTeamModeInput): EffectiveTeamM
 
   const denied = nearest("denied");
   if (denied) return from(denied, "private");
+
+  const readonly = nearest("readonly");
+  if (readonly) return from(readonly, "readonly");
 
   const edit = nearest("edit");
   const view = nearest("view");

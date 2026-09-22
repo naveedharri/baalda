@@ -91,6 +91,8 @@ function fakeApi(serverNotes: Array<{ id: string; rel_path: string }>) {
     createFolder: vi.fn(async (input: { path: string }) => ({ id: `f-${input.path}` })),
     listNotes,
     listNoteRegistry: vi.fn(async () => ({ notes: serverNotes, tombstones: [] })),
+    // The paged twin the reconciler actually calls; identical answer.
+    listNoteRegistryPaged: vi.fn(async () => ({ notes: serverNotes, tombstones: [] })),
     createNote: vi.fn(async (input: { relPath: string }) => ({
       id: `new-${input.relPath}`,
       rel_path: input.relPath,
@@ -215,8 +217,8 @@ describe("reconcile — the index's title rows are read on demand", () => {
       treeWith(["a.md", "b.md"]),
     );
 
-    // Once, not twice: the inbound pass and the create-missing pass share the
-    // memoized read.
+    // Once, not twice: the inbound pass and the registry creation pass share
+    // the memoized read.
     expect(ipc.listNoteTitles).toHaveBeenCalledTimes(1);
   });
 });

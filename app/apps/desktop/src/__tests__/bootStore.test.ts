@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
   listUserInvitations: vi.fn(async () => [] as unknown[]),
   getBillingConfig: vi.fn(async () => ({ enabled: false })),
   getOrgBilling: vi.fn(async () => null),
+  getMyBilling: vi.fn(async () => ({ vaults: [] })),
   listVaults: vi.fn(async () => [] as unknown[]),
   listVaultLocks: vi.fn(async () => [] as unknown[]),
 }));
@@ -34,6 +35,10 @@ const authManager = vi.hoisted(() => ({
   currentSession: vi.fn(async () => null as unknown),
   signOut: vi.fn(async () => {}),
   getServerUrl: () => "http://localhost:3010",
+}));
+
+const attachmentEntitlement = vi.hoisted(() => ({
+  listener: undefined as ((blocked: boolean) => void) | undefined,
 }));
 
 vi.mock("../lib/auth/authManager", () => {
@@ -65,6 +70,7 @@ const sync = vi.hoisted(() => ({
   setPresenceStatus: vi.fn(),
   handleRegistryChanged: vi.fn(),
   setStatusListener: vi.fn(),
+  setVaultStatusListener: vi.fn(),
   setSessionRejectedListener: vi.fn(),
   setActivityListeners: vi.fn(),
   setRegistryListener: vi.fn(),
@@ -75,10 +81,16 @@ const sync = vi.hoisted(() => ({
   setVoiceListener: vi.fn(),
   setSyncProgressListener: vi.fn(),
   setDocStateListener: vi.fn(),
+  setFileStateListener: vi.fn(),
+  setAttachmentEntitlementListener: vi.fn((listener: (blocked: boolean) => void) => {
+    attachmentEntitlement.listener = listener;
+  }),
   setRegistryMapListener: vi.fn(),
   setNoteMetaListener: vi.fn(),
   setColorListener: vi.fn(),
   setFailureListener: vi.fn(),
+  recheckAttachmentEntitlement: vi.fn(),
+  checkAttachmentEntitlement: vi.fn(),
   announcePresence: vi.fn(),
 }));
 
@@ -139,6 +151,7 @@ const flush = async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sync.registry.vaultId = null;
   sync.syncable = false;
   sync.isSyncable.mockImplementation(() => sync.syncable);
   sync.enable.mockImplementation(async (_s, _v, hooks) => {
@@ -159,6 +172,35 @@ beforeEach(() => {
     openingNotePath: null,
     openFolderIsSynced: null,
     tree: null,
+  });
+});
+
+describe("access overlay refresh ordering", () => {
+  it("does not let an older read-only response replace a newer Shared response", async () => {
+    sync.registry.vaultId = "v1";
+    useStore.setState({ vault: vault(), syncEnabled: true, locks: [], denies: [], lifts: [] });
+    const held = gate();
+    api.listVaultLocks.mockImplementationOnce(async () => {
+      await held.waited;
+      return [{ id: "old-lock", permission: "locked", resourceId: "n1" }];
+    });
+    const old = useStore.getState().refreshLocks();
+    api.listVaultLocks.mockResolvedValueOnce([]);
+    await useStore.getState().refreshLocks();
+    held.open();
+    await old;
+    expect(useStore.getState().locks).toEqual([]);
+  });
+
+  it("retains known restrictions when a refresh fails", async () => {
+    sync.registry.vaultId = "v1";
+    useStore.setState({ vault: vault(), syncEnabled: true });
+    api.listVaultLocks.mockResolvedValueOnce([{ id: "lock", permission: "locked", resourceId: "n1" }]);
+    await useStore.getState().refreshLocks();
+    const known = useStore.getState().locks;
+    api.listVaultLocks.mockRejectedValueOnce(new Error("temporarily offline"));
+    await useStore.getState().refreshLocks();
+    expect(useStore.getState().locks).toEqual(known);
   });
 });
 
@@ -239,6 +281,55 @@ describe("enableSyncForVault — background returns at the prime", () => {
     await enabling;
     expect(settled).toBe(true);
     expect(useStore.getState().syncEnabled).toBe(true);
+  });
+});
+
+describe("attachment entitlement — vault-scoped server verdict", () => {
+  it("publishes the explicit verdict and clears it when the vault closes", () => {
+    const listener = attachmentEntitlement.listener;
+    expect(listener).toBeTypeOf("function");
+
+    listener?.(true);
+    expect(useStore.getState().attachmentSyncBlocked).toBe(true);
+
+    useStore.getState().closeLocalVault();
+    expect(useStore.getState().attachmentSyncBlocked).toBe(false);
+  });
+
+  it("retries attachments exactly when billing confirms a Free-to-Pro upgrade", async () => {
+    useStore.setState({
+      session: session(),
+      billingConfig: { enabled: true } as never,
+      myBilling: { vaults: [{ orgId: ORG, plan: "free" }] } as never,
+      attachmentSyncBlocked: true,
+    });
+    api.getMyBilling.mockResolvedValue({
+      vaults: [{ orgId: ORG, plan: "pro" }],
+    } as never);
+
+    await useStore.getState().refreshMyBilling();
+    expect(sync.recheckAttachmentEntitlement).toHaveBeenCalledOnce();
+
+    await useStore.getState().refreshMyBilling();
+    expect(sync.recheckAttachmentEntitlement).toHaveBeenCalledOnce();
+    expect(sync.checkAttachmentEntitlement).toHaveBeenCalledOnce();
+  });
+
+  it("probes again when a still-Free account may have a stale server-policy verdict", async () => {
+    useStore.setState({
+      session: session(),
+      billingConfig: { enabled: true } as never,
+      myBilling: { vaults: [{ orgId: ORG, plan: "free" }] } as never,
+      attachmentSyncBlocked: false,
+    });
+    api.getMyBilling.mockResolvedValue({
+      vaults: [{ orgId: ORG, plan: "free" }],
+    } as never);
+
+    await useStore.getState().refreshMyBilling();
+
+    expect(sync.recheckAttachmentEntitlement).not.toHaveBeenCalled();
+    expect(sync.checkAttachmentEntitlement).toHaveBeenCalledOnce();
   });
 });
 

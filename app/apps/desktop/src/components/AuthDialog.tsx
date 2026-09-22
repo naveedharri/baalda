@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
@@ -12,10 +13,11 @@ import { readServerChoice, writeServerChoice } from "../lib/prefs";
 import {
   initialEmail,
   readRememberedEmail,
-  readRememberEmail,
   rememberEmailAddress,
   writeRememberEmail,
 } from "../lib/rememberedEmail";
+import { readRememberPassword, saveRememberedPassword, writeRememberPassword } from "../lib/rememberedPassword";
+import { useRememberedPassword } from "../lib/useRememberedPassword";
 import { passwordResetFailureMessage } from "../lib/resetFlow";
 import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
@@ -139,11 +141,8 @@ export function AuthDialog({
       devFallback: import.meta.env.DEV ? "test@context.local" : "",
     }),
   );
-  // "Remember email address" (#120). Opens on its last answer, so someone who
-  // ticked it once never ticks it again. Only the address is ever kept — the
-  // password is not, and the session token lives in the OS keychain.
-  const [rememberEmail, setRememberEmail] = useState(readRememberEmail);
-  const [password, setPassword] = useState(import.meta.env.DEV ? "Context-Test-2026!" : "");
+  const [rememberPassword, setRememberPassword] = useState(readRememberPassword);
+  const [rememberError, setRememberError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Password reset: its own busy/error/sent state, because the outcome is not a
   // session — the form is replaced by a confirmation and the person leaves for
@@ -170,6 +169,7 @@ export function AuthDialog({
       pendingServerLink,
     }),
   );
+  const [password, setPassword] = useRememberedPassword(serverUrl, email, mode, step, rememberPassword);
   // Revealed by the "Your own server" card rather than shown alongside it: an
   // input sitting under two options reads as belonging to both.
   const [ownOpen, setOwnOpen] = useState(false);
@@ -256,12 +256,12 @@ export function AuthDialog({
     // handed a link to another (that is the normal case for a teammate who
     // signed up on the managed instance by mistake), and closing the card out
     // from under them would apply nothing and explain nothing.
-    if (step === "confirm-link") return;
+    if (step === "confirm-link" || busy || rememberError) return;
     if (authStatus === "signed-in") {
       if (onSignedIn) onSignedIn();
       else onClose();
     }
-  }, [authStatus, step, onClose, onSignedIn]);
+  }, [authStatus, step, busy, rememberError, onClose, onSignedIn]);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,15 +286,19 @@ export function AuthDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  /**
-   * Persist the switch the moment it moves, not at sign-in: unticking it is how
-   * a person says "forget the address you have", and that has to take effect
-   * even if they then close the card without signing in (`writeRememberEmail`
-   * clears the stored address on the way down).
-   */
-  const toggleRememberEmail = (next: boolean) => {
-    setRememberEmail(next);
+  const toggleRememberPassword = async (next: boolean) => {
+    setRememberError(null);
+    setRememberPassword(next);
     writeRememberEmail(next);
+    try {
+      await writeRememberPassword(next);
+    } catch {
+      // Keep the switch available to retry forgetting if the keychain is locked.
+      setRememberPassword(!next);
+      setRememberError(next
+        ? "Couldn't enable Remember password on this device."
+        : "Couldn't remove the saved password from the OS keychain. Unlock it and try again.");
+    }
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -319,6 +323,11 @@ export function AuthDialog({
       // Only on the way out of a SUCCESSFUL attempt — a typo someone abandoned
       // is not an address worth handing back. A no-op while the switch is off.
       rememberEmailAddress(email.trim());
+      try {
+        await saveRememberedPassword(serverUrl, email.trim(), password);
+      } catch {
+        setRememberError("You're signed in, but the password couldn't be saved in the OS keychain.");
+      }
       setPassword("");
     } catch {
       /* error surfaced via authError */
@@ -394,7 +403,7 @@ export function AuthDialog({
             ? "Welcome back"
             : "Create your account";
 
-  return (
+  return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal auth-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
@@ -664,11 +673,11 @@ export function AuthDialog({
                 <div className="auth-form-options">
                   <label className="auth-remember">
                     <Switch
-                      checked={rememberEmail}
-                      ariaLabel="Remember email address"
-                      onChange={toggleRememberEmail}
+                      checked={rememberPassword}
+                      ariaLabel="Remember password"
+                      onChange={(next) => void toggleRememberPassword(next)}
                     />
-                    <span>Remember email address</span>
+                    <span>Remember password</span>
                   </label>
                   {mode === "sign-in" && resetAvailable && (
                     <button
@@ -741,6 +750,16 @@ export function AuthDialog({
             {/* Gated on the mode: a sign-in failure still sitting in the store
                 would otherwise render under the reset form as if the reset had
                 failed. */}
+            {rememberError && (
+              <div className="auth-error" role="alert">
+                {rememberError}
+                {authStatus === "signed-in" && (
+                  <button type="button" className="linkish" onClick={() => setRememberError(null)}>
+                    Continue
+                  </button>
+                )}
+              </div>
+            )}
             {mode !== "reset" && authError && <div className="auth-error">{authError}</div>}
             {/* The one trap this form can't detect: an account created THROUGH
                 Google has no password at all, so email sign-in answers "Invalid
@@ -799,6 +818,7 @@ export function AuthDialog({
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

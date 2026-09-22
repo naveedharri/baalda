@@ -1,4 +1,5 @@
-// Editor factory. Builds the CodeMirror 6 extension set for a markdown note.
+// Editor factory. Builds the CodeMirror 6 extension set for a note — markdown
+// by default, and plain text for a `.txt` (see `noteLanguage`).
 // Designed so Phase 1 can append a Yjs `y-codemirror.next` binding to
 // `extraExtensions` without changing any callsite.
 
@@ -17,6 +18,7 @@ import {
 } from "@codemirror/view";
 import { GFM } from "@lezer/markdown";
 import type { NoteTitle } from "../ipc";
+import { isMarkdownNote, stemOf } from "../notePath";
 import { blockDecorations } from "./blocks";
 import { codeFenceFlair } from "./codeFence";
 import { codeLanguages } from "./codeLanguages";
@@ -28,6 +30,7 @@ import { listKeymap } from "./lists";
 import { livePreview } from "./livePreview";
 import { noteHeader, type NoteHeaderOptions } from "./noteHeader";
 import { ofmDecorations, ofmMarkdown, tagCompletions, type TagSuggestion } from "./ofm";
+import { richNoteCopy, type ReadCopyAttachment } from "./copy";
 import { smartPaste, type SaveAttachment } from "./paste";
 import { tableAtomicRanges } from "./table/atomic";
 import { tripleClickLine } from "./selection";
@@ -60,6 +63,7 @@ export interface CreateEditorOptions {
    * `src` to embed. Omitted → image paste/drop falls back to default handling.
    */
   saveAttachment?: SaveAttachment;
+  copyAttachments?: { notePath: string; read: ReadCopyAttachment };
   /**
    * When true, a Yjs `y-codemirror.next` binding (passed via extraExtensions)
    * owns change propagation and undo history, so we drop CM6's local
@@ -85,8 +89,50 @@ export function lineNumberExtension(on: boolean): Extension {
   return on ? lineNumbers() : [];
 }
 
+/**
+ * The note's grammar — markdown, or none at all.
+ *
+ * The CRDT editor family is md/markdown/mdx **and txt** (`notePath.ts
+ * isEditorNote`), and only the first three are markdown. Handing a `.txt` the
+ * markdown language would turn every syntax-tree-driven extension loose on
+ * prose: `# eggs` in a shopping list becomes a heading, `*star*` folds into
+ * italics, and a line of `---` becomes a rule — in the one file format a person
+ * picks BECAUSE it has no syntax. Dropping the language leaves those extensions
+ * reading an empty tree, which is exactly the plain-text buffer we want; the
+ * keymaps, wrapping, theme, header and paste handling all still apply.
+ *
+ * Keyed off `header.path`, the only place the factory learns which file it is.
+ * With no header — the version-preview view and the tests, which have no note
+ * behind them — the answer stays markdown, exactly as before.
+ */
+function isPlainTextNote(opts: CreateEditorOptions): boolean {
+  return opts.header != null && !isMarkdownNote(opts.header.path);
+}
+
+function noteLanguage(opts: CreateEditorOptions): Extension {
+  if (isPlainTextNote(opts)) return [];
+  // GFM adds tables, task lists, strikethrough, and autolinks; `ofmMarkdown`
+  // adds Obsidian's `==highlight==`, `%%comment%%` and `#tag` on top, so a
+  // vault reads the same here and in Obsidian.
+  // `codeLanguages` are LanguageDescriptions with dynamic imports: nothing
+  // here reaches the startup bundle, and a grammar is fetched only when a
+  // fence in an open note claims that language.
+  return markdown({
+    base: markdownLanguage,
+    extensions: [GFM, ...ofmMarkdown],
+    codeLanguages,
+  });
+}
+
 export function baseExtensions(opts: CreateEditorOptions): Extension[] {
   const collab = opts.collab ?? false;
+  // A `.txt` is plain text: no grammar, and nothing that RENDERS markdown over
+  // its bytes. Almost every decoration follows the grammar for free (an empty
+  // syntax tree yields nothing), so `checkboxes` is the only extra gate — it
+  // matches `- [ ]` with a regex (`tasks.ts TASK_RE`), language or not, and
+  // would otherwise replace those five characters with a widget in a file that
+  // has no task syntax.
+  const plain = isPlainTextNote(opts);
   const keys = [
     ...closeBracketsKeymap,
     ...defaultKeymap,
@@ -129,17 +175,8 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
         ...(opts.getTags ? [tagCompletions({ getTags: opts.getTags })] : []),
       ],
     }),
-    // GFM adds tables, task lists, strikethrough, and autolinks; `ofmMarkdown`
-    // adds Obsidian's `==highlight==`, `%%comment%%` and `#tag` on top, so a
-    // vault reads the same here and in Obsidian.
-    // `codeLanguages` are LanguageDescriptions with dynamic imports: nothing
-    // here reaches the startup bundle, and a grammar is fetched only when a
-    // fence in an open note claims that language.
-    markdown({
-      base: markdownLanguage,
-      extensions: [GFM, ...ofmMarkdown],
-      codeLanguages,
-    }),
+    // Markdown, or nothing for a `.txt` (see `noteLanguage`).
+    noteLanguage(opts),
     markdownHighlight,
     // Frontmatter first: blocks.ts and livePreview.ts both read its range so
     // nothing else decorates inside it (see lib/editor/frontmatter.ts).
@@ -150,15 +187,23 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     blockDecorations,
     // Live-preview inline rendering: hide markers off the active line, render
     // bullets/links/images/tables, and preview embedded HTML blocks (never run).
-    livePreview({ resolveAsset: opts.resolveAsset, onNavigate: opts.onNavigate }),
+    livePreview({
+      resolveAsset: opts.resolveAsset,
+      onNavigate: opts.onNavigate,
+      // Older notes can carry a first `# Heading` that repeats the filename
+      // title introduced later. Live preview collapses only that exact legacy
+      // duplicate; the Markdown stays in the buffer and reveals for editing.
+      inlineTitle: opts.header && !plain ? stemOf(opts.header.path) : undefined,
+    }),
     // A table is always rendered, so the caret must never walk into one.
     tableAtomicRanges,
-    // Clickable `- [ ]` task checkboxes.
-    checkboxes,
+    // Clickable `- [ ]` task checkboxes (markdown only — see `plain`).
+    ...(plain ? [] : [checkboxes]),
     // A copy button on every code fence.
     codeFenceFlair,
     // Paste a URL over a selection → link; paste/drop an image → attachment.
     smartPaste(opts.saveAttachment),
+    ...(opts.copyAttachments ? [richNoteCopy(opts.copyAttachments.notePath, opts.copyAttachments.read)] : []),
     editorTheme,
     wikilinks({ getTitles: opts.getTitles, onNavigate: opts.onNavigate }),
     // Callout tinting + tag pills. After livePreview, whose QuoteMark rule

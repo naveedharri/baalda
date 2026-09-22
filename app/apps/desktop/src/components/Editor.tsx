@@ -23,13 +23,13 @@ import { colorForUser, PRESENCE_OFFLINE, statusTone, ringShowsColor } from "../l
 import type { ActivityStatus } from "../lib/prefs";
 import { useStore } from "../store";
 import * as ipc from "../lib/ipc";
-import { HtmlView } from "./HtmlView";
 import { FilePreview } from "./FilePreview";
-import { previewKind } from "../lib/preview";
+import { viewerFor } from "../lib/formats";
 import { relativeAgo } from "./Identity";
 import { EditorEmpty, EditorSkeleton } from "./EditorPlaceholders";
 import { characterSvg } from "./Avatar";
 import { agoFromIso, lastEditedTooltip } from "./versionFormat";
+import { noteContentReady, shouldShowNoteSkeleton } from "../lib/editor/noteLoading";
 
 interface Peer {
   id: string;
@@ -352,9 +352,11 @@ export function Editor() {
 
   const [peers, setPeers] = useState<Peer[]>([]);
   const [readOnly, setReadOnly] = useState(false);
-  // False from the moment a note starts opening until its CodeMirror view is in
-  // the DOM. Drives the loading skeleton over the (genuinely empty) pane.
-  const [viewMounted, setViewMounted] = useState(false);
+  // These carry the path they describe rather than booleans. React renders the
+  // new `openNote` before the old effect's cleanup runs; a plain `true` from the
+  // previous note therefore briefly claimed the new note was already mounted.
+  const [mountedNotePath, setMountedNotePath] = useState<string | null>(null);
+  const [readyNotePath, setReadyNotePath] = useState<string | null>(null);
   // True between destroying one note's view and mounting the next one's: the
   // pane is empty because WE emptied it, so the skeleton must appear at once
   // rather than after its first-open grace delay (see `EditorSkeleton`).
@@ -391,9 +393,10 @@ export function Editor() {
   const awarenessRef = useRef<Awareness | null>(null);
   // Pings already played, keyed by sender clientId + timestamp.
   const seenPingsRef = useRef<Set<string>>(new Set());
-  const isHtml = notePath != null && /\.html?$/i.test(notePath);
-  // Images/PDFs aren't notes: no CRDT doc, no sync — just a streamed preview.
-  const preview = notePath != null ? previewKind(notePath) : null;
+  // The registry decides what opens this path. `editor` is the CRDT note
+  // family (md/markdown/mdx/txt); everything else — an HTML page, an image, a
+  // PDF, a spreadsheet, an unknown type — is `FilePreview`'s business.
+  const isNoteEditor = notePath != null && viewerFor(notePath) === "editor";
 
   // The roster opens on hover/focus of the presence stack (below); these keep it
   // honest for the pointer/keyboard paths too — a press outside closes it, as
@@ -454,8 +457,9 @@ export function Editor() {
   const itemLock = lockScope === "vault" ? null : lockScope;
 
   useEffect(() => {
-    if (!hostRef.current || notePath == null || /\.html?$/i.test(notePath)) return;
-    if (previewKind(notePath) != null) return; // image/PDF preview, not a CRDT note
+    // Same test as the render branch below: only the `editor` family has a
+    // CRDT doc behind it, so nothing else opens a bridge or a provider.
+    if (!hostRef.current || notePath == null || viewerFor(notePath) !== "editor") return;
     const docId = useStore.getState().openNote?.id ?? null;
     if (docId == null) return; // wait until the note's doc_id (meta) is known
     const myUserId = useStore.getState().session?.user.id ?? null;
@@ -464,11 +468,13 @@ export function Editor() {
     let view: EditorView | null = null;
     let awareness: Awareness | null = null;
     let onAwarenessChange: (() => void) | null = null;
+    let onInitialContent: (() => void) | null = null;
     // The editor pane is empty until CodeMirror is constructed below, and
     // getting there means opening the bridge, hydrating the CRDT from SQLite
     // and — for a synced note — waiting out the provider's first sync. On a
     // cold note that is a blank white sheet for long enough to look broken.
-    setViewMounted(false);
+    setMountedNotePath(null);
+    setReadyNotePath(null);
 
     const navigate = async (target: string) => {
       try {
@@ -586,7 +592,8 @@ export function Editor() {
           useStore.getState().vault?.path ?? null,
           notePath
         ),
-        saveAttachment,
+        saveAttachment: (bytes, ext) => saveAttachment(bytes, ext, epoch),
+        copyAttachments: { notePath, read: path => ipc.readBinaryFile(path, epoch) },
         extraExtensions: [
           yCollab(bridge.text, awareness, { undoManager: bridge.undoManager }),
           // Our own animated carets + always-on name flags, over yCollab's
@@ -625,7 +632,43 @@ export function Editor() {
       if (foldEffects.length) view.dispatch({ effects: foldEffects });
       viewRef.current = view;
       switchingNoteRef.current = false;
-      setViewMounted(true);
+      setMountedNotePath(notePath);
+
+      const reveal = () => {
+        if (!cancelled) setReadyNotePath(notePath);
+      };
+      const readyAtMount = noteContentReady({
+        textLength: bridge.text.length,
+        hasSync: opened.sync != null,
+        syncStatus: opened.status,
+      });
+      if (readyAtMount) {
+        reveal();
+      } else {
+        // A cold synced note mounts against an empty Y.Text and receives its
+        // content during the provider handshake. Keep the skeleton over that
+        // half-hydrated editor (whose filename title already exists) until
+        // either content arrives or the handshake settles with a truly empty
+        // note. The timeout inside `whenSynced` preserves offline-first access.
+        const stopWatchingInitialContent = () => {
+          if (!onInitialContent) return;
+          bridge.text.unobserve(onInitialContent);
+          onInitialContent = null;
+        };
+        onInitialContent = () => {
+          if (bridge.text.length === 0) return;
+          stopWatchingInitialContent();
+          reveal();
+        };
+        bridge.text.observe(onInitialContent);
+        void opened.sync!
+          .whenSynced(5000)
+          .catch(() => {})
+          .then(() => {
+            stopWatchingInitialContent();
+            reveal();
+          });
+      }
       setActiveNote(bindActiveNote(view)); // let out-of-tree drops embed into this note
       if (!ro && !titleWantsFocus) view.focus();
 
@@ -653,12 +696,14 @@ export function Editor() {
 
     return () => {
       cancelled = true;
+      if (onInitialContent) bridgeRef.current?.text.unobserve(onInitialContent);
       if (onAwarenessChange && awareness) awareness.off("change", onAwarenessChange);
       setActiveNote(null);
-      // Order matters: the ref is read by the render that `setViewMounted`
-      // schedules, so it must be written first.
+      // Order matters: the ref is read by the render that clears the mounted
+      // path, so it must be written first.
       if (view) switchingNoteRef.current = true;
-      setViewMounted(false);
+      setMountedNotePath(null);
+      setReadyNotePath(null);
       if (view) view.destroy();
       viewRef.current = null;
       editableRef.current = null;
@@ -789,13 +834,9 @@ export function Editor() {
     return <EditorEmpty />;
   }
 
-  // HTML pages render live in a sandboxed frame instead of the CRDT editor.
-  if (isHtml) {
-    return <HtmlView path={notePath} />;
-  }
-
-  // Images and PDFs stream from disk into a lightweight viewer.
-  if (preview) {
+  // Everything that is not a CRDT note — an HTML page, an image, a PDF, a
+  // CSV, a docx, an unknown type — routes through the viewer registry.
+  if (!isNoteEditor) {
     return <FilePreview path={notePath} />;
   }
 
@@ -812,8 +853,14 @@ export function Editor() {
 
   const showToolbar = peers.length > 0;
   // A different note is on its way in. Reopening the SAME path (a tab click) is
-  // not "opening another" — `!viewMounted` already covers that one.
+  // not "opening another" — the path-scoped mounted state covers that one.
   const isOpeningAnother = openingNotePath != null && openingNotePath !== notePath;
+  const showSkeleton = shouldShowNoteSkeleton({
+    requestedPath: notePath,
+    mountedPath: mountedNotePath,
+    readyPath: readyNotePath,
+    openingAnother: isOpeningAnother,
+  });
   // "from 2h ago" for the pill. The panel holds the metadata; the preview state
   // carries only the id + text, so look the timestamp back up here.
   const previewedAt =
@@ -844,9 +891,15 @@ export function Editor() {
                 </svg>
               </span>
               <span className="editor-lockbanner-text">
-                <strong>{itemLock ? "This note is locked" : "View-only access"}</strong>
+                <strong>
+                  {syncStatus === "no-access"
+                    ? "Access removed"
+                    : itemLock ? "This note is locked" : "View-only access"}
+                </strong>
                 <span className="editor-lockbanner-sub">
-                  {itemLock
+                  {syncStatus === "no-access"
+                    ? "This local copy is not syncing. Editing is disabled."
+                    : itemLock
                     ? "You can read it, but your changes won’t be saved or synced."
                     : "You can read this note, but you can’t edit it."}
                 </span>
@@ -916,14 +969,13 @@ export function Editor() {
       </div>
       {/* One continuous loading state, from the click to the first painted line.
           `openingNotePath` covers the registration round trip (the old note is
-          still on screen, so the bars fade in over it); `!viewMounted` covers
-          the bridge open and the CodeMirror build that follow. Both render the
-          same element in the same place, so the swap is one animation rather
-          than the old note → bare pane → bars → text flicker. */}
-      {(!viewMounted || isOpeningAnother) && (
+          still on screen, so the bars fade in over it); the path-scoped mount
+          and ready states cover the bridge open, CodeMirror build, and a cold
+          note's first server hydration. The same element stays in place, so the
+          swap is one animation rather than title → bare pane → text. */}
+      {showSkeleton && (
         <EditorSkeleton immediate={switchingNoteRef.current} />
       )}
     </div>
   );
 }
-

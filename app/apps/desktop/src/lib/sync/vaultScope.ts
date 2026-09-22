@@ -201,6 +201,7 @@ export function currentVaultEpoch(): number | null {
  */
 export type SyncProgressPhase =
   | "idle"
+  | "removing"
   | "registering"
   | "uploading"
   | "downloading"
@@ -211,7 +212,7 @@ export type SyncProgressPhase =
  *  failed. The UI uses it to hold still: the sidebar pins its row order for the
  *  length of a wave rather than re-sorting under the pointer as each file lands. */
 export function isBulkPhase(phase: SyncProgressPhase | undefined | null): boolean {
-  return phase === "registering" || phase === "uploading" || phase === "downloading";
+  return phase === "removing" || phase === "registering" || phase === "uploading" || phase === "downloading";
 }
 
 /** Counted progress for the current vault's sync run. `null` when none is running. */
@@ -222,6 +223,18 @@ export interface SyncProgress {
   total: number;
   /** Subset of `done` that failed — surfaced so a partial run isn't reported clean. */
   failed: number;
+  /**
+   * Bytes moved / bytes to move, when the phase knows (today: the bootstrap
+   * download). A SUBTITLE on the one item counter, never a second denominator:
+   * "settled" is `done === total` on ITEMS and nothing else. Two counters on
+   * screen would disagree with each other about whether the vault is finished,
+   * which is the same reason binaries join the item denominator rather than
+   * opening one of their own.
+   *
+   * Absent whenever the current phase has no byte figure to report.
+   */
+  bytesDone?: number;
+  bytesTotal?: number;
 }
 
 /**

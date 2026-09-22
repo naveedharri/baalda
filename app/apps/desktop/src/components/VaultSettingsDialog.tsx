@@ -9,6 +9,7 @@ import {
   type Member,
   type MyBillingVault,
   type OrgBilling,
+  type UnsyncPreview,
   type VaultCheckpoint,
 } from "../lib/api";
 import { toast } from "../lib/toast";
@@ -17,9 +18,11 @@ import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
 import { authManager } from "../lib/auth/authManager";
 import {
   classifyLimitError,
+  FREE_PLAN_EXPLANATION,
   type LimitKind,
   limitFromError,
   planPillLabel,
+  PRO_BENEFITS,
   subscriptionStatusLine,
   transferTargets,
 } from "../lib/billing";
@@ -36,6 +39,7 @@ import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { AiSettingsTab } from "./AiSettingsTab";
 import { HealthTab } from "./HealthTab";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
@@ -92,6 +96,10 @@ const HEALTH_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
       <path d="M3 12h4l2-6 4 12 2-6h6" />
     </MenuIcon>
   ),
+};
+
+const AI_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
+  id: "ai", label: "AI", icon: <MenuIcon><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></MenuIcon>,
 };
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
@@ -217,6 +225,7 @@ export function VaultSettingsDialog({
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locals = useLocalVaults();
 
+  const [diagnosticFocus, setDiagnosticFocus] = useState<import("./HealthChecks").CheckFocus | null>(null);
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
@@ -232,7 +241,7 @@ export function VaultSettingsDialog({
   // are local folders to list — that's what "View all" opens into.
   const showVaults = !!session || locals.length > 0;
   const tabs = useMemo(() => {
-    const out = [GENERAL_TAB, HEALTH_TAB];
+    const out = [GENERAL_TAB, HEALTH_TAB, AI_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
@@ -245,6 +254,10 @@ export function VaultSettingsDialog({
   if (!session && !vault) return null;
   const myMember = members.find((m) => m.userId === session?.user.id);
   const canManage = myMember?.role === "owner" || myMember?.role === "admin";
+  // Stricter than `canManage`: making a vault local only destroys the server
+  // copy for everyone, so an admin may not do it (the server agrees — 403
+  // `owner_only`) and the control simply isn't drawn for them.
+  const isOwner = myMember?.role === "owner";
   const activeTab = tabs.find((t) => t.id === tab) ?? tabs[0];
   const lockedTab = TEAM_TABS.has(activeTab.id) && !isSynced;
 
@@ -273,12 +286,12 @@ export function VaultSettingsDialog({
               <button
                 key={t.id}
                 type="button"
-                className={`menu-item${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
+                className={`menu-item${t.id === "ai" ? " settings-ai-item" : ""}${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
                 onClick={() => setTab(t.id)}
                 title={locked ? "Turn on sync to unlock" : undefined}
               >
                 {t.icon}
-                <span className="menu-item-label">{t.label}</span>
+                <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -305,15 +318,19 @@ export function VaultSettingsDialog({
             <GeneralTab
               isSynced={isSynced}
               canManage={canManage}
+              isOwner={isOwner}
               activeOrgName={activeOrg?.name ?? null}
               onRequestSignIn={onRequestSignIn}
             />
           ) : tab === "health" ? (
             <HealthTab
+              onOpenDiagnostics={id => { setDiagnosticFocus(id ? { id, n: Date.now() } : null); setTab("ai"); }}
               onRequestSignIn={onRequestSignIn}
               onGoToGeneral={() => setTab("general")}
               onClose={onClose}
             />
+          ) : tab === "ai" ? (
+            <AiSettingsTab onClose={onClose} requestedCheck={diagnosticFocus} onOpenHealth={() => setTab("health")} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onGoToSync={() => setTab("general")} />
           ) : tab === "vaults" ? (
@@ -349,12 +366,15 @@ export function VaultSettingsDialog({
 function GeneralTab({
   isSynced,
   canManage,
+  isOwner,
   activeOrgName,
   onRequestSignIn,
 }: {
   isSynced: boolean;
   /** Owner/admin — the only roles that may flip a vault-wide latch. */
   canManage: boolean;
+  /** Owner alone — the only role that may destroy the server copy. */
+  isOwner: boolean;
   activeOrgName: string | null;
   onRequestSignIn?: () => void;
 }) {
@@ -499,8 +519,267 @@ function GeneralTab({
         </code>
       </div>
 
+      {isSynced && isOwner && <UnsyncDangerZone />}
+
       {upgradeOpen && <UpgradeDialog onClose={() => setUpgradeOpen(false)} />}
     </>
+  );
+}
+
+/**
+ * The mirror of "Turn on sync": take the vault back off the server and keep the
+ * folder. Owner-only, at the bottom of the page, behind a type-the-name confirm
+ * — the three things that stop a mis-click on the one action in this dialog that
+ * destroys other people's access.
+ *
+ * The counts come from the preview call rather than from anything this device
+ * knows: what matters is what the SERVER is about to lose (edit history, version
+ * checkpoints, public links, MCP tokens), none of which the local index can see.
+ */
+function UnsyncDangerZone() {
+  const orgId = useStore((s) => s.session?.activeOrganizationId ?? null);
+  const orgName = useStore(
+    (s) =>
+      s.organizations.find((o) => o.id === s.session?.activeOrganizationId)?.name ?? null,
+  );
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
+  const serverUrl = useStore((s) => s.serverUrl);
+  const [preview, setPreview] = useState<UnsyncPreview | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    if (!orgId) return;
+    let cancelled = false;
+    authManager.api
+      .getUnsyncPreview(orgId)
+      .then((p) => {
+        if (!cancelled) setPreview(p);
+      })
+      // A preview that won't load must not hide the control: the confirm asks
+      // again, and the server is the gate either way.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId]);
+
+  if (!orgId || !orgName) return null;
+  const folder = vaultPath ? (vaultPath.split("/").pop() ?? vaultPath) : null;
+
+  return (
+    <>
+      <div className="menu-sep" />
+      <div className="subhead">Danger zone</div>
+      <div className="vault-local-only-card">
+        <span className="vault-local-only-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3 2.5 20h19L12 3Z" />
+            <path d="M12 9v5M12 17h.01" />
+          </svg>
+        </span>
+        <div className="vault-local-only-copy">
+          <strong>Make this vault local only</strong>
+          <span className="field-hint">
+            {folder ? (
+              <>
+                Keep the <strong>{folder}</strong> folder on this device and remove its synced copy
+                from {serverHost(serverUrl)}.
+              </>
+            ) : (
+              <>Keep the local folder on this device and remove its synced copy from {serverHost(serverUrl)}.</>
+            )}{" "}
+            {preview ? (
+              <>
+                The server copy of {preview.notes} note{plural(preview.notes)} and {preview.files} file
+                {plural(preview.files)}, version history, and sharing will be deleted.{" "}
+                {preview.members > 0
+                  ? `${preview.members} teammate${plural(preview.members)} lose access.`
+                  : "No teammates currently have access."}
+              </>
+            ) : (
+              "Checking what will be removed…"
+            )}
+          </span>
+        </div>
+        <button className="vault-local-only-action" onClick={() => setConfirming(true)}>
+          Make local only
+        </button>
+      </div>
+      {confirming && (
+        <UnsyncConfirmDialog
+          orgId={orgId}
+          orgName={orgName}
+          folderName={folder}
+          seed={preview}
+          onCancel={() => setConfirming(false)}
+          onDone={() => setConfirming(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/** "1 note" / "2 notes", without reaching for a formatting library. */
+function plural(n: number): string {
+  return n === 1 ? "" : "s";
+}
+
+/** Just the host of the server URL — the whole URL is noise inside a sentence. */
+function serverHost(serverUrl: string): string {
+  try {
+    return new URL(serverUrl).host;
+  } catch {
+    return serverUrl;
+  }
+}
+
+/**
+ * The confirm for "make local only".
+ *
+ * Wraps the shared `ConfirmDialog` rather than replacing it, and uses its
+ * `confirmDisabled` for a type-the-vault-name gate: this is the one action in
+ * the app that destroys data for people who are not at the keyboard, so there is
+ * deliberately no path from a single click to done.
+ *
+ * On failure the dialog STAYS OPEN so the server's reason (403 `owner_only`, a
+ * 409 `name_mismatch`, the 502 a refusing billing provider produces) has
+ * somewhere to show, with a sticky error toast beside it — a destructive path
+ * must never look like a success (#85). Nothing was destroyed in that case: the
+ * store only touches this device once the server has answered.
+ */
+function UnsyncConfirmDialog({
+  orgId,
+  orgName,
+  folderName,
+  seed,
+  onCancel,
+  onDone,
+}: {
+  orgId: string;
+  orgName: string;
+  folderName: string | null;
+  /** An already-loaded preview, so the page and the dialog don't both count. */
+  seed?: UnsyncPreview | null;
+  onCancel: () => void;
+  onDone: () => void;
+}) {
+  const serverUrl = useStore((s) => s.serverUrl);
+  const [preview, setPreview] = useState<UnsyncPreview | null>(seed ?? null);
+  const [loading, setLoading] = useState(!seed);
+  const [error, setError] = useState<string | null>(null);
+  const [typed, setTyped] = useState("");
+
+  useEffect(() => {
+    if (seed) return;
+    let cancelled = false;
+    setLoading(true);
+    authManager.api
+      .getUnsyncPreview(orgId)
+      .then((p) => {
+        if (!cancelled) setPreview(p);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId, seed]);
+
+  const run = async () => {
+    setError(null);
+    try {
+      await useStore.getState().unsyncVault(orgId, orgName);
+      onDone();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      toast(`Couldn't make the vault local only — ${message}`, "error");
+    }
+  };
+
+  const sub = preview?.subscription ?? null;
+
+  return (
+    <ConfirmDialog
+      title={`Make ${orgName} local only?`}
+      confirmLabel="Make local only"
+      // The name has to match exactly. The server re-checks it too (409
+      // `name_mismatch`), so a slip here can't get past either gate.
+      confirmDisabled={loading || typed.trim() !== orgName}
+      onCancel={onCancel}
+      onConfirm={run}
+    >
+      <p>
+        Your files stay where they are.{" "}
+        {folderName ? (
+          <>
+            <strong>{folderName}</strong> on this device keeps every note and
+            attachment as ordinary files.
+          </>
+        ) : (
+          "This device keeps every note and attachment as ordinary files."
+        )}
+      </p>
+      <p>
+        <strong>Deleted from {serverHost(serverUrl)}, permanently:</strong>
+      </p>
+      {loading && !preview ? (
+        <p className="muted">Counting what would be deleted…</p>
+      ) : preview ? (
+        <ul className="confirm-list">
+          <li>
+            {preview.notes} note{plural(preview.notes)} and {preview.files} file
+            {plural(preview.files)}, with all of their edit history
+            {preview.checkpoints > 0
+              ? ` and ${preview.checkpoints} version checkpoint${plural(preview.checkpoints)}`
+              : ""}
+          </li>
+          {preview.members > 0 && (
+            <li>
+              {preview.members} teammate{plural(preview.members)} lose access
+              immediately; their own local copies are kept
+            </li>
+          )}
+          {preview.publicLinks > 0 && (
+            <li>
+              {preview.publicLinks} public share link{plural(preview.publicLinks)} stop
+              working
+            </li>
+          )}
+          {preview.mcpTokens > 0 && (
+            <li>
+              {preview.mcpTokens} MCP token{plural(preview.mcpTokens)} stop working — AI
+              clients lose access
+            </li>
+          )}
+        </ul>
+      ) : null}
+      {sub && (
+        <p>
+          {sub.currentPeriodEnd
+            ? `Pro ends on ${formatDate(sub.currentPeriodEnd)} — until then you can move the subscription to another vault from Billing.`
+            : "Pro ends when the current period does — until then you can move the subscription to another vault from Billing."}
+        </p>
+      )}
+      <p>This cannot be undone. Teammates cannot get the vault back from us.</p>
+      <label className="confirm-type">
+        <span>
+          Type <strong>{orgName}</strong> to confirm
+        </span>
+        <input
+          autoFocus
+          value={typed}
+          spellCheck={false}
+          placeholder={orgName}
+          onChange={(e) => setTyped(e.target.value)}
+        />
+      </label>
+      {error && <div className="auth-error">{error}</div>}
+    </ConfirmDialog>
   );
 }
 
@@ -636,6 +915,12 @@ function VaultsTab() {
   // A vault the user is about to leave (#121). Always the full dialog: it has
   // to say that the folder on this device goes too, which a row can't.
   const [confirmLeave, setConfirmLeave] = useState<{ orgId: string; name: string } | null>(
+    null,
+  );
+  // A vault the user is about to make LOCAL ONLY. Always the full dialog: the
+  // counts, the teammates who lose access and the type-the-name gate have
+  // nowhere to live in a two-click row.
+  const [confirmUnsync, setConfirmUnsync] = useState<{ orgId: string; name: string } | null>(
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
@@ -873,6 +1158,25 @@ function VaultsTab() {
     }
   };
 
+  const openExisting = async () => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      // Pick only. `openLocalVault` retires the current sync scope before Rust
+      // swaps its one global vault slot; `pickVault` opens during the dialog and
+      // cannot provide that ordering guarantee.
+      const path = await ipc.pickFolder();
+      if (path) await useStore.getState().openLocalVault(path);
+      setBound(readOrgVaults());
+      setLocalsNonce((n) => n + 1);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const changeRoot = async () => {
     try {
       const picked = await ipc.pickVaultsRoot();
@@ -905,6 +1209,7 @@ function VaultsTab() {
       {session && (
         <>
       <div className="subhead">In this account ({organizations.length})</div>
+      <p className="muted">These are the vaults in your signed-in account. Other folders may still exist on disk, including vaults opened in another Baalda app. Use Open existing to reopen one. Removing a vault from the device list keeps its files.</p>
       <ul className="member-list vault-list">
         {ordered.map((o) => {
           const isActive = isOpenOrg(o.id);
@@ -971,6 +1276,22 @@ function VaultsTab() {
                       }}
                     >
                       Leave
+                    </button>
+                  )}
+                  {/* Same owner heuristic as Delete: on the active row we know
+                      the caller's role, elsewhere we don't, so we offer it and
+                      let the server's 403 `owner_only` settle it. */}
+                  {canDelete(o.id) && (
+                    <button
+                      className="link-btn danger"
+                      disabled={busy}
+                      title="Delete this vault from the server and keep its files on this device"
+                      onClick={() => {
+                        setActionError(null);
+                        setConfirmUnsync({ orgId: o.id, name: o.name });
+                      }}
+                    >
+                      Make local only
                     </button>
                   )}
                   {canDelete(o.id) && (
@@ -1082,6 +1403,13 @@ function VaultsTab() {
               </svg>
               <span>Join with code</span>
             </button>
+            <AsyncButton
+              className="ghost-pill vault-tab-add"
+              disabled={busy}
+              onClick={openExisting}
+            >
+              <span>Open existing</span>
+            </AsyncButton>
           </>
         )}
       </div>
@@ -1232,6 +1560,19 @@ function VaultsTab() {
           <p>To come back later, you'll need a new invitation or join code.</p>
           {actionError && <div className="auth-error">{actionError}</div>}
         </ConfirmDialog>
+      )}
+
+      {confirmUnsync && (
+        <UnsyncConfirmDialog
+          orgId={confirmUnsync.orgId}
+          orgName={confirmUnsync.name}
+          folderName={folderName(confirmUnsync.orgId)}
+          onCancel={() => setConfirmUnsync(null)}
+          onDone={() => {
+            setConfirmUnsync(null);
+            setBound(readOrgVaults());
+          }}
+        />
       )}
 
       {subDelete && (
@@ -1791,7 +2132,8 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
         <p>
           Choose the vault that becomes Pro. It keeps the same billing period and
           price. <strong>{transfer.sourceLabel}</strong> drops to Free — its members
-          and notes stay, but free-plan limits apply to it again.
+          and notes stay, but its attachments stop syncing. Every local copy remains
+          available on its device.
         </p>
         <div className="transfer-targets" role="radiogroup" aria-label="Destination vault">
           {targets.map((t) => {
@@ -1856,7 +2198,9 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
                   : "Active"}
             </span>
           </div>
-          <div className="muted">Everything unlimited on this vault.</div>
+          <div className="muted">
+            Attachment sync is active across devices and with your team.
+          </div>
           {orgBilling.currentPeriodEnd && (
             <div className="menu-row">
               <span className="menu-row-label">
@@ -1909,11 +2253,11 @@ function BillingTab({ canManage, isSynced }: { canManage: boolean; isSynced: boo
         )}
 
         <div className="subhead">Upgrade to Pro unlocks</div>
+        <div className="muted">{FREE_PLAN_EXPLANATION}</div>
         <ul className="upgrade-features">
-          <li>Unlimited team members</li>
-          <li>Unlimited notes, devices &amp; AI edits</li>
-          <li>Doesn't count toward your free vaults</li>
-          <li>Priority support</li>
+          {PRO_BENEFITS.map((benefit) => (
+            <li key={benefit}>{benefit}</li>
+          ))}
         </ul>
 
         {canManage ? (
@@ -2134,11 +2478,11 @@ function LimitNudge({
   // independently (members were 10 for a while; both are 3 since 2026-09-09).
   const n =
     limit ??
-    (kind === "member_limit"
+    (kind === "note_limit" ? 20000 : kind === "member_limit"
       ? (freeLimits?.membersPerVault ?? 3)
       : (freeLimits?.vaultsPerUser ?? 3));
   const message =
-    kind === "member_limit"
+    kind === "note_limit" ? `This Free vault has reached ${n.toLocaleString()} synced notes. Upgrade to Pro to sync more; additional notes stay on this device.` : kind === "member_limit"
       ? `Free plan limit reached — this vault allows ${n} member${n === 1 ? "" : "s"}.`
       : // The cap counts FREE vaults only: a Pro vault leaves the count, so
         // upgrading one of them opens a slot for another free vault.

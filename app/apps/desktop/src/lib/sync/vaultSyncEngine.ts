@@ -151,6 +151,8 @@ export interface VaultSyncEngineOptions {
    * download phase used to end that way, i.e. never.
    */
   onInboundIdle?: () => void;
+  /** A large live access grant should be downloaded through HTTP bootstrap. */
+  onBootstrapRequired?: () => void;
   /**
    * The server named the readable docs it holds NO CRDT state for (`ready.empty`).
    *
@@ -193,8 +195,28 @@ export interface VaultSyncEngineOptions {
    * one is about what the session is allowed to remove from disk.
    */
   onServerDrop?: (docId: string) => void;
+  /**
+   * doc ids of the `files` rows (tree binaries) this device holds on disk —
+   * the registry's `files` map.
+   *
+   * Announced in `hello.files`, never in the manifest: a binary has no CRDT, so
+   * there is no state vector and nothing to backfill. It is announced at all
+   * because `ready.revoked` can only name what we say we hold, and a `.pdf` set
+   * to Private must leave this disk exactly as a note does.
+   */
+  fileDocIds?: () => string[];
+  heldNoteIds?: () => string[];
   /** Injected in tests. Defaults to the global WebSocket. */
   wsFactory?: WsFactory;
+  /**
+   * Start the channel in LIVE-ONLY mode: `hello.mode = "live-only"`, so the
+   * server skips its cold backfill and sends only `ready` plus live traffic.
+   *
+   * Set while the bulk engine owns the download (`sync/bootstrap.ts`). Flipped
+   * back with {@link VaultSyncEngine.reconnect} once the bulk phase is done, at
+   * which point the manifest is complete and the resulting backfill is ~0.
+   */
+  liveOnly?: boolean;
   /** Backoff bounds (ms). */
   reconnect?: { baseMs?: number; maxMs?: number };
   /** Queued inbound bytes past which the engine applies backpressure (default
@@ -283,10 +305,13 @@ export class VaultSyncEngine {
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;
   private readonly onInboundIdle?: () => void;
+  private readonly onBootstrapRequired?: () => void;
   private readonly onServerEmpty?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerBehind?: (docIds: string[]) => void;
   private readonly onServerRevoked?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerDrop?: (docId: string) => void;
+  private readonly fileDocIds?: () => string[];
+  private readonly heldNoteIds?: () => string[];
   private readonly wsFactory: WsFactory;
   private readonly inboundMaxBytes: number;
   private readonly baseMs: number;
@@ -341,6 +366,8 @@ export class VaultSyncEngine {
    *  Live frames are never counted (see `onInboundProgress`). */
   private inboundTotal = 0;
   private inboundDone = 0;
+  /** Ask for a live-only channel in the next `hello` (see the option). */
+  private liveOnly = false;
   /** True from `hello` until the server's `ready`, which terminates the backfill
    *  it follows (server: "`ready` can never overtake the backfill it
    *  terminates"). This flag is the live/backfill boundary. */
@@ -363,6 +390,9 @@ export class VaultSyncEngine {
     this.onVoice = opts.onVoice;
     this.onInboundProgress = opts.onInboundProgress;
     this.onInboundIdle = opts.onInboundIdle;
+    this.onBootstrapRequired = opts.onBootstrapRequired;
+    this.fileDocIds = opts.fileDocIds;
+    this.heldNoteIds = opts.heldNoteIds;
     this.onServerEmpty = opts.onServerEmpty;
     this.onServerBehind = opts.onServerBehind;
     this.onServerRevoked = opts.onServerRevoked;
@@ -370,6 +400,7 @@ export class VaultSyncEngine {
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
       opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
+    this.liveOnly = opts.liveOnly === true;
     this.baseMs = opts.reconnect?.baseMs ?? 150;
     this.maxMs = opts.reconnect?.maxMs ?? 15_000;
     this.random = opts.random ?? Math.random;
@@ -433,6 +464,28 @@ export class VaultSyncEngine {
     this.closeSocket();
     this.setStatus("connecting");
     this.scheduleReconnect();
+  }
+
+  /**
+   * Change the hello MODE and force a fresh handshake.
+   *
+   * The one way out of live-only: the bulk phase finishes, the manifest now
+   * covers everything it downloaded, and the reconnect's `hello` therefore asks
+   * the server for a backfill that is ~0 frames wide — while still collecting
+   * this connect's `ready.empty`/`behind`/`revoked`, which is what the session
+   * keys the remaining work off.
+   *
+   * Reuses {@link VaultSyncEngine.refresh} (and therefore the reconnect
+   * machinery) rather than opening a second socket: one WS per vault.
+   */
+  reconnect(opts: { liveOnly?: boolean } = {}): void {
+    if (opts.liveOnly !== undefined) this.liveOnly = opts.liveOnly;
+    this.refresh();
+  }
+
+  /** Is the channel currently asking for a live-only session? (tests) */
+  isLiveOnly(): boolean {
+    return this.liveOnly;
   }
 
   /** Tear down permanently; no further reconnects. */
@@ -603,6 +656,22 @@ export class VaultSyncEngine {
       manifest = {};
     }
     const priority = this.sink.recentDocs();
+    // Tree binaries, alongside the manifest's notes. Read here rather than
+    // cached: the registry's `files` map moves with every upload, rename and
+    // removal, and a stale id would have the server name a revocation for a file
+    // that is no longer on this disk at all.
+    let files: string[] = [];
+    try {
+      files = this.fileDocIds?.() ?? [];
+    } catch {
+      files = [];
+    }
+    let held: string[] = [];
+    try {
+      held = this.heldNoteIds?.() ?? [];
+    } catch {
+      // A vault switch may retire the registry while hello is being prepared.
+    }
     // The socket may have closed while we were minting/building — guard the send.
     if (!this.ws) return;
     // `origin` is this app instance's id, matching the `x-baalda-origin` header on
@@ -615,6 +684,13 @@ export class VaultSyncEngine {
         token,
         manifest,
         priority,
+        // Omitted when empty, so the common frame stays byte-identical to what
+        // every shipped server already parses.
+        ...(files.length > 0 ? { files } : {}),
+        ...(held.length > 0 ? { held } : {}),
+        // …and the same for the mode: absent means "backfill me", exactly as
+        // every older client and server already behave.
+        ...(this.liveOnly ? { mode: "live-only" as const } : {}),
         origin: this.api.getClientId(),
         // Opt in to the frame types this build understands. Without it the
         // server withholds them (see `CLIENT_CAPS`).
@@ -676,6 +752,11 @@ export class VaultSyncEngine {
         // (Re)announce our presence now the channel is live — covers first
         // connect and every reconnect so teammates never see us go stale.
         this.sendPresence();
+      } else if (control.t === "bootstrap") {
+        this.onBootstrapRequired?.();
+      } else if (control.t === "revoked") {
+        for (const docId of control.docIds) this.sink.drop(docId);
+        this.onServerRevoked?.(control.docIds, false);
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
         // …and tell the session WHICH doc left, so the live revocation path

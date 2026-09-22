@@ -156,4 +156,30 @@ describe("block replace widgets and the shared inset class", () => {
     expect(pdf.classList.contains("cm-block-inset")).toBe(false);
     view.destroy();
   });
+
+  it("holds that rule for every other inline embed — video, audio, CSV, chip", () => {
+    // They all READ as blocks (`display: block` on the element itself), which is
+    // exactly the trap: none of them is a block DECORATION, so each already
+    // inherits `.cm-line`'s inset and a second copy would double-indent it.
+    for (const [src, selector] of [
+      ["files/clip.mp4", ".cm-md-video"],
+      ["files/song.mp3", ".cm-md-audio"],
+      ["files/rows.csv", ".cm-md-csv"],
+      ["files/report.docx", ".cm-md-file-chip"],
+    ] as const) {
+      const view = mount(`Before.\n\n![x](${src})\n`);
+      const el = view.contentDOM.querySelector(selector);
+      expect(el, selector).not.toBeNull();
+      expect(el!.classList.contains("cm-block-inset"), selector).toBe(false);
+      view.destroy();
+    }
+  });
+
+  it("spaces the media embeds with PADDING, never margin — CM6 cannot see margins", () => {
+    for (const sel of [".cm-md-video", ".cm-md-audio", ".cm-md-csv"]) {
+      expect(editorThemeSpec[sel].paddingBlock, sel).toBeDefined();
+      expect(editorThemeSpec[sel].margin, sel).toBeUndefined();
+      expect(editorThemeSpec[sel].marginBlock, sel).toBeUndefined();
+    }
+  });
 });

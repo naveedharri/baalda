@@ -3,6 +3,7 @@ import { pgText } from "../db/text.js";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { loadDocState } from "../yjs/persistence.js";
+import { purgeBlobRefs, replaceBlobRefs } from "../blobs/refs.js";
 import { cosineSimilarity, embed, tokenize } from "./embedder.js";
 
 /**
@@ -115,6 +116,12 @@ export async function indexDoc(
     [docId, note.vault_id, title, content, JSON.stringify(vector)],
   );
 
+  // Which attachments this note points at (migration 027). Derived from the
+  // SAME text `note_index.content` was just written from, so the two can never
+  // disagree about what the note says, and written here because this is the one
+  // place that sees a note's markdown after every edit.
+  await replaceBlobRefs(docId, note.vault_id, content, db);
+
   // Replace this doc's link edges wholesale (cheap; a doc has few links).
   await db.query("DELETE FROM note_links WHERE from_doc = $1", [docId]);
   for (const toTitle of links) {
@@ -148,16 +155,57 @@ export function scheduleIndex(docId: string, delayMs: number = DEBOUNCE_MS): voi
 }
 
 /**
- * Backfill: index any live note that has no note_index row yet, using its
+ * Run every pending debounced index NOW, and wait for it.
+ *
+ * A test hook, and the reason the bulk `docs/batch` path may hand its docs to
+ * {@link scheduleIndex} instead of awaiting {@link indexDoc} per item: search is
+ * eventually consistent on that path, so a test that wants to observe
+ * `note_index` after a batch push asks for the queue to be flushed rather than
+ * forcing the request path to pay for a second CRDT load per doc.
+ *
+ * Sequential on purpose — the same shape the timers would have had, and it must
+ * not open 100 pool connections at once. New work scheduled WHILE this runs is
+ * not awaited (its own timer still fires), so callers that need a quiet point
+ * flush after the writes have settled.
+ */
+export async function flushIndexQueue(): Promise<void> {
+  const ids = [...pending.keys()];
+  for (const id of ids) {
+    const timer = pending.get(id);
+    if (timer) clearTimeout(timer);
+    pending.delete(id);
+  }
+  for (const id of ids) {
+    try {
+      await indexDoc(id);
+    } catch (err) {
+      console.error(`[indexer] failed to index ${id}:`, err);
+    }
+  }
+}
+
+/**
+ * Backfill: index any live note whose derived row is MISSING or STALE, using its
  * already-stored Yjs state. Runs once on boot so existing docs become
  * searchable/graphable without waiting for a fresh edit. Best-effort — a
  * failure on one doc is logged and skipped. Returns the count indexed.
+ *
+ * "Stale" (`note_index.updated_at < notes.updated_at`) is the other half, and it
+ * is what makes {@link scheduleIndex}'s debounce safe to lean on: the bulk
+ * `docs/batch` path defers its re-index by {@link DEBOUNCE_MS}, so a deploy or a
+ * crash inside that window would otherwise leave a doc that ALREADY had a row
+ * describing its previous body — forever, since a missing-row backfill cannot
+ * see it and nothing re-indexes it until the next edit. Both timestamps are
+ * written by the same edit (the stamp in `versions/capture.ts`, then this
+ * module), so an up-to-date row is strictly the newer of the two and is left
+ * alone.
  */
 export async function backfillIndex(db: Queryable = defaultPool): Promise<number> {
   const { rows } = await db.query<{ id: string }>(
     `SELECT n.id FROM notes n
        LEFT JOIN note_index ni ON ni.doc_id = n.id
-      WHERE n.deleted_at IS NULL AND ni.doc_id IS NULL`,
+      WHERE n.deleted_at IS NULL
+        AND (ni.doc_id IS NULL OR ni.updated_at < n.updated_at)`,
   );
   let count = 0;
   for (const { id } of rows) {
@@ -186,6 +234,10 @@ export async function purgeNoteIndex(
   if (docIds.length === 0) return;
   await db.query("DELETE FROM note_index WHERE doc_id = ANY($1::text[])", [docIds]);
   await db.query("DELETE FROM note_links WHERE from_doc = ANY($1::text[])", [docIds]);
+  // A deleted note references nothing. Leaving its rows would keep every
+  // attachment it ever embedded permanently uncollectable — the exact shape of
+  // leak `blob_refs` exists to close.
+  await purgeBlobRefs(docIds, db);
 }
 
 // ── search ──────────────────────────────────────────────────────────────────
@@ -194,12 +246,23 @@ export async function purgeNoteIndex(
  * One ranked search hit. This shape is the API contract of BOTH
  * `GET /api/vaults/:vaultId/search` and the MCP `search_notes` tool — don't
  * change it without changing them together.
+ *
+ * A hit is a NOTE (ranked from `note_index`, the Yjs body) or a FILE (ranked
+ * from `blob_text`, the words a desktop extracted out of a docx/xlsx/pdf/…).
+ * `kind` is how a caller tells them apart; `blobId` and `ext` are only on file
+ * hits, and `docId` is null for the one kind of file that has no doc of its own
+ * — a hash-named `attachments/` drop.
  */
 export interface NoteSearchHit {
-  docId: string;
+  docId: string | null;
   title: string;
   relPath: string;
   score: number;
+  kind: "note" | "file";
+  /** File hits only: the blob whose text matched (fetch it via /api/blobs/:id). */
+  blobId?: string;
+  /** File hits only: lowercase extension without the dot, e.g. `xlsx`. */
+  ext?: string;
 }
 
 /**
@@ -208,6 +271,24 @@ export interface NoteSearchHit {
  * around 1 MB regardless of vault size. Note BODIES never leave Postgres.
  */
 const SEARCH_BATCH = 500;
+
+/**
+ * How many `blob_text` rows one query may score.
+ *
+ * Files are capped where notes are not, and the asymmetry is deliberate: a
+ * note's body is a few KB and a `blob_text` row is up to a megabyte, so the
+ * `position(token IN lower(content))` pass costs orders of magnitude more per
+ * row. A vault with tens of thousands of indexed files would otherwise turn one
+ * search into a full scan of all of them. Bodies still never leave Postgres.
+ */
+const FILE_SEARCH_CAP = 2000;
+
+/** Lowercase extension of a path, without the dot (`""` when there is none). */
+function extOf(relPath: string): string {
+  const base = relPath.split("/").pop() ?? relPath;
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
 
 /**
  * Rank the notes of one vault against a query, keeping peak memory bounded.
@@ -229,6 +310,7 @@ const SEARCH_BATCH = 500;
  *
  * `readableDocIds` is pushed into the query rather than filtered afterwards, so
  * notes the caller may not read are never scored (they'd be a content oracle).
+ * The same rule governs the FILE pass — see `searchBlobText`.
  *
  * Note on `lower()`: query tokens are ASCII by construction (`tokenize` yields
  * `[a-z0-9_]+`), and Postgres `lower()` matches JS `toLowerCase()` on ASCII, so
@@ -243,12 +325,30 @@ export async function searchNoteIndex(opts: {
   k: number;
   /** Doc ids the caller may read — the candidate set. */
   readableDocIds: Iterable<string>;
+  /**
+   * Also rank the vault's FILES (`blob_text`). Default true. The one caller
+   * that turns it off is MCP's `search_notes` with `includeFiles: false`.
+   */
+  includeFiles?: boolean;
+  /**
+   * Does the caller hold vault-wide read? It decides one thing and only one:
+   * whether the hash-named `attachments/` blobs — which have no doc of their
+   * own to resolve — are in the file candidate set. Mirrors
+   * `permissions/http-gates.ts canReadAttachment`'s vault-wide branch, which is
+   * the same answer the download route gives for those blobs. A scoped member
+   * never scores them; running the LIKE-per-note reference test over a search's
+   * whole candidate set is not something a request path can afford.
+   */
+  vaultWideReader?: boolean;
   db?: Queryable;
 }): Promise<NoteSearchHit[]> {
   const db = opts.db ?? defaultPool;
   if (opts.k <= 0) return [];
   const docIds = Array.from(opts.readableDocIds);
-  if (docIds.length === 0) return [];
+  const includeFiles = opts.includeFiles !== false;
+  // No readable docs AND no vault-wide reach: nothing to score at all. (A
+  // vault-wide reader with an empty note set can still match an attachment.)
+  if (docIds.length === 0 && !(includeFiles && opts.vaultWideReader)) return [];
 
   const qVec = embed(opts.query);
   const qTokens = Array.from(new Set(tokenize(opts.query)));
@@ -256,7 +356,7 @@ export async function searchNoteIndex(opts: {
   // Phase 1: score every candidate, retaining only id + score per note.
   const scored: Array<{ docId: string; score: number }> = [];
   let after = "";
-  for (;;) {
+  for (; docIds.length > 0; ) {
     const { rows } = await db.query<{
       doc_id: string;
       vector: number[] | null;
@@ -287,10 +387,22 @@ export async function searchNoteIndex(opts: {
     if (rows.length < SEARCH_BATCH) break;
   }
 
+  const fileHits = includeFiles
+    ? await searchBlobText({
+        db,
+        vaultId: opts.vaultId,
+        qVec,
+        qTokens,
+        k: opts.k,
+        readableDocIds: docIds,
+        vaultWideReader: opts.vaultWideReader === true,
+      })
+    : [];
+
   // Stable sort over doc_id-ordered input, so equal scores keep a deterministic
   // order (the previous version left ties at the database's arbitrary order).
   const top = scored.sort((a, b) => b.score - a.score).slice(0, opts.k);
-  if (top.length === 0) return [];
+  if (top.length === 0) return fileHits.slice(0, opts.k);
 
   // Phase 2: fetch the display fields for the winners only.
   const { rows: metaRows } = await db.query<{
@@ -315,9 +427,95 @@ export async function searchNoteIndex(opts: {
       title: m.title ?? relPathStem(m.rel_path),
       relPath: m.rel_path,
       score: t.score,
+      kind: "note",
     });
   }
-  return hits;
+  if (fileHits.length === 0) return hits;
+
+  // One ranking, two sources. Notes win a TIE rather than being nudged by a
+  // magic penalty term: the scores are comparable (same embedder, same keyword
+  // boost), so the only place the two kinds need separating is where they are
+  // equal — and there the note, whose text a person actually wrote, is the
+  // better answer.
+  return [...hits, ...fileHits]
+    .sort((a, b) => b.score - a.score || (a.kind === b.kind ? 0 : a.kind === "note" ? -1 : 1))
+    .slice(0, opts.k);
+}
+
+/**
+ * The FILE half of {@link searchNoteIndex}: rank `blob_text` the same way.
+ *
+ * Same embedder, same keyword boost, same "bodies stay in Postgres" shape as
+ * the note pass — `position(token IN lower(content))` is computed in SQL and
+ * only a blob id, a vector and a small integer come back.
+ *
+ * VISIBILITY IS THE POINT, so it is in the WHERE clause and not a filter after
+ * the fact. Two kinds of file, matching the two branches of
+ * `canReadAttachment`:
+ *
+ *   · a registered tree file — `blobs.doc_id` (the live column, not the
+ *     denormalised copy, so a blob that adopted its doc after its text was
+ *     stored is still found) must be in the caller's readable set;
+ *   · an `attachments/` drop with no doc — only for a vault-wide reader.
+ *
+ * Everything else is never scored, which is what keeps an unreadable file's
+ * contents from influencing the ranking of a readable one (a content oracle:
+ * "your query scored higher when I added a word that only appears in a file you
+ * cannot see" is a slow read of that file).
+ */
+async function searchBlobText(opts: {
+  db: Queryable;
+  vaultId: string;
+  qVec: number[];
+  qTokens: string[];
+  k: number;
+  readableDocIds: string[];
+  vaultWideReader: boolean;
+}): Promise<NoteSearchHit[]> {
+  const { rows } = await opts.db.query<{
+    blob_id: string;
+    doc_id: string | null;
+    rel_path: string | null;
+    filename: string | null;
+    vector: number[] | null;
+    matched: number;
+  }>(
+    `SELECT bt.blob_id,
+            b.doc_id,
+            b.rel_path,
+            b.filename,
+            bt.vector,
+            (
+              SELECT count(*) FROM unnest($3::text[]) AS t(tok)
+               WHERE position(t.tok IN lower(coalesce(b.rel_path, '') || ' ' || bt.content)) > 0
+            )::int AS matched
+       FROM blob_text bt
+       JOIN blobs b ON b.id = bt.blob_id AND b.status = 'ready'
+      WHERE bt.vault_id = $1
+        AND (
+          (b.doc_id IS NOT NULL AND b.doc_id = ANY($2::text[]))
+          OR (b.doc_id IS NULL AND $4::boolean)
+        )
+      ORDER BY bt.blob_id
+      LIMIT $5`,
+    [opts.vaultId, opts.readableDocIds, opts.qTokens, opts.vaultWideReader, FILE_SEARCH_CAP],
+  );
+
+  const scored = rows.map((r) => {
+    const sim = r.vector ? cosineSimilarity(opts.qVec, r.vector) : 0;
+    const boost = opts.qTokens.length > 0 ? 0.1 * (r.matched / opts.qTokens.length) : 0;
+    const relPath = r.rel_path ?? "";
+    return {
+      docId: r.doc_id,
+      blobId: r.blob_id,
+      relPath,
+      title: r.filename ?? (relPath ? (relPath.split("/").pop() ?? relPath) : r.blob_id),
+      ext: extOf(relPath),
+      score: sim + boost,
+      kind: "file" as const,
+    };
+  });
+  return scored.sort((a, b) => b.score - a.score).slice(0, opts.k);
 }
 
 /** Filename stem of a rel_path, used as a fallback title. */

@@ -1,4 +1,4 @@
-// "Remember email address" on the sign-in card (#120).
+// Email preference and prefill, retained for existing email-only preferences.
 //
 // Device-local, like the theme and the other `prefs` values: a person signing
 // in on their own machine should not retype the same address every time the
@@ -10,9 +10,8 @@
 //   - the ADDRESS, written only when a sign-in actually succeeded, so a typo
 //     someone abandoned is never the thing we hand them back.
 //
-// Only the address is ever stored. The password is not, and neither is the
-// session token — that lives in the OS keychain (`keychain.rs`), which is the
-// only place in this app allowed to hold a credential.
+// This module stores only the address. Remembered passwords are handled by
+// rememberedPassword.ts in the OS keychain, separately from session tokens.
 
 /** The switch: "on" when the person asked us to remember, absent otherwise. */
 export const REMEMBER_EMAIL_KEY = "context.rememberEmail";

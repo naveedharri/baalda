@@ -12,11 +12,14 @@ import { openLinkRoutes } from "./routes/open-link.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { blobRoutes } from "./routes/blobs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
+import { createBulkRoutes } from "./routes/bulk.js";
+import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { syncTokenRoutes } from "./routes/sync-token.js";
 import { vaultTokenRoutes } from "./routes/vault-token.js";
 import { desktopOauthRoutes } from "./routes/desktop-oauth.js";
 import { createShareRoutes, type ShareDeps } from "./routes/shares.js";
 import { createOrgRoutes } from "./routes/orgs.js";
+import { createHousekeeperRoutes } from "./routes/housekeeper.js";
 import { graphRoutes } from "./routes/graph.js";
 import { createMcpRoutes } from "./routes/mcp.js";
 import { createRepairRoutes } from "./routes/repair.js";
@@ -95,6 +98,8 @@ function allowedOrigins(): string[] {
  *                   invitations, members, etc.)
  *  - /api/sync-token → mint per-doc sync JWTs
  *  - /api/{vaults,folders,notes,files} → registry
+ *  - /api/vaults/:id/{folders,notes,files,docs}/batch → bulk registration + push
+ *  - /api/vaults/:id/bootstrap[/:sessionId] → whole-vault download session
  *  - /api/vaults/:id/blobs, /api/blobs/:id → attachment blob store
  *  - /api/notes/:id/versions, /api/vaults/:id/checkpoints → version history
  *  - /api/shares → folder/file ACL management
@@ -125,13 +130,32 @@ export function createApp(deps: AppDeps): Hono {
         "Authorization",
         "x-file-name",
         "x-rel-path",
+        // Content hash a client declares before an attachment upload, so known
+        // content is deduped without sending a byte.
+        "x-sha256",
+        // The `files` doc a legacy-POST upload's bytes belong to, so a tree
+        // binary's blob carries the doc identity its ACL is resolved from.
+        "x-doc-id",
         // Opaque per-client instance id on registry writes, so the vault channel
         // doesn't tell a client to re-pull its own structural change.
         ORIGIN_HEADER,
       ],
       // set-auth-token carries the session token the desktop client reads after
       // sign-in/up; without exposing it the browser hides it even on success.
-      exposeHeaders: ["set-auth-token"],
+      //
+      // The bootstrap page headers are here for exactly the same reason, and the
+      // failure is sharper: a cross-origin reader that cannot see
+      // `X-Baalda-Cursor` cannot tell a drained session from a page boundary, so
+      // it would stop after the first page of a whole-vault download and report
+      // success. The webview IS cross-origin to the API in every configuration
+      // we ship.
+      exposeHeaders: [
+        "set-auth-token",
+        "X-Baalda-Cursor",
+        "X-Baalda-Docs",
+        "X-Baalda-Bytes",
+        "ETag",
+      ],
     }),
   );
 
@@ -202,8 +226,24 @@ export function createApp(deps: AppDeps): Hono {
     createRegistryRoutes({
       onRegistryChanged: deps.onRegistryChanged,
       disconnectDoc: deps.disconnectDoc,
+      evictDoc: deps.evictDoc,
     }),
   );
+  // Bulk engine: the batched twins of the registry creates, plus the whole-vault
+  // bootstrap download. Mounted beside the registry because they ARE the
+  // registry — same shared `registry/batch-ops.ts` body, same refusal codes —
+  // only without a network round trip per item.
+  app.route(
+    "/api",
+    createBulkRoutes({
+      onRegistryChanged: deps.onRegistryChanged,
+      // The bulk delete route kicks + unloads the docs it removes, off the
+      // response path. `evictDoc` and not `disconnectDoc`: the rows are gone, so
+      // a cached `Y.Doc` served to the next connect would re-materialise them.
+      evictDoc: deps.evictDoc,
+    }),
+  );
+  app.route("/api", bootstrapRoutes);
   app.route("/api", blobRoutes);
   app.route(
     "/api",
@@ -228,12 +268,14 @@ export function createApp(deps: AppDeps): Hono {
   );
   app.route("/api", createBillingRoutes({ provider: billingProvider }));
   app.route("/api", graphRoutes);
+  app.route("/api", createHousekeeperRoutes(deps.docWriter));
   app.route(
     "/api",
     createMcpRoutes({
       docWriter: deps.docWriter,
       disconnectDoc: deps.disconnectDoc,
       onRegistryChanged: deps.onRegistryChanged,
+      onAclChanged: deps.onAclChanged,
     }),
   );
 

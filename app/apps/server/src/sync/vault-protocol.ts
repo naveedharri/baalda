@@ -29,6 +29,26 @@ export interface HelloFrame {
   /** Optional recently-touched docIds to backfill first (spec 05 §4). */
   priority?: string[];
   /**
+   * doc ids of `files` rows (tree binaries) this client holds on disk.
+   *
+   * Separate from {@link manifest} because a binary has no CRDT and therefore no
+   * state vector to advertise — there is nothing for the backfill to diff, and
+   * putting a sentinel in the manifest would have the backfill open a Y.Doc per
+   * PDF. The ONE thing these ids are for is the set arithmetic behind
+   * `ready.revoked`: a file set to Private has to leave the ex-reader's disk
+   * exactly as a note does, and the server can only name what the client says it
+   * holds.
+   *
+   * They count toward `REVOKED_CAP` alongside the manifest's notes — one frame,
+   * one budget, and a vault whose revocation is mostly binaries must not be able
+   * to push its notes out of the list.
+   *
+   * Absent on clients that predate this (they simply never have a file named).
+   */
+  files?: string[];
+  /** Mapped notes held locally, including those with no CRDT state vector yet. */
+  held?: string[];
+  /**
    * Opaque per-app-instance id, echoed by the client on its registry HTTP writes
    * (`x-baalda-origin`). It lets the channel skip telling a client about a
    * structural change it made itself — a 500-note reconcile used to bounce ~1,100
@@ -48,6 +68,22 @@ export interface HelloFrame {
    * new binary frame type to a connection that asked for it.
    */
   caps?: string[];
+  /**
+   * How much of the channel this connection wants.
+   *
+   * `"live-only"` says the client is fetching its cold state over the bootstrap
+   * HTTP routes and needs the socket ONLY for live updates: the server skips
+   * `backfill()` entirely and still sends `ready`. Everything on `ready` is
+   * either free set arithmetic (`revoked`) or one query over the readable set
+   * (`empty`), and all three lists are what the client acts on — so withholding
+   * them to save the backfill would trade a download for a stuck vault.
+   * `behind` may come back empty in this mode, because it is a BY-PRODUCT of the
+   * backfill diff and there is no backfill; the bootstrap session's byte-sized
+   * doc list answers the same question.
+   *
+   * Absent ⇒ full backfill, which is every shipped client.
+   */
+  mode?: "live-only";
 }
 
 /** A teammate's live "who's viewing what" state, forwarded to every subscriber
@@ -114,6 +150,8 @@ export type ServerControl =
       revoked?: string[];
       revokedTruncated?: true;
     }
+  | { t: "revoked"; docIds: string[] }
+  | { t: "bootstrap" }
   | { t: "drop"; docId: string } // access lost / doc removed -> client evicts
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token
   | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry
@@ -179,8 +217,17 @@ export function parseHello(text: string): HelloFrame | null {
     token: f.token,
     manifest: f.manifest ?? {},
     priority: Array.isArray(f.priority) ? f.priority : undefined,
+    files: Array.isArray(f.files)
+      ? f.files.filter((d): d is string => typeof d === "string" && d !== "")
+      : undefined,
+    held: Array.isArray(f.held)
+      ? f.held.filter((d): d is string => typeof d === "string" && d !== "")
+      : undefined,
     origin: typeof f.origin === "string" && f.origin ? f.origin : undefined,
     caps: Array.isArray(f.caps) ? f.caps.filter((c): c is string => typeof c === "string") : undefined,
+    // Exactly one recognised value; anything else is an older or a confused
+    // client and gets the full backfill, which is always correct if slower.
+    mode: f.mode === "live-only" ? "live-only" : undefined,
   };
 }
 

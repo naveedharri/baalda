@@ -14,11 +14,37 @@ export interface HelloFrame {
   /** Recently-touched docIds to backfill first (spec 05 §4). */
   priority?: string[];
   /**
+   * doc ids of the `files` rows (tree binaries) this device holds on disk.
+   *
+   * Not in {@link manifest}, because a binary has no CRDT and so no state vector
+   * — there is nothing to diff and nothing to backfill. The one thing the server
+   * does with them is the `ready.revoked` set arithmetic: a `.pdf` set to Private
+   * has to leave this disk exactly as a note does, and the server can only name
+   * what we tell it we hold. They share the notes' `REVOKED_CAP`.
+   */
+  files?: string[];
+  /** Mapped notes held locally, including those with no CRDT state vector yet. */
+  held?: string[];
+  /**
    * This app instance's id (`ApiClient.getClientId()`), the same value sent as
    * `x-baalda-origin` on registry writes. Lets the server skip telling us to
    * re-pull a structural change we made ourselves.
    */
   origin?: string;
+  /**
+   * Ask the server for a LIVE channel only: no cold `backfill()`.
+   *
+   * Sent while the bulk engine owns the download — the bootstrap route pages the
+   * same content out over HTTP with a resumable cursor, and having both deliver
+   * it means every doc arrives twice. The server still computes and sends
+   * `ready` (`empty`/`revoked`; `behind` may be empty), because those three
+   * lists are authorities the session needs on every connect, backfill or not.
+   *
+   * Omitted (not `false`) when the backfill IS wanted, so the common frame stays
+   * byte-identical to what every shipped server already parses; an older server
+   * ignores the unknown field and simply backfills, which is today's behaviour.
+   */
+  mode?: "live-only";
   /**
    * Feature flags this build understands. The server withholds any NEW binary
    * frame type from a client that didn't list it — without that, an older build
@@ -29,7 +55,7 @@ export interface HelloFrame {
 }
 
 /** What this build can handle beyond the original protocol. Sent in `hello`. */
-export const CLIENT_CAPS = ["voice"];
+export const CLIENT_CAPS = ["voice", "revocation-batches", "bulk-regrant"];
 
 /** A teammate's live "who's viewing what" state (mirror of the server type).
  *  `docId` null means the user isn't viewing anything (or left) — clear them. */
@@ -73,8 +99,9 @@ export type ServerControl =
       /** More than one frame would name (cap 2000). */
       behindTruncated?: boolean;
       /**
-       * Readable-no-longer docIds: docs OUR OWN manifest told the server we
-       * hold, which are not in our readable set any more. The server STATING a
+       * Readable-no-longer docIds: docs OUR OWN hello told the server we hold
+       * (the manifest's notes AND `files`' tree binaries), which are not in our
+       * readable set any more. The server STATING a
        * revocation instead of us inferring one from a short listing.
        *
        * This is what covers a revocation that happened while the app was shut.
@@ -92,6 +119,8 @@ export type ServerControl =
       /** More than one frame would name (cap 2000). */
       revokedTruncated?: boolean;
     }
+  | { t: "revoked"; docIds: string[] }
+  | { t: "bootstrap" }
   | { t: "drop"; docId: string }
   | { t: "reauth" }
   | { t: "registry" }
@@ -144,6 +173,13 @@ export function parseServerControl(text: string): ServerControl | null {
       ...(revoked && revoked.length > 0 ? { revoked } : {}),
       ...(o.revokedTruncated === true ? { revokedTruncated: true } : {}),
     };
+  }
+  if (t === "bootstrap") return { t: "bootstrap" };
+  if (t === "revoked") {
+    const docIds = (v as { docIds?: unknown }).docIds;
+    if (!Array.isArray(docIds) || docIds.length > 2000 ||
+        !docIds.every((id) => typeof id === "string" && id.length > 0)) return null;
+    return { t: "revoked", docIds };
   }
   if (t === "reauth") return { t: "reauth" };
   if (t === "registry") return { t: "registry" };

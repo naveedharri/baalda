@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient, ApiError, HEALTH_TIMEOUT_MS } from "../api";
+import { gzipSync } from "node:zlib";
+import { encodeBootstrapPage, decodeBootstrapPage } from "../sync/bootstrapCodec";
 
 interface Call {
   url: string;
@@ -34,6 +36,22 @@ function fakeFetch(
 }
 
 describe("ApiClient against a mocked fetch", () => {
+  it.each([true, false])("decodes bootstrap transport with gzip=%s", async (compressed) => {
+    const docs = [{ docId: "d1", relPath: "A.md", update: new Uint8Array([0, 0]) }];
+    const page = encodeBootstrapPage(docs);
+    const bytes = compressed ? gzipSync(page) : page;
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: async () =>
+      new Response(new Uint8Array(bytes), { headers: {
+        "content-type": "application/vnd.baalda.bootstrap",
+        "x-baalda-cursor": "1", "x-baalda-docs": "1",
+      } }),
+    });
+    const result = await api.fetchBootstrapPage("v1", "s1");
+    expect(decodeBootstrapPage(result.bytes)).toEqual(docs);
+    expect(result.nextCursor).toBe(1);
+    expect(result.docs).toBe(1);
+  });
+
   it("captures the set-auth-token header on sign-in and sends it as Bearer", async () => {
     const { impl, calls } = fakeFetch((call) => {
       if (call.url.endsWith("/api/auth/sign-in/email")) {
@@ -105,6 +123,59 @@ describe("ApiClient against a mocked fetch", () => {
     expect(await api.listVaults()).toHaveLength(1);
     const notes = await api.listNotes("v1");
     expect(notes[0].id).toBe("n1");
+  });
+
+  it("reads and updates the future-member access default", async () => {
+    const { impl, calls } = fakeFetch((call) => ({
+      json: { mode: call.method === "PUT" ? "readonly" : "private" },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+
+    expect(await api.getAccessDefault("org one")).toEqual({ mode: "private" });
+    expect(await api.setAccessDefault("org one", "readonly")).toEqual({ mode: "readonly" });
+    expect(calls[0]).toMatchObject({
+      url: "http://localhost:3010/api/orgs/org%20one/access-default",
+      method: "GET",
+    });
+    expect(calls[1]).toMatchObject({
+      url: "http://localhost:3010/api/orgs/org%20one/access-default",
+      method: "PUT",
+      body: { mode: "readonly" },
+    });
+  });
+
+  it("sends the bulk access audience and resources without widening their scope", async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      json: {
+        mode: "private",
+        resourcesChanged: 2,
+        overridesCleared: 4,
+        membersAffected: 2,
+        disconnectedDocs: 1,
+      },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+    const input = {
+      resources: [
+        { resourceType: "folder" as const, resourceId: "folder-1" },
+        { resourceType: "file" as const, resourceId: "doc-2" },
+      ],
+      audience: { type: "users" as const, userIds: ["u2", "u3"] },
+      mode: "private" as const,
+    };
+
+    expect(await api.setBulkAccess("org-1", input)).toEqual({
+      mode: "private",
+      resourcesChanged: 2,
+      overridesCleared: 4,
+      membersAffected: 2,
+      disconnectedDocs: 1,
+    });
+    expect(calls[0]).toMatchObject({
+      url: "http://localhost:3010/api/orgs/org-1/access/bulk",
+      method: "POST",
+      body: input,
+    });
   });
 
   it("base URL trailing slashes are stripped so paths don't double up", async () => {
@@ -324,6 +395,69 @@ describe("ApiClient against a mocked fetch", () => {
 });
 
 /**
+ * The two calls a tree binary adds (PR3 Stage A). Both are wire contracts with
+ * the server half, so the bodies are asserted literally rather than by shape.
+ */
+describe("ApiClient tree-binary routes", () => {
+  it("registers a `files` row at /api/files with the local id as `docId`", async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 201,
+      json: { id: "local-1", docId: "local-1", vaultId: "v1", folderId: "f1", path: "Team/report.docx" },
+    }));
+    const api = new ApiClient({ baseUrl: "https://api.test", token: "t", fetchImpl: impl });
+
+    const row = await api.registerFile({ vaultId: "v1", id: "local-1", path: "Team/report.docx" });
+
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("https://api.test/api/files");
+    // No `folderId`: the server resolves the parent FROM the path, which is
+    // what keeps `rel_path` and `folder_id` in agreement.
+    expect(calls[0].body).toEqual({ vaultId: "v1", path: "Team/report.docx", docId: "local-1" });
+    expect(row.docId).toBe("local-1");
+  });
+
+  it("PUTs extracted text, and stops offering it after a 404", async () => {
+    let status = 204;
+    const { impl, calls } = fakeFetch(() => ({ status, json: {} }));
+    const api = new ApiClient({ baseUrl: "https://api.test", token: "t", fetchImpl: impl });
+
+    await api.uploadBlobText("v1", "blob-1", {
+      chars: 5,
+      content: "hello",
+      source: "client",
+      docId: "local-1",
+      sha256: "abc",
+    });
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toBe("https://api.test/api/vaults/v1/blobs/blob-1/text");
+    expect(calls[0].body).toEqual({
+      chars: 5,
+      content: "hello",
+      source: "client",
+      docId: "local-1",
+      sha256: "abc",
+    });
+    expect(api.supportsBlobText()).toBe(true);
+
+    status = 404;
+    await expect(
+      api.uploadBlobText("v1", "blob-2", { chars: 1, content: "x", source: "client", sha256: "d" }),
+    ).rejects.toThrow();
+    expect(api.supportsBlobText()).toBe(false);
+    // Known-negative now: the next call answers locally, with no round trip.
+    const before = calls.length;
+    await expect(
+      api.uploadBlobText("v1", "blob-3", { chars: 1, content: "x", source: "client", sha256: "e" }),
+    ).rejects.toThrow();
+    expect(calls.length).toBe(before);
+
+    // Capabilities belong to ONE server: pointing at another re-asks.
+    api.setBaseUrl("https://other.test");
+    expect(api.supportsBlobText()).toBeNull();
+  });
+});
+
+/**
  * `health()` — the one probe in api.ts that must NOT fail closed (#91).
  *
  * The onboarding step validates a server URL before adopting it, and adopting
@@ -435,5 +569,85 @@ describe("ApiClient.health", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("listNoteRegistryPaged — the keyset listing the reconciler pulls", () => {
+  /** Script a server that pages: `limit` rows at a time, `nextAfter` = the last
+   *  `rel_path`, and tombstones ONLY on the final page (the server's contract,
+   *  which is what preserves the "one snapshot, no precedence rule" property). */
+  function pagingServer(paths: string[], tombstones: string[]) {
+    return fakeFetch((call) => {
+      const url = new URL(call.url);
+      if (!url.pathname.endsWith("/api/notes")) return { json: {} };
+      const after = url.searchParams.get("after");
+      const limit = Number(url.searchParams.get("limit") ?? paths.length);
+      const start = after ? paths.indexOf(after) + 1 : 0;
+      const slice = paths.slice(start, start + limit);
+      const last = start + slice.length >= paths.length;
+      return {
+        json: {
+          notes: slice.map((p) => ({ id: `srv-${p}`, rel_path: p })),
+          ...(last ? { tombstones } : {}),
+          ...(last ? {} : { nextAfter: slice[slice.length - 1] }),
+        },
+      };
+    });
+  }
+
+  it("follows the cursor and returns what one unpaged answer would have", async () => {
+    const paths = ["a.md", "b.md", "c.md", "d.md", "e.md"];
+    const { impl, calls } = pagingServer(paths, ["dead-1"]);
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+
+    const out = await api.listNoteRegistryPaged("v1", { limit: 2 });
+    expect(out.notes.map((n) => n.rel_path)).toEqual(paths);
+    // Tombstones ride the LAST page, and that is the set the caller gets.
+    expect(out.tombstones).toEqual(["dead-1"]);
+    expect(calls).toHaveLength(3); // 2 + 2 + 1
+    expect(new URL(calls[0].url).searchParams.get("after")).toBeNull();
+    expect(new URL(calls[1].url).searchParams.get("after")).toBe("b.md");
+    expect(new URL(calls[2].url).searchParams.get("after")).toBe("d.md");
+  });
+
+  it("asks an OLD server exactly once, and answers identically", async () => {
+    // A server that predates the keyset: it ignores `limit`/`after` and returns
+    // the whole vault with no `nextAfter`. That is one request, and the result
+    // must be indistinguishable from `listNoteRegistry`'s.
+    const rows = [
+      { id: "srv-a", rel_path: "a.md" },
+      { id: "srv-b", rel_path: "b.md" },
+    ];
+    const { impl, calls } = fakeFetch(() => ({
+      json: { notes: rows, tombstones: ["dead-1"] },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+
+    const paged = await api.listNoteRegistryPaged("v1");
+    expect(calls).toHaveLength(1);
+    expect(paged).toEqual({ notes: rows, tombstones: ["dead-1"] });
+
+    const unpaged = await api.listNoteRegistry("v1");
+    expect(paged).toEqual(unpaged);
+  });
+
+  it("keeps `tombstones: null` meaning 'the server did not say'", async () => {
+    // Null is NOT `[]`. The reconciler must never infer a delete from silence,
+    // so an answer with no `tombstones` key stays null through the paging loop.
+    const { impl } = fakeFetch(() => ({ json: { notes: [] } }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    expect((await api.listNoteRegistryPaged("v1")).tombstones).toBeNull();
+  });
+
+  it("stops rather than looping when a server repeats its cursor", async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      json: { notes: [{ id: "srv-a", rel_path: "a.md" }], nextAfter: "a.md" },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", fetchImpl: impl });
+    const out = await api.listNoteRegistryPaged("v1", { limit: 1 });
+    // Second request returns the same cursor ⇒ a server bug; stopping beats
+    // paging forever.
+    expect(calls.length).toBeLessThanOrEqual(2);
+    expect(out.notes.length).toBeGreaterThan(0);
   });
 });

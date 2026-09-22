@@ -8,6 +8,7 @@ import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
 import { setMemberJoinedPublisher } from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
+import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
@@ -21,7 +22,33 @@ import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
  *     as-is for back-compat with existing desktop builds and local dev.
  * See README "Ports".
  */
+/**
+ * Last line of defence for the whole process.
+ *
+ * Node 22 exits on an unhandled rejection, and this server has hooks it does not
+ * own the call sites of — Hocuspocus invokes `onChange` unawaited and uncaught,
+ * so one rejected query there used to end the process and drop every connected
+ * client. Each call site still handles its own errors (see `onChange`); this
+ * catches the ones nobody anticipated rather than trading a degraded request for
+ * a total outage.
+ *
+ * `uncaughtException` is the same bargain and the more dangerous one — the
+ * process continues with unknown state — but for a relay whose durable state is
+ * in Postgres, a logged exception beats every open socket dying at once. A
+ * supervisor restart is still the right answer to a *repeating* one, which is
+ * why these are loud.
+ */
+function installProcessGuards(): void {
+  process.on("unhandledRejection", (reason) => {
+    console.error("[process] unhandled promise rejection (keeping the process alive):", reason);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[process] uncaught exception (keeping the process alive):", err);
+  });
+}
+
 async function main() {
+  installProcessGuards();
   // Vault replication channel (spec 05): pub/sub is in-memory unless REDIS_URL
   // is set, in which case fanout spans instances (HA / rolling deploys).
   const pubsub = await createPubSub(config.redisUrl);
@@ -50,8 +77,12 @@ async function main() {
   // sync server, which needs this hook) — hence the late binding. Every edit,
   // however it arrived, ends up in exactly one place.
   let versionCapture: VersionCapture | null = null;
-  const noteEdited = (vaultId: string, docId: string, userId: string | null) =>
-    versionCapture?.touch(vaultId, docId, userId);
+  const noteEdited = (
+    vaultId: string,
+    docId: string,
+    userId: string | null,
+    source?: string | null,
+  ) => versionCapture?.touch(vaultId, docId, userId, source);
 
   // Every persisted doc change is fanned out to background vault subscribers.
   const sync = createSyncServer(
@@ -126,9 +157,20 @@ async function main() {
     .then((n) => n > 0 && console.log(`Indexer: backfilled ${n} note(s).`))
     .catch((err) => console.error("Indexer backfill failed:", err));
 
+  // Attachment lifecycle. Three sweeps on one `unref`ed timer, each serialized
+  // across instances by its own advisory lock:
+  //   · abandoned uploads — a `pending` blob row holds its content's dedupe
+  //     slot, so leaving them would make a later upload of the same bytes adopt
+  //     an upload that never finished;
+  //   · the deletion queue — objects whose row a vault cascade or an org delete
+  //     already removed without knowing an object store exists;
+  //   · unreferenced attachments, only when BLOB_GC_ENABLED says so.
+  startBlobGc();
+
   const shutdown = async () => {
     console.log("Shutting down…");
     versionCapture?.stop();
+    stopBlobGc();
     syncWss.close();
     vaultWss.close();
     await pubsub.close();

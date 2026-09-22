@@ -249,12 +249,20 @@ fn data_volume_bench() {
         .collect();
 
     let t = Instant::now();
-    let failures = idx.index_notes(&vault, &batch).unwrap();
+    let outcome = idx.index_notes(&vault, &batch).unwrap();
     let batched_ms = t.elapsed().as_millis();
-    assert!(failures.is_empty(), "batch reported failures: {failures:?}");
+    assert!(
+        outcome.failures.is_empty(),
+        "batch reported failures: {:?}",
+        outcome.failures
+    );
+    // Every file in this batch is byte-identical to what is already indexed, so
+    // the hash gate should take all of them: this times the cheap path (one read
+    // + one sha256 per file, no link pass), which is the one an idle vault pays.
     println!(
-        "index_notes({batch_n}):  {batched_ms:>6} ms  ({:.2} ms/note, 1 link pass)",
-        batched_ms as f64 / batch_n as f64
+        "index_notes({batch_n}):  {batched_ms:>6} ms  ({:.2} ms/note, {} unchanged)",
+        batched_ms as f64 / batch_n as f64,
+        outcome.unchanged.len()
     );
 
     // The same work the old way: one call, one transaction, one link pass each.
@@ -285,9 +293,17 @@ fn data_volume_bench() {
         dropped.push(vault.join(&rel));
     }
     let t = Instant::now();
-    let failures = idx.index_notes(&vault, &dropped).unwrap();
+    let outcome = idx.index_notes(&vault, &dropped).unwrap();
     let drop_ms = t.elapsed().as_millis();
-    assert!(failures.is_empty(), "drop reported failures: {failures:?}");
+    assert!(
+        outcome.failures.is_empty(),
+        "drop reported failures: {:?}",
+        outcome.failures
+    );
+    assert!(
+        outcome.unchanged.is_empty(),
+        "every dropped file is new, so none can be unchanged"
+    );
     println!(
         "drop {drop_n} + index:  {drop_ms:>6} ms  ({:.2} ms/note)",
         drop_ms as f64 / drop_n as f64

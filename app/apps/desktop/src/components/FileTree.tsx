@@ -20,7 +20,12 @@ import {
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { TreeNode } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
-import { ITEM_COLORS, itemColorValue } from "../lib/appearance";
+import {
+  automaticItemColorAssignments,
+  ITEM_COLORS,
+  itemColorValue,
+} from "../lib/appearance";
+import { readAutomaticItemColors } from "../lib/prefs";
 import {
   applyOrder,
   childrenAt,
@@ -34,7 +39,6 @@ import {
 import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
-import { previewKind } from "../lib/preview";
 import { ancestorPaths } from "../lib/accessTree";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { displayName } from "../lib/notePath";
@@ -46,10 +50,12 @@ import {
   type TreeSyncIndex,
 } from "../lib/syncRollup";
 import { embedDroppedFile } from "../lib/attachments";
+import { isNoteExt, isOpenable } from "../lib/formats";
+import { iconKeyForPath, type TreeIconKey } from "../lib/treeIcons";
 import { toast } from "../lib/toast";
 import { deletePaths } from "../lib/vault/mutatePaths";
 import { AsyncButton } from "./AsyncButton";
-import { Spinner } from "./Spinner";
+import { OpeningGlyph } from "./OpeningGlyph";
 import {
   activeNoteEditable,
   insertIntoActiveNote,
@@ -105,11 +111,6 @@ function parentDir(path: string): string {
 
 function basename(path: string): string {
   return path.split("/").pop() ?? path;
-}
-
-/** Files the in-app editor can render: markdown notes and HTML pages. */
-function isOpenablePath(path: string): boolean {
-  return /\.(md|html?)$/i.test(path);
 }
 
 /** Resolve a client (CSS px) point to the vault-relative dir under it, using the
@@ -228,13 +229,21 @@ export function FileTree() {
   const session = useStore((s) => s.session);
   const members = useStore((s) => s.members);
   const itemColors = useStore((s) => s.itemColors);
+  const automaticItemColors = useStore((s) => s.automaticItemColors);
+  const vault = useStore((s) => s.vault);
   const rootFrozen = useStore((s) => s.rootFrozen);
   const itemOrder = useStore((s) => s.itemOrder);
   const treeSort = useStore((s) => s.treeSort);
   const docSyncState = useStore((s) => s.docSyncState);
+  // The same fact for files that sync as blobs (`.pdf`, `.docx`, `.mp4`): the
+  // attachment mirror's own map, keyed by path rather than docId.
+  const fileSyncState = useStore((s) => s.fileSyncState);
   const docIdByPath = useStore((s) => s.docIdByPath);
   const titles = useStore((s) => s.titles);
   const [containerRef, dim] = useDimensions();
+  useEffect(() => {
+    useStore.setState({ automaticItemColors: readAutomaticItemColors(session?.user.id) });
+  }, [session?.user.id]);
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   // Resolved once the menu has been measured; null means "not placed yet", which
@@ -311,6 +320,7 @@ export function FileTree() {
   // that rate was pure allocation churn on the main thread — the same thread
   // the sidebar's clicks are queued on.
   const localNotePaths = useMemo(() => titles.map((t) => t.path), [titles]);
+  const removingAccess = useStore((s) => s.syncProgress?.phase === "removing");
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {
     const waveKey = syncEnabled ? vaultPath : null;
     if (lastWaveKeyRef.current !== waveKey) {
@@ -318,6 +328,12 @@ export function FileTree() {
       lastWaveKeyRef.current = waveKey;
     }
     if (!syncEnabled) return null;
+    // Removing a revoked copy is not an upload completing. The header owns
+    // cleanup progress; discard the old wave so removal cannot advance it.
+    if (removingAccess) {
+      wavesRef.current.reset();
+      return null;
+    }
     // No server contact yet this session ⇒ no marks (see `sidebarMarksVisible`).
     // The wave tracker is left alone so the counters resume where they were
     // once the channel comes back, rather than restarting at "0/N".
@@ -326,10 +342,20 @@ export function FileTree() {
       docIdByPath,
       docSyncState,
       localNotePaths,
+      fileSyncState,
     });
     wavesRef.current.apply(index);
     return index;
-  }, [syncEnabled, syncStatus, docIdByPath, docSyncState, localNotePaths, vaultPath]);
+  }, [
+    syncEnabled,
+    removingAccess,
+    syncStatus,
+    docIdByPath,
+    docSyncState,
+    fileSyncState,
+    localNotePaths,
+    vaultPath,
+  ]);
 
   // ---- Row-order stability while something is syncing ------------------
   //
@@ -434,6 +460,44 @@ export function FileTree() {
     );
   }, [tree, itemOrder, treeSort, orderPinned]);
 
+  // Assign each sibling group as a unit. Identity hashing keeps colours stable,
+  // while the group pass prevents adjacent rows from landing on the same small
+  // patch of colour. Nested folders restart the adjacency window because their
+  // children are a separate visual list.
+  const automaticColors = useMemo(() => {
+    if (!automaticItemColors) return {};
+    const owner = session?.user.id ?? "local";
+    const vaultIdentity = session?.activeOrganizationId ?? vault?.path ?? "vault";
+    const assigned: Record<string, string> = {};
+    const walk = (siblings: TreeNode[]) => {
+      Object.assign(
+        assigned,
+        automaticItemColorAssignments(
+          owner,
+          vaultIdentity,
+          siblings.map((node) => ({
+            key: node.path,
+            identity: docIdByPath[node.path] ?? node.path,
+            explicitColorId: itemColors[node.path],
+          })),
+        ),
+      );
+      for (const node of siblings) {
+        if (node.children) walk(node.children);
+      }
+    };
+    walk(data);
+    return assigned;
+  }, [
+    automaticItemColors,
+    data,
+    docIdByPath,
+    itemColors,
+    session?.activeOrganizationId,
+    session?.user.id,
+    vault?.path,
+  ]);
+
   // Flatten the (arranged) tree so bulk actions can resolve any path — even a
   // collapsed one — to its node, and so "Select all" knows every path.
   const nodeByPath = useMemo(() => {
@@ -504,6 +568,17 @@ export function FileTree() {
       epoch: store.vault?.epoch,
       deleteDisk: (p, epoch) => ipc.deletePath(p, epoch),
       unregister: (p) => syncManager.registry.deletePath(p),
+      // Taken only above the bulk threshold (see `mutatePaths`): 30 selected
+      // notes become ONE request instead of 30, each of which used to re-resolve
+      // the permission algebra and broadcast a `registry-changed` that every
+      // teammate's app re-pulled the whole vault on. Folders stay on their own
+      // single cascading delete, inside `registry.deletePaths`.
+      unregisterMany: async (ps) =>
+        (await syncManager.registry.deletePaths(ps)).map((o) => ({
+          path: o.path,
+          ok: o.status === "deleted",
+          reason: o.reason,
+        })),
       onProgress: (done, total) => setBulkProgress({ done, total }),
     });
     // A refused delete (offline, or no permission on the server) leaves the item
@@ -627,7 +702,7 @@ export function FileTree() {
   }
 
   /**
-   * After an import, register the new markdown notes on the server under their
+   * After an import, register the new notes on the server under their
    * LOCAL index doc_ids (via the same id the editor's bridge uses), so sync
    * doesn't fork a second identity for them. Without this an imported note lives
    * only on disk until the seed race, which the background feed could lose.
@@ -639,7 +714,10 @@ export function FileTree() {
     const under = (p: string) =>
       roots.some((r) => p === r || p.startsWith(`${r}/`));
     for (const t of useStore.getState().titles) {
-      if (!t.path.toLowerCase().endsWith(".md") || !under(t.path)) continue;
+      // The whole CRDT note family (`formats.ts NOTE_EXTS`), not just `.md`:
+      // `flattenTree` registers all seven, so an imported `.txt` left out here
+      // would wait for the seed race to give it a server identity.
+      if (!isNoteExt(t.path) || !under(t.path)) continue;
       try {
         await syncManager.registry.registerNote(t.path, t.title, t.id);
       } catch (e) {
@@ -735,14 +813,26 @@ export function FileTree() {
           // live) → attach the files INTO that note's content rather than
           // importing them as sidebar entries.
           if (!pt && activeNoteEditable()) {
-            try {
-              const embeds: string[] = [];
-              for (const path of p.paths)
+            // Per file, not per drop: one refusal (an oversize video — see
+            // `attachments.ts saveAttachment`, which raises its own toast) must
+            // not throw away the four files dropped alongside it.
+            const embeds: string[] = [];
+            let failed = 0;
+            for (const path of p.paths) {
+              try {
                 embeds.push(await embedDroppedFile(path));
+              } catch (e) {
+                failed++;
+                console.error("attach (drop) failed", path, e);
+              }
+            }
+            if (embeds.length > 0) {
               insertIntoActiveNote(embeds.join("\n"));
               await refreshAll();
-            } catch (e) {
-              console.error("attach (drop) failed", e);
+            }
+            // The size gate speaks for itself; only say something when the
+            // failure had no voice of its own.
+            if (failed > 0 && embeds.length === 0) {
               flashStatus("Couldn't attach file", "error");
             }
             return;
@@ -760,11 +850,11 @@ export function FileTree() {
             await refreshAll();
             await registerImported(summary);
             announceImport(summary);
-            // A single image/PDF dropped on the empty main area → preview it.
+            // A single openable file dropped on the empty main area → open it.
             if (
               !pt &&
               summary.imported.length === 1 &&
-              previewKind(summary.imported[0]) != null
+              isOpenable(summary.imported[0])
             ) {
               await useStore.getState().openNoteByPath(summary.imported[0]);
             }
@@ -894,12 +984,11 @@ export function FileTree() {
       return;
     }
     if (!node.data.isDir) {
-      // Notes/pages render in the editor; images/PDFs open in the file preview.
-      // Any other binary is listed but not opened (nothing can render it).
-      if (
-        isOpenablePath(node.data.path) ||
-        previewKind(node.data.path) != null
-      ) {
+      // One gate, the registry's: notes/pages render in the editor, everything
+      // else opens the viewer its format names — at worst the file card. A type
+      // the sidebar surfaces but nothing opened used to be a DEAD CLICK, which
+      // is exactly how `.txt`, `.markdown`, `.mdx` and `.canvas` behaved.
+      if (isOpenable(node.data.path)) {
         void useStore.getState().openNoteByPath(node.data.path);
       }
     }
@@ -1492,6 +1581,7 @@ export function FileTree() {
       syncIndex,
       presenceByDoc,
       itemColors,
+      automaticColors,
       onMenu: onRowMenu,
       selectMode,
       selected,
@@ -1506,6 +1596,7 @@ export function FileTree() {
       syncIndex,
       presenceByDoc,
       itemColors,
+      automaticColors,
       onRowMenu,
       selectMode,
       selected,
@@ -1916,10 +2007,13 @@ export function FileTree() {
               </li>
             ))}
           {menu.node && (
+            <li className="menu-heading menu-sep-item">Color</li>
+          )}
+          {menu.node && (
             <li className="menu-swatches" onClick={(e) => e.stopPropagation()}>
               <span
-                className="swatch clear"
-                title="Default color"
+                className={`swatch clear${itemColors[menu.node.data.path] == null ? " on" : ""}`}
+                title="Clear color"
                 onClick={() => {
                   useStore.getState().setItemColor(menu.node!.data.path, null);
                   setMenu(null);
@@ -1993,6 +2087,8 @@ interface RowShared {
   presenceByDoc: Map<string, VaultPeer[]>;
   /** Item color ids (vault-local preference) — tint the type glyph. */
   itemColors: Record<string, string | undefined>;
+  /** Personal automatic fallbacks, already assigned in sibling order. */
+  automaticColors: Record<string, string | undefined>;
   onMenu: (
     x: number,
     y: number,
@@ -2025,7 +2121,9 @@ function TreeRow(props: NodeRendererProps<TreeNode>) {
       lock={shared.lockByPath.get(path) ?? null}
       syncIndex={shared.syncIndex}
       presenceByDoc={shared.presenceByDoc}
-      color={shared.itemColors[path]}
+      color={
+        shared.itemColors[path] ?? shared.automaticColors[path]
+      }
       onMenu={shared.onMenu}
       selectMode={shared.selectMode}
       checked={shared.selected.has(path)}
@@ -2105,6 +2203,81 @@ const ICON_HTML = (
     <path d="m10 12-2 2.5 2 2.5M14 12l2 2.5-2 2.5" />
   </TreeSvg>
 );
+/* One glyph per format family (see `lib/treeIcons.ts` for the mapping). A
+   vault that holds videos, spreadsheets and archives alongside notes is
+   unreadable when every row is the same page icon — the glyph is how you find
+   the PDF in a folder of thirty files without reading thirty names. */
+const ICON_IMAGE = (
+  <TreeSvg>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <circle cx="9" cy="9" r="1.6" />
+    <path d="m21 15-4.5-4.5L7 20" />
+  </TreeSvg>
+);
+const ICON_PDF = (
+  <TreeSvg>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M15 2v5h5" />
+    <path d="M8.5 17v-4h1.3a1.3 1.3 0 0 1 0 2.6H8.5M13.5 17v-4h1.2a1.4 1.4 0 0 1 1.4 1.4v1.2a1.4 1.4 0 0 1-1.4 1.4Z" />
+  </TreeSvg>
+);
+const ICON_SHEET = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M3 9h18M3 14.5h18M9 4v16M15 4v16" />
+  </TreeSvg>
+);
+const ICON_DOC = (
+  <TreeSvg>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M15 2v5h5" />
+    <path d="M8 12h8M8 15.5h8M8 19h5" />
+  </TreeSvg>
+);
+const ICON_SLIDES = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M12 16v4M8.5 20h7" />
+  </TreeSvg>
+);
+const ICON_MEDIA = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="m10.5 9 4.5 3-4.5 3Z" />
+  </TreeSvg>
+);
+const ICON_ARCHIVE = (
+  <TreeSvg>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M3 9h18" />
+    <path d="M11 4v5M13 9v3M11 12v2.5h2V12" />
+  </TreeSvg>
+);
+const ICON_CODE = (
+  <TreeSvg>
+    <path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" />
+  </TreeSvg>
+);
+
+/** `TreeIconKey` → the glyph. The mapping FROM a path lives in `treeIcons.ts`. */
+const TREE_ICONS: Record<TreeIconKey, React.ReactNode> = {
+  file: ICON_FILE,
+  html: ICON_HTML,
+  image: ICON_IMAGE,
+  pdf: ICON_PDF,
+  sheet: ICON_SHEET,
+  doc: ICON_DOC,
+  slides: ICON_SLIDES,
+  media: ICON_MEDIA,
+  archive: ICON_ARCHIVE,
+  code: ICON_CODE,
+};
+
+/** The glyph for a file row. Exported for the Access panel's file rows, so the
+ *  two lists cannot draw the same `.pdf` differently. */
+export function iconForPath(path: string): React.ReactNode {
+  return TREE_ICONS[iconKeyForPath(path)];
+}
 
 /** Is `path` (file or folder) in the store's tree yet? `nodeAt` only walks
  *  folders, so look the parent up and then check its listing for the entry. */
@@ -2113,10 +2286,6 @@ function treeHasPath(root: TreeNode | null, path: string): boolean {
   const slash = path.lastIndexOf("/");
   const dir = slash === -1 ? root : nodeAt(root, path.slice(0, slash));
   return dir?.children?.some((c) => c.path === path) ?? false;
-}
-
-function isHtmlPath(path: string): boolean {
-  return /\.html?$/i.test(path);
 }
 
 const ICON_LOCK = (
@@ -2181,7 +2350,10 @@ function peersForNode(
  * Sized and positioned like `.tree-lock` (its neighbour) and built from the same
  * `.sync-dot` element and semantic tone tokens the vault-level `.sync-badge`
  * uses, so "synced" looks the same everywhere in the app. One span, no layout
- * shift while settled, nothing at all when there is nothing to say.
+ * shift while settled. Notes and files (which sync as blobs, not as CRDTs) both
+ * get one; a row with nothing to say — sync off, or a file the mirror has never
+ * seen — still gets the empty slot, so every label ends at the same edge and its
+ * overflow fade lands before the dot column, not on top of it.
  */
 function TreeSyncMark({
   node,
@@ -2191,7 +2363,7 @@ function TreeSyncMark({
   index: TreeSyncIndex;
 }) {
   const mark = rowSyncMark(node.data, index);
-  if (!mark) return null;
+  if (!mark) return <span className="tree-sync" aria-hidden="true" />;
   return (
     <span
       className={`tree-sync ${mark.state}`}
@@ -2379,22 +2551,16 @@ function Node({
         style={colorValue ? { color: colorValue } : undefined}
         aria-hidden="true"
       >
-        {/* The glyph slot is the row's own status light: while a note is being
-            opened it becomes the spinner. Reusing the slot rather than adding one
-            keeps the label from shifting sideways as the state changes. */}
-        {isOpening ? (
-          <Spinner size="xs" tone="accent" />
-        ) : isDir ? (
-          node.isOpen && !isEmpty ? (
-            ICON_FOLDER_OPEN
-          ) : (
-            ICON_FOLDER
-          )
-        ) : isHtmlPath(node.data.path) ? (
-          ICON_HTML
-        ) : (
-          ICON_FILE
-        )}
+        {/* Opening must not replace this glyph: the unmount/remount was visible
+            as a blink, especially now that every glyph may carry a colour. Slow
+            opens get a delayed ring around the stable icon instead. */}
+        <OpeningGlyph opening={isOpening}>
+          {isDir
+            ? node.isOpen && !isEmpty
+              ? ICON_FOLDER_OPEN
+              : ICON_FOLDER
+            : iconForPath(node.data.path)}
+        </OpeningGlyph>
       </span>
       {node.isEditing ? (
         <input

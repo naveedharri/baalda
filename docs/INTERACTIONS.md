@@ -120,7 +120,7 @@ n/a = synchronous or sub-100ms by construction.
 
 | Action | Work | Latency | Feedback |
 | --- | --- | --- | --- |
-| Open a note | meta read + server register | 0.05–2s | ✅ row pre-selects, glyph → spinner, editor skeleton |
+| Open a note | meta read + server register | 0.05–2s | ✅ row pre-selects; slow opens add a delayed ring around the stable glyph; editor skeleton |
 | New note / New folder | atomic write + reindex | fast | ✅ row appears, is revealed and opens in inline rename |
 | Rename (inline) | disk rename + registry | 0.1–1s | n/a — inline edit already commits visibly |
 | Delete (single / bulk) | deepest-first disk + server | 0.2s–10s | ✅ bulk progress counter |

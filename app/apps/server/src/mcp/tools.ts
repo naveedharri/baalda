@@ -6,23 +6,42 @@ import {
   deleteFolder,
   deleteNote,
   editNote,
+  getAccessDefaultTool,
+  listAttachments,
   listFolders,
+  listResourceAccessTool,
   listNotes,
   listVaults,
   moveFolderTool,
   moveNoteTool,
+  manageAccessTool,
+  readAttachmentText,
   readNote,
   searchNotes,
+  setAccessDefaultTool,
   updateNote,
   type McpContext,
   type NoteEdit,
 } from "./service.js";
+import type {
+  AccessAudience,
+  AccessMode,
+  AccessResource,
+} from "../permissions/access-management.js";
 
 /**
  * The MCP tool catalog. Each entry carries a JSON-Schema `inputSchema` (sent to
  * clients via tools/list) and a handler that validates its args and calls the
  * gated service. Keep names snake_case and descriptions action-first — that's
  * what the calling model reads to pick a tool.
+ *
+ * NO `attach_file`, deliberately. Uploading through here would mean base64 over
+ * JSON-RPC — the whole file in the request, in the response envelope's memory,
+ * and through a transport with no resume — while the HTTP side spent PR 2b
+ * building the opposite (intent → presigned PUT → complete, bytes never
+ * touching this process). There is also no idempotency story for it: `create_note`
+ * can adopt a path, but a retried upload of 40 MB has no key to recognise
+ * itself by. Files come in through the desktop; the AI reads them.
  */
 
 type Args = Record<string, unknown>;
@@ -89,6 +108,45 @@ function optStrOrNull(args: Args, key: string): string | null | undefined {
 
 const S = (description: string) => ({ type: "string", description });
 
+function accessMode(args: Args): AccessMode {
+  const mode = reqStr(args, "mode");
+  if (mode !== "private" && mode !== "readonly" && mode !== "open") {
+    throw new McpToolError("mode must be private, readonly, or open");
+  }
+  return mode;
+}
+
+function accessResources(raw: unknown): AccessResource[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new McpToolError("resources must be a non-empty array");
+  }
+  return raw.map((value, index) => {
+    if (!value || typeof value !== "object") {
+      throw new McpToolError(`resources[${index}] must be an object`);
+    }
+    const row = value as Args;
+    const resourceType = reqStr(row, "resourceType");
+    if (resourceType !== "folder" && resourceType !== "file" && resourceType !== "vault") {
+      throw new McpToolError(`resources[${index}].resourceType is invalid`);
+    }
+    return { resourceType, resourceId: reqStr(row, "resourceId") };
+  });
+}
+
+function accessAudience(raw: unknown): AccessAudience {
+  if (!raw || typeof raw !== "object") throw new McpToolError("audience is required");
+  const row = raw as Args;
+  const type = reqStr(row, "type");
+  if (type === "org") return { type };
+  if (type !== "users" || !Array.isArray(row.userIds)) {
+    throw new McpToolError("audience must be org or users with userIds");
+  }
+  if (row.userIds.some((id) => typeof id !== "string" || !id)) {
+    throw new McpToolError("audience.userIds must contain non-empty strings");
+  }
+  return { type, userIds: row.userIds as string[] };
+}
+
 /** Validate `edit_note`'s `edits` argument into typed edits (McpToolError on a bad shape). */
 function parseEdits(raw: unknown): NoteEdit[] {
   if (!Array.isArray(raw) || raw.length === 0) {
@@ -128,6 +186,93 @@ export const TOOLS: McpTool[] = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
     handler: (ctx) => listVaults(ctx),
+  },
+  {
+    name: "get_access_default",
+    description:
+      "Get what future members initially see when they join this vault. Owner/admin only.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+    handler: (ctx) => getAccessDefaultTool(ctx),
+  },
+  {
+    name: "set_access_default",
+    description:
+      "Set future members' initial access to content that already exists when they join. Existing members are unchanged. Owner/admin only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["private", "readonly", "open"] },
+      },
+      required: ["mode"],
+      additionalProperties: false,
+    },
+    handler: (ctx, args) => setAccessDefaultTool(ctx, accessMode(args)),
+  },
+  {
+    name: "list_resource_access",
+    description:
+      "List every vault member's effective access to one folder or file. Owner/admin only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        resourceType: { type: "string", enum: ["folder", "file"] },
+        resourceId: S("Folder id or file/note docId"),
+      },
+      required: ["resourceType", "resourceId"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    handler: (ctx, args) => {
+      const resourceType = reqStr(args, "resourceType");
+      if (resourceType !== "folder" && resourceType !== "file") {
+        throw new McpToolError("resourceType must be folder or file");
+      }
+      return listResourceAccessTool(ctx, resourceType, reqStr(args, "resourceId"));
+    },
+  },
+  {
+    name: "manage_access",
+    description:
+      "Replace access on one or more selected folders/files, or the whole vault. Everyone clears all custom member overrides in selected subtrees; selected users changes only those users. Owner/admin only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        resources: {
+          type: "array",
+          minItems: 1,
+          maxItems: 1000,
+          items: {
+            type: "object",
+            properties: {
+              resourceType: { type: "string", enum: ["folder", "file", "vault"] },
+              resourceId: S("Resource id; for vault use the organization id"),
+            },
+            required: ["resourceType", "resourceId"],
+            additionalProperties: false,
+          },
+        },
+        audience: {
+          type: "object",
+          properties: {
+            type: { type: "string", enum: ["org", "users"] },
+            userIds: { type: "array", items: { type: "string" } },
+          },
+          required: ["type"],
+          additionalProperties: false,
+        },
+        mode: { type: "string", enum: ["private", "readonly", "open"] },
+      },
+      required: ["resources", "audience", "mode"],
+      additionalProperties: false,
+    },
+    handler: (ctx, args) =>
+      manageAccessTool(
+        ctx,
+        accessResources(args.resources),
+        accessAudience(args.audience),
+        accessMode(args),
+      ),
   },
   {
     name: "list_folders",
@@ -173,20 +318,78 @@ export const TOOLS: McpTool[] = [
   {
     name: "search_notes",
     description:
-      "Semantic + keyword search over the notes you can access in a vault. Returns ranked docIds.",
+      "Semantic + keyword search over everything you can access in a vault: notes, and the text extracted from files (docx, xlsx, pdf, csv, code…). Each hit carries kind: 'note' or 'file' — read a note with read_note and a file's text with read_attachment_text.",
     inputSchema: {
       type: "object",
       properties: {
         vaultId: S("Vault id from list_vaults"),
         query: S("What to search for"),
         k: { type: "number", description: "Max results (default 10, max 50)" },
+        includeFiles: {
+          type: "boolean",
+          description: "Also search the text of files, not just notes. Default true.",
+        },
       },
       required: ["vaultId", "query"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true },
     handler: (ctx, a) =>
-      searchNotes(ctx, reqStr(a, "vaultId"), reqStr(a, "query"), optNum(a, "k")),
+      searchNotes(
+        ctx,
+        reqStr(a, "vaultId"),
+        reqStr(a, "query"),
+        optNum(a, "k"),
+        optBool(a, "includeFiles"),
+      ),
+  },
+  {
+    name: "list_attachments",
+    description:
+      "List the files (not notes) stored in a vault that you can access — spreadsheets, documents, PDFs, images, attachments. hasText tells you whether read_attachment_text has anything for one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vaultId: S("Vault id from list_vaults"),
+        folder: S("Optional vault-relative folder to list within, e.g. 'Team/Reports'"),
+        limit: { type: "number", description: "Max files to return (default 50, max 200)" },
+      },
+      required: ["vaultId"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    handler: (ctx, a) =>
+      listAttachments(ctx, reqStr(a, "vaultId"), {
+        folder: optStr(a, "folder"),
+        limit: optNum(a, "limit"),
+      }),
+  },
+  {
+    name: "read_attachment_text",
+    description:
+      "Read the extracted plain text of a file — NOT the file itself. Identify it by relPath or blobId (both from list_attachments or a search_notes hit with kind 'file'). Returns an empty text if the file has not been indexed yet.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vaultId: S("Vault id from list_vaults"),
+        relPath: S("Vault-relative path of the file, e.g. 'Team/q3.xlsx'"),
+        blobId: S("Blob id from list_attachments or a file search hit (instead of relPath)"),
+        maxChars: {
+          type: "number",
+          description: "Max characters to return (default 20000, max 200000). `truncated` says whether there was more.",
+        },
+      },
+      required: ["vaultId"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    handler: (ctx, a) =>
+      readAttachmentText(
+        ctx,
+        reqStr(a, "vaultId"),
+        { relPath: optStr(a, "relPath"), blobId: optStr(a, "blobId") },
+        optNum(a, "maxChars"),
+      ),
   },
   {
     name: "create_note",

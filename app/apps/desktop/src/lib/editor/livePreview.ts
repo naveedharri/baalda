@@ -43,8 +43,9 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import type { SyntaxNodeRef } from "@lezer/common";
-import { openExternal } from "../ipc";
-import { previewKind } from "../preview";
+import { formatFor } from "../formats";
+import * as ipc from "../ipc";
+import { requestOpenFile } from "../openFileRequest";
 import { fenceRenderKind } from "./fenceKind";
 import { frontmatterField } from "./frontmatter";
 import { MermaidWidget } from "./mermaid/MermaidWidget";
@@ -58,13 +59,10 @@ import {
   setFocused,
   tokenOwner,
 } from "./reveal";
+import { type ResolveAsset, renderEmbeddedHtml } from "./sanitizeHtml";
 import { TableWidget } from "./table/TableWidget";
 import { TASK_RE } from "./tasks";
-import { isDangerousUrl } from "./urlSafety";
 import { wikilinkRe } from "./wikilinks";
-
-/** Turns an image `src` into a webview-loadable URL (see CreateEditorOptions). */
-type ResolveAsset = (src: string) => string;
 
 const identityAsset: ResolveAsset = (src) => src;
 
@@ -79,67 +77,6 @@ class BulletWidget extends WidgetType {
     s.textContent = "•";
     return s;
   }
-}
-
-/** Tags that could execute code or leak styles — dropped entirely. */
-const BLOCKED_HTML_TAGS = new Set([
-  "SCRIPT",
-  "STYLE",
-  "LINK",
-  "IFRAME",
-  "OBJECT",
-  "EMBED",
-  "META",
-  "BASE",
-]);
-
-/**
- * Render an embedded HTML fragment into `target` as real DOM so it flows inline
- * with the surrounding Markdown — a heading, an image, a paragraph, all in the
- * one note. It's a *render, never a run*: `<script>`/`<style>`/frames are
- * dropped, every `on*` handler and `javascript:` URL is stripped, and anchors
- * are rewired to open externally (a raw `<a href>` would otherwise navigate the
- * whole app away). `DOMParser` splits head/body even for a full-document paste,
- * so `<!DOCTYPE html>…<body>…` renders just its body content.
- */
-function renderEmbeddedHtml(target: HTMLElement, html: string, resolveAsset: ResolveAsset) {
-  const parsed = new DOMParser().parseFromString(html, "text/html");
-  parsed.querySelectorAll("*").forEach((el) => {
-    // Uppercase so a foreign-content (SVG/MathML) <script> — whose tagName is
-    // lowercase — is caught by the same blocklist as an HTML one.
-    if (BLOCKED_HTML_TAGS.has(el.tagName.toUpperCase())) {
-      el.remove();
-      return;
-    }
-    for (const attr of Array.from(el.attributes)) {
-      const name = attr.name.toLowerCase();
-      const isUrlAttr = name === "href" || name === "src" || name === "xlink:href";
-      if (name.startsWith("on")) {
-        // Inline event handlers.
-        el.removeAttribute(attr.name);
-      } else if (name === "style") {
-        // Inline styles enable full-screen fixed overlays / UI spoofing.
-        el.removeAttribute(attr.name);
-      } else if (isUrlAttr && isDangerousUrl(attr.value)) {
-        el.removeAttribute(attr.name);
-      }
-    }
-    // Point <img> at a loadable URL so vault-local images actually display.
-    if (el.tagName === "IMG") {
-      const src = el.getAttribute("src");
-      if (src) el.setAttribute("src", resolveAsset(src));
-    }
-    // Rewire links so a click opens externally instead of hijacking the window.
-    if (el.tagName === "A") {
-      const href = el.getAttribute("href") ?? "";
-      el.removeAttribute("href");
-      if (/^(https?:|mailto:)/i.test(href)) {
-        el.setAttribute("data-href", href);
-        el.classList.add("cm-md-link");
-      }
-    }
-  });
-  target.innerHTML = parsed.body.innerHTML;
 }
 
 /** A block of raw HTML rendered inline (see {@link renderEmbeddedHtml}). */
@@ -210,6 +147,273 @@ class PdfEmbedWidget extends WidgetType {
   }
 }
 
+/**
+ * `src` as a vault-relative path, for the widgets that have to READ the file
+ * (size, CSV rows) or open it, rather than just point a URL at it.
+ *
+ * Root-relative (`/attachments/x.csv`) is what everything the app writes looks
+ * like (`attachments.ts saveAttachment`), and a bare relative path is treated as
+ * root-relative too. A path that climbs out of the note's directory (`../`) is
+ * refused rather than guessed at: the widget does not know which note it is in
+ * (live preview is per-document, not per-path), and a wrong guess would read
+ * the wrong file. Those still render — they just show no size and no preview.
+ */
+function vaultRelFromSrc(src: string): string | null {
+  if (!src || /^(https?:|data:|blob:|asset:|tauri:|mailto:)/i.test(src)) return null;
+  const rel = src.replace(/^\/+/, "").replace(/^\.\//, "");
+  if (!rel || rel.split("/").includes("..")) return null;
+  return rel;
+}
+
+/** "4.2 MB" — the file card voice, in one line. */
+function humanSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const mb = n / (1024 * 1024);
+  if (mb >= 1) return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB`;
+  return `${Math.round(n / 1024)} KB`;
+}
+
+/**
+ * A `![alt](src.mp4|src.mp3)` embed rendered as a player, inline like the PDF
+ * embed (`display:block` on the element itself, so it reads as a block without
+ * being a block decoration). `preload="metadata"` so a note full of clips costs
+ * a few headers, not a few hundred megabytes — the asset protocol serves range
+ * requests, so seeking still works.
+ */
+class MediaEmbedWidget extends WidgetType {
+  constructor(
+    readonly kind: "video" | "audio",
+    readonly src: string,
+    readonly name: string,
+  ) {
+    super();
+  }
+  eq(other: MediaEmbedWidget) {
+    return other.src === this.src && other.kind === this.kind;
+  }
+  toDOM() {
+    const el = document.createElement(this.kind);
+    el.className = this.kind === "video" ? "cm-md-video" : "cm-md-audio";
+    el.controls = true;
+    if (this.kind === "video") (el as HTMLVideoElement).preload = "metadata";
+    el.src = this.src;
+    if (this.name) el.title = this.name;
+    return el;
+  }
+  ignoreEvent() {
+    return true; // the player owns its clicks, drags and keyboard
+  }
+}
+
+/** Rows × columns a CSV shows INSIDE a note. The pane viewer is where a big
+ *  table belongs; here it is a glance, and a 40k-row table in the middle of a
+ *  document would cost more layout than the note it is in. */
+const CSV_EMBED_ROWS = 200;
+const CSV_EMBED_COLS = 50;
+
+/**
+ * Split RFC-4180 CSV/TSV far enough for a preview: quoted fields, `""` escapes
+ * and embedded newlines/delimiters, CRLF or LF.
+ *
+ * Deliberately local and minimal. The pane viewer has the real parser
+ * (`lib/csv.ts`); duplicating ~30 lines here keeps the editor's startup chunk
+ * free of a module it only needs when a note happens to embed a table, and the
+ * two answer the same shapes. PR review can point this at `lib/csv.ts` once
+ * both have shipped.
+ */
+function splitDelimited(text: string, delimiter: string, maxRows: number): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else quoted = false;
+      } else field += ch;
+      continue;
+    }
+    if (ch === '"' && field === "") {
+      quoted = true;
+    } else if (ch === delimiter) {
+      row.push(field);
+      field = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      row.push(field);
+      field = "";
+      rows.push(row);
+      row = [];
+      if (rows.length >= maxRows) return rows;
+    } else {
+      field += ch;
+    }
+  }
+  if (field !== "" || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * A `![alt](src.csv)` embed rendered as a small table.
+ *
+ * The bytes are read asynchronously (`ipc.readBinaryFile`, epoch-pinned like
+ * every vault read) and dropped into a placeholder, the same shape the mermaid
+ * widget uses: `toDOM` must return synchronously, and CodeMirror measures what
+ * it returns.
+ */
+class CsvEmbedWidget extends WidgetType {
+  constructor(readonly rel: string, readonly delimiter: string) {
+    super();
+  }
+  eq(other: CsvEmbedWidget) {
+    return other.rel === this.rel;
+  }
+  toDOM() {
+    const wrap = document.createElement("div");
+    wrap.className = "cm-md-csv";
+    const note = document.createElement("div");
+    note.className = "cm-md-csv-note";
+    note.textContent = this.rel.split("/").pop() ?? this.rel;
+    wrap.appendChild(note);
+    void this.fill(wrap, note);
+    return wrap;
+  }
+  private async fill(wrap: HTMLElement, note: HTMLElement): Promise<void> {
+    let rows: string[][];
+    try {
+      const bytes = await ipc.readBinaryFile(this.rel);
+      rows = splitDelimited(
+        new TextDecoder().decode(bytes),
+        this.delimiter,
+        CSV_EMBED_ROWS + 1,
+      );
+    } catch {
+      note.textContent = `Can't read ${this.rel}`;
+      return;
+    }
+    if (rows.length === 0) {
+      note.textContent = "Empty file";
+      return;
+    }
+    const truncatedRows = rows.length > CSV_EMBED_ROWS;
+    const body = rows.slice(0, CSV_EMBED_ROWS);
+    const table = document.createElement("table");
+    let truncatedCols = false;
+    body.forEach((cells, r) => {
+      if (cells.length > CSV_EMBED_COLS) truncatedCols = true;
+      const tr = document.createElement("tr");
+      for (const cell of cells.slice(0, CSV_EMBED_COLS)) {
+        // textContent only — a CSV is untrusted content from a teammate's disk.
+        const td = document.createElement(r === 0 ? "th" : "td");
+        td.textContent = cell;
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    });
+    wrap.replaceChildren(table);
+    if (truncatedRows || truncatedCols) {
+      const footer = document.createElement("div");
+      footer.className = "cm-md-csv-note";
+      footer.textContent = `Showing the first ${body.length} rows — open the file for the rest`;
+      wrap.appendChild(footer);
+    }
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+/**
+ * The honest fallback for an `![…](file.docx)`: a chip with the file's name and
+ * size that opens the pane viewer on click. Before this, an `![]()` pointing at
+ * anything live preview could not draw rendered as a broken `<img>` — the note
+ * said a file was there and showed a torn-page icon.
+ */
+class FileChipWidget extends WidgetType {
+  constructor(readonly rel: string | null, readonly name: string) {
+    super();
+  }
+  eq(other: FileChipWidget) {
+    return other.rel === this.rel && other.name === this.name;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-md-file-chip";
+    el.setAttribute("role", "button");
+    el.tabIndex = 0;
+    const label = document.createElement("span");
+    label.className = "cm-md-file-chip-name";
+    label.textContent = this.name;
+    el.appendChild(label);
+    const size = document.createElement("span");
+    size.className = "cm-md-file-chip-size";
+    el.appendChild(size);
+    if (this.rel) {
+      // The card never reads the file to print its size (`file_stat`).
+      void ipc
+        .fileStat(this.rel)
+        .then((stat) => {
+          size.textContent = humanSize(stat.size);
+        })
+        .catch(() => {
+          size.textContent = "missing";
+          el.classList.add("is-missing");
+        });
+      const open = () => requestOpenFile(this.rel!);
+      el.addEventListener("click", open);
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open();
+        }
+      });
+    }
+    return el;
+  }
+  ignoreEvent() {
+    return false; // the chip's own listeners handle the click
+  }
+}
+
+/**
+ * The widget an `![alt](src)` gets, by what the registry says `src` IS.
+ *
+ * One switch, so the answer cannot drift from the pane viewer's
+ * (`viewerFor` drives both). `![[…]]` embeds stay unhandled — out of scope.
+ */
+function embedWidget(src: string, resolved: string, alt: string): WidgetType {
+  const format = formatFor(src);
+  const rel = vaultRelFromSrc(src);
+  const name = (src.split(/[\\/]/).pop() || alt || "file").split("?")[0];
+  switch (format?.viewer) {
+    case "image":
+      return new ImageWidget(resolved, alt);
+    case "pdf":
+      return new PdfEmbedWidget(resolved, alt);
+    case "video":
+      return new MediaEmbedWidget("video", resolved, name);
+    case "audio":
+      return new MediaEmbedWidget("audio", resolved, name);
+    case "csv":
+      // No vault path (a remote URL, or a `../` climb) → the chip, which at
+      // least names the file, rather than a table we cannot fill.
+      return rel
+        ? new CsvEmbedWidget(rel, name.toLowerCase().endsWith(".tsv") ? "\t" : ",")
+        : new FileChipWidget(null, name);
+    default:
+      // Unknown types included: a format the table has never heard of is a file
+      // with a name, and that is exactly what the chip shows.
+      return new FileChipWidget(rel, name);
+  }
+}
+
 const bullet = Decoration.replace({ widget: new BulletWidget() });
 const hidden = Decoration.replace({});
 
@@ -260,16 +464,58 @@ interface BlockDecorations {
   blocks: Array<[number, number]>;
 }
 
+/**
+ * A legacy first H1 that says exactly the same thing as the filename title.
+ *
+ * The inline title is deliberately metadata (renaming it renames the file), so
+ * this never rewrites the heading out of the Markdown. It only identifies the
+ * narrow presentation duplicate: the first non-blank body line, an ATX H1,
+ * with plain text equal to the filename stem. A different/cased/formatted H1
+ * remains authored body content and stays visible.
+ */
+function redundantInlineTitleRange(
+  state: EditorState,
+  inlineTitle?: string,
+): [number, number] | null {
+  // Callers without an inline title omit this value, leaving the authored H1
+  // untouched.
+  if (!inlineTitle) return null;
+  const fm = state.field(frontmatterField, false) ?? null;
+  let line = state.doc.lineAt(fm ? Math.min(state.doc.length, fm.to + 1) : 0);
+  while (line.text.trim() === "" && line.number < state.doc.lines) {
+    line = state.doc.line(line.number + 1);
+  }
+  // CommonMark permits up to three leading spaces. Requiring whitespace after
+  // `#` avoids treating a hashtag as a heading. A closing hash sequence only
+  // closes when whitespace precedes it.
+  const match = /^ {0,3}#[\t ]+(.+?)[\t ]*$/.exec(line.text);
+  if (!match) return null;
+  const heading = match[1].replace(/[\t ]+#+[\t ]*$/, "");
+  if (heading !== inlineTitle) return null;
+  return [line.from, line.to];
+}
+
 function buildBlockDecorations(
   state: EditorState,
   resolveAsset: ResolveAsset,
   onNavigate?: (target: string) => void,
+  inlineTitle?: string,
 ): BlockDecorations {
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const blocks: Array<[number, number]> = [];
   const isActive = activeLineChecker(state);
   const inFrontmatter = frontmatterChecker(state);
+  const duplicateTitle = redundantInlineTitleRange(state, inlineTitle);
+
+  if (duplicateTitle) {
+    // Keep it in `blocks` even while revealed so a caret/focus move can switch
+    // the presentation without reparsing on unrelated arrow-key movement.
+    blocks.push(duplicateTitle);
+    if (state.readOnly || !isActive(...duplicateTitle)) {
+      decos.push(Decoration.replace({ block: true }).range(...duplicateTitle));
+    }
+  }
 
   // Force-parse the whole doc if the background parse hasn't caught up yet —
   // notes are small, and a partially-parsed tree would silently drop widgets.
@@ -355,13 +601,21 @@ function blocksTouched(blocks: Array<[number, number]>, state: EditorState): boo
   return blocks.some(([from, to]) => onLine(from, to));
 }
 
-function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): DecorationSet {
+function buildDecorations(
+  view: EditorView,
+  resolveAsset: ResolveAsset,
+  inlineTitle?: string,
+): DecorationSet {
   const { state } = view;
   const doc = state.doc;
   const decos: ReturnType<Decoration["range"]>[] = [];
   const isActive = activeLineChecker(state);
   const touches = selectionTouches(state);
   const inFrontmatter = frontmatterChecker(state);
+  const duplicateTitle = redundantInlineTitleRange(state, inlineTitle);
+  const titleIsHidden =
+    duplicateTitle != null &&
+    (state.readOnly || !isActive(duplicateTitle[0], duplicateTitle[1]));
 
   /**
    * TOKEN scope: is the inline construct this marker belongs to being edited?
@@ -412,6 +666,15 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
       from,
       to,
       enter: (node) => {
+        // The StateField owns the whole redundant heading while it is hidden;
+        // do not also emit marker decorations inside its block replacement.
+        if (
+          titleIsHidden &&
+          node.from >= duplicateTitle![0] &&
+          node.to <= duplicateTitle![1]
+        ) {
+          return false;
+        }
         // Frontmatter owns its own look: without this, lezer's reading of
         // `key: v\n---` as a SetextHeading2 would hide the region's HeaderMark
         // and render the YAML as a giant bold heading (see frontmatter.ts).
@@ -505,20 +768,19 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
             break;
           case "Image": {
             if (isActiveToken(node)) break;
-            // Render `![alt](src)` in place; skip its child marks. Images become
-            // an inline <img>; PDFs become a framed preview block. (Both embed
-            // the same way — the file type picks the widget.)
+            // Render `![alt](src)` in place; skip its child marks. WHICH
+            // rendering is the format registry's call (see `embedWidget`): an
+            // image inline, a PDF/video/audio/CSV as a preview block, anything
+            // else as a named chip that opens the pane.
             const urlNode = node.node.getChild("URL");
             const src = urlNode ? doc.sliceString(urlNode.from, urlNode.to) : "";
             if (src) {
               const raw = doc.sliceString(node.from, node.to);
               const alt = /^!\[([^\]]*)\]/.exec(raw)?.[1] ?? "";
-              const widget =
-                previewKind(src) === "pdf"
-                  ? new PdfEmbedWidget(resolveAsset(src), alt)
-                  : new ImageWidget(resolveAsset(src), alt);
               decos.push(
-                Decoration.replace({ widget }).range(node.from, node.to)
+                Decoration.replace({
+                  widget: embedWidget(src, resolveAsset(src), alt),
+                }).range(node.from, node.to)
               );
               return false;
             }
@@ -559,16 +821,22 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
  *    cursor moves.
  */
 export function livePreview(
-  opts: { resolveAsset?: ResolveAsset; onNavigate?: (target: string) => void } = {}
+  opts: {
+    resolveAsset?: ResolveAsset;
+    onNavigate?: (target: string) => void;
+    inlineTitle?: string;
+  } = {}
 ) {
   const resolveAsset = opts.resolveAsset ?? identityAsset;
   const onNavigate = opts.onNavigate;
+  const inlineTitle = opts.inlineTitle;
 
   const blockWidgets = StateField.define<BlockDecorations>({
-    create: (state) => buildBlockDecorations(state, resolveAsset, onNavigate),
+    create: (state) =>
+      buildBlockDecorations(state, resolveAsset, onNavigate, inlineTitle),
     update(value, tr) {
       if (tr.docChanged || tr.startState.readOnly !== tr.state.readOnly) {
-        return buildBlockDecorations(tr.state, resolveAsset, onNavigate);
+        return buildBlockDecorations(tr.state, resolveAsset, onNavigate, inlineTitle);
       }
       const selectionMoved = !tr.startState.selection.eq(tr.state.selection);
       const focusMovedHere = tr.effects.some((e) => e.is(setFocused));
@@ -582,7 +850,7 @@ export function livePreview(
       ) {
         return value;
       }
-      return buildBlockDecorations(tr.state, resolveAsset, onNavigate);
+      return buildBlockDecorations(tr.state, resolveAsset, onNavigate, inlineTitle);
     },
     provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
   });
@@ -591,13 +859,13 @@ export function livePreview(
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
-        this.decorations = buildDecorations(view, resolveAsset);
+        this.decorations = buildDecorations(view, resolveAsset, inlineTitle);
       }
       update(u: ViewUpdate) {
         // `focusMoved`: blurring hides every marker, so the set goes stale the
         // moment focus moves even though neither doc nor selection did.
         if (u.docChanged || u.viewportChanged || u.selectionSet || focusMoved(u)) {
-          this.decorations = buildDecorations(u.view, resolveAsset);
+          this.decorations = buildDecorations(u.view, resolveAsset, inlineTitle);
         }
       }
     },
@@ -609,7 +877,7 @@ export function livePreview(
           const href = el?.getAttribute("data-href");
           if (!href) return false;
           event.preventDefault();
-          void openExternal(href);
+          void ipc.openExternal(href);
           return true;
         },
       },

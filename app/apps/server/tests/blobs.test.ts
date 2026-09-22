@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
@@ -7,6 +7,8 @@ import { resetDb } from "./helpers/db.js";
 import { authHeaders, signUp } from "./helpers/auth.js";
 import {
   seedMember,
+  seedFile,
+  seedBlob,
   seedNote,
   seedOrg,
   seedVault,
@@ -30,7 +32,7 @@ function uploadBlob(
   token: string | null,
   vaultId: string,
   bytes: Uint8Array,
-  opts: { mime?: string; relPath?: string; fileName?: string } = {},
+  opts: { mime?: string; relPath?: string; fileName?: string; sha256?: string } = {},
 ) {
   const headers: Record<string, string> = {
     "content-type": opts.mime ?? "application/octet-stream",
@@ -38,6 +40,7 @@ function uploadBlob(
   if (token) headers.authorization = `Bearer ${token}`;
   if (opts.relPath) headers["x-rel-path"] = opts.relPath;
   if (opts.fileName) headers["x-file-name"] = opts.fileName;
+  if (opts.sha256) headers["x-sha256"] = opts.sha256;
   return app.fetch(
     new Request(`http://local/api/vaults/${vaultId}/blobs`, {
       method: "POST",
@@ -63,15 +66,71 @@ function downloadBlob(token: string, id: string) {
   );
 }
 
+// One pool for the whole file; closed once, after every describe in it.
+afterAll(async () => {
+  await pool.end();
+});
+
 describe("attachment blob store (spec 02 §2/§5A)", () => {
   beforeEach(async () => {
     await resetDb();
   });
-  afterAll(async () => {
-    await pool.end();
+
+  afterEach(() => { delete process.env.POLAR_ACCESS_TOKEN; });
+
+  it("keeps standalone bytes Pro-only while exposing readable metadata", async () => {
+    process.env.POLAR_ACCESS_TOKEN = "test-token";
+    const owner = await signUp("owner@standalone.com");
+    const org = await seedOrg("Files", "standalone-plan");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const docId = await seedFile(vault, null, "report.pdf");
+    const blobId = await seedBlob(vault, org, "report.pdf", { docId });
+    expect((await listBlobs(owner.token, vault)).status).toBe(200);
+    const denied = await downloadBlob(owner.token, blobId);
+    expect(denied.status).toBe(402);
+    expect(await denied.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+    const upload = await app.fetch(new Request(`http://local/api/vaults/${vault}/blobs/intent`, {
+      method: "POST", headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ docId, relPath: "attachments/disguised.pdf", sha256: "a".repeat(64), size: 3, mime: "application/pdf" }),
+    }));
+    expect(upload.status).toBe(402);
   });
 
-  it("upload → list → download round-trips byte-identical", async () => {
+  it("keeps pre-update embedded images available to existing Free members without rewriting them", async () => {
+    const owner = await signUp("owner@legacy-images.com");
+    const member = await signUp("member@legacy-images.com");
+    const outsider = await signUp("outsider@legacy-images.com");
+    const org = await seedOrg("Legacy", "legacy-images");
+    await seedMember(org, owner.userId, "owner");
+    await seedMember(org, member.userId, "member");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    // Existing data from the legacy raw-upload route, before the new policy.
+    const original = await uploadBlob(owner.token, vault, bytes, {
+      relPath: "attachments/old-image.png", mime: "image/png",
+    });
+    expect(original.status).toBe(201);
+    const blob = await original.json() as { id: string; sha256: string; relPath: string };
+    const docId = await seedNote(vault, null, "Existing note.md");
+    const markdown = "My original note ![photo](/attachments/old-image.png)";
+    await indexNote(docId, vault, markdown);
+    process.env.POLAR_ACCESS_TOKEN = "test-token";
+    const listed = await listBlobs(member.token, vault);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({ blobs: [expect.objectContaining({ id: blob.id, relPath: blob.relPath, sha256: blob.sha256 })] });
+    const downloaded = await downloadBlob(member.token, blob.id);
+    expect(downloaded.status).toBe(200);
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
+    expect((await downloadBlob(outsider.token, blob.id)).status).toBe(403);
+    const unchanged = await pool.query("SELECT content FROM note_index WHERE doc_id = $1", [docId]);
+    expect(unchanged.rows[0].content).toBe(markdown);
+  });
+
+  it.each([false, true])("embedded upload → list → download round-trips (billing %s)", async (billing) => {
+    if (billing) process.env.POLAR_ACCESS_TOKEN = "test-token";
     const owner = await signUp("owner@blob.com");
     const org = await seedOrg("Acme", "acme-blob1");
     await seedMember(org, owner.userId, "owner");
@@ -213,5 +272,202 @@ describe("attachment blob store (spec 02 §2/§5A)", () => {
       blobs: Array<{ relPath: string | null }>;
     };
     expect(memberList.blobs.map((b) => b.relPath)).toEqual(["attachments/mine.png"]);
+  });
+});
+
+// ── write validation (PR 2a) ──────────────────────────────────────────────
+//
+// Until now the upload route stored whatever it was handed: a `rel_path` of
+// `../../etc/passwd` went straight into the column, and a `Content-Type` of
+// `text/html` was kept verbatim and handed back on download. These are the
+// checks that close that, and they all run BEFORE the body is read.
+describe("attachment upload validation", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  async function vaultWithOwner(tag: string) {
+    const owner = await signUp(`owner@${tag}.com`);
+    const org = await seedOrg("Acme", tag);
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    return { owner, org, vault };
+  }
+
+  it("refuses any rel_path that is not a real path under attachments/", async () => {
+    const { owner, vault } = await vaultWithOwner("relpath");
+    const bytes = new Uint8Array([1, 2, 3]);
+
+    for (const relPath of [
+      "../x.png", // traversal
+      "/etc/passwd", // absolute → first segment is not attachments/
+      "notes/x.png", // outside attachments/
+      "attachments/../x.png", // traversal after a legal first segment
+      "attachments", // the directory itself, no file
+      "C:\\x.png", // Windows drive (a scheme) + backslashes
+      "http://evil/x.png", // scheme
+      "attachments//x.png", // empty segment
+    ]) {
+      const res = await uploadBlob(owner.token, vault, bytes, { relPath });
+      expect([relPath, res.status]).toEqual([relPath, 400]);
+      expect(((await res.json()) as { code: string }).code).toBe("invalid_rel_path");
+    }
+
+    // A nested path under attachments/ is fine — this is not a flat namespace.
+    const ok = await uploadBlob(owner.token, vault, bytes, {
+      relPath: "attachments/sub/dir/x.png",
+      mime: "image/png",
+    });
+    expect(ok.status).toBe(201);
+    expect(((await ok.json()) as { relPath: string }).relPath).toBe("attachments/sub/dir/x.png");
+  });
+
+  it("refuses an upload with no rel_path at all", async () => {
+    const { owner, vault } = await vaultWithOwner("norelpath");
+    const res = await uploadBlob(owner.token, vault, new Uint8Array([1]));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("invalid_rel_path");
+  });
+
+  it("refuses a MIME type that is not on the allow-list (415)", async () => {
+    const { owner, vault } = await vaultWithOwner("mime");
+    const res = await uploadBlob(owner.token, vault, new Uint8Array([1, 2]), {
+      relPath: "attachments/x.exe",
+      mime: "application/x-msdownload",
+    });
+    expect(res.status).toBe(415);
+    expect(((await res.json()) as { code: string }).code).toBe("unsupported_media_type");
+
+    // Legacy clients upload unknown types as octet-stream; that must keep working.
+    const legacy = await uploadBlob(owner.token, vault, new Uint8Array([3, 4]), {
+      relPath: "attachments/x.bin",
+    });
+    expect(legacy.status).toBe(201);
+  });
+
+  it("BLOB_MIME_ENFORCE=warn stores the unlisted type instead of refusing it", async () => {
+    const { owner, vault } = await vaultWithOwner("mimewarn");
+    vi.resetModules();
+    const prev = process.env.BLOB_MIME_ENFORCE;
+    process.env.BLOB_MIME_ENFORCE = "warn";
+    try {
+      const { createApp: freshApp } = await import("../src/http/app.js");
+      const { testAppDeps: freshDeps } = await import("./helpers/app.js");
+      const { pool: freshPool } = await import("../src/db/pool.js");
+      const warnApp = freshApp(freshDeps());
+      const res = await warnApp.fetch(
+        new Request(`http://local/api/vaults/${vault}/blobs`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${owner.token}`,
+            "content-type": "application/x-msdownload",
+            "x-rel-path": "attachments/x.exe",
+          },
+          body: new Uint8Array([1, 2]),
+        }),
+      );
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as { mime: string }).mime).toBe("application/x-msdownload");
+      await freshPool.end();
+    } finally {
+      if (prev === undefined) delete process.env.BLOB_MIME_ENFORCE;
+      else process.env.BLOB_MIME_ENFORCE = prev;
+      vi.resetModules();
+    }
+  });
+
+  it("refuses bytes that contradict the declared type, and never sniffs text", async () => {
+    const { owner, vault } = await vaultWithOwner("magic");
+    // A real PNG signature + IHDR header, so `file-type` identifies it.
+    const png = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+      0x15, 0xc4, 0x89,
+    ]);
+
+    const lying = await uploadBlob(owner.token, vault, png, {
+      relPath: "attachments/not-really.pdf",
+      mime: "application/pdf",
+    });
+    expect(lying.status).toBe(400);
+    expect(((await lying.json()) as { code: string }).code).toBe("content_type_mismatch");
+
+    // The same bytes, honestly declared.
+    expect(
+      (await uploadBlob(owner.token, vault, png, { relPath: "attachments/real.png", mime: "image/png" }))
+        .status,
+    ).toBe(201);
+
+    // Text has no signature to check, so arbitrary bytes are accepted as CSV —
+    // sniffing text would reject legitimate files on a guess.
+    expect(
+      (
+        await uploadBlob(owner.token, vault, new Uint8Array([0xff, 0xfe, 0x41]), {
+          relPath: "attachments/t.csv",
+          mime: "text/csv",
+        })
+      ).status,
+    ).toBe(201);
+  });
+
+  it("verifies x-sha256, and answers a known hash without reading a byte", async () => {
+    const { owner, vault } = await vaultWithOwner("sha");
+    const bytes = new Uint8Array([7, 7, 7, 7]);
+    const sha = createHash("sha256").update(bytes).digest("hex");
+
+    const first = await uploadBlob(owner.token, vault, bytes, {
+      relPath: "attachments/a.bin",
+      sha256: sha,
+    });
+    expect(first.status).toBe(201);
+    const created = (await first.json()) as { id: string };
+
+    // A claimed hash the vault already holds short-circuits: the body here is
+    // deliberately NOT that content, and it is never looked at.
+    const dedupe = await uploadBlob(owner.token, vault, new Uint8Array([0]), {
+      relPath: "attachments/b.bin",
+      sha256: sha,
+    });
+    expect(dedupe.status).toBe(200);
+    const hit = (await dedupe.json()) as { id: string; deduped: boolean };
+    expect(hit).toMatchObject({ id: created.id, deduped: true });
+
+    // A claimed hash for content we do NOT have is checked against the bytes.
+    const wrong = await uploadBlob(owner.token, vault, new Uint8Array([1, 2, 3]), {
+      relPath: "attachments/c.bin",
+      sha256: "b".repeat(64),
+    });
+    expect(wrong.status).toBe(400);
+    expect(((await wrong.json()) as { code: string }).code).toBe("sha_mismatch");
+  });
+
+  it("HEAD /api/blobs/:id answers the download headers with no body", async () => {
+    const { owner, vault } = await vaultWithOwner("head");
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const created = (await (
+      await uploadBlob(owner.token, vault, bytes, { relPath: "attachments/h.bin" })
+    ).json()) as { id: string };
+
+    const res = await app.fetch(
+      new Request(`http://local/api/blobs/${created.id}`, {
+        method: "HEAD",
+        headers: { authorization: `Bearer ${owner.token}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await res.text()).toBe("");
+
+    // Same gates as GET.
+    const stranger = await signUp("stranger@head.com");
+    const denied = await app.fetch(
+      new Request(`http://local/api/blobs/${created.id}`, {
+        method: "HEAD",
+        headers: { authorization: `Bearer ${stranger.token}` },
+      }),
+    );
+    expect(denied.status).toBe(403);
   });
 });

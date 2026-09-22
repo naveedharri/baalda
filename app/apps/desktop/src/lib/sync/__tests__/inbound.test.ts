@@ -30,6 +30,11 @@ const empty = {
   // The docs the server NAMED on `ready.revoked`, when it named any. Undefined
   // by default, which is the live `reauth` path: authority with no list.
   authoritativeRevoked: undefined as ReadonlySet<string> | undefined,
+  // Tree binaries: doc_id → path, the registry's `files` map inverted. Empty by
+  // default — a vault of pure notes plans exactly as it always did.
+  localFiles: new Map<string, string>(),
+  // Legacy authorship metadata. Empty by default; compatibility cases opt in.
+  authoredByMe: new Set<string>() as ReadonlySet<string>,
 };
 
 function plan(over: Partial<typeof empty>) {
@@ -318,16 +323,14 @@ describe("planInbound — renames", () => {
 });
 
 describe("planInbound — deletes", () => {
-  it("trashes a note the server tombstoned", () => {
+  it("removes a note the server tombstoned", () => {
     const p = plan({
       baseline: new Map([["d1", "bye.md"]]),
       local: new Map([["d1", "bye.md"]]),
       tombstones: new Set(["d1"]),
     });
-    expect(p.trash).toEqual([
-      { docId: "d1", path: "bye.md", reason: "deleted", recoverable: true },
-    ]);
-    // Suppressed as well, so even if the trash step is skipped the note is not
+    expect(p.trash).toEqual([{ docId: "d1", path: "bye.md", reason: "deleted" }]);
+    // Suppressed as well, so even if the removal is skipped the note is not
     // re-registered as an unsyncable ghost.
     expect([...p.suppress]).toEqual(["bye.md"]);
   });
@@ -335,19 +338,16 @@ describe("planInbound — deletes", () => {
   it("removes the file when a note left the listing (access revoked)", () => {
     // `GET /api/notes` is ACL-filtered, so losing access looks like a delete —
     // hence the tombstone set, which says which of the two it was. Both end in
-    // the vault's trash, but they are tagged differently because they carry
+    // a final local removal, but they are tagged differently because they carry
     // different risk and get different safety caps.
     const p = plan({
       baseline: new Map([["d1", "shared.md"]]),
       local: new Map([["d1", "shared.md"]]),
       tombstones: new Set(),
     });
-    // Not recoverable: a trash copy would hand the ex-reader back the readable
-    // `.md` the revocation exists to take away. The one exception is a note this
-    // user wrote themselves (`authoredByMe`).
-    expect(p.trash).toEqual([
-      { docId: "d1", path: "shared.md", reason: "revoked", recoverable: false },
-    ]);
+    // A trash copy would hand the ex-reader back the readable `.md` the
+    // revocation exists to take away.
+    expect(p.trash).toEqual([{ docId: "d1", path: "shared.md", reason: "revoked" }]);
     // Suppressed too, so the outbound half can't re-register it on the way out.
     expect([...p.suppress]).toEqual(["shared.md"]);
   });
@@ -491,7 +491,7 @@ describe("planInbound — circuit breakers", () => {
 
     // 99 revocations against a cap of 50 → the whole revoked group is refused…
     expect(p.trash).toEqual([
-      { docId: "d0", path: "n0.md", reason: "deleted", recoverable: true },
+      { docId: "d0", path: "n0.md", reason: "deleted" },
     ]);
     expect(p.rejected).toHaveLength(98);
     expect(p.rejected[0].reason).toContain("access removals");
@@ -583,6 +583,18 @@ describe("planInbound — circuit breakers", () => {
       const q = plan({ localFolderIds, localFolders });
       expect(q.removeFolders).toEqual([]);
       expect(q.rejected).toHaveLength(100);
+    });
+
+    it("cleans up large folder sets with named revocations, while retaining the unannounced cap", () => {
+      const localFolders = new Set(Array.from({ length: 1743 }, (_, i) => `F${i}`));
+      const localFolderIds = new Map([...localFolders].map((path, i) => [path, `f${i}`]));
+      const authoritativeRevoked = new Set(["d1"]);
+      const p = plan({ localFolders, localFolderIds, authoritativeRevoked, authoritative: true });
+      expect(p.removeFolders).toHaveLength(1743);
+      expect(p.rejected).toEqual([]);
+      const q = plan({ localFolders, localFolderIds, authoritativeRevoked });
+      expect(q.removeFolders).toEqual([]);
+      expect(q.rejected).toHaveLength(1743);
     });
 
     it("removes only the docs the server NAMED, when it named any", () => {
@@ -782,5 +794,97 @@ describe("planInbound — a case-variant spelling is the same file", () => {
       baseline: new Map([["doc-1", "Projects/community/a.md"]]),
     });
     expect(p.renames).toEqual([]);
+  });
+});
+
+describe("planInbound — tree binaries", () => {
+  const authoritative = { authoritative: true };
+  const files = () => new Map([["file-1", "Team/report.pdf"]]);
+
+  it("plans a revoked binary the server NAMED", () => {
+    const p = plan({
+      ...authoritative,
+      localFiles: files(),
+      authoritativeRevoked: new Set(["file-1"]),
+    });
+    expect(p.trash).toEqual([
+      { docId: "file-1", path: "Team/report.pdf", reason: "revoked", binary: true },
+    ]);
+  });
+
+  it("plans nothing for a binary the server did not name", () => {
+    // A binary has no listing to be absent from — `fileByPath` is this device's
+    // own map, and the blob listing legitimately omits a `files` row whose bytes
+    // never uploaded. Absence proves nothing, so only a name acts.
+    expect(plan({ ...authoritative, localFiles: files() }).trash).toEqual([]);
+    expect(
+      plan({ ...authoritative, localFiles: files(), authoritativeRevoked: new Set(["other"]) }).trash,
+    ).toEqual([]);
+  });
+
+  it("plans nothing without revocation authority", () => {
+    expect(
+      plan({ localFiles: files(), authoritativeRevoked: new Set(["file-1"]) }).trash,
+    ).toEqual([]);
+  });
+
+  it("does not retain the uploader's revoked binary", () => {
+    const p = plan({
+      ...authoritative,
+      localFiles: files(),
+      authoritativeRevoked: new Set(["file-1"]),
+      authoredByMe: new Set(["file-1"]),
+    });
+    expect(p.trash[0]).toEqual({
+      docId: "file-1",
+      path: "Team/report.pdf",
+      reason: "revoked",
+      binary: true,
+    });
+  });
+
+  it("refuses an unsafe binary path, and a note that reached the files map", () => {
+    const p = plan({
+      ...authoritative,
+      localFiles: new Map([
+        ["file-1", ".context/config.json"],
+        ["file-2", "../escape.pdf"],
+        // A `.md` here would be removed by the half of the pipeline that skips
+        // releasing its doc — so the binary guard refuses a note extension too.
+        ["file-3", "Team/notes.md"],
+      ]),
+      authoritativeRevoked: new Set(["file-1", "file-2", "file-3"]),
+    });
+    expect(p.trash).toEqual([]);
+    expect(p.rejected.map((r) => r.docId).sort()).toEqual(["file-1", "file-2", "file-3"]);
+  });
+
+  it("never enters the capped group, and always owes the access check", () => {
+    // `mapped` stays the NOTE baseline: counting binaries into it would only
+    // loosen the note cap, which is the one thing that budget exists to hold. A
+    // binary rides no cap at all — it is named or it is not planned — so the
+    // round trip is what stands in for one. A lone note revocation still costs
+    // no round trip at all.
+    const localFiles = new Map<string, string>();
+    const named = new Set<string>();
+    for (let i = 0; i < 50; i++) {
+      localFiles.set(`file-${i}`, `Team/f${i}.pdf`);
+      named.add(`file-${i}`);
+    }
+    const p = plan({ ...authoritative, localFiles, authoritativeRevoked: named });
+    expect(p.trash).toHaveLength(50);
+    expect(p.rejected).toEqual([]);
+    expect(p.needsAccessCheck.sort()).toEqual([...named].sort());
+  });
+
+  it("leaves a small note revocation free of the round trip beside it", () => {
+    const p = plan({
+      ...authoritative,
+      baseline: new Map([["d1", "a.md"]]),
+      local: new Map([["d1", "a.md"]]),
+      authoritativeRevoked: new Set(["d1", "file-1"]),
+      localFiles: files(),
+    });
+    expect(p.needsAccessCheck).toEqual(["file-1"]);
   });
 });

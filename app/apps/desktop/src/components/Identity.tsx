@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CheckMark } from "./Spinner";
-import type { SyncProgress } from "../lib/sync/vaultScope";
+import { isBulkPhase, type SyncProgress } from "../lib/sync/vaultScope";
 
 /** "just now" / "1m ago" / "2h ago" — coarse on purpose; it ticks every 30s. */
 export function relativeAgo(ts: number, now: number): string {
@@ -13,17 +13,9 @@ export function relativeAgo(ts: number, now: number): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-/** Phases in which the vault is actively moving data, as opposed to idle or
- *  terminal. Only these turn the pill into a counted progress report. */
-const ACTIVE_SYNC_PHASES: ReadonlySet<string> = new Set([
-  "registering",
-  "uploading",
-  "downloading",
-]);
-
 /** True while the open vault has a bulk sync run in flight. */
 export function isSyncRunActive(progress: SyncProgress | null | undefined): boolean {
-  return progress != null && ACTIVE_SYNC_PHASES.has(progress.phase);
+  return isBulkPhase(progress?.phase);
 }
 
 /** The run's completion as a whole percentage, or null when it has no total.
@@ -64,6 +56,9 @@ export function syncBadgeLabel(args: {
   noteOpen?: boolean;
 }): string {
   const { status, pending, lastSyncedAt, now, enabled, progress, noteOpen } = args;
+  if (progress?.phase === "removing") {
+    return `Updating access · ${Math.max(0, progress.total - progress.done).toLocaleString()} remaining`;
+  }
   // A grant fact about the open note outranks everything else: there is no point
   // reporting upload progress on a doc we are not allowed to write.
   if (noteOpen !== false) {
@@ -87,7 +82,7 @@ export function syncBadgeLabel(args: {
     // on an already-synced vault "Uploading files" read as "my synced vault is
     // being re-sent". Done is clamped so a racing denominator can never render
     // an impossible "585/164".
-    return `Syncing ${Math.min(progress.done, progress.total)}/${progress.total}`;
+    return `Syncing ${Math.min(progress.done, progress.total)}/${progress.total} updates`;
   }
   // A run that finished with failures must not read "Synced". `failed` is the
   // number of notes that are still only on this device.
@@ -123,6 +118,7 @@ export function syncBadgeTone(args: {
   noteOpen?: boolean;
 }): string {
   const { status, progress, noteOpen } = args;
+  if (progress?.phase === "removing") return "connecting";
   if (noteOpen !== false && (status === "no-access" || status === "read-only")) {
     return status;
   }
@@ -242,7 +238,7 @@ export function SyncBadge({
   // Hover answers "how far along?" in the same shape as the folder tooltips.
   const runTitle =
     running && progress && percent != null
-      ? `${progress.done} of ${progress.total} notes · ${percent}%`
+      ? `${progress.done} of ${progress.total} ${progress.phase === "removing" ? "items checked" : "updates"} · ${percent}%`
       : undefined;
   // A run that ended with failures is actionable when the caller gave us the
   // action: the pill becomes a button and one click either explains the failure

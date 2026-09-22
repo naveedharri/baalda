@@ -5,7 +5,8 @@
    just as true for a vault that has never had a server. */
 import { useState } from "react";
 import type { HistoryFootprint, SizedFile, VaultCheckId, VaultStats } from "../lib/health/types";
-import { activityCellTitle, activityGrid, formatBytes, relativeTime } from "../lib/health/format";
+import { activityCellTitle, formatBytes, relativeTime } from "../lib/health/format";
+import { buildHeatmap, heatmapRangeLabel } from "../lib/health/heatmapRange";
 import { MAX_NOTE_BYTES } from "../lib/sync/contentUpload";
 import { AsyncButton } from "./AsyncButton";
 import { Glyph, PathText, type GlyphName, type HealthHandlers } from "./HealthShared";
@@ -20,6 +21,8 @@ interface Metric {
   icon: GlyphName;
   label: string;
   value: string;
+  /** The lead figure in this overview. */
+  primary?: boolean;
   /** Tooltip detail; kept off the strip so it stays one quiet row. */
   sub?: string;
   /** Short inline note when something is off ("1 broken"), amber. */
@@ -27,35 +30,40 @@ interface Metric {
   /** The check that lists the affected files; the flag becomes a link to it. */
   check?: VaultCheckId;
   action?: "reclaim";
+  detail?: string;
 }
 
-/**
- * The census as one compact strip under the verdict card: ten numbers, each a
- * value over a tiny label, with the detail on hover. It used to be three groups
- * of tall cards further down the page, which pushed everything a person came
- * for (what failed, and why) below the fold behind numbers that rarely change.
- */
+/** The three numbers people use to understand the size of a vault. Detailed
+ * index/history/link figures live in Advanced diagnostics below. */
 export function HealthStats({
   stats,
+  noteCount,
+  folderCount,
   loading,
   statsError,
   handlers,
   onFlag,
+  syncing = false,
 }: {
   stats: VaultStats | null;
+  /** Supported standalone files in the surfaced tree; null while that tree loads. */
+  noteCount: number | null;
+  /** Surfaced folders in the supported-file tree; null while that tree loads. */
+  folderCount: number | null;
   loading: boolean;
   statsError: string | null;
   handlers: HealthHandlers;
   /** A flag like "1 broken" is a dead end unless it leads somewhere: this opens
    *  the check that lists the files. */
   onFlag?: (check: VaultCheckId) => void;
+  syncing?: boolean;
 }) {
   if (!stats) {
     return (
       <>
         {statsError && <div className="auth-error">{statsError}</div>}
         <ul className="health-metrics" aria-busy={loading || undefined}>
-          {Array.from({ length: 10 }, (_, i) => (
+          {Array.from({ length: 3 }, (_, i) => (
             <li key={i} className="health-metric is-skeleton" aria-hidden="true">
               <span className="health-metric-value" />
               <span className="health-metric-label" />
@@ -69,62 +77,34 @@ export function HealthStats({
     );
   }
 
-  const orphans = stats.history.orphanDocs;
   const totalBytes = stats.notes.bytes + stats.attachments.bytes + stats.otherFiles.bytes;
-
   const metrics: Metric[] = [
-    { icon: "note", label: "Notes", value: stats.notes.count.toLocaleString(), sub: formatBytes(stats.notes.bytes) },
-    { icon: "folder", label: "Folders", value: stats.folders.toLocaleString() },
     {
-      icon: "paperclip",
-      label: "Attachments",
-      value: stats.attachments.count.toLocaleString(),
-      sub: formatBytes(stats.attachments.bytes),
-    },
-    {
-      icon: "file",
-      label: "Other files",
-      value: stats.otherFiles.count.toLocaleString(),
-      sub: formatBytes(stats.otherFiles.bytes),
-    },
-    { icon: "tag", label: "Tags", value: stats.tags.toLocaleString() },
-    {
-      icon: "link",
-      label: "Links",
-      value: stats.links.toLocaleString(),
-      flag: stats.brokenLinks > 0 ? `${stats.brokenLinks.toLocaleString()} broken` : undefined,
-      check: "broken-links",
-    },
-    {
-      icon: "empty",
-      label: "Empty notes",
-      value: stats.notes.empty.toLocaleString(),
-      flag: stats.notes.empty > 0 ? "0 bytes" : undefined,
+      icon: "note",
+      label: "Notes",
+      value: noteCount?.toLocaleString() ?? "—",
+      primary: true,
+      sub:
+        noteCount == null
+          ? "Counting supported files…"
+          : "Text notes and other supported formats",
+      flag: !syncing && stats.notes.empty > 0 ? `${stats.notes.empty.toLocaleString()} empty` : undefined,
       check: "empty-notes",
     },
     {
+      icon: "folder",
+      label: "Folders",
+      value: folderCount?.toLocaleString() ?? "—",
+      sub: "Folders on this computer",
+    },
+    {
       icon: "disk",
-      label: "Total size",
+      label: "Stored locally",
       value: formatBytes(totalBytes),
-      sub: "Notes, attachments and other files",
-    },
-    {
-      icon: "database",
-      label: "Index",
-      value: formatBytes(stats.index.bytes),
-      sub: `${stats.notes.count.toLocaleString()} notes indexed`,
-    },
-    {
-      icon: "history",
-      label: "History",
-      value: formatBytes(stats.history.bytes),
-      sub: `${stats.history.docs.toLocaleString()} notes · ${stats.history.updates.toLocaleString()} updates`,
-      flag:
-        orphans > 0
-          ? `${formatBytes(stats.history.orphanBytes)} reclaimable`
-          : undefined,
-      check: "orphan-history",
-      action: orphans > 0 ? "reclaim" : undefined,
+      sub: "Vault files and embedded attachments; excludes the local index and edit history",
+      detail: stats.attachments.count > 0
+        ? `${stats.attachments.count.toLocaleString()} ${stats.attachments.count === 1 ? "attachment" : "attachments"} · ${formatBytes(stats.attachments.bytes)}`
+        : undefined,
     },
   ];
 
@@ -135,6 +115,7 @@ export function HealthStats({
         {metrics.map((m) => (
           <li
             className="health-metric"
+            data-primary={m.primary ? "" : undefined}
             data-flag={m.flag ? "" : undefined}
             key={m.label}
             title={m.sub ? `${m.label}: ${m.sub}` : undefined}
@@ -144,6 +125,7 @@ export function HealthStats({
               <Glyph name={m.icon} size={12} />
               {m.label}
             </span>
+            {m.detail && <span className="health-metric-detail">{m.detail}</span>}
             {m.flag &&
               (m.check && onFlag ? (
                 <button
@@ -172,12 +154,20 @@ export function HealthStats({
 // ── Activity ──────────────────────────────────────────────────────────────────
 
 /**
- * Twelve rolling seven-day windows as a contribution strip.
+ * A calendar of per-day edits: a column per week, a row per weekday.
  *
- * v1 drew these as bar heights, which failed the commonest case there is: a
- * vault whose notes were all touched this week rendered eleven invisible stubs
- * beside one full-height block. A filled cell with its count inside is legible
- * at every distribution, including a single week and a flat one.
+ * v1 drew twelve rolling seven-day windows as bar heights, which failed the
+ * commonest case there is: a vault whose notes were all touched this week
+ * rendered eleven invisible stubs beside one full-height block. v2 became a
+ * GitHub-style contribution grid, and inherited GitHub's trailing TWELVE
+ * MONTHS with it — 52 columns of grey on a vault that is a fortnight old.
+ *
+ * The window is `heatmapRange.ts` now: last month, this month, and three
+ * months of empty days ahead. The forward stretch is the point — it is the
+ * space the vault is about to fill, and it keeps today near the middle of the
+ * strip instead of jammed against the right edge. Those days carry
+ * `data-future` and never take a heat level, so "nothing yet" and "nothing
+ * happened" cannot read the same.
  */
 export function HealthActivity({
   activity,
@@ -188,11 +178,13 @@ export function HealthActivity({
   now?: number;
 }) {
   const days = activity.days ?? [];
-  const grid = activityGrid(days, now);
+  const grid = buildHeatmap(days, now);
   const caption =
     `${activity.modifiedLast7d.toLocaleString()} ${activity.modifiedLast7d === 1 ? "note" : "notes"} ` +
     `edited in the last 7 days · ${activity.modifiedLast30d.toLocaleString()} in 30 days`;
-  const active = days.filter((n) => n > 0).length;
+  // Counted over the DRAWN days, not the whole census: the label describes the
+  // strip a reader is looking at.
+  const active = grid.cells.filter((c) => !c.future && c.count > 0).length;
 
   return (
     <div className="health-activity">
@@ -203,7 +195,7 @@ export function HealthActivity({
         <div
           className="health-heatmap"
           role="img"
-          aria-label={`Notes edited per day over the last ${days.length} days: ${active} active ${active === 1 ? "day" : "days"}. ${caption}`}
+          aria-label={`Notes edited per day, ${heatmapRangeLabel(grid.range)}: ${active} active ${active === 1 ? "day" : "days"}. ${caption}`}
           style={{ ["--heat-cols" as string]: grid.columns }}
         >
           {grid.months.map((m) => (
@@ -229,7 +221,10 @@ export function HealthActivity({
             <span
               key={c.date}
               className="health-heatcell"
-              data-level={c.level}
+              // A future day gets no `data-level` at all: the shade scale means
+              // "this many edits", and 0 there would claim a quiet day.
+              data-level={c.future ? undefined : c.level}
+              data-future={c.future ? "" : undefined}
               data-today={c.today ? "" : undefined}
               style={{ gridColumn: c.col + 2, gridRow: c.row + 2 }}
               title={activityCellTitle(c)}
@@ -328,7 +323,7 @@ function FileTable({
           <th scope="col" className="health-num">
             Size
           </th>
-          <th scope="col" className="health-num">
+          <th scope="col" className="health-num health-modified">
             Modified
           </th>
           <th scope="col" aria-label="Actions" />
@@ -351,7 +346,9 @@ function FileTable({
                   </span>
                 )}
               </td>
-              <td className="health-num">{relativeTime(row.mtime, handlers.now)}</td>
+              <td className="health-num health-modified">
+                {relativeTime(row.mtime, handlers.now)}
+              </td>
               <td className="health-row-actions">
                 {openable && (
                   <button

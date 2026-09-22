@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as ipc from "../lib/ipc";
+import { copyText } from "../lib/clipboard";
+import { toast } from "../lib/toast";
 import { useStore } from "../store";
 import { Spinner } from "./Spinner";
 
@@ -23,7 +26,19 @@ export function SidebarHeader() {
   const switching = useStore((s) => s.switchingVault);
   const reduceMotion = useReducedMotion();
 
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  useEffect(() => {
+    if (!copiedPath) return;
+    const timer = setTimeout(() => setCopiedPath(null), 1800);
+    return () => clearTimeout(timer);
+  }, [copiedPath]);
+
   if (!vault) return null;
+  const copyPath = async () => {
+    if (switching) return;
+    if (await copyText(vault.path)) setCopiedPath(vault.path);
+    else toast("Couldn't copy the vault path", "error");
+  };
 
   const activeOrg =
     organizations.find((o) => o.id === session?.activeOrganizationId) ?? null;
@@ -66,8 +81,29 @@ export function SidebarHeader() {
         {/* The path is the one thing that is genuinely still the OLD vault's
             while switching — the folder hasn't swapped yet. Say so rather than
             showing a path that contradicts the name above it. */}
-        <span className="vault-path">
-          {switching ? "Switching…" : displayPath(vault.path)}
+        <span
+          className="vault-path-copy"
+          role="button"
+          tabIndex={switching ? -1 : 0}
+          aria-disabled={!!switching}
+          title={`Copy ${vault.path}`}
+          aria-label="Copy vault folder path"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={() => void copyPath()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              void copyPath();
+            }
+          }}
+        >
+          <span className="vault-path">{switching ? "Switching…" : displayPath(vault.path)}</span>
+          {copiedPath === vault.path && !switching && (
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+              className="vault-path-copied" role="img" aria-label="Path copied">
+              <path d="m3 8 3 3 7-7" />
+            </svg>
+          )}
         </span>
         {/* Reveal-in-file-manager sits on the path row — it acts on the path,
             so it belongs beside it — and stays visible: an affordance that only

@@ -1,3 +1,4 @@
+import { FREE_NOTE_LIMIT } from "../../billing/note-quota.js";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { config, billingEnabled } from "../../config.js";
@@ -15,6 +16,7 @@ import {
   normalizeIntervalForApi,
   seatCount,
   countOwnedUnsubscribedOrgs,
+  freeVaultLimitForUser,
   type Entitlement,
 } from "../../billing/entitlements.js";
 import {
@@ -157,6 +159,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
         // Legacy wire field names (desktop parses by exact name); do not rename.
         vaultsPerUser: config.freeMaxVaults,
         membersPerVault: config.freeMaxMembers,
+        notesPerVault: FREE_NOTE_LIMIT,
       },
     });
   });
@@ -532,8 +535,9 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
       orphaned,
       freeLimits: {
         // Frozen wire field names, as in /config.
-        vaultsPerUser: config.freeMaxVaults,
+        vaultsPerUser: await freeVaultLimitForUser(userId),
         membersPerVault: config.freeMaxMembers,
+        notesPerVault: FREE_NOTE_LIMIT,
         freeVaultsUsed: await countOwnedUnsubscribedOrgs(userId),
       },
     });

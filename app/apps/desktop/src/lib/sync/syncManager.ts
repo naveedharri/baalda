@@ -37,6 +37,30 @@ export type SyncStatus =
  */
 export const CLOSE_NOTE_TOO_LARGE = 4413;
 
+/**
+ * How long outgoing Yjs updates are batched into one websocket message.
+ *
+ * The provider sends one message per `doc.on("update")` by default, and a doc
+ * under an ingest (or a fast typist) produces dozens a second — each one its own
+ * frame, its own server `onChange`, its own persistence debounce reset. Within
+ * this window the updates are merged with `Y.mergeUpdates` into a single
+ * message; it is a fixed batch rather than a resetting debounce, so the latency
+ * a teammate sees is capped at this number however long the burst lasts.
+ *
+ * 300 ms: below the 700 ms badge settle (so "Saving…" still reads as one
+ * continuous state), well under the 800 ms local-change debounce, and small
+ * enough that live collaboration keeps feeling live.
+ *
+ * ── The safety property ─────────────────────────────────────────────────────
+ * Batching is a DELAY, not a drop: an update sitting in the window still counts
+ * toward the provider's unsynced total, so {@link DocSync.whenFlushed} cannot
+ * mistake "buffered" for "acked" and mark a doc pushed. The buffer is
+ * nevertheless discarded on `onClose`, so everything that takes a connection
+ * down deliberately — a teardown, a token-refresh reconnect, a destroy — flushes
+ * first ({@link DocSync.flushPending}).
+ */
+export const FLUSH_DELAY_MS = 300;
+
 /** Statuses from which no reconnect will ever help. Reaching one must stop the
  *  provider's own retry loop, not merely paint a different colour. */
 export function isTerminalSyncStatus(s: SyncStatus): boolean {
@@ -231,6 +255,8 @@ export class DocSync {
       document: opts.doc,
       // A token *function* → the provider re-mints on every (re)connect.
       token: async () => (await this.mintToken()) ?? "",
+      // One message per burst instead of one per keystroke (see FLUSH_DELAY_MS).
+      flushDelay: FLUSH_DELAY_MS,
       ...(opts.webSocketPolyfill
         ? { WebSocketPolyfill: opts.webSocketPolyfill as typeof WebSocket }
         : {}),
@@ -416,6 +442,22 @@ export class DocSync {
     return this.provider.isSynced;
   }
 
+  /**
+   * Send whatever the {@link FLUSH_DELAY_MS} window is holding, right now.
+   *
+   * Called before anything that ends this connection and before anything that
+   * WAITS on the server's ack: the provider drops its buffer in `onClose`, and a
+   * waiter that did not flush first would simply sit out the window. Safe when
+   * nothing is pending, and safe after destroy (the provider guards itself).
+   */
+  flushPending(): void {
+    try {
+      this.provider.flushPendingUpdates();
+    } catch {
+      /* provider already torn down — nothing buffered can be sent anyway */
+    }
+  }
+
   /** Resolve once the initial server sync completes (or reject on no-access). */
   whenSynced(timeoutMs = 10_000): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -449,6 +491,8 @@ export class DocSync {
   whenFlushed(timeoutMs = 30_000): Promise<boolean> {
     if (this.destroyed) return Promise.resolve(false);
     if (isTerminalSyncStatus(this._status)) return Promise.resolve(false);
+    // Nothing may sit in the batch window while somebody waits for its ack.
+    this.flushPending();
     if (this.unsyncedCount === 0 && this.provider.isSynced) return Promise.resolve(true);
     return new Promise<boolean>((resolve) => {
       let done = false;
@@ -575,6 +619,9 @@ export class DocSync {
     // strands the provider offline forever. Connect only once the close has
     // actually landed (with a timeout fallback in case it never fires).
     this.reconnectPending = true;
+    // The socket is about to go down and `onClose` discards the batch window:
+    // send its contents while there is still a connection to send them on.
+    this.flushPending();
     let timer: ReturnType<typeof setTimeout> | null = null;
     const connectNow = () => {
       wsp.off("disconnect", connectNow);
@@ -618,6 +665,11 @@ export class DocSync {
 
   destroy(): void {
     if (this.destroyed) return;
+    // BEFORE the destroyed latch: the tail of a burst (the last keystrokes
+    // before a note is closed, a vault is switched or the app quits) is still in
+    // the batch window, and this is the last moment it can reach the socket.
+    // `provider.destroy()` flushes too, but only for the path that reaches it.
+    this.flushPending();
     this.destroyed = true;
     // Unpark anything waiting on a flush: the provider is going away, so the ack
     // will never come and the waiter must not sit out its whole timeout.

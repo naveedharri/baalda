@@ -1,3 +1,19 @@
+import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
+// Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
+// wire contract, and importing the TYPES keeps this module a runtime leaf.
+import type {
+  BootstrapSession,
+  DocPushItem,
+  DocPushResult,
+  FileBatchItem,
+  FileBatchResult,
+  FolderBatchItem,
+  FolderBatchResult,
+  NoteBatchItem,
+  NoteBatchResult,
+  NoteDeleteResult,
+} from "./sync/bulkTypes";
+
 // The ONE typed HTTP boundary to the Baalda server. Every `fetch`
 // to the server lives here — auth, organizations, registry, shares, sync-token.
 // Components and managers call these methods; they never call `fetch` directly.
@@ -170,9 +186,7 @@ export interface RegisteredNote {
   last_edited_at?: string | null;
   /** Palette id (see `lib/appearance`), shared by the whole team. */
   color?: string | null;
-  /** Who created the note. Read by the inbound reconciler: a note the LOCAL user
-   *  authored keeps a recoverable `.context/trash` copy when access to it is
-   *  revoked, instead of being removed outright. */
+  /** Who created the note, retained for attribution and config compatibility. */
   createdBy?: string | null;
   created_by?: string | null;
 }
@@ -189,6 +203,15 @@ export interface NoteLastEdited {
 export interface AccessTreeResponse {
   folders: Array<{ id: string; path: string; color: string | null }>;
   notes: Array<{ id: string; relPath: string }>;
+  /**
+   * The vault's `files` rows — the tree binaries (pdf/docx/xlsx/mp4/…).
+   *
+   * A separate array rather than a `kind` on `notes`, because they are separate
+   * tables with different path columns; they become one leaf class in the
+   * panel's list, not in the wire shape. Empty from a server too old to send
+   * them, which simply lists no file rows.
+   */
+  files: Array<{ id: string; path: string }>;
 }
 
 export interface RegisteredFolder {
@@ -201,6 +224,23 @@ export interface RegisteredFolder {
   path: string;
   /** Palette id (see `lib/appearance`), shared by the whole team. */
   color?: string | null;
+}
+
+/**
+ * A `files` row — the server's generic "this vault path is a doc" record, the
+ * binary twin of {@link RegisteredNote}.
+ *
+ * It exists so a tree binary has a doc_id the ACL can resolve: `shares`,
+ * `effectivePermission` and `listReadableDocsInVault` all already walk these
+ * rows, so registering one is what makes a `.docx` in a shared folder obey the
+ * folder's grant instead of the blob store's path heuristic.
+ */
+export interface RegisteredFile {
+  id: string;
+  docId?: string;
+  vaultId?: string;
+  folderId?: string | null;
+  path: string;
 }
 
 export interface Share {
@@ -216,7 +256,7 @@ export interface Share {
   principal_type?: "user" | "org";
   principalId?: string;
   principal_id?: string;
-  permission: "view" | "edit" | "locked" | "denied";
+  permission: "view" | "edit" | "readonly" | "locked" | "denied";
   createdBy?: string;
   created_by?: string;
 }
@@ -232,7 +272,7 @@ export interface TeamAccessOverride {
   vaultId: string;
   resourceType: "folder" | "file";
   resourceId: string;
-  permission: "edit" | "view" | "locked" | "denied";
+  permission: "edit" | "view" | "readonly" | "locked" | "denied";
 }
 
 /**
@@ -261,6 +301,34 @@ export interface TeamAccessResult {
   postureChanged: boolean;
 }
 
+/** Access granted to members who join after this setting is changed. */
+export interface AccessDefault {
+  mode: TeamAccessMode;
+}
+
+export interface BulkAccessResource {
+  resourceType: "folder" | "file" | "vault";
+  resourceId: string;
+}
+
+export type BulkAccessAudience =
+  | { type: "org" }
+  | { type: "users"; userIds: string[] };
+
+export interface BulkAccessInput {
+  resources: BulkAccessResource[];
+  audience: BulkAccessAudience;
+  mode: TeamAccessMode;
+}
+
+export interface BulkAccessResult {
+  mode: TeamAccessMode;
+  resourcesChanged: number;
+  overridesCleared: number;
+  membersAffected: number;
+  disconnectedDocs: number;
+}
+
 /** One member's effective access to a resource, as resolved server-side. */
 export interface ResolvedMemberAccess {
   userId: string;
@@ -276,6 +344,11 @@ export interface ResolvedMemberAccess {
 
 export interface AccessResolution {
   members: ResolvedMemberAccess[];
+}
+
+/** Effective mode across selected resource roots, their descendants, and users. */
+export interface AccessSummary {
+  mode: TeamAccessMode | "mixed";
 }
 
 /** An MCP access token (metadata only; the plaintext is shown once at creation). */
@@ -323,6 +396,92 @@ export interface BlobMeta {
   filename?: string | null;
   /** True when the upload deduped to an existing row (server-set). */
   deduped?: boolean;
+  /** `pending` until the bytes land (intent → PUT → complete); `ready` after.
+   *  Absent on servers that predate the transport. */
+  status?: "pending" | "ready";
+  /** Which store holds the bytes — `postgres` or `s3`. Informational: every
+   *  read path asks the SERVER, never this field, which store to talk to. */
+  storageProvider?: string | null;
+  /** The `files` row these bytes are, or null for an `attachments/` drop. The
+   *  server has always sent it; the desktop records it on download so a
+   *  teammate's binary gets a doc id here too (`attachments.ts ServerBlob`). */
+  docId?: string | null;
+}
+
+/**
+ * The upload an intent hands back — the one shape both storage providers speak.
+ *
+ * `direct` is the whole security story: `true` means the URL is a third-party
+ * presign (S3/R2/MinIO) and MUST NOT carry our bearer; `false` means it is our
+ * own server and the `?t=` query IS the auth, so it must not carry the bearer
+ * either. Nothing in this flow ever sends `Authorization` to an upload URL —
+ * see {@link ApiClient.uploadBytesTo}.
+ */
+export interface BlobUploadSingle {
+  kind: "single";
+  method: string;
+  url: string;
+  /** Sent VERBATIM (content-type + content-length); the presign signs them. */
+  headers: Record<string, string>;
+  /** Epoch millis after which the URL is dead. */
+  expiresAt: number;
+  direct: boolean;
+}
+
+/** One presigned `UploadPart` URL. `partNumber` is 1-based, like S3's. */
+export interface BlobUploadPart {
+  partNumber: number;
+  url: string;
+}
+
+export interface BlobUploadMultipart {
+  kind: "multipart";
+  method: string;
+  uploadId: string;
+  /** Slice size: part n covers `[(n-1)*partBytes, n*partBytes)`. */
+  partBytes: number;
+  parts: BlobUploadPart[];
+  headers: Record<string, string>;
+  expiresAt: number;
+  direct: boolean;
+  /** Carried inside `partsUrl` too; kept for callers that rebuild the URL. */
+  token?: string;
+  /** Absolute; POST `{partNumbers}` here for fresh URLs when one expires. */
+  partsUrl: string;
+}
+
+export type BlobUpload = BlobUploadSingle | BlobUploadMultipart;
+
+/** The server already holds these bytes — send nothing. */
+export interface BlobIntentDeduped {
+  deduped: true;
+  blob: BlobMeta;
+}
+
+/** The server wants the bytes, and this is where to PUT them. */
+export interface BlobIntentUpload {
+  deduped?: false;
+  blobId: string;
+  upload: BlobUpload;
+  /** Absolute URL to POST once every byte is in (bearer REQUIRED — ours). */
+  completeUrl: string;
+}
+
+export type BlobIntent = BlobIntentDeduped | BlobIntentUpload;
+
+/** Body of `POST {completeUrl}`: `{}` for single, parts + id for multipart. */
+export interface BlobCompleteBody {
+  uploadId?: string;
+  parts?: Array<{ partNumber: number; etag: string }>;
+}
+
+/** Where to GET an attachment's bytes right now. */
+export interface BlobDownloadTarget {
+  url: string;
+  /** Epoch millis, or null when the URL does not expire (our own route). */
+  expiresAt: number | null;
+  /** `true` = a third-party presign: fetch it with NO `Authorization` at all. */
+  direct: boolean;
 }
 
 // ---- Versioning (per-note history + vault checkpoints) --------------------
@@ -407,7 +566,7 @@ export interface BillingPlan {
 export interface BillingConfig {
   enabled: boolean;
   plans?: BillingPlan[];
-  freeLimits?: { vaultsPerUser: number; membersPerVault: number };
+  freeLimits?: { vaultsPerUser: number; membersPerVault: number; notesPerVault?: number };
 }
 
 /** A single vault's subscription state + seat usage. */
@@ -477,6 +636,7 @@ export interface MyBilling {
   freeLimits: {
     vaultsPerUser: number;
     membersPerVault: number;
+    notesPerVault?: number;
     /** Owned vaults with no subscription — what counts against the cap. */
     freeVaultsUsed: number;
   };
@@ -492,6 +652,57 @@ export interface VaultDeleteResult {
   subscription: { cancelAtPeriodEnd: boolean; currentPeriodEnd: string | null } | null;
 }
 
+/**
+ * What `GET /api/orgs/:orgId/unsync-preview` reports: everything the server
+ * would destroy if this vault were made local only.
+ *
+ * `members` EXCLUDES the owner — it is the number of people who lose access,
+ * which is the sentence the confirm dialog has to say out loud.
+ */
+export interface UnsyncPreview {
+  orgName: string;
+  notes: number;
+  files: number;
+  folders: number;
+  attachmentBytes: number;
+  members: number;
+  publicLinks: number;
+  mcpTokens: number;
+  checkpoints: number;
+  /** The vault's live subscription, when it has one — the period-end sentence. */
+  subscription: {
+    status: string;
+    currentPeriodEnd: string | null;
+    cancelAtPeriodEnd: boolean;
+  } | null;
+}
+
+/** What `POST /api/orgs/:orgId/unsync` reports back once the server copy is gone. */
+export interface UnsyncResult {
+  unsynced: boolean;
+  notes: number;
+  files: number;
+  members: number;
+  /** Set when the vault carried a live subscription: cancelled at the period end. */
+  subscription: { cancelAtPeriodEnd: boolean; currentPeriodEnd: string | null } | null;
+}
+
+/**
+ * `GET /api/orgs/:orgId/status`, as a VALUE rather than an exception.
+ *
+ * The three answers mean three different things to the folder on disk, and the
+ * caller has to tell them apart: `vault-not-found` is "this vault was made local
+ * only (or deleted) — offer the fix", `not-a-member` is "it is somebody else's
+ * folder — keep refusing", and `unknown` is "we could not ask", which must stay
+ * silent (fail closed). Returning them instead of throwing is what keeps that
+ * distinction from collapsing into one `catch`.
+ */
+export type OrgStatus =
+  | { kind: "member"; orgId: string; name: string; role: string }
+  | { kind: "not-a-member" }
+  | { kind: "vault-not-found" }
+  | { kind: "unknown" };
+
 /** A rejected server response — carries the HTTP status for callers to branch on. */
 export class ApiError extends Error {
   constructor(
@@ -503,6 +714,152 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
+/**
+ * A blob-transport call the server refused, carrying the machine-readable
+ * `code` the flow branches on (`storage_limit_reached`, `attachment_too_large`,
+ * `upload_incomplete`, …) next to the status.
+ *
+ * An `ApiError` subclass so every existing `catch (e) { if (e instanceof
+ * ApiError) }` keeps working — the code is the only thing added, and it is read
+ * through {@link blobErrorCode} so a plain `ApiError` from an older path still
+ * answers.
+ */
+export class BlobTransportError extends ApiError {
+  constructor(
+    status: number,
+    public code: string | null,
+    message: string,
+    body?: unknown,
+  ) {
+    super(status, message, body);
+    this.name = "BlobTransportError";
+  }
+}
+
+/**
+ * The server's error code for a failed blob call, or null when it named none.
+ * Reads `code` first and `error` second, which is how the server's JSON bodies
+ * spell it in the two generations of these routes.
+ */
+export function blobErrorCode(e: unknown): string | null {
+  if (e instanceof BlobTransportError) return e.code;
+  if (e instanceof ApiError) return errorCodeOf(e.body);
+  return null;
+}
+
+function errorCodeOf(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as { code?: unknown; error?: unknown };
+  if (typeof b.code === "string") return b.code;
+  if (typeof b.error === "string") return b.error;
+  return null;
+}
+
+/**
+ * A refused bulk-sync call, carrying the machine-readable `code` the engine
+ * branches on next to the status.
+ *
+ * An {@link ApiError} subclass, like {@link BlobTransportError}, so every
+ * existing `catch (e) { if (e instanceof ApiError) }` keeps working.
+ * `retryAfterMs` is set only for a 503 `bootstrap_busy`, where the server told
+ * us when to come back.
+ */
+export class BulkApiError extends ApiError {
+  constructor(
+    status: number,
+    public code: string | null,
+    message: string,
+    body?: unknown,
+    public retryAfterMs: number | null = null,
+  ) {
+    super(status, message, body);
+    this.name = "BulkApiError";
+  }
+}
+
+/**
+ * The error code for a failed bulk call.
+ *
+ * The server's own `code` wins; the three statuses below are what a bare status
+ * MEANS on these routes. `server_too_old` in particular is never sent by anyone
+ * — it is what a 404 on a route this build requires means, and it is terminal.
+ */
+function bulkCodeFor(status: number, body: unknown): string | null {
+  const code = errorCodeOf(body);
+  if (code) return code;
+  if (status === 404) return "server_too_old";
+  if (status === 410) return "session_expired";
+  if (status === 503) return "bootstrap_busy";
+  return null;
+}
+
+/** Re-type a failed bulk call so callers can branch on the server's `code`. */
+function asBulkError(e: unknown): unknown {
+  if (e instanceof BulkApiError) return e;
+  if (e instanceof ApiError) {
+    return new BulkApiError(e.status, bulkCodeFor(e.status, e.body), e.message, e.body);
+  }
+  return e;
+}
+
+/**
+ * The bulk `code` an error carries, or null (a network failure names none).
+ *
+ * Also reads a plain `code` property off anything else thrown, because the
+ * engine's own modules (`bootstrap.ts`, `docBatchPush.ts`) branch on exactly
+ * that field and their injected transports are not required to be an
+ * {@link ApiError} — the code is the contract, not the class.
+ */
+export function bulkErrorCode(e: unknown): string | null {
+  if (e instanceof BulkApiError) return e.code;
+  if (e instanceof ApiError) return bulkCodeFor(e.status, e.body);
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code ? code : null;
+}
+
+/** "This server does not have the bulk engine" — the one terminal verdict. */
+export function isServerTooOld(e: unknown): boolean {
+  return bulkErrorCode(e) === "server_too_old";
+}
+
+/** `Retry-After` as milliseconds: seconds, or an HTTP date, or null. */
+function retryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const at = Date.parse(header);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - Date.now());
+}
+
+function numHeader(v: string | null): number {
+  const n = v ? Number(v) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** One `GET …/bootstrap/:sessionId` page: bytes plus the three headers. */
+export interface BootstrapPageResponse {
+  /** The page, already un-gzipped by the fetch stack. Decode with
+   *  `sync/bootstrapCodec.ts`. */
+  bytes: Uint8Array;
+  /** Cursor for the NEXT page; `null` (header absent) ⇒ drained. */
+  nextCursor: number | null;
+  /** Docs in this page, as the server counted them. */
+  docs: number;
+  /** Uncompressed payload bytes, for the progress subtitle. */
+  uncompressedBytes: number;
+}
+
+/**
+ * Notes per page in {@link ApiClient.listNoteRegistryPaged}.
+ *
+ * 1000 rows is a body of a few hundred KB — small enough that a page parses in
+ * one frame, large enough that a 6,000-note vault is six round trips rather
+ * than sixty. Omitting `limit` entirely is what an OLD server does with it, and
+ * that is exactly today's unpaged behaviour.
+ */
+export const REGISTRY_PAGE_LIMIT = 1000;
 
 /**
  * A server address didn't check out. Thrown by {@link ApiClient.health}, which
@@ -583,10 +940,59 @@ function newClientId(): string {
  * manager owns persistence (keychain) and calls `setToken`.
  */
 export class ApiClient {
+  async housekeeperDiagnose(vaultId: string, diagnostics: DiagnosticInput, provider?: AssistantProvider): Promise<DiagnosticReview> {
+    return (await this.request<DiagnosticReview>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/diagnose`, {
+      body: { diagnostics, consent: true, provider }, timeoutMs: 20_000,
+    })).data;
+  }
+
+  async housekeeperStatus(vaultId: string): Promise<HousekeeperStatus> {
+    return (await this.request<HousekeeperStatus>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/status`, { timeoutMs: 15_000 })).data;
+  }
+
+  async housekeeperSuggest(vaultId: string, docId: string, offset = 0, provider?: AssistantProvider): Promise<HousekeeperScan> {
+    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/suggest`, {
+      body: { docId, consent: true, offset, provider }, timeoutMs: 60_000,
+    })).data;
+  }
+
+  async housekeeperRepair(vaultId: string, docId: string, finding: string, provider?: AssistantProvider): Promise<HousekeeperScan> {
+    return (await this.request<HousekeeperScan>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/repair`, {
+      body: { docId, finding, consent: true, provider }, timeoutMs: 30_000,
+    })).data;
+  }
+
+  async housekeeperAuthorize(vaultId: string, docId: string, path: string): Promise<void> {
+    await this.request("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/authorize`, { body: { docId, path } });
+  }
+
+  async housekeeperEdit(vaultId: string, action: "apply" | "undo", id: string): Promise<HousekeeperEdit> {
+    return (await this.request<HousekeeperEdit>("POST", `/api/vaults/${encodeURIComponent(vaultId)}/housekeeper/${action}`, {
+      body: { id }, timeoutMs: 20_000,
+    })).data;
+  }
+
   private baseUrl: string;
   private token: string | null;
   private readonly fetchImpl: FetchLike;
   private readonly clientId: string;
+  /**
+   * Does THIS server speak the intent → PUT → complete upload flow?
+   *
+   * Tri-state on purpose: `null` = not asked yet (try it), `true` = yes,
+   * `false` = it answered 404, so every later upload goes straight to the
+   * legacy `POST /api/vaults/:id/blobs` without paying for a 404 first. The
+   * answer belongs to ONE server, so {@link setBaseUrl} clears it — a user who
+   * switches from the managed instance to a self-host they run from last
+   * spring must not inherit the managed instance's capabilities.
+   */
+  private blobIntentSupported: boolean | null = null;
+  /** Same tri-state for `GET /api/blobs/:id/url` (presigned download). */
+  private blobUrlSupported: boolean | null = null;
+  /** Same tri-state for `PUT /api/vaults/:id/blobs/:id/text` (extracted text).
+   *  A 404 here means the server predates the route OR has forgotten the blob;
+   *  either way there is nothing to retry, so the whole session stops asking. */
+  private blobTextSupported: boolean | null = null;
 
   constructor(opts: ApiClientOptions = {}) {
     this.baseUrl = stripTrailingSlash(opts.baseUrl ?? DEFAULT_SERVER_URL);
@@ -613,7 +1019,14 @@ export class ApiClient {
     return this.baseUrl;
   }
   setBaseUrl(url: string): void {
-    this.baseUrl = stripTrailingSlash(url);
+    const next = stripTrailingSlash(url);
+    if (next !== this.baseUrl) {
+      // Capabilities are per server (see `blobIntentSupported`).
+      this.blobIntentSupported = null;
+      this.blobUrlSupported = null;
+      this.blobTextSupported = null;
+    }
+    this.baseUrl = next;
   }
   getToken(): string | null {
     return this.token;
@@ -643,7 +1056,7 @@ export class ApiClient {
        */
       timeoutMs?: number;
     } = {},
-  ): Promise<{ data: T; authToken: string | null }> {
+  ): Promise<{ data: T; authToken: string | null; status: number }> {
     const url = new URL(this.baseUrl + path);
     if (opts.query) {
       for (const [k, v] of Object.entries(opts.query)) {
@@ -714,7 +1127,11 @@ export class ApiClient {
       throw new ApiError(res.status, msg, parsed);
     }
 
-    return { data: parsed as T, authToken };
+    // The status rides along because a couple of routes say something in it that
+    // the body does not: `POST /api/notes` answers 201 for a row it created and
+    // 200 for one it adopted, and only the first is provably empty on the
+    // server. Every other caller destructures `data` and never sees this.
+    return { data: parsed as T, authToken, status: res.status };
   }
 
   // ---- Reachability -------------------------------------------------------
@@ -1122,6 +1539,71 @@ export class ApiClient {
   }
 
   /**
+   * What making this vault local only would destroy (owner only). Pure counting
+   * — nothing is changed. Throws ApiError 403 `owner_only` for anyone else and
+   * 404 `vault_not_found` for a vault that is already gone.
+   */
+  async getUnsyncPreview(organizationId: string): Promise<UnsyncPreview> {
+    const { data } = await this.request<UnsyncPreview>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(organizationId)}/unsync-preview`,
+    );
+    return data;
+  }
+
+  /**
+   * Make a vault local only (owner only): the server deletes everything it
+   * holds for the vault — notes, files, history, shares, links, tokens — and
+   * the caller keeps its `.md` files on disk.
+   *
+   * `confirmName` must equal the vault's name; the server answers 409
+   * `name_mismatch` otherwise and destroys NOTHING. Same billing rule as
+   * `deleteRemoteVault`: a paid vault is cancelled at the provider first and a
+   * provider refusal aborts the whole thing with 502
+   * `subscription_cancel_failed`, so a throw here means the server copy is
+   * still intact — which is exactly why the caller must not touch this device
+   * until this resolves.
+   */
+  async unsyncVault(organizationId: string, confirmName: string): Promise<UnsyncResult> {
+    const { data } = await this.request<UnsyncResult>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(organizationId)}/unsync`,
+      { body: { confirmName } },
+    );
+    return data;
+  }
+
+  /**
+   * Does this vault still exist, and are we in it? The one probe that can tell
+   * "the owner made it local only" apart from "it is another account's vault" —
+   * a folder stamped for an org we cannot see looks identical in both cases,
+   * and only the first one deserves the recovery banner.
+   *
+   * Never throws: every refusal becomes an {@link OrgStatus}, and an
+   * unreachable server answers `unknown` so the caller stays silent rather than
+   * accusing a perfectly good folder.
+   */
+  async getOrgStatus(organizationId: string): Promise<OrgStatus> {
+    try {
+      const { data } = await this.request<{ orgId: string; name: string; role: string }>(
+        "GET",
+        `/api/orgs/${encodeURIComponent(organizationId)}/status`,
+      );
+      return { kind: "member", orgId: data.orgId, name: data.name, role: data.role };
+    } catch (e) {
+      if (e instanceof ApiError) {
+        // The code is the contract, the status is the fallback — same rule as
+        // `blobErrorCode`, so an older server that sends a bare status still
+        // lands in the right branch.
+        const code = errorCodeOf(e.body);
+        if (code === "vault_not_found" || e.status === 404) return { kind: "vault-not-found" };
+        if (code === "not_a_member" || e.status === 403) return { kind: "not-a-member" };
+      }
+      return { kind: "unknown" };
+    }
+  }
+
+  /**
    * Remove a member from a vault (owner/admin). The server deletes the
    * membership, purges any shares granted directly to that user, and force-closes
    * their live sync sockets so access is revoked immediately. Throws ApiError 403
@@ -1372,7 +1854,7 @@ export class ApiClient {
       "GET",
       `/api/vaults/${encodeURIComponent(vaultId)}/access-tree`,
     );
-    return { folders: data.folders ?? [], notes: data.notes ?? [] };
+    return { folders: data.folders ?? [], notes: data.notes ?? [], files: data.files ?? [] };
   }
 
   async listFolders(vaultId: string): Promise<RegisteredFolder[]> {
@@ -1487,15 +1969,27 @@ export class ApiClient {
     };
   }
 
+  /**
+   * Register one note. `created` distinguishes the two 2xx answers this route
+   * gives (201 a new row, 200 an existing one adopted by path/doc_id) — the
+   * single-note twin of the batch route's `status: "created" | "adopted"`, and
+   * the same question: a row the server just made holds no CRDT, so it can be
+   * seeded in bulk; an adopted one may hold a teammate's content.
+   *
+   * Optional on purpose: absent reads as "not known to be new", which is the
+   * safe direction — the caller simply does not announce it.
+   */
   async createNote(input: {
     vaultId: string;
     relPath: string;
     title?: string | null;
     folderId?: string | null;
     docId?: string;
-  }): Promise<RegisteredNote> {
-    const { data } = await this.request<RegisteredNote>("POST", "/api/notes", { body: input });
-    return data;
+  }): Promise<RegisteredNote & { created?: boolean }> {
+    const { data, status } = await this.request<RegisteredNote>("POST", "/api/notes", {
+      body: input,
+    });
+    return { ...data, created: status === 201 };
   }
 
   /** Rename/move a note (rel_path/folder/title); doc_id is unchanged. */
@@ -1519,6 +2013,277 @@ export class ApiClient {
   /** Soft-delete a note (keeps its doc_id row; drops it from the registry list). */
   async deleteNote(id: string): Promise<void> {
     await this.request<unknown>("DELETE", `/api/notes/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Register a tree binary as a `files` row, so its blob has a doc_id the
+   * permission resolver understands.
+   *
+   * `id` is the LOCAL `files.id` (a uuid the SQLite index keeps stable per path
+   * across rebuilds), supplied the way `createNote` supplies a note's docId, so
+   * this device's index and the server name the same identity. `folderId` is
+   * deliberately not sent: the server resolves the parent from the path
+   * (`resolveParentFolder`), which is the rule that keeps `rel_path` and
+   * `folder_id` in agreement — a mismatch comes back as 400
+   * `path_folder_mismatch`.
+   */
+  async registerFile(input: {
+    vaultId: string;
+    id: string;
+    path: string;
+  }): Promise<RegisteredFile> {
+    // `/api/files`, not `/api/registry/files`: the registry router is mounted at
+    // `/api` (see the server's `http/app.ts`), exactly like `/api/notes` and
+    // `/api/folders` beside it.
+    const { data } = await this.request<RegisteredFile>("POST", "/api/files", {
+      body: { vaultId: input.vaultId, path: input.path, docId: input.id },
+    });
+    return data;
+  }
+
+  /**
+   * Delete a tree file — the `files` row and the blob that IS its bytes.
+   *
+   * Not the note's soft delete: a file owns no CRDT and `files` has no
+   * tombstone, so the server removes it outright (`DELETE /api/files/:id`).
+   * That is what takes it out of `GET /vaults/:id/blobs`, and therefore what
+   * stops the next attachment pass downloading it straight back onto the disk
+   * it was just deleted from.
+   *
+   * Idempotent by design at the other end: an id with no row answers 204, so a
+   * queue draining twice is not an error.
+   */
+  async deleteFile(id: string): Promise<void> {
+    await this.request<unknown>("DELETE", `/api/files/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Delete one blob by id — the hidden `attachments/` store's half of the same
+   * job, where there is no `files` row to delete.
+   *
+   * `force` is deliberately NOT exposed as a default: without it the server
+   * answers 409 `blob_referenced` when a note still embeds those bytes, and
+   * that refusal is the point — an image a teammate's note shows must not
+   * vanish because one device tidied its `attachments/` folder.
+   */
+  async deleteBlob(id: string, opts: { force?: boolean } = {}): Promise<void> {
+    await this.request<unknown>("DELETE", `/api/blobs/${encodeURIComponent(id)}`, {
+      query: opts.force ? { force: "1" } : undefined,
+    });
+  }
+
+  // ---- Bulk sync engine (batch registry, batched push, bootstrap) ---------
+  //
+  // Every route here is NEW. A server that predates them answers 404, and a 404
+  // on any of them is terminal `server_too_old` — deliberately NOT the tri-state
+  // capability memo `blobIntentSupported` uses, which exists to degrade
+  // silently. Degrading silently here would put a 5,000-note vault back on the
+  // per-note path at 3.7 notes/second and call it success.
+
+  /**
+   * Register folders in bulk. No `parentId`: the server sorts by depth and
+   * resolves parents inside the request, which deletes the client's
+   * level-by-level loop.
+   */
+  async batchCreateFolders(
+    vaultId: string,
+    items: FolderBatchItem[],
+  ): Promise<FolderBatchResult[]> {
+    return this.bulk<{ results: FolderBatchResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/folders/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /** Register notes in bulk. `folderPath`, never `folderId` — see the type. */
+  async batchCreateNotes(
+    vaultId: string,
+    items: NoteBatchItem[],
+  ): Promise<NoteBatchResult[]> {
+    return this.bulk<{ results: NoteBatchResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/notes/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /** Register tree binaries (`files` rows) in bulk. */
+  async batchCreateFiles(
+    vaultId: string,
+    items: FileBatchItem[],
+  ): Promise<FileBatchResult[]> {
+    return this.bulk<{ results: FileBatchResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/files/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /**
+   * Push N docs' CRDT state in one request (base64 Yjs V1 per doc).
+   *
+   * The caller packs by BYTES as well as by count — see `BATCH_MAX_DOCS` /
+   * `BATCH_MAX_DECODED_BYTES` in `sync/pool.ts`, which mirror the server's
+   * limits; overshooting them is `batch_too_large`, not a truncated apply.
+   */
+  async batchPushDocs(vaultId: string, items: DocPushItem[]): Promise<DocPushResult[]> {
+    return this.bulk<{ results: DocPushResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/docs/batch`,
+      { items },
+    ).then((d) => d.results ?? []);
+  }
+
+  /**
+   * Soft-delete N notes in one request — the batched twin of
+   * {@link ApiClient.deleteNote}, same write, same broadcast, one of each.
+   *
+   * Chunking is the CALLER's (`registry.deletePaths`, at `BATCH_MAX_NOTES`):
+   * this method sends exactly what it is given, so an over-long list comes back
+   * as `batch_too_large` rather than being silently truncated here. The answer
+   * is per item, in request order, and a 404 on the route is the usual terminal
+   * `server_too_old` — a server that predates it still has the per-note DELETE.
+   */
+  async deleteNotesBatch(vaultId: string, docIds: string[]): Promise<NoteDeleteResult[]> {
+    return this.bulk<{ results: NoteDeleteResult[] }>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/notes/delete-batch`,
+      { docIds },
+    ).then((d) => d.results ?? []);
+  }
+
+  /**
+   * Open a bootstrap session: the server takes one snapshot of what this member
+   * may read and pages it out from a cursor.
+   *
+   * `have` is the docIds this device already holds CRDT state for — the server
+   * subtracts them from the download set, so a second device with most of the
+   * vault pays for the difference and not for the vault.
+   */
+  async createBootstrapSession(
+    vaultId: string,
+    have: string[] = [],
+  ): Promise<BootstrapSession> {
+    const data = await this.bulk<BootstrapSession>(
+      `/api/vaults/${encodeURIComponent(vaultId)}/bootstrap`,
+      have.length > 0 ? { have } : {},
+    );
+    return {
+      sessionId: data.sessionId,
+      docs: data.docs ?? 0,
+      bytes: data.bytes ?? 0,
+      emptyDocs: data.emptyDocs ?? [],
+      emptyTruncated: data.emptyTruncated === true,
+      expiresAt: data.expiresAt ?? "",
+    };
+  }
+
+  /**
+   * Fetch one page of a bootstrap session: gzip binary, decoded by
+   * `sync/bootstrapCodec.ts`.
+   *
+   * Bypasses {@link ApiClient.request} on purpose — the body is bytes, not JSON
+   * — and is modelled on {@link ApiClient.downloadBlob}/{@link
+   * ApiClient.downloadBytesFrom}. The server sends gzip without Content-Encoding,
+   * so inflate explicitly. Accept already-decoded pages from older transports.
+   *
+   * Three statuses carry meaning rather than failure: 410 `session_expired`
+   * (the caller re-POSTs with a fresh `have`), 503 `bootstrap_busy` with a
+   * `Retry-After` (the server's bootstrap semaphore is full), and 404
+   * `server_too_old`.
+   */
+  async fetchBootstrapPage(
+    vaultId: string,
+    sessionId: string,
+    opts: { cursor?: number; maxBytes?: number } = {},
+  ): Promise<BootstrapPageResponse> {
+    const url = new URL(
+      `${this.baseUrl}/api/vaults/${encodeURIComponent(vaultId)}/bootstrap/${encodeURIComponent(sessionId)}`,
+    );
+    if (opts.cursor !== undefined) url.searchParams.set("cursor", String(opts.cursor));
+    if (opts.maxBytes !== undefined) url.searchParams.set("maxBytes", String(opts.maxBytes));
+    const res = await this.fetchImpl(url.toString(), {
+      method: "GET",
+      headers: { ...this.baseHeaders(), [ORIGIN_HEADER]: this.clientId },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let parsed: unknown = text;
+      try {
+        parsed = text ? JSON.parse(text) : undefined;
+      } catch {
+        /* a plain-text body is fine; `bulkCodeFor` falls back to the status */
+      }
+      throw new BulkApiError(
+        res.status,
+        bulkCodeFor(res.status, parsed),
+        text || `HTTP ${res.status}`,
+        parsed,
+        retryAfterMs(res.headers.get("retry-after")),
+      );
+    }
+    const cursorHeader = res.headers.get("x-baalda-cursor");
+    let body = new Uint8Array(await res.arrayBuffer());
+    if (body[0] === 0x1f && body[1] === 0x8b) {
+      const inflated = new Blob([body]).stream().pipeThrough(new DecompressionStream("gzip"));
+      body = new Uint8Array(await new Response(inflated).arrayBuffer());
+    }
+    return {
+      bytes: body,
+      // ABSENT means drained. An empty string is not a cursor either.
+      nextCursor: cursorHeader ? Number(cursorHeader) : null,
+      docs: numHeader(res.headers.get("x-baalda-docs")),
+      uncompressedBytes: numHeader(res.headers.get("x-baalda-bytes")),
+    };
+  }
+
+  /** POST a bulk route, re-typing any refusal as a {@link BulkApiError}. */
+  private async bulk<T>(path: string, body: unknown): Promise<T> {
+    try {
+      const { data } = await this.request<T>("POST", path, { body });
+      return data;
+    } catch (e) {
+      throw asBulkError(e);
+    }
+  }
+
+  /**
+   * The registry pull's note listing, following the server's keyset pages.
+   *
+   * Callers are unchanged: this answers exactly what {@link listNoteRegistry}
+   * does. `limit` is what asks a NEW server to page; a server that predates
+   * pagination ignores it and answers the whole vault with no `nextAfter`, which
+   * is the single-page case below — so there is no capability probe and no
+   * fallback path to get wrong.
+   *
+   * `tombstones` ride the LAST page only (that is what keeps the "one snapshot,
+   * no precedence rule" property of the unpaged listing), so they are taken from
+   * whichever response ended the loop, and `null` still means "the server did not
+   * answer the question" rather than "nothing is deleted".
+   */
+  async listNoteRegistryPaged(
+    vaultId: string,
+    opts: { limit?: number } = {},
+  ): Promise<{ notes: RegisteredNote[]; tombstones: string[] | null }> {
+    const limit = opts.limit ?? REGISTRY_PAGE_LIMIT;
+    const notes: RegisteredNote[] = [];
+    let tombstones: string[] | null = null;
+    let after: string | undefined;
+    // Bounded so a server that keeps answering the same `nextAfter` cannot spin
+    // this loop forever; 1000 pages is 1,000,000 notes at the default limit.
+    for (let page = 0; page < 1000; page++) {
+      const { data } = await this.request<{
+        notes: RegisteredNote[];
+        tombstones?: string[];
+        nextAfter?: string | null;
+      }>("GET", "/api/notes", {
+        query: { vaultId, limit: String(limit), after },
+      });
+      notes.push(...(data.notes ?? []));
+      tombstones = Array.isArray(data.tombstones) ? data.tombstones : null;
+      const next = typeof data.nextAfter === "string" ? data.nextAfter : null;
+      // No cursor ⇒ the last (or only) page. A cursor that did not ADVANCE is a
+      // server bug; stopping is strictly better than looping on it.
+      if (!next || next === after) return { notes, tombstones };
+      after = next;
+    }
+    return { notes, tombstones };
   }
 
   // ---- Versioning ---------------------------------------------------------
@@ -1660,7 +2425,7 @@ export class ApiClient {
     /** Required for user shares; ignored for org-wide grants/locks. */
     principalId?: string;
     principalType?: "user" | "org";
-    permission: Permission | "locked" | "denied";
+    permission: Permission | "readonly" | "locked" | "denied";
   }): Promise<Share> {
     const { data } = await this.request<Share>("POST", "/api/shares", { body: input });
     return data;
@@ -1710,6 +2475,40 @@ export class ApiClient {
     };
   }
 
+  /** What future members may see when they join. Existing members are unchanged. */
+  async getAccessDefault(orgId: string): Promise<AccessDefault> {
+    const { data } = await this.request<AccessDefault>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/access-default`,
+    );
+    return { mode: data.mode ?? "private" };
+  }
+
+  async setAccessDefault(orgId: string, mode: TeamAccessMode): Promise<AccessDefault> {
+    const { data } = await this.request<AccessDefault>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/access-default`,
+      { body: { mode } },
+    );
+    return { mode: data.mode ?? mode };
+  }
+
+  /** Apply one access mode to one or more resource roots in a single transaction. */
+  async setBulkAccess(orgId: string, input: BulkAccessInput): Promise<BulkAccessResult> {
+    const { data } = await this.request<BulkAccessResult>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/access/bulk`,
+      { body: input },
+    );
+    return {
+      mode: data.mode ?? input.mode,
+      resourcesChanged: data.resourcesChanged ?? 0,
+      overridesCleared: data.overridesCleared ?? 0,
+      membersAffected: data.membersAffected ?? 0,
+      disconnectedDocs: data.disconnectedDocs ?? 0,
+    };
+  }
+
   /** Resolve every member's effective access to a resource (the "who can access"
    *  view). Same manage-gate as {@link listShares}. */
   async resolveAccess(
@@ -1720,6 +2519,21 @@ export class ApiClient {
       query: { resourceType, resourceId },
     });
     return { members: data.members ?? [] };
+  }
+
+  /** Resolve selected people's effective access across compact resource roots.
+   * The server expands folder/vault descendants and bounds resolver concurrency. */
+  async resolveAccessSummary(
+    orgId: string,
+    resources: BulkAccessResource[],
+    userIds: string[],
+  ): Promise<AccessSummary> {
+    const { data } = await this.request<AccessSummary>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/access/summary`,
+      { body: { resources, userIds } },
+    );
+    return data;
   }
 
   /** All locks in a vault (readable by any vault member — drives lock badges). */
@@ -1788,11 +2602,17 @@ export class ApiClient {
     bytes: Uint8Array;
     mime?: string;
     fileName?: string;
+    /** The `files` row this blob's bytes belong to (tree binaries only) —
+     *  stored as `blobs.doc_id` so the ACL resolves the file, not its path. */
+    docId?: string | null;
   }): Promise<BlobMeta> {
     const headers = this.baseHeaders();
     headers["Content-Type"] = input.mime ?? "application/octet-stream";
     headers["x-rel-path"] = input.relPath;
     if (input.fileName) headers["x-file-name"] = input.fileName;
+    // A header rather than a body field, because the body IS the file here. An
+    // older server ignores it and falls back to the path heuristic.
+    if (input.docId) headers["x-doc-id"] = input.docId;
 
     // Copy into a fresh ArrayBuffer so the fetch body is a clean BodyInit.
     const buf = input.bytes.slice().buffer;
@@ -1809,6 +2629,255 @@ export class ApiClient {
     return parsed as unknown as BlobMeta;
   }
 
+  /**
+   * Headers that prove who we are on a blob route we host ourselves.
+   *
+   * Public because the attachment sync has to decide, per download, whether the
+   * URL it was handed is ours (bearer REQUIRED) or a third-party presign
+   * (bearer FORBIDDEN — S3 rejects a request that carries both a signature and
+   * an `Authorization` header). The decision lives in `sync/attachments.ts`
+   * where it is tested; this just supplies the header when the answer is "ours".
+   */
+  authHeaders(): Record<string, string> {
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
+  }
+
+  /** Whether this server is known to speak the intent flow (null = unasked). */
+  supportsBlobIntent(): boolean | null {
+    return this.blobIntentSupported;
+  }
+
+  /**
+   * Announce an upload: what the bytes are, where they belong, how big.
+   *
+   * The server answers either "already have them" (`deduped`, zero bytes move —
+   * which is the whole reason this exists: the legacy route learned that only
+   * AFTER a new device re-uploaded every attachment in full) or a URL to PUT
+   * them to, for BOTH storage providers. A 404 means this server predates the
+   * flow: remembered per server URL so exactly one upload pays for the probe.
+   */
+  async createBlobIntent(
+    vaultId: string,
+    meta: {
+      sha256: string;
+      size: number;
+      mime: string;
+      relPath: string;
+      filename?: string | null;
+      /** The `files` row these bytes belong to — see {@link registerFile}. The
+       *  server stores it as `blobs.doc_id`; an older one ignores it. */
+      docId?: string | null;
+    },
+  ): Promise<BlobIntent> {
+    if (this.blobIntentSupported === false) {
+      // Known-legacy server: answer the way it would, without the round trip.
+      throw new BlobTransportError(404, "not_found", "server has no blob intent route");
+    }
+    try {
+      const { data } = await this.request<BlobIntent>(
+        "POST",
+        `/api/vaults/${encodeURIComponent(vaultId)}/blobs/intent`,
+        { body: meta },
+      );
+      this.blobIntentSupported = true;
+      return data;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) this.blobIntentSupported = false;
+      throw asBlobError(e);
+    }
+  }
+
+  /**
+   * Finish an upload: the server checks what landed and promotes the row to
+   * `ready`. Idempotent, so a retry after a dropped response is safe.
+   *
+   * `completeUrl` comes from the intent and is absolute — the server owns the
+   * path, and a multipart flow may point it elsewhere entirely.
+   */
+  async completeBlob(completeUrl: string, body: BlobCompleteBody = {}): Promise<BlobMeta> {
+    return (await this.requestAbsolute<BlobMeta>("POST", completeUrl, body)) ?? ({} as BlobMeta);
+  }
+
+  /** Fresh presigned URLs for parts whose own presign expired mid-upload. */
+  async requestBlobParts(
+    partsUrl: string,
+    partNumbers: number[],
+  ): Promise<{ parts: BlobUploadPart[]; expiresAt?: number }> {
+    const data = await this.requestAbsolute<{ parts: BlobUploadPart[]; expiresAt?: number }>(
+      "POST",
+      partsUrl,
+      { partNumbers },
+    );
+    return { parts: data?.parts ?? [], expiresAt: data?.expiresAt };
+  }
+
+  /**
+   * Where to GET this blob's bytes right now.
+   *
+   * A JSON URL rather than following `GET /api/blobs/:id`'s 302: reqwest
+   * forwards `Authorization` across a redirect and S3 rejects a presign that
+   * arrives with one, so the desktop asks first and then fetches with a client
+   * that carries exactly the headers `direct` calls for. 404 = a server that
+   * predates this; the caller falls back to {@link downloadBlob}.
+   */
+  async blobDownloadUrl(blobId: string): Promise<BlobDownloadTarget> {
+    if (this.blobUrlSupported === false) {
+      throw new BlobTransportError(404, "not_found", "server has no blob url route");
+    }
+    try {
+      const { data } = await this.request<BlobDownloadTarget>(
+        "GET",
+        `/api/blobs/${encodeURIComponent(blobId)}/url`,
+      );
+      this.blobUrlSupported = true;
+      return data;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) this.blobUrlSupported = false;
+      throw asBlobError(e);
+    }
+  }
+
+  /** Whether this server is known to accept extracted text (null = unasked). */
+  supportsBlobText(): boolean | null {
+    return this.blobTextSupported;
+  }
+
+  /**
+   * Hand the server the plain text Rust already extracted from a blob, so the
+   * team's search can find a `.docx` by what is inside it.
+   *
+   * Ranking fuel and snippets only — never served as content, never an
+   * authorization input, and re-derivable from the bytes, which is what makes a
+   * CLIENT-supplied extraction acceptable: a member who can upload the file can
+   * already write any words they like into a note. The server caps the body at
+   * 1 MB (413) and answers 409 when the blob's own sha does not match the one
+   * this text describes, so a racing re-upload cannot attach stale words to new
+   * bytes.
+   *
+   * 404 disables it for the whole session (remembered per server URL like
+   * {@link createBlobIntent}'s probe): it means either a server that predates
+   * the route or a blob it has forgotten, and neither is worth a retry per
+   * file.
+   */
+  async uploadBlobText(
+    vaultId: string,
+    blobId: string,
+    body: {
+      chars: number;
+      content: string;
+      source: "client";
+      docId?: string | null;
+      sha256: string;
+    },
+  ): Promise<void> {
+    if (this.blobTextSupported === false) {
+      throw new BlobTransportError(404, "not_found", "server has no blob text route");
+    }
+    try {
+      await this.request<unknown>(
+        "PUT",
+        `/api/vaults/${encodeURIComponent(vaultId)}/blobs/${encodeURIComponent(blobId)}/text`,
+        { body },
+      );
+      this.blobTextSupported = true;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) this.blobTextSupported = false;
+      throw asBlobError(e);
+    }
+  }
+
+  /**
+   * PUT raw bytes at a presigned URL from the WEBVIEW — the fallback for when
+   * the Rust streaming command is unavailable (tests, or a build without it).
+   *
+   * Sends `headers` and nothing else. No bearer, ever: `direct: true` is a
+   * third-party presign that rejects one, and `direct: false` is our own route
+   * whose `?t=` query IS the credential. Note the webview's own limits — the
+   * body lives in the JS heap and the bucket needs CORS — which is exactly why
+   * Rust is the primary path.
+   */
+  async uploadBytesTo(input: {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    bytes: Uint8Array;
+  }): Promise<{ status: number; etag: string | null }> {
+    const res = await this.fetchImpl(input.url, {
+      method: input.method ?? "PUT",
+      headers: { ...(input.headers ?? {}) },
+      body: input.bytes.slice().buffer,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new BlobTransportError(res.status, null, text || `HTTP ${res.status}`);
+    }
+    return { status: res.status, etag: res.headers.get("etag") };
+  }
+
+  /** GET bytes from an arbitrary (possibly presigned) URL — webview fallback. */
+  async downloadBytesFrom(
+    url: string,
+    headers: Record<string, string> = {},
+  ): Promise<Uint8Array> {
+    const res = await this.fetchImpl(url, { method: "GET", headers: { ...headers } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new BlobTransportError(res.status, null, text || `HTTP ${res.status}`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  /**
+   * JSON round trip to an ABSOLUTE url the server handed us (complete, parts).
+   *
+   * The bearer goes only to our own origin; a `completeUrl` pointing anywhere
+   * else gets the body and nothing to replay. Same-origin is the test because
+   * these URLs are minted by the server we are already authenticated to.
+   */
+  private async requestAbsolute<T>(
+    method: string,
+    url: string,
+    body: unknown,
+  ): Promise<T | null> {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      [ORIGIN_HEADER]: this.clientId,
+    };
+    if (this.isOwnOrigin(url)) {
+      try {
+        headers.Origin = new URL(this.baseUrl).origin;
+      } catch {
+        /* leave unset */
+      }
+      if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    }
+    const res = await this.fetchImpl(url, { method, headers, body: JSON.stringify(body) });
+    const text = await res.text();
+    let parsed: unknown = undefined;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
+    }
+    if (!res.ok) {
+      const code = errorCodeOf(parsed);
+      throw new BlobTransportError(res.status, code, code ?? `HTTP ${res.status}`, parsed);
+    }
+    return (parsed ?? null) as T | null;
+  }
+
+  /** Is this absolute URL served by the server we hold a session for? */
+  private isOwnOrigin(url: string): boolean {
+    try {
+      return new URL(url).origin === new URL(this.baseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
   /** Download an attachment's bytes by blob id. */
   async downloadBlob(id: string): Promise<Uint8Array> {
     const res = await this.fetchImpl(`${this.baseUrl}/api/blobs/${encodeURIComponent(id)}`, {
@@ -1821,6 +2890,15 @@ export class ApiClient {
     }
     return new Uint8Array(await res.arrayBuffer());
   }
+}
+
+/** Re-type a failed blob call so callers can branch on the server's `code`. */
+function asBlobError(e: unknown): unknown {
+  if (e instanceof BlobTransportError) return e;
+  if (e instanceof ApiError) {
+    return new BlobTransportError(e.status, errorCodeOf(e.body), e.message, e.body);
+  }
+  return e;
 }
 
 function stripTrailingSlash(url: string): string {

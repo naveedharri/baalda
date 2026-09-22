@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { createApp } from "../src/http/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
@@ -8,6 +9,7 @@ import {
   seedFolder,
   seedLock,
   seedMember,
+  seedNote,
   seedOrg,
   seedShare,
   seedUser,
@@ -29,6 +31,7 @@ const disconnected = rec.disconnected;
 /** Every `registry-changed` broadcast the MCP routes fire. An MCP write that
  *  doesn't land here is invisible to every running app until it restarts. */
 const registryBroadcasts = rec.registryBroadcasts;
+const aclBroadcasts = rec.aclBroadcasts;
 
 let rpcId = 0;
 async function rpc(token: string | null, method: string, params?: unknown) {
@@ -108,8 +111,119 @@ describe("MCP server", () => {
         "edit_note",
         "delete_note",
         "search_notes",
+        "get_access_default",
+        "set_access_default",
+        "list_resource_access",
+        "manage_access",
       ]),
     );
+  });
+
+  describe("access management tools", () => {
+    it("lets owners/admins manage defaults and inspect resource access", async () => {
+      const org = await seedOrg("Access", `mcp-access-${rpcId}`);
+      const owner = await seedUser(`access-owner-${rpcId}@mcp.test`);
+      const admin = await seedUser(`access-admin-${rpcId}@mcp.test`);
+      const member = await seedUser(`access-member-${rpcId}@mcp.test`);
+      await seedMember(org, owner, "owner");
+      await seedMember(org, admin, "admin");
+      await seedMember(org, member, "member");
+      const vault = await seedVault(org);
+      const folder = await seedFolder(vault, null, "Docs", "Docs", owner);
+      await seedNote(vault, folder, "Docs/note.md", owner);
+      const ownerToken = await tokenFor(owner, org);
+      const adminToken = await tokenFor(admin, org);
+
+      expect((await call(ownerToken, "get_access_default")).data.mode).toBe("private");
+      expect(
+        (await call(adminToken, "set_access_default", { mode: "readonly" })).data.mode,
+      ).toBe("readonly");
+      expect((await call(ownerToken, "get_access_default")).data.mode).toBe("readonly");
+
+      const listed = await call(ownerToken, "list_resource_access", {
+        resourceType: "folder",
+        resourceId: folder,
+      });
+      expect(listed.isError).toBe(false);
+      expect(listed.data.results.map((row: any) => row.userId)).toEqual(
+        expect.arrayContaining([owner, admin, member]),
+      );
+    });
+
+    it("refuses plain members and resources outside the token's vault", async () => {
+      const org = await seedOrg("Access", `mcp-access-denied-${rpcId}`);
+      const owner = await seedUser(`access-owner-denied-${rpcId}@mcp.test`);
+      const member = await seedUser(`access-member-denied-${rpcId}@mcp.test`);
+      await seedMember(org, owner, "owner");
+      await seedMember(org, member, "member");
+      const memberToken = await tokenFor(member, org);
+      expect((await call(memberToken, "get_access_default")).isError).toBe(true);
+
+      const otherOrg = await seedOrg("Other", `mcp-access-other-${rpcId}`);
+      const otherOwner = await seedUser(`access-other-${rpcId}@mcp.test`);
+      await seedMember(otherOrg, otherOwner, "owner");
+      const otherVault = await seedVault(otherOrg);
+      const otherFolder = await seedFolder(otherVault, null, "Secret", "Secret", otherOwner);
+      const ownerToken = await tokenFor(owner, org);
+      const cross = await call(ownerToken, "manage_access", {
+        resources: [{ resourceType: "folder", resourceId: otherFolder }],
+        audience: { type: "org" },
+        mode: "open",
+      });
+      expect(cross.isError).toBe(true);
+      expect(cross.text).toMatch(/Unknown resource/i);
+    });
+
+    it("Everyone replaces subtree overrides, deduplicates resources, and announces the ACL", async () => {
+      const org = await seedOrg("Access", `mcp-access-bulk-${rpcId}`);
+      const owner = await seedUser(`access-owner-bulk-${rpcId}@mcp.test`);
+      const member = await seedUser(`access-member-bulk-${rpcId}@mcp.test`);
+      await seedMember(org, owner, "owner");
+      await seedMember(org, member, "member");
+      const vault = await seedVault(org);
+      const folder = await seedFolder(vault, null, "Docs", "Docs", owner);
+      const child = await seedFolder(vault, folder, "Child", "Docs/Child", owner);
+      const doc = await seedNote(vault, child, "Docs/Child/note.md", owner);
+      await pool.query(
+        `INSERT INTO shares
+           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+         VALUES ($1,$2,'file',$3,'user',$4,'denied'),
+                ($5,$2,'folder',$6,'org',$2,'view')`,
+        [randomUUID(), org, doc, member, randomUUID(), child],
+      );
+      const token = await tokenFor(owner, org);
+      disconnected.length = 0;
+      aclBroadcasts.length = 0;
+
+      const result = await call(token, "manage_access", {
+        resources: [
+          { resourceType: "folder", resourceId: folder },
+          { resourceType: "folder", resourceId: folder },
+        ],
+        audience: { type: "org" },
+        mode: "open",
+      });
+      expect(result.isError).toBe(false);
+      expect(result.data.resourcesChanged).toBe(1);
+      expect(result.data.overridesCleared).toBe(2);
+      expect(disconnected).toContainEqual({ vaultId: vault, docId: doc });
+      expect(aclBroadcasts).toContain(vault);
+
+      const rows = await pool.query<{
+        resource_type: string;
+        resource_id: string;
+        principal_type: string;
+        permission: string;
+      }>("SELECT resource_type, resource_id, principal_type, permission FROM shares WHERE org_id = $1", [org]);
+      expect(rows.rows).toEqual([
+        expect.objectContaining({
+          resource_type: "folder",
+          resource_id: folder,
+          principal_type: "org",
+          permission: "edit",
+        }),
+      ]);
+    });
   });
 
   it("owner: full note CRUD lifecycle", async () => {

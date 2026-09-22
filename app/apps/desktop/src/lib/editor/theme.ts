@@ -75,17 +75,20 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     borderLeftWidth: "2px",
   },
 
-  // Selection: a clearly visible accent wash on the drawSelection() layer.
-  // `--accent-soft` was too faint to read as a selection on the white sheet.
+  // Selection: explicit active/inactive washes on the drawSelection() layer.
+  // These differ from native selection because this layer sits above the text.
   // (No `::selection` clause: drawSelection blanks the native one with a
   // `Prec.highest` rule of its own, so styling it here would be dead CSS.)
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-    backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
+  "& > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+    backgroundColor: "var(--editor-selection-bg-inactive)",
   },
-  // drawSelection() paints in a layer BEHIND the content, so opaque line and
-  // span backgrounds (the .cm-codeblock well, inline-code chips, rendered
-  // tables) swallow the wash and a selection looks like it skips them. Lift the
-  // layer ABOVE the content instead and paint it as a plain translucent wash:
+  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+    backgroundColor: "var(--editor-selection-bg)",
+  },
+  // drawSelection() paints in a layer BEHIND the content by default, so opaque
+  // line and span backgrounds (the .cm-codeblock well, inline-code chips,
+  // rendered tables) swallow the wash and a selection looks like it skips them.
+  // Lift the layer ABOVE the content and paint it as a plain translucent wash:
   // every pixel in the range — text, chips, markers, widgets — gets the same
   // tint, and 28% accent over dark text still reads. (A `multiply` blend was
   // tried first: it kept text crisper but barely tinted grey chips, so a
@@ -218,6 +221,82 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     height: "100%",
     border: "0",
     display: "block",
+  },
+  // Markdown `![alt](src.mp4)` / `![alt](src.mp3)` embeds rendered as players.
+  // Inline replace widgets like `.cm-md-pdf`: `display: block` makes them READ
+  // as a block without being a block decoration, so they keep the `.cm-line`
+  // horizontal inset and must NOT carry `.cm-block-inset` (which would add it
+  // twice). Vertical spacing is PADDING, never margin — CM6 measures a widget
+  // with getBoundingClientRect, which does not see margins (see `.cm-md-html`).
+  ".cm-md-video": {
+    display: "block",
+    paddingBlock: "var(--sp-3)",
+    maxWidth: "100%",
+    maxHeight: "480px",
+    borderRadius: "var(--radius-sm)",
+    background: "var(--bg-subtle)",
+  },
+  ".cm-md-audio": {
+    display: "block",
+    paddingBlock: "var(--sp-2)",
+    width: "100%",
+  },
+  // `![alt](src.csv)` embeds rendered as a glance-sized table. Containment for
+  // the same reason `.cm-md-table` has it: without it a wide table's natural
+  // width propagates into `.cm-content` and widens the whole sheet instead of
+  // scrolling here.
+  ".cm-md-csv": {
+    display: "block",
+    paddingBlock: "var(--sp-3)",
+    overflowX: "auto",
+    contain: "inline-size",
+  },
+  ".cm-md-csv table": {
+    borderCollapse: "collapse",
+    width: "max-content",
+    fontSize: "0.95em",
+  },
+  ".cm-md-csv th, .cm-md-csv td": {
+    border: "1px solid var(--border)",
+    padding: "var(--sp-1) var(--sp-2)",
+    textAlign: "left",
+  },
+  ".cm-md-csv th": {
+    fontWeight: "600",
+    background: "var(--bg-subtle)",
+  },
+  // "Showing the first N rows…" / the pre-load file name — the quiet hint voice.
+  ".cm-md-csv-note": {
+    color: "var(--text-tertiary)",
+    fontSize: "var(--fs-xs)",
+    paddingTop: "var(--sp-1)",
+  },
+  // The fallback for an `![]()` nothing can draw: a named, clickable chip that
+  // opens the pane viewer. Inline (it can sit mid-sentence), so no `display:
+  // block` here — and no inset class, like every other inline widget.
+  ".cm-md-file-chip": {
+    display: "inline-flex",
+    alignItems: "baseline",
+    gap: "var(--sp-2)",
+    padding: "var(--sp-1) var(--sp-2)",
+    borderRadius: "var(--radius-sm)",
+    border: "1px solid var(--border)",
+    background: "var(--bg-subtle)",
+    cursor: "pointer",
+    fontSize: "0.95em",
+    verticalAlign: "baseline",
+  },
+  ".cm-md-file-chip:hover": {
+    borderColor: "var(--border-strong, var(--border))",
+  },
+  ".cm-md-file-chip-size": {
+    color: "var(--text-tertiary)",
+    fontSize: "var(--fs-xs)",
+  },
+  // The file the note points at is not on this disk (yet — an attachment can
+  // still be downloading). Say so rather than showing a blank size.
+  ".cm-md-file-chip.is-missing": {
+    color: "var(--text-tertiary)",
   },
   ".cm-md-html :first-child": { marginTop: "0" },
   ".cm-md-html :last-child": { marginBottom: "0" },
@@ -641,7 +720,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // start of the document (see `titleSelectionMirror` in noteHeader.ts). Same
   // colour as `.cm-selectionBackground` above.
   ".cm-note-title.is-selected": {
-    backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
+    backgroundColor: "var(--editor-selection-bg)",
     borderRadius: "var(--radius-sm)",
   },
   ".inline-title-wrap": {

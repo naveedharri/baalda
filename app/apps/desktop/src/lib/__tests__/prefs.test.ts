@@ -9,7 +9,9 @@ import {
   EDITOR_MEASURE_DEFAULT,
   EDITOR_MEASURE_MAX,
   EDITOR_MEASURE_MIN,
+  readAutomaticItemColors,
   readEditorMeasure,
+  writeAutomaticItemColors,
   writeEditorMeasure,
 } from "../prefs";
 
@@ -122,5 +124,28 @@ describe("clampEditorMeasure", () => {
     expect(clampEditorMeasure(Number.NaN)).toBe(EDITOR_MEASURE_DEFAULT);
     expect(clampEditorMeasure(Number.POSITIVE_INFINITY)).toBe(EDITOR_MEASURE_MAX);
     expect(clampEditorMeasure(Number.NEGATIVE_INFINITY)).toBe(EDITOR_MEASURE_MIN);
+  });
+});
+
+describe("automatic item colours", () => {
+  it("defaults off and stores an explicit choice per account", () => {
+    const store = stubStorage();
+
+    expect(readAutomaticItemColors("alice")).toBe(false);
+    expect(readAutomaticItemColors("bob")).toBe(false);
+
+    writeAutomaticItemColors("alice", false);
+    expect(store.get("context.automaticItemColors:alice")).toBe("off");
+    expect(readAutomaticItemColors("alice")).toBe(false);
+    expect(readAutomaticItemColors("bob")).toBe(false);
+
+    writeAutomaticItemColors("alice", true);
+    expect(readAutomaticItemColors("alice")).toBe(true);
+  });
+
+  it("falls back to off when storage is unavailable", () => {
+    stubThrowingStorage();
+    expect(readAutomaticItemColors("alice")).toBe(false);
+    expect(() => writeAutomaticItemColors("alice", false)).not.toThrow();
   });
 });

@@ -6,13 +6,13 @@ import type { SyncStatus } from "../lib/sync/syncManager";
  * Why the open note is not reaching the server, when the answer is something the
  * user must act on rather than wait out.
  *
- * Deliberately only two: these are the *silent divergence* states, where the app
+ * These are the *silent divergence* states, where the app
  * looks and behaves exactly like a healthy one — the vault opens, notes render,
  * edits are accepted — while nothing leaves the device. A vault that is merely
  * offline or reconnecting is NOT here; it resolves itself, and the corner pill
  * already says so.
  */
-export type NotSyncingReason = "signed-out" | "no-access";
+export type NotSyncingReason = "signed-out" | "no-access" | "vault-no-access";
 
 /**
  * Should the "not syncing" banner be up, and for which reason?
@@ -51,6 +51,8 @@ export function notSyncingReason(args: {
    *  a half-established session cannot read as signed in. */
   hasSession: boolean;
   syncStatus: SyncStatus;
+  /** The vault channel alone: a note denial does not revoke membership. */
+  vaultSyncStatus?: SyncStatus;
   /** The store's `openFolderIsSynced`: null until the stamp peek lands. */
   folderIsSynced: boolean | null;
   /** Is a note actually on screen? `syncStatus` is only about the open doc. */
@@ -60,6 +62,7 @@ export function notSyncingReason(args: {
   if (folderIsSynced !== true) return null;
   if (authStatus === "unknown") return null;
   if (authStatus !== "signed-in" || !hasSession) return "signed-out";
+  if (args.vaultSyncStatus === "no-access") return "vault-no-access";
   if (noteOpen && syncStatus === "no-access") return "no-access";
   return null;
 }
@@ -96,10 +99,13 @@ export function NotSyncingBannerView({
 }) {
   return (
     <Banner show={reason != null} className="not-syncing-banner" role="alert">
-      {reason === "no-access" ? (
+      {reason === "no-access" || reason === "vault-no-access" ? (
         <span>
-          <strong>You no longer have access to this vault</strong> — your changes are not
-          syncing.
+          <strong>
+            {reason === "vault-no-access"
+              ? "You no longer have access to this vault"
+              : "You no longer have access to this note"}
+          </strong>{" "}— changes here are not syncing.
         </span>
       ) : (
         <span>

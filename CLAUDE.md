@@ -107,7 +107,17 @@ Build: `pnpm run build:desktop`.
 Commands registered in `lib.rs`; `AppState` (`state.rs`) is one `Mutex` over `{ vault, index, watcher }`.
 Errors: single `AppError(String)` (`error.rs`).
 - `vault.rs` — path safety (`resolve_in_vault` rejects `..`/absolute/escape); ignores `.context/`, `.git`, dotfiles.
-- `tree.rs` — recursive walk to nested `TreeNode`; surfaces `.md`/`.html` only.
+- `tree.rs` — recursive walk to nested `TreeNode`; surfaces exactly `vault.rs ALLOWED_EXTS` (notes,
+  images, pdf, office docs, audio/video, csv/json/code, zip) and hides the root `attachments/` folder.
+  **`ALLOWED_EXTS` and `NOTE_EXTS` are ONE contract with the desktop's format registry**
+  (`src/lib/formats.ts` — `SURFACED_EXTS`/`NOTE_EXTS`, the single authority for what a file is: how it
+  surfaces, opens, embeds, uploads and syncs) and with the `NOTE_EXTS` literals in `sync/registry.ts` /
+  `sync/inbound.ts`; `formatsLockstep.test.ts` reads those source files and fails on any drift. Only
+  `NOTE_EXTS` (md, markdown, mdx, txt, html, htm, canvas) are CRDT notes and index rows; a viewer
+  choice is display-only and never promotes a file into the bridge. The webview CSP in
+  `tauri.conf.json` is pinned by `src/__tests__/csp.test.ts` — Tauri injects it only in packaged
+  builds, `frame-src`/`media-src` must allow `asset:`, `http://asset.localhost` (Windows) and
+  `https://asset.localhost`, and dev never exercises it.
 - `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`.
 - `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter. `derive_title`
   (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title — `index.rs`
@@ -139,7 +149,11 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 
 - **Ingest (disk→CRDT):** debounced 150ms; diff current serialization vs file (diff-match-patch), apply as
   `Y.Text` insert/delete under `disk` origin. A large diff ratio (>0.6, e.g. an AI whole-file rewrite)
-  takes a recovery snapshot first.
+  takes a recovery snapshot first. If a transaction races the file read, hash, or snapshot,
+  retain the pre-read CRDT and apply the disk diff on that branch, then merge its operations
+  into the live doc. Never re-diff older file bytes against newly arrived peer content: that
+  turns peer additions into deletions. Ignore repeat reads of the merged disk input until
+  the combined result is written; allocate the branch only when a transaction actually races.
 - **Egest (CRDT→disk):** debounced 300ms; set echo hash, atomic write (Rust re-indexes on write).
 - CRDT persistence: every `doc.on("update")` appends to the SQLite log; compact into a snapshot past ~64 updates.
 
@@ -172,13 +186,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   (`ipc.noteExists`), and a pending delete whose doc text hashes equal to an unmapped file that appeared in
   the same window is a RENAME — `registry.renamePath` + `ipc.rebindNoteId` keep the `doc_id` (a batch that
   queued a delete also defers its registry pull, or the new path would register as a second note first).
-  Survivors write the doc's text to `.context/trash/<stamp>/` (`ipc.writeTrashCopy`) and then call
-  `registry.deletePath` — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
+  Survivors call `registry.deletePath` — or `registry.deletePaths` → `POST /notes/delete-batch`
+  above `BULK_THRESHOLD_DOCS`,
+  both pooled — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
   is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
-  startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window —
-  which abandons the whole batch and reports it, because an unmounted volume looks exactly like a bulk
-  delete. The ingest side is guarded too: a 0-byte file never clears a populated doc
+  startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
+  FIRST, before any server call, and abandoning the whole batch, because an unmounted
+  volume looks exactly like a bulk delete. The ingest side is guarded too: a 0-byte file never clears a populated doc
   (`allowTruncateFromDisk`, default false).
 - **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
   readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing
@@ -199,7 +214,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   flip arms the pull the authority is meant to cover; that ordering is what cleans up a member whose app
   was closed when the owner went Private, on their next launch. A revoked file leaves the disk only when
   all seven hold: both listings 200; the server ANSWERED the tombstone question; `isLive()`; an ACL
-  signal ≤60 s old (`ready.revoked` or `reauth`); the group fits `revokeCap = max(20, ceil(mapped*0.5))`
+  signal ≤60 s old (`ready.revoked`, batched `revoked`, or `reauth`); the group fits `revokeCap = max(20, ceil(mapped*0.5))`
   OR the server NAMED this doc; the access-check agrees where the cap lift is what saved it; and the doc
   is `pushed` or the file is empty. The named list is NOT a second opinion — `/api/notes` and
   `revokedFromManifest` both call `listReadableDocsInVault`, so it only catches a racy short answer; the
@@ -210,14 +225,26 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   LEAVES the whole group (a refused id also leaves the named set via
   `InboundHost.revocationRefused`). The named set unions across the session
   (`handleServerReauth` never clears it; `onServerDrop` feeds the live path) and a truncated list keeps
-  its 2000 as the allow-list. `folderLift` needs an authoritative pass that named nothing, and folder
-  removal is empty-only. Removal is OUTRIGHT via Rust `delete_file` (`rel_path_is_ignored` FIRST, so
+  its 2000 as the allow-list for older peers. Clients advertising `revocation-batches` receive all
+  named revocations in frames of at most 2000 ids (before `ready` on connect, before `reauth` live).
+  `hello.held` includes mapped notes without a local state vector; `hello.files` carries binaries.
+  Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
+  notes, then pull the registry and use the HTTP bulk downloader. Bootstrap pages are
+  gzip without `Content-Encoding`; the desktop explicitly inflates before decoding.
+  Active backfill retains download progress across buffer pauses, and open read-only
+  notes compare the pre-pull file with confirmed server content before reporting an edit.
+  The named-list and independent access-check guards still apply. Confirmed access changes may
+  remove empty folders even with a named note list; folder removal is always non-recursive, after
+  note checks, and unannounced mass removals retain their cap.
+  Large local note removals use `delete_files_batch` in chunks of at most 64, including revoked CRDT
+  cleanup, and report a throttled `removing` phase with a remaining-item count. Confirmed deletions
+  and revocations are OUTRIGHT via Rust `delete_file`
+  (`rel_path_is_ignored` FIRST, so
   `.context` AND `.context/config.json` are refused, then a directory refusal; `deletePath` stays the
-  sidebar's recursive one) — unless this user AUTHORED the note, which goes to
-  `.context/trash` (`authored`, learned in `syncStructure`, persisted in `.context/config.json` as
-  `{ userId, docIds }` and honoured only for that user; item-Private still beats authorship). A revoked
-  removal also `docStore.drop`s + `ipc.clearYjsDoc`s, so `ready` stops re-naming it. The deletion cap is
-  never lifted.
+  sidebar's recursive one), regardless of authorship. A revoked removal also `docStore.drop`s +
+  `ipc.clearYjsDoc`s, so `ready` stops re-naming it. The deletion cap is never lifted. Separate
+  read-only reconciliation preserves a divergent local edit in `.context/trash` before replacing it
+  with the server's canonical content; deletion and revocation never create those recovery copies.
 - **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
   the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
   said `Projects/community` while the server said `Projects/Community` (with empty server folders under
@@ -263,6 +290,41 @@ and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mo
 waits for the real GET) — falling back to Private flashed the opposite of the truth on every open of
 a shared vault. `lib/accessMode.ts` `effectiveTeamMode` is the single authority for both the row
 badges and the detail pane's tri-state, mirroring `permissions/resolver.ts` at the org level.
+The panel now edits one or many folder/file rows through the atomic bulk-access API; its synthetic
+Entire vault row is mutually exclusive with item selections. **Everyone** replaces both org and
+per-member overrides in the selected subtrees, while a named audience replaces only those members.
+`readonly` is the item-level combined grant+cap (the vault posture still stores `view`).
+
+Automatic sidebar colours are a deterministic, account-personal fallback for files/folders without
+an explicit manual colour. A broad palette hashes stable item identities, then resolves collisions
+within each ordered sibling group so the two preceding rows do not repeat; explicit synced colours
+always win and participate in that neighbour check. Automatic colours are stable across restarts and
+can be enabled in Account Settings → Appearance; they are off by default.
+
+Vault Health reads `vaultSyncStatus` from the vault channel independently of the open note's
+`syncStatus`, which still controls editor permissions. A note-level refusal is not lost vault
+membership. Inbound safety refusals are `inbound-blocked` issues, distinct from disk write failures;
+large issue lists render in pages.
+
+Vault Health keeps its local census separate from its server inventory. Local totals come from Rust's
+disk/index pass and refresh during sync and access cleanup. For owners and admins, stored server totals
+and missing-from-server checks use the access tree, including private notes; the registry remains the
+accessible inventory used for download comparisons. Other accounts see their accessible server inventory.
+The server view is explicitly last-known while offline, signed out, reconnecting or denied. Matching
+paths/counts never imply matching content — per-note pushed/sync state remains the content authority,
+and active work takes precedence over a healthy comparison.
+An attachment-local-only notice is driven only by the server's explicit
+`attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
+the vault may be Pro, and billing-disabled self-hosts may still sync attachments.
+The notice persists in file previews and Vault Health while notes continue to
+report their own sync state. Health includes server-only files when deciding
+whether to show the refusal. Missing binary files offer explicit single/all
+file downloads through the attachment mirror's readable listing and guarded
+transport; errors remain visible. Confirmed server removal uses the existing
+file-delete authorization and is serialized against the mirror's transfers.
+The vault Settings list shows account memberships and this app profile's recent
+local folders, not a scan of the managed root. Production and staging have
+separate recents even when they share a root; Open existing reopens a folder.
 
 ### Server (`app/apps/server/src/`)
 Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
@@ -276,6 +338,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `organization` plugins (org = **vault**, the user-facing unified entity — Local / Synced / Remote states;
   roles owner/admin/member; 48h invitations). Session token is
   opaque (instant revocation), stored client-side only in the OS keychain.
+  Desktop "Remember password" is a separate explicit opt-in: `rememberedPassword.ts`
+  keeps only the last successfully authenticated password in the OS keychain,
+  bound to server URL and email. Logout clears the session but retains this saved
+  login; turning the switch off deletes it. The old email-only preference does
+  not opt existing users into password storage. No password enters localStorage.
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
   `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
@@ -283,6 +350,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   no renderer deps).
 - `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
+  Managed billing gives new accounts two free unsubscribed vaults and reserves standalone-file sync for
+  Pro vaults. Migration 031 snapshots the prior benefits per user: existing accounts keep three free
+  vaults, but standalone-file sync still requires Pro. An active or past-due Pro vault unlocks standalone-file
+  sync for all its members; billing-disabled self-hosts remain unlimited.
   Deleting a vault cancels **at period end first** and aborts the delete if the provider refuses (502
   `subscription_cancel_failed`; Better Auth's own org-delete is off via `disableOrganizationDeletion`).
   The row then outlives the org as a **tombstone** — migration 024 dropped the cascade and added
@@ -310,7 +381,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   registry pull and `ready.revoked` follow the posture for free. Management stays role-based
   (`shares.ts canManage`), so an owner can always undo what they set; two gates that used to ride on
   the role now ask for content access too — minting a public link, and a whole-vault checkpoint
-  revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). **New
+  revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). A blob that carries a
+  `doc_id` is judged by this same resolver (`canReadAttachment` / `canWriteBlob` in
+  `permissions/http-gates.ts`), so a folder share reaches the FILES in it and not only the notes;
+  a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — vault-wide
+  readers see all, a scoped member only what a readable note references. **New
   vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
   grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
   owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,
@@ -337,6 +412,16 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   carry `code: "no_write_access"` and are checked BEFORE the `root_frozen` latch. `onAuthenticate`
   re-resolves `effectivePermission` at connect, so a pre-revocation edit token cannot be replayed for the
   rest of its TTL.
+  Future-member access is separate from the live vault posture. Migration 032 adds an org
+  `join_default` (Private by default), per-membership snapshots and an ordered ACL revision, and
+  migration 033 seeds that default ONCE from each existing vault's posture (org-wide vault grant
+  `edit` → `open`, `view` → `readonly`, sealed or ungranted → `private`) so a Shared team sees no
+  change; vaults created later keep the Private default. Only
+  content that already existed when someone joined uses that snapshot; a team grant written before
+  a Private join stays hidden, while a later Everyone action has a newer revision and deliberately
+  opens the selected subtree. Existing memberships have no snapshot and are unchanged. The default
+  and atomic bulk mutation live in `permissions/access-management.ts`, shared by HTTP and MCP, and
+  management remains owner/admin-only even when the manager cannot read the selected content.
   `POST /vaults/:vaultId/access-check` (member-gated, `ACCESS_CHECK_MAX` 2000, `runPool` at
   `config.backfillConcurrency`) answers per-doc `effectivePermission` so the desktop can cross-check a
   revocation against the resolver rather than against the listing that announced it; an id with no row
@@ -346,7 +431,7 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   member as a REVOCATION (no tombstone) instead of a deletion.
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note`.
+  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text`.
   `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
   optional `expectedRevision` and refuse a stale write (the check runs under the doc writer's per-doc
   lock, so check + apply are atomic). `edit_note` applies exact-anchor replace/insert/delete ops (an
@@ -357,6 +442,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   every open app exactly like a teammate's. `delete_folder` refuses a non-empty folder unless
   `recursive: true`. Move/delete semantics live in `src/registry/tree-ops.ts`, shared with the HTTP
   registry routes so the two surfaces cannot drift.
+  `search_notes` ranks `blob_text` beside `note_index` and tags every hit `kind: "note" | "file"`
+  (opt out with `includeFiles: false`); `list_attachments` / `read_attachment_text` serve the
+  EXTRACTED TEXT of a file, never its bytes, through `filterReadableBlobs` / `canReadAttachment`.
+  There is deliberately no `attach_file` — base64 over JSON-RPC with no idempotency key, against a
+  byte path built to avoid exactly that (see the note in `tools.ts`).
   Token = `mcp_…` minted from desktop Vault Settings → MCP; scoped to one (user, vault), gated by
   the **same** per-file ACL. Only a sha256 hash is stored.
 - `index/` — `embedder.ts` is a dependency-free 256-dim hashed bag-of-words (works air-gapped;
@@ -366,8 +456,10 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
 **Postgres tables** — Better Auth (`user`, `session`, `account`, `organization`, `member`, `invitation`;
 camelCase quoted, migration 001), app tables (all ids `TEXT`, migration 002+): `vaults`, `folders`, `notes`
 (id==doc_id, soft-delete via `deleted_at`), `files` (id==doc_id), `shares`, `doc_updates`, `doc_snapshots`,
-`blobs`, `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one plaintext
-token per note; revoke = DELETE).
+`blobs` (`doc_id` = the `files` row these bytes are, or NULL for an `attachments/` drop — m028),
+`blob_text` (a file's extracted text + vector; derived, purgeable, cascades with the blob and the
+vault — m028), `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one
+plaintext token per note; revoke = DELETE).
 
 ## Server env vars (`app/apps/server/.env`)
 `DATABASE_URL` (Docker host port **5439**→5432) · `JWT_SECRET` (Better Auth crypto **and** sync JWTs —
@@ -416,3 +508,41 @@ Phases 0–3 are complete and wired end-to-end: local Obsidian-lite → local CR
 (multi-device) → team collaboration (orgs, folder ACL, presence, attachments) — plus MCP, locks, join
 codes, semantic search, and a graph view. Deferred to Phase 4: structural WYSIWYG CRDT, richer vector
 search, AI-as-CRDT-peer, at-rest encryption, OAuth, and an iOS app.
+
+Embedded attachments under `attachments/` without a standalone `files` identity sync on Free,
+subject to storage quotas and existing blob ACLs. Bytes remain in the configured blob store,
+not in Yjs. A standalone-file Pro refusal must not stop embedded transfers. Rich note copy
+embeds attachment bytes in sanitized clipboard HTML; paste imports them into the destination
+vault. Plain-text clipboard fallback remains Markdown.
+
+Existing embedded links and blob IDs are retained across the Free attachment-policy
+update; no note rewrite or blob migration is required. Missing embedded paths are
+restored even if identical bytes already exist at another local path, without
+overwriting occupied paths. Legacy whole-list Pro refusals can be re-probed on
+a sync pass after a one-minute cooldown, allowing a running updated desktop to
+recover when its server is upgraded.
+
+### Baalda Assistant engine
+
+AI’s Baalda Assistant provides user-reviewed agent repairs. `http/routes/housekeeper.ts` hosts the optional
+`app/apps/server/housekeeper/index.mjs` module (override with `HOUSEKEEPER_MODULE`) without a
+static build dependency. Every request checks vault membership and a non-deleted
+`pro` subscription in `active`/`past_due` on Cloud. Self-hosters with
+`BAALDA_DEPLOYMENT=self-hosted` have access. The Apache-2.0 module uses the server-side
+OpenRouter SDK through swappable Decisions/chat adapters. Personal provider keys live in the desktop OS keychain and are supplied per inference request; the server does not persist them. Candidate reads use per-note permissions and apply/undo use
+`DocWriter.editContent` with revision/span guards under its lock. Preview tokens
+are scoped to user/vault, expire, and live in bounded process memory. No sync wire
+format or bridge timing changes. Setup, limits and isolated tests:
+[Baalda Assistant](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI; Health retains its basic overview.
+
+Baalda Agents follow observe → investigate → propose → approve → execute → verify.
+Finding cards are data-driven; models choose allowlisted capabilities, while
+existing permission-checked tools own changes. Link and filename changes require
+concrete previews. Never interpret generated text as executable tool authority.
+
+On Cloud servers Free vaults can register 20,000 live notes. New note
+registration and MCP creation serialize quota checks with the same per-vault
+session advisory lock (`billing/note-quota.ts`). Existing notes remain adoptable
+at/above the cap; no data is deleted. `note_limit_reached` prompts an upgrade but
+does not stop reconciliation of existing notes. Self-hosters and
+active paid subscriptions bypass this note cap.

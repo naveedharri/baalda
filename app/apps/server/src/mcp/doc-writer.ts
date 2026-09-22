@@ -3,9 +3,21 @@ import * as Y from "yjs";
 import type { LocalTransactionOrigin, Server } from "@hocuspocus/server";
 import { formatDocName } from "../sync/doc-name.js";
 import type { SyncContext } from "../sync/hocuspocus.js";
-import { appendUpdate, loadDocState } from "../yjs/persistence.js";
-import { indexDoc } from "../index/indexer.js";
+import { loadDocState } from "../yjs/persistence.js";
 import { config } from "../config.js";
+import {
+  applyDetached,
+  setDocBatchRuntime,
+  withDocLock,
+  type DocActor,
+  type DocUpdatePublisher,
+  type DocWrittenHook,
+} from "../sync/doc-batch.js";
+
+/** Re-exported from `sync/doc-batch.ts`, which now owns the write path these
+ *  describe (the MCP tools and the bulk push route share it). Kept on this
+ *  module so every existing importer keeps its import path. */
+export type { DocActor, DocUpdatePublisher, DocWrittenHook };
 
 /**
  * Server-side writer for a note's shared Y.Text `content` — the bridge between
@@ -28,11 +40,6 @@ import { config } from "../config.js";
 const CONTENT_FIELD = "content";
 /** Transaction origin tag for edits that originate from the MCP server. */
 export const MCP_ORIGIN = "mcp";
-
-/** Who is behind a server-side write, for attribution (versions, last-edited). */
-export interface DocActor {
-  userId?: string | null;
-}
 
 /**
  * One targeted change to a note body: delete `deleteLength` chars at `index`,
@@ -107,71 +114,16 @@ export interface DocWriter {
   peekContent(vaultId: string, docId: string): Promise<string | null>;
 }
 
-/**
- * Called after a DETACHED write (no client connected), with the writer's
- * identity. The live path needs no equivalent: it goes through Hocuspocus, whose
- * `onChange` already reports the editor via the transaction origin's context.
- */
-export type DocWrittenHook = (
-  vaultId: string,
-  docId: string,
-  userId: string | null,
-) => void;
-
-/**
- * Publishes a doc update to background vault subscribers — the same fan-out the
- * sync server's `onChange` performs for a live document.
- *
- * The detached path below needs this explicitly. `publishDocUpdate` is driven
- * off Hocuspocus's `onChange`, and the detached path deliberately never touches
- * Hocuspocus, so without this an edit to a note nobody has open is persisted
- * correctly and announced to no one: every connected app keeps the old text on
- * disk until its next full reconcile. Since "nobody has this note open" is the
- * normal case for an AI writing into a vault, that was most MCP edits.
- *
- * Returns `void | Promise<void>` so the contract itself is safe: the real
- * publisher fans out over pub/sub and can REJECT (a Redis blip), and a rejection
- * nobody awaits is an unhandled rejection — which on Node 22 with no
- * `unhandledRejection` handler takes the whole process down. Declaring the
- * promise here means `mutate` below awaits and swallows it once, for every
- * present and future injection site, instead of depending on each caller to
- * remember its own `.catch`.
- */
-export type DocUpdatePublisher = (
-  vaultId: string,
-  docId: string,
-  update: Uint8Array,
-) => void | Promise<void>;
-
 export function createDocWriter(
   server: Server<SyncContext>,
   publishUpdate?: DocUpdatePublisher,
   onDocWritten?: DocWrittenHook,
 ): DocWriter {
-  /**
-   * Per-doc write serialisation. The detached path awaits between reading the
-   * stored state and appending its update, so two concurrent MCP writes to one
-   * note used to each hydrate the SAME state and each apply a whole-body
-   * delete+insert — Yjs merged both inserts and the note held the text twice
-   * (#78's "duplicated" outcome). Chaining per docId makes the second write see
-   * the first's result, which is also what makes a revision precondition mean
-   * anything. Self-cleaning: an entry is removed once its chain settles.
-   */
-  const locks = new Map<string, Promise<unknown>>();
-  async function withDocLock<T>(docId: string, fn: () => Promise<T>): Promise<T> {
-    const prev = locks.get(docId) ?? Promise.resolve();
-    const run = prev.then(fn, fn);
-    const chain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    locks.set(docId, chain);
-    try {
-      return await run;
-    } finally {
-      if (locks.get(docId) === chain) locks.delete(docId);
-    }
-  }
+  // Everything the bulk `docs/batch` applier needs to take the LIVE path and to
+  // fan out a detached write — the live sync server plus these two hooks. This
+  // is the one place that already holds all three, and there is exactly one of
+  // each per process. See `sync/doc-batch.ts DocBatchRuntime`.
+  setDocBatchRuntime({ server, hooks: { publishUpdate, onDocWritten } });
 
   function mutate(
     vaultId: string,
@@ -206,52 +158,12 @@ export function createDocWriter(
       return;
     }
 
-    // Detached path: hydrate, mutate, persist the incremental update.
-    const state = await loadDocState(docId);
-    const doc = new Y.Doc();
-    const updates: Uint8Array[] = [];
-    const capture = (u: Uint8Array) => updates.push(u);
-    try {
-      if (state) Y.applyUpdate(doc, state);
-      // Register AFTER hydration so we capture only our own edit.
-      doc.on("update", capture);
-      try {
-        doc.transact(() => fn(doc.getText(CONTENT_FIELD)), MCP_ORIGIN);
-      } finally {
-        doc.off("update", capture);
-      }
-      if (updates.length > 0) {
-        const merged = Y.mergeUpdates(updates);
-        await appendUpdate(docId, merged);
-        // Fan out to background subscribers, which the live path gets free from
-        // Hocuspocus's onChange. Best-effort like the re-index: the write is
-        // already durable, and failing it here would turn a delivery problem
-        // into a lost edit.
-        //
-        // `await` inside the try so this covers BOTH failure shapes: a
-        // synchronous throw AND a rejected promise. The catch alone only handled
-        // the first, and the production publisher is async — so the case that
-        // actually happens (pub/sub down) was the one going uncaught, where an
-        // unhandled rejection would take the process with it.
-        try {
-          await publishUpdate?.(vaultId, docId, merged);
-        } catch (err) {
-          console.warn(`[mcp] failed to publish update for ${docId}`, err);
-        }
-        // Keep search/graph in sync (best-effort; never fail the write on it).
-        await indexDoc(docId).catch(() => {});
-        // Attribution + version capture, the detached counterpart of the sync
-        // server's `onDocEdited`. Best-effort for the same reason the publish
-        // above is: the write is already durable.
-        try {
-          onDocWritten?.(vaultId, docId, userId);
-        } catch (err) {
-          console.warn(`[mcp] onDocWritten hook failed for ${docId}`, err);
-        }
-      }
-    } finally {
-      doc.destroy();
-    }
+    // Detached path: hydrate, mutate, persist the incremental update. Shared
+    // with the bulk push route — see `sync/doc-batch.ts applyDetached`, which
+    // carries the register-observer-after-hydration subtlety.
+    await applyDetached(vaultId, docId, (doc) => doc.transact(() => fn(doc.getText(CONTENT_FIELD)), MCP_ORIGIN), actor, {
+      hooks: { publishUpdate, onDocWritten },
+    });
   }
 
   // A plain closure, NOT a method using `this`: call sites hand these functions

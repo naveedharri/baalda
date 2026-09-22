@@ -95,6 +95,12 @@ describe("notSyncingReason", () => {
     ).toBe("no-access");
   });
 
+  it("distinguishes a connected vault with a denied note from revoked membership", () => {
+    const state = { ...signedOutOnSyncedVault, authStatus: "signed-in" as const, hasSession: true, syncStatus: "no-access" as const };
+    expect(notSyncingReason({ ...state, vaultSyncStatus: "synced" })).toBe("no-access");
+    expect(notSyncingReason({ ...state, vaultSyncStatus: "no-access", noteOpen: false })).toBe("vault-no-access");
+  });
+
   it("drops a stale no-access once the note is closed", () => {
     // `syncStatus` belongs to the open doc's socket and `closeNote` leaves the
     // last verdict in place, so the empty pane must not keep accusing the vault.
@@ -178,7 +184,7 @@ describe("NotSyncingBannerView", () => {
     // An alarm, not a status line — screen readers should interrupt for it.
     expect(banner?.getAttribute("role")).toBe("alert");
     expect(banner?.textContent).toContain("Signed out");
-    expect(banner?.textContent).toContain("your changes are not syncing");
+    expect(banner?.textContent).toContain("not syncing");
   });
 
   it("invokes the sign-in action when Sign in is clicked", () => {
@@ -197,8 +203,9 @@ describe("NotSyncingBannerView", () => {
   it("names a withdrawn grant without offering Sign in", () => {
     const el = render({ reason: "no-access", onSignIn: () => {} });
     const banner = el.querySelector(".not-syncing-banner");
-    expect(banner?.textContent).toContain("You no longer have access to this vault");
-    expect(banner?.textContent).toContain("your changes are not syncing");
+    expect(banner?.textContent).toContain("You no longer have access to this note");
+    expect(banner?.textContent).not.toContain("access to this vault");
+    expect(banner?.textContent).toContain("not syncing");
     expect(banner?.querySelector("button")).toBeNull();
   });
 

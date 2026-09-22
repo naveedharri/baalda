@@ -7,7 +7,315 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Make a vault local only (server + desktop).** `GET /api/orgs/:orgId/unsync-preview`
+  (owner; counts notes/files/folders/`attachmentBytes`/members/publicLinks/mcpTokens/
+  checkpoints plus the live `subscription` `{status, currentPeriodEnd, cancelAtPeriodEnd}`),
+  `POST /api/orgs/:orgId/unsync` (`{confirmName}`; 409 `name_mismatch` and NOTHING is
+  touched, 403 `owner_only`, 404 `vault_not_found`, 502 `subscription_cancel_failed`), and
+  `GET /api/orgs/:orgId/status` (404 `vault_not_found` vs 403 `not_a_member` — the one probe
+  that tells "the owner made it local only" apart from "that folder is someone else's").
+  The teardown is `deleteVaultEverywhere`, SHARED with `DELETE /api/orgs/:orgId` so a second
+  hand-written purge cannot drift from its table list: money first (a provider that will not
+  cancel aborts with a 502 before anything is destroyed), then the rows, then every session's
+  `activeOrganizationId` nulled. `GET /api/folders|/notes|/files` now answer **404
+  `vault_not_found`** for a vault row that is gone instead of `200 []` — an empty listing
+  reads as "everything you hold was revoked" and the inbound planner would remove the lot,
+  so the listing has to throw. Desktop: a danger-zone action in Vault Settings behind a
+  type-the-name confirm, `lib/vault/unsyncPlan.ts` for the local half, a
+  `VaultUnsyncedBanner` and `stampedOrgGone` in the store for a folder whose vault is gone.
+  The `.md` files on disk are never touched.
+- **Bulk note deletes.** `POST /api/vaults/:vaultId/notes/delete-batch` soft-deletes up to
+  `batchMaxNotes` ids in one request: scoped to the vault (an id with no live `notes` row
+  here never reaches the resolver), per-doc `effectivePermission` through the shared
+  `ResolverCache`, `NoteDeleteResult` `deleted` | `denied` | `error` per id, ONE
+  `registry-changed` for the batch, and `evictDoc` off the response path. The desktop's
+  `registry.deletePaths` takes it above `BULK_THRESHOLD_DOCS`.
+- **Bulk sync engine (server + desktop).** Above `BULK_THRESHOLD_DOCS` (25) the desktop
+  registers folders/notes/files through `POST /api/vaults/:id/{folders,notes,files}/batch`,
+  pushes content through `POST /api/vaults/:id/docs/batch` (base64 Yjs V1, per-item
+  `effectivePermission`, `expectEmpty` re-checked under the per-doc lock so a seeded push
+  can never double a teammate's text), and downloads a whole vault through a paged, gzipped
+  bootstrap (`POST /api/vaults/:id/bootstrap` + `GET …/bootstrap/:sid?cursor=`) applied by one
+  Rust IPC per page (`apply_bootstrap_batch`), which writes a file only over nothing
+  (missing or 0 bytes), reports identical bytes `unchanged` (still committing the CRDT rows,
+  the crash-mid-page idempotency), and answers `conflict` for differing content so the
+  per-doc merge path handles it. Server-only notes materialize through one
+  `materialize_notes_batch` IPC per chunk. Registry reads gain keyset pagination
+  (`limit`/`after`); the vault channel hello gains `mode: "live-only"`. Resume state lives
+  on `VaultSyncConfig.bootstrap`; a 404 on any bulk route is a terminal `server_too_old`
+  error with no silent per-note fallback. Migration 030, env keys `BATCH_MAX_*` /
+  `BOOTSTRAP_*` (see `docs/DEPLOY.md`). 5,000 docs bootstrap in ~0.7 s server-side with a
+  constant 5 queries per page.
+
+- **Heal and bulk actions on the Health checks (desktop).** A failing check row now
+  carries the whole-check buttons its items allow: "Delete all" on empty or unreadable
+  notes, "Save copies" on unreadable and oversized ones, "Empty trash", and a single
+  accented **Heal** on the six findings Baalda can fix itself — rebuild the index
+  (stale index, markdown not picked up), reclaim leftover history, reset the history of
+  every heavy note, create the empty notes a broken `[[wikilink]]` points at, and rename
+  illegal Windows filenames to legal ones through the path that preserves `doc_id`.
+  Destructive runs confirm once, with the true count, in the page's existing dialog;
+  the row then reports "Deleted 11 of 12 · 1 failed" inline (never only a toast), lists
+  what it left alone and why, and the checks re-run afterwards. Case collisions, long
+  paths, duplicate titles, broken properties blocks and missing embeds stay MANUAL on
+  purpose, and each now says so in its own "What to do". Wording and the per-check
+  action table live in `lib/health/checks.ts`; the planning, skip rules and execution
+  loop are pure and injected (`lib/health/checkActions.ts`), so all of it is tested in
+  Node with no vault underneath.
+- **Files in the Access panel.** `GET /vaults/:id/access-tree` now returns the
+  vault's `files` rows beside its notes, and the panel lists them with the
+  sidebar's own glyph. They were already enforceable — one
+  `shares.resource_type = 'file'` namespace, one `effectivePermission`,
+  `locateDoc` reading `notes` and `files` in one union — so a `.pdf` obeyed its
+  folder's grant while being the one thing in the vault whose access could not
+  be seen or set. `AccessEntry.kind` splits `note` from `file` for the glyph
+  and the noun; `accessResourceType` maps both back to the server's one `file`
+  type, so nothing about the wire changed. The local-tree fallback emits a file
+  row only for a path this device has registered (no `files` id, no share to
+  name), and a hidden root `attachments/` blob has no row at all.
+- **`S3_KEY_PREFIX` (server, operator-only).** Optional prefix on every NEW blob object
+  key (`<prefix>/vaults/<vaultId>/<sha256>`), so staging and production can share one
+  bucket. Slashes are stripped, `..` is refused at startup, and rows keep storing the
+  full key — reads, deletes, GC and `migrate-blobs` still resolve objects written under
+  any earlier prefix.
+- **Tree binaries sync (desktop, Stage A).** `list_binaries` walks the whole vault for
+  registry binary formats (not only `attachments/`), sharing the `attachment_hashes`
+  cache; each tree binary is registered as a server `files` row via `POST /api/files`
+  with the local `files.id` (persisted under `files` in `.context/config.json`) and
+  uploaded with `docId` so the server's resolver ACL applies. Downloads of tree paths go
+  through `write_tree_binary` (its own guard; `ensure_attachment_rel` untouched for
+  server-supplied `attachments/` paths) and are remembered for one watcher echo. Any
+  `syncAs: attachment` change now routes to attachment sync instead of the note path.
+  Extracted text is pushed to `PUT /api/vaults/:id/blobs/:blobId/text` after
+  `files-indexed`. Rename of a tree binary still does not propagate (pinned test; Stage B).
+- **Attachment transport (desktop).** `AttachmentSync.pass` uses the server's
+  `intent → PUT → complete` flow when offered (404 ⇒ legacy POST, remembered per server
+  URL): a dedupe hit sends zero bytes, 402 aborts the pass with one toast, 413/415 skip
+  the file permanently, `upload_incomplete` retries the PUT, multipart parts carry ETags.
+  Bytes move through Rust (`attachments.rs upload_file`/`download_file`, `reqwest` with
+  `redirect::Policy::none()`, no bearer on presigned URLs, hash-as-you-write into a
+  `.tmp` then rename). `list_attachments` caches `(size, mtime, sha256)` in
+  `attachment_hashes` inside `.context/index.sqlite` and hashes misses with the streamed
+  `sha256_file`, so a vault of videos is no longer re-read on every reconcile.
+- **Search over files.** `index.rs` gains a tier-2 `files`/`files_fts`/`file_text`
+  schema for every surfaced non-note file; `extract.rs` pulls text from txt/csv/json/
+  code, html (tag-stripped), docx/xlsx/pptx (`zip` + `quick-xml`) and zip entry names,
+  with size caps, an unzip guard, `catch_unwind` around parsers and control-char
+  stripping so binary-derived text can never forge a `<mark>`. Extraction runs on one
+  per-vault worker thread (`extract_worker.rs`) outside the index mutex, cached by
+  sha in `file_text`. `search_all` merges both FTS tables (notes win ties); results
+  carry `kind`/`ext`, and `SearchPanel` badges file hits. `get_file_text` IPC and a
+  coalesced `files-indexed` event are the hooks for the server-side `blob_text` pass.
+- **Format registry + viewers.** `src/lib/formats.ts` is the single authority for
+  what a file is (surface/open/embed/mime/syncAs/maxBytes), kept in lockstep with
+  Rust `vault.rs ALLOWED_EXTS`/`NOTE_EXTS` by `formatsLockstep.test.ts`. `FilePreview`
+  routes to lazy viewers: video/audio (native), csv (`lib/csv.ts`), code (read-only
+  CM6), docx (mammoth through `editor/sanitizeHtml.ts`), xlsx (`read-excel-file`),
+  and a `FileCard` fallback so nothing surfaced is a dead click. In-note embeds gain
+  media, csv and file-chip widgets. Drop/paste accept any registry format and refuse
+  oversize files with a toast before writing.
+- **Note family indexed and openable.** `index.rs` indexes all seven note extensions
+  (only markdown runs tag/wikilink parsing); `.txt`/`.markdown`/`.mdx` open in the
+  editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
+
+### Changed
+- **"Baalda Steward" is now "Baalda Assistant".** UI copy, docs and the `Steward*`
+  components/identifiers were renamed; the `housekeeper` engine names, API paths, env
+  vars and stored keychain/localStorage keys are unchanged.
+- **Existing vaults keep letting new teammates in.** Migration 032 gave every vault a
+  Private default for people who join later, which silently shut newcomers out of a vault
+  whose posture is Shared. Migration 033 seeds that default once from each existing vault's
+  current posture — Shared stays Shared, Read-only stays Read-only, Private and never-shared
+  stay Private — and never touches a vault whose default has already been set. Vaults created
+  from here on still start Private for future members.
+- **The Health page's activity strip looks forward.** The heat-map ran GitHub's
+  trailing twelve months, so a young vault was 52 columns of grey with two coloured
+  cells in the far right. It now spans the 1st of last month through the end of the
+  month three ahead (`HEATMAP_FORWARD_MONTHS` in `lib/health/heatmapRange.ts`, a pure
+  range/grid module): five months, today near the middle, and the days that have not
+  happened drawn as dashed `data-future` cells that never take a heat level.
+
+### Fixed
+- **Revoked binaries are removed only once this device has confirmed the server holds
+  their bytes.** A `files` row is minted before the upload and the upload can be refused
+  for good (Free plan, blob ceiling, full quota), so the row was never proof of possession.
+  The registry now persists `filesConfirmed` in `.context/config.json` (set only by a
+  completed upload, a download, a dedupe adoption or a ready-blob listing match), announces
+  only confirmed ids in `hello.files`, and `removeRevokedBinary` leaves an unconfirmed file
+  on disk with an `orphan` failure, mirroring the note rail's `isPushed` refusal. Older
+  configs load unconfirmed and settle on the next listing pass without re-uploading.
+- **Server CRDT store.** `compact()` runs under a per-doc advisory lock in one transaction
+  with a `seq` guard, so two racing compactions can no longer overwrite a newer snapshot
+  and delete its log (committed edits were lost). `loadDocState`/`loadDocDiff` read snapshot
+  + log in one `REPEATABLE READ` transaction, so a compaction landing between the two reads
+  can no longer serve a truncated doc and cache its state vector as authoritative. A failed
+  `appendUpdate` in Hocuspocus `onChange` is logged instead of crashing the process
+  (`unhandledRejection`/`uncaughtException` guards in `index.ts`).
+- **Blobs.** The orphan sweep no longer collects doc-backed tree files (`doc_id IS NULL`);
+  the object-deletion drain skips keys a live row still references; two identical tree
+  files get their own rows (migration 029 replaces the `(vault, sha)` unique with per-doc /
+  attachment partials) so deleting one no longer destroys the other's bytes; a folder
+  move rewrites `files.path` and `blobs.rel_path`; a folder delete removes its files and
+  writes `file_tombstones` so `/access-check` answers `none` for them; superseded rows for
+  an edited file are retired; the direct upload route derives the S3 object key so it
+  works against an S3/R2 server. Desktop: `diffAttachments` never downloads onto a path the
+  disk already occupies, so an edited attachment is not overwritten by its older server copy.
+- **Desktop bridge.** Local-only vaults reconcile a persisted-empty doc against a file that
+  gained content while the app was closed (the first keystroke used to erase it);
+  `VaultDocStore.promote` waits for an in-flight cold apply (one bridge per doc_id);
+  `save_yjs_snapshot` truncates the update log only up to a watermark the bridge saw
+  (`appendYjsUpdate` returns the rowid, `loadYjsState` reports `lastUpdateId`); atomic writes
+  use unique temp names; `drainEgest` serializes; `settleServerEmpty` also checks the local
+  CRDT before marking a doc pushed; a read-only doc keeps a `.context/trash` copy of an
+  on-disk edit it cannot send.
+- **Server permissions / versions.** `scopedDocs` includes the per-user vault-scoped grant
+  (readable set ≡ resolver); revert runs content writes after COMMIT, skips a 23505 note
+  re-insert, and refuses a revert that would soft-delete more than `max(5, 20%)` notes
+  (409 `revert_too_destructive`); `noteSizeRefusal` compares bytes; migrations take an
+  advisory lock; `canWriteBlob` asks `canEditDoc` first.
+- **Tests.** The server suite pins `BLOB_STORAGE=postgres` in a vitest setup file so a dev
+  `.env` pointing attachments at a real bucket does not change what the suite asserts.
+- **A re-shared file took a restart to come back, and downloaded in silence
+  (desktop).** The blob mirror was driven by local disk events alone — a watcher
+  change, the delete queue, and the one pass inside `enable` — so no server-side
+  signal ever scheduled it: a note whose access returned was materialized by the
+  `reauth` pull in seconds, while the `.docx` beside it waited for an unrelated
+  file to change or for the app to relaunch (the same silence hid a teammate's
+  newly added binary). `handleServerReauth`, `handleServerRevoked` and a registry
+  pull that changed something now each schedule a (debounced, coalesced) pass,
+  and that pass reports itself: it announces its downloads to the vault's
+  `SyncProgressReporter`, so the header counts files beside notes and refuses to
+  stamp `done` while bytes are still moving, and it badges each incoming path
+  `queued` → `syncing` → `synced` — which the folder roll-up credits even before
+  the file exists on disk, since a file the sidebar has no row for yet still has
+  a folder. Per-file byte progress is deliberately not surfaced: the Rust
+  streaming download hashes into a temp file and renames, and emits no progress
+  events.
+- **Dev only: the app stopped reporting its sync status after a hot reload.** `useStore`
+  and `syncManager` are module singletons, and every listener that connects them (badge
+  status, progress, per-doc and per-file dots, registry map, presence) is registered once
+  per page load, in `initAuth`. A Vite HMR round that re-executed `store.ts` or the sync
+  layer therefore produced a fresh, listener-less pair that nothing re-initialised: the
+  vault opened and the channel connected, but the header read "not connected" until the
+  webview was reloaded by hand. Both modules now reload the page on a hot update instead
+  of running half-wired. No effect on packaged builds, where a module is evaluated once.
+- **Renaming a synced file could fork it into two `files` rows (desktop +
+  server).** When the rename's grace window closed against an unreachable
+  server, the delete queue dropped the candidate ("listing failed — leave the
+  server alone"), so the new path looked brand new and the upload pass
+  registered a SECOND row for it — while the blob, a dedupe hit, stayed bound to
+  the first (`doc_id` adoption is NULL→set only). One file, two doc_ids, and
+  Private set on whichever row the panel happened to show did nothing on disk.
+  A failed listing (or a refused move) now KEEPS the candidate for up to three
+  windows instead of falling through, and `ensureFileRow` mints no new id while
+  one is unsettled; a dedupe hit whose blob names another row whose path is gone
+  from this disk is treated as that file renamed — the duplicate row is dropped
+  and the original adopted onto the new path, which also heals a fork an earlier
+  session already wrote to `.context/config.json`. Two files that merely hold
+  identical bytes are untouched (still one blob, two rows). Server-side, a
+  dedupe hit rebinds a blob whose `files` row has been DELETED, so bytes are
+  never stranded on an id the resolver cannot answer for.
+- **A file set to Private stayed on the disk of everyone who lost access
+  (desktop + server).** A note leaves via `ready.revoked` → the inbound plan;
+  a `files` row had no route at all, so a `.pdf` set to Private stopped syncing,
+  left every teammate's sidebar, and remained fully readable in any viewer on
+  their disk forever. Three gaps, all closed. `hello` now carries a `files`
+  array of tree-binary doc ids beside the state-vector `manifest` (a binary has
+  no CRDT, so it has no state vector to advertise), and
+  `revokedFromManifest` names them under the same `REVOKED_CAP`.
+  `POST /vaults/:id/access-check` unions `files` with `notes`, so a revoked
+  binary is ANSWERED rather than left out — an unanswered id reads as "no second
+  opinion", which kept the whole group on disk. And `planInbound` gained a
+  binary pass: a named binary is removed via Rust `delete_file`, or moved to
+  `.context/trash/<stamp>/` when this user uploaded it, then `forgetFileId`s its
+  mapping. (`files` has no `created_by` and the doc is absent from every listing
+  by the time the answer is needed, so authorship is learned where the row is
+  created — the blob mirror's upload path — and persisted beside the notes' in
+  `.context/config.json`; a DOWNLOADED binary is explicitly not claimed.) Deliberately narrower than a note's route — a binary has no listing to
+  be absent from, so it is never removed on absence and always owes the
+  access-check round trip, whatever the cap says; the note cap still counts notes
+  only, so binaries can never loosen it. The removal claims its own watcher echo
+  (`BinaryDeleteQueue.suppressNext`), or the delete queue would have read it as a
+  user delete and answered with `DELETE /api/files/:id`, destroying the owner's
+  copy. `GET /vaults/:id/blobs` already filtered the bytes out, so nothing
+  downloads back (pinned). The blob listing's `docId` is now recorded on
+  download too, which is what gives a teammate's binary a doc id on this device
+  and so lets a later revocation of it be named at all. The Access panel's
+  Private copy says what actually happens.
+- **Deleting a synced file brought it back (desktop + server).** Binary identity
+  was the sha256 and nothing else, so a file removed from the vault — in the
+  sidebar or in Finder — was, to `diffAttachments`, content the server had and
+  this device did not: the next pass downloaded it again. Deletes now propagate.
+  New `DELETE /api/files/:id` (member + the `canWriteBlob` gate that let the
+  bytes be uploaded; idempotent 204) removes the `files` row AND the blobs whose
+  `doc_id` it is, so the file leaves `GET /vaults/:id/blobs`, the readable set
+  and the access tree at once — a hard delete, because `files` has no tombstone
+  and no client removes a local binary on the strength of a missing row. On the
+  desktop, `lib/sync/binaryDeletes.ts` mirrors the note queue's rails
+  (`drainDiskDeletes`, #93): a 2.5s window, the DISK — not the watcher event,
+  which is a bare `tree` for every binary — decides at the end of it, a rename
+  is paired by content and MOVES the `files` row (`POST /api/files` with the
+  same id) instead of forking its identity, the server must already hold the
+  bytes, and more than `max(5, ceil(binaries × 0.2))` vanishing at once abandons
+  the batch with a toast. An `attachments/` drop goes through
+  `DELETE /api/blobs/:id` unforced, so a 409 `blob_referenced` leaves an image
+  a note still embeds alone. `AttachmentSync` skips a download while a delete is
+  pending, which is what stops the 400ms pass resurrecting the file mid-window.
+  No trash copy, deliberately: a binary's bytes live only in the file that was
+  deleted, so the only copy left to keep is the one we were asked to remove.
+- **Packaged-build CSP.** `frame-src 'none'` blocked the PDF embed, the file preview
+  and `HtmlView` in installed builds, there was no `media-src`, and Windows serves the
+  asset protocol at `http://asset.localhost`, which `img-src` never allowed. Pinned by
+  `src/__tests__/csp.test.ts`.
+
 ### Performance
+- **Batched sync is no longer only the first-enable path.** The live import
+  (`runLocalChangePush`, the debounced drain of notes that arrive while the app is open)
+  and `runBulkSync` both route through `DocBatchPusher` once a run holds at least
+  `BULK_THRESHOLD_DOCS` (25) docs, so an import lands in batches instead of one WebSocket
+  connect per note. `DocBatchPusher` reports `deferred` (items the run did not finish, which
+  the session re-queues) apart from `transportError` (the whole request failed — a 404 on a
+  bulk route is still the terminal `server_too_old`), and the registry's new
+  `noteServerCreated` hook — fed by `createNote`'s **201 created vs 200 adopted** answer, the
+  single-note twin of the batch route's `created`/`adopted` — hands the session the ids the
+  server just made, which hold no CRDT and can therefore be seeded in bulk rather than pulled.
+- **Attachments transfer in parallel.** `BINARY_CONCURRENCY` 6 under a 32 MiB
+  `BYTES_IN_FLIGHT_BUDGET` (six large videos at width 6 would otherwise be 1.2 GB in flight),
+  `MULTIPART_CONCURRENCY` 4 within a single file, and a probe-first pass that asks what the
+  server already holds before reading bytes off disk.
+- **Disk deletes are one round trip.** The blast-radius cap (`max(5, ceil(mapped * 0.2))`) is
+  judged FIRST — before any trash copy or server call — the recovery copies and the local
+  deletes then run pooled instead of serially, and the server rows go through the new
+  `delete-batch` above the bulk threshold. Write-all-then-delete still holds per note: a doc
+  whose bytes could not be kept never reaches the delete.
+- **Hocuspocus `flushDelay` 300 ms** (`FLUSH_DELAY_MS`) instead of per-update sends, with an
+  explicit `flushPending` on every deliberate teardown (destroy, token-refresh reconnect) so
+  the last window's ops cannot be dropped by the close.
+- **The registry listings are prefetched** (`prefetchListings`/`takeListings`): the folder and
+  paged note reads start during the connect window and are consumed once by the pull.
+- **`settleServerEmpty` asks `fileStat`** rather than reading the file, pooled 8 wide; a doc is
+  only settled when the file AND the local doc are empty, so a failed `materializeContent`
+  cannot badge a 0-byte file as synced.
+- **Progress and checkpoint cadence follow the bulk run**, not each item, and `patchTitles` is
+  bounded: above `PATCH_TITLES_MAX` paths it does one `refreshTitles` instead of that many
+  concurrent `get_note_meta` invokes contending for the Rust index mutex, and below it runs
+  through a pool rather than an unbounded `Promise.all`.
+- **Registry pages up to `PAGE_LIMIT_MAX` (5000)**, and `writeConfig` skips a rewrite whose
+  bytes are identical — a 5,000-note `.context/config.json` is ~500 KB and a checkpoint fires
+  on a timer as well as a count, so most ticks during a bulk run were re-serializing an
+  unchanged map several times a second.
+- **Server: `docs/batch` defers indexing.** Index work is queued and drained at a quiet point
+  (`flushIndexQueue`) instead of running inline per doc; `registry-changed` is coalesced per
+  vault inside the vault channel; and a bulk push arms no version timers at all
+  (`NO_VERSION_SOURCES`), so an import cannot schedule one idle-capture per note.
+- **Server: `ResolverCache` + an `unnest` register.** `registerNotes` inserts a chunk with one
+  `INSERT … SELECT FROM unnest(…) ON CONFLICT` and the permission algebra memoises its inputs
+  across the batch, so 200 notes cost ~10 queries rather than per-note round trips.
+- **`PG_POOL_MAX` default 20 → 30.** During an import a registration batch holds one slot, each
+  pushed doc up to two, a bootstrap page one (×`BOOTSTRAP_CONCURRENCY`) and each vault-channel
+  backfill runs 6 wide; a couple of importers plus a few joining devices reached 20, after
+  which `connectionTimeoutMillis` failed requests at 5 s while Postgres itself was idle.
 - **Time to connect, on launch and on every vault switch.** The vault channel is
   now opened during the PRIME window, in parallel with `registry.reconcile()`,
   instead of after it (`docSession.ts enable`). The collection id is the only
@@ -53,6 +361,45 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **Linux re-indexed an idle vault forever (#155, reported and diagnosed by
+  @cjpatten).** `notify`'s inotify backend subscribes with `WatchMask::OPEN`
+  next to CREATE/MODIFY/DELETE, so every *read* of a file or directory produces
+  an `EventKind::Access` event. `watcher.rs` forwarded every event's paths to
+  the drain thread and `plan_batch` classifies any existing `.md` as `modified`
+  (it only asks whether the path exists) — and indexing a batch reads the notes
+  in it, which emitted a fresh round of Access events, which re-indexed them. An
+  untouched 503-note vault ran `index_notes` 264–335 times a minute and wrote
+  ~32 MB/s into `.context/index.sqlite`. The watcher callback now drops an event
+  iff it is `EventKind::Access(_)`, is not `Access(Close(AccessMode::Write))` and
+  carries no Rescan flag (`watcher.rs should_forward`). `Close(Write)` is kept
+  because on inotify it is the reliable end-of-write signal for editors that
+  write in place; a Rescan-flagged event is kept because it means the backend's
+  queue overflowed and the batch must still be re-indexed. macOS/FSEvents and
+  Windows never emit Access, so their behaviour is unchanged. Three unit tests
+  in `watcher.rs` pin the three groups.
+- **An unchanged file is no longer re-indexed or re-synced (#155, defence in
+  depth).** The incremental index path had no content check: every path handed
+  to `Index::index_notes` was read, parsed and rewritten across `notes`,
+  `notes_fts`, `note_tags` and `links`, then included in the scoped
+  `resolve_links` pass — even when the bytes were byte-for-byte what was already
+  indexed. `rebuild` has always skipped unchanged files (by mtime); only the
+  incremental path paid. `index_one` now hashes the file it just read and
+  compares it against the `sha256` the row already holds for that same path: a
+  match writes nothing at all, refreshing only `notes.mtime` (single-column
+  UPDATE, so `rebuild`'s mtime skip still fires) and returning
+  `IndexedNote::Unchanged`, which keeps the doc out of `touched` — a batch of
+  untouched files runs no link pass. A NULL `sha256`, a row at a different path
+  and a file with no row are all treated as changed. `index_notes` returns an
+  `IndexOutcome { failures, unchanged }`, the watcher forwards the unchanged
+  paths as `unchanged: true` on the matching `modified` entries of
+  `files-changed` (entries are never dropped: the TS side needs exactly one echo
+  per materialised path, and a `modified` is what cancels a pending disk
+  delete), and the `index_notes` log line now reports the unchanged count. The
+  event source behind #155 is fixed at the watcher; this makes any other
+  spurious source — a backup, git or cloud-sync tool rewriting identical bytes,
+  or Windows reporting an attribute change as `Modify(Metadata)` — cost one read
+  and one hash instead of the whole index. Six tests in `index.rs` and two in
+  `watcher.rs`.
 - **"Syncing" on note open, third cause — the provider handshake.** Hocuspocus
   reports `onUnsyncedChanges` for the sync-step/awareness messages it queues
   while the socket comes up, and `DocSync` turned any count > 0 into
@@ -518,6 +865,47 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Files are first-class docs (server).** Migration 028 gives `blobs.doc_id` a
+  meaning — the `files` row whose bytes a blob is — and adds `blob_text`, a derived,
+  purgeable cache of the plain text a desktop extracted from a file (with the same
+  256-dim `embed()` vector `note_index` stores), written through
+  `PUT /api/vaults/:vaultId/blobs/:blobId/text` (204; 409 `sha_mismatch`, 413
+  `text_too_large` past 1 MB) and cascading away with its blob and its vault. A blob
+  with a `doc_id` is now authorised by `effectivePermission` rather than by
+  `note_index.content LIKE '%path%'`, so a folder share, an org grant, a sealed vault,
+  a per-user deny and a `locked` cap all reach a `.xlsx` exactly as they reach a `.md`
+  — and `canWriteBlob` closes the folder-lock gap for it, because a registered file
+  finally HAS a folder to resolve against. Hash-named `attachments/` drops keep the
+  path heuristic unchanged. Search (`GET /vaults/:id/search` and MCP `search_notes`)
+  ranks `blob_text` beside `note_index` and tags each hit `kind: "note" | "file"`, with
+  the visibility rule inside the query so an unreadable file can never influence a
+  readable one's score. `POST /api/files` accepts a client-supplied `docId`, adopts the row
+  already at a path before anything else (so re-registration is idempotent, a second
+  device converges on the first's id instead of tripping `files_vault_path_ci_uq`, and
+  neither needs this server to know the folder yet — the `POST /notes` rule, applied one
+  layer down) and otherwise treats the same id at a new path as a MOVE. MCP
+  gains `list_attachments` and `read_attachment_text` (the extracted text, never the
+  bytes) and `search_notes` gains `includeFiles`; `attach_file` is deliberately absent.
+- **Blob lifecycle (server).** Migration 027 adds `blob_refs` (which notes reference
+  which attachment path, derived by `index/indexer.ts` beside `note_index`, lowercased)
+  and `blob_deletions`, a queue filled by an `AFTER DELETE` trigger on `blobs` so org
+  delete, vault cascade, the new `DELETE /api/blobs/:id` (409 `blob_referenced` unless
+  `force`) and GC all free S3 objects without knowing S3 exists. `gc.ts` drains the queue
+  with backoff and runs an opt-in orphan sweep (`BLOB_GC_ENABLED`, guarded by note_index
+  presence, a refs rebuild, and a per-run cap). Intent enforces `FREE_MAX_STORAGE_MB` for
+  unsubscribed orgs when billing is on (402 `storage_limit_reached`); `GET
+  /api/vaults/:id/storage` reports usage. `pnpm run blobs:migrate -- --copy|--cutover`
+  moves BYTEA rows to S3 in two verified, idempotent phases.
+- **S3 blob provider + presigned upload flow (server).** `src/blobs/s3-store.ts`
+  (AWS SDK v3, `WHEN_REQUIRED` checksums, path-style for MinIO, `content-length`
+  signed into every presign, never `x-amz-checksum-sha256` against a custom endpoint,
+  presigned multipart above 100 MB). New `intent → PUT → complete` endpoints serve BOTH
+  providers — Postgres via a same-origin PUT authorised by an HS256 upload token — so a
+  dedupe hit costs zero bytes and every gate (ACL, rel_path, MIME, cap) runs before a
+  byte moves. `GET /api/blobs/:id/url` hands the desktop a presigned or same-origin URL
+  instead of a 302. Pending rows are swept by an advisory-locked 15-minute timer.
+  `BLOB_STORAGE=s3` fails closed at boot when config is incomplete. Compose gains a
+  `minio` profile; DEPLOY.md gains an "Attachments storage" section.
 - **Updates install themselves, with the wall as the fallback.** The app no
   longer waits for a click to install an update it has already downloaded: it
   checks, downloads, installs and relaunches at a quiet moment. The blocking

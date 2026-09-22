@@ -5,7 +5,33 @@
 use crate::error::{io_ctx, AppError, AppResult};
 use crate::vault::resolve_in_vault;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A UNIQUE sibling temp path for an atomic write.
+///
+/// Every atomic write in this file (and in `attachments.rs`) is temp + rename,
+/// and the temp name used to be `.{file_name}.tmp` — ONE name per target. Two
+/// writers of the same file then `write` that same temp path concurrently and
+/// the *interleave* of their two contents is what the rename publishes over the
+/// note; the loser's rename also fails, which surfaces as a spurious "save the
+/// note" error and an egest backoff. `write_note` is an async command that does
+/// not hold the state mutex, and `drainEgest` has no in-flight guard, so an
+/// egest racing a `writeThrough`/materialize is reachable (desktop-audit #7).
+///
+/// A process-wide counter plus the pid makes the name unique per call, so each
+/// writer renames its OWN complete file: the worst outcome becomes "the older
+/// content won", never a spliced one.
+///
+/// The leading dot is load-bearing — `vault.rs is_ignored_name` skips every
+/// dot-prefixed name, so the tree walk, the watcher and the index never see
+/// these, and a crash between write and rename leaves invisible debris rather
+/// than a phantom note.
+pub fn temp_sibling(parent: &Path, file_name: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(".{file_name}.{}.{n}.tmp", std::process::id()))
+}
 
 /// Read a `.md` note to a string (vault-relative path).
 pub fn read_note(vault: &Path, rel: &str) -> AppResult<String> {
@@ -29,7 +55,7 @@ pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| AppError::new("invalid file name"))?;
-    let tmp = parent.join(format!(".{file_name}.tmp"));
+    let tmp = temp_sibling(parent, file_name);
 
     std::fs::write(&tmp, content.as_bytes()).map_err(io_ctx("write the note", &abs))?;
     // rename is atomic on the same filesystem.
@@ -58,7 +84,7 @@ pub fn write_atomic_fsync(target: &Path, content: &[u8]) -> AppResult<()> {
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| AppError::new("invalid file name"))?;
-    let tmp = parent.join(format!(".{file_name}.tmp"));
+    let tmp = temp_sibling(parent, file_name);
 
     {
         use std::io::Write;
@@ -97,6 +123,78 @@ pub fn write_note_if_missing(vault: &Path, rel: &str, content: &str) -> AppResul
     }
     write_note(vault, rel, content)?;
     Ok(true)
+}
+
+/// What [`write_note_if_absent_or_empty`] did with one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// Nothing was there (missing, or a 0-byte placeholder): the content was
+    /// written.
+    Written,
+    /// A non-empty file was already there and its bytes hash EQUAL to the
+    /// content: nothing was written, and nothing needed to be.
+    Unchanged,
+    /// A non-empty file was already there with DIFFERENT bytes: nothing was
+    /// written. The caller owns the merge.
+    Conflict,
+}
+
+/// Write a note only over nothing — a missing file or a 0-byte placeholder —
+/// and otherwise report what is there instead of touching it.
+///
+/// This is the bulk bootstrap's write. Applying a page of server CRDT means
+/// materializing N `.md` files from state this device has never seen, and the
+/// one thing that must never happen is a server page landing on top of local
+/// content. So the decision is made from the FILE, not from a list:
+///
+/// | on disk                       | outcome     | writes |
+/// |-------------------------------|-------------|--------|
+/// | missing / 0 bytes             | `Written`   | yes    |
+/// | non-empty, sha256 == content  | `Unchanged` | no     |
+/// | non-empty, sha256 differs     | `Conflict`  | **no** |
+///
+/// Strictly stronger than [`write_note_if_missing`], which only refuses to
+/// *create* over an existing file, and than `write_note`, which refuses
+/// nothing: this refuses ANY content over a differing non-empty file.
+///
+/// `Unchanged` is not "nothing happened" — it is what makes a crashed bootstrap
+/// page idempotent. Files are written before the CRDT rows commit, so a killed
+/// process can leave a file with no `yjs_snapshot`; the re-apply must still be
+/// allowed to write those rows, or the doc is stranded and the sync channel
+/// re-backfills it forever.
+///
+/// Uses `write_note`'s un-fsync'd temp + rename on purpose: these bytes also
+/// live in the Y.Doc and on the server, so a torn tail costs a re-egest.
+/// `write_atomic_fsync` is for `.context/*`, which has no second copy.
+pub fn write_note_if_absent_or_empty(
+    vault: &Path,
+    rel: &str,
+    content: &str,
+) -> AppResult<WriteOutcome> {
+    let abs = resolve_in_vault(vault, rel)?;
+    // One stat answers both "is it there" and "is it empty", and a missing file
+    // is not an error here — it is the common case.
+    let size = match std::fs::metadata(&abs) {
+        Ok(m) if m.is_dir() => {
+            return Err(AppError::new("refusing to write a note over a directory"))
+        }
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => return Err(io_ctx("read the note", &abs)(e)),
+    };
+    if size == 0 {
+        write_note(vault, rel, content)?;
+        return Ok(WriteOutcome::Written);
+    }
+    // Hashed, not compared byte-for-byte in memory: the incoming content is
+    // already a String, but the file may be a 10 MB note and `sha256_file`
+    // streams it.
+    let on_disk = sha256_file(&abs).map_err(io_ctx("read the note", &abs))?;
+    if on_disk == sha256_hex(content) {
+        Ok(WriteOutcome::Unchanged)
+    } else {
+        Ok(WriteOutcome::Conflict)
+    }
 }
 
 /// Create a new empty note. `parent_rel` is "" for the vault root. Returns the
@@ -176,8 +274,8 @@ pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<bool> {
     Ok(true)
 }
 
-/// Move a note OUT of the note pipeline into `.context/trash/<stamp>/<rel>`
-/// rather than deleting it. Returns the trash-relative destination.
+/// Legacy helper that moves a note OUT of the note pipeline into
+/// `.context/trash/<stamp>/<rel>`. Returns the trash-relative destination.
 ///
 /// Why `.context` and not the OS trash: `vault::IGNORED_DIRS` keeps `.context` out
 /// of the tree walk, the watcher and the index, so a trashed note is recoverable
@@ -217,16 +315,11 @@ pub fn trash_note(vault: &Path, rel: &str, stamp: &str) -> AppResult<String> {
     Ok(dest_rel)
 }
 
-/// Write `content` into `.context/trash/<stamp>/<rel>` — the recovery copy for a
-/// note whose FILE IS ALREADY GONE.
+/// Write unsendable local `content` into `.context/trash/<stamp>/<rel>`.
 ///
-/// [`trash_note`] cannot serve this case: it renames the source file, and refuses
-/// outright when the source does not exist. A disk-observed delete (someone
-/// removed the `.md` in Finder, a script, `git checkout`) is propagated to the
-/// server as a real delete, and the only surviving copy of the text at that
-/// moment is the doc the caller holds in memory — so it is written here first,
-/// under the same `.context/trash/<stamp>/` layout an inbound delete uses, and
-/// with the same suffixing when a name inside the stamp is taken.
+/// Used when a read-only server state is about to replace divergent local bytes
+/// that could not be uploaded. The stamped layout and collision suffix keep
+/// repeated recoveries separate.
 ///
 /// Returns the trash-relative destination that was written.
 pub fn write_trash_copy(vault: &Path, rel: &str, stamp: &str, content: &str) -> AppResult<String> {
@@ -346,10 +439,8 @@ pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
 
 /// Delete a single FILE. Refuses a directory outright.
 ///
-/// This is the delete the inbound reconciler uses for a revoked note — the one
-/// code path that removes something from disk with no recoverable copy anywhere
-/// (a revocation is deliberately not trashed; a trash copy would hand the
-/// ex-reader back the readable `.md` the revocation exists to take away).
+/// This is the delete the inbound reconciler uses for confirmed deleted and
+/// revoked notes. Neither creates a retained recovery copy.
 ///
 /// Today the paths reaching it come from the local note listing and have already
 /// passed `isSafeNotePath`, so none of them is a directory and none of them is
@@ -377,6 +468,23 @@ pub fn delete_file(vault: &Path, rel: &str) -> AppResult<()> {
     }
     std::fs::remove_file(&abs)?;
     Ok(())
+}
+
+/// Hex-encoded SHA-256 of a FILE, read in chunks.
+///
+/// `std::io::copy` into the hasher, deliberately: the tier-2 file index hashes
+/// every binary it surfaces, and `fs::read` on a 500 MB video would allocate the
+/// whole thing to produce 64 characters. Nothing here holds the index mutex.
+pub fn sha256_file(abs: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(abs)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let digest = hasher.finalize();
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    Ok(s)
 }
 
 /// Hex-encoded SHA-256 of a note's content (echo-suppression aid for the index).
@@ -473,6 +581,93 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn atomic_writes_use_a_unique_temp_name_per_call() {
+        // desktop-audit #7: one temp name per target let two concurrent writers
+        // of the same note interleave their bytes into one temp file, which the
+        // rename then published. The names must differ per call — and stay
+        // dot-prefixed, or the tree walk and watcher would surface them.
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path();
+        let a = temp_sibling(parent, "note.md");
+        let b = temp_sibling(parent, "note.md");
+        assert_ne!(a, b, "two temp paths for one target must not collide");
+        for path in [&a, &b] {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            assert!(name.starts_with('.'), "{name} must stay hidden");
+            assert!(name.ends_with(".tmp"), "{name} must stay a .tmp");
+            assert!(name.contains("note.md"), "{name} must name its target");
+            assert!(crate::vault::is_ignored_name(&name), "{name} must be ignored");
+        }
+
+        // The real writers pick up the unique name: a write leaves no debris and
+        // the content is whole.
+        write_note(tmp.path(), "note.md", "one").unwrap();
+        write_atomic_fsync(&tmp.path().join(".context/x.json"), b"{}").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files survive a write");
+    }
+
+    #[test]
+    fn write_if_absent_or_empty_writes_over_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Missing.
+        assert_eq!(
+            write_note_if_absent_or_empty(tmp.path(), "a/Note.md", "server text").unwrap(),
+            WriteOutcome::Written
+        );
+        assert_eq!(read_note(tmp.path(), "a/Note.md").unwrap(), "server text");
+    }
+
+    #[test]
+    fn write_if_absent_or_empty_fills_a_zero_byte_placeholder() {
+        // The 307-stub case: `write_note_if_missing` left these behind, and the
+        // bootstrap is what finally fills them.
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "Stub.md", "").unwrap();
+        assert_eq!(
+            write_note_if_absent_or_empty(tmp.path(), "Stub.md", "hydrated").unwrap(),
+            WriteOutcome::Written
+        );
+        assert_eq!(read_note(tmp.path(), "Stub.md").unwrap(), "hydrated");
+    }
+
+    #[test]
+    fn write_if_absent_or_empty_reports_identical_bytes_unchanged() {
+        // Not an error and not a no-op for the CALLER: this is the re-apply of a
+        // page whose files landed but whose CRDT rows never committed.
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "Same.md", "identical").unwrap();
+        assert_eq!(
+            write_note_if_absent_or_empty(tmp.path(), "Same.md", "identical").unwrap(),
+            WriteOutcome::Unchanged
+        );
+        assert_eq!(read_note(tmp.path(), "Same.md").unwrap(), "identical");
+    }
+
+    #[test]
+    fn write_if_absent_or_empty_refuses_to_touch_differing_content() {
+        // The whole point: a server page never lands on local content.
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "Mine.md", "my local edit").unwrap();
+        assert_eq!(
+            write_note_if_absent_or_empty(tmp.path(), "Mine.md", "the server's text").unwrap(),
+            WriteOutcome::Conflict
+        );
+        assert_eq!(read_note(tmp.path(), "Mine.md").unwrap(), "my local edit");
+        // Empty content over content is refused too (the reverse of the 428-note
+        // incident), and traversal never gets that far.
+        assert_eq!(
+            write_note_if_absent_or_empty(tmp.path(), "Mine.md", "").unwrap(),
+            WriteOutcome::Conflict
+        );
+        assert!(write_note_if_absent_or_empty(tmp.path(), "../escape.md", "x").is_err());
     }
 
     #[test]
@@ -575,9 +770,8 @@ mod tests {
 
     // ---- trash / ensure_folder --------------------------------------------
     //
-    // `trash_note` is how a remote delete is applied locally, so it is the only
-    // inbound operation that takes a file away from the user. It has to be
-    // recoverable, and it must never be talked into touching anything else.
+    // `trash_note` remains as a legacy recovery primitive. Its path guards stay
+    // pinned even though confirmed sync removals now use `delete_file`.
 
     #[test]
     fn trash_moves_the_note_into_context_and_leaves_no_source() {
@@ -656,10 +850,8 @@ mod tests {
 
     // ---- write_trash_copy -------------------------------------------------
     //
-    // The recovery copy for a note whose file is ALREADY gone (someone deleted
-    // the `.md` outside the app). `trash_note` refuses that case by design — it
-    // renames a source file — so this is the only way those bytes survive the
-    // delete we are about to propagate to the server.
+    // The recovery copy for local bytes that cannot be synced. `trash_note`
+    // renames a source file; this helper writes an explicit snapshot instead.
 
     #[test]
     fn write_trash_copy_saves_content_for_a_file_that_is_already_gone() {
@@ -673,8 +865,8 @@ mod tests {
             std::fs::read_to_string(tmp.path().join(".context/trash/s1/Notes/bye.md")).unwrap(),
             "# Bye\n\ntext"
         );
-        // Nothing appeared back at the note's own path — a recovery copy must
-        // never resurrect the file the user deleted.
+        // Nothing appeared back at the note's own path — a recovery copy stays
+        // outside the live note pipeline.
         assert!(!tmp.path().join("Notes/bye.md").exists());
     }
 

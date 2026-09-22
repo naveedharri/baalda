@@ -99,10 +99,14 @@ export const BEHIND_CAP = 2000;
 /**
  * Most docs one `ready.revoked` names.
  *
- * The list is already bounded by the CLIENT'S manifest — it can only name docs
- * this client says it holds — so this cap is about frame size, not about the
- * size of the vault. A member of a private-by-default vault with 10,000 docs
- * they never had is named zero of them.
+ * The list is already bounded by what the CLIENT says it holds — the manifest's
+ * notes plus `hello.files`' tree binaries — so this cap is about frame size, not
+ * about the size of the vault. A member of a private-by-default vault with
+ * 10,000 docs they never had is named zero of them.
+ *
+ * Notes and files share the one budget deliberately: they are one namespace to
+ * `effectivePermission` and one list to the client, and giving binaries their
+ * own allowance would let a vault of PDFs push its notes out of the frame.
  */
 export const REVOKED_CAP = 2000;
 
@@ -475,7 +479,13 @@ class VaultConnection {
       this.handlePresence(parked);
     }
 
-    await this.backfill(hello.manifest, hello.priority ?? []);
+    // `mode: "live-only"` — the client is pulling its cold state over the
+    // bootstrap HTTP routes, so the socket is for live updates only. `ready`
+    // still ships below: its `empty` and `revoked` lists are what the client
+    // ACTS on (seed these from disk; remove these from disk), and they cost one
+    // query and no query respectively. `behind` is the only casualty, and it is
+    // a by-product of the diff this mode is skipping.
+    if (hello.mode !== "live-only") await this.backfill(hello.manifest, hello.priority ?? []);
 
     // Backfill sends nothing for a doc with no server state, so the client would
     // otherwise sit on a blank note it can't tell apart from one still in flight
@@ -504,7 +514,13 @@ class VaultConnection {
     // …and the mirror image: docs this client says it HOLDS that it may no
     // longer read. Pure set arithmetic over two things already in hand (the
     // hello manifest and `this.readable`), so it costs no query.
-    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest);
+    const batchedRevocations = this.caps.has("revocation-batches");
+    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest, [...(hello.files ?? []), ...(hello.held ?? [])]);
+    if (batchedRevocations) {
+      for (let i = 0; i < revoked.length; i += REVOKED_CAP) {
+        this.send({ t: "revoked", docIds: revoked.slice(i, i + REVOKED_CAP) });
+      }
+    }
     this.send({
       t: "ready",
       // Omitted when nothing is empty, so the common frame is byte-identical to
@@ -513,7 +529,7 @@ class VaultConnection {
       ...(empty.length > 0 && emptyTruncated ? { emptyTruncated: true as const } : {}),
       ...(behind.length > 0 ? { behind } : {}),
       ...(behind.length > 0 && behindTruncated ? { behindTruncated: true as const } : {}),
-      ...(revoked.length > 0 ? { revoked } : {}),
+      ...(!batchedRevocations && revoked.length > 0 ? { revoked } : {}),
       ...(revoked.length > 0 && revokedTruncated ? { revokedTruncated: true as const } : {}),
     });
   }
@@ -537,6 +553,10 @@ class VaultConnection {
    * What the client already holds is both bounded and, by definition, already
    * known to it.
    *
+   * Both kinds of doc: the manifest's notes AND the `files` ids `hello.files`
+   * carries. A binary has no state vector to put in the manifest, but it is the
+   * same doc id to the resolver and the same removal to the client.
+   *
    * A doc the owner DELETED also leaves the readable set and so is named here.
    * The frame's contract is "these are gone for you", not "an admin revoked
    * these". Usually the client then resolves it as a tombstone on the pull that
@@ -547,18 +567,28 @@ class VaultConnection {
    * branch); before it did, a share-only member's deleted notes fell through to
    * the revocation path and were removed with no recoverable copy.
    */
-  private revokedFromManifest(manifest: Record<string, string>): {
+  private revokedFromManifest(
+    manifest: Record<string, string>,
+    files?: string[],
+  ): {
     revoked: string[];
     revokedTruncated: boolean;
   } {
     const revoked: string[] = [];
+    const seen = new Set<string>();
     let revokedTruncated = false;
-    for (const docId of Object.keys(manifest)) {
+    // Notes first, then the tree binaries the client listed separately. Both are
+    // ordinary doc ids to `listReadableDocsInVault` (its `files` UNION is the
+    // whole reason a `.pdf` set to Private leaves the readable set at all), so
+    // this stays pure set arithmetic over two things already in hand.
+    for (const docId of [...Object.keys(manifest), ...(files ?? [])]) {
       if (this.readable.has(docId)) continue;
-      if (revoked.length >= REVOKED_CAP) {
+      if (seen.has(docId)) continue;
+      if (!this.caps.has("revocation-batches") && revoked.length >= REVOKED_CAP) {
         revokedTruncated = true;
         break;
       }
+      seen.add(docId);
       revoked.push(docId);
     }
     return { revoked, revokedTruncated };
@@ -845,12 +875,22 @@ class VaultConnection {
     const prev = this.readable;
     this.readable = next;
     let lost = 0;
+    let revokedBatch: string[] = [];
     for (const docId of prev) {
       if (!next.has(docId)) {
-        this.send({ t: "drop", docId }); // access lost
+        if (this.caps.has("revocation-batches")) {
+          revokedBatch.push(docId);
+          if (revokedBatch.length === REVOKED_CAP) {
+            this.send({ t: "revoked", docIds: revokedBatch });
+            revokedBatch = [];
+          }
+        } else {
+          this.send({ t: "drop", docId });
+        }
         lost++;
       }
     }
+    if (revokedBatch.length > 0) this.send({ t: "revoked", docIds: revokedBatch });
     const added = [...next].filter((d) => !prev.has(d));
     // The set of readable docs only shifts on add/remove — but a view↔edit change
     // (or a lock) leaves the set intact while flipping the OPEN note's editability.
@@ -873,6 +913,12 @@ class VaultConnection {
       // We can now see docs we couldn't before — ask the vault to re-announce
       // presence so viewers of the newly-readable docs light up for us.
       void this.pubsub.publish(vaultTopic(this.vaultId), encodePubsubPresenceQuery());
+    }
+    // Large grants use the client's bounded HTTP bootstrap, with real download
+    // progress. Flooding the live feed here bypasses its backfill counters.
+    if (added.length >= 25 && this.caps.has("bulk-regrant")) {
+      this.send({ t: "bootstrap" });
+      return;
     }
     // Newly-readable docs: full backfill (client holds no state vector for them).
     await runPool(added, this.deps.concurrency, (docId) => this.sendDocBackfill(docId, undefined));

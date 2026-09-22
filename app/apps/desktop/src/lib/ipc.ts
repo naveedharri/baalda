@@ -146,6 +146,37 @@ export interface SearchResult {
   path: string;
   title: string;
   snippet: string;
+  /** `"note"` — `id` is the CRDT doc_id — or `"file"`, where it is the local
+   *  `files.id` of a tree binary and the path is what opens it. */
+  kind: "note" | "file";
+  /** Lowercase extension, no dot. Badged on file hits. */
+  ext: string | null;
+}
+
+/** The extracted plain text of one tree binary (`get_file_text`). A DERIVED
+ *  cache — never the file itself — which is what makes it safe to upload as
+ *  ranking fuel rather than content. */
+export interface FileText {
+  path: string;
+  /** sha256 of the FILE; empty until the extraction worker has hashed it. */
+  sha256: string;
+  /** pending | ok | skipped_size | unsupported | error (Rust `TextStatus`). */
+  status: string;
+  chars: number;
+  text: string;
+}
+
+/** One tier-2 `files` row (mirrors the Rust `FileRow`). `id` is the identity a
+ *  tree binary is registered under on the server — stable per path across
+ *  index rebuilds, which is what makes it safe to supply. */
+export interface FileRow {
+  id: string;
+  path: string;
+  ext: string | null;
+  kind: string | null;
+  size: number;
+  /** pending | ok | skipped_size | unsupported | error (Rust `TextStatus`). */
+  textStatus: string;
 }
 
 export interface Backlink {
@@ -179,6 +210,22 @@ export interface ResolvedLink {
 export interface FileChanged {
   path: string;
   kind: "modified" | "removed" | "tree";
+  /**
+   * The bytes on disk did NOT change: the indexer read the file and its sha256
+   * equalled the one the SQLite index already held for this same path (#155).
+   *
+   * Only ever set on `modified` — `removed` and `tree` always report `false`.
+   * Optional so an older Rust build (whose payload has no such field) still
+   * decodes; a missing value means `false`, i.e. "assume the bytes moved".
+   *
+   * Sources: our own egest echo, a materialized placeholder echoing back, a
+   * `git checkout` / cloud-sync / backup tool rewriting identical bytes, and the
+   * spurious inotify read events that made an idle Linux vault re-index itself.
+   * Rust never drops these entries — the bookkeeping they carry (a materialized
+   * echo to consume, a pending disk delete to cancel) is real; what they must
+   * not do is re-index, re-render or re-upload anything.
+   */
+  unchanged?: boolean;
 }
 
 /** One attachment file's metadata (mirrors the Rust `AttachmentMeta`). */
@@ -186,6 +233,36 @@ export interface AttachmentMeta {
   relPath: string;
   size: number;
   sha256: string;
+}
+
+/** Half-open byte range `[start, end)` — one multipart part of a file. */
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
+/** What a streamed upload PUT answered (mirrors the Rust `UploadOutcome`). */
+export interface AttachmentUploadResult {
+  status: number;
+  /** S3's part receipt, replayed back at `complete`. Null on our own route. */
+  etag: string | null;
+  /** A truncated response body, present only when the status was not 2xx. */
+  error: string | null;
+}
+
+/** What a streamed download wrote (mirrors the Rust `DownloadOutcome`). */
+export interface AttachmentDownloadResult {
+  status: number;
+  bytes: number;
+  /** sha256 of what landed — already checked against `expectedSha256`. */
+  sha256: string;
+}
+
+/** One file's size + mtime (mirrors the Rust `FileStat`). */
+export interface FileStat {
+  size: number;
+  /** Milliseconds since the Unix epoch, or null when the OS won't say. */
+  modified: number | null;
 }
 
 /** Outcome of an import (mirrors the Rust `ImportSummary`). */
@@ -300,12 +377,8 @@ export const readNote = (path: string, expectedEpoch?: VaultEpoch) =>
 export const noteExists = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("note_exists", { path, expectedEpoch: expectedEpoch ?? null });
 /**
- * Save a deleted note's text into `.context/trash/<stamp>/<rel>` and return the
- * trash-relative destination.
- *
- * The counterpart to {@link trashNote} for a file that is ALREADY gone: nothing
- * can be moved, so the doc's in-memory text is written instead. Same stamped
- * layout, so a disk delete lands in the trash next to a teammate's.
+ * Save local text that could not be synced into `.context/trash/<stamp>/<rel>`
+ * and return the trash-relative destination.
  */
 export const writeTrashCopy = (
   path: string,
@@ -362,9 +435,9 @@ export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch)
 export const ensureFolder = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("ensure_folder", { path, expectedEpoch: expectedEpoch ?? null });
 /**
- * Move a note into `.context/trash/<stamp>/…` instead of deleting it, and return
- * the trash-relative destination. Used for remote deletes, so applying a
- * teammate's delete is recoverable rather than final.
+ * Move a file into `.context/trash/<stamp>/…` and return the destination.
+ * Kept for compatibility with legacy recovery flows; confirmed sync deletions
+ * now use {@link deleteFile}.
  */
 export const trashNote = (path: string, stamp: string, expectedEpoch?: VaultEpoch) =>
   invoke<string>("trash_note", { path, stamp, expectedEpoch: expectedEpoch ?? null });
@@ -374,13 +447,22 @@ export const deletePath = (path: string, expectedEpoch?: VaultEpoch) =>
 /**
  * Delete a single FILE, refusing a directory.
  *
- * Used by the inbound reconciler for a REVOKED note — the one removal in the app
- * that leaves no recoverable copy anywhere. `deletePath` above is recursive for
+ * Used by the inbound reconciler for confirmed deleted and revoked files.
+ * `deletePath` above is recursive for
  * a directory, deliberately, because the sidebar's Delete means it; nothing
  * driven by the server may reach that. See `notefile.rs delete_file`.
  */
 export const deleteFile = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_file", { path, expectedEpoch: expectedEpoch ?? null });
+/** Bounded, file-only inbound cleanup; docId also clears revoked CRDT state. */
+export const deleteFilesBatch = (
+  items: Array<{ path: string; docId: string | null }>,
+  expectedEpoch?: VaultEpoch,
+) => invoke<Array<{ path: string; error: string | null }>>("delete_files_batch", {
+  items,
+  expectedEpoch: expectedEpoch ?? null,
+});
+
 /**
  * Remove a folder the server has deleted — only if it is empty by now. Resolves
  * true only when THIS call removed it (the watcher will echo that); false when
@@ -405,6 +487,13 @@ export const exportPath = (rel: string, dest: string, expectedEpoch?: VaultEpoch
 
 export const searchNotes = (query: string) =>
   invoke<SearchResult[]>("search_notes", { query });
+/** The extracted text of a tree binary, or null when it has no `files` row
+ *  (a note, an attachment, or something the walk ignores). */
+export const getFileText = (path: string) =>
+  invoke<FileText | null>("get_file_text", { path });
+/** Every `files` row (id + path + text status) — the sync layer's source of
+ *  stable ids for registering tree binaries. One call for the whole walk. */
+export const listFileRows = () => invoke<FileRow[]>("list_file_rows");
 export const getBacklinks = (noteId: string) =>
   invoke<Backlink[]>("get_backlinks", { noteId });
 /** Every resolved graph edge (source id -> target id) in one call — backs the
@@ -427,31 +516,95 @@ export const listNoteTitles = (expectedEpoch?: VaultEpoch) =>
 // as the whole `invoke` payload. Every wrapper signature is unchanged, so no
 // caller (or test mock) had to move.
 
+/**
+ * Append one Yjs update to a doc's log. Resolves with the row's
+ * `yjs_updates.id` — the COMPACTION WATERMARK.
+ *
+ * The caller tracks the highest id it has seen and hands it back as
+ * {@link saveYjsSnapshot}'s `upTo`. Without it, `compact()` encoded a snapshot,
+ * awaited this IPC's siblings, and then truncated the WHOLE log — including the
+ * keystroke-sized appends that committed while it was awaiting and that the
+ * snapshot therefore does not contain. The surviving later updates then
+ * referenced a missing item, Yjs parked them as pending forever, and the doc
+ * loaded short (desktop-audit #4).
+ */
 export const appendYjsUpdate = (
   docId: string,
   update: Uint8Array,
   expectedEpoch?: VaultEpoch,
-) =>
-  invoke<void>(
+): Promise<number> =>
+  invoke<number>(
     "append_yjs_update",
     frame({ docId, expectedEpoch: expectedEpoch ?? null }, update),
   );
 
+/**
+ * Bytes of `encode_yjs_state`'s TRAILER: `[u8 hasLastId][i64 lastUpdateId]`,
+ * little-endian, at the very end of the frame.
+ *
+ * It rides at the end so every byte `decodeYjsState` reads stays at the offset
+ * it was at — a header would have forced a `buf.slice()` copy of the whole
+ * frame (17.7 MB on the largest doc measured) just to re-align the payload,
+ * which is the cost this binary format exists to avoid. `decodeYjsState` stops
+ * after `updateCount` updates and never looks further, so it is unaffected.
+ */
+const YJS_STATE_TRAILER_BYTES = 9;
+
+/**
+ * Read the compaction watermark off the end of a `load_yjs_state` frame: the
+ * `yjs_updates.id` of the LAST update in it, or `undefined` when the log was
+ * empty.
+ *
+ * `undefined` and `0` are different answers — 0 is a legal rowid — so the flag
+ * byte is what decides, never the value.
+ */
+function readLastUpdateId(buf: ArrayBuffer): number | undefined {
+  if (buf.byteLength < YJS_STATE_TRAILER_BYTES) return undefined;
+  const view = new DataView(buf, buf.byteLength - YJS_STATE_TRAILER_BYTES);
+  if (view.getUint8(0) !== 1) return undefined;
+  return Number(view.getBigInt64(1, true));
+}
+
+/**
+ * A doc's persisted CRDT state, plus the watermark a load-time compaction needs.
+ *
+ * `lastUpdateId` is the row id of the last update in `updates`. A bridge that
+ * hydrates and immediately compacts (the log outlived a relaunch, so
+ * `shouldCompact` fires right after `hydrate`) has appended nothing itself and
+ * would otherwise know no watermark — it would pass none, truncate nothing, and
+ * the log would never shrink again. Rust reads the id from the last row it
+ * actually returned, in the same statement, so it can never name a row that is
+ * not in `updates` and therefore not in the snapshot about to be written.
+ */
 export const loadYjsState = (
   docId: string,
   expectedEpoch?: VaultEpoch,
-): Promise<YjsState> =>
+): Promise<YjsState & { lastUpdateId?: number }> =>
   invoke<ArrayBuffer>("load_yjs_state", {
     docId,
     expectedEpoch: expectedEpoch ?? null,
-  }).then(decodeYjsState);
+  }).then((buf) => ({
+    ...decodeYjsState(buf),
+    lastUpdateId: readLastUpdateId(buf),
+  }));
 
+/**
+ * Write a doc's merged snapshot + state vector, truncating its update log up to
+ * `upTo`.
+ *
+ * `upTo` is the last `yjs_updates.id` this snapshot folds in — the highest id
+ * {@link appendYjsUpdate} returned BEFORE the snapshot was encoded. OMITTING it
+ * deletes nothing and writes the snapshot only, which is the safe default: a
+ * caller that cannot say what its snapshot covers must not be allowed to say
+ * "all of it".
+ */
 export const saveYjsSnapshot = (
   docId: string,
   snapshot: Uint8Array,
   stateVector: Uint8Array,
   expectedEpoch?: VaultEpoch,
-) =>
+  upTo?: number,
+): Promise<void> =>
   invoke<void>(
     "save_yjs_snapshot",
     frame(
@@ -460,6 +613,7 @@ export const saveYjsSnapshot = (
         expectedEpoch: expectedEpoch ?? null,
         // Where Rust splits the payload back into its two halves.
         snapshotLen: snapshot.byteLength,
+        upTo: upTo ?? null,
       },
       snapshot,
       stateVector,
@@ -523,6 +677,115 @@ export const listYjsStateVectors = (expectedEpoch?: VaultEpoch) =>
     expectedEpoch: expectedEpoch ?? null,
   }).then(decodeStateVectors);
 
+// ---- Bulk sync: bootstrap pages + batched materialize ---------------------
+// The batch replacements for the per-note IPC storm of a cold join. Both are
+// epoch-pinned, both are idempotent, and neither can write over content.
+
+/** One doc of a bootstrap page: its markdown plus its CRDT. */
+export interface BootstrapEntry {
+  /** The SERVER's doc id — the identity every layer keys by. */
+  docId: string;
+  relPath: string;
+  /** The markdown the server's Y.Doc serializes to. */
+  content: string;
+  /** That doc's merged Yjs update, stored verbatim as its snapshot. */
+  snapshot: Uint8Array;
+  stateVector: Uint8Array;
+}
+
+/**
+ * What the batch did with one doc.
+ *
+ * | local CRDT rows | local file | status |
+ * |---|---|---|
+ * | none | missing or 0 bytes | `written` — file + snapshot + state vector |
+ * | none | non-empty, sha256 == content | `unchanged` — STILL writes the CRDT rows |
+ * | none | non-empty, differs | `conflict` — writes nothing; route it to a `DocSync` |
+ * | any | any | `rejected` — cold-apply through `VaultDocStore`, which MERGES |
+ *
+ * `written` and `unchanged` both mean the rows are stored, so both may
+ * `markPushed`. `rejected` also covers a refused path and a per-doc failure,
+ * and always carries a `reason`.
+ */
+export type BootstrapStatus = "written" | "unchanged" | "conflict" | "rejected";
+
+export interface BootstrapOutcome {
+  docId: string;
+  status: BootstrapStatus;
+  reason: string | null;
+}
+
+/**
+ * Apply one bootstrap page — N docs' markdown + CRDT in ONE IPC and ONE SQLite
+ * transaction.
+ *
+ * Rust decides each doc's fate from the FILE and the local CRDT tables, never
+ * from this list, so a wrong list costs nothing: the worst it can do is refuse
+ * work. Applying the same page twice is safe — every doc then has CRDT rows and
+ * comes back `rejected`, having written nothing.
+ *
+ * The payload is every entry's `content || snapshot || stateVector`
+ * concatenated in `entries` order; the meta carries only the lengths, exactly
+ * like {@link saveYjsStateVectors}.
+ */
+export const applyBootstrapBatch = (
+  entries: BootstrapEntry[],
+  expectedEpoch?: VaultEpoch,
+): Promise<BootstrapOutcome[]> => {
+  const encoder = new TextEncoder();
+  const bodies = entries.map((e) => encoder.encode(e.content));
+  return invoke<BootstrapOutcome[]>(
+    "apply_bootstrap_batch",
+    frame(
+      {
+        expectedEpoch: expectedEpoch ?? null,
+        // Lengths only; the three parts of each entry follow in this order.
+        entries: entries.map((e, i) => ({
+          docId: e.docId,
+          relPath: e.relPath,
+          contentLen: bodies[i].byteLength,
+          snapshotLen: e.snapshot.byteLength,
+          stateVectorLen: e.stateVector.byteLength,
+        })),
+      },
+      ...entries.flatMap((e, i) => [bodies[i], e.snapshot, e.stateVector]),
+    ),
+  );
+};
+
+/** One server-only note to materialize as a local placeholder. */
+export interface MaterializeItem {
+  relPath: string;
+  /** The server's doc id. `null` leaves the index row on the id it has. */
+  docId: string | null;
+}
+
+export interface MaterializeOutcome {
+  relPath: string;
+  /** The file was missing and was created EMPTY. */
+  created: boolean;
+  /** The index row at this path now carries the server's `docId`. */
+  rebound: boolean;
+}
+
+/**
+ * Materialize N server-only notes as create-only placeholders, then index and
+ * re-key them in ONE transaction with ONE link pass.
+ *
+ * The batch form of the registry's join loop, which was 2–3 IPC round trips per
+ * note — each `rebindNoteId` carrying a whole-`links` scan. Every write is
+ * `write_note_if_missing`: create-only, never an overwrite, which is why the
+ * 428-note incident cost nothing.
+ */
+export const materializeNotesBatch = (
+  items: MaterializeItem[],
+  expectedEpoch?: VaultEpoch,
+): Promise<MaterializeOutcome[]> =>
+  invoke<MaterializeOutcome[]>("materialize_notes_batch", {
+    items,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
 // ---- Attachment binary I/O (Phase 3 blob store, spec 02 §2) ---------------
 // Reads answer with raw bytes, like the CRDT reads above — the whole response
 // body IS the file, so there is no frame. All paths are validated inside the
@@ -534,6 +797,17 @@ export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
     expectedEpoch: expectedEpoch ?? null,
   }).then((b) => new Uint8Array(b));
 
+/**
+ * Size + mtime of a vault file, without reading it.
+ *
+ * Epoch-pinned like every other vault-scoped read: the file card asks about a
+ * path, and a stat that crossed a vault switch would describe another vault's
+ * disk. Read scope is the whole vault (not just `attachments/`) — the same
+ * asymmetry as {@link readBinaryFile}, because tree files get a card too.
+ */
+export const fileStat = (relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<FileStat>("file_stat", { relPath, expectedEpoch: expectedEpoch ?? null });
+
 export const writeBinaryFile = (
   relPath: string,
   bytes: Uint8Array,
@@ -544,8 +818,98 @@ export const writeBinaryFile = (
     frame({ relPath, expectedEpoch: expectedEpoch ?? null }, bytes),
   );
 
+/**
+ * Materialize a binary that lives in the TREE (not under `attachments/`) — a
+ * file a teammate dropped into a folder, arriving here as a blob.
+ *
+ * A separate command because it is a separate WRITE GUARD: `writeBinaryFile`
+ * still refuses everything outside `attachments/`, and this one accepts exactly
+ * the set the binary walk produces — a surfaced, non-note extension outside
+ * `.context/`, `.git`, dotfiles and the denied dirs. A server-supplied path can
+ * therefore name a file the user could have dropped there themselves, and
+ * nothing else; notes are refused as firmly as `.context/` is.
+ */
+export const writeTreeBinary = (
+  relPath: string,
+  bytes: Uint8Array,
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<void>(
+    "write_tree_binary",
+    frame({ relPath, expectedEpoch: expectedEpoch ?? null }, bytes),
+  );
+
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Every syncable binary in the vault: the `attachments/` store PLUS the tree
+ * binaries (a `.docx` in `Team/`, a `.mp4` in `Media/`) — what the blob diff
+ * runs on now that a tree binary gets its own `files` row and ACL.
+ *
+ * A superset of {@link listAttachments}, sharing its hash cache, so the widened
+ * walk still costs a `stat` per file rather than a re-read.
+ */
+export const listBinaries = (expectedEpoch?: VaultEpoch) =>
+  invoke<AttachmentMeta[]>("list_binaries", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * Stream an attachment (or one byte range of it) to a presigned URL from RUST.
+ *
+ * Not a webview `fetch` on purpose: the bucket would need CORS for a
+ * `tauri://localhost` Origin, the CSP would have to permit whatever plain-http
+ * MinIO a self-hoster runs, and a 500 MB video would have to exist in the JS
+ * heap first. `headers` goes out verbatim and is the ONLY auth — an upload URL
+ * carries its own credential (an S3 signature, or our route's `?t=` token), and
+ * S3 rejects a request that also presents a bearer.
+ */
+export const uploadAttachment = (
+  input: {
+    relPath: string;
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    range?: ByteRange;
+  },
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<AttachmentUploadResult>("upload_attachment", {
+    relPath: input.relPath,
+    url: input.url,
+    method: input.method ?? "PUT",
+    headers: input.headers ?? {},
+    range: input.range ?? null,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
+/**
+ * Stream a URL into `attachments/<…>`, atomically and hash-verified.
+ *
+ * Rust writes to `.<name>.tmp`, hashes as it writes, and renames only when the
+ * digest matches `expectedSha256` — so a truncated transfer never appears under
+ * the real name for the next diff to accept. Redirects are NOT followed (see
+ * `attachments.rs`): the bearer must never reach a presigned host.
+ */
+export const downloadAttachment = (
+  input: {
+    url: string;
+    relPath: string;
+    headers?: Record<string, string>;
+    expectedSha256?: string | null;
+    /** True when `relPath` is a TREE binary, so Rust applies the tree guard
+     *  ({@link writeTreeBinary}) instead of the `attachments/` one. */
+    tree?: boolean;
+  },
+  expectedEpoch?: VaultEpoch,
+) =>
+  invoke<AttachmentDownloadResult>("download_attachment", {
+    url: input.url,
+    relPath: input.relPath,
+    headers: input.headers ?? {},
+    expectedSha256: input.expectedSha256 ?? null,
+    tree: input.tree ?? false,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
 /**
  * A one-shot census of the open vault for Vault Settings → Health: counts and
@@ -640,6 +1004,8 @@ export interface OauthListen {
 }
 export const googleOauthListen = () => invoke<OauthListen>("google_oauth_listen");
 export const googleOauthAwait = () => invoke<string>("google_oauth_await");
+/** Best-effort restore/show/focus of this exact app process after sign-in. */
+export const googleOauthReturnToApp = () => invoke<void>("google_oauth_return_to_app");
 
 // ---- Sync server URL (app config, next to last-vault) ----------------------
 
@@ -756,3 +1122,15 @@ export interface IndexReady {
 }
 export const onIndexReady = (cb: (e: IndexReady) => void): Promise<UnlistenFn> =>
   listen<IndexReady>("index-ready", (event) => cb(event.payload));
+
+/** Extracted text for these tree binaries just landed in the index — a search
+ *  that ran before them can now answer differently. Coalesced in Rust (the
+ *  extraction worker batches ~20 files / 400 ms), so this is not a per-file
+ *  firehose even during a 200-document drop. */
+export interface FilesIndexed {
+  paths: string[];
+}
+export const onFilesIndexed = (
+  cb: (paths: string[]) => void,
+): Promise<UnlistenFn> =>
+  listen<FilesIndexed>("files-indexed", (event) => cb(event.payload?.paths ?? []));

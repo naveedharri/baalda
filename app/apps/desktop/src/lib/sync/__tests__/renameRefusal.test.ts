@@ -89,6 +89,8 @@ function fakeApi(refusal: () => Error) {
     listFolderRegistry: vi.fn(async () => ({ folders: [], tombstones: [] })),
     listNotes: vi.fn(async () => []),
     listNoteRegistry: vi.fn(async () => ({ notes: [], tombstones: [] })),
+    // The paged twin the reconciler actually calls; identical answer.
+    listNoteRegistryPaged: vi.fn(async () => ({ notes: [], tombstones: [] })),
     createFolder: vi.fn(async (input: { path: string }) => ({
       id: `folder-${input.path}`,
       path: input.path,

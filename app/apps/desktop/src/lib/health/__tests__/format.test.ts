@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   activityCellTitle,
-  activityGrid,
   activityLevel,
   clockTime,
   dayKey,
@@ -153,6 +152,7 @@ describe("kindLabel", () => {
     "no-access",
     "left-behind",
     "materialize-failed",
+    "inbound-blocked",
     "orphan-history",
   ];
 
@@ -248,51 +248,6 @@ describe("dayKey / dayLabel", () => {
   it("does not throw on a broken timestamp", () => {
     expect(dayKey(Number.NaN)).toBe("unknown");
     expect(dayLabel(Number.NaN, noon)).toBe("Unknown");
-  });
-});
-
-describe("activityGrid", () => {
-  // Wednesday 16 Sep 2026, 10:00 local.
-  const now = new Date(2026, 8, 16, 10, 0, 0).getTime();
-
-  it("puts today in the last column on its weekday row, and lays days back from it", () => {
-    const days = Array.from({ length: 112 }, (_, i) => (i === 111 ? 5 : i === 110 ? 1 : 0));
-    const g = activityGrid(days, now);
-    const today = g.cells.find((c) => c.today)!;
-    expect(today.col).toBe(g.columns - 1);
-    expect(today.row).toBe(3); // Wednesday, Sunday = 0
-    expect(today.level).toBe(4);
-    const yesterday = g.cells.find((c) => c.date === today.date - 86_400_000)!;
-    expect(yesterday.row).toBe(2);
-    expect(yesterday.col).toBe(g.columns - 1);
-    expect(yesterday.level).toBe(1);
-  });
-
-  it("starts a new column at each Sunday and never puts two days in one cell", () => {
-    const g = activityGrid(new Array(112).fill(0), now);
-    const seen = new Set(g.cells.map((c) => `${c.col}:${c.row}`));
-    expect(seen.size).toBe(112);
-    // 112 days ending on a Wednesday: this week is partial (Sun–Wed = 4 days),
-    // so the oldest days spill into a 17th column.
-    expect(g.columns).toBe(17);
-    const lastSaturday = g.cells.find((c) => c.row === 6 && c.col === g.columns - 2)!;
-    expect(lastSaturday.date).toBe(new Date(2026, 8, 12).getTime());
-  });
-
-  it("labels the column where a month begins, once per month", () => {
-    const g = activityGrid(new Array(112).fill(0), now);
-    const labels = g.months.map((m) => m.label);
-    expect(new Set(labels).size).toBe(labels.length);
-    expect(labels[labels.length - 1]).toBe("Sep");
-    const sep = g.months.find((m) => m.label === "Sep")!;
-    const firstOfSep = g.cells.find((c) => c.date === new Date(2026, 8, 1).getTime())!;
-    expect(sep.col).toBe(firstOfSep.col);
-  });
-
-  it("renders an empty grid for no data", () => {
-    const g = activityGrid([], now);
-    expect(g.columns).toBe(0);
-    expect(g.cells).toHaveLength(0);
   });
 });
 

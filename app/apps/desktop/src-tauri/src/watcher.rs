@@ -10,10 +10,26 @@
 //!
 //! `.context/` and dotfolders are ignored so the app's own state dir never
 //! feeds the note pipeline (spec 02 §2 hard rule).
+//!
+//! Read-only events are dropped at the source ([`should_forward`]): on Linux
+//! `notify`'s inotify backend reports every open/read/close-after-read, and
+//! indexing a note is itself a read, so forwarding those made the watcher feed
+//! itself forever.
+//!
+//! Whatever still gets through is priced by content, not by the event: the index
+//! compares each file's sha256 against the row it already holds, and a path whose
+//! bytes did not change is reported back as `unchanged` and forwarded to the UI
+//! as `unchanged: true` on its [`FileChanged`] entry. The entry is NOT dropped —
+//! the TS side counts on exactly one watcher echo per path it materialises
+//! (`registry.consumeMaterialized`) and on a `modified` cancelling a pending disk
+//! delete — it just lets the UI and the sync layer skip the expensive half
+//! (re-reading the note, diffing it into the CRDT, re-uploading it).
 
+use crate::extract_worker::{self, ExtractQueue, ExtractWorker};
 use crate::index::Index;
-use crate::vault::{rel_from_abs, rel_path_is_ignored};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use crate::vault::{is_indexable_file, is_note_file, rel_from_abs, rel_path_is_ignored};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -37,6 +53,19 @@ pub struct FileChanged {
     pub path: String,
     /// "modified" | "removed" | "tree" (folder/structure change).
     pub kind: String,
+    /// The index re-read this file and its bytes were identical to what it had
+    /// already indexed, so nothing was rewritten — the event fired for something
+    /// that is not a content change (a metadata/attribute touch, a backup or
+    /// cloud-sync tool rewriting the same bytes, our own echo).
+    ///
+    /// Always `false` for `removed` and `tree`, which have no content to compare.
+    ///
+    /// The entry is still emitted rather than filtered out, because the TS side
+    /// treats the echo itself as meaningful: `registry.consumeMaterialized`
+    /// expects exactly one per path it wrote, and a `modified` inside the
+    /// `DISK_DELETE_GRACE_MS` window is what cancels a pending disk delete. The
+    /// flag only tells it to skip the work that would have no effect.
+    pub unchanged: bool,
 }
 
 /// Payload of the single `files-changed` event emitted per batch.
@@ -94,6 +123,19 @@ pub struct VaultWatcher {
     _watcher: RecommendedWatcher,
     stop: Arc<AtomicBool>,
     drain: Option<std::thread::JoinHandle<()>>,
+    /// The tier-2 extraction thread. Declared last so it is dropped (stopped and
+    /// joined) after the drain thread that feeds it, and never while that thread
+    /// is mid-enqueue.
+    extractor: ExtractWorker,
+}
+
+impl VaultWatcher {
+    /// A handle for enqueuing file extractions from outside the watcher — what
+    /// `open_vault`'s background `rebuild` and the `rebuild_index` command use
+    /// to hand over the files whose text is stale.
+    pub fn extract_queue(&self) -> ExtractQueue {
+        self.extractor.queue()
+    }
 }
 
 impl Drop for VaultWatcher {
@@ -109,6 +151,40 @@ impl Drop for VaultWatcher {
     }
 }
 
+/// Should this raw `notify` event reach the drain thread at all?
+///
+/// Everything is forwarded EXCEPT a pure read: `Access(_)` in every shape
+/// (open, read, close-after-read) other than `Access(Close(Write))`.
+///
+/// Why. Linux is the only platform that reports reads. `notify`'s inotify
+/// backend subscribes with `WatchMask::OPEN` alongside CREATE/MODIFY/DELETE, so
+/// merely *reading* a file — or a directory — produces `EventKind::Access`
+/// events. Indexing a batch reads every note in it, which produced a fresh
+/// round of Access events, which `plan_batch` classified as `modified` (it only
+/// asks whether the path exists), which re-indexed them: a vault that nobody
+/// touched re-indexed itself 264–335 times a minute and wrote ~32 MB/s into
+/// `.context/index.sqlite` (#155). macOS/FSEvents and Windows
+/// `ReadDirectoryChangesW` never emit Access, so their behaviour is unchanged.
+///
+/// Two deliberate exceptions:
+/// - `Access(Close(Write))` is KEPT. On inotify that is `IN_CLOSE_WRITE`, the
+///   reliable "the writer is done" signal for editors that write a file in
+///   place (no temp+rename, so no Create/Rename to lean on). It follows a write,
+///   never a read, so it cannot feed the loop.
+/// - An event carrying the Rescan flag is KEPT whatever its kind: that flag
+///   means the backend's queue overflowed and state may have been missed, so it
+///   must still reach the drain thread and re-index the batch.
+pub(crate) fn should_forward(event: &notify::Event) -> bool {
+    if event.need_rescan() {
+        return true;
+    }
+    match event.kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
 /// Start watching `vault`. Returns a handle that must be kept alive.
 pub fn start(
     vault: PathBuf,
@@ -119,11 +195,19 @@ pub fn start(
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
+            if !should_forward(&event) {
+                return;
+            }
             // Forward the event's paths; the drain thread decides what to do.
             let _ = tx.send(event.paths);
         }
     })?;
     watcher.watch(&vault, RecursiveMode::Recursive)?;
+
+    // One extraction worker per open vault, started before the drain thread so
+    // the very first batch has somewhere to hand its files.
+    let extractor = extract_worker::start(vault.clone(), index.clone(), app.clone());
+    let queue = extractor.queue();
 
     // Drain thread: collect until quiet (or until the batch has been open for
     // MAX_WINDOW), then process the dirty set as one batch.
@@ -149,14 +233,14 @@ pub fn start(
                     if stale && !dirty.is_empty() {
                         opened_at = None;
                         let batch = std::mem::take(&mut dirty);
-                        process_batch(&vault, &index, &app, batch, &thread_stop);
+                        process_batch(&vault, &index, &app, &queue, batch, &thread_stop);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if !dirty.is_empty() {
                         opened_at = None;
                         let batch = std::mem::take(&mut dirty);
-                        process_batch(&vault, &index, &app, batch, &thread_stop);
+                        process_batch(&vault, &index, &app, &queue, batch, &thread_stop);
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -168,6 +252,7 @@ pub fn start(
         _watcher: watcher,
         stop,
         drain: Some(drain),
+        extractor,
     })
 }
 
@@ -190,16 +275,24 @@ pub struct PlannedChange {
 /// I/O is the existence check that decides modified-vs-removed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// `.md` files present on disk → `Index::index_notes`.
+    /// Note-family files present on disk → `Index::index_notes`.
     pub modified: Vec<PathBuf>,
-    /// Everything to drop from the index → `Index::remove_notes`.
+    /// Everything to drop from the index → `Index::remove_notes` AND
+    /// `Index::remove_files` (a vanished path may have been either, or a folder
+    /// holding both).
     pub removed: Vec<PathBuf>,
+    /// Tree binaries present on disk → `Index::index_files`, then the extraction
+    /// worker. These are the SAME entries the UI is told about as `"tree"`: the
+    /// emitted kind is a wire contract with the TS side (a non-note file has
+    /// always meant "refresh the sidebar"), and the file index is a second
+    /// consumer of the plan, not a new event.
+    pub indexable_files: Vec<PathBuf>,
     /// The UI event payload, in a deterministic order.
     pub changes: Vec<PlannedChange>,
 }
 
 /// Turn a dirty set into a [`Plan`]: drop ignored paths, sort for determinism,
-/// and split `.md` writes from `.md` deletions from structural changes.
+/// and split note-family writes from note-family deletions from structural changes.
 pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Plan {
     let mut planned: Vec<PlannedChange> = Vec::new();
     for abs in batch {
@@ -209,16 +302,21 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         if rel.is_empty() || rel_path_is_ignored(&rel) {
             continue;
         }
-        let is_md = rel.to_lowercase().ends_with(".md");
+        // The whole note family, not just `.md` — `index.rs` indexes all of it,
+        // so a `.txt` edit that arrived as a "tree" change would refresh the
+        // sidebar and never re-index the file it actually touched. Asked of the
+        // file NAME, so a dot in a directory (`a.b/notes`) cannot answer for it.
+        let name = rel.rsplit('/').next().unwrap_or(rel.as_str());
+        let is_note = is_note_file(name);
         let exists = abs.exists();
-        let (kind, gone) = if is_md {
+        let (kind, gone) = if is_note {
             if exists && abs.is_file() {
                 ("modified", false)
             } else {
                 ("removed", true)
             }
         } else {
-            // Directory or non-markdown file → structural refresh. If it's gone
+            // Directory or non-note file → structural refresh. If it's gone
             // it may have been a folder, so prune its notes from the index too.
             ("tree", !exists)
         };
@@ -243,9 +341,18 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         .filter(|c| c.gone)
         .map(|c| c.abs.clone())
         .collect();
+    // Present, surfaced, not a note, not under `attachments/` — see
+    // `vault::is_indexable_file`, the one authority both this and
+    // `Index::rebuild` ask.
+    let indexable_files = planned
+        .iter()
+        .filter(|c| c.kind == "tree" && !c.gone && is_indexable_file(&c.rel) && c.abs.is_file())
+        .map(|c| c.abs.clone())
+        .collect();
     Plan {
         modified,
         removed,
+        indexable_files,
         changes: planned,
     }
 }
@@ -254,6 +361,7 @@ fn process_batch(
     vault: &Path,
     index: &Arc<Mutex<Index>>,
     app: &AppHandle,
+    queue: &ExtractQueue,
     batch: HashSet<PathBuf>,
     stop: &AtomicBool,
 ) {
@@ -267,6 +375,7 @@ fn process_batch(
     // held for the whole batch. A UI command only ever waits for the chunk in
     // flight. See `CHUNK`.
     let mut chunks = 0usize;
+    let mut unchanged: HashSet<PathBuf> = HashSet::new();
     for slice in plan.modified.chunks(CHUNK) {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -277,10 +386,11 @@ fn process_batch(
         chunks += 1;
         {
             let guard = index.lock().unwrap();
-            if let Ok(failures) = guard.index_notes(vault, slice) {
-                for (path, err) in failures {
+            if let Ok(outcome) = guard.index_notes(vault, slice) {
+                for (path, err) in outcome.failures {
                     eprintln!("[watcher] index failed for {}: {err}", path.display());
                 }
+                unchanged.extend(outcome.unchanged);
             }
         }
     }
@@ -299,24 +409,65 @@ fn process_batch(
                     eprintln!("[watcher] remove failed for {}: {err}", path.display());
                 }
             }
+            // The same paths, against tier 2: a vanished path is a note, a tree
+            // binary or a folder holding either, and nothing here knows which.
+            if let Err(e) = guard.remove_files(vault, slice) {
+                eprintln!("[watcher] file rows: {e}");
+            }
         }
     }
+
+    // Tier 2, same chunking and the same short holds: the rows are written
+    // under the lock (they are a stat and an insert), and the paths whose TEXT
+    // is stale go to the extraction worker, which parses with no lock at all.
+    let mut pending: Vec<PathBuf> = Vec::new();
+    for slice in plan.indexable_files.chunks(CHUNK) {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        if chunks > 0 {
+            std::thread::sleep(CHUNK_GAP);
+        }
+        chunks += 1;
+        {
+            let guard = index.lock().unwrap();
+            match guard.index_files(vault, slice) {
+                Ok(mut stale) => pending.append(&mut stale),
+                Err(e) => eprintln!("[watcher] file rows: {e}"),
+            }
+        }
+    }
+    queue.enqueue(pending);
 
     // ONE event for the whole batch. The UI used to receive one `file-changed`
     // per path, so a bulk drop turned into a storm of tree refreshes.
     let _ = app.emit(
         "files-changed",
         FilesChanged {
-            changes: plan
-                .changes
-                .into_iter()
-                .map(|c| FileChanged {
-                    path: c.rel,
-                    kind: c.kind.to_string(),
-                })
-                .collect(),
+            changes: mark_unchanged(plan.changes, &unchanged),
         },
     );
+}
+
+/// Turn the plan into the emitted payload, flagging the `modified` entries the
+/// index reported as byte-identical.
+///
+/// Split out so the flag can be tested without an `AppHandle`. Matching is by
+/// absolute path, which is exactly what `index_notes` was handed and hands back.
+/// `removed` and `tree` entries are always `unchanged: false` — there is no
+/// content comparison behind them.
+pub(crate) fn mark_unchanged(
+    changes: Vec<PlannedChange>,
+    unchanged: &HashSet<PathBuf>,
+) -> Vec<FileChanged> {
+    changes
+        .into_iter()
+        .map(|c| FileChanged {
+            unchanged: c.kind == "modified" && unchanged.contains(&c.abs),
+            path: c.rel,
+            kind: c.kind.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -468,7 +619,11 @@ mod tests {
             .into_iter()
             .collect();
         let plan = plan_batch(&v, batch);
-        assert!(idx.index_notes(&v, &plan.modified).unwrap().is_empty());
+        assert!(idx
+            .index_notes(&v, &plan.modified)
+            .unwrap()
+            .failures
+            .is_empty());
         assert!(idx.remove_notes(&v, &plan.removed).unwrap().is_empty());
 
         let paths: Vec<String> = idx
@@ -478,5 +633,226 @@ mod tests {
             .map(|t| t.path)
             .collect();
         assert_eq!(paths, vec!["Alpha.md".to_string()]);
+    }
+
+    /// The flag the UI reads: only `modified` entries the index reported as
+    /// byte-identical carry it, and nothing is ever dropped from the event.
+    #[test]
+    fn mark_unchanged_flags_only_the_matching_modified_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Same.md", "# Same").unwrap();
+        write_note(&v, "Edited.md", "# Edited").unwrap();
+        std::fs::create_dir_all(v.join("folder")).unwrap();
+
+        let batch: HashSet<PathBuf> = [
+            v.join("Same.md"),
+            v.join("Edited.md"),
+            v.join("Gone.md"),
+            v.join("folder"),
+        ]
+        .into_iter()
+        .collect();
+        let plan = plan_batch(&v, batch);
+
+        // The index saw Same.md as byte-identical. `Gone.md` is named too, to
+        // pin that a non-`modified` entry can never pick the flag up.
+        let unchanged: HashSet<PathBuf> =
+            [v.join("Same.md"), v.join("Gone.md")].into_iter().collect();
+        let changes = mark_unchanged(plan.changes, &unchanged);
+
+        assert_eq!(
+            changes,
+            vec![
+                FileChanged {
+                    path: "Edited.md".into(),
+                    kind: "modified".into(),
+                    unchanged: false,
+                },
+                FileChanged {
+                    path: "Gone.md".into(),
+                    kind: "removed".into(),
+                    unchanged: false,
+                },
+                FileChanged {
+                    path: "Same.md".into(),
+                    kind: "modified".into(),
+                    unchanged: true,
+                },
+                FileChanged {
+                    path: "folder".into(),
+                    kind: "tree".into(),
+                    unchanged: false,
+                },
+            ],
+            "every path is still reported; only the modified match is flagged"
+        );
+    }
+
+    /// The flag is derived from what the index actually did, not from the event:
+    /// re-indexing the same bytes must produce `unchanged: true` end to end.
+    #[test]
+    fn a_no_op_rewrite_reaches_the_event_as_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Alpha.md", "# Alpha\n\nbody").unwrap();
+        let idx = Index::open(&v).unwrap();
+        let plan = plan_batch(&v, [v.join("Alpha.md")]);
+        assert!(
+            idx.index_notes(&v, &plan.modified)
+                .unwrap()
+                .unchanged
+                .is_empty(),
+            "first pass indexes it"
+        );
+
+        // A second watcher event for a file nobody edited.
+        let plan = plan_batch(&v, [v.join("Alpha.md")]);
+        let out = idx.index_notes(&v, &plan.modified).unwrap();
+        let changes = mark_unchanged(plan.changes, &out.unchanged.into_iter().collect());
+        assert_eq!(
+            changes,
+            vec![FileChanged {
+                path: "Alpha.md".into(),
+                kind: "modified".into(),
+                unchanged: true,
+            }]
+        );
+    }
+
+    /// Tier 2 rides the SAME plan without changing the wire: a `.docx` is still
+    /// reported to the UI as `"tree"` (that is what a non-note file has always
+    /// meant — refresh the sidebar), and separately collected for the file
+    /// index. Changing the kind would be a breaking change for every TS consumer
+    /// of `files-changed`.
+    #[test]
+    fn a_tree_binary_is_indexable_and_still_reported_as_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Note.md", "# Note").unwrap();
+        std::fs::write(v.join("Report.docx"), b"PK\x03\x04").unwrap();
+        std::fs::create_dir_all(v.join("attachments")).unwrap();
+        std::fs::write(v.join("attachments/a1b2.png"), b"\x89PNG").unwrap();
+        std::fs::create_dir_all(v.join("sub")).unwrap();
+        std::fs::write(v.join("sub/clip.mp4"), b"ftyp").unwrap();
+        std::fs::write(v.join("notes.bak"), b"junk").unwrap();
+
+        let batch: HashSet<PathBuf> = [
+            v.join("Note.md"),
+            v.join("Report.docx"),
+            v.join("attachments/a1b2.png"),
+            v.join("sub/clip.mp4"),
+            v.join("notes.bak"),
+        ]
+        .into_iter()
+        .collect();
+        let plan = plan_batch(&v, batch);
+
+        assert_eq!(
+            kinds(&plan),
+            vec![
+                ("Note.md".to_string(), "modified"),
+                ("Report.docx".to_string(), "tree"),
+                ("attachments/a1b2.png".to_string(), "tree"),
+                ("notes.bak".to_string(), "tree"),
+                ("sub/clip.mp4".to_string(), "tree"),
+            ],
+        );
+        assert_eq!(
+            plan.indexable_files,
+            vec![v.join("Report.docx"), v.join("sub/clip.mp4")],
+            "the attachments store is excluded (hash-named, hidden, unlocatable \
+             hits) and `.bak` is not a surfaced format at all"
+        );
+    }
+
+    /// A deleted binary must leave no row behind — and the plan cannot tell a
+    /// vanished file from a vanished folder, so both tiers are asked.
+    #[test]
+    fn a_vanished_binary_prunes_its_file_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        std::fs::create_dir_all(v.join("Reports")).unwrap();
+        std::fs::write(v.join("Reports/q3.docx"), b"PK\x03\x04").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.file_rows().unwrap().len(), 1);
+
+        // The whole folder goes, which is one unpaired "tree" event for a path
+        // that no longer exists.
+        std::fs::remove_dir_all(v.join("Reports")).unwrap();
+        let plan = plan_batch(&v, [v.join("Reports")]);
+        assert_eq!(kinds(&plan), vec![("Reports".to_string(), "tree")]);
+        assert!(plan.indexable_files.is_empty(), "gone files are not queued");
+        idx.remove_files(&v, &plan.removed).unwrap();
+        assert!(idx.file_rows().unwrap().is_empty());
+    }
+
+    /// Linux-only feedback loop (#155). Every read-shaped inotify event must die
+    /// in the callback, or indexing (which reads the notes) re-dirties them.
+    #[test]
+    fn read_only_access_events_are_dropped() {
+        use notify::event::{AccessKind, AccessMode};
+        use notify::{Event, EventKind};
+
+        let read_kinds = [
+            EventKind::Access(AccessKind::Any),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Other),
+        ];
+        for kind in read_kinds {
+            let event = Event::new(kind).add_path(PathBuf::from("/vault/Note.md"));
+            assert!(
+                !should_forward(&event),
+                "{kind:?} is a read and must not reach the drain thread"
+            );
+        }
+    }
+
+    /// Everything that can mean "the bytes on disk changed" still gets through —
+    /// including `Close(Write)`, the in-place editor's end-of-write signal.
+    #[test]
+    fn writes_renames_and_deletes_are_forwarded() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+            RenameMode,
+        };
+        use notify::{Event, EventKind};
+
+        let write_kinds = [
+            EventKind::Create(CreateKind::Any),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            EventKind::Remove(RemoveKind::Any),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Any,
+            EventKind::Other,
+        ];
+        for kind in write_kinds {
+            let event = Event::new(kind).add_path(PathBuf::from("/vault/Note.md"));
+            assert!(
+                should_forward(&event),
+                "{kind:?} may have changed the file and must be forwarded"
+            );
+        }
+    }
+
+    /// The Rescan flag means the backend's queue overflowed, so its kind is not
+    /// to be trusted — forward it even though it claims to be a read.
+    #[test]
+    fn a_rescan_flagged_access_event_is_forwarded() {
+        use notify::event::{AccessKind, Flag};
+        use notify::{Event, EventKind};
+
+        let event = Event::new(EventKind::Access(AccessKind::Read))
+            .add_path(PathBuf::from("/vault/Note.md"))
+            .set_flag(Flag::Rescan);
+        assert!(event.need_rescan());
+        assert!(should_forward(&event));
     }
 }

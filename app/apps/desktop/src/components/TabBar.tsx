@@ -90,7 +90,7 @@ export function TabBar() {
   return (
     <div className="tab-strip" role="tablist" aria-label="Open files">
       <LayoutGroup>
-        {tabs.map((path) => {
+        {tabs.map((path, index) => {
           const active = path === activePath;
           // The openingNotePath acknowledgement, same as the sidebar row: a tab
           // click in a synced vault takes a round trip before the editor swaps.
@@ -99,7 +99,7 @@ export function TabBar() {
           return (
             <div
               key={path}
-              className={`tab${active ? " active" : ""}${opening ? " opening" : ""}`}
+              className={`tab${index === 0 ? " first-tab" : ""}${active ? " active" : ""}${opening ? " opening" : ""}`}
               role="tab"
               aria-selected={active}
               title={path}

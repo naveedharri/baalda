@@ -6,6 +6,7 @@
 // problem actually is.
 
 import { describe, expect, it } from "vitest";
+import { syncBadgeLabel } from "../../../components/Identity";
 import {
   buildHealthReport,
   classifyUploadReason,
@@ -50,7 +51,7 @@ function statsWith(over: Partial<VaultStats> = {}): VaultStats {
     tags: 4,
     links: 9,
     brokenLinks: 0,
-    index: { bytes: 100_000 },
+    index: { bytes: 100_000, files: 0, extractedTextBytes: 0 },
     history: { docs: 10, updates: 100, bytes: 200_000, orphanDocs: 0, orphanBytes: 0 },
     largestNotes: [],
     largestFiles: [],
@@ -155,7 +156,7 @@ describe("verdict precedence", () => {
       }),
     );
     expect(r.verdict).toBe("syncing");
-    expect(r.headline).toBe("Syncing — 40 of 100");
+    expect(r.headline).toBe("Syncing — 40 of 100 updates");
     expect(stage(r, "server").state).toBe("busy");
   });
 
@@ -191,7 +192,7 @@ describe("verdict precedence", () => {
   it("reports `healthy` only when every note is confirmed", () => {
     const r = buildHealthReport(input(healthyVault(1204)));
     expect(r.verdict).toBe("healthy");
-    expect(r.headline).toBe("All 1,204 notes are on the server");
+    expect(r.headline).toBe("All 1,204 notes are on the Remote Vault");
     expect(r.detail).toContain("api.baalda.com");
     expect(r.detail).toContain("2 min ago");
     expect(r.counts).toEqual({
@@ -220,7 +221,7 @@ describe("verdict precedence", () => {
     expect(r.counts?.total).toBe(3);
     expect(r.counts?.synced).toBe(2);
     expect(r.verdict).toBe("attention");
-    expect(r.headline).toBe("1 note is not on the server");
+    expect(r.headline).toBe("1 note is not on the Remote Vault");
   });
 });
 
@@ -230,6 +231,7 @@ describe("content failures", () => {
     relPath: "Big.md",
     reason: "too large to sync (12.4 MB; the limit is 10 MB)",
     permanent: true,
+    kind: "too-large" as const,
   };
   const tooLargeHistory = {
     docId: "doc-hist",
@@ -238,9 +240,10 @@ describe("content failures", () => {
       "too large to sync (17.2 MB of edit history; the limit is 10 MB) — " +
       "reset this note's history to sync it again",
     permanent: true,
+    kind: "too-large" as const,
   };
 
-  it("maps a permanent failure to `too-large`, never offering a Retry that cannot work", () => {
+  it("maps a typed size failure to `too-large`, never offering a Retry that cannot work", () => {
     const r = buildHealthReport(
       input({ failures: { registry: [], content: [tooLargeFile], limitCode: null } }),
     );
@@ -272,7 +275,7 @@ describe("content failures", () => {
     expect(r.issues[0].explanation.fixes[0]).toContain("Reset this note's history");
   });
 
-  it("quotes the sync layer verbatim when the reason has an unexpected shape", () => {
+  it("does not guess that an untyped permanent failure is too large", () => {
     const r = buildHealthReport(
       input({
         failures: {
@@ -282,8 +285,33 @@ describe("content failures", () => {
         },
       }),
     );
-    expect(r.issues[0].kind).toBe("too-large");
-    expect(r.issues[0].why).toContain("the server said no");
+    expect(r.issues[0].kind).toBe("upload-failed");
+    expect(r.issues[0].why).toContain("The server said no");
+  });
+
+  it("reports a refused local edit as an access problem, not a size problem", () => {
+    const r = buildHealthReport(
+      input({
+        failures: {
+          registry: [],
+          content: [
+            {
+              docId: "d-readonly",
+              relPath: "Small.md",
+              reason:
+                "edit could not be sent: no write access; copy saved to .context/trash/t/Small.md",
+              permanent: true,
+              kind: "no-write-access",
+            },
+          ],
+          limitCode: null,
+        },
+      }),
+    );
+    expect(r.issues[0].kind).toBe("no-write-access");
+    expect(r.issues[0].title).toBe("Read-only sync needs review");
+    expect(r.issues[0].remedies).toContain("retry");
+    expect(r.issues[0].why).toContain("recovery copy");
   });
 
   it("maps a transient failure to `upload-failed`, with a Retry", () => {
@@ -345,6 +373,19 @@ describe("registry failures", () => {
     expect(i).toBeDefined();
     expect(i?.path).toBeNull();
     expect(i?.remedies).toEqual(["upgrade", "copy-details"]);
+  });
+
+  it("reports refused inbound removals as safety checks without claiming a downloaded copy", () => {
+    const r = buildHealthReport(input({ failures: {
+      registry: [{ kind: "inbound-blocked", path: "Campaigns", docId: null,
+        reason: "refused: 1743 folder access removals exceeds the safety limit", code: null }],
+      content: [], limitCode: null,
+    } }));
+    const issue = r.issues.find((i) => i.path === "Campaigns")!;
+    expect(issue.kind).toBe("inbound-blocked");
+    expect(issue.title).toBe("Local change held for safety");
+    expect(issue.explanation.safety).toBe("unknown");
+    expect(issue.why).not.toContain("could not be written");
   });
 
   it("maps note/folder failures to `register-failed` and materialize/inbound to `materialize-failed`", () => {
@@ -499,7 +540,7 @@ describe("stats-derived issues and stages", () => {
       tags: 88,
       links: 640,
       brokenLinks: 5,
-      index: { bytes: 12_000_000 },
+      index: { bytes: 12_000_000, files: 0, extractedTextBytes: 0 },
       history: { docs: 1204, updates: 90_000, bytes: 40_000_000, orphanDocs: 0, orphanBytes: 0 },
       largestNotes: [],
       largestFiles: [],
@@ -527,7 +568,7 @@ describe("stats-derived issues and stages", () => {
     const i = r.issues.find((x) => x.kind === "orphan-history");
     expect(i?.severity).toBe("warn");
     expect(i?.remedies).toEqual(["reclaim"]);
-    expect(i?.why).toContain("953 notes");
+    expect(i?.facts).toContainEqual({ label: "Leftover notes", value: "953" });
     expect(stage(r, "history").state).toBe("warn");
     // A warning is not a reason to stop calling the vault healthy.
     expect(r.verdict).toBe("healthy");
@@ -620,7 +661,7 @@ describe("issue ordering", () => {
           tags: 0,
           links: 0,
           brokenLinks: 0,
-          index: { bytes: 0 },
+          index: { bytes: 0, files: 0, extractedTextBytes: 0 },
           history: { docs: 1, updates: 1, bytes: 1, orphanDocs: 4, orphanBytes: 9 },
           largestNotes: [],
           largestFiles: [],
@@ -877,7 +918,7 @@ describe("explanations", () => {
       "orphan-history",
     );
     expect(i.explanation.safety).toBe("both");
-    expect(i.explanation.meaning).toContain("nothing is at risk");
+    expect(i.explanation.meaning).toContain("Safe to reclaim or ignore");
     expect(i.remedies).toEqual(["reclaim"]);
     expect(i.facts.find((f) => f.label === "Space used")?.value).toBe("2 KB");
   });
@@ -1053,9 +1094,9 @@ describe("classifyUploadReason", () => {
     );
     // `syncManager.ts` rejects with the terminal status as the message.
     expect(classifyUploadReason("no-access")).toContain("view-only");
-    expect(classifyUploadReason("deleted")).toContain("no row for this note");
+    expect(classifyUploadReason("deleted")).toContain("no record for this note");
     expect(classifyUploadReason("error")).toContain("connection");
-    expect(classifyUploadReason("Failed to fetch")).toContain("could not reach the server");
+    expect(classifyUploadReason("Failed to fetch")).toContain("could not reach the Remote Vault");
     expect(classifyUploadReason("HTTP 503")).toContain("error of its own");
   });
 
@@ -1075,4 +1116,21 @@ describe("classifyUploadReason", () => {
     );
     expect(r.issues[0].explanation.meaning).toContain("Wibble.");
   });
+});
+
+
+describe("Health and header agreement during regrant", () => {
+  it.each(["registering", "uploading", "downloading", "removing"] as const)(
+    "keeps %s active even when all note confirmations still say synced", (phase) => {
+      const progress = { phase, done: 6476, total: 6628, failed: 0 };
+      const report = buildHealthReport(input({ ...healthyVault(6974), syncProgress: progress }));
+      expect(report.verdict).toBe("syncing");
+      const badge = syncBadgeLabel({ status: "synced", now: NOW, progress });
+      expect(badge).toContain(phase === "removing" ? "Updating access" : "Syncing");
+      expect(report.headline).toContain(phase === "removing" ? "Updating access" : "Syncing");
+      const settled = buildHealthReport(input({ ...healthyVault(6974),
+        syncProgress: { ...progress, phase: "done", done: 6628 } }));
+      expect(settled.verdict).toBe("healthy");
+    },
+  );
 });

@@ -76,6 +76,67 @@ export async function seedNote(
   return docId;
 }
 
+/**
+ * A `files` row — a binary that lives in the tree and has a doc_id of its own
+ * (migration 028's premise: its ACL comes from the resolver, like a note's).
+ */
+export async function seedFile(
+  vaultId: string,
+  folderId: string | null,
+  path: string,
+  docId: string = randomUUID(),
+): Promise<string> {
+  await pool.query(
+    "INSERT INTO files (id, vault_id, folder_id, path) VALUES ($1, $2, $3, $4)",
+    [docId, vaultId, folderId, path],
+  );
+  return docId;
+}
+
+/** A `ready` blob row, optionally bound to a `files` doc. Written directly
+ *  rather than through the upload route when a test only needs the row. */
+export async function seedBlob(
+  vaultId: string,
+  orgId: string,
+  relPath: string,
+  opts: { docId?: string | null; sha256?: string; mime?: string; size?: number } = {},
+): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
+                        storage_provider, status, data, doc_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'postgres', 'ready', $9, $10)`,
+    [
+      id,
+      vaultId,
+      orgId,
+      opts.sha256 ?? randomUUID().replace(/-/g, "").padEnd(64, "0").slice(0, 64),
+      opts.size ?? 3,
+      opts.mime ?? "application/octet-stream",
+      relPath,
+      relPath.split("/").pop() ?? relPath,
+      Buffer.from([1, 2, 3]),
+      opts.docId ?? null,
+    ],
+  );
+  return id;
+}
+
+/** The extracted-text cache row for a blob (migration 028). */
+export async function seedBlobText(
+  blobId: string,
+  vaultId: string,
+  docId: string | null,
+  content: string,
+): Promise<void> {
+  const { embed } = await import("../../src/index/embedder.js");
+  await pool.query(
+    `INSERT INTO blob_text (blob_id, vault_id, doc_id, chars, content, vector, source)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'client')`,
+    [blobId, vaultId, docId, content.length, content, JSON.stringify(embed(content))],
+  );
+}
+
 export async function seedShare(
   orgId: string,
   resourceType: "folder" | "file",

@@ -34,8 +34,11 @@ const SERVER_ENV = [
   "JWT_SECRET",
   "BETTER_AUTH_URL",
   "PORT",
+  // Template Dockerfile detection; preserve when applying IaC to a template deployment.
+  "RAILWAY_DOCKERFILE_PATH",
   "HOCUSPOCUS_PORT",
   "NODE_ENV",
+  "BAALDA_DEPLOYMENT",
   "NODE_OPTIONS",
   "SYNC_TOKEN_TTL_SECONDS",
   "COMPACTION_THRESHOLD",
@@ -46,7 +49,50 @@ const SERVER_ENV = [
   "MAX_NOTE_MB",
   "MAX_BLOB_BYTES",
   "MAX_INFLIGHT_UPLOAD_BYTES",
+  // Attachment storage adapter: provider for new blobs, how strictly the upload
+  // route enforces the MIME allow-list, and how long an abandoned upload holds
+  // its dedupe slot.
+  "BLOB_STORAGE",
+  "BLOB_MIME_ENFORCE",
+  "BLOB_PENDING_TTL_MINUTES",
+  // Attachment lifecycle: the free-tier storage cap, and the orphan sweep
+  // (default OFF — the deletion queue is always on and has no switch).
+  "FREE_MAX_STORAGE_MB",
+  "BLOB_GC_ENABLED",
+  "BLOB_GC_ORPHAN_DAYS",
+  "BLOB_GC_INTERVAL_MS",
+  "BLOB_GC_MAX_DELETES_PER_RUN",
+  // S3/R2/MinIO, read only when BLOB_STORAGE=s3. Every one of these must be
+  // listed: `railway config apply` DELETES a variable the IaC does not name,
+  // so an omission here silently unconfigures the bucket on the next apply.
+  "S3_BUCKET",
+  "S3_REGION",
+  "S3_ENDPOINT",
+  "S3_ACCESS_KEY_ID",
+  "S3_SECRET_ACCESS_KEY",
+  "S3_FORCE_PATH_STYLE",
+  "S3_KEY_PREFIX",
+  "S3_PRESIGN_UPLOAD_TTL_SECONDS",
+  "S3_PRESIGN_DOWNLOAD_TTL_SECONDS",
+  "S3_PROXY_DOWNLOADS",
+  "S3_CHECKSUM_MODE",
+  "S3_MULTIPART_THRESHOLD_BYTES",
+  "S3_MULTIPART_PART_BYTES",
+  "MAX_BLOB_BYTES_DIRECT",
   "BACKFILL_CONCURRENCY",
+  // Bulk sync engine: the per-request item ceilings for the `/batch` routes and
+  // the bootstrap page/session budgets. All have safe defaults in
+  // `apps/server/src/config.ts` — they are listed so a deployment CAN tune them
+  // without the next `railway config apply` deleting the value.
+  "BATCH_MAX_NOTES",
+  "BATCH_MAX_FOLDERS",
+  "BATCH_MAX_FILES",
+  "BATCH_MAX_DOCS",
+  "BATCH_MAX_DECODED_BYTES",
+  "BOOTSTRAP_MAX_PAGE_BYTES",
+  "BOOTSTRAP_MAX_PAGE_DOCS",
+  "BOOTSTRAP_CONCURRENCY",
+  "BOOTSTRAP_TTL_HOURS",
   "VERSION_IDLE_MS",
   "VAULT_SYNC_PATH",
   "VAULT_HEARTBEAT_MS",

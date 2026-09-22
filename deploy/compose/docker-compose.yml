@@ -22,6 +22,7 @@ x-server-image: &server-image
 
 x-server-env: &server-env
   NODE_ENV: production
+  BAALDA_DEPLOYMENT: self-hosted
   # Compose resolves this against the postgres service below, on the internal
   # network — Postgres is never published to the host.
   DATABASE_URL: postgres://baalda:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/baalda
@@ -84,5 +85,61 @@ services:
       retries: 5
       start_period: 30s
 
+  # OPTIONAL, and off unless you ask for it: `docker compose --profile minio up -d`.
+  # A plain `docker compose up -d` never starts it, so the zero-configuration
+  # path (attachments in Postgres) is completely unaffected by this block.
+  #
+  # MinIO is an S3-compatible object store you run yourself. Point the server at
+  # it when you want attachments out of the database — big videos, a Postgres
+  # you would rather keep small, or backups that do not carry every byte of
+  # every file.
+  #
+  # First run, once, to create the bucket:
+  #   docker compose --profile minio up -d minio
+  #   docker compose exec minio mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+  #   docker compose exec minio mc mb local/baalda
+  #
+  # Then add these to x-server-env above (and restart the server):
+  #   BLOB_STORAGE: s3
+  #   S3_ENDPOINT: http://minio:9000     # the INTERNAL name; see the note below
+  #   S3_BUCKET: baalda
+  #   S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  #   S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  #   S3_FORCE_PATH_STYLE: "true"        # MinIO has no bucket-per-subdomain DNS
+  #   S3_PROXY_DOWNLOADS: "1"            # see below
+  #
+  # THE ENDPOINT IS THE PART PEOPLE GET WRONG. Presigned URLs are handed to the
+  # CLIENT, so the endpoint the server signs must be an address the client can
+  # reach. `http://minio:9000` only resolves inside this network — which is
+  # exactly why `S3_PROXY_DOWNLOADS=1` is suggested above: with it, downloads
+  # stream through the server and never leak an unreachable URL. Uploads are
+  # still presigned, so for a client-reachable MinIO publish the port below and
+  # set S3_ENDPOINT to the public address instead — terminate TLS in front of it
+  # the same way you do for the API, since a webview will not upload to plain
+  # http from an https page.
+  minio:
+    image: quay.io/minio/minio:latest
+    profiles: ["minio"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      # Named volume, like the database's: this is where the attachments live
+      # once BLOB_STORAGE=s3. `docker compose down -v` deletes it. Back it up.
+      - baalda_minio:/data
+    # Not published by default — the server reaches it on the internal network.
+    # Uncomment to expose the API (9000) and the web console (9001) on the host.
+    # ports:
+    #   - "127.0.0.1:9000:9000"
+    #   - "127.0.0.1:9001:9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   baalda_pgdata:
+  baalda_minio:
