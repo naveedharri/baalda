@@ -132,17 +132,19 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
       <div className="housekeeper-card">
         <div className="housekeeper-heading"><h4>Smart diagnostics</h4></div>
 
-        <div className="housekeeper-actions">
-          <button className="primary" disabled={busy || !ready || (!diagnostics && !collectDiagnostics)} onClick={() => void run(async () => {
+        {!ready ? <div className="housekeeper-callout">
+          <p>Add an AI provider key to scan this vault. Keys stay in this device's keychain.</p>
+          <div className="housekeeper-actions"><button className="primary" onClick={() => setPane("settings")}>Connect a provider</button></div>
+        </div> : <div className="housekeeper-actions">
+          <button className="primary" disabled={busy || (!diagnostics && !collectDiagnostics)} onClick={() => void run(async () => {
             setReview(null); setRepairOpen(false); setScan(null); setExpanded(null);
             const input = collectDiagnostics ? await collectDiagnostics() : diagnostics!;
             if (!alive.current) return;
             const result = await api.housekeeperDiagnose(vaultId, input, ...(provider ? [provider] : []));
             if (alive.current) setReview({ fingerprint: JSON.stringify(input), result });
           }, "Scanning vault…")}>{busy ? activity : "Scan vault"}</button>
-        </div>
-        {!ready && <button className="secondary" onClick={() => setPane("settings")}>Connect a provider to scan</button>}
-        {!diagnostics && <p className="housekeeper-detail">Collecting vault evidence…</p>}
+        </div>}
+        {ready && !diagnostics && <p className="housekeeper-detail">Collecting vault evidence…</p>}
         {activity && <p className="assistant-progress" role="status"><span className="assistant-spinner" aria-hidden="true" />{activity}</p>}
         {review && review.fingerprint !== fingerprint && <p role="status">Findings changed. Run the review again for current priorities.</p>}
         {review && review.fingerprint === fingerprint && <div aria-live="polite">

@@ -137,6 +137,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   happened drawn as dashed `data-future` cells that never take a heat level.
 
 ### Fixed
+- **Access panel is fast on large vaults.** Per-person summaries no longer resolve every note
+  with ~5 queries per person: `loadAccessIndex` preloads the organization's share rows and
+  structure once per request and the unchanged resolver (`resolveAccessForUser`) reads them in
+  memory — `tests/access-index.test.ts` pins it to the per-query answers across all four vault
+  postures. New `POST /api/orgs/:orgId/access/summaries` answers every visible row in one
+  request (the desktop batches row badges, falls back per row on older servers), and people
+  selections settle for 300 ms before resolving instead of re-resolving the vault per click.
+  Everyone view no longer labels a folder "Restricted" when one person is read-only: it keeps
+  the team badge and says "Read-only for <name>". Assistant without a provider key now shows
+  one "Connect a provider" prompt instead of a disabled Scan button.
 - **Revoked binaries are removed only once this device has confirmed the server holds
   their bytes.** A `files` row is minted before the upload and the upload can be refused
   for good (Free plan, blob ceiling, full quota), so the row was never proof of possession.
