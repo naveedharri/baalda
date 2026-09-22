@@ -144,7 +144,7 @@ it("local rename authorization requires live edit permission without returning n
   expect((await request("authorize", { docId: "source" }, "other-vault")).status).toBe(404);
 });
 
-it.each(["", "operator-billing"])("includes Steward for self-hosters with billing token %s", async token => {
+it.each(["", "operator-billing"])("includes Assistant for self-hosters with billing token %s", async token => {
   vi.stubEnv("BAALDA_DEPLOYMENT", "self-hosted"); vi.stubEnv("POLAR_ACCESS_TOKEN", token); state.plan = "free";
   expect((await request()).status).toBe(200);
 });

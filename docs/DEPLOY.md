@@ -764,7 +764,7 @@ unset and the server behaves exactly as before (Postgres only).
 
 ### Self-hosted agent access
 
-Set `BAALDA_DEPLOYMENT=self-hosted` (as in `.env.example`) to enable Steward with
+Set `BAALDA_DEPLOYMENT=self-hosted` (as in `.env.example`) to enable the Assistant with
 users’ own model keys, independently of optional billing setup. You can configure
 billing later without changing AI access. The setting defaults to `cloud` when
 omitted: AI requires Pro and Free vaults have a 20,000-note sync cap.

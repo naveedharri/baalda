@@ -120,6 +120,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Changed
+- **"Baalda Steward" is now "Baalda Assistant".** UI copy, docs and the `Steward*`
+  components/identifiers were renamed; the `housekeeper` engine names, API paths, env
+  vars and stored keychain/localStorage keys are unchanged.
 - **Existing vaults keep letting new teammates in.** Migration 032 gave every vault a
   Private default for people who join later, which silently shut newcomers out of a vault
   whose posture is Shared. Migration 033 seeds that default once from each existing vault's

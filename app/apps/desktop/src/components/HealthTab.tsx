@@ -228,7 +228,7 @@ export function HealthView({
   if (mode === "finding" && findingId) {
     const check = checks?.results.find(c => c.id === findingId);
     const issues = findingId.startsWith("issue-") ? report.issues.filter(i => i.kind === findingId.slice(6)) : report.issues;
-    return <div className="health-tab steward-finding-tools">
+    return <div className="health-tab assistant-finding-tools">
       {check ? <HealthChecks checks={checks} loading={loading} handlers={handlers} onlyIds={[findingId]} focus={{ id: check.id, n: 1 }} /> :
         findingId === "vault-storage" ? stats && <HealthLargest stats={stats} handlers={handlers} /> :
         ["remote-files", "local-files"].includes(findingId) ? <InventoryComparison inventory={snapshot.inventory} report={report} handlers={handlers} standaloneFileSyncBlocked={standaloneFileSyncBlocked} showAttachmentUpgrade={showAttachmentUpgrade} /> :

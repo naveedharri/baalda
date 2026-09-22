@@ -3,7 +3,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import { StewardLocalRepair } from "../StewardLocalRepair";
+import { AssistantLocalRepair } from "../AssistantLocalRepair";
 import type { VaultHealthSnapshot } from "../../lib/health/types";
 const env = vi.hoisted(() => ({ state: { vault: { path: "/vault", epoch: 1 }, serverUrl: "local", session: { user: { id: "user" } }, docIdByPath: { "Big.md": "doc" }, titles: [] }, status: vi.fn(), checks: vi.fn(), pick: vi.fn(), copy: vi.fn() }));
 vi.mock("../../store", () => ({ useStore: { getState: () => env.state } }));
@@ -21,7 +21,7 @@ beforeEach(() => {
   host = document.createElement("div"); root = createRoot(host);
 });
 afterEach(() => act(() => root.unmount()));
-async function render() { await act(async () => root.render(createElement(StewardLocalRepair, { id: finding.id, snapshot, onClose: vi.fn() }))); }
+async function render() { await act(async () => root.render(createElement(AssistantLocalRepair, { id: finding.id, snapshot, onClose: vi.fn() }))); }
 async function apply() { await act(async () => [...host.querySelectorAll("button")].find(b => b.textContent?.includes("Save copies"))!.click()); }
 it("previews exact files and only copies after approval with the original epoch", async () => {
   await render(); expect(host.textContent).toContain("Big.md"); expect(env.copy).not.toHaveBeenCalled();

@@ -522,9 +522,9 @@ overwriting occupied paths. Legacy whole-list Pro refusals can be re-probed on
 a sync pass after a one-minute cooldown, allowing a running updated desktop to
 recover when its server is upgraded.
 
-### Baalda Steward engine
+### Baalda Assistant engine
 
-AI’s Baalda Steward provides user-reviewed agent repairs. `http/routes/housekeeper.ts` hosts the optional
+AI’s Baalda Assistant provides user-reviewed agent repairs. `http/routes/housekeeper.ts` hosts the optional
 `app/apps/server/housekeeper/index.mjs` module (override with `HOUSEKEEPER_MODULE`) without a
 static build dependency. Every request checks vault membership and a non-deleted
 `pro` subscription in `active`/`past_due` on Cloud. Self-hosters with
@@ -533,7 +533,7 @@ OpenRouter SDK through swappable Decisions/chat adapters. Personal provider keys
 `DocWriter.editContent` with revision/span guards under its lock. Preview tokens
 are scoped to user/vault, expire, and live in bounded process memory. No sync wire
 format or bridge timing changes. Setup, limits and isolated tests:
-[Baalda Steward](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI; Health retains its basic overview.
+[Baalda Assistant](docs/HOUSEKEEPER.md). Keys are user-owned and stored in the desktop OS keychain; inference supplies them per request. Diagnostic review sends aggregate counts only and returns allowlisted next-step recommendations. Advanced diagnostic tools live in AI; Health retains its basic overview.
 
 Baalda Agents follow observe → investigate → propose → approve → execute → verify.
 Finding cards are data-driven; models choose allowlisted capabilities, while

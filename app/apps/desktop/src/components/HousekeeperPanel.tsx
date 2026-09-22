@@ -6,10 +6,10 @@ import { authManager } from "../lib/auth/authManager";
 import { syncManager } from "../lib/sync/docSession";
 import { CHECK_DEFINITIONS } from "../lib/health/checks";
 import { ApiError } from "../lib/api";
-import type { StewardProvider, DiagnosticInput, DiagnosticReview, HousekeeperScan, HousekeeperStatus } from "../lib/housekeeper";
+import type { AssistantProvider, DiagnosticInput, DiagnosticReview, HousekeeperScan, HousekeeperStatus } from "../lib/housekeeper";
 import type { NoteTitle } from "../lib/ipc";
 import "./housekeeper.css";
-import { StewardProviderSettings } from "./StewardProviderSettings";
+import { AssistantProviderSettings } from "./AssistantProviderSettings";
 
 interface AssistantProps {
   identity?: string;
@@ -47,7 +47,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
   const [expanded, setExpanded] = useState<string | null>(null);
   const [repairFinding, setRepairFinding] = useState("broken-links");
   const [repairOpen, setRepairOpen] = useState(false);
-  const [provider, setProvider] = useState<StewardProvider | null>(null);
+  const [provider, setProvider] = useState<AssistantProvider | null>(null);
   const ready = identity ? provider !== null : true;
   const [status, setStatus] = useState<HousekeeperStatus | null>(null);
   const [refresh, setRefresh] = useState(0);
@@ -111,16 +111,16 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
   }
   useEffect(() => { if (repairOpen) showRepair(); }, [repairOpen]);
   const availableNotes = notes.filter(n => /\.md$/i.test(n.path));
-  return <section className="housekeeper-panel" aria-label="Baalda Steward">
-    <div className="housekeeper-heading"><h3>Baalda Steward</h3>{status?.requiresPro !== false && <span className="housekeeper-badge">Pro</span>}</div>
+  return <section className="housekeeper-panel" aria-label="Baalda Assistant">
+    <div className="housekeeper-heading"><h3>Baalda Assistant</h3>{status?.requiresPro !== false && <span className="housekeeper-badge">Pro</span>}</div>
     <p className="housekeeper-intro">Keep your vault tidy. Review every change.</p>
     <div className="housekeeper-announcement"><span className="housekeeper-badge">NEW</span><span>TypeSafe Jev is now available in Baalda.</span></div>
     {identity && <>
-      <div className="steward-tabs" role="tablist" aria-label="AI sections">
+      <div className="assistant-tabs" role="tablist" aria-label="AI sections">
         <button role="tab" aria-selected={pane === "diagnostics"} onClick={() => setPane("diagnostics")}>Diagnostics</button>
         <button role="tab" aria-selected={pane === "settings"} onClick={() => setPane("settings")}>Settings</button>
       </div>
-      <div hidden={pane !== "settings"}><StewardProviderSettings identity={identity} onChange={setProvider}
+      <div hidden={pane !== "settings"}><AssistantProviderSettings identity={identity} onChange={setProvider}
         onReady={hasKey => setPane(current => !hasKey ? "settings" : current ?? "diagnostics")} onSaved={() => setPane("diagnostics")} /></div>
     </>}
     <div hidden={identity !== undefined && pane !== "diagnostics"}>
@@ -143,7 +143,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
         </div>
         {!ready && <button className="secondary" onClick={() => setPane("settings")}>Connect a provider to scan</button>}
         {!diagnostics && <p className="housekeeper-detail">Collecting vault evidence…</p>}
-        {activity && <p className="steward-progress" role="status"><span className="steward-spinner" aria-hidden="true" />{activity}</p>}
+        {activity && <p className="assistant-progress" role="status"><span className="assistant-spinner" aria-hidden="true" />{activity}</p>}
         {review && review.fingerprint !== fingerprint && <p role="status">Findings changed. Run the review again for current priorities.</p>}
         {review && review.fingerprint === fingerprint && <div aria-live="polite">
           <p className="housekeeper-detail">{review.result.findings.length} {review.result.findings.length === 1 ? "finding" : "findings"} · {review.result.checked} checks</p>
@@ -151,10 +151,10 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
           <ul className="housekeeper-suggestions">{review.result.findings.map((f, index) => {
             const measured = CHECK_DEFINITIONS.find(check => check.id === f.id)?.severity;
             const severity = measured === "error" || f.id.startsWith("issue-") ? "error" : measured === "info" || f.id === "vault-storage" || f.id === "vault-local" ? "info" : "warning";
-            return <li key={f.id} className={`steward-finding severity-${severity}`}>
-            <div className="steward-finding-marker"><span>{index + 1}</span><span className="steward-severity-icon" aria-label={severity}>{severity === "error" ? "!" : severity === "warning" ? "△" : "i"}</span></div>
-            <div className="steward-finding-content">
-            <div className="steward-finding-heading"><strong>{f.title}</strong><span className="housekeeper-badge">{f.count}</span><span className={`housekeeper-priority housekeeper-priority-${f.priority}`}>{f.label}</span></div>
+            return <li key={f.id} className={`assistant-finding severity-${severity}`}>
+            <div className="assistant-finding-marker"><span>{index + 1}</span><span className="assistant-severity-icon" aria-label={severity}>{severity === "error" ? "!" : severity === "warning" ? "△" : "i"}</span></div>
+            <div className="assistant-finding-content">
+            <div className="assistant-finding-heading"><strong>{f.title}</strong><span className="housekeeper-badge">{f.count}</span><span className={`housekeeper-priority housekeeper-priority-${f.priority}`}>{f.label}</span></div>
             {f.action && f.action !== "inspect" && <p className="housekeeper-detail">{f.actionReason}</p>}
             {["illegal-names", "case-collisions", "long-paths", "oversized-notes", "unreadable-notes", "heavy-history", "orphan-history", "trash", "issue-no-access", "issue-no-write-access", "vault-no-access", "issue-left-behind", "remote-files"].includes(f.id) && onPrepareFix && <button className="primary" disabled={busy} onClick={() => {
               setActiveFinding(f.id);
@@ -168,7 +168,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
             }}>{busy && activeFinding === f.id ? "Investigating…" : "Investigate & prepare fix"}</button>}
             {onDiagnosticAction && ["rebuild-index", "sync-now", "retry-files"].includes(f.action ?? "") && <button className="primary" disabled={busy} onClick={() => void run(async () => {
               const access = await api.housekeeperStatus(vaultId);
-              if (!access.available) throw new Error("Steward is currently unavailable.");
+              if (!access.available) throw new Error("Assistant is currently unavailable.");
               if (!alive.current) return;
               const result = await onDiagnosticAction(f.id, f.action!);
               if (alive.current) { setReview(null); setNotice(result); }
@@ -177,15 +177,15 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
             <button className="secondary" disabled={busy} onClick={() => setExpanded(expanded === f.id ? null : f.id)}>
               {expanded === f.id ? "Close details" : f.action === "review-links" ? "Review link fixes" : f.action === "review-storage" ? "Review storage" : f.action === "review-renames" ? "Review paths" : f.action === "review-empty" ? "Review empty files" : f.action === "review-properties" ? "Review properties" : f.action === "review-access" ? "Review access" : f.action === "review-recovery" ? "Review recovery" : "Inspect finding"}
             </button>
-            {expanded === f.id && <div className="steward-finding-details">
+            {expanded === f.id && <div className="assistant-finding-details">
               {["empty-notes", "bad-frontmatter", "duplicate-titles"].includes(f.id) && (repairNotes[f.id] ?? []).map(item => {
                 const note = availableNotes.find(n => n.id === item.docId || n.path === item.path);
-                return <div className="steward-affected-note" key={item.path}><strong>{item.path}</strong>
+                return <div className="assistant-affected-note" key={item.path}><strong>{item.path}</strong>
                   <button className="primary" disabled={busy || !ready || !note} onClick={() => note && void scanNote(note.id, f.id)}>{f.id === "empty-notes" ? "Find recoverable version" : "Prepare fix"}</button></div>;
               })}
               {f.action === "review-links" && brokenLinkNotes.map(item => {
                 const note = availableNotes.find(n => n.id === item.docId || n.path === item.path);
-                return <div className="steward-affected-note" key={item.path}>
+                return <div className="assistant-affected-note" key={item.path}>
                   <div><strong>{item.path}</strong>{item.detail && <span className="housekeeper-detail">{item.detail}</span>}</div>
                   {note && <button className="primary" disabled={busy || !ready} onClick={() => void scanNote(note.id)}>Find a fix</button>}
                 </div>;

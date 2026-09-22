@@ -34,4 +34,4 @@ export interface DiagnosticReview {
   findings: { id: string; count: number; priority: "now" | "soon" | "later" | "review"; label: string; title: string; guidance: string; action?: "inspect" | "rebuild-index" | "review-links" | "sync-now" | "review-storage" | "configure-sync" | "retry-files" | "review-renames" | "review-empty" | "review-properties" | "review-access" | "review-recovery"; actionReason?: string }[];
 }
 
-export interface StewardProvider { name: "openrouter"; apiKey: string; model: string; mode: "decisions" | "chat" }
+export interface AssistantProvider { name: "openrouter"; apiKey: string; model: string; mode: "decisions" | "chat" }

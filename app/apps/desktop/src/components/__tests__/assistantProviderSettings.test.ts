@@ -3,7 +3,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
-import { StewardProviderSettings } from "../StewardProviderSettings";
+import { AssistantProviderSettings } from "../AssistantProviderSettings";
 const keys = vi.hoisted(() => ({ keychainGet: vi.fn(), keychainSet: vi.fn(), keychainDelete: vi.fn() }));
 vi.mock("../../lib/ipc", () => keys);
 it("loads the identity-scoped key securely, defaults to Jev and disables inference when toggled off", async () => {
@@ -11,7 +11,7 @@ it("loads the identity-scoped key securely, defaults to Jev and disables inferen
   keys.keychainGet.mockResolvedValue("sk-or-test-key");
   const host = document.createElement("div"); const root = createRoot(host); const onChange = vi.fn();
   try {
-    await act(async () => root.render(createElement(StewardProviderSettings, { identity: "account", onChange })));
+    await act(async () => root.render(createElement(AssistantProviderSettings, { identity: "account", onChange })));
     expect(keys.keychainGet).toHaveBeenCalledWith("steward:openrouter:account");
     expect(onChange).toHaveBeenLastCalledWith({ name: "openrouter", apiKey: "sk-or-test-key", model: "typesafe/jev-1.13", mode: "decisions" });
     await act(async () => (host.querySelector('[aria-label="Model"]') as HTMLButtonElement).click());

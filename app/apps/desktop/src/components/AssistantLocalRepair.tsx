@@ -4,14 +4,14 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { CHECK_DEFINITIONS, type CheckAction } from "../lib/health/checks";
 import { planCheckAction, suggestLegalPath, outcomeSummary, runCheckAction, type CheckActionPlan } from "../lib/health/checkActions";
 import type { VaultHealthSnapshot } from "../lib/health/types";
-import { distinctRepairPath } from "../lib/stewardRepairs";
+import { distinctRepairPath } from "../lib/assistantRepairs";
 import { useStore } from "../store";
 import { syncManager } from "../lib/sync/docSession";
 import { authManager } from "../lib/auth/authManager";
 import * as ipc from "../lib/ipc";
 
 type Plan = { title: string; description: string; label: string; paths: string[]; check?: CheckActionPlan; renames?: { from: string; to: string; docId: string }[]; action?: "access" | "register" | "download" };
-export function StewardLocalRepair({ id, snapshot, onClose }: { id: string; snapshot: VaultHealthSnapshot; onClose: () => void }) {
+export function AssistantLocalRepair({ id, snapshot, onClose }: { id: string; snapshot: VaultHealthSnapshot; onClose: () => void }) {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
@@ -68,7 +68,7 @@ export function StewardLocalRepair({ id, snapshot, onClose }: { id: string; snap
     setRunning(true); setError(null);
     try {
       checkScope();
-      if (!scope.vaultId || !(await authManager.api.housekeeperStatus(scope.vaultId)).available) throw new Error("Steward access is unavailable.");
+      if (!scope.vaultId || !(await authManager.api.housekeeperStatus(scope.vaultId)).available) throw new Error("Assistant access is unavailable.");
       checkScope();
       if (finding) {
         const fresh = await ipc.vaultChecks(Object.fromEntries(Object.entries(useStore.getState().docIdByPath).map(([path, docId]) => [docId, path])), scope.epoch);
@@ -122,7 +122,7 @@ export function StewardLocalRepair({ id, snapshot, onClose }: { id: string; snap
     } catch (e) { setError(e instanceof Error ? e.message : "Action failed."); }
     finally { setRunning(false); }
   }}>
-    {plan && !result && <><p>{plan.description}</p><ul className="steward-preview-paths">{plan.paths.map(path => <li key={path}><code>{path}</code></li>)}</ul>{plan.check && plan.check.unlisted > 0 && <p>{plan.check.unlisted} additional items are outside this preview.</p>}</>}
+    {plan && !result && <><p>{plan.description}</p><ul className="assistant-preview-paths">{plan.paths.map(path => <li key={path}><code>{path}</code></li>)}</ul>{plan.check && plan.check.unlisted > 0 && <p>{plan.check.unlisted} additional items are outside this preview.</p>}</>}
     {error && <p role="alert">{error}</p>}{result && <p role="status">{result}</p>}
   </ConfirmDialog>;
 }

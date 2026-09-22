@@ -1,4 +1,4 @@
-# Baalda Steward
+# Baalda Assistant
 
 **Vault Settings → AI → Scan vault** collects fresh whole-vault measurements and
 asks the selected model to produce a prioritized action plan. AI has Diagnostics
@@ -88,7 +88,7 @@ and limits are process-local; deployments need a single process or sticky routin
 - `node --test app/apps/server/housekeeper/*.test.mjs` from the repository root.
 - `pnpm exec vitest run src/http/routes/housekeeper.test.ts` in the server directory.
   This file mocks database/auth and SDK transport; it does not wipe a database.
-- Desktop typecheck and the Steward, Health rendering and check-action suites.
+- Desktop typecheck and the Assistant, Health rendering and check-action suites.
 - Live Jev tests used synthetic evidence and notes: diagnostic recommendations,
   candidate selection, guarded apply and undo. User vault notes were not edited.
 
@@ -134,7 +134,7 @@ arbitrary YAML rewrites and content deduplication are not supported repairs.
 ## Deployment policy
 
 Set `BAALDA_DEPLOYMENT=self-hosted` for self-hosted installations (included in
-`.env.example`). Steward remains available whether billing is absent, configured
+`.env.example`). The Assistant remains available whether billing is absent, configured
 at installation, or added later. Operator billing configuration is independent.
 `BAALDA_DEPLOYMENT=cloud` requires Pro for AI and limits Free vaults to 20,000 synced
 notes. Omission defaults to `cloud` so existing Cloud deployments remain guarded,

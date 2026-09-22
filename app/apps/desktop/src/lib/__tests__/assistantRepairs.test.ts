@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect } from "vitest";
-import { distinctRepairPath } from "../stewardRepairs";
+import { distinctRepairPath } from "../assistantRepairs";
 describe("agent rename candidates", () => {
   it("preserves extension and avoids names case-insensitively", () => {
     expect(distinctRepairPath("Work/Plan.md", new Set(["work/plan (1).md"]))).toBe("Work/Plan (2).md");
