@@ -2536,6 +2536,25 @@ export class ApiClient {
     return data;
   }
 
+  /** {@link resolveAccessSummary} for many groups of roots in one request —
+   * one per visible Access panel row. The server shares one access index
+   * across them. Throws ApiError(404) on a server that predates the route. */
+  async resolveAccessSummaries(
+    orgId: string,
+    groups: BulkAccessResource[][],
+    userIds: string[],
+  ): Promise<AccessSummary["mode"][]> {
+    const { data } = await this.request<{ modes: AccessSummary["mode"][] }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/access/summaries`,
+      { body: { groups, userIds } },
+    );
+    if (!Array.isArray(data.modes) || data.modes.length !== groups.length) {
+      throw new Error("Access summaries did not match the request");
+    }
+    return data.modes;
+  }
+
   /** All locks in a vault (readable by any vault member — drives lock badges). */
   /**
    * Every access OVERLAY row in a note collection: `locked` (the read-only cap)

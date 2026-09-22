@@ -24,6 +24,7 @@ import { MODE_LABEL, buildOrgRowsByPath, effectiveTeamMode, effectiveVaultMode, 
 import { readTeamAccessCache, writeTeamAccessCache } from "../lib/teamAccessCache";
 import { itemLockRows, resourceIdsByPath } from "../lib/locks";
 import { scrollPaneIntoContainer } from "../lib/scrollPlan";
+import { createAccessSummaryBatcher } from "../lib/accessSummaryBatch";
 import { syncManager } from "../lib/sync/docSession";
 import { toast } from "../lib/toast";
 import { useStore } from "../store";
@@ -211,6 +212,19 @@ function buildLockMap(entries: readonly AccessEntry[], locks: Share[]): Map<stri
   return effective;
 }
 
+/** People are usually ticked in quick succession; resolve once they settle
+ *  instead of once per click. */
+export const PEOPLE_SETTLE_MS = 300;
+
+function useSettled<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [value, delayMs]);
+  return settled;
+}
+
 export function AccessPanel({ canManage }: { canManage: boolean }) {
   const session = useStore((state) => state.session);
   const members = useStore((state) => state.members);
@@ -319,7 +333,9 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     [entries, selectedKeys],
   );
   const selectedUserIds = [...selectedUsers];
-  const viewedUsers = audienceType === "users" ? JSON.stringify([...selectedUsers].sort()) : "[]";
+  const viewedUsersNow = audienceType === "users" ? JSON.stringify([...selectedUsers].sort()) : "[]";
+  const viewedUsers = useSettled(viewedUsersNow, PEOPLE_SETTLE_MS);
+  const peopleSettled = viewedUsers === viewedUsersNow;
   const viewOptions: MenuSelectOption<string>[] = [
     { value: "everyone", label: "Everyone" },
     ...members.map((member) => ({
@@ -387,7 +403,8 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
 
   useEffect(() => {
     const mine = ++peopleLoadGen.current;
-    if (audienceType !== "users" || selectedUsers.size === 0 || selectedResources.length === 0) {
+    const userIds = JSON.parse(viewedUsers) as string[];
+    if (audienceType !== "users" || userIds.length === 0 || selectedResources.length === 0) {
       setPeopleCurrentMode(null);
       setPeopleAccessState("idle");
       return;
@@ -397,7 +414,6 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       setPeopleAccessState("unavailable");
       return;
     }
-    const userIds = [...selectedUsers];
     setPeopleCurrentMode(null);
     setPeopleAccessState("loading");
     void authManager.api.resolveAccessSummary(orgId!, peopleTargets, userIds).then((summary) => {
@@ -409,13 +425,13 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       setPeopleCurrentMode(null);
       setPeopleAccessState("unavailable");
     });
-  }, [audienceType, selectedUsers, selectedResources.length, peopleTargets, teamAccess]);
+  }, [audienceType, viewedUsers, selectedResources.length, peopleTargets, teamAccess]);
 
-  const selectedCurrentMode = audienceType === "org" ? orgCurrentMode : peopleCurrentMode;
+  const selectedCurrentMode = audienceType === "org" ? orgCurrentMode : peopleSettled ? peopleCurrentMode : null;
   const currentAccessMessage = audienceType === "users"
     ? selectedUsers.size === 0
       ? "Select a person to view their access."
-      : peopleAccessState === "loading"
+      : peopleAccessState === "loading" || !peopleSettled
         ? "Loading current access…"
         : peopleAccessState === "unavailable"
           ? "Current access is unavailable."
@@ -671,7 +687,10 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
               const inheritedSelection = selection.inheritedFrom;
               const mode = teamModeFor(resource.path);
               const itemLock = lockMap.get(resource.path);
-              const restricted = !!itemLock && !itemLock.org && itemLock.users.size > 0;
+              // Per-person read-only caps are exceptions to the team's mode, not
+              // the team's mode: Everyone still sees the team badge, plus a note
+              // of who is held back.
+              const personalLocks = itemLock && !itemLock.org ? [...itemLock.users] : [];
               const open = expanded.has(resource.path);
               return (
                 <li key={resource.key} className="access-item" style={{ paddingLeft: `${10 + resource.depth * 16}px` }}>
@@ -711,7 +730,10 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
                     )}
                     <span className="access-rright">{audienceType === "users" && orgId
                       ? <PersonAccessBadge orgId={orgId} resourceType={resource.kind === "folder" ? "folder" : "file"} resourceId={resource.id} users={viewedUsers} revision={teamAccess} />
-                      : mode ? <AccessBadge mode={mode} restricted={restricted} /> : <LoadingBadge />}</span>
+                      : mode ? <>
+                          {personalLocks.length > 0 && <PersonalExceptions userIds={personalLocks} members={members} />}
+                          <AccessBadge mode={mode} />
+                        </> : <LoadingBadge />}</span>
                   </label>
                 </li>
               );
@@ -817,34 +839,37 @@ function rowGlyph(resource: Resource): React.ReactNode {
   return resource.kind === "file" ? iconForPath(resource.path) : ICON.note;
 }
 
-function AccessBadge({ mode, restricted = false }: { mode: Mode; restricted?: boolean }) {
-  const shown = restricted ? "readonly" : mode;
+function AccessBadge({ mode }: { mode: Mode }) {
   return (
-    <span className={`access-badge ${shown === "private" ? "priv" : shown === "readonly" ? "ro" : "open"}`}>
-      {shown === "private" ? ICON.shield : shown === "readonly" ? ICON.lock : ICON.open}
-      {restricted ? "Restricted" : MODE_LABEL[shown]}
+    <span className={`access-badge ${mode === "private" ? "priv" : mode === "readonly" ? "ro" : "open"}`}>
+      {mode === "private" ? ICON.shield : mode === "readonly" ? ICON.lock : ICON.open}
+      {MODE_LABEL[mode]}
     </span>
   );
+}
+
+function PersonalExceptions({ userIds, members }: {
+  userIds: string[];
+  members: ReturnType<typeof useStore.getState>["members"];
+}) {
+  const names = userIds.map((id) => {
+    const member = members.find((candidate) => candidate.userId === id);
+    return member?.user?.name || member?.user?.email || "a former member";
+  });
+  const label = names.length === 1 ? `Read-only for ${names[0]}` : `Read-only for ${names.length} people`;
+  return <span className="access-selection-source" title={`Read-only for ${names.join(", ")}`}>{label}</span>;
 }
 
 function LoadingBadge() {
   return <span className="access-badge loading" aria-label="Loading access"><Spinner size="xs" /></span>;
 }
 
-// Resolve only rows near the viewport, with bounded requests even for very
-// large expanded folders. Each read still uses the server's full resolver.
-const accessReadQueue: Array<() => Promise<void>> = [];
-let activeAccessReads = 0;
-function drainAccessReads() {
-  while (activeAccessReads < 4 && accessReadQueue.length) {
-    const read = accessReadQueue.shift()!;
-    activeAccessReads++;
-    void read().finally(() => {
-      activeAccessReads--;
-      drainAccessReads();
-    });
-  }
-}
+// Resolve only rows near the viewport. Rows that mount together share one
+// request; the server resolves each with its full resolver.
+const accessSummaries = createAccessSummaryBatcher({
+  many: (orgId, groups, userIds) => authManager.api.resolveAccessSummaries(orgId, groups, userIds),
+  one: async (orgId, resources, userIds) => (await authManager.api.resolveAccessSummary(orgId, resources, userIds)).mode,
+});
 
 function PersonAccessBadge({ orgId, resourceType, resourceId, users, revision }: {
   orgId: string;
@@ -868,16 +893,10 @@ function PersonAccessBadge({ orgId, resourceType, resourceId, users, revision }:
     const start = () => {
       if (started || cancelled) return;
       started = true;
-      accessReadQueue.push(async () => {
-        if (cancelled) return;
-        try {
-          const summary = await authManager.api.resolveAccessSummary(orgId, [{ resourceType, resourceId }], userIds);
-          if (!cancelled) setResult({ scope, revision, mode: summary.mode });
-        } catch {
-          if (!cancelled) setResult({ scope, revision, mode: "unavailable" });
-        }
-      });
-      drainAccessReads();
+      accessSummaries.read(orgId, { resourceType, resourceId }, userIds, () => cancelled).then(
+        (mode) => { if (!cancelled) setResult({ scope, revision, mode }); },
+        () => { if (!cancelled) setResult({ scope, revision, mode: "unavailable" }); },
+      );
     };
     const observer = typeof IntersectionObserver !== "undefined"
       ? new IntersectionObserver((observations) => {

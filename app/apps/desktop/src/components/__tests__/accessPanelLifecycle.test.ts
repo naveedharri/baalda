@@ -9,7 +9,7 @@ import { useStore } from "../../store";
 
 const api = vi.hoisted(() => ({
   getTeamAccess: vi.fn(), listAccessTree: vi.fn(), getAccessDefault: vi.fn(),
-  resolveAccessSummary: vi.fn(), setBulkAccess: vi.fn(),
+  resolveAccessSummary: vi.fn(), resolveAccessSummaries: vi.fn(), setBulkAccess: vi.fn(),
 }));
 vi.mock("../../lib/auth/authManager", () => ({
   authManager: { api, getServerUrl: () => "http://test.invalid" },
@@ -46,6 +46,10 @@ describe("Access panel during sync and permission changes", () => {
     });
     api.getAccessDefault.mockResolvedValue({ mode: "open" });
     api.resolveAccessSummary.mockResolvedValue({ mode: "open" });
+    // The batch route answers each row with the same resolver as the single
+    // one; delegate so every test can script `resolveAccessSummary` alone.
+    api.resolveAccessSummaries.mockImplementation(async (org, groups, users) =>
+      Promise.all(groups.map(async (group: unknown[]) => (await api.resolveAccessSummary(org, group, users)).mode)));
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
@@ -61,6 +65,10 @@ describe("Access panel during sync and permission changes", () => {
     expect(element).not.toBeNull();
     await act(async () => element!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   }
+  /** Let people selections settle and batched row reads flush. */
+  async function settle() {
+    for (let i = 0; i < 3; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 200)); });
+  }
   const button = (label: string) => [...host.querySelectorAll("button")]
     .find((node) => node.textContent === label) ?? null;
 
@@ -69,6 +77,7 @@ describe("Access panel during sync and permission changes", () => {
     await click(host.querySelector(".access-vault-row input"));
     await click(button("Specific people"));
     await click(host.querySelector(".access-member-choice input"));
+    await settle();
     expect(api.resolveAccessSummary).toHaveBeenCalledTimes(3);
     for (let i = 0; i < 4; i++) {
       await act(async () => patchStore({ tree: { path: "", isDir: true, children: [], name: `batch-${i}` } }));
@@ -81,6 +90,7 @@ describe("Access panel during sync and permission changes", () => {
     await click(host.querySelector('[aria-label="View access for"]'));
     await click([...document.querySelectorAll('[role="menuitemradio"]')]
       .find((node) => node.textContent?.includes(name)) ?? null);
+    await settle();
   }
 
   it("shows a person's resolved row access before any items are selected", async () => {
@@ -115,6 +125,7 @@ describe("Access panel during sync and permission changes", () => {
     expect(host.querySelector(".access-item [aria-label='Loading access']")).not.toBeNull();
     await viewPerson("Bob");
     await act(async () => oldResponses.forEach((resolve) => resolve({ mode: "open" })));
+    await settle();
     expect(host.querySelector(".access-item .access-badge")?.textContent).toBe("Unavailable");
   });
 
