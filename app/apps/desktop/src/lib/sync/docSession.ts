@@ -4802,6 +4802,9 @@ export class SyncManager implements InboundHost {
           })),
         ),
       rememberFileId: (relPath, id, opts) => this.registry.setFileId(relPath, id, opts),
+      // A row is not its bytes. This is the separate, stronger claim that lets a
+      // revocation remove the file (`registry.confirmFileBytes`).
+      confirmFileBytes: (relPath) => this.registry.confirmFileBytes(relPath),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => this.registry.forgetFileId(relPath),

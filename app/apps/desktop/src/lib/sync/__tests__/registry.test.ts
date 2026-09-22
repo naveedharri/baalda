@@ -665,6 +665,73 @@ describe("VaultRegistry tree-binary `files` map", () => {
     expect(lastWrite()).toEqual(first);
   });
 
+  it("round-trips the bytes confirmation, and an older config loads unconfirmed", async () => {
+    // `files` says a ROW exists; `filesConfirmed` says the SERVER HAS THE BYTES.
+    // Only the second may license a revocation to take the file off this disk,
+    // so it has to survive a restart on its own — and a config written before
+    // the key existed must load as unconfirmed rather than as permission.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    reg.setFileId("Team/report.docx", "file-1");
+    reg.setFileId("Team/slides.pptx", "file-2");
+    // Registered is not uploaded: neither is announced yet.
+    expect(reg.fileDocIds()).toEqual([]);
+    reg.confirmFileBytes("Team/report.docx");
+    expect(reg.fileBytesConfirmed("file-1")).toBe(true);
+    expect(reg.fileBytesConfirmed("file-2")).toBe(false);
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1][0] as string) as {
+      files?: Record<string, string>;
+      filesConfirmed?: string[];
+    };
+    expect(cfg.files).toEqual({ "Team/report.docx": "file-1", "Team/slides.pptx": "file-2" });
+    expect(cfg.filesConfirmed).toEqual(["file-1"]);
+
+    // Reload it as a fresh session: the claim survives.
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(cfg) as never);
+    const reloaded = new VaultRegistry(api);
+    await reconcileWithTree(reloaded, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(reloaded.fileBytesConfirmed("file-1")).toBe(true);
+    expect(reloaded.fileBytesConfirmed("file-2")).toBe(false);
+
+    // …and the same config WITHOUT the key — everything an older client wrote —
+    // loads with nothing confirmed.
+    const legacy = { ...cfg };
+    delete legacy.filesConfirmed;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(legacy) as never);
+    const older = new VaultRegistry(api);
+    await reconcileWithTree(older, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(older.getFileId("Team/report.docx")).toBe("file-1");
+    expect(older.fileBytesConfirmed("file-1")).toBe(false);
+    expect(older.fileDocIds()).toEqual([]);
+  });
+
+  it("drops the confirmation with the row it was made about", async () => {
+    // A path re-used by a different file must not inherit a claim made about
+    // the bytes that used to live there.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    reg.setFileId("Team/report.docx", "file-1");
+    reg.confirmFileBytes("Team/report.docx");
+    reg.forgetFileId("Team/report.docx");
+    reg.setFileId("Team/report.docx", "file-1");
+    expect(reg.fileBytesConfirmed("file-1")).toBe(false);
+
+    // A RENAME is the opposite case: same bytes, same row, so the claim rides
+    // along (it is keyed by id, not path).
+    reg.confirmFileBytes("Team/report.docx");
+    reg.moveFileId("Team/report.docx", "Archive/report.docx");
+    expect(reg.fileBytesConfirmed("file-1")).toBe(true);
+    expect(reg.fileDocIds()).toEqual(["file-1"]);
+  });
+
   it("forgets binary ids on a vault switch — an id from vault A names nothing in B", async () => {
     const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
     const reg = new VaultRegistry(api);

@@ -34,6 +34,9 @@ interface Log {
   materialized: string[];
   texts: Array<{ blobId: string; docId: string | null | undefined; chars: number }>;
   remembered: Array<{ relPath: string; id: string; authored: boolean }>;
+  /** Paths the mirror said the SERVER HOLDS THE BYTES for — the claim that
+   *  licenses a revocation to remove the file (`registry.confirmFileBytes`). */
+  confirmed: string[];
 }
 
 /**
@@ -54,6 +57,7 @@ function makeVault(
     materialized: [],
     texts: [],
     remembered: [],
+    confirmed: [],
   };
   const timers: Array<() => void> = [];
   const setTimeoutImpl = ((cb: () => void) => {
@@ -106,6 +110,9 @@ function makeVault(
     rememberFileId: (relPath, id, opts) => {
       log.remembered.push({ relPath, id, authored: opts?.authored === true });
     },
+    confirmFileBytes: (relPath) => {
+      log.confirmed.push(relPath);
+    },
     fileText: async (relPath) => ({
       sha256: `sha-${relPath}`,
       status: "ok",
@@ -147,8 +154,8 @@ describe("tree binaries register as `files` rows", () => {
     expect(log.intents).toEqual([{ relPath: "Team/report.docx", docId: "local-id-0" }]);
     // And it is remembered, so the next session pays no round trip for it —
     // `authored`, because this is the UPLOAD path: these bytes are this user's,
-    // and that is the only authorship signal a binary has. It decides whether a
-    // later revocation leaves them a `.context/trash` copy or nothing at all.
+    // and that is the only authorship signal a binary has. Removal policy no
+    // longer reads it: deletions and revocations are outright for everyone.
     expect(log.remembered).toEqual([
       { relPath: "Team/report.docx", id: "local-id-0", authored: true },
     ]);
@@ -242,6 +249,62 @@ describe("tree binaries register as `files` rows", () => {
 
     expect(log.registered).toEqual([]);
     expect(log.intents[0].docId).toBeUndefined();
+  });
+});
+
+describe("a `files` row is not its bytes", () => {
+  // The row is minted BEFORE the upload, and the upload can be refused for
+  // good (a Free vault's standalone file, one over the blob ceiling, one behind
+  // a full quota). Only a completed transfer — or a listing that already holds
+  // the sha — may tell the registry the server has these bytes, because that
+  // claim is what lets a revocation take the file off this disk.
+
+  it("confirms the bytes once the upload completes", async () => {
+    const { sync, log } = makeVault([{ relPath: "Team/report.docx" }]);
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(1);
+    expect(log.confirmed).toEqual(["Team/report.docx"]);
+  });
+
+  it("registers the row but confirms NOTHING when the plan refuses the upload", async () => {
+    const createIntent = vi.fn(async () => {
+      throw serverError(402, "attachment_sync_requires_pro");
+    });
+    const { sync, log } = makeVault([{ relPath: "Team/report.docx" }], { createIntent });
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(0);
+    // The row exists — the server accepted it, and the ACL resolves through it.
+    expect(log.registered).toEqual([{ relPath: "Team/report.docx", id: "local-id-0" }]);
+    // …and the bytes never left, so nothing here may license their removal.
+    expect(log.confirmed).toEqual([]);
+  });
+
+  it("confirms from the listing when the server already holds the sha", async () => {
+    // The repair path for an install that predates the flag: rows written by an
+    // older client load unconfirmed and settle on the next pass, without a
+    // single byte moving.
+    const { sync, log } = makeVault([{ relPath: "Team/report.docx" }], {
+      listServer: async () => [
+        { id: "blob-1", sha256: "sha-Team/report.docx", relPath: "Team/report.docx" },
+      ],
+    });
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(0);
+    expect(log.intents).toEqual([]);
+    expect(log.confirmed).toEqual(["Team/report.docx"]);
+  });
+
+  it("says nothing about a hidden `attachments/` drop — it has no `files` row", async () => {
+    const { sync, log } = makeVault([{ relPath: "attachments/abc123.png" }], {
+      listServer: async () => [
+        { id: "blob-1", sha256: "sha-attachments/abc123.png", relPath: "attachments/abc123.png" },
+      ],
+    });
+    await sync.reconcile();
+    expect(log.confirmed).toEqual([]);
   });
 });
 

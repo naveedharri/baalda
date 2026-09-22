@@ -295,6 +295,16 @@ async function twoPasses(opts: {
    *  the relaunch reads — the same route `adoptConfigFiles` takes in production.
    *  relPath → `files` id. */
   files?: Record<string, string>;
+  /**
+   * Which of those `files` ids this device has confirmed the server's copy of
+   * (`registry.confirmFileBytes` — a completed upload, a download, a dedupe, or
+   * a listing sha match).
+   *
+   * Defaults to ALL of them, which is the ordinary state of a synced binary and
+   * what every revocation test means. Pass `[]` for the state this guard exists
+   * for: a `files` row minted before an upload that was then refused for good.
+   */
+  filesConfirmed?: readonly string[];
   /** Which docs the server NAMED on `ready.revoked` / `drop`. A binary is only
    *  ever removed when it is on this list; there is no listing absence to read
    *  for one. */
@@ -313,7 +323,11 @@ async function twoPasses(opts: {
   const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
   let written = writes[writes.length - 1]?.[0] as string;
   if (opts.files) {
-    written = JSON.stringify({ ...JSON.parse(written), files: opts.files });
+    written = JSON.stringify({
+      ...JSON.parse(written),
+      files: opts.files,
+      filesConfirmed: opts.filesConfirmed ?? Object.values(opts.files),
+    });
   }
   vi.mocked(ipc.getVaultConfig).mockResolvedValue(written as never);
   vi.mocked(ipc.renamePath).mockClear();
@@ -1512,6 +1526,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     // Authorship of the BINARY is carried the same way a note's is: the doc is
     // absent from every listing by the time the answer is needed.
     carried.files = { "Team/report.pdf": "file-1" };
+    carried.filesConfirmed = ["file-1"];
     carried.authored = { userId: ME, docIds: ["d1", "file-1"] };
     vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(carried) as never);
 
@@ -1524,6 +1539,62 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(disk.trashed).toEqual([]);
     expect(disk.deleted).toEqual(["Team/report.pdf"]);
     expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
+  });
+
+  it("keeps a binary whose bytes this device never confirmed upstream", async () => {
+    // The hole this closes. A `files` row is minted BEFORE the upload
+    // (`attachments.ts ensureFileRow`), and on a Free vault — or above the blob
+    // size ceiling, or behind a full quota — the bytes never follow. Reading the
+    // row as "the server has it" and removing the file on a revocation destroys
+    // the ONLY copy, which is exactly what `isPushed` refuses to do for a note.
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      authority: true,
+      files: { "Team/report.pdf": "file-1" },
+      filesConfirmed: [],
+      named: new Set(["file-1"]),
+    });
+
+    expect(disk.binaries.has("Team/report.pdf")).toBe(true);
+    expect(disk.deleted).toEqual([]);
+    expect(r.filesRemoved).toEqual([]);
+    // The mapping SURVIVES: a later pass that does confirm these bytes may
+    // remove the file properly. It just stays out of the `hello` claim
+    // meanwhile, so nothing re-announces it.
+    expect(r.reg.getFileId("Team/report.pdf")).toBe("file-1");
+    expect(r.reg.fileDocIds()).toEqual([]);
+    expect(r.reg.failures().map((f) => [f.kind, f.path, f.reason])).toEqual([
+      [
+        "orphan",
+        "Team/report.pdf",
+        "access was removed, but this device never confirmed its bytes upstream — left on disk",
+      ],
+    ]);
+  });
+
+  it("does not announce an unconfirmed binary, so the server cannot name it", async () => {
+    // Belt and braces are different rails: the guard above refuses the removal,
+    // this keeps the question from being asked at all. It matters because every
+    // `ready.revoked` re-stamps the ACL-authority clock, so a permanently
+    // unconfirmable file would hold the wholesale-removal window open for every
+    // OTHER doc on every reconnect.
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    disk.binaries.add("Team/slides.pptx");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      files: { "Team/report.pdf": "file-1", "Team/slides.pptx": "file-2" },
+      filesConfirmed: ["file-2"],
+    });
+    expect(r.reg.fileDocIds()).toEqual(["file-2"]);
   });
 });
 
@@ -1545,6 +1616,7 @@ describe("a revoked binary that is already off disk", () => {
     const carried = JSON.parse(writes[writes.length - 1]?.[0] as string);
     // Mapped, authored — but never on this fake disk.
     carried.files = { "Team/gone.pdf": "file-1" };
+    carried.filesConfirmed = ["file-1"];
     carried.authored = { userId: ME, docIds: ["file-1"] };
     vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(carried) as never);
 

@@ -20,19 +20,11 @@
 
 ## 0.1.63
 
-- AI (Beta) adds Baalda Steward: scan your vault, review prioritized findings, and approve suggested repairs using your own OpenRouter key. Pro on Baalda Cloud; included for self-hosters.
-- Upgrade messaging highlights Jev from TypeSafe, now available on Baalda. Embedded attachments remain Free, with standalone file sync on Pro.
-- Sign-in is centred over the whole window, and Remember password uses the OS keychain. Copying notes includes images in rich paste.
-- Access shows each person's permissions directly in the file tree. Health updates local counts during sync and separates stored server totals from access restrictions.
-- Sync preserves concurrent disk and collaborator edits, restores large shared vaults in batches, and avoids uploading unchanged empty notes after a restart.
-
-## 0.1.62
-
-- More files now open, embed and search inside Baalda, including Office documents, CSV, audio, video, code and archives. Notes sync on every plan; Pro also syncs attachments, with a clear local-only notice on Free.
-- Health now leads with useful vault totals and a clear device-versus-Remote Vault comparison. Advanced diagnostics groups fresh checks, note inspection, sync retry and a shareable report.
-- Selecting a folder in Access now clearly includes its contents. Sidebar colors have more variety and stay off until enabled; item menus focus on choosing or clearing a color.
-- Large vaults join and sync much faster with resumable batch transfers. A vault owner can also remove a vault from the server while keeping its Markdown files safely on disk.
-- Dark mode uses neutral charcoal with clearer selection. File icons stay visible on open, tabs and previews are polished, and fixes protect history, attachments and deletes.
+- More files open, embed and search: Office docs, CSV, audio, video, code and archives. Notes sync on every plan, embedded attachments stay free, and standalone file sync is Pro. On first launch Baalda scans your vault and uploads what your plan allows.
+- Large vaults join and sync much faster in batches, edits from disk and from collaborators are both kept, and unchanged empty notes stop re-uploading after a restart. Self-hosters: update the server before the desktop.
+- Access shows each person's permissions in the file tree, and selecting a folder includes its contents. People who join a vault from now on start with no access until you share or change the new-member default in Access.
+- Vault Health leads with vault totals, a device-versus-server comparison and advanced diagnostics. AI (Beta) adds Baalda Steward, which proposes repairs you approve with your own OpenRouter key: Pro on Cloud, free for self-hosters.
+- Dark mode is a neutral charcoal, sign-in is centred, and Remember password lives in your OS keychain. Copying a note carries its images, a vault can be made local only while keeping its files, and icons, tabs and previews are tidier.
 
 ## 0.1.61
 

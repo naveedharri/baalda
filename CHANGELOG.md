@@ -128,6 +128,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   happened drawn as dashed `data-future` cells that never take a heat level.
 
 ### Fixed
+- **Revoked binaries are removed only once this device has confirmed the server holds
+  their bytes.** A `files` row is minted before the upload and the upload can be refused
+  for good (Free plan, blob ceiling, full quota), so the row was never proof of possession.
+  The registry now persists `filesConfirmed` in `.context/config.json` (set only by a
+  completed upload, a download, a dedupe adoption or a ready-blob listing match), announces
+  only confirmed ids in `hello.files`, and `removeRevokedBinary` leaves an unconfirmed file
+  on disk with an `orphan` failure, mirroring the note rail's `isPushed` refusal. Older
+  configs load unconfirmed and settle on the next listing pass without re-uploading.
 - **Server CRDT store.** `compact()` runs under a per-doc advisory lock in one transaction
   with a `seq` guard, so two racing compactions can no longer overwrite a newer snapshot
   and delete its log (committed edits were lost). `loadDocState`/`loadDocDiff` read snapshot

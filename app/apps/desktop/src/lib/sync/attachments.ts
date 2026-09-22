@@ -635,6 +635,18 @@ export interface AttachmentSyncDeps {
   >;
   /** Remember a registered row for the next session. */
   rememberFileId?: (relPath: string, id: string, opts?: { authored?: boolean }) => void;
+  /**
+   * The server HOLDS this path's bytes, as a fact rather than an inference
+   * (`registry.confirmFileBytes`).
+   *
+   * Separate from {@link rememberFileId} because a row and its bytes are
+   * different claims and the gap between them is the whole point: a row is
+   * minted before the upload and the upload can be refused for good. Only four
+   * positions may call it — a completed upload, a download, an intent that
+   * deduped onto an existing row, and a listing whose sha matches the local
+   * file — and it is what lets a revocation take the file off this disk.
+   */
+  confirmFileBytes?: (relPath: string) => void;
   /** Forget a mapping whose path is not this file's any more — the other half
    *  of an adoption, so `.context/config.json` never names two ids for one
    *  file (`registry.forgetFileId`). */
@@ -871,6 +883,8 @@ export class AttachmentSync {
           if (blob.docId) {
             this.fileIds.set(path, blob.docId);
             this.deps.rememberFileId?.(path, blob.docId);
+            // Downloaded, so the server holds it — same reading as the pass.
+            this.deps.confirmFileBytes?.(path);
           }
           this.setFileState(path, "synced");
         } catch (e) {
@@ -939,6 +953,21 @@ export class AttachmentSync {
     // two passes old would move a row onto a path that has since changed again.
     this.localPathKeys = new Set(local.map((a) => a.relPath.toLowerCase()));
     const { toUpload, toDownload } = diffAttachments(local, server);
+
+    // A local file the uploader did NOT queue is one whose sha the server's
+    // listing already carries, which is the listing saying it holds these
+    // bytes. That is the confirmation a revocation needs before it may take the
+    // file away (`registry.confirmFileBytes`), and reading it here is what
+    // repairs an install that predates the flag: rows written by an older
+    // client load unconfirmed and settle on the next pass, without a byte
+    // moving. Under `attachments/` there are no `files` rows to confirm.
+    if (this.deps.confirmFileBytes) {
+      const queued = new Set(toUpload.map((a) => a.relPath));
+      for (const a of local) {
+        if (isUnderAttachments(a.relPath) || queued.has(a.relPath)) continue;
+        this.deps.confirmFileBytes(a.relPath);
+      }
+    }
 
     // The downloads this pass will actually make, decided BEFORE anything is
     // reported: a file inside an open delete window is not a file this device is
@@ -1020,6 +1049,8 @@ export class AttachmentSync {
         try {
           if (await bytes.run(a.size ?? 0, () => this.uploadOne(a))) {
             uploaded++;
+            // The bytes are THERE now — the one position an upload may say so.
+            this.deps.confirmFileBytes?.(a.relPath);
             this.setFileState(a.relPath, "synced");
           } else {
             // The only `false` is a permanent refusal (413 too large, 415 wrong
@@ -1072,6 +1103,8 @@ export class AttachmentSync {
           if (b.relPath && b.docId && !isUnderAttachments(b.relPath)) {
             this.fileIds.set(b.relPath, b.docId);
             this.deps.rememberFileId?.(b.relPath, b.docId);
+            // These bytes came FROM the server, so it has them.
+            this.deps.confirmFileBytes?.(b.relPath);
           }
           // It came FROM the server, so the server has it — and its row appears
           // in the sidebar on the watcher echo, before the next pass would say so.
@@ -1679,9 +1712,13 @@ export class AttachmentSync {
       const id = await this.deps.registerFile({ relPath, id: localId });
       if (!id) return undefined;
       this.fileIds.set(relPath, id);
-      // `authored`: this is the UPLOAD path, so these bytes are this user's.
-      // It is the only authorship signal a binary has, and it decides whether a
-      // later revocation leaves them a `.context/trash` copy or nothing.
+      // `authored`: this is the UPLOAD path, so these bytes are this user's. It
+      // is the only authorship signal a binary has. It no longer changes how a
+      // removal happens — deletions and revocations are outright for everyone,
+      // author included — and it is deliberately NOT a confirmation that the
+      // server holds the bytes: we have only just minted the row, and the
+      // upload below can still be refused for good. `confirmFileBytes` is that
+      // claim, and it is made after the transfer, never here.
       this.deps.rememberFileId?.(relPath, id, { authored: true });
       return id;
     } catch (e) {
@@ -1786,6 +1823,9 @@ export class AttachmentSync {
       // there. The claim this device made when it first uploaded them is keyed
       // by doc_id and survives the rename on its own.
       this.deps.rememberFileId?.(relPath, id);
+      // Adoption happens only on a dedupe hit — the server already holds these
+      // bytes under this row, which is possession however they got there.
+      this.deps.confirmFileBytes?.(relPath);
       if (rowPath) this.deps.forgetFileId?.(rowPath);
       console.info(
         `[attachments] ${rowPath ?? "?"} → ${relPath} (renamed on disk; adopted file ${id} by content)`,
