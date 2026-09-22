@@ -120,6 +120,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   editor (txt without the markdown grammar); imported `.txt` is no longer renamed.
 
 ### Changed
+- **Existing vaults keep letting new teammates in.** Migration 032 gave every vault a
+  Private default for people who join later, which silently shut newcomers out of a vault
+  whose posture is Shared. Migration 033 seeds that default once from each existing vault's
+  current posture — Shared stays Shared, Read-only stays Read-only, Private and never-shared
+  stay Private — and never touches a vault whose default has already been set. Vaults created
+  from here on still start Private for future members.
 - **The Health page's activity strip looks forward.** The heat-map ran GitHub's
   trailing twelve months, so a young vault was 52 columns of grey with two coloured
   cells in the far right. It now spans the 1st of last month through the end of the
