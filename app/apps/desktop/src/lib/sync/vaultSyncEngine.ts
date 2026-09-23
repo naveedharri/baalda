@@ -330,6 +330,18 @@ export class VaultSyncEngine {
    * credentials the server may have just refused.
    */
   private tokenPromise: Promise<string> | null = null;
+  /**
+   * Set once the sink's durable manifest has loaded. Until then a connect
+   * waits BEFORE opening the socket: the server drops a socket that sends no
+   * `hello` within its idle window, and on a big vault's first launch the
+   * manifest load (an IPC read of every stored state vector, queued behind
+   * startup's other Rust work) can alone outlast it.
+   */
+  private sinkReady = false;
+  /** Bumped by every connect and socket teardown, so a connect still waiting
+   *  on the sink abandons itself when a stop/refresh/reconnect overtook it. */
+  private connectGen = 0;
+  private waitingForSink = false;
   private status: VaultSyncStatus = "idle";
   private stopped = false;
   private attempt = 0;
@@ -443,7 +455,7 @@ export class VaultSyncEngine {
 
   /** Open the connection (idempotent). */
   start(): void {
-    if (this.stopped || this.ws) return;
+    if (this.stopped || this.ws || this.waitingForSink) return;
     this.connect();
   }
 
@@ -552,6 +564,30 @@ export class VaultSyncEngine {
 
   private connect(): void {
     this.setStatus("connecting");
+    const gen = ++this.connectGen;
+    const ready = this.sinkReady ? undefined : this.sink.whenReady?.();
+    if (!ready) {
+      this.sinkReady = true;
+      this.openSocket();
+      return;
+    }
+    // Load the manifest first, THEN open the socket: `hello` must follow the
+    // upgrade promptly, and everything `onOpen` still awaits after this is the
+    // token mint (already in flight by then) and in-memory reads.
+    this.waitingForSink = true;
+    void ready
+      .catch(() => {
+        /* a failed load just means an empty manifest, as before */
+      })
+      .then(() => {
+        this.waitingForSink = false;
+        this.sinkReady = true;
+        if (this.stopped || gen !== this.connectGen || this.ws) return;
+        this.openSocket();
+      });
+  }
+
+  private openSocket(): void {
     // Mint the vault token NOW, alongside the TCP/TLS/upgrade handshake instead
     // of after it. Nothing about the mint depends on the socket existing, so
     // doing them in sequence (which is what waiting until `onopen` meant) made
@@ -952,6 +988,7 @@ export class VaultSyncEngine {
 
   private closeSocket(): void {
     this.tokenPromise = null;
+    this.connectGen++; // a connect still waiting on the sink must not open now
     if (!this.ws) return;
     const ws = this.ws;
     this.ws = null;
