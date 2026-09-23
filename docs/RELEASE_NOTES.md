@@ -18,6 +18,11 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.65
+
+- Files that stayed "syncing" forever now repair themselves: if a file was wrongly removed from the server while it was still on your computer, Baalda registers and uploads it again on its own.
+- Health page: files on this computer that are not on the Remote Vault can now be selected and retried or deleted in bulk.
+
 ## 0.1.64
 
 - Access is much faster on large vaults and teams: seeing a person's access, ticking several people and viewing the whole vault now load in one quick step instead of one folder at a time.
