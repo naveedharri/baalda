@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "../../ipc";
-import { pinModified, sortTree } from "../sort";
+import { pinModified, renameInFolderSorts, sortTree } from "../sort";
 import { applyOrder } from "../../ordering";
 
 const dir = (name: string, modified: number, children: TreeNode[] = []): TreeNode => ({
@@ -165,5 +165,54 @@ describe("pinModified", () => {
     const level = [dir("Work", 1, [file("Work/x.md", 1)]), file("a.md", 2)];
     pinModified(level, pins);
     expect(pinModified(level, pins)).toBe(level);
+  });
+});
+
+describe("Name (Z–A) and per-folder sorts", () => {
+  // The Daily folder from the report: dated names, and the latest must be on top
+  // even when an old note was edited most recently.
+  const daily = dir("Daily", 5, [
+    file("Daily/2026-09-14.md", 900), // edited last, but oldest by name
+    file("Daily/2026-09-23.md", 100),
+    file("Daily/2026-09-22.md", 200),
+  ]);
+
+  it("Z–A puts the newest dated note first, whatever was modified last", () => {
+    const [out] = sortTree([daily], "name-desc");
+    expect(names(out.children!)).toEqual(["2026-09-23.md", "2026-09-22.md", "2026-09-14.md"]);
+  });
+
+  it("Z–A reverses folders too", () => {
+    expect(names(sortTree([dir("2025", 1), dir("2026", 1)], "name-desc"))).toEqual(["2026", "2025"]);
+  });
+
+  it("a folder's own sort applies to it and below, and the rest keeps the vault sort", () => {
+    const tree = [
+      dir("Daily", 5, [
+        file("Daily/2026-09-14.md", 900),
+        file("Daily/2026-09-23.md", 100),
+        {
+          ...dir("Archive", 1, [file("Daily/Archive/a.md", 1), file("Daily/Archive/b.md", 2)]),
+          path: "Daily/Archive",
+        },
+      ]),
+      dir("Work", 5, [file("Work/old.md", 1), file("Work/new.md", 9)]),
+    ];
+    const out = sortTree(tree, "recent", { Daily: "name-desc", "Daily/Archive": "name" });
+    const [dailyOut, workOut] = out;
+    expect(names(dailyOut.children!)).toEqual(["Archive", "2026-09-23.md", "2026-09-14.md"]);
+    expect(names(dailyOut.children![0].children!)).toEqual(["a.md", "b.md"]);
+    expect(names(workOut.children!)).toEqual(["new.md", "old.md"]); // vault sort: recent
+  });
+
+  it("a hand-made arrangement still wins over a folder sort", () => {
+    const sorted = sortTree([daily], "recent", { Daily: "name-desc" });
+    const arranged = applyOrder(sorted, "", { Daily: ["Daily/2026-09-14.md"] });
+    expect(names(arranged[0].children!)[0]).toBe("2026-09-14.md");
+  });
+
+  it("follows a folder rename, subtree included", () => {
+    const out = renameInFolderSorts({ Daily: "name-desc", "Daily/Archive": "name", Work: "recent" }, "Daily", "Journal");
+    expect(out).toEqual({ Journal: "name-desc", "Journal/Archive": "name", Work: "recent" });
   });
 });
