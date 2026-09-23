@@ -43,6 +43,8 @@ function actions(): HealthActions {
   return {
     downloadFiles: vi.fn(async () => {}),
     removeServerFile: vi.fn(async () => {}),
+    retryLocalFiles: vi.fn(async () => {}),
+    deleteLocalFiles: vi.fn(async () => ({ deleted: [], failed: [] })),
     syncNow: vi.fn(async () => {}),
     retryDoc: vi.fn(async () => {}),
     resetHistory: vi.fn(async () => ({ bytesFreed: 0 })),

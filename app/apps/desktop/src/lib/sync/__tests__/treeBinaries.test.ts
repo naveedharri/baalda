@@ -182,6 +182,61 @@ describe("tree binaries register as `files` rows", () => {
     expect(log.intents[0].docId).toBe("id-from-config");
   });
 
+  it("drops a remembered id the server no longer has, re-registers, and uploads", async () => {
+    // 2026-09-22: rows deleted server-side while the file stayed on disk. The
+    // intent named a dead id, the server fell through to the `attachments/`-only
+    // path check and answered 400 `invalid_rel_path` — on every pass, forever.
+    let known: string | null = "dead-id";
+    const forgotten: string[] = [];
+    const intents: Array<string | null | undefined> = [];
+    const { sync, log } = makeVault([{ relPath: "research/s-000.png" }], {
+      knownFileId: () => known,
+      forgetFileId: (relPath) => {
+        forgotten.push(relPath);
+        known = null;
+      },
+      createIntent: async (input) => {
+        intents.push(input.docId);
+        if (input.docId === "dead-id") throw serverError(400, "invalid_rel_path");
+        return {
+          blobId: "blob-1",
+          completeUrl: "https://api.test/blobs/1/complete",
+          upload: {
+            kind: "single" as const,
+            method: "PUT",
+            url: "https://s3.test/put",
+            headers: {},
+            expiresAt: Date.now() + 60_000,
+            direct: true,
+          },
+        };
+      },
+    });
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(1);
+    expect(intents).toEqual(["dead-id", "local-id-0"]);
+    expect(forgotten).toEqual(["research/s-000.png"]);
+    expect(log.registered).toEqual([{ relPath: "research/s-000.png", id: "local-id-0" }]);
+    expect(log.confirmed).toEqual(["research/s-000.png"]);
+  });
+
+  it("retries a dead id only once per upload", async () => {
+    const intents: Array<string | null | undefined> = [];
+    const { sync } = makeVault([{ relPath: "research/s-000.png" }], {
+      knownFileId: () => "dead-id",
+      registerFile: async () => "still-dead",
+      createIntent: async (input) => {
+        intents.push(input.docId);
+        throw serverError(400, "invalid_rel_path");
+      },
+    });
+    const res = await sync.reconcile();
+
+    expect(res.uploaded).toBe(0);
+    expect(intents).toEqual(["dead-id", "dead-id"]);
+  });
+
   it("uploads without a doc_id when the server refuses the row, and stops asking", async () => {
     const registerFile = vi.fn(async () => {
       throw serverError(403, "no_write_access");
@@ -194,6 +249,23 @@ describe("tree binaries register as `files` rows", () => {
     expect(log.intents.map((i) => i.docId)).toEqual([undefined, undefined]);
     // One refusal is enough: asking again every pass is a guaranteed 403 a pass.
     expect(registerFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks again after a refusal once the user retries the file (Vault Health)", async () => {
+    let refuse = true;
+    const registerFile = vi.fn(async ({ id }: { relPath: string; id: string }) => {
+      if (refuse) throw serverError(403, "no_write_access");
+      return id;
+    });
+    const { sync, log } = makeVault([{ relPath: "Team/report.docx" }], { registerFile });
+    await sync.reconcile();
+    await sync.reconcile();
+    expect(registerFile).toHaveBeenCalledTimes(1);
+
+    refuse = false; // an owner granted access meanwhile
+    await sync.retryFiles(["Team/report.docx"]);
+    expect(registerFile).toHaveBeenCalledTimes(2);
+    expect(log.intents[log.intents.length - 1].docId).toBe("local-id-0");
   });
 
   it("retries after a path_folder_mismatch — the registry pull that fixes it is already queued", async () => {

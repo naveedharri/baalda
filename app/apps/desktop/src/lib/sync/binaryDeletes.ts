@@ -100,7 +100,13 @@ export interface BinaryDeleteDeps {
    * the disk (or the pull) hasn't caught up, not that anyone deleted it.
    */
   isLive(): boolean;
-  /** Is the file at this path on disk right now (`ipc.fileStat`)? */
+  /**
+   * Is the file at this path on disk right now (`ipc.binaryExists`)?
+   *
+   * `false` ONLY for a definite not-found. Anything that stopped the disk from
+   * answering must THROW — the drain reads a throw as "couldn't ask", and a
+   * `false` here is the first step toward deleting the server's copy.
+   */
   exists(relPath: string): Promise<boolean>;
   /** Every local binary — the rename hunt and the blast-radius cap read it. */
   listLocal(): Promise<LocalBinary[]>;
@@ -366,6 +372,22 @@ export class BinaryDeleteQueue {
         return;
       }
       if (!this.deps.isCurrent()) return;
+
+      // 1b. A second witness before anything destructive. The per-path stat in
+      //     step 1 reads "couldn't answer" as "gone" for any error Rust returns,
+      //     and the disk listing we just made may still name the file. When the
+      //     two disagree the file is on disk: a delete propagated from a stat
+      //     that failed is how 88 present binaries lost their `files` rows at
+      //     once (2026-09-22), each one then stuck re-uploading under a dead id.
+      const onDisk = new Set(local.map((a) => key(a.relPath)));
+      for (let i = gone.length - 1; i >= 0; i--) {
+        if (!onDisk.has(key(gone[i].relPath))) continue;
+        console.info(
+          `[attachments] ${gone[i].relPath} failed its stat but is still listed on disk — not a delete`,
+        );
+        gone.splice(i, 1);
+      }
+      if (gone.length === 0) return;
 
       const blobByPath = new Map<string, RemoteBlob>();
       for (const b of server) if (b.relPath) blobByPath.set(key(b.relPath), b);

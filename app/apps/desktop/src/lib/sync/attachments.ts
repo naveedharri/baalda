@@ -811,6 +811,25 @@ export class AttachmentSync {
     if (this.fileStates.delete(relPath)) this.publishFileStates();
   }
 
+  /**
+   * The user asked to retry these files (Vault Health). Forget what this session
+   * decided never to try again for them — a refused registration, a permanent
+   * skip for their bytes — and run a pass now. Everything else a pass decides
+   * (the plan gate, the quota, the delete windows) still applies.
+   */
+  async retryFiles(paths: readonly string[]): Promise<ReconcileResult> {
+    const wanted = new Set(paths.map((p) => p.toLowerCase()));
+    for (const p of paths) this.registerRefused.delete(p);
+    try {
+      for (const a of await this.deps.listLocal()) {
+        if (wanted.has(a.relPath.toLowerCase())) this.permanentSkips.delete(a.sha256);
+      }
+    } catch {
+      // No listing, no shas to forgive; the pass below reports the same failure.
+    }
+    return this.reconcile();
+  }
+
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
   async reconcile(): Promise<ReconcileResult> {
     // A server can be upgraded while this desktop stays open. Re-probe old
@@ -1168,8 +1187,9 @@ export class AttachmentSync {
     }
   }
 
-  /** {@link uploadOne}'s body, with this sha's claim already held. */
-  private async uploadOneClaimed(a: LocalAttachment): Promise<boolean> {
+  /** {@link uploadOne}'s body, with this sha's claim already held. `healed`:
+   *  this is the one retry after {@link forgetDeadFileId} dropped a dead id. */
+  private async uploadOneClaimed(a: LocalAttachment, healed = false): Promise<boolean> {
     const mime = mimeForPath(a.relPath);
     // A tree binary is a `files` row FIRST: the id has to exist before the
     // bytes, because it is what the blob carries as `doc_id` and what the
@@ -1220,6 +1240,22 @@ export class AttachmentSync {
         }
         this.notifyStorageLimit();
         throw new AbortPass(errCode(e) ?? "storage_limit_reached");
+      }
+      if (
+        status === 400 &&
+        errCode(e) === "invalid_rel_path" &&
+        docId &&
+        !healed &&
+        !isUnderAttachments(a.relPath)
+      ) {
+        // The server resolved our `files` id to NO row, so it read this as an
+        // `attachments/` drop — and a tree path is not one. The id is dead: the
+        // row was deleted (by a delete propagated from a stat that failed, or on
+        // another device) while this device kept the file and remembered the id.
+        // Retrying it is a guaranteed 400 on every pass, forever, with the file
+        // badged as syncing. Forget it and register the file afresh, once.
+        this.forgetDeadFileId(a.relPath, docId);
+        return this.uploadOneClaimed(a, true);
       }
       if (status === 413 || status === 415) {
         // Permanent for these bytes: the file is over the cap or of a type the
@@ -1676,6 +1712,23 @@ export class AttachmentSync {
         );
       }
     }
+  }
+
+  /**
+   * Drop a `files` id the server no longer has, everywhere this device keeps it:
+   * the session cache {@link ensureFileRow} reads first, and the registry (which
+   * persists it to `.context/config.json` together with the claim that the
+   * server holds its bytes — a claim about a row that is gone).
+   */
+  private forgetDeadFileId(relPath: string, deadId: string): void {
+    this.fileIds.delete(relPath);
+    this.registerRefused.delete(relPath);
+    // `localIds` is deliberately kept: the local index's id is what the retry
+    // registers, and without it the file would upload with no id at all.
+    this.deps.forgetFileId?.(relPath);
+    console.warn(
+      `[attachments] ${relPath} — files row ${deadId} no longer exists on the server; registering it again`,
+    );
   }
 
   /**

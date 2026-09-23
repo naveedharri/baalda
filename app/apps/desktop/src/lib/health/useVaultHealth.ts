@@ -432,6 +432,15 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         await syncManager.removeMissingServerFile(path, vaultEpoch);
         refresh();
       },
+      async retryLocalFiles(paths) {
+        if (vaultEpoch == null) throw new Error("No vault is open.");
+        try { await syncManager.retryLocalFiles(paths, vaultEpoch); }
+        finally { refresh(); }
+      },
+      async deleteLocalFiles(paths) {
+        try { return await deleteVaultPaths([...paths]); }
+        finally { refresh(); }
+      },
       syncNow: () => syncManager.retrySync(),
 
       retryDoc: (docId: string) => syncManager.retryDoc(docId),

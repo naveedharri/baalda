@@ -1107,6 +1107,15 @@ export class SyncManager implements InboundHost {
     await this.attachments.downloadMissing(paths);
   }
 
+  /** Vault Health's Retry for files on this computer the server lacks. */
+  async retryLocalFiles(paths: readonly string[], epoch: number): Promise<void> {
+    const scope = this.scope;
+    if (!scope?.isCurrent() || scope.vaultEpoch !== epoch || !this.attachments) {
+      throw new Error("Connect this vault to the server before retrying files.");
+    }
+    await this.attachments.retryFiles(paths);
+  }
+
   async removeMissingServerFile(path: string, epoch: number): Promise<void> {
     const scope = this.scope;
     if (!scope?.isCurrent() || scope.vaultEpoch !== epoch) throw new Error("The open vault changed.");
@@ -4682,21 +4691,23 @@ export class SyncManager implements InboundHost {
       // The same liveness the note queue uses: the vault channel is synced and
       // one pull has completed, so a missing file is a decision, not a startup.
       isLive: () => this.isLive(),
-      exists: async (relPath) => {
-        try {
-          await ipc.fileStat(relPath, epoch);
-          return true;
-        } catch (e) {
-          // A vault switch is NOT an answer about this file — rethrow, and the
-          // drain's own catch reads it as "couldn't ask" rather than "gone".
-          if (ipc.isVaultMismatch(e)) throw e;
-          return false;
-        }
-      },
+      // `false` only for a definite not-found; every other failure — a vault
+      // switch, an IPC hiccup under load — rejects, and the drain reads a
+      // rejection as "couldn't ask" rather than "gone". This used to be a
+      // `file_stat` whose EVERY error meant "deleted", which propagated deletes
+      // for binaries that never left the disk.
+      exists: (relPath) => ipc.binaryExists(relPath, epoch),
       listLocal: () => ipc.listBinaries(epoch),
       listServer: () => api.listVaultBlobs(vaultId),
       fileId: (relPath) => this.registry.getFileId(relPath),
-      forgetFileId: (relPath) => this.registry.forgetFileId(relPath),
+      // The mirror caches ids per path too, and consults that cache BEFORE the
+      // registry. Forgetting only the registry's copy left the dead id live for
+      // the rest of the session: a file that came back uploaded under a row
+      // the server had just deleted, and failed on every pass.
+      forgetFileId: (relPath) => {
+        this.registry.forgetFileId(relPath);
+        this.attachments?.forgetFile(relPath);
+      },
       moveFileId: (from, to) => this.registry.moveFileId(from, to),
       deleteFile: (id) => api.deleteFile(id),
       // Never forced: a 409 means a note still embeds those bytes, and that

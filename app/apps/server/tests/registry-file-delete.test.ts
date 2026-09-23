@@ -79,6 +79,29 @@ describe("DELETE /api/files/:id", () => {
     expect((await del(owner, randomUUID())).status).toBe(204);
   });
 
+  it("leaves a tombstone, and the id can still be registered again", async () => {
+    const docId = await seedFile(vaultId, folderId, "Team/shot.png");
+    expect((await del(owner, docId)).status).toBe(204);
+
+    const { rows } = await pool.query<{ path: string }>(
+      "SELECT path FROM file_tombstones WHERE id = $1",
+      [docId],
+    );
+    expect(rows).toEqual([{ path: "Team/shot.png" }]);
+
+    // A device that kept the file (and its id) re-registers it — the desktop's
+    // recovery when its upload names a row the server no longer has.
+    const again = await app.fetch(
+      new Request("http://local/api/files", {
+        method: "POST",
+        headers: { ...authHeaders(owner), "content-type": "application/json" },
+        body: JSON.stringify({ vaultId, path: "Team/shot.png", docId }),
+      }),
+    );
+    expect(again.status).toBe(201);
+    expect(await fileRows(docId)).toBe(1);
+  });
+
   it("drops the file from the blob listing, so no device re-downloads it", async () => {
     const docId = await seedFile(vaultId, folderId, "Team/deck.pptx");
     await seedBlob(vaultId, orgId, "Team/deck.pptx", { docId });
