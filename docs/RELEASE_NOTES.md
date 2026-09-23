@@ -22,7 +22,7 @@
 
 - Shared files stay in step: when a teammate updates an image or file you also have, Baalda now brings their version to you instead of both computers overwriting each other. Any copy it replaces is kept in the vault's trash.
 - Notes a teammate deleted no longer come back or retry in the background; your local copy stays on your computer, marked as no longer synced.
-- Improvements and bug fixes: empty files no longer sit on "syncing" forever, sync connects more reliably on large vaults, and files that could not be uploaded now say so instead of retrying endlessly.
+- Improvements and bug fixes: empty files no longer sit on "syncing" forever, sync connects more reliably on large vaults, and files that could not be uploaded now say so instead of retrying endlessly, plus security updates to the libraries Baalda uses.
 
 ## 0.1.67
 
