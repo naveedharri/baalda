@@ -143,6 +143,37 @@ describe("future-member access snapshots", () => {
     expect(rows.rows.map((row) => row.principal_id)).toEqual([untouched]);
   });
 
+  it("whole-vault selected people replace only their own overrides (no 500)", async () => {
+    const { org, owner, doc } = await fixture();
+    const selected = await seedUser(`selected-${randomUUID()}@test.dev`);
+    const untouched = await seedUser(`untouched-${randomUUID()}@test.dev`);
+    await seedMember(org, selected, "member");
+    await seedMember(org, untouched, "member");
+    await pool.query(
+      `INSERT INTO shares
+         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ($1,$2,'file',$3,'user',$4,'denied'),
+              ($5,$2,'file',$3,'user',$6,'denied')`,
+      [randomUUID(), org, doc, selected, randomUUID(), untouched],
+    );
+
+    await applyBulkAccess({
+      organizationId: org,
+      actorUserId: owner,
+      resources: [{ resourceType: "vault", resourceId: org }],
+      audience: { type: "users", userIds: [selected, owner] },
+      mode: "open",
+    });
+
+    expect(await effectivePermission(selected, doc)).toBe("edit");
+    expect(await effectivePermission(untouched, doc)).toBe("none");
+    const rows = await pool.query<{ principal_id: string }>(
+      "SELECT principal_id FROM shares WHERE resource_type = 'file' AND resource_id = $1",
+      [doc],
+    );
+    expect(rows.rows.map((row) => row.principal_id)).toEqual([untouched]);
+  });
+
   it("whole-vault Everyone replaces snapshots and every member override but not the future default", async () => {
     const { org, owner, doc } = await fixture();
     const member = await seedUser(`member-${randomUUID()}@test.dev`);

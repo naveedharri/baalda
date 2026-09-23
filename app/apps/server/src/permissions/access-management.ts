@@ -167,9 +167,11 @@ async function clearResourceOverrides(
   resource: AccessResource,
   userIds: string[],
 ): Promise<number> {
-  const audience = userIds.length
-    ? `AND principal_type = 'user' AND principal_id = ANY($3::text[])`
-    : "";
+  // The vault branch has no `$2` (the resource IS the org), so its audience is
+  // `$2`; a gap in the numbering leaves Postgres unable to type the unused slot.
+  const audienceAt = (n: number) =>
+    userIds.length ? `AND principal_type = 'user' AND principal_id = ANY($${n}::text[])` : "";
+  const audience = audienceAt(3);
   if (resource.resourceType === "file") {
     const result = await db.query(
       `DELETE FROM shares
@@ -211,8 +213,8 @@ async function clearResourceOverrides(
                 SELECT id, vault_id FROM notes UNION ALL SELECT id, vault_id FROM files
               ) d JOIN vaults v ON v.id = d.vault_id
                WHERE d.id = s.resource_id AND v.organization_id = $1))
-        ) ${audience}`,
-    userIds.length ? [organizationId, resource.resourceId, userIds] : [organizationId],
+        ) ${audienceAt(2)}`,
+    userIds.length ? [organizationId, userIds] : [organizationId],
   );
   return result.rowCount ?? 0;
 }
