@@ -234,6 +234,7 @@ export function FileTree() {
   const rootFrozen = useStore((s) => s.rootFrozen);
   const itemOrder = useStore((s) => s.itemOrder);
   const treeSort = useStore((s) => s.treeSort);
+  const folderSorts = useStore((s) => s.folderSorts);
   const docSyncState = useStore((s) => s.docSyncState);
   // The same fact for files that sync as blobs (`.pdf`, `.docx`, `.mp4`): the
   // attachment mirror's own map, keyed by path rather than docId.
@@ -372,7 +373,8 @@ export function FileTree() {
   // it; "name" has no live sort key.
   const [pointerInTree, setPointerInTree] = useState(false);
   const syncBusy = useStore((s) => isBulkPhase(s.syncProgress?.phase));
-  const orderPinned = treeSort === "recent" && (pointerInTree || syncBusy);
+  const anyRecent = treeSort === "recent" || Object.values(folderSorts).includes("recent");
+  const orderPinned = anyRecent && (pointerInTree || syncBusy);
   const pinnedMtimes = useRef(new Map<string, number>());
   // Safety net for a pin that never got its `pointerleave` — the window losing
   // focus with the cursor still over the tree (cmd-tab, a dialog stealing it).
@@ -451,14 +453,14 @@ export function FileTree() {
     const level = tree?.children ?? [];
     if (!orderPinned) {
       pinnedMtimes.current.clear();
-      return applyOrder(sortTree(level, treeSort), "", itemOrder);
+      return applyOrder(sortTree(level, treeSort, folderSorts), "", itemOrder);
     }
     return applyOrder(
-      sortTree(pinModified(level, pinnedMtimes.current), treeSort),
+      sortTree(pinModified(level, pinnedMtimes.current), treeSort, folderSorts),
       "",
       itemOrder,
     );
-  }, [tree, itemOrder, treeSort, orderPinned]);
+  }, [tree, itemOrder, treeSort, folderSorts, orderPinned]);
 
   // Assign each sibling group as a unit. Identity hashing keeps colours stable,
   // while the group pass prevents adjacent rows from landing on the same small
@@ -1938,25 +1940,63 @@ export function FileTree() {
             </li>
           )}
           {menu.node && <li onClick={() => menu.node!.edit()}>Rename</li>}
-          {/* The same vault-wide sort as the header button. A per-folder sort
-              would be a third arrangement layer fighting the other two, so
-              there is one setting and it is reachable from both places. */}
-          <li className="menu-heading menu-sep-item">Sort notes by</li>
-          {TREE_SORTS.map((s) => (
-            <li
-              key={s.id}
-              role="menuitemradio"
-              aria-checked={treeSort === s.id}
-              className={treeSort === s.id ? "is-on" : undefined}
-              title={s.hint}
-              onClick={() => useStore.getState().setTreeSort(s.id)}
-            >
-              <span className="menu-tick" aria-hidden="true">
-                {treeSort === s.id ? "✓" : ""}
-              </span>
-              {s.label}
-            </li>
-          ))}
+          {/* At the vault root this is the vault-wide sort (the same setting
+              as the header button). Inside a folder it is THAT folder's sort:
+              it replaces the vault-wide one for the folder and everything under
+              it (until a deeper folder sets its own) — the same base layer,
+              scoped, never a third one: a hand-made arrangement still sits on
+              top of it. "Vault default" drops the override. */}
+          {menuDir === "" ? (
+            <>
+              <li className="menu-heading menu-sep-item">Sort notes by</li>
+              {TREE_SORTS.map((s) => (
+                <li
+                  key={s.id}
+                  role="menuitemradio"
+                  aria-checked={treeSort === s.id}
+                  className={treeSort === s.id ? "is-on" : undefined}
+                  title={s.hint}
+                  onClick={() => useStore.getState().setTreeSort(s.id)}
+                >
+                  <span className="menu-tick" aria-hidden="true">
+                    {treeSort === s.id ? "✓" : ""}
+                  </span>
+                  {s.label}
+                </li>
+              ))}
+            </>
+          ) : (
+            <>
+              <li className="menu-heading menu-sep-item">Sort this folder by</li>
+              <li
+                role="menuitemradio"
+                aria-checked={!folderSorts[menuDir]}
+                className={!folderSorts[menuDir] ? "is-on" : undefined}
+                title="Follow the vault-wide sort (header button)"
+                onClick={() => useStore.getState().setFolderSort(menuDir, null)}
+              >
+                <span className="menu-tick" aria-hidden="true">
+                  {!folderSorts[menuDir] ? "✓" : ""}
+                </span>
+                Vault default
+              </li>
+              {TREE_SORTS.map((s) => (
+                <li
+                  key={s.id}
+                  role="menuitemradio"
+                  aria-checked={folderSorts[menuDir] === s.id}
+                  className={folderSorts[menuDir] === s.id ? "is-on" : undefined}
+                  title={s.hint}
+                  onClick={() => useStore.getState().setFolderSort(menuDir, s.id)}
+                >
+                  <span className="menu-tick" aria-hidden="true">
+                    {folderSorts[menuDir] === s.id ? "✓" : ""}
+                  </span>
+                  {s.label}
+                </li>
+              ))}
+            </>
+          )}
           {/* Only offered where there IS an arrangement to drop — this clears
               the hand-made order for one folder so its contents fall back to
               the sort above, and leaves every other folder's alone. */}

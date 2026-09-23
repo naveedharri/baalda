@@ -8,6 +8,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Sidebar: Name (Z–A) and per-folder sort (desktop).** A third sort, Name (Z–A), puts dated
+  notes like `2026-09-23` newest first (folders reverse too). Right-click a folder → "Sort this
+  folder by" to give it (and everything under it, until a deeper folder sets its own) a sort of
+  its own; "Vault default" drops it. It replaces the base sort for that subtree — a hand-made
+  drag-and-drop arrangement still sits on top. Device-local, per vault (`context.folderSort:`),
+  and it follows folder renames.
 - **Make a vault local only (server + desktop).** `GET /api/orgs/:orgId/unsync-preview`
   (owner; counts notes/files/folders/`attachmentBytes`/members/publicLinks/mcpTokens/
   checkpoints plus the live `subscription` `{status, currentPeriodEnd, cancelAtPeriodEnd}`),

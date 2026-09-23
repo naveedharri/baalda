@@ -55,6 +55,8 @@ import {
   readLineNumbers,
   readPropertiesMode,
   readTreeSort,
+  readFolderSorts,
+  writeFolderSorts,
   writeActivityStatus,
   writeAutomaticItemColors,
   writeMentionSound,
@@ -64,7 +66,7 @@ import {
   writeTreeSort,
 } from "./lib/prefs";
 import type { PropertiesMode } from "./lib/editor/frontmatter";
-import type { TreeSort } from "./lib/tree/sort";
+import { renameInFolderSorts, type FolderSorts, type TreeSort } from "./lib/tree/sort";
 import type { AccountSettingsTab, SettingsTab } from "./lib/settingsTabs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
@@ -444,6 +446,8 @@ interface AppStore {
   /** How the sidebar arranges everything the user hasn't arranged by hand.
    *  Layered UNDER `itemOrder`, never replacing it — see `lib/tree/sort`. */
   treeSort: TreeSort;
+  /** Per-folder overrides of `treeSort` for the open vault (device-local). */
+  folderSorts: FolderSorts;
   /** Set briefly when a teammate joins the vault, to drive the celebration
    *  banner + confetti. `at` changes each time so a repeat join re-triggers it. */
   memberJoined: { name: string; at: number } | null;
@@ -458,6 +462,8 @@ interface AppStore {
   setRootFrozen: (frozen: boolean) => Promise<void>;
   setItemOrder: (order: ItemOrder) => void;
   setTreeSort: (sort: TreeSort) => void;
+  /** Sort one folder's subtree its own way; `null` goes back to the vault sort. */
+  setFolderSort: (folderPath: string, sort: TreeSort | null) => void;
   setAutomaticItemColors: (enabled: boolean) => void;
   /**
    * Re-list the sidebar. With `folders`, ONLY those folder listings are re-read
@@ -1657,6 +1663,7 @@ export const useStore = create<AppStore>((set, get) => ({
   lineNumbers: readLineNumbers(),
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
+  folderSorts: {},
   memberJoined: null,
 
   setVault: (v) => {
@@ -1673,6 +1680,7 @@ export const useStore = create<AppStore>((set, get) => ({
       vault: v,
       itemColors: readItemColors(v?.path),
       itemOrder: readItemOrder(v?.path),
+      folderSorts: readFolderSorts(v?.path),
       ...(switched ? { openFolderIsSynced: null } : {}),
     });
     // Answer "does THIS folder sync?" for the open gate (see `probeFolderSync`).
@@ -1736,6 +1744,16 @@ export const useStore = create<AppStore>((set, get) => ({
     // vault — it's a device preference.
     writeTreeSort(sort);
     set({ treeSort: sort });
+  },
+
+  setFolderSort: (folderPath, sort) => {
+    const vault = get().vault;
+    if (!vault || !folderPath) return;
+    const next = { ...get().folderSorts };
+    if (sort) next[folderPath] = sort;
+    else delete next[folderPath];
+    writeFolderSorts(vault.path, next);
+    set({ folderSorts: next });
   },
 
   setAutomaticItemColors: (enabled) => {
@@ -2323,6 +2341,14 @@ export const useStore = create<AppStore>((set, get) => ({
       console.warn("[sync] renamePath failed", oldPath, e);
     }
     get().setItemOrder(renameInOrder(get().itemOrder, oldPath, newPath));
+    {
+      const sorts = renameInFolderSorts(get().folderSorts, oldPath, newPath);
+      const vault = get().vault;
+      if (sorts !== get().folderSorts && vault) {
+        writeFolderSorts(vault.path, sorts);
+        set({ folderSorts: sorts });
+      }
+    }
     get().followNoteRename(oldPath, newPath);
     await get().refreshTree();
     await get().refreshTitles();
@@ -2719,6 +2745,7 @@ export const useStore = create<AppStore>((set, get) => ({
       noteRemovedSynced: false,
       itemColors: readItemColors(undefined),
       itemOrder: readItemOrder(undefined),
+      folderSorts: {},
     });
     // Welcome is now the state a reload should restore (same rule as
     // closeLocalVault) — don't let the launch reopen undo the sign-out landing.
