@@ -24,6 +24,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `baseline-browser-mapping`; no source changes.
 
 ### Fixed
+- **Setting whole-vault access for specific people returned HTTP 500 (server).** The vault branch
+  of `clearResourceOverrides` skipped parameter `$2`, which Postgres cannot type (`42P18`); it now
+  numbers its parameters without a gap. Everyone, folder and file selections were unaffected.
 - **Shared binaries flipped between teammates' versions (desktop + server).** Doc-bound tree
   binaries now sync three-way against a per-file base persisted in `.context/config.json`
   (`fileBases`): only-server-changed downloads, only-local-changed uploads with `baseSha`, and no
