@@ -37,6 +37,7 @@ import type {
   HealthInventory,
   HealthIssue,
   NoteInspection,
+  ServerStorage,
   SyncLogEntry,
   VaultChecks,
   VaultHealthSnapshot,
@@ -66,6 +67,7 @@ const NO_FAILURES: HealthFailures = { registry: [], content: [], limitCode: null
 export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealthSnapshot {
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
+  const vaultReadySeen = useStore((s) => s.vaultReadySeen);
   const syncStatus = useStore((s) => s.vaultSyncStatus);
   const authStatus = useStore((s) => s.authStatus);
   const hasSession = useStore((s) => s.session != null);
@@ -81,6 +83,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const myRole = members.find((m) => m.userId === userId)?.role;
   const canManage = myRole === "owner" || myRole === "admin";
   const [serverTree, setServerTree] = useState<AccessTreeResponse | null>(null);
+  const [serverStorage, setServerStorage] = useState<ServerStorage | null>(null);
 
   const [stats, setStats] = useState<VaultStats | null>(null);
   const [checks, setChecks] = useState<VaultChecks | null>(null);
@@ -108,6 +111,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   useEffect(() => {
     setStats(null);
     setServerTree(null);
+    setServerStorage(null);
     setChecks(null);
     setLocalInventoryPaths(null);
     setStatsError(null);
@@ -132,6 +136,23 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     }, 500);
     return () => { live = false; clearTimeout(timer); };
   }, [canManage, syncEnabled, serverVaultId, vaultPath, vaultEpoch, nonce, syncActive, docIdByPath]);
+
+  // The Remote Vault's file/attachment bytes, for the comparison's size row.
+  // Best effort: a failure (offline, older server, no membership) leaves it
+  // null and the card shows "—"; nothing on the page waits for it.
+  useEffect(() => {
+    if (!syncEnabled || !serverVaultId) {
+      setServerStorage(null);
+      return;
+    }
+    let live = true;
+    const timer = setTimeout(() => {
+      void Promise.resolve().then(() => authManager.api.vaultStorage(serverVaultId)).then((usage) => {
+        if (live) setServerStorage({ usedBytes: usage.usedBytes, limitBytes: usage.limitBytes });
+      }).catch(() => { if (live) setServerStorage(null); });
+    }, 500);
+    return () => { live = false; clearTimeout(timer); };
+  }, [syncEnabled, serverVaultId, vaultPath, vaultEpoch, nonce, syncActive]);
 
   // ── The Rust census ────────────────────────────────────────────────────────
   // Re-run on vault change and on every `refresh()`. A response that lands after
@@ -279,6 +300,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const report = useMemo(() => {
     const input: HealthInput = {
       syncEnabled,
+      serverSettled: vaultReadySeen,
       syncStatus,
       authStatus,
       hasSession,
@@ -296,6 +318,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     };
     return buildHealthReport(input);
   }, [
+    vaultReadySeen,
     syncEnabled,
     syncStatus,
     authStatus,
@@ -695,6 +718,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     inventory,
     hasLocalAttachments,
     stats,
+    serverStorage,
     checks,
     statsError,
     loading,

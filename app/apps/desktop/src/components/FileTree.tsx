@@ -322,6 +322,10 @@ export function FileTree() {
   // the sidebar's clicks are queued on.
   const localNotePaths = useMemo(() => titles.map((t) => t.path), [titles]);
   const removingAccess = useStore((s) => s.syncProgress?.phase === "removing");
+  // The ONE switch between the two sidebar looks (see `rowSyncMark`): wave
+  // counters while a run is moving — the same condition under which the corner
+  // pill reads "Syncing N/M" — and a column of green dots otherwise.
+  const runActive = useStore((s) => isBulkPhase(s.syncProgress?.phase));
   const syncIndex = useMemo<TreeSyncIndex | null>(() => {
     const waveKey = syncEnabled ? vaultPath : null;
     if (lastWaveKeyRef.current !== waveKey) {
@@ -344,11 +348,23 @@ export function FileTree() {
       docSyncState,
       localNotePaths,
       fileSyncState,
+      // Unreported mapped notes read as synced even before `ready`: the
+      // least noisy of the two honest pre-`ready` looks, and the post-`ready`
+      // rule anyway (see `TreeSyncInput.serverSettled`).
+      serverSettled: true,
+      // Failures are the Health page's; the sidebar never shows an error.
+      failuresAsSynced: true,
     });
-    wavesRef.current.apply(index);
+    // A wave belongs to one run. With none moving there is no counter to draw,
+    // and forgetting it here is what stops a finished run's leftovers from
+    // pinning "0/14" on a folder until the next one.
+    if (runActive) wavesRef.current.apply(index);
+    else wavesRef.current.reset();
+    index.runActive = runActive;
     return index;
   }, [
     syncEnabled,
+    runActive,
     removingAccess,
     syncStatus,
     docIdByPath,
@@ -372,7 +388,7 @@ export function FileTree() {
   // and the true order is restored the moment both clear. Only "recent" needs
   // it; "name" has no live sort key.
   const [pointerInTree, setPointerInTree] = useState(false);
-  const syncBusy = useStore((s) => isBulkPhase(s.syncProgress?.phase));
+  const syncBusy = runActive;
   const anyRecent = treeSort === "recent" || Object.values(folderSorts).includes("recent");
   const orderPinned = anyRecent && (pointerInTree || syncBusy);
   const pinnedMtimes = useRef(new Map<string, number>());

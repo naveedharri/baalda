@@ -5,7 +5,7 @@ import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
-import { SyncIssuesBannerView, syncIssuesBanner } from "./components/SyncIssuesBanner";
+import { NoteLimitBannerView, noteLimitBanner } from "./components/NoteLimitBanner";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
@@ -227,32 +227,29 @@ function VaultUnsyncedBanner() {
 }
 
 /**
- * The strip that says a finished sync run left notes behind, and points at the
- * page that can explain each one.
+ * The Free note-limit upgrade strip (the only part of the old "N notes didn't
+ * sync" banner that survives — see `noteLimitBanner`).
  *
- * Wired here, alongside the other banners, so `SyncIssuesBannerView` stays a
- * pure component and its one decision (`syncIssuesBanner`) stays unit-testable.
  * The dismissal is local state on purpose: it is a view preference about ONE
- * run, nothing else reads it, and keying it on the store's `failedRunToken`
- * means the next failing run raises the banner again by itself.
+ * run, and keying it on the store's `failedRunToken` means the next failing run
+ * raises the strip again by itself.
  */
-function SyncIssuesBanner() {
+function NoteLimitBanner() {
   const syncEnabled = useStore((s) => s.syncEnabled);
   const progress = useStore((s) => s.syncProgress);
   const runToken = useStore((s) => s.failedRunToken);
   const [dismissedRunToken, setDismissedRunToken] = useState<number | null>(null);
-  const { show, failed } = syncIssuesBanner({
+  const show = noteLimitBanner({
     syncEnabled,
     progress,
+    noteLimit: syncManager.registry.limitCode() === "note_limit_reached",
     runToken,
     dismissedRunToken,
   });
   return (
-    <SyncIssuesBannerView
+    <NoteLimitBannerView
       show={show}
-      failed={failed}
-      noteLimit={syncManager.registry.limitCode() === "note_limit_reached"}
-      onOpenHealth={() => useStore.getState().requestSettings(syncManager.registry.limitCode() === "note_limit_reached" ? "billing" : "health")}
+      onUpgrade={() => useStore.getState().requestSettings("billing")}
       onDismiss={() => setDismissedRunToken(runToken)}
     />
   );
@@ -682,8 +679,8 @@ function SyncIndicator({
   // vault's bulk-run progress, so a vault that is still uploading 380 of its 500
   // notes says so instead of claiming "Synced · just now" off a live socket.
   // With no note open the pill goes vault-wide: it appears whenever a bulk run
-  // has something to report and stays put afterwards ("Synced ✓" / "N not
-  // synced"), so a fresh hydration is never invisible.
+  // has something to report and stays put afterwards ("Synced ✓" — per-note
+  // failures are the Health page's), so a fresh hydration is never invisible.
   const status = useStore((s) => s.syncStatus);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
@@ -702,11 +699,10 @@ function SyncIndicator({
       pending={pending}
       progress={progress}
       noteOpen={noteOpen}
-      // "N not synced" carries its own remedy: one click re-pulls the registry
-      // and re-runs the content pass for everything still unconfirmed.
+      // A run that could not proceed carries its own remedy: one click re-pulls
+      // the registry and re-runs the content pass for everything unconfirmed.
       onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
-      // …and when a run has actually failed, the first click should EXPLAIN
-      // rather than retry: a note the server refused for its size only re-fails.
+      // …and the first click should EXPLAIN rather than retry blindly.
       onOpenHealth={
         syncEnabled ? () => useStore.getState().requestSettings("health") : undefined
       }
@@ -1321,7 +1317,7 @@ export default function App() {
           </header>
           <VaultUnsyncedBanner />
           <NotSyncingBanner />
-          <SyncIssuesBanner />
+          <NoteLimitBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}

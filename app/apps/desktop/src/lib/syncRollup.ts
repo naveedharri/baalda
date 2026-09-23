@@ -100,6 +100,12 @@ export interface TreeSyncIndex {
   /** The whole vault's roll-up (the root folder), or null when it holds nothing
    *  that syncs. */
   vault: FolderSyncSummary | null;
+  /**
+   * A sync run is moving right now (the pill's "Syncing N/M" condition). Not
+   * derived here — the sidebar stamps it after building, so rows read it off
+   * the index they already receive. Absent ⇒ false. See {@link rowSyncMark}.
+   */
+  runActive?: boolean;
 }
 
 export interface TreeSyncInput {
@@ -126,6 +132,22 @@ export interface TreeSyncInput {
    * this map is one sync has never seen rather than one it lost.
    */
   fileSyncState?: Record<string, DocSyncState>;
+  /**
+   * The server has answered this session (the vault channel's first `ready`
+   * landed — `store.vaultReadySeen`). From then on a mapped note with no
+   * reported transition counts as SYNCED: every doc the server named at connect
+   * (`ready.empty` / `ready.behind`) or this device has not confirmed is queued
+   * into the run and reports its own state, so silence after `ready` means
+   * "nothing to do". `unreported` is then always 0. Default false — the
+   * pre-`ready` reading, where silence is not yet a verdict.
+   */
+  serverSettled?: boolean;
+  /**
+   * Count per-note failures (`error`) as synced, for surfaces that must not show
+   * them (the sidebar). The failure itself is untouched — Health reads it from
+   * `syncManager.syncFailures()`. Default false, so `failed` keeps counting.
+   */
+  failuresAsSynced?: boolean;
 }
 
 function parentDir(path: string): string {
@@ -165,6 +187,10 @@ function summarize(c: Counts): FolderSyncSummary {
 /** Build the whole tree's sync index in one pass. */
 export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
   const { docIdByPath, docSyncState, localNotePaths } = input;
+  const settled = input.serverSettled === true;
+  const failuresAsSynced = input.failuresAsSynced === true;
+  const seen = (state: DocSyncState): DocSyncState =>
+    failuresAsSynced && state === "error" ? "synced" : state;
   const notes = new Map<string, DocSyncState>();
   /** Mapped notes with no reported transition (see `FolderSyncSummary.unreported`). */
   const unreported = new Set<string>();
@@ -172,8 +198,14 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
   // Every note the server knows about, at its reported state.
   for (const [relPath, docId] of Object.entries(docIdByPath)) {
     const reported = docSyncState[docId];
-    if (reported === undefined) unreported.add(relPath);
-    notes.set(relPath, reported ?? "unsynced");
+    if (reported === undefined) {
+      if (settled) {
+        notes.set(relPath, "synced");
+        continue;
+      }
+      unreported.add(relPath);
+    }
+    notes.set(relPath, seen(reported ?? "unsynced"));
   }
   // Every note only this device knows about. It has no docId, so it cannot have a
   // state — and "no server row" is exactly what unsynced means.
@@ -195,7 +227,7 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
     // A path cannot be both. If the registry claims it as a note, that claim is
     // the one the sidebar draws — and it must not be counted twice.
     if (notes.has(relPath)) continue;
-    files.set(relPath, state);
+    files.set(relPath, seen(state));
   }
 
   const counts = new Map<string, Counts>();
@@ -240,6 +272,12 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
   return { notes, files, folders, vault };
 }
 
+/** Notes and files a run still has to move: neither synced, failed (nothing is
+ *  moving those) nor unreported (no verdict yet — see `unreported`). */
+function outstanding(s: FolderSyncSummary): number {
+  return s.total - s.synced - s.failed - s.unreported;
+}
+
 /**
  * Remembers, per folder, how big the CURRENT wave of not-yet-synced notes got,
  * so the badge can show progress through the files that actually need syncing.
@@ -253,7 +291,8 @@ export function buildTreeSyncIndex(input: TreeSyncInput): TreeSyncIndex {
  * fresh "0/1" rather than resuming an old count.
  *
  * One instance should live as long as the vault view (the sidebar keeps one in
- * a ref and resets it on vault switch).
+ * a ref and resets it on vault switch, and whenever no run is active — a wave
+ * belongs to one run, and the next run's counts start from zero).
  */
 export class FolderWaveTracker {
   /** folder path ("" = vault root) → the wave's pinned denominator. */
@@ -272,14 +311,14 @@ export class FolderWaveTracker {
     // deleted folder must not pin memory forever.
     for (const key of [...this.waves.keys()]) {
       const s = key === "" ? index.vault : index.folders.get(key);
-      if (!s || s.total - s.synced <= 0) this.waves.delete(key);
+      if (!s || outstanding(s) <= 0) this.waves.delete(key);
     }
     const stamp = (path: string, s: FolderSyncSummary): void => {
       // Only notes that have actually been REPORTED as not synced are work. A
       // mapped note nobody has spoken for yet is not in the wave: before the
       // run's first batch of `synced` stamps lands, every note looks unsynced,
       // and pinning the wave then is exactly the "186/187" badge.
-      const remaining = s.total - s.synced - s.unreported;
+      const remaining = outstanding(s);
       if (remaining <= 0) return;
       const wave = Math.max(this.waves.get(path) ?? 0, remaining);
       this.waves.set(path, wave);
@@ -338,20 +377,28 @@ function waveOrNull(
 }
 
 /**
- * Tooltip for a folder row: always the real counts, never a rounded claim.
+ * Tooltip for a folder row, in the SAME numbers the row shows: the wave while
+ * a run is moving it ("Syncing 3 of 14 files"), the whole population once it is
+ * settled ("All 25 files synced"). The two used to disagree — "0/14" on the
+ * row, "11 of 25 files synced" on hover — because one counted the wave and the
+ * other the folder.
  *
- * "files", not "notes": the counts hold the folder's binaries too now, and a
- * folder of three PDFs claiming "All 3 notes synced" would be the small lie
- * this whole module exists to avoid.
+ * "files", not "notes": the counts hold the folder's binaries too, and a folder
+ * of three PDFs claiming "All 3 notes synced" would be a small lie.
  */
-export function folderSyncTitle(s: FolderSyncSummary): string {
-  if (s.failed > 0) {
-    return `${plural(s.failed, "file")} of ${s.total} couldn't sync`;
-  }
-  if (s.synced === s.total) {
-    return `All ${plural(s.total, "file")} synced`;
-  }
-  return `${s.synced} of ${plural(s.total, "file")} synced`;
+export function folderSyncTitle(
+  s: FolderSyncSummary,
+  progress: { done: number; total: number } | null = null,
+): string {
+  if (progress) return `Syncing ${progress.done} of ${plural(progress.total, "file")}`;
+  return `All ${plural(s.total, "file")} synced`;
+}
+
+/** A row's state as the sidebar draws it: live only while a run is moving, and
+ *  never `error` (per-note failures are the Health page's job). */
+function sidebarState(state: DocSyncState, runActive: boolean): DocSyncState {
+  if (!runActive || state === "error") return "synced";
+  return state;
 }
 
 /**
@@ -359,45 +406,54 @@ export function folderSyncTitle(s: FolderSyncSummary): string {
  * a file that isn't a synced note (an image, an unmapped page), or a folder that
  * contains no notes at all.
  *
- * A folder shows "done/total" of its current sync wave until it is settled,
- * then a single dot — which is what makes "are all my folders synced?"
- * answerable at a glance: a column of quiet dots means yes, any "1/2" in it
- * says exactly where things stand. (Previously the folder's whole population —
- * "1113/1114" — which buried the one file that was actually moving; and before
- * that a percentage, which read as gibberish on small folders.)
+ * Two looks, and the switch is the RUN, not the counts:
+ *
+ *  - While a sync run is moving (`runActive` — the same condition under which
+ *    the corner pill reads "Syncing N/M"), a folder with outstanding work shows
+ *    "done/total" of its current wave and a note shows its live state.
+ *  - Otherwise every row with an indicator is the green synced dot. A counter
+ *    that outlives its run is the stuck amber "0/14" this replaced: the wave
+ *    counted leftovers (notes the run failed or never reached) forever.
+ *
+ * Never an error tone, whatever the index says.
  */
 export function rowSyncMark(
   row: { path: string; isDir: boolean },
   index: TreeSyncIndex,
+  runActive = index.runActive === true,
 ): RowSyncMark | null {
   if (row.isDir) {
     const summary = row.path === "" ? index.vault : (index.folders.get(row.path) ?? null);
     if (!summary) return null;
-    const settled = summary.state === "synced" || summary.state === "error";
+    const progress = runActive
+      ? // No tracker ran (no `apply` call) ⇒ fall back to the wave a fresh
+        // tracker would report: everything REPORTED as outstanding right now,
+        // none done. Nothing reported at all ⇒ no counts to show, just the dot.
+        waveOrNull(
+          summary.wave ?? {
+            done: 0,
+            total: outstanding(summary),
+          },
+        )
+      : null;
     return {
-      state: summary.state,
-      progress: settled
-        ? null
-        : // No tracker ran (no `apply` call) ⇒ fall back to the wave a fresh
-          // tracker would report: everything REPORTED unsynced right now, none
-          // done. Nothing reported at all ⇒ no counts to show yet, just the dot.
-          waveOrNull(
-            summary.wave ?? {
-              done: 0,
-              total: summary.total - summary.synced - summary.unreported,
-            },
-          ),
-      title: folderSyncTitle(summary),
+      state: progress ? "syncing" : "synced",
+      progress,
+      title: folderSyncTitle(summary, progress),
     };
   }
-  const state = index.notes.get(row.path);
-  if (state) return { state, progress: null, title: DOC_SYNC_TITLES[state] };
+  const noteState = index.notes.get(row.path);
+  if (noteState) {
+    const state = sidebarState(noteState, runActive);
+    return { state, progress: null, title: DOC_SYNC_TITLES[state] };
+  }
   // Not a note — but a `.pdf`/`.docx`/`.mp4` the attachment mirror carries gets
   // the SAME dot, in the same column, in its own words. A file the mirror has
   // never spoken for (sync off, no pass yet) still gets nothing.
   const fileState = index.files.get(row.path);
   if (fileState) {
-    return { state: fileState, progress: null, title: FILE_SYNC_TITLES[fileState] };
+    const state = sidebarState(fileState, runActive);
+    return { state, progress: null, title: FILE_SYNC_TITLES[state] };
   }
   return null;
 }

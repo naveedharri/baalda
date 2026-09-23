@@ -71,6 +71,9 @@ export interface HealthFailures {
 export interface HealthInput {
   /** `store.syncEnabled` — is the sync layer live for this vault? */
   syncEnabled: boolean;
+  /** `store.vaultReadySeen` — the one "synced" rule (`TreeSyncInput.serverSettled`):
+   *  after the server's first `ready`, a mapped note it did not name is synced. */
+  serverSettled?: boolean;
   /** `store.vaultSyncStatus` — the vault channel, independent of note permissions. */
   syncStatus: SyncStatus;
   /** `store.authStatus`. */
@@ -794,6 +797,7 @@ export function buildHealthReport(input: HealthInput): HealthReport {
     docIdByPath: input.docIdByPath,
     docSyncState: input.docSyncState,
     localNotePaths: input.localNotePaths,
+    serverSettled: input.serverSettled === true,
   });
   const v = index.vault;
   const counts: HealthCounts = v

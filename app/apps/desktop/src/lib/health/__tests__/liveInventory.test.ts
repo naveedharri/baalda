@@ -10,7 +10,7 @@ import * as ipc from "../../ipc";
 import { authManager } from "../../auth/authManager";
 import type { VaultHealthSnapshot } from "../types";
 
-vi.mock("../../auth/authManager", () => ({ authManager: { api: { listAccessTree: vi.fn() } } }));
+vi.mock("../../auth/authManager", () => ({ authManager: { api: { listAccessTree: vi.fn(), vaultStorage: vi.fn() } } }));
 vi.mock("../../../store", async () => {
   const { create } = await import("zustand");
   return { useStore: create(() => ({})) };
@@ -94,4 +94,25 @@ it("uses admin storage paths for missing-server checks without downloading priva
   expect(snapshot.inventory.server?.notes).toBe(0);
   expect(snapshot.inventory.deviceOnlyNotes).toEqual(["2.md"]);
   expect(snapshot.inventory.serverOnlyNotes).toEqual([]);
+});
+
+it("reads the Remote Vault's file storage and degrades to null when it fails", async () => {
+  patch({ session: { user: { id: "owner" } }, members: [{ userId: "owner", role: "owner" }] });
+  const { syncManager } = await import("../../sync/docSession");
+  Object.assign(syncManager.registry, { vaultId: "v1", healthInventory: () => ({
+    hasServerVault: true, notePaths: [], folderPaths: [], filePaths: [],
+  }) });
+  vi.mocked(authManager.api.listAccessTree).mockResolvedValue({ notes: [], folders: [], files: [] });
+  vi.mocked(authManager.api.vaultStorage).mockResolvedValue({
+    usedBytes: 2048, pendingBytes: 0, blobCount: 1, limitBytes: 1024 * 1024,
+  });
+  await act(async () => root.render(createElement(Probe)));
+  await act(async () => vi.advanceTimersByTimeAsync(500));
+  expect(authManager.api.vaultStorage).toHaveBeenCalledWith("v1");
+  expect(snapshot.serverStorage).toEqual({ usedBytes: 2048, limitBytes: 1024 * 1024 });
+
+  vi.mocked(authManager.api.vaultStorage).mockRejectedValue(new Error("offline"));
+  await act(async () => snapshot.refresh());
+  await act(async () => vi.advanceTimersByTimeAsync(500));
+  expect(snapshot.serverStorage).toBeNull();
 });

@@ -26,6 +26,11 @@ initTheme();
 initPlatform();
 // Dev builds only: webview console → `tauri dev` terminal, for sync diagnostics.
 mirrorConsoleToTerminal();
+// Dev builds only: `window.__baaldaHealthDemo(true)` shows every Health state
+// from fixtures. The whole branch is stripped from production builds.
+if (import.meta.env.DEV) {
+  void import("./lib/health/demoFixture").then((m) => m.installHealthDemoToggle());
+}
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

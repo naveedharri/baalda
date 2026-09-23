@@ -1,155 +1,18 @@
 /* Vault Settings → Health — the census: what is actually in this vault.
-   A compact metrics strip, a twelve-week activity strip and one "largest" table
-   behind a segmented control. Everything here comes from the Rust census in
+   An activity strip and one "largest" table behind a segmented control. Everything here comes from the Rust census in
    `VaultStats`; nothing is derived from the sync layer, so this whole block is
    just as true for a vault that has never had a server. */
 import { useState } from "react";
-import type { HistoryFootprint, SizedFile, VaultCheckId, VaultStats } from "../lib/health/types";
+import type { HistoryFootprint, SizedFile, VaultStats } from "../lib/health/types";
 import { activityCellTitle, formatBytes, relativeTime } from "../lib/health/format";
 import { buildHeatmap, heatmapRangeLabel } from "../lib/health/heatmapRange";
 import { MAX_NOTE_BYTES } from "../lib/sync/contentUpload";
 import { AsyncButton } from "./AsyncButton";
-import { Glyph, PathText, type GlyphName, type HealthHandlers } from "./HealthShared";
+import { PathText, type HealthHandlers } from "./HealthShared";
 
 /** Amber before the hard ceiling: a note this size is one paste from being
  *  refused, and the warning is only useful while it can still be acted on. */
 const NOTE_WARN_BYTES = 8 * 1024 * 1024;
-
-// ── Metrics strip ─────────────────────────────────────────────────────────────
-
-interface Metric {
-  icon: GlyphName;
-  label: string;
-  value: string;
-  /** The lead figure in this overview. */
-  primary?: boolean;
-  /** Tooltip detail; kept off the strip so it stays one quiet row. */
-  sub?: string;
-  /** Short inline note when something is off ("1 broken"), amber. */
-  flag?: string;
-  /** The check that lists the affected files; the flag becomes a link to it. */
-  check?: VaultCheckId;
-  action?: "reclaim";
-  detail?: string;
-}
-
-/** The three numbers people use to understand the size of a vault. Detailed
- * index/history/link figures live in Advanced diagnostics below. */
-export function HealthStats({
-  stats,
-  noteCount,
-  folderCount,
-  loading,
-  statsError,
-  handlers,
-  onFlag,
-  syncing = false,
-}: {
-  stats: VaultStats | null;
-  /** Supported standalone files in the surfaced tree; null while that tree loads. */
-  noteCount: number | null;
-  /** Surfaced folders in the supported-file tree; null while that tree loads. */
-  folderCount: number | null;
-  loading: boolean;
-  statsError: string | null;
-  handlers: HealthHandlers;
-  /** A flag like "1 broken" is a dead end unless it leads somewhere: this opens
-   *  the check that lists the files. */
-  onFlag?: (check: VaultCheckId) => void;
-  syncing?: boolean;
-}) {
-  if (!stats) {
-    return (
-      <>
-        {statsError && <div className="auth-error">{statsError}</div>}
-        <ul className="health-metrics" aria-busy={loading || undefined}>
-          {Array.from({ length: 3 }, (_, i) => (
-            <li key={i} className="health-metric is-skeleton" aria-hidden="true">
-              <span className="health-metric-value" />
-              <span className="health-metric-label" />
-            </li>
-          ))}
-        </ul>
-        {!loading && !statsError && (
-          <p className="muted">These numbers are not available for this vault yet.</p>
-        )}
-      </>
-    );
-  }
-
-  const totalBytes = stats.notes.bytes + stats.attachments.bytes + stats.otherFiles.bytes;
-  const metrics: Metric[] = [
-    {
-      icon: "note",
-      label: "Notes",
-      value: noteCount?.toLocaleString() ?? "—",
-      primary: true,
-      sub:
-        noteCount == null
-          ? "Counting supported files…"
-          : "Text notes and other supported formats",
-      flag: !syncing && stats.notes.empty > 0 ? `${stats.notes.empty.toLocaleString()} empty` : undefined,
-      check: "empty-notes",
-    },
-    {
-      icon: "folder",
-      label: "Folders",
-      value: folderCount?.toLocaleString() ?? "—",
-      sub: "Folders on this computer",
-    },
-    {
-      icon: "disk",
-      label: "Stored locally",
-      value: formatBytes(totalBytes),
-      sub: "Vault files and embedded attachments; excludes the local index and edit history",
-      detail: stats.attachments.count > 0
-        ? `${stats.attachments.count.toLocaleString()} ${stats.attachments.count === 1 ? "attachment" : "attachments"} · ${formatBytes(stats.attachments.bytes)}`
-        : undefined,
-    },
-  ];
-
-  return (
-    <>
-      {statsError && <div className="auth-error">{statsError}</div>}
-      <ul className="health-metrics" aria-label="Vault at a glance">
-        {metrics.map((m) => (
-          <li
-            className="health-metric"
-            data-primary={m.primary ? "" : undefined}
-            data-flag={m.flag ? "" : undefined}
-            key={m.label}
-            title={m.sub ? `${m.label}: ${m.sub}` : undefined}
-          >
-            <span className="health-metric-value">{m.value}</span>
-            <span className="health-metric-label">
-              <Glyph name={m.icon} size={12} />
-              {m.label}
-            </span>
-            {m.detail && <span className="health-metric-detail">{m.detail}</span>}
-            {m.flag &&
-              (m.check && onFlag ? (
-                <button
-                  type="button"
-                  className="health-metric-flag"
-                  title="Show the affected files"
-                  onClick={() => onFlag(m.check as VaultCheckId)}
-                >
-                  {m.flag}
-                </button>
-              ) : (
-                <span className="health-metric-flag">{m.flag}</span>
-              ))}
-            {m.action === "reclaim" && (
-              <AsyncButton className="link-btn health-metric-action" onClick={handlers.reclaim}>
-                Reclaim
-              </AsyncButton>
-            )}
-          </li>
-        ))}
-      </ul>
-    </>
-  );
-}
 
 // ── Activity ──────────────────────────────────────────────────────────────────
 

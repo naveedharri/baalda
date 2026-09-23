@@ -218,8 +218,7 @@ describe("local attachment detection", () => {
 describe("HealthView", () => {
   it("renders a local vault without a sync breakdown", () => {
     const html = render(snapshot());
-    expect(html).toContain("Local only");
-    expect(html).toContain("Sync is off for this folder");
+    expect(html).toContain("Sync is off for this vault.");
     expect(html).toContain("Nothing needs attention");
     // No bar, because there are no counts to put in it.
     expect(html).not.toContain("health-bar-seg");
@@ -247,12 +246,12 @@ describe("HealthView", () => {
     expect(html).toContain("12.0 MB");
   });
 
-  it("counts every standalone format as a note but excludes embedded attachments", () => {
+  it("counts only text notes as Notes and every other format as Files", () => {
     const html = render(
       snapshot({
         // The raw census intentionally disagrees with the surfaced tree: it
         // also sees unsupported files and folders under hidden attachments/.
-        // Product Notes/Folders must use the supported tree counts below.
+        // The comparison must use the supported tree counts below.
         stats: {
           ...stats,
           folders: 9,
@@ -260,22 +259,73 @@ describe("HealthView", () => {
         },
       }),
     );
-    expect((html.match(/class="health-metric"/g) ?? []).length).toBe(3);
-    expect(html).not.toContain("Total items");
-    expect(html).toContain("data-primary");
-    // 12 text notes + 4 standalone notes in other formats. The 2 embedded
-    // attachments contribute storage bytes, but not another two notes.
-    expect(html).toMatch(
-      /health-metric-value">16<\/span><span class="health-metric-label">.*?Notes/s,
+    // The stat strip is gone; the comparison card carries the numbers.
+    expect(html).not.toContain("health-metric");
+    // 12 text notes — NOT 12 + 4 standalone files.
+    expect(html).toContain('class="health-place-primary">12</strong>');
+    expect(html).not.toContain('class="health-place-primary">16</strong>');
+    expect(html).toContain(
+      '<dt title="PDFs, images, data, and other supported files">Files</dt><dd>4</dd>',
+    );
+    expect(html).toContain("<dt>Folders</dt><dd>3</dd>");
+    expect(html).not.toContain("Other formats");
+    expect(html).not.toContain("<dd>9</dd>");
+  });
+
+  it("measures Files & attachments on the same basis on both cards", () => {
+    const inventory = {
+      ...snapshot().inventory,
+      server: { notes: 12, folders: 3, files: 4, total: 19 },
+      serverState: "current" as const,
+    };
+    const synced = { ...localReport, verdict: "healthy" as const,
+      counts: { total: 12, synced: 12, pending: 0, failed: 0, unsynced: 0, unreported: 0 } };
+    // attachments 1024 + other files 2048 = 3 KB; note text, index and
+    // history bytes are excluded so a synced vault can match the server.
+    const html = render(snapshot({
+      report: synced,
+      inventory,
+      stats: { ...stats, notes: { count: 12, bytes: 9_999_999, empty: 0 } },
+      serverStorage: { usedBytes: 3072, limitBytes: null },
+    }));
+    expect(html.match(/Files &amp; attachments<\/dt><dd>3 KB<\/dd>/g)?.length).toBe(2);
+
+    const capped = render(snapshot({
+      report: synced,
+      inventory,
+      serverStorage: { usedBytes: 3072, limitBytes: 5 * 1024 * 1024 * 1024 },
+    }));
+    expect(capped).toContain("3 KB of 5.0 GB");
+
+    // Unknown on either side is a dash, never a zero, and never blocks the page.
+    const unknown = render(snapshot({ report: synced, inventory, stats: null, serverStorage: null }));
+    expect(unknown.match(/Files &amp; attachments<\/dt><dd>—<\/dd>/g)?.length).toBe(2);
+    expect(unknown).toContain("Needs attention");
+  });
+
+  it("puts Sync now and Refresh beside the page title and drops the status card", () => {
+    const html = render(
+      snapshot({
+        report: {
+          ...localReport,
+          verdict: "healthy",
+          headline: "All 12 notes are on the Remote Vault",
+          detail: "Last confirmed 2 minutes ago · api.baalda.com.",
+          counts: { total: 12, synced: 12, pending: 0, failed: 0, unsynced: 0, unreported: 0 },
+          serverHost: "api.baalda.com",
+        },
+      }),
+      { title: "Health" },
     );
     expect(html).toMatch(
-      /health-metric-value">3<\/span><span class="health-metric-label">.*?Folders/s,
+      /class="health-page-head"><h2 class="settings-section-title">Health<\/h2><div class="health-verdict-actions health-page-actions">.*Sync now.*Refresh/s,
     );
-    expect(html).not.toContain('health-metric-value">111</span>');
-    expect(html).not.toContain('health-metric-value">9</span>');
-    expect(html).toContain("Stored locally");
-    expect(html.indexOf("Notes")).toBeLessThan(html.indexOf("Folders"));
-    expect(html.indexOf("health-metrics")).toBeLessThan(html.indexOf("health-verdict"));
+    expect(html).not.toContain("Copy diagnostics");
+    expect(html).not.toContain("health-verdict\"");
+    expect(html).not.toContain("health-host");
+    expect(html).not.toContain("All 12 notes are on the Remote Vault");
+    expect(html).not.toContain("Last confirmed");
+    expect(html.indexOf("health-page-head")).toBeLessThan(html.indexOf("health-inventory"));
   });
 
   it("organises advanced diagnostics around clear tools and safe actions", () => {
@@ -339,22 +389,39 @@ describe("HealthView", () => {
         },
       }),
     );
-    expect(html).toContain("1 text note is missing from the Remote Vault");
-    expect(html).toContain("2 text notes are missing from this computer");
-    expect(html).not.toContain("paths differ");
-    expect(html).toContain("Difference breakdown");
-    expect(html).toContain("Missing from the Remote Vault");
-    expect(html).toContain("Missing from this computer");
-    expect(html).toContain("<dt>Text notes</dt><dd>1</dd>");
-    expect(html).toContain(
-      '<dt title="PDFs, images, data, and other supported files">Notes in other formats</dt><dd>1</dd>',
-    );
-    expect(html).toContain("Review differences");
-    expect(html).toContain("9 of 12 text notes have confirmed content on the Remote Vault");
+    // Two groups — where each item lives — not six by type.
+    expect(html).toContain("<h4>Only on this computer · 3 items</h4>");
+    expect(html).toContain("<h4>Only on the Remote Vault · 3 items</h4>");
+    expect((html.match(/health-place-group/g) ?? []).length).toBe(2);
+    expect(html).not.toContain("health-inventory-result");
+    expect(html).not.toContain("health-difference-breakdown");
+    expect(html).not.toContain("Review differences");
+    // Notes, then folders, then files, each with its type icon and action.
+    const local = html.slice(html.indexOf("Only on this computer"), html.indexOf("Only on the Remote Vault"));
+    expect(local.indexOf("Draft.md")).toBeLessThan(local.indexOf("Local drafts"));
+    expect(local.indexOf("Local drafts")).toBeLessThan(local.indexOf("diagram.pdf"));
+    expect(local).toContain('aria-label="Note"');
+    expect(local).toContain('aria-label="Folder"');
+    expect(local).toContain('aria-label="File"');
+    expect(local.match(/>Open</g)?.length).toBe(1);
+    expect(local.match(/>Show</g)?.length).toBe(2);
+    const remoteStart = html.indexOf("Only on the Remote Vault");
+    const remote = html.slice(remoteStart, html.indexOf("</ul>", remoteStart));
+    expect(remote.match(/>Download</g)?.length).toBe(1);
+    expect(remote).toContain("Download all");
+    expect(remote).toContain("Remove from server");
+    expect(remote).not.toContain(">Open<");
+    expect(html).toContain('title="Draft.md"');
+    expect(html.match(/>Check again</g)?.length).toBe(2);
+    // The differences replace the all-clear card.
+    expect(html).not.toContain("Nothing needs attention");
+    expect(html).toContain("<dt>Folders</dt><dd>3</dd>");
     expect(html).toContain("Current Remote Vault view");
-    expect(html).toContain('class="health-place-primary">16</strong>');
-    expect(html).toContain('class="health-place-primary">17</strong>');
-    expect(html).not.toMatch(/\bserver\b/i);
+    expect(html).toContain('class="health-place-primary">12</strong>');
+    expect(html).toContain('class="health-place-primary">13</strong>');
+    // Page copy says "Remote Vault"; the only "server" left is the existing
+    // per-file "Remove from server" action, now visible without a toggle.
+    expect(html.split("Remove from server").join("")).not.toMatch(/\bserver\b/i);
   });
 
   it("explains plan-blocked format notes without presenting them as a failed retry", () => {
@@ -395,17 +462,20 @@ describe("HealthView", () => {
       { standaloneFileSyncBlocked: true, showAttachmentUpgrade: true },
     );
 
-    expect(html).toContain("6,974 text notes synced · 160 notes in other formats local only");
-    expect(html).toContain("Partially synced");
     expect(html).not.toContain(">Healthy<");
     expect(html).not.toContain("All 6,974 notes are on the Remote Vault");
-    expect(html).toContain("160 notes in other formats stay on this computer");
-    expect(html).toContain("Syncing these file types requires Pro");
-    expect(html).toContain("Other-format notes stay local on this plan");
+    expect(html).toContain("<h4>Only on this computer · 160 items</h4>");
+    expect(html).toContain("PDFs, images and other files need Pro to sync. Notes and folders sync on every plan.");
+    expect(html).not.toMatch(/other formats?/i);
+    expect(html).toContain("Select all");
+    expect(html).not.toContain("Select files");
+    expect(html.match(/class="health-pro-tag">Pro</g)?.length).toBe(20);
+    expect(html).toContain("Show more (140 remaining)");
     // The container owns the single upgrade CTA in the top attachment banner.
     expect(html).not.toContain("Upgrade to Pro");
     expect(html).not.toContain(">Check again<");
-    expect((html.match(/class="health-difference-side"/g) ?? []).length).toBe(1);
+    expect(html).not.toContain("health-difference-side");
+    expect(html).not.toContain("Nothing needs attention");
     expect(html).not.toContain("data-zero");
   });
 
@@ -434,26 +504,38 @@ describe("HealthView", () => {
     expect(html).not.toContain("items Baalda can list");
   });
 
-  it.each(["syncing", "connecting"] as const)("does not call %s unavailable or flag its placeholders as empty notes", (verdict) => {
+  const busyInventory = () => ({
+    local: { notes: 6974, folders: 1743, files: 0, total: 8717 },
+    localReady: true,
+    server: { notes: 6974, folders: 1743, files: 0, total: 8717 },
+    serverState: "updating" as const,
+    deviceOnlyNotes: [], serverOnlyNotes: [], deviceOnlyFolders: [],
+    serverOnlyFolders: [], deviceOnlyFiles: [], serverOnlyFiles: [],
+  });
+
+  it("does not call a running sync unavailable or flag its placeholders as empty notes", () => {
     const html = render(snapshot({
-      report: { ...localReport, verdict },
+      report: { ...localReport, verdict: "syncing" },
       stats: { ...stats, notes: { count: 6974, bytes: 4096, empty: 6667 } },
-      inventory: {
-        local: { notes: 6974, folders: 1743, files: 0, total: 8717 },
-        localReady: true,
-        server: { notes: 6974, folders: 1743, files: 0, total: 8717 },
-        serverState: "updating",
-        deviceOnlyNotes: [], serverOnlyNotes: [], deviceOnlyFolders: [],
-        serverOnlyFolders: [], deviceOnlyFiles: [], serverOnlyFiles: [],
-      },
+      inventory: busyInventory(),
     }));
     expect(html).toContain("Updating Remote Vault view");
-    expect(html).toContain("Sync is still updating your local copy");
-    expect(html).toContain("Counts are provisional until sync finishes");
+    expect(html).not.toContain("Sync is still updating your local copy");
+    expect(html).not.toContain("Counts are provisional until sync finishes");
     expect(html).toContain("Remote counts include only notes you can access");
     expect(html).not.toContain("The Remote Vault is unavailable");
     expect(html).not.toContain("6,667 empty");
     expect(html).not.toContain("Notes and folders match");
+  });
+
+  it("only says sync is updating the local copy while a run is actually active", () => {
+    const html = render(snapshot({
+      report: { ...localReport, verdict: "connecting" },
+      inventory: busyInventory(),
+    }));
+    expect(html).not.toContain("Sync is still updating your local copy");
+    expect(html).not.toContain("Counts are provisional until sync finishes");
+    expect(html).not.toContain("The Remote Vault is unavailable");
   });
 
   it("does not invent local counts while the supported-file tree is loading", () => {
@@ -476,7 +558,6 @@ describe("HealthView", () => {
 
     expect(html).toContain("Still counting notes on this computer");
     expect(html).toContain("supported vault file list is ready");
-    expect(html).toContain("12 text notes synced · counting other formats");
     expect(html).not.toContain("Notes and folders match");
   });
 
@@ -522,24 +603,6 @@ describe("HealthView", () => {
     expect(html).toContain(
       'title="Projects/2026/Research/Interviews/Transcripts/session-seventeen.md"',
     );
-  });
-});
-
-describe("HealthView — verdict details", () => {
-  it("sets the server host as a chip instead of ending a sentence in it", () => {
-    const html = render(
-      snapshot({
-        report: {
-          ...localReport,
-          verdict: "healthy",
-          detail: "Last confirmed 2 minutes ago · api.baalda.com.",
-          serverHost: "api.baalda.com",
-        },
-      }),
-    );
-    expect(html).toContain('class="health-host"');
-    expect(html).toContain("Last confirmed 2 minutes ago.");
-    expect(html).not.toContain("ago · api.baalda.com");
   });
 });
 
@@ -710,53 +773,72 @@ describe("HealthIssues", () => {
     expect(html).toContain("note-99.md");
     expect(html).not.toContain("note-100.md");
     expect(html).toContain("1850 remaining");
+    // No filter box, however long the list: groups and paging carry it.
+    expect(html).not.toContain('type="search"');
+    expect(html).not.toContain("Filter by name or path");
     const focused = renderIssues({ issues, focusKey: "item-1949" });
     expect(focused).toContain("note-1949.md");
     expect(focused).not.toContain("note-100.md");
   });
 
-  it("keeps the reasoning collapsed until the row is opened", () => {
+  it("renders each issue as one line with no expanded reasoning panel", () => {
+    // Even a focused row stays one line: no disclosure, no panel.
+    for (const html of [renderIssues(), renderIssues({ focusKey: "doc-9" })]) {
+      expect(html).toContain("Too large to sync");
+      expect(html).toContain("note.md");
+      expect(html).not.toContain("aria-expanded");
+      expect(html).not.toContain("health-issue-panel");
+      expect(html).not.toContain("What this means");
+      expect(html).not.toContain("What Baalda does next");
+      expect(html).not.toContain("Where your content is");
+      expect(html).not.toContain("Copy Doc id");
+      expect(html).not.toContain("Needs you");
+      expect(html).not.toContain(explanation.meaning);
+      // The long why sentence is only a tooltip, not a painted line.
+      expect(html).not.toContain('class="health-why"');
+    }
+  });
+
+  it("shows only the path on a grouped row — the header names the kind", () => {
     const html = renderIssues();
-    expect(html).toContain("Too large to sync");
-    expect(html).toContain('aria-expanded="false"');
-    expect(html).not.toContain("Where your content is");
-    expect(html).not.toContain(explanation.meaning);
+    expect(html).toContain("<h4>1 note too large to sync</h4>");
+    expect(html).toMatch(/health-issue-meta"><span class="health-path" title="note\.md">note\.md/);
+    expect(html).not.toContain(">Too large to sync<");
+    expect(html).not.toContain(" · Too large");
+    expect(html).toContain('title="12.4 MB against a 10 MB cap."');
   });
 
-  it("lays out the whole argument once the row is open", () => {
-    const html = renderIssues({ focusKey: "doc-9" });
-    expect(html).toContain('aria-expanded="true"');
-    expect(html).toContain("What this means");
-    expect(html).toContain(explanation.meaning);
-    expect(html).toContain("What Baalda does next");
-    expect(html).toContain(explanation.next);
-    expect(html).toContain("What you can do");
-    for (const fix of explanation.fixes) expect(html).toContain(fix);
-    // Where the content is, in the model's own words — never re-derived here.
-    expect(html).toContain("Where your content is");
-    expect(html).toContain("On this device only");
-    // And the facts table, with a copy button on the copyable row.
-    expect(html).toContain("Doc id");
-    expect(html).toContain("doc-9");
-    expect(html).toContain("Copy Doc id");
+  it("lays out a no-access row as one sentence and a Contact the owner pill", () => {
+    const html = renderIssues({
+      issues: [{
+        ...issue, key: "vault:no-access", kind: "no-access", docId: null, path: null,
+        title: "The Remote Vault refused access", remedies: ["contact-owner", "copy-details"],
+      }],
+    });
+    expect(html).toContain("<h4>No access</h4>");
+    expect(html).toContain('class="health-issue-sentence">You don&#x27;t have access to this vault</span>');
+    expect(html).toMatch(/class="ghost-pill sm"><span class="async-btn-label">Contact the owner/);
+    expect(html).not.toContain("health-owner-card");
+    expect(html).not.toContain("Request copied");
   });
 
-  it("tags a row by whether it will fix itself, inside the panel", () => {
-    // The collapsed row is dot, title, path, one line of why and one button.
-    // The tag belongs to "what Baalda does next", so it lives with it.
-    expect(renderIssues()).not.toContain("Needs you");
-    expect(renderIssues({ focusKey: "doc-9" })).toContain("Needs you");
-    expect(
-      renderIssues({ issues: [{ ...issue, autoRetries: true }], focusKey: "doc-9" }),
-    ).toContain("Retries by itself");
-  });
-
-  it("keeps the collapsed row to one line of cause and one button", () => {
-    const html = renderIssues();
-    // The primary remedy only — the rest of the row's buttons are in the panel.
+  it("shows the primary action, a small Copy details and Ignore on the row", () => {
+    const html = renderIssues({ onDismiss: () => {} });
     expect(html).toContain("Reset history");
-    expect(html).not.toContain("Copy details");
+    expect(html).toContain("Copy details");
+    expect(html).toContain(">Ignore<");
     expect(html).toContain('class="health-issue-badge"');
+    // Open is not the first remedy and not a second-slot action.
+    expect(html).not.toContain(">Open<");
+  });
+
+  it("offers Re-register beside the primary action on a left-on-disk row", () => {
+    const html = renderIssues({
+      issues: [{ ...issue, kind: "left-behind", remedies: ["open", "reveal", "reregister", "delete", "copy-details"] }],
+    });
+    expect(html).toContain(">Open<");
+    expect(html).toContain(">Re-register<");
+    expect(html).not.toContain(">Delete<");
   });
 
   it("only offers the remedies an issue actually carries", () => {
@@ -804,10 +886,26 @@ describe("HealthIssues", () => {
         },
       ],
     });
-    expect(html).toContain("Too large");
-    expect(html).toContain("Not uploaded yet");
-    expect(html).toContain("Errors");
-    expect(html).toContain("Warnings");
+    // One group per kind, in the same group shape as the difference lists.
+    expect(html).toContain("<h4>1 note too large to sync</h4>");
+    expect(html).toContain("<h4>1 note isn&#x27;t registered</h4>");
+    expect((html.match(/health-difference-group health-issue-group/g) ?? []).length).toBe(2);
+    expect(html).not.toContain("health-chips");
+  });
+
+  it("renders differences and issues as one list with a single all-clear", () => {
+    const diff = createElement("div", { className: "health-difference-group" }, "diff group");
+    const both = renderIssues({ before: diff, hasOtherItems: true });
+    expect((both.match(/class="health-attention-list"/g) ?? []).length).toBe(1);
+    expect(both.indexOf("diff group")).toBeLessThan(both.indexOf("Too large to sync"));
+    expect(both).not.toContain("Nothing needs attention");
+
+    const onlyDiff = renderIssues({ issues: [], before: diff, hasOtherItems: true });
+    expect(onlyDiff).toContain("diff group");
+    expect(onlyDiff).not.toContain("Nothing needs attention");
+
+    const none = renderIssues({ issues: [] });
+    expect((none.match(/Nothing needs attention/g) ?? []).length).toBe(1);
   });
 
   it("calms down to a single card when there is nothing to report", () => {
@@ -942,7 +1040,6 @@ it("shows stored private notes without calling the vault empty or missing locall
   }));
   expect(html).toContain("6,974");
   expect(html).toContain("Stored on server");
-  expect(html).toContain("No notes accessible to this account");
   expect(html).not.toContain("This vault is empty");
   expect(html).not.toContain("Notes and folders match");
   expect(html).not.toContain("missing from this computer");
