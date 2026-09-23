@@ -229,6 +229,7 @@ pub fn run() {
             commands::clear_yjs_doc,
             commands::read_binary_file,
             commands::file_stat,
+            commands::binary_exists,
             commands::write_binary_file,
             commands::write_tree_binary,
             commands::list_attachments,

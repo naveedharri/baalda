@@ -137,6 +137,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   happened drawn as dashed `data-future` cells that never take a heat level.
 
 ### Fixed
+- **Files stuck "syncing" after a false disk delete (desktop + server).** The binary delete
+  queue read ANY failed `file_stat` as "deleted" and removed the server's `files` row for
+  files that never left disk; the device then kept the dead id and every upload got 400
+  `invalid_rel_path` forever. Now a new Rust `binary_exists` answers `false` only for a
+  real not-found, the drain refuses a delete the disk listing still names, a 400
+  `invalid_rel_path` on an id'd upload drops the dead id and re-registers once, and
+  `DELETE /api/files/:id` writes a `file_tombstones` row like a folder delete.
 - **Access panel is fast on large vaults.** Per-person summaries no longer resolve every note
   with ~5 queries per person: `loadAccessIndex` preloads the organization's share rows and
   structure once per request and the unchanged resolver (`resolveAccessForUser`) reads them in

@@ -120,6 +120,39 @@ describe("BinaryDeleteQueue", () => {
     expect(h.forgotten).toEqual(["Team/guide.pdf"]);
   });
 
+  it("never deletes a file the disk listing still names, whatever its stat said", async () => {
+    // 2026-09-22: 88 binaries that never left the disk lost their `files` rows
+    // because a failed stat read as "deleted". The listing is the second witness.
+    const shots = ["ts-shots/s-000.png", "ts-shots/s-001.png"];
+    const h = harness({
+      local: shots.map((relPath, i) => ({ relPath, sha256: `sha-${i}` })),
+      server: shots.map((p, i) => blob(`b${i}`, p, `sha-${i}`)),
+      onDisk: [], // the per-path check answered "not there" for both
+      fileIds: { [shots[0]]: "file-0", [shots[1]]: "file-1" },
+    });
+    for (const p of shots) h.queue.noteChanged(p);
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+    expect(h.forgotten).toEqual([]);
+  });
+
+  it("reads a stat that throws as couldn't-ask, not as a delete", async () => {
+    const h = harness({
+      server: [blob("b1", "Team/guide.pdf")],
+      fileIds: { "Team/guide.pdf": "file-1" },
+    });
+    h.deps.exists = async () => {
+      throw new Error("IPC custom protocol failed");
+    };
+    h.queue.noteChanged("Team/guide.pdf");
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual([]);
+    expect(h.forgotten).toEqual([]);
+  });
+
   it("deletes an attachments/ drop by blob id, never by a files row", async () => {
     const h = harness({
       server: [blob("b9", "attachments/abc.png")],

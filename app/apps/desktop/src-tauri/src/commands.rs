@@ -2402,6 +2402,17 @@ pub async fn file_stat(
     attachments::file_stat(&vault, &rel_path)
 }
 
+/// Disk-truth for the binary delete queue — see `attachments::binary_exists`.
+#[tauri::command]
+pub async fn binary_exists(
+    state: State<'_, AppState>,
+    rel_path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    attachments::binary_exists(&vault, &rel_path)
+}
+
 #[tauri::command(async)]
 pub fn write_binary_file(
     state: State<'_, AppState>,

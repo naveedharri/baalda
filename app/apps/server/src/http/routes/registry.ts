@@ -32,6 +32,7 @@ import {
   resolveFolderParent,
   resolveParentFolder,
   samePath,
+  tombstoneFile,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 
@@ -1002,6 +1003,11 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // exactly the shape `canReadAttachment` falls back to the path heuristic
     // for, i.e. bytes nobody can see and nothing will collect.
     const blobs = await deleteDocBlobs(id, row.vault_id);
+    // Tombstone BEFORE the row goes, as a folder delete does. Without it the id
+    // simply stops existing, and nothing on the server can say this file was
+    // deleted rather than never registered — which is the first question when a
+    // device turns up still holding the id. Re-registering the id stays allowed.
+    await tombstoneFile(pool, id);
     await pool.query("DELETE FROM files WHERE id = $1", [id]);
     console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
     changed(c, row.vault_id);
