@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Shared-note sync reliability (desktop + server).** A note's file is merged only after the first
+  server pull (three-way against the pre-pull state), so an edit already on the server can no longer
+  be re-inserted; a persisted per-note disk base stops an older file from undoing newer text; the
+  open/close handoff between the editor and background sync no longer runs two copies of a note;
+  typed changes are trimmed to the text that actually differs; server content replacement applies
+  only the changed span.
+
 ### Added
 - **Sidebar: Name (Z–A) and per-folder sort (desktop).** A third sort, Name (Z–A), puts dated
   notes like `2026-09-23` newest first (folders reverse too). Right-click a folder → "Sort this

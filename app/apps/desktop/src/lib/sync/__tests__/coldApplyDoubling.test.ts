@@ -189,3 +189,76 @@ describe("one writer per doc_id", () => {
     await store.destroyAll();
   });
 });
+
+/**
+ * #200: the same double insert through a TIMER. `NoteBridge.open` used to arm
+ * a debounced ingest for any non-empty doc, then await a load-time compaction
+ * (> 64 rows or > 1 MB). When that compaction outlived the 150 ms debounce,
+ * the ingest merged the file before `coldApply` got to look at it — and then
+ * applied the very update the file already reflected, on top.
+ */
+describe("cold apply: a slow load-time compaction", () => {
+  it("does not merge the file before the update is applied", async () => {
+    const server = serverDoc("x 97\n");
+    const base = stateOf(server);
+    const peer = new Y.Doc();
+    Y.applyUpdate(peer, base);
+    const sv = Y.encodeStateVector(server);
+    peer.getText("content").delete(2, 1);
+    peer.getText("content").insert(2, "12");
+    const delta = Y.encodeStateAsUpdate(peer, sv);
+
+    const { io, fs, persistence } = makeHarness({ [PATH]: "x 127\n" });
+    // Enough rows that opening the doc compacts it, and a snapshot write slow
+    // enough to outlive the ingest debounce.
+    for (let i = 0; i < 70; i++) await persistence.appendUpdate(DOC, base);
+    const save = persistence.saveSnapshot.bind(persistence);
+    persistence.saveSnapshot = async (...a: Parameters<typeof save>) => {
+      await new Promise((r) => setTimeout(r, 250));
+      return save(...a);
+    };
+    const merges: string[] = [];
+    const store = new VaultDocStore({
+      io,
+      resolvePath: () => PATH,
+      onExternalMerge: (d) => merges.push(d),
+    });
+
+    await store.applyUpdate(DOC, delta);
+
+    expect(fs.get(PATH)).toBe("x 127\n");
+    expect(merges).toEqual([]);
+    await store.destroyAll();
+  });
+});
+
+/**
+ * #200: the editor's bridge outlives its provider by one flush. While it is
+ * closing, a background update for the same doc must wait for it — never open
+ * a second bridge beside it — and must still be applied afterwards.
+ */
+describe("closing hold", () => {
+  it("queues a feed update behind the closing editor bridge", async () => {
+    const { io, fs } = makeHarness({ [PATH]: BASE });
+    const store = new VaultDocStore({ io, resolvePath: () => PATH });
+    const server = serverDoc(BASE);
+    await store.applyUpdate(DOC, stateOf(server));
+
+    let finishClose!: () => void;
+    const closing = new Promise<void>((r) => {
+      finishClose = r;
+    });
+    store.holdUntil(DOC, closing);
+
+    server.getText("content").insert(BASE.length, ADDED);
+    const applied = store.applyUpdate(DOC, stateOf(server));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fs.get(PATH)).toBe(BASE); // held, not applied beside the closing bridge
+    expect(store.pendingColdDocs()).toEqual([DOC]);
+
+    finishClose();
+    await applied;
+    expect(fs.get(PATH)).toBe(BASE + ADDED);
+    await store.destroyAll();
+  });
+});

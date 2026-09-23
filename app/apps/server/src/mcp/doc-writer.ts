@@ -63,6 +63,43 @@ export function revisionOf(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+const isHighSurrogate = (c: number) => c >= 0xd800 && c <= 0xdbff;
+const isLowSurrogate = (c: number) => c >= 0xdc00 && c <= 0xdfff;
+
+/**
+ * The smallest single replacement that turns `current` into `next`: the shared
+ * prefix and suffix are left alone. So `update_note` on a 20 KB note where one
+ * paragraph changed touches one paragraph's worth of CRDT — a concurrent edit
+ * elsewhere in the note merges instead of being clobbered by a delete-all —
+ * while remaining, by construction, a whole-body replacement in effect.
+ *
+ * The span never starts or ends inside a surrogate pair: Yjs stores inserted
+ * strings as UTF-8, where a lone surrogate becomes U+FFFD, so splitting an emoji
+ * across the boundary would corrupt it on every peer.
+ */
+export function replacementOp(current: string, next: string): TextOp[] {
+  if (current === next) return [];
+  let prefix = 0;
+  const max = Math.min(current.length, next.length);
+  while (prefix < max && current.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++;
+  if (prefix > 0 && isHighSurrogate(current.charCodeAt(prefix - 1))) prefix--;
+  let suffix = 0;
+  while (
+    suffix < max - prefix &&
+    current.charCodeAt(current.length - 1 - suffix) === next.charCodeAt(next.length - 1 - suffix)
+  ) {
+    suffix++;
+  }
+  if (suffix > 0 && isLowSurrogate(current.charCodeAt(current.length - suffix))) suffix--;
+  return [
+    {
+      index: prefix,
+      deleteLength: current.length - prefix - suffix,
+      insert: next.slice(prefix, next.length - suffix),
+    },
+  ];
+}
+
 /** A mutation's precondition failed: the note is not the text the caller read. */
 export class StaleRevisionError extends Error {
   constructor(
@@ -240,8 +277,13 @@ export function createDocWriter(
         docId,
         (text) => {
           requireUnderCap(content.length);
-          if (text.length > 0) text.delete(0, text.length);
-          if (content) text.insert(0, content);
+          // The minimal span, never delete-all + insert (#200). Version revert,
+          // vault revert and create_note's adopt all come through here, and a
+          // whole-body rewrite re-created every character under the server's
+          // client id: an offline peer's insert anchored inside the note then
+          // had nothing left to attach to and merged back as stray fragments.
+          // The resulting text is identical either way.
+          applyOps(text, replacementOp(text.toString(), content));
         },
         actor,
       ),

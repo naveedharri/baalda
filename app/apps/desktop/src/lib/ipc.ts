@@ -402,8 +402,26 @@ export const writeTrashCopy = (
  */
 export const rebindNoteId = (path: string, docId: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("rebind_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
-export const writeNote = (path: string, content: string, expectedEpoch?: VaultEpoch) =>
-  invoke<void>("write_note", { path, content, expectedEpoch: expectedEpoch ?? null });
+/** Atomic write + re-index. `docId` (the bridge's egest) also records the
+ *  written bytes as that doc's disk base in the same Rust call (#200). */
+export const writeNote = (
+  path: string,
+  content: string,
+  expectedEpoch?: VaultEpoch,
+  docId?: string,
+) =>
+  invoke<void>("write_note", {
+    path,
+    content,
+    expectedEpoch: expectedEpoch ?? null,
+    docId: docId ?? null,
+  });
+/** The sha256 of the bytes this device last synced between a doc's file and
+ *  its CRDT, or null when none was ever recorded (see `yjs_disk_base`). */
+export const getDiskBase = (docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string | null>("get_disk_base", { docId, expectedEpoch: expectedEpoch ?? null });
+export const setDiskBase = (docId: string, sha256: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("set_disk_base", { docId, sha256, expectedEpoch: expectedEpoch ?? null });
 /** Create a note only if the path is free. Resolves true when it was created,
  *  false when a file was already there (untouched). The registry materializes
  *  server-only notes through THIS, never `writeNote`, so a wrong "this device

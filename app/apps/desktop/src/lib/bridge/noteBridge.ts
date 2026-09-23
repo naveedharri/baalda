@@ -34,6 +34,37 @@ export class NoteBridge {
 
   /** Hash of the bytes we last wrote to disk; the ingest echo guard (spec 03 §5). */
   private lastWrittenHash: string | null = null;
+  /**
+   * The DURABLE twin of `lastWrittenHash` (#200): sha256 of the bytes this
+   * device last synced between the file and the doc — the last egest write,
+   * or the last file read INTO the doc — persisted per doc so it survives a
+   * relaunch. A file that still hashes to it was never edited outside the app
+   * since then, so a doc that differs from it is AHEAD of the file (an egest
+   * that failed, or a quit inside the 300ms debounce). Diffing that older file
+   * into the doc would turn the newest text into deletions; writing the doc out
+   * is the only right answer. Null = unknown (an older vault): every differing
+   * file is then diffed, as before.
+   */
+  private diskBase: string | null = null;
+  /**
+   * Pull-before-merge (#200). Non-null while a signed-in bridge waits for its
+   * first server pull: the doc's state as it was BEFORE that pull, encoded.
+   *
+   * Merging the file into a local CRDT that is behind the server re-inserts
+   * whatever the server already has: a local doc at `Price: 97`, a file at
+   * `Price: 127` (a teammate's edit, egested on an earlier launch) and a
+   * pre-pull ingest makes this device insert `12` under its own client id; the
+   * pull then lands the teammate's identical `12` and the note reads
+   * `Price: 12127` — and gains the digits again on every such round. So while
+   * this is set the file is neither ingested (watcher events only mark it
+   * dirty) nor written (egests are deferred), and `reconcileAfterPull` settles
+   * it once, three-way, against this pre-pull state.
+   */
+  private prePull: Uint8Array | null = null;
+  /** An egest was requested while {@link prePull} was set. */
+  private egestDeferred = false;
+  /** Upper bound on the pull wait — see `pullReconcileTimeoutMs`. */
+  private pullTimer: number | null = null;
 
   /** Count of updates in the persisted log since the last snapshot/compaction. */
   private logLength = 0;
@@ -232,7 +263,17 @@ export class NoteBridge {
   }
 
   private async hydrate(): Promise<void> {
-    const state = await this.io.persistence.loadState(this.docId);
+    const loadBase = this.io.persistence.loadDiskBase;
+    const [state, base] = await Promise.all([
+      this.io.persistence.loadState(this.docId),
+      loadBase
+        ? Promise.resolve(loadBase.call(this.io.persistence, this.docId)).catch((e) => {
+            this.reportError(e, "hydrate:loadDiskBase");
+            return null;
+          })
+        : Promise.resolve(null),
+    ]);
+    this.diskBase = base ?? null;
     const hasPersisted = state.snapshot != null || state.updates.length > 0;
 
     if (hasPersisted) {
@@ -271,7 +312,15 @@ export class NoteBridge {
       // file. Without this the editor paints empty over that file and the first
       // keystroke egests the emptiness away — the file's content destroyed with
       // no trash copy (desktop-audit #2).
-      if (this.text.length > 0 || this.seedOnOpen) this.ingest();
+      //
+      // A SIGNED-IN doc with content is not ingested here at all (#200): its
+      // local CRDT may be behind the server, and the file may already hold the
+      // server's newer text (egested on an earlier launch) — diffing that file
+      // into the older doc re-inserts the server's edit under this device's
+      // client id, and the pull then doubles it. It waits for the pull instead
+      // (`beginPull` → `reconcileAfterPull`).
+      if (this.seedOnOpen) this.ingest();
+      else if (this.text.length > 0) this.beginPull();
       if (this.shouldCompact()) await this.compact();
     } else {
       // No CRDT yet. Normally seed Y.Text from the file in a 'disk' transaction
@@ -301,6 +350,9 @@ export class NoteBridge {
       // later egest of server content is seen as a genuine change and no
       // spurious ingest fires before we've seeded.
       this.lastWrittenHash = await this.hash(fileText);
+      if (this.seedOnOpen && fileText.length > 0 && this.text.toString() === fileText) {
+        this.recordDiskBase(this.lastWrittenHash);
+      }
     }
   }
 
@@ -338,7 +390,139 @@ export class NoteBridge {
     }, ORIGIN_DISK);
     if (!seeded) return false;
     this.lastWrittenHash = await this.hash(fileText);
+    this.recordDiskBase(this.lastWrittenHash);
     return true;
+  }
+
+  // ---- Pull-before-merge (#200) -----------------------------------------
+
+  /** True while this bridge waits for its first server pull (see {@link prePull}). */
+  get awaitingPull(): boolean {
+    return this.prePull != null;
+  }
+
+  /**
+   * Enter the pull wait: remember the doc as it is now (the pre-pull state),
+   * stop ingesting and writing the file until {@link reconcileAfterPull}.
+   * `hydrate` calls this for every signed-in doc that opened with content; the
+   * sync layer calls it before connecting a bridge that was already resident.
+   * Idempotent — a second call keeps the FIRST pre-pull state.
+   */
+  beginPull(): void {
+    if (this.destroyed || this.prePull) return;
+    this.prePull = Y.encodeStateAsUpdate(this.doc);
+    // Nobody has compared this doc with its file yet.
+    this.ingestDirty = true;
+    if (this.ingestTimer != null) {
+      this.clearT(this.ingestTimer);
+      this.ingestTimer = null;
+    }
+    if (this.egestTimer != null) {
+      this.clearT(this.egestTimer);
+      this.egestTimer = null;
+      this.egestDeferred = true;
+    }
+    if (this.cfg.pullReconcileTimeoutMs > 0) {
+      this.pullTimer = this.setT(() => {
+        this.pullTimer = null;
+        void this.reconcileAfterPull();
+      }, this.cfg.pullReconcileTimeoutMs);
+    }
+  }
+
+  /**
+   * End the pull wait: merge the file into the doc ONCE, three-way, against
+   * the state the doc had BEFORE the pull. Resolves true iff file bytes entered
+   * the doc (a genuine external edit the server does not have yet).
+   *
+   *  - file == the doc now (post-pull)    ⇒ nothing to do — the file already
+   *    held the server's text; ingesting it would have re-inserted that text;
+   *  - file == the disk base, or == the pre-pull doc ⇒ the file is merely
+   *    BEHIND: write the doc out, never diff the older bytes in;
+   *  - anything else ⇒ an edit made outside the app: the diff pre-pull → file
+   *    is applied on a branch forked from the pre-pull state and that branch's
+   *    ops are merged into the live doc (the same technique a racing ingest
+   *    uses), so the server's ops and the file's edit both survive.
+   *
+   * Call it after the provider's first sync — or after that sync timed out,
+   * where it degrades to an ordinary ingest. A no-op (false) when the bridge
+   * is not waiting.
+   */
+  async reconcileAfterPull(): Promise<boolean> {
+    if (this.destroyed || !this.prePull) return false;
+    const pre = this.prePull;
+    this.releasePull();
+    if (this.ingestTimer != null) {
+      this.clearT(this.ingestTimer);
+      this.ingestTimer = null;
+    }
+    this.ingestDirty = true;
+    let changed = false;
+    try {
+      changed = await this.drainIngest(pre);
+    } finally {
+      if (this.egestDeferred) {
+        this.egestDeferred = false;
+        this.scheduleEgest();
+      }
+    }
+    const merged = changed || this.diskMergedUnreported;
+    this.diskMergedUnreported = false;
+    return merged;
+  }
+
+  /**
+   * End the pull wait WITHOUT reading the file into the doc. For a caller
+   * that must not merge it: a read-only grant (the edit cannot be sent), or a
+   * write-through whose caller knows the file is a placeholder. `egest` says
+   * whether a write deferred during the wait may now go ahead.
+   */
+  abandonPull(egest = true): void {
+    if (!this.prePull) return;
+    this.releasePull();
+    const deferred = this.egestDeferred;
+    this.egestDeferred = false;
+    if (deferred && egest) this.scheduleEgest();
+  }
+
+  private releasePull(): void {
+    this.prePull = null;
+    if (this.pullTimer != null) {
+      this.clearT(this.pullTimer);
+      this.pullTimer = null;
+    }
+  }
+
+  /**
+   * Does the file hold bytes the doc has not taken in? A read-only probe (no
+   * merge) for the sync layer's no-socket fast path: false for our own egest
+   * echo and for a file equal to the doc; true for anything else, including a
+   * doc that is merely ahead of its file (the reconcile then writes it out).
+   */
+  async hasUnmergedFileChange(): Promise<boolean> {
+    if (this.destroyed) return false;
+    if (this.diskMergedUnreported) return true;
+    let fileText: string;
+    try {
+      fileText = await this.io.readFile(this._path);
+    } catch {
+      return false;
+    }
+    const fileHash = await this.hash(fileText);
+    if (fileHash === this.lastWrittenHash || fileHash === this.pendingMergedFileHash) return false;
+    return fileText !== this.text.toString();
+  }
+
+  /** Persist the disk base. Fire-and-forget: a lost record only means the next
+   *  launch treats a differing file as an edit, which is the older behaviour. */
+  private recordDiskBase(hash: string): void {
+    if (this.diskBase === hash) return;
+    this.diskBase = hash;
+    const save = this.io.persistence.saveDiskBase;
+    if (!save) return;
+    Promise.resolve(save.call(this.io.persistence, this.docId, hash)).catch((e) =>
+      this.reportError(e, "saveDiskBase"),
+    );
   }
 
   private subscribe(): void {
@@ -356,6 +540,9 @@ export class NoteBridge {
   ingest(): void {
     if (this.destroyed) return;
     this.ingestDirty = true;
+    // Waiting for the first pull: remember that the file moved, merge it in
+    // `reconcileAfterPull` — never against a doc the pull has not caught up.
+    if (this.prePull) return;
     if (this.ingestTimer != null) this.clearT(this.ingestTimer);
     this.ingestTimer = this.setT(() => {
       this.ingestTimer = null;
@@ -380,6 +567,9 @@ export class NoteBridge {
    */
   async ingestNow(): Promise<boolean> {
     if (this.destroyed) return false;
+    // A bridge waiting for its pull merges through the three-way reconcile:
+    // same caller contract ("did disk bytes reach the doc?"), right base.
+    if (this.prePull) return this.reconcileAfterPull();
     if (this.ingestTimer != null) {
       this.clearT(this.ingestTimer);
       this.ingestTimer = null;
@@ -397,7 +587,7 @@ export class NoteBridge {
    * still merged (against the doc as the earlier pass left it) and one that was
    * already covered costs nothing.
    */
-  private async drainIngest(): Promise<boolean> {
+  private async drainIngest(base?: Uint8Array): Promise<boolean> {
     const prior = this.ingestInFlight;
     const run = (async () => {
       if (prior) {
@@ -407,7 +597,7 @@ export class NoteBridge {
           // A failed pass must not strand the queue behind it.
         }
       }
-      return this.runIngest();
+      return this.runIngest(base);
     })();
     this.ingestInFlight = run;
     try {
@@ -417,9 +607,22 @@ export class NoteBridge {
     }
   }
 
-  private async runIngest(): Promise<boolean> {
+  private async runIngest(base?: Uint8Array): Promise<boolean> {
     if (this.destroyed || !this.ingestDirty) return false;
     this.ingestDirty = false;
+
+    if (base) {
+      // The post-pull reconcile: the base is fixed (the pre-pull state), so the
+      // file is diffed against THAT and replayed on a branch of it, whatever
+      // the pull and any later transaction did to the live doc.
+      const branch = new Y.Doc();
+      Y.applyUpdate(branch, base);
+      try {
+        return await this.mergeDiskRead(() => branch, () => {}, this.everHadContent);
+      } finally {
+        branch.destroy();
+      }
+    }
 
     // The file read, hash and recovery snapshot cross async boundaries. If a
     // peer edits during any of them, diffing the older file against the NEW
@@ -484,10 +687,28 @@ export class NoteBridge {
     if (this.text.toString() === fileText) {
       // Already converged (e.g. we ingested this exact change already).
       this.lastWrittenHash = fileHash;
+      this.recordDiskBase(fileHash);
+      return false;
+    }
+    if (this.diskBase != null && fileHash === this.diskBase) {
+      // The file is exactly what this device last synced with the doc, and the
+      // doc has moved on since: the FILE is behind (a write that failed, or a
+      // quit inside the egest debounce), not edited. Diffing it in would turn
+      // the doc's newest text into deletions (#200) — write the doc out instead.
+      this.lastWrittenHash = fileHash;
+      this.scheduleEgest();
       return false;
     }
     const current = getBaseline().getText("content").toString();
-    if (current === fileText) return false;
+    if (current === fileText) {
+      // The file matches the doc as it was before a racing transaction or a
+      // pull: it is behind, and the doc's newer text must reach it.
+      if (getBaseline() !== this.doc) {
+        this.lastWrittenHash = fileHash;
+        this.scheduleEgest();
+      }
+      return false;
+    }
 
     // The ingest twin of the empty-egest clobber guard. A file that is
     // COMPLETELY empty against a doc that still holds text is not an edit we can
@@ -581,6 +802,7 @@ export class NoteBridge {
     // no-socket fast path in `ContentUploader.pushOne` keeps firing for our own
     // egest echoes — the flag is set strictly for merges that really happened.
     this.diskMergedUnreported = true;
+    this.recordDiskBase(fileHash);
     return true;
   }
 
@@ -588,6 +810,12 @@ export class NoteBridge {
 
   private scheduleEgest(): void {
     if (this.destroyed) return;
+    // Waiting for the first pull: the file has not been reconciled yet, and a
+    // write now would overwrite an edit made outside the app before it is read.
+    if (this.prePull) {
+      this.egestDeferred = true;
+      return;
+    }
     if (this.egestTimer != null) this.clearT(this.egestTimer);
     this.egestTimer = this.setT(() => {
       this.egestTimer = null;
@@ -671,7 +899,7 @@ export class NoteBridge {
       return;
     }
     try {
-      await this.io.writeFileAtomic(this._path, content);
+      await this.io.writeFileAtomic(this._path, content, this.docId);
     } catch (e) {
       // The .md on disk is the durable source of truth, so a lost write is a
       // data-safety event, not a log line: tell the UI, and retry with backoff
@@ -687,6 +915,8 @@ export class NoteBridge {
       return;
     }
     this.lastWrittenHash = hash;
+    // `writeFileAtomic` recorded it durably along with the write.
+    this.diskBase = hash;
     if (this.text.toString() === content) this.pendingMergedFileHash = null;
     this.clearWriteFailure();
     // Indexing is derived state: a failure here is worth a log, not a re-write.
@@ -738,6 +968,8 @@ export class NoteBridge {
    * nothing is pending, so closing an untouched note performs no write.
    */
   async flushEgest(): Promise<void> {
+    // A write deferred by the pull wait: reconcile first (it re-arms the egest).
+    if (this.prePull && this.egestDeferred) await this.reconcileAfterPull();
     if (this.egestTimer == null) return;
     this.clearT(this.egestTimer);
     this.egestTimer = null;
@@ -751,6 +983,7 @@ export class NoteBridge {
    * transient bridge may still persist/destroy normally without its retire path
    * overwriting those bytes with the Remote Vault's text. */
   cancelEgest(): void {
+    this.egestDeferred = false;
     if (this.egestTimer == null) return;
     this.clearT(this.egestTimer);
     this.egestTimer = null;
@@ -789,6 +1022,9 @@ export class NoteBridge {
    */
   async writeThrough(): Promise<boolean> {
     if (this.destroyed) return false;
+    // The caller wants the doc on disk now (a placeholder to fill): that ends
+    // any pull wait without merging the placeholder's bytes in.
+    this.abandonPull(false);
     if (this.egestTimer != null) {
       this.clearT(this.egestTimer);
       this.egestTimer = null;
@@ -938,6 +1174,7 @@ export class NoteBridge {
     if (this.egestTimer != null) this.clearT(this.egestTimer);
     this.ingestTimer = null;
     this.egestTimer = null;
+    this.releasePull();
     this.text.unobserve(this.onTextChange);
     this.doc.off("update", this.onDocUpdate);
     this.undoManager.off("stack-item-added", this.onUndoStackItemAdded);

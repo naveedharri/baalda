@@ -25,7 +25,13 @@ import {
 } from "../registry/tree-ops.js";
 import { purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
 import type { McpAuth } from "./tokens.js";
-import { StaleRevisionError, revisionOf, type DocWriter, type TextOp } from "./doc-writer.js";
+import {
+  StaleRevisionError,
+  replacementOp,
+  revisionOf,
+  type DocWriter,
+  type TextOp,
+} from "./doc-writer.js";
 import {
   AccessManagementError,
   applyBulkAccess,
@@ -730,33 +736,9 @@ async function writeOrToolError<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/**
- * The smallest single replacement that turns `current` into `next`: the shared
- * prefix and suffix are left alone. So `update_note` on a 20 KB note where one
- * paragraph changed touches one paragraph's worth of CRDT — a concurrent edit
- * elsewhere in the note merges instead of being clobbered by a delete-all —
- * while remaining, by construction, a whole-body replacement in effect.
- */
-export function replacementOp(current: string, next: string): TextOp[] {
-  if (current === next) return [];
-  let prefix = 0;
-  const max = Math.min(current.length, next.length);
-  while (prefix < max && current.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++;
-  let suffix = 0;
-  while (
-    suffix < max - prefix &&
-    current.charCodeAt(current.length - 1 - suffix) === next.charCodeAt(next.length - 1 - suffix)
-  ) {
-    suffix++;
-  }
-  return [
-    {
-      index: prefix,
-      deleteLength: current.length - prefix - suffix,
-      insert: next.slice(prefix, next.length - suffix),
-    },
-  ];
-}
+/** The smallest single replacement between two bodies — lives beside the writer
+ *  it feeds (`setContent` uses it too); re-exported for the MCP tools. */
+export { replacementOp };
 
 export async function updateNote(
   ctx: McpContext,
