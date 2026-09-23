@@ -52,6 +52,24 @@ pub fn file_stat(vault: &Path, rel: &str) -> AppResult<FileStat> {
     Ok(FileStat { size: meta.len(), modified })
 }
 
+/// Is there a FILE at this vault-relative path?
+///
+/// `Ok(false)` only for a definite answer — nothing there, or something that is
+/// not a file. Every other failure (a permission error, an interrupted call) is
+/// an `Err`, never a `false`: the disk-delete queue deletes the server's copy of
+/// whatever this calls absent, so "couldn't look" must not read as "gone".
+pub fn binary_exists(vault: &Path, rel: &str) -> AppResult<bool> {
+    let abs = resolve_in_vault(vault, rel)?;
+    match std::fs::metadata(&abs) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        // A component of the path that is a file, not a directory: nothing can
+        // exist below it, which is as definite as NotFound.
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Hex SHA-256 over raw bytes.
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();

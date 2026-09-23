@@ -808,6 +808,11 @@ export const readBinaryFile = (relPath: string, expectedEpoch?: VaultEpoch) =>
 export const fileStat = (relPath: string, expectedEpoch?: VaultEpoch) =>
   invoke<FileStat>("file_stat", { relPath, expectedEpoch: expectedEpoch ?? null });
 
+/** Is there a file at this path? `false` only for a definite not-found; any
+ *  other failure rejects (see `attachments.rs binary_exists`). */
+export const binaryExists = (relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("binary_exists", { relPath, expectedEpoch: expectedEpoch ?? null });
+
 export const writeBinaryFile = (
   relPath: string,
   bytes: Uint8Array,
