@@ -107,6 +107,55 @@ function stateFromSnapshot(
   };
 }
 
+/**
+ * A live subscription for a vault that is gone would bill its owner forever
+ * for nothing: vault deletion cancels at period end, but a webhook can still
+ * land a live, renewing subscription on a tombstone (a checkout that completed
+ * after the delete, a resume from the provider portal). When that happens we
+ * ask the provider to stop it at period end — never `now`, the period is paid
+ * for — and write back what it answers, which is what makes this idempotent:
+ * the stored row then says `cancel_at_period_end` and the next event skips it.
+ *
+ * Only for subscriptions this server can vouch for. The tombstone's owner must
+ * be a user HERE: a provider organization shared by two servers (staging and
+ * production on one Polar org) delivers every checkout to both endpoints, and
+ * each sees the other's vault as "deleted". Canceling those would stop a live
+ * subscription that belongs to the other deployment, so they are only logged.
+ *
+ * Best-effort: a refusal or outage is logged and the row stays as the provider
+ * last described it; the owner can still cancel or transfer it themselves.
+ */
+async function cancelOrphanedSubscription(
+  provider: BillingProvider,
+  row: SubscriptionRow,
+): Promise<void> {
+  const subId = row.provider_subscription_id;
+  if (!row.deleted_at || !subId || !isActiveStatus(row.status) || row.cancel_at_period_end) {
+    return;
+  }
+  const { rowCount } = await pool.query('SELECT 1 FROM "user" WHERE id = $1', [
+    row.owner_user_id ?? "",
+  ]);
+  if (!rowCount) {
+    console.warn(
+      `billing: live subscription ${subId} on deleted vault ${row.organization_id} has no owner on this server; not canceling (another deployment's?)`,
+    );
+    return;
+  }
+  try {
+    const snap = await provider.cancelSubscription(subId, "period_end");
+    await applySubscriptionState(pool, stateFromSnapshot(row.organization_id, snap));
+    console.warn(
+      `billing: canceled orphaned subscription ${subId} of deleted vault ${row.organization_id} at period end`,
+    );
+  } catch (err) {
+    console.warn(
+      `billing: could not cancel orphaned subscription ${subId} of deleted vault ${row.organization_id}:`,
+      (err as Error).message,
+    );
+  }
+}
+
 /** The `GET /api/billing/orgs/:orgId` body — shared with cancel and transfer. */
 function orgBillingBody(
   ent: Entitlement,
@@ -332,7 +381,7 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
       // event is at least as new as the row we hold. A stale redelivery is
       // still recorded as processed by the claim above but must NOT overwrite
       // newer state.
-      await applySubscriptionState(client, {
+      const stored = await applySubscriptionState(client, {
         organizationId: orgId,
         providerCustomerId: event.providerCustomerId,
         providerSubscriptionId: event.providerSubscriptionId,
@@ -351,6 +400,9 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
       });
 
       await client.query("COMMIT");
+      // Outside the transaction: a provider call must never hold (or roll back)
+      // the idempotency claim, and its failure must never fail the webhook.
+      if (stored) await cancelOrphanedSubscription(deps.provider, stored);
       return c.body(null, 200);
     } catch (err) {
       await client.query("ROLLBACK");

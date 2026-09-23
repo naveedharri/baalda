@@ -74,6 +74,7 @@ describe("hello.mode", () => {
       wsFactory: () => sock.ws,
     });
     engine.start();
+    await flush(); // the socket opens once the sink's manifest has loaded
     sock.ws.onopen?.({});
     await flush();
 
@@ -100,6 +101,7 @@ describe("hello.mode", () => {
       clearTimeoutImpl: () => {},
     });
     engine.start();
+    await flush();
     sockets[0].ws.onopen?.({});
     await flush();
     expect(sockets[0].hellos()[0].mode).toBe("live-only");
@@ -137,6 +139,7 @@ describe("hello.mode", () => {
       clearTimeoutImpl: () => {},
     });
     engine.start();
+    await flush(); // the socket opens once the sink's manifest has loaded
     sock.ws.onopen?.({});
     await flush();
     engine.reconnect({ liveOnly: false });

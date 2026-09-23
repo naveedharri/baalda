@@ -887,6 +887,65 @@ describe("AttachmentSync per-file state (store.fileSyncState)", () => {
     expect(last()["Media/huge.mp4"]).toBe("error");
   });
 
+  it("settles an empty file without registering or announcing it", async () => {
+    // The server refuses a 0-byte blob (`invalid_size`); asking anyway used to
+    // mint a `files` row, fail, and leave the file `syncing` on every pass.
+    const registered: string[] = [];
+    const { deps, log, last } = withStates(
+      [
+        { relPath: "Code/pkg/__init__.py", bytes: new Uint8Array([]) },
+        { relPath: "Code/pkg/main.py", bytes: new Uint8Array([1]) },
+      ],
+      () => SINGLE_INTENT,
+      {
+        registerFile: async ({ relPath, id }) => {
+          registered.push(relPath);
+          return id;
+        },
+        localFileIds: async () =>
+          new Map([
+            ["Code/pkg/__init__.py", "local-init"],
+            ["Code/pkg/main.py", "local-main"],
+          ]),
+      },
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    await sync.reconcile();
+
+    expect(log.intents.map((i) => i.relPath)).not.toContain("Code/pkg/__init__.py");
+    expect(registered).toContain("Code/pkg/main.py");
+    expect(registered).not.toContain("Code/pkg/__init__.py");
+    expect(last()["Code/pkg/__init__.py"]).toBe("synced");
+  });
+
+  it.each([
+    [400, "invalid_size"],
+    [403, "no_write_access"],
+  ])("fails a file the intent answers %i for, once, until Retry", async (status, code) => {
+    const { deps, log, last } = withStates(
+      [
+        { relPath: "Team/refused.jpg", bytes: new Uint8Array([1]) },
+        { relPath: "Team/ok.png", bytes: new Uint8Array([2]) },
+      ],
+      ({ relPath }) =>
+        relPath === "Team/refused.jpg" ? serverError(status, code) : SINGLE_INTENT,
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    expect(last()["Team/refused.jpg"]).toBe("error");
+
+    // Read as transient it was asked again on EVERY pass, badged `syncing`.
+    await sync.reconcile();
+    const asked = () => log.intents.filter((i) => i.relPath === "Team/refused.jpg").length;
+    expect(asked()).toBe(1);
+    expect(last()["Team/refused.jpg"]).toBe("error");
+
+    // Retry is the user's way to ask again — exactly once more.
+    await sync.retryFiles(["Team/refused.jpg"]);
+    expect(asked()).toBe(2);
+  });
+
   it("leaves the hidden attachments/ store out — it has no row to badge", async () => {
     const { deps, last } = withStates(
       [
