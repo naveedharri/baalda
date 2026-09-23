@@ -94,6 +94,25 @@ async function attachmentSyncDenied(orgId: string, relPath: string | null, docId
   return !(await canSyncAttachments(orgId));
 }
 
+/**
+ * An upload whose path resolved to neither a registered `files` row nor an
+ * `attachments/` path. That is a standalone file by definition — so on a vault
+ * that cannot sync standalone files, the plan is the real answer and it must
+ * come FIRST. Answering 400 `invalid_rel_path` instead hid the 402 the desktop
+ * reacts to (upgrade notice, stop retrying): a Free vault's binaries retried a
+ * guaranteed 400 on every pass, forever, with no explanation (prod 2026-09-23).
+ */
+async function unlocatedUpload(c: Context, orgId: string): Promise<Response> {
+  if (!(await canSyncAttachments(orgId))) return attachmentSyncRequired(c);
+  return c.json(
+    {
+      error: "Attachment path must be a vault-relative path under attachments/",
+      code: "invalid_rel_path",
+    },
+    400,
+  );
+}
+
 function attachmentSyncRequired(c: Context): Response {
   return c.json(
     {
@@ -271,15 +290,7 @@ blobRoutes.post(
       claimedDoc,
       c.req.header("x-rel-path") ?? c.req.query("relPath") ?? filename,
     );
-    if (!located) {
-      return c.json(
-        {
-          error: "Attachment path must be a vault-relative path under attachments/",
-          code: "invalid_rel_path",
-        },
-        400,
-      );
-    }
+    if (!located) return unlocatedUpload(c, org);
     const { relPath, docId } = located;
     if (await attachmentSyncDenied(org, relPath, docId)) return attachmentSyncRequired(c);
 
@@ -744,15 +755,7 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
     claimedDoc,
     typeof body.relPath === "string" ? body.relPath : filename,
   );
-  if (!located) {
-    return c.json(
-      {
-        error: "Attachment path must be a vault-relative path under attachments/",
-        code: "invalid_rel_path",
-      },
-      400,
-    );
-  }
+  if (!located) return unlocatedUpload(c, org);
   const { relPath, docId } = located;
   if (await attachmentSyncDenied(org, relPath, docId)) return attachmentSyncRequired(c);
 

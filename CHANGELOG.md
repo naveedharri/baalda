@@ -137,6 +137,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   happened drawn as dashed `data-future` cells that never take a heat level.
 
 ### Fixed
+- **Free vaults retried standalone files forever (server).** A blob upload whose path resolved
+  to neither a registered `files` row nor `attachments/` answered 400 `invalid_rel_path` BEFORE
+  the plan check, hiding the 402 `attachment_sync_requires_pro` the desktop reacts to (notice +
+  stop retrying). Both upload routes now answer the plan first when the vault cannot sync files.
 - **Files stuck "syncing" after a false disk delete (desktop + server).** The binary delete
   queue read ANY failed `file_stat` as "deleted" and removed the server's `files` row for
   files that never left disk; the device then kept the dead id and every upload got 400
