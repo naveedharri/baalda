@@ -608,6 +608,65 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
   });
 });
 
+describe("VaultRegistry.reconcile — paths the server says this user cannot see", () => {
+  // Prod 2026-09-23: a member whose disk still held ~3,900 folders from before
+  // their parents went Private re-registered all of them every ~10 s. The server
+  // now answers `not_readable`; the client must stop asking, quietly, and must
+  // never touch the files.
+  it("asks once, records no failure, and leaves the paths alone on later passes", async () => {
+    const { api, createNote } = fakeApi({ vaults: [{ id: "v1", name: "v", organization_id: ORG }] });
+    const { ApiError } = await import("../../api");
+    const refuse = () => new ApiError(409, "not readable", { code: "not_readable" });
+    const createFolder = vi.fn(async () => { throw refuse(); });
+    (api as unknown as { createFolder: unknown }).createFolder = createFolder;
+    createNote.mockImplementation(async () => { throw refuse(); });
+    const reg = new VaultRegistry(api);
+    const tree: TreeNode = {
+      id: "root", name: "v", path: "", isDir: true,
+      children: [{
+        id: "r", name: "Restricted", path: "Restricted", isDir: true,
+        children: [{ id: "p", name: "plan.md", path: "Restricted/plan.md", isDir: false }],
+      }],
+    };
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    expect(createFolder).toHaveBeenCalledTimes(1);
+    expect(createNote).toHaveBeenCalledTimes(1);
+    expect(reg.failures()).toEqual([]);
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    expect(createFolder).toHaveBeenCalledTimes(1);
+    expect(createNote).toHaveBeenCalledTimes(1);
+    expect(reg.failures()).toEqual([]);
+    expect(vi.mocked(ipc.writeNote)).not.toHaveBeenCalled();
+  });
+
+  it("treats the path as ordinary again once the server lists it", async () => {
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "v", organization_id: ORG }] });
+    const { ApiError } = await import("../../api");
+    let hidden = true;
+    const createFolder = vi.fn(async (input: { path: string }) => {
+      if (hidden) throw new ApiError(409, "not readable", { code: "not_readable" });
+      return { id: `folder-${input.path}` };
+    });
+    const listFolderRegistry = vi.fn(async () => ({
+      folders: hidden ? [] : [{ id: "f-r", path: "Restricted", name: "Restricted", parent_id: null }],
+      tombstones: [],
+    }));
+    Object.assign(api as object, { createFolder, listFolderRegistry, listFolders: vi.fn(async () => []) });
+    const reg = new VaultRegistry(api);
+    const tree: TreeNode = {
+      id: "root", name: "v", path: "", isDir: true,
+      children: [{ id: "r", name: "Restricted", path: "Restricted", isDir: true, children: [] }],
+    };
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    hidden = false; // the owner shared it back
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    hidden = true; // …and made it Private again: asked afresh, not remembered forever
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    expect(createFolder).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("VaultRegistry tree-binary `files` map", () => {
   it("persists registered binaries under their own config key, never into `docs`", async () => {
     const { api } = fakeApi({

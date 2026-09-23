@@ -107,9 +107,12 @@ describe("registration batch query count", () => {
     const counter = countingDb();
     const again = await registerNotes(registerCtx(vault, owner.userId, counter.db), inputs);
     expect(again.every((r) => r.status === "adopted")).toBe(true);
-    // 1 adopt probe + 1 parent-folder map. (The folder read is still made
-    // because a batch does not know in advance that every item will adopt.)
-    expect(counter.count()).toBe(2);
+    // 1 adopt probe + 1 parent-folder map + 1 Private probe (may this caller
+    // adopt what it found? — `canAdoptDoc`; one indexed read for the whole
+    // batch, and the recursive walk only when the vault has Private items).
+    // The folder read is still made because a batch does not know in advance
+    // that every item will adopt.
+    expect(counter.count()).toBe(3);
   });
 
   /** Spread across folders, the only term that grows is `canCreateIn`, and it
