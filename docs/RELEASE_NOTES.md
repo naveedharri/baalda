@@ -21,6 +21,7 @@
 ## 0.1.67
 
 - Sidebar sorting: sort by Name (Z–A) so your latest daily note sits on top, and give any folder its own sort from its right-click menu.
+- Improvements and bug fixes: syncing and editing shared notes with your team is more reliable, so everyone's changes come through cleanly and your notes stay exactly as you wrote them.
 
 ## 0.1.66
 
