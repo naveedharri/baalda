@@ -211,6 +211,8 @@ function bridge(): NoteBridge {
     doc,
     serialize: () => "hello",
     seedFromFileIfEmpty: async () => {},
+    abandonPull: () => {},
+    reconcileAfterPull: async () => false,
   } as unknown as NoteBridge;
 }
 

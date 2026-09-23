@@ -1458,6 +1458,10 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
       doc: new Y.Doc(),
       serialize: () => "content",
       async seedFromFileIfEmpty() {},
+      abandonPull() {},
+      async reconcileAfterPull() {
+        return false;
+      },
     };
     await sm.openDoc(bridge as never, "Open.md");
     expect(connects.order).toContain("d-open");

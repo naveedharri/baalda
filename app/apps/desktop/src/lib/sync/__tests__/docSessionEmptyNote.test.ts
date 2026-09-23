@@ -246,6 +246,8 @@ function bridge(): NoteBridge {
     doc: new Y.Doc(),
     serialize: () => "typed while offline",
     seedFromFileIfEmpty: async () => {},
+    abandonPull: () => {},
+    reconcileAfterPull: async () => false,
   } as unknown as NoteBridge;
 }
 
