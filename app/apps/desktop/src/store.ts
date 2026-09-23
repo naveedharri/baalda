@@ -316,12 +316,22 @@ interface AppStore {
    * Identity of the most recent bulk run that ENDED in failure — bumped once per
    * fresh transition into the `error` phase, never while a run is moving.
    *
-   * What makes the sync-issues banner dismissible per failure rather than per
+   * What makes the note-limit banner dismissible per failure rather than per
    * app launch: the banner remembers the token it was dismissed for, so the next
    * failing run is a different number and raises it again. Vault-scoped like
    * `syncProgress` (a failure in the vault you left is not news here).
    */
   failedRunToken: number;
+  /**
+   * The vault channel has reached `synced` — its `ready` arrived — at least once
+   * since this vault was opened. Sticky across reconnects (a later drop does not
+   * un-say what the server already answered); reset on every vault switch.
+   *
+   * The pivot of the one "synced" rule (`TreeSyncInput.serverSettled`): after
+   * `ready`, a mapped note with no reported transition was not named by the
+   * server and is not in the run, so it counts as synced.
+   */
+  vaultReadySeen: boolean;
   /**
    * Per-doc sync state for the sidebar badge, keyed by **docId, never by path**
    * (paths change on rename and collide across vaults). Dropped on every vault
@@ -1503,6 +1513,7 @@ function vaultScopedSyncReset() {
     syncPending: false,
     syncProgress: null,
     failedRunToken: 0,
+    vaultReadySeen: false,
     docSyncState: {} as Record<string, DocSyncState>,
     fileSyncState: {} as Record<string, DocSyncState>,
     attachmentSyncBlocked: false,
@@ -2444,7 +2455,11 @@ export const useStore = create<AppStore>((set, get) => ({
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
     syncManager.setVaultStatusListener((status) =>
-      set({ vaultSyncStatus: status === "idle" ? "offline" : status }),
+      set(
+        status === "synced"
+          ? { vaultSyncStatus: status, vaultReadySeen: true }
+          : { vaultSyncStatus: status === "idle" ? "offline" : status },
+      ),
     );
     // The server refused our session at token mint and a fresh session check
     // agreed it is gone (`sync/sessionGuard.ts`). Fires at most once per
@@ -4117,7 +4132,7 @@ export const useStore = create<AppStore>((set, get) => ({
       );
     }
     // A FRESH arrival at `error` is a new failed run, and the only thing that
-    // may un-dismiss the sync-issues banner. Later emissions of the same phase
+    // may un-dismiss the note-limit banner. Later emissions of the same phase
     // (the reporter re-flushes while failures trickle in) must not, or a
     // dismissed banner would pop back up as the counter moved.
     if (prev?.phase !== "error" && progress?.phase === "error") {

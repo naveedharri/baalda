@@ -7,6 +7,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **Calmer sync status (desktop).** The "N notes didn't sync" banner is gone, and the top pill only
+  reads "Synced" or "Syncing N/M": per-note failures no longer turn it amber or leave it stuck. A
+  mapped note the server did not name on connect counts as synced everywhere. Sidebar folders show
+  x/y only during a run and settle to green dots, with tooltips matching the badge. The Health page
+  drops the status card, stat row and "Copy diagnostics"; its comparison counts text notes, files,
+  folders and file storage on the same basis on both sides; and "Needs attention" is one
+  de-duplicated list ("Only on this computer", "Only on the Remote Vault", then issue groups with
+  one-line rows and bulk actions). The Health entry carries a grey count for failures that need the
+  user. The Cloud note-limit upgrade strip is kept.
+
 ### Security
 - **Dependency updates.** All 40 open Dependabot alerts resolved by bumping `nodemailer` (7 → 9),
   `hono`, `undici`, `vitest`, `@dicebear/initials`, `nanoid`, `postcss`, `browserslist` and

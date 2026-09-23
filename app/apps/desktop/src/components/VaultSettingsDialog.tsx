@@ -41,6 +41,7 @@ import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { AiSettingsTab } from "./AiSettingsTab";
 import { HealthTab } from "./HealthTab";
+import { useHealthAttentionCount } from "../lib/health/useHealthAttention";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
 // Static, not via ./Face: this module is itself a lazy chunk, so it pays for
@@ -224,6 +225,7 @@ export function VaultSettingsDialog({
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locals = useLocalVaults();
+  const healthAttention = useHealthAttentionCount();
 
   const [diagnosticFocus, setDiagnosticFocus] = useState<import("./HealthChecks").CheckFocus | null>(null);
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
@@ -292,6 +294,15 @@ export function VaultSettingsDialog({
               >
                 {t.icon}
                 <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
+                {t.id === "health" && healthAttention > 0 && (
+                  <span
+                    className="nav-count"
+                    aria-label={`${healthAttention} ${healthAttention === 1 ? "item needs" : "items need"} your action`}
+                    title="Sync items that need your action"
+                  >
+                    {healthAttention > 99 ? "99+" : healthAttention}
+                  </span>
+                )}
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -313,7 +324,8 @@ export function VaultSettingsDialog({
         </nav>
 
         <section className="settings-content" aria-label={activeTab.label}>
-          <h2 className="settings-section-title">{activeTab.label}</h2>
+          {/* Health sets its own title, on one row with its page actions. */}
+          {tab !== "health" && <h2 className="settings-section-title">{activeTab.label}</h2>}
           {tab === "general" ? (
             <GeneralTab
               isSynced={isSynced}

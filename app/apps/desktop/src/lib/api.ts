@@ -408,6 +408,15 @@ export interface BlobMeta {
   docId?: string | null;
 }
 
+/** `GET /api/vaults/:vaultId/storage` — attachment/file bytes this vault holds
+ *  on the server. `limitBytes` null ⇒ this vault's plan has no storage cap. */
+export interface VaultStorageUsage {
+  usedBytes: number;
+  pendingBytes: number;
+  blobCount: number;
+  limitBytes: number | null;
+}
+
 /**
  * The upload an intent hands back — the one shape both storage providers speak.
  *
@@ -2612,6 +2621,20 @@ export class ApiClient {
       `/api/vaults/${encodeURIComponent(vaultId)}/blobs`,
     );
     return data.blobs ?? [];
+  }
+
+  /** How many attachment/file bytes this vault stores on the server. */
+  async vaultStorage(vaultId: string): Promise<VaultStorageUsage> {
+    const { data } = await this.request<VaultStorageUsage>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/storage`,
+    );
+    return {
+      usedBytes: Number(data.usedBytes ?? 0),
+      pendingBytes: Number(data.pendingBytes ?? 0),
+      blobCount: Number(data.blobCount ?? 0),
+      limitBytes: data.limitBytes == null ? null : Number(data.limitBytes),
+    };
   }
 
   /** Upload raw bytes as a vault attachment; server dedupes by sha256. */

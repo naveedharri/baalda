@@ -3275,18 +3275,15 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   }
 }
 
-/* Sync-issues strip: the not-syncing geometry (flush, full-width, same amber),
-   for the other half of the same message — a run that FINISHED and left notes
-   behind. Same rule rather than a new look, because they are the same kind of
-   statement and a second visual language for it would only make the pair read
-   as unrelated. */
-.sync-issues-banner {
+/* Free note-limit strip: the not-syncing geometry (flush, full-width, same
+   amber) — the same kind of statement, so the same look. */
+.note-limit-banner {
   margin: 0;
   border-radius: 0;
   border-bottom: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
   padding: var(--sp-3) var(--sp-6);
 }
-.sync-issues-banner strong {
+.note-limit-banner strong {
   color: var(--warning);
 }
 
@@ -4049,6 +4046,20 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
   height: 13px;
   flex-shrink: 0;
   color: var(--text-tertiary);
+}
+/* A quiet count on a settings nav entry (Health: items waiting on the user).
+   Neutral grey on purpose — it asks for a look, it is not an alarm. */
+.nav-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 var(--sp-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: center;
 }
 /* Turn-on-sync promo card on the General tab of a local vault. */
 .sync-promo {

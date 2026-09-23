@@ -9,8 +9,8 @@
    underneath.
 
    The sections live in `HealthIssues`, `HealthChecks`, `HealthInspector`,
-   `HealthTimeline` and `HealthStats`; this file owns the layout, the verdict
-   card, the pipeline strip, the sync bar and every destructive confirm. The
+   `HealthTimeline` and `HealthStats`; this file owns the layout, the page
+   actions, the inventory comparison and every destructive confirm. The
    confirms live HERE rather than inside the row that raised them, so a row
    unmounting mid-dialog — a refresh landing, a filter changing — cannot take
    the dialog with it.
@@ -18,35 +18,37 @@
    The whole page has to survive a vault that has never synced: `report.counts`
    is null, the last two pipeline stages are `off`, and the analytics below are
    still the point. Nothing here may assume a server. */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../store";
 import type { NoteTitle } from "../lib/ipc";
 import type {
   HealthInventory,
+  ServerStorage,
   VaultHealthSnapshot,
 } from "../lib/health/types";
 import { useVaultHealth } from "../lib/health/useVaultHealth";
-import { formatBytes, verdictLabel, verdictTone } from "../lib/health/format";
+import { demoSnapshot, healthDemoEnabled } from "../lib/health/demoFixture";
+import { formatBytes } from "../lib/health/format";
+import { dedupeDifferences, localFilesBytes, runEach } from "../lib/health/attention";
 import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { UpgradeDialog } from "./UpgradeDialog";
-import { MissingFileActions } from "./MissingFileActions";
-import { LocalOnlyFileActions } from "./LocalOnlyFileActions";
+import { LocalOnlyGroup, RemoteOnlyGroup } from "./HealthPlaceGroups";
 import { HealthIssues } from "./HealthIssues";
 import { HealthChecks, type CheckFocus } from "./HealthChecks";
 import { useHealthIgnores } from "../lib/health/useHealthIgnores";
 import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
-import { HealthActivity, HealthLargest, HealthStats } from "./HealthStats";
+import { HealthActivity, HealthLargest } from "./HealthStats";
 import { AttachmentSyncNotice } from "./AttachmentSyncNotice";
 import {
   Glyph,
-  PathText,
   Section,
   type CheckRun,
   type ConfirmState,
   type HealthHandlers,
+  type LeftBehindRun,
 } from "./HealthShared";
 import type { CheckActionPlan } from "../lib/health/checkActions";
 import type { VaultCheckId } from "../lib/health/types";
@@ -75,16 +77,21 @@ export function HealthTab({
   // upgrade path is self-contained wherever it is raised from. A caller may
   // still pass its own opener.
   const [upgradeOpen, setUpgradeOpen] = useState(false);
-  const snapshot = useVaultHealth({
+  const liveSnapshot = useVaultHealth({
     onOpenUpgrade: onOpenUpgrade ?? (() => setUpgradeOpen(true)),
     onRequestSignIn,
   });
+  // DEV-only fixture mode (see `lib/health/demoFixture.ts`). `import.meta.env.DEV`
+  // folds to false in production, so the fixture never replaces live data there.
+  const demo = import.meta.env.DEV && healthDemoEnabled();
+  const demoData = useMemo(() => (demo ? demoSnapshot() : null), [demo]);
+  const snapshot = demoData ?? liveSnapshot;
   // The one store read on this page, and it stays in the CONTAINER so
   // `HealthView` keeps rendering from nothing but its props — a fixture, in the
   // tests.
   const notes = useStore((s) => s.titles);
   const vaultPath = useStore((s) => s.vault?.path ?? null);
-  const standaloneFileSyncBlocked = useStore((s) => s.attachmentSyncBlocked);
+  const standaloneFileSyncBlocked = useStore((s) => s.attachmentSyncBlocked) || demo;
   const showAttachmentUpgrade = useStore((s) => s.billingConfig?.enabled === true);
 
   return (
@@ -96,6 +103,8 @@ export function HealthTab({
       <HealthView
         key={vaultPath}
         mode="overview"
+        title="Health"
+        demo={demo}
         onOpenDiagnostics={onOpenDiagnostics}
         snapshot={snapshot}
         notes={notes}
@@ -114,9 +123,10 @@ export function HealthTab({
 
 export function HealthView({
   mode = "all",
+  title,
+  demo = false,
   findingId,
   requestedCheck,
-  onOpenDiagnostics,
   snapshot,
   notes = [],
   vaultPath = null,
@@ -126,8 +136,15 @@ export function HealthView({
   onClose,
 }: {
   mode?: "all" | "overview" | "diagnostics" | "finding";
+  /** The page title, set beside the page actions. The settings dialog skips its
+   *  own heading for this tab so the two sit on one row. */
+  title?: string;
+  /** DEV-only fixture mode: labels the page so nobody reads it as real. */
+  demo?: boolean;
   findingId?: string;
   requestedCheck?: CheckFocus | null;
+  /** Kept for callers. The overview's stat strip used it to jump to a flagged
+   *  check; the checks themselves now live only under diagnostics. */
   onOpenDiagnostics?: (id?: VaultCheckId) => void;
   snapshot: VaultHealthSnapshot;
   notes?: NoteTitle[];
@@ -140,7 +157,7 @@ export function HealthView({
   onGoToGeneral?: () => void;
   onClose?: () => void;
 }) {
-  const { report, stats, checks, statsError, loading, log, refresh, actions } = snapshot;
+  const { report, stats, checks, loading, log, refresh, actions } = snapshot;
   // Relative times go stale while the dialog sits open; a slow tick is enough
   // and costs one render a minute.
   const [now, setNow] = useState(() => Date.now());
@@ -197,9 +214,40 @@ export function HealthView({
     if (!outcome.cancelled) refresh();
   };
 
+  // The Left-on-disk group's bulk run. Page-owned for the same reason as
+  // `checkRuns`: every success removes a row, and the last one removes the
+  // group — the result has to outlive both.
+  const [leftBehindRun, setLeftBehindRun] = useState<LeftBehindRun | null>(null);
+  const startLeftBehind = async (verb: LeftBehindRun["verb"], paths: string[]): Promise<void> => {
+    if (leftBehindRun?.running || paths.length === 0) return;
+    setLeftBehindRun({ verb, running: true, done: 0, total: paths.length, failed: [] });
+    const outcome = await runEach(
+      paths,
+      (path) => (verb === "delete" ? actions.deleteNote(path) : actions.reregister(path)),
+      (done, total) =>
+        setLeftBehindRun((r) => (r?.running ? { ...r, done, total } : r)),
+    );
+    setLeftBehindRun({ verb, running: false, ...outcome });
+    if (outcome.failed.length === 0) {
+      toast(
+        verb === "delete"
+          ? `Deleted ${outcome.done.toLocaleString()} local ${outcome.done === 1 ? "copy" : "copies"}`
+          : `Re-registered ${outcome.done.toLocaleString()} ${outcome.done === 1 ? "file" : "files"} — content is uploading now`,
+      );
+    }
+    refresh();
+  };
+
+  // A path with an issue is listed once, under the issue; see `dedupeDifferences`.
+  const attentionInventory = dedupeDifferences(snapshot.inventory, report.issues);
+
   const handlers: HealthHandlers = {
     actions,
     now,
+    leftBehind: {
+      run: leftBehindRun,
+      start: (verb, paths) => startLeftBehind(verb, paths),
+    },
     confirm: setConfirming,
     openNote(path) {
       actions.openNote(path);
@@ -232,46 +280,27 @@ export function HealthView({
     return <div className="health-tab assistant-finding-tools">
       {check ? <HealthChecks checks={checks} loading={loading} handlers={handlers} onlyIds={[findingId]} focus={{ id: check.id, n: 1 }} /> :
         findingId === "vault-storage" ? stats && <HealthLargest stats={stats} handlers={handlers} /> :
-        ["remote-files", "local-files"].includes(findingId) ? <InventoryComparison inventory={snapshot.inventory} report={report} handlers={handlers} standaloneFileSyncBlocked={standaloneFileSyncBlocked} showAttachmentUpgrade={showAttachmentUpgrade} /> :
+        ["remote-files", "local-files"].includes(findingId) ? <InventoryComparison inventory={snapshot.inventory} report={report} handlers={handlers} standaloneFileSyncBlocked={standaloneFileSyncBlocked} showAttachmentUpgrade={showAttachmentUpgrade} localBytes={localFilesBytes(stats)} serverStorage={snapshot.serverStorage ?? null} /> :
         issues.length ? <HealthIssues issues={issues} handlers={handlers} syncEnabled={report.counts != null} focusKey={issues.length === 1 ? issues[0].key : undefined} /> :
         <><p>{report.detail}</p><HealthTimeline log={log} now={now} onInspect={path => setInspectRequest({ path, n: Date.now() })} /></>}
       {inspectRequest && <HealthInspector notes={notes} handlers={handlers} request={inspectRequest} onShowIssue={setFocusIssue} />}
-      <Confirms confirming={confirming} onDone={() => setConfirming(null)} actions={actions} onRunCheckAction={startCheckAction} />
+      <Confirms confirming={confirming} onDone={() => setConfirming(null)} actions={actions} onRunCheckAction={startCheckAction} onDeleteLeftBehind={(paths) => startLeftBehind("delete", paths)} />
     </div>;
   }
 
   return (
     <div className="health-tab">
       {mode !== "diagnostics" && <>
-      <HealthStats
-        stats={stats}
-        syncing={report.verdict === "syncing" || report.verdict === "connecting"}
-        noteCount={
-          snapshot.inventory.localReady
-            ? snapshot.inventory.local.notes + snapshot.inventory.local.files
-            : null
-        }
-        folderCount={
-          snapshot.inventory.localReady ? snapshot.inventory.local.folders : null
-        }
-        loading={loading}
-        statsError={statsError}
-        handlers={handlers}
-        onFlag={(id) => {
-          if (mode === "overview" && onOpenDiagnostics) { onOpenDiagnostics(id); return; }
-          ignores.restoreCheck(id);
-          setFocusCheck((f) => ({ id, n: (f?.n ?? 0) + 1 }));
-        }}
-      />
-
-      <VerdictCard
-        snapshot={snapshot}
-        standaloneFileSyncBlocked={standaloneFileSyncBlocked}
-        onRefresh={refresh}
-        loading={loading}
-        onGoToGeneral={onGoToGeneral}
-      />
-
+      <div className="health-page-head">
+        {title && <h2 className="settings-section-title">{title}</h2>}
+        {demo && <span className="health-pill health-demo-chip" data-tone="warn">Demo data</span>}
+        <PageActions
+          snapshot={snapshot}
+          onRefresh={refresh}
+          loading={loading}
+          onGoToGeneral={onGoToGeneral}
+        />
+      </div>
 
       <InventoryComparison
         inventory={snapshot.inventory}
@@ -279,16 +308,26 @@ export function HealthView({
         handlers={handlers}
         standaloneFileSyncBlocked={standaloneFileSyncBlocked}
         showAttachmentUpgrade={showAttachmentUpgrade}
+        localBytes={localFilesBytes(stats)}
+        serverStorage={snapshot.serverStorage ?? null}
+        part="cards"
       />
-
 
       <Section
         title="Needs attention"
-        description="Open a row for the full reasoning."
       >
-        {report.issues.length === 0 && snapshot.inventory.serverOnlyFiles.length > 0 ? (
-          <p>Files are missing from this computer. Review the differences above to download them or see what is blocking them.</p>
-        ) : <HealthIssues
+        <HealthIssues
+          before={
+            <InventoryComparison
+              inventory={attentionInventory}
+              report={report}
+              handlers={handlers}
+              standaloneFileSyncBlocked={standaloneFileSyncBlocked}
+              showAttachmentUpgrade={showAttachmentUpgrade}
+              part="differences"
+            />
+          }
+          hasOtherItems={differenceGroupsShown(attentionInventory, report)}
           issues={report.issues}
           handlers={handlers}
           syncEnabled={report.counts != null}
@@ -296,7 +335,7 @@ export function HealthView({
           dismissed={ignores.issues}
           onDismiss={ignores.dismissIssue}
           onRestore={ignores.restoreIssue}
-        />}
+        />
       </Section>
 
       </>}
@@ -392,6 +431,7 @@ export function HealthView({
         onDone={() => setConfirming(null)}
         actions={actions}
         onRunCheckAction={startCheckAction}
+        onDeleteLeftBehind={(paths) => startLeftBehind("delete", paths)}
       />
     </div>
   );
@@ -540,15 +580,23 @@ function InventoryComparison({
   report,
   handlers,
   standaloneFileSyncBlocked,
-  showAttachmentUpgrade,
+  localBytes = null,
+  serverStorage = null,
+  part = "all",
 }: {
+  /** "cards" = only the two copies; "differences" = only what needs attention
+   *  (rendered under Needs attention); "all" = both, for a focused finding. */
+  part?: "all" | "cards" | "differences";
   inventory: HealthInventory;
   report: VaultHealthSnapshot["report"];
   handlers: HealthHandlers;
   standaloneFileSyncBlocked: boolean;
   showAttachmentUpgrade: boolean;
+  /** Attachment + standalone-file bytes on disk; null while unknown. */
+  localBytes?: number | null;
+  /** The Remote Vault's file/attachment bytes; null when unknown. */
+  serverStorage?: ServerStorage | null;
 }) {
-  const [open, setOpen] = useState(false);
   const differences =
     inventory.deviceOnlyNotes.length +
     inventory.serverOnlyNotes.length +
@@ -572,8 +620,10 @@ function InventoryComparison({
     ? Math.max(0, stored.notes + stored.files - inventory.server.notes - inventory.server.files) : 0;
   const comparisonWarn = unexpectedDifferences > 0 || countsDiffer;
   const comparisonStale = inventory.serverState === "last-known";
-  const comparisonUpdating = inventory.serverState === "updating" ||
-    report.verdict === "syncing" || report.verdict === "connecting";
+  // Only a bulk run that is actually moving puts the comparison on hold. A
+  // socket that is merely (re)connecting is not updating anything yet, and
+  // saying it was left the page claiming work that never happened.
+  const comparisonUpdating = report.verdict === "syncing";
   const differenceSummaries = [
     inventory.deviceOnlyNotes.length > 0
       ? `${inventory.deviceOnlyNotes.length.toLocaleString()} text ${inventory.deviceOnlyNotes.length === 1 ? "note is" : "notes are"} missing from the Remote Vault`
@@ -588,10 +638,10 @@ function InventoryComparison({
       ? `${inventory.serverOnlyFolders.length.toLocaleString()} ${inventory.serverOnlyFolders.length === 1 ? "folder is" : "folders are"} missing from this computer`
       : null,
     !standaloneFileSyncBlocked && inventory.deviceOnlyFiles.length > 0
-      ? `${inventory.deviceOnlyFiles.length.toLocaleString()} ${inventory.deviceOnlyFiles.length === 1 ? "note in another format is" : "notes in other formats are"} missing from the Remote Vault`
+      ? `${inventory.deviceOnlyFiles.length.toLocaleString()} ${inventory.deviceOnlyFiles.length === 1 ? "file is" : "files are"} missing from the Remote Vault`
       : null,
     inventory.serverOnlyFiles.length > 0
-      ? `${inventory.serverOnlyFiles.length.toLocaleString()} ${inventory.serverOnlyFiles.length === 1 ? "note in another format is" : "notes in other formats are"} missing from this computer`
+      ? `${inventory.serverOnlyFiles.length.toLocaleString()} ${inventory.serverOnlyFiles.length === 1 ? "file is" : "files are"} missing from this computer`
       : null,
   ].filter((summary): summary is string => summary != null);
   const confirmed = report.counts?.synced ?? 0;
@@ -604,78 +654,35 @@ function InventoryComparison({
       : inventory.serverState === "last-known"
         ? "Last known"
         : "Unavailable";
-  const issueWhy = new Map(
-    report.issues
-      .filter((issue) => issue.path != null)
-      .map((issue) => [issue.path!.toLowerCase(), issue.why] as const),
-  );
 
-  return (
-    <section className="health-inventory" aria-labelledby="health-inventory-title">
-      <div className="health-inventory-head">
-        <div>
-          <span className="health-kicker">Your copies</span>
-          <h3 id="health-inventory-title">This computer and the Remote Vault</h3>
-          <p>
-            {stored ? "Server totals include private notes." : "Remote counts include only notes you can access."}
-          </p>
-        </div>
-        {inventory.server && (
-          <span className="health-freshness" data-state={inventory.serverState}>
-            {stateLabel} Remote Vault view
-          </span>
-        )}
-      </div>
+  // The quiet "everything matches" case says nothing the two equal cards do not
+  // already show, so the strip only appears when it has something to report.
+  const resultTone =
+    !inventory.server || comparisonUpdating
+      ? "muted"
+      : comparisonWarn
+        ? "warn"
+        : localOnlyFormatNotes > 0 || comparisonStale || comparisonPending
+          ? "muted"
+          : "good";
+  // A sync in progress is not something to attend to — the pill and the
+  // "Updating Remote Vault view" chip already say it — so it never earns a strip.
+  const resultIsPlainMatch =
+    comparisonUpdating ||
+    (resultTone === "good" &&
+      differenceSummaries.length === 0 &&
+      !countsDiffer &&
+      restrictedNotes === 0);
+  // The groups below name every difference themselves; a strip restating
+  // them above was clutter. It stays only for states with no list to show.
+  const groupsShown = differenceGroupsShown(inventory, report);
 
-      <div className="health-inventory-grid">
-        <InventoryPlace
-          icon="disk"
-          title="This computer"
-          subtitle="Stored locally"
-          counts={inventory.local}
-          countsReady={inventory.localReady}
-        />
-        <div className="health-inventory-bridge" aria-hidden="true">
-          <span className="health-inventory-line" />
-          <Glyph
-            name={comparisonUpdating ? "info" : comparisonWarn ? "alert" : comparisonStale || comparisonPending ? "info" : "check"}
-            size={16}
-          />
-          <span className="health-inventory-line" />
-        </div>
-        {inventory.server ? (
-          <InventoryPlace
-            icon="database"
-            title="Remote Vault"
-            subtitle={stored ? "Stored on server" : "Accessible to you"}
-            counts={stored ?? inventory.server}
-          />
-        ) : (
-          <div className="health-place is-unavailable">
-            <span className="health-place-icon"><Glyph name="database" size={18} /></span>
-            <div>
-              <strong>Remote Vault</strong>
-              <p>
-                {report.verdict === "local"
-                  ? "Sync is off for this vault."
-                  : "No Remote Vault inventory has been received yet."}
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
-
+  const differencesUi = (
+    <>
+      {!resultIsPlainMatch && !groupsShown && (
       <div
         className="health-inventory-result"
-        data-tone={
-          !inventory.server || comparisonUpdating
-              ? "muted"
-            : comparisonWarn
-              ? "warn"
-              : localOnlyFormatNotes > 0 || comparisonStale || comparisonPending
-                ? "muted"
-                : "good"
-        }
+        data-tone={resultTone}
       >
         <div className="health-inventory-result-icon" aria-hidden="true">
           <Glyph
@@ -706,7 +713,7 @@ function InventoryComparison({
                 : countsDiffer
                   ? "The latest note and folder counts do not match yet"
                   : localOnlyFormatNotes > 0
-                    ? `${localOnlyFormatNotes.toLocaleString()} ${localOnlyFormatNotes === 1 ? "note in another format stays" : "notes in other formats stay"} on this computer`
+                    ? `${localOnlyFormatNotes.toLocaleString()} ${localOnlyFormatNotes === 1 ? "file stays" : "files stay"} on this computer`
                   : comparisonStale
                     ? "The current Remote Vault contents cannot be confirmed"
                   : restrictedNotes > 0
@@ -733,155 +740,124 @@ function InventoryComparison({
               : "Your local files remain available on this computer."}
           </p>
         </div>
-        {!comparisonUpdating && inventory.server && (differences > 0 || countsDiffer) && (
+        {!comparisonUpdating && inventory.server && countsDiffer && (
           <div className="health-inventory-actions">
-            {differences > 0 && (
-              <button type="button" className="ghost-pill sm" onClick={() => setOpen((v) => !v)}>
-                {open ? "Hide differences" : "Review differences"}
-              </button>
-            )}
-            {comparisonWarn && (
-              <AsyncButton className="primary sm" onClick={() => handlers.actions.syncNow()}>
-                Check again
-              </AsyncButton>
-            )}
+            <AsyncButton className="primary sm" onClick={() => handlers.actions.syncNow()}>
+              Check again
+            </AsyncButton>
+          </div>
+        )}
+      </div>
+      )}
 
+      {groupsShown && (
+        <div className="health-differences">
+          <LocalOnlyGroup
+            inventory={inventory}
+            actions={handlers.actions}
+            filesBlocked={standaloneFileSyncBlocked}
+            onOpen={handlers.openNote}
+            onShow={(path) => void handlers.actions.reveal(path)}
+            stale={comparisonStale}
+          />
+          <RemoteOnlyGroup
+            inventory={inventory}
+            actions={handlers.actions}
+            downloadsBlocked={standaloneFileSyncBlocked}
+            showCheckAgain={inventory.serverOnlyNotes.length + inventory.serverOnlyFolders.length > 0}
+            stale={comparisonStale}
+          />
+        </div>
+      )}
+    </>
+  );
+  if (part === "differences") {
+    return resultIsPlainMatch && !groupsShown ? null : <div className="health-inventory-differences">{differencesUi}</div>;
+  }
+
+  return (
+    <section className="health-inventory" aria-labelledby="health-inventory-title">
+      <div className="health-inventory-head">
+        <div>
+          <span className="health-kicker">Your copies</span>
+          <h3 id="health-inventory-title">This computer and the Remote Vault</h3>
+          <p>
+            {stored ? "Server totals include private notes." : "Remote counts include only notes you can access."}
+          </p>
+        </div>
+        {inventory.server && (
+          <span className="health-freshness" data-state={inventory.serverState}>
+            {stateLabel} Remote Vault view
+          </span>
+        )}
+      </div>
+
+      <div className="health-inventory-grid">
+        <InventoryPlace
+          icon="disk"
+          title="This computer"
+          subtitle="Stored locally"
+          counts={inventory.local}
+          countsReady={inventory.localReady}
+          bytes={localBytes == null ? "—" : formatBytes(localBytes)}
+        />
+        <div className="health-inventory-bridge" aria-hidden="true">
+          <span className="health-inventory-line" />
+          <Glyph
+            name={comparisonUpdating ? "info" : comparisonWarn ? "alert" : comparisonStale || comparisonPending ? "info" : "check"}
+            size={16}
+          />
+          <span className="health-inventory-line" />
+        </div>
+        {inventory.server ? (
+          <InventoryPlace
+            icon="database"
+            title="Remote Vault"
+            subtitle={stored ? "Stored on server" : "Accessible to you"}
+            counts={stored ?? inventory.server}
+            bytes={
+              serverStorage == null
+                ? "—"
+                : serverStorage.limitBytes == null
+                  ? formatBytes(serverStorage.usedBytes)
+                  : `${formatBytes(serverStorage.usedBytes)} of ${formatBytes(serverStorage.limitBytes)}`
+            }
+          />
+        ) : (
+          <div className="health-place is-unavailable">
+            <span className="health-place-icon"><Glyph name="database" size={18} /></span>
+            <div>
+              <strong>Remote Vault</strong>
+              <p>
+                {report.verdict === "local"
+                  ? "Sync is off for this vault."
+                  : "No Remote Vault inventory has been received yet."}
+              </p>
+            </div>
           </div>
         )}
       </div>
 
-      {!comparisonUpdating && inventory.server && differences > 0 && (
-        <div className="health-difference-breakdown" aria-label="Difference breakdown">
-          <DifferenceSide
-            title={
-              comparisonStale
-                ? "Missing from the Remote Vault (last known view)"
-                : "Missing from the Remote Vault"
-            }
-            textNotes={inventory.deviceOnlyNotes.length}
-            otherFormats={inventory.deviceOnlyFiles.length}
-            folders={inventory.deviceOnlyFolders.length}
-            note={
-              localOnlyFormatNotes > 0
-                ? showAttachmentUpgrade
-                  ? "Other-format notes stay local on this plan. Preview them here or upgrade to sync them."
-                  : "Other-format notes stay local on this plan and remain available to preview here."
-                : unexpectedDifferences > 0
-                  ? "Check again to retry anything that has not synced yet."
-                  : undefined
-            }
-          />
-          <DifferenceSide
-            title={
-              comparisonStale
-                ? "Missing from this computer (last known view)"
-                : "Missing from this computer"
-            }
-            textNotes={inventory.serverOnlyNotes.length}
-            otherFormats={inventory.serverOnlyFiles.length}
-            folders={inventory.serverOnlyFolders.length}
-            note={
-              inventory.serverOnlyNotes.length +
-                inventory.serverOnlyFiles.length +
-                inventory.serverOnlyFolders.length >
-              0
-                ? standaloneFileSyncBlocked && inventory.serverOnlyFiles.length > 0
-                  ? "File downloads are blocked by this vault’s Pro requirement. Review differences for options."
-                  : "Review differences to download missing files. Check again refreshes text notes and folders."
-                : undefined
-            }
-          />
-        </div>
-      )}
-
-      {!comparisonUpdating && open && differences > 0 && (
-        <div className="health-differences">
-          <DifferenceList
-            title="Text notes missing from the Remote Vault"
-            description="These notes have no matching Remote Vault path yet. Open one to review it, or check again to retry sync."
-            paths={inventory.deviceOnlyNotes}
-            details={issueWhy}
-            actionLabel="Open"
-            onAction={handlers.openNote}
-          />
-          <DifferenceList
-            title="Folders missing from the Remote Vault"
-            description="These folders have no matching Remote Vault path yet. Check again to retry sync."
-            paths={inventory.deviceOnlyFolders}
-            actionLabel="Show"
-            onAction={(path) => void handlers.actions.reveal(path)}
-          />
-          {inventory.deviceOnlyFiles.length > 0 && <LocalOnlyFileActions
-            paths={inventory.deviceOnlyFiles}
-            actions={handlers.actions}
-            blocked={standaloneFileSyncBlocked}
-            onShow={(path) => void handlers.actions.reveal(path)}
-          />}
-          <DifferenceList
-            title="Text notes missing from this computer"
-            description="The Remote Vault knows these paths but this computer has no matching note. Check again to download anything you can access."
-            paths={inventory.serverOnlyNotes}
-            details={issueWhy}
-          />
-          <DifferenceList
-            title="Folders missing from this computer"
-            description="The Remote Vault knows these folders but this computer has no matching folders. Check again to download anything you can access."
-            paths={inventory.serverOnlyFolders}
-          />
-          {inventory.serverOnlyFiles.length > 0 && <MissingFileActions
-            paths={inventory.serverOnlyFiles}
-            actions={handlers.actions}
-            blocked={standaloneFileSyncBlocked}
-            showUpgrade={showAttachmentUpgrade}
-          />}
-        </div>
-      )}
+      {part === "all" && differencesUi}
     </section>
   );
 }
 
-function DifferenceSide({
-  title,
-  textNotes,
-  otherFormats,
-  folders,
-  note,
-}: {
-  title: string;
-  textNotes: number;
-  otherFormats: number;
-  folders: number;
-  note?: string;
-}) {
-  if (textNotes === 0 && otherFormats === 0 && folders === 0) return null;
-
+/** True when Needs attention lists difference groups. The all-clear card
+ *  must not sit beside them. */
+export function differenceGroupsShown(
+  inventory: HealthInventory,
+  report: VaultHealthSnapshot["report"],
+): boolean {
+  if (report.verdict === "syncing" || !inventory.server) return false;
   return (
-    <div className="health-difference-side">
-      <strong>{title}</strong>
-      <dl>
-        {textNotes > 0 && (
-          <div>
-            <dt>Text notes</dt>
-            <dd>{textNotes.toLocaleString()}</dd>
-          </div>
-        )}
-        {otherFormats > 0 && (
-          <div>
-            <dt title="PDFs, images, data, and other supported files">
-              Notes in other formats
-            </dt>
-            <dd>{otherFormats.toLocaleString()}</dd>
-          </div>
-        )}
-        {folders > 0 && (
-          <div>
-            <dt>Folders</dt>
-            <dd>{folders.toLocaleString()}</dd>
-          </div>
-        )}
-      </dl>
-      {note && <p>{note}</p>}
-    </div>
+    inventory.deviceOnlyNotes.length +
+      inventory.serverOnlyNotes.length +
+      inventory.deviceOnlyFolders.length +
+      inventory.serverOnlyFolders.length +
+      inventory.deviceOnlyFiles.length +
+      inventory.serverOnlyFiles.length >
+    0
   );
 }
 
@@ -891,12 +867,15 @@ function InventoryPlace({
   subtitle,
   counts,
   countsReady = true,
+  bytes,
 }: {
   icon: "disk" | "database";
   title: string;
   subtitle: string;
   counts: NonNullable<HealthInventory["server"]>;
   countsReady?: boolean;
+  /** "Files & attachments" size, already formatted; "—" when unknown. */
+  bytes: string;
 }) {
   const shown = (count: number) => (countsReady ? count.toLocaleString() : "—");
   return (
@@ -905,69 +884,26 @@ function InventoryPlace({
         <span className="health-place-icon"><Glyph name={icon} size={18} /></span>
         <div><strong>{title}</strong><p>{subtitle}</p></div>
       </div>
-      <strong className="health-place-primary">
-        {countsReady ? (counts.notes + counts.files).toLocaleString() : "—"}
-      </strong>
+      {/* Notes means text notes (NOTE_EXTS) and nothing else; every other
+          supported format is a File, counted beside it. */}
+      <strong className="health-place-primary">{shown(counts.notes)}</strong>
       <span className="health-place-primary-label">Notes</span>
       <dl>
         <div>
-          <dt>Text notes</dt>
-          <dd>{shown(counts.notes)}</dd>
-        </div>
-        <div>
-          <dt>Other formats</dt>
+          <dt title="PDFs, images, data, and other supported files">Files</dt>
           <dd>{shown(counts.files)}</dd>
         </div>
         <div>
           <dt>Folders</dt>
           <dd>{shown(counts.folders)}</dd>
         </div>
+        <div>
+          <dt title="Embedded attachments and standalone files; excludes note text, the local index and edit history">
+            Files &amp; attachments
+          </dt>
+          <dd>{bytes}</dd>
+        </div>
       </dl>
-    </div>
-  );
-}
-
-function DifferenceList({
-  title,
-  description,
-  paths,
-  details,
-  actionLabel,
-  onAction,
-}: {
-  title: string;
-  description: string;
-  paths: string[];
-  details?: ReadonlyMap<string, string>;
-  actionLabel?: string;
-  onAction?: (path: string) => void;
-}) {
-  if (paths.length === 0) return null;
-  const shown = paths.slice(0, 20);
-  return (
-    <div className="health-difference-group">
-      <h4>{title} <span>{paths.length.toLocaleString()}</span></h4>
-      <p>{description}</p>
-      <ul>
-        {shown.map((path) => (
-          <li key={path}>
-            <span className="health-difference-rowcopy">
-              <PathText path={path} />
-              {details?.get(path.toLowerCase()) && (
-                <small>{details.get(path.toLowerCase())}</small>
-              )}
-            </span>
-            {actionLabel && onAction && (
-              <button type="button" className="link-btn" onClick={() => onAction(path)}>
-                {actionLabel}
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
-      {paths.length > shown.length && (
-        <p className="muted">And {(paths.length - shown.length).toLocaleString()} more.</p>
-      )}
     </div>
   );
 }
@@ -981,12 +917,15 @@ function Confirms({
   onDone,
   actions,
   onRunCheckAction,
+  onDeleteLeftBehind,
 }: {
   confirming: ConfirmState | null;
   onDone: () => void;
   actions: VaultHealthSnapshot["actions"];
   /** Start a confirmed check action; the row reports on it, not a toast. */
   onRunCheckAction?: (plan: CheckActionPlan) => Promise<void>;
+  /** Start the Left-on-disk group's confirmed delete; its bar reports on it. */
+  onDeleteLeftBehind?: (paths: string[]) => Promise<void>;
 }) {
   if (!confirming) return null;
 
@@ -1046,6 +985,27 @@ function Confirms({
           </p>
         </ConfirmDialog>
       );
+    case "delete-left-behind": {
+      const n = confirming.paths.length;
+      return (
+        <ConfirmDialog
+          title={`Delete ${n.toLocaleString()} local ${n === 1 ? "copy" : "copies"}?`}
+          confirmLabel="Delete all"
+          onCancel={onDone}
+          onConfirm={() => {
+            onDone();
+            void onDeleteLeftBehind?.(confirming.paths);
+          }}
+        >
+          <p className="muted">
+            {n === 1 ? "This file is" : `These ${n.toLocaleString()} files are`} no longer on the
+            Remote Vault, and this device never confirmed {n === 1 ? "its" : "their"} content
+            there. {n === 1 ? "It may be the only copy." : "They may be the only copies."}{" "}
+            Deleting removes {n === 1 ? "it" : "them"} from this computer.
+          </p>
+        </ConfirmDialog>
+      );
+    }
     case "empty-trash":
       return (
         <ConfirmDialog
@@ -1125,141 +1085,67 @@ function Confirms({
   }
 }
 
-// ── Verdict ───────────────────────────────────────────────────────────────────
+// ── Page actions ──────────────────────────────────────────────────────────────
 
-/**
- * Pull the trailing " · <host>" the model folds into `detail` back out, so the
- * card can set it as a quiet mono chip instead of ending a plain sentence in
- * "…baalda-production.up.railway.app.". The model keeps owning the wording;
- * this only decides where the host is painted.
- */
-export function splitHost(
-  detail: string,
-  host: string | null,
-): { text: string; host: string | null } {
-  if (!host) return { text: detail, host: null };
-  const needle = ` · ${host}`;
-  const at = detail.lastIndexOf(needle);
-  if (at < 0) return { text: detail, host: null };
-  const text = (detail.slice(0, at) + detail.slice(at + needle.length))
-    // The host sometimes sits between a sentence's own full stop and the one
-    // the template adds, which leaves ".." behind once it is lifted out.
-    .replace(/\s*\.\s*\.\s*$/, ".")
-    .trim();
-  return { text, host };
-}
-
-function VerdictCard({
+/** The two buttons beside the page title. "Sync now" becomes "Sign in" or
+ *  "Turn on sync" when there is nothing it could start. */
+function PageActions({
   snapshot,
-  standaloneFileSyncBlocked,
   onRefresh,
   loading,
   onGoToGeneral,
 }: {
   snapshot: VaultHealthSnapshot;
-  standaloneFileSyncBlocked: boolean;
   onRefresh: () => void;
   loading: boolean;
   /** Where sync is turned on; a local vault's primary button leads there. */
   onGoToGeneral?: () => void;
 }) {
   const { report, actions } = snapshot;
-  const [copied, setCopied] = useState(false);
   const syncing = report.verdict === "syncing" || report.verdict === "connecting";
   const local = report.verdict === "local";
   // Signed out is a verdict, not an issue row (the model emits no `sign-in`
   // remedy), so the way back in lives here: there is no sync run to retry until
   // a session exists, and a disabled "Sync now" would say nothing about why.
   const signedOut = report.verdict === "signed-out";
-  const { text, host } = splitHost(report.detail, report.serverHost);
-  const localOnlyFormatNotes = standaloneFileSyncBlocked
-    ? snapshot.inventory.deviceOnlyFiles.length
-    : 0;
-  const planPartial = report.verdict === "healthy" && localOnlyFormatNotes > 0;
-  const healthyPending = report.verdict === "healthy" && !snapshot.inventory.localReady;
-  const tone = planPartial || healthyPending ? "muted" : verdictTone(report.verdict);
-  const syncedTextNotes = report.counts?.synced ?? 0;
-  const headline =
-    report.verdict !== "healthy"
-      ? report.headline
-      : healthyPending
-        ? `${syncedTextNotes.toLocaleString()} text notes synced · counting other formats`
-        : localOnlyFormatNotes > 0
-          ? `${syncedTextNotes.toLocaleString()} text notes synced · ${localOnlyFormatNotes.toLocaleString()} ${localOnlyFormatNotes === 1 ? "note in another format" : "notes in other formats"} local only`
-          : report.counts?.total === 0
-            ? snapshot.inventory.local.notes + snapshot.inventory.local.files === 0
-              ? snapshot.inventory.serverStored && snapshot.inventory.serverStored.notes + snapshot.inventory.serverStored.files > 0
-                ? "No notes accessible to this account"
-                : "No accessible notes to sync"
-              : "No text notes need content sync"
-            : `${syncedTextNotes.toLocaleString()} text notes synced`;
-
-  const copy = async () => {
-    await actions.copyDiagnostics();
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
-  };
 
   return (
-    <div className="health-verdict" data-tone={tone}>
-      <div className="health-verdict-main">
-        <span className="health-pill" data-tone={tone}>
-          {healthyPending
-            ? "Checking notes"
-            : planPartial
-              ? "Partially synced"
-              : verdictLabel(report.verdict)}
-        </span>
-        <h3 className="health-headline">{headline}</h3>
-        {/* The model already folds "Last confirmed …" into `detail` (see
-            `model.ts` → `describe`), so the card prints it verbatim rather than
-            assembling a second, contradictory version. Only the server host is
-            lifted out, and only to be set as a chip. */}
-        <p className="health-detail">
-          {text}
-          {host && <span className="health-host">{host}</span>}
-        </p>
-      </div>
-      <div className="health-verdict-actions">
-        {signedOut ? (
-          <button
-            type="button"
-            className="primary sm"
-            onClick={() => actions.requestSignIn()}
-          >
-            Sign in
-          </button>
-        ) : local && onGoToGeneral ? (
-          // A local folder has nothing to sync "now"; the useful button is the
-          // one that turns sync on, which lives on the General tab.
-          <button type="button" className="primary sm" onClick={onGoToGeneral}>
-            Turn on sync
-          </button>
-        ) : (
-          <AsyncButton
-            className="primary sm"
-            spinnerTone="on-accent"
-            disabled={syncing || local}
-            title={
-              local ? "This folder does not sync" : syncing ? "Already syncing" : undefined
-            }
-            onClick={() => actions.syncNow()}
-          >
-            Sync now
-          </AsyncButton>
-        )}
+    <div className="health-verdict-actions health-page-actions">
+      {signedOut ? (
         <button
           type="button"
-          className="ghost-pill sm"
-          disabled={loading}
-          onClick={onRefresh}
+          className="primary sm"
+          onClick={() => actions.requestSignIn()}
         >
-          Refresh
+          Sign in
         </button>
-        <AsyncButton className="ghost-pill sm" onClick={copy}>
-          {copied ? "Copied ✓" : "Copy diagnostics"}
+      ) : local && onGoToGeneral ? (
+        // A local folder has nothing to sync "now"; the useful button is the
+        // one that turns sync on, which lives on the General tab.
+        <button type="button" className="primary sm" onClick={onGoToGeneral}>
+          Turn on sync
+        </button>
+      ) : (
+        <AsyncButton
+          className="primary sm"
+          spinnerTone="on-accent"
+          disabled={syncing || local}
+          title={
+            local ? "This folder does not sync" : syncing ? "Already syncing" : undefined
+          }
+          onClick={() => actions.syncNow()}
+        >
+          Sync now
         </AsyncButton>
-      </div>
+      )}
+      <button
+        type="button"
+        className="ghost-pill sm"
+        disabled={loading}
+        onClick={onRefresh}
+      >
+        Refresh
+      </button>
     </div>
   );
 }
