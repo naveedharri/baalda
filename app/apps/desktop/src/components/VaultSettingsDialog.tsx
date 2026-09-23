@@ -99,6 +99,10 @@ const HEALTH_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
   ),
 };
 
+/** The AI (Beta) page is hidden for now; flip to bring it back. Anything that
+ *  asks for the "ai" tab while it is hidden lands on Health instead. */
+const SHOW_AI_TAB = false;
+
 const AI_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
   id: "ai", label: "AI", icon: <MenuIcon><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></MenuIcon>,
 };
@@ -228,7 +232,9 @@ export function VaultSettingsDialog({
   const healthAttention = useHealthAttentionCount();
 
   const [diagnosticFocus, setDiagnosticFocus] = useState<import("./HealthChecks").CheckFocus | null>(null);
-  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
+  const visibleTab = (t: SettingsTab): SettingsTab => (!SHOW_AI_TAB && t === "ai" ? "health" : t);
+  const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
+  const setTab = (t: SettingsTab) => setTabRaw(visibleTab(t));
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
   const activeOrg =
@@ -243,7 +249,7 @@ export function VaultSettingsDialog({
   // are local folders to list — that's what "View all" opens into.
   const showVaults = !!session || locals.length > 0;
   const tabs = useMemo(() => {
-    const out = [GENERAL_TAB, HEALTH_TAB, AI_TAB];
+    const out = SHOW_AI_TAB ? [GENERAL_TAB, HEALTH_TAB, AI_TAB] : [GENERAL_TAB, HEALTH_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
