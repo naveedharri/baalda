@@ -14,7 +14,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { makeHarness } from "../../bridge/__tests__/helpers";
-import { ContentUploader, MAX_NOTE_BYTES, type DocPush } from "../contentUpload";
+import { ContentUploader, MAX_NOTE_BYTES, TerminalSyncError, type DocPush } from "../contentUpload";
 import { UPLOAD_CONCURRENCY } from "../pool";
 import type { SyncProgressSink } from "../progress";
 import { VaultDocStore } from "../vaultDocStore";
@@ -49,6 +49,8 @@ interface PushBehaviour {
   readOnly?: Set<string>;
   /** Docs the server never acknowledges. */
   neverFlushed?: Set<string>;
+  /** Docs whose provider turns terminal (`deleted` / `no-access`) mid-wait. */
+  terminal?: Map<string, string>;
 }
 
 /** A `DocPush` that behaves like `DocSync` over `server`. */
@@ -70,6 +72,8 @@ function makeConnect(server: FakeServer, behaviour: PushBehaviour = {}) {
       },
       async whenSynced() {
         await tick();
+        const terminal = behaviour.terminal?.get(docId);
+        if (terminal) throw new TerminalSyncError(terminal);
         if (behaviour.neverSynced?.has(docId)) return; // times out, isSynced stays false
         // SyncStep1/2, both directions — exactly what makes pull-before-seed work.
         Y.applyUpdate(doc, Y.encodeStateAsUpdate(remote, Y.encodeStateVector(doc)), "remote");
@@ -665,6 +669,43 @@ describe("ContentUploader — resume and honest failures", () => {
     // Bounded: it does not grind through all 50 timeouts.
     expect(result.failed).toBeLessThanOrEqual(6);
     expect(r.connects.length).toBeLessThanOrEqual(6);
+  });
+
+  // Prod 2026-09-23: ~25 notes a teammate deleted, re-queued every ~30 s. Each
+  // one's token mint 404s, the provider turns `deleted`, and the push must fail
+  // ONCE, permanently — never a transient failure that re-queues, and never a
+  // hit on the streak that would pause the run for every healthy note.
+  it("records a doc that turns deleted / no-access as a PERMANENT failure, off the streak", async () => {
+    const notes = [
+      ...Array.from({ length: 6 }, (_, i) => ({ docId: `gone${i}`, relPath: `Gone${i}.md` })),
+      { docId: "revoked", relPath: "Revoked.md" },
+      { docId: "ok", relPath: "Ok.md" },
+    ];
+    const files: Record<string, string> = {};
+    for (const n of notes) files[n.relPath] = "text";
+    const terminal = new Map<string, string>(
+      notes.filter((n) => n.docId.startsWith("gone")).map((n) => [n.docId, "deleted"] as const),
+    );
+    terminal.set("revoked", "no-access");
+    const r = rig({
+      files,
+      notes,
+      behaviour: { terminal },
+      concurrency: 1,
+      failureStreakLimit: 2, // two COUNTED failures would abort the run
+    });
+    const result = await r.uploader.run();
+
+    expect(result.aborted).toBe(false);
+    expect(r.marked).toEqual(["ok"]);
+    const failed = r.uploader.failedDocs();
+    expect(failed).toHaveLength(7);
+    for (const f of failed) expect(f.permanent).toBe(true);
+    expect(failed.find((f) => f.docId === "gone0")).toMatchObject({
+      status: "deleted",
+      reason: "this note was deleted on the server",
+    });
+    expect(failed.find((f) => f.docId === "revoked")).toMatchObject({ status: "no-access" });
   });
 
   it("survives an acquire failure without abandoning the rest of the queue", async () => {

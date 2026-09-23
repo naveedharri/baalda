@@ -42,13 +42,40 @@ import type { NoteBridge } from "../bridge";
 import { UPLOAD_CONCURRENCY, runPool } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 
+/**
+ * `DocPush.whenSynced` rejected because the doc reached a status no reconnect
+ * can fix (`DocSync`'s `isTerminalSyncStatus`: the server deleted it, access is
+ * gone, or it is over the size cap). Carries that status so the uploader can
+ * record the doc as a PERMANENT failure instead of a transient one.
+ *
+ * Defined here rather than in `syncManager.ts` so this engine stays free of the
+ * provider import; `DocSync` throws it.
+ */
+export class TerminalSyncError extends Error {
+  readonly terminal = true;
+  constructor(readonly status: string) {
+    super(status);
+    this.name = "TerminalSyncError";
+  }
+}
+
+function terminalStatusOf(e: unknown): string | null {
+  if (e instanceof TerminalSyncError) return e.status;
+  if (typeof e === "object" && e !== null && (e as { terminal?: unknown }).terminal === true) {
+    const st = (e as { status?: unknown }).status;
+    if (typeof st === "string") return st;
+  }
+  return null;
+}
+
 /** The network side of one doc's push. Implemented by `DocSync` in production. */
 export interface DocPush {
   /** View-only grant: we must not attempt to push (the server would refuse). */
   readonly readOnly: boolean;
   /** True once the initial server sync genuinely completed. */
   readonly isSynced: boolean;
-  /** Resolve when the initial sync lands, or after `timeoutMs` either way. */
+  /** Resolve when the initial sync lands, or after `timeoutMs` either way.
+   *  Rejects with a {@link TerminalSyncError} the moment the doc turns terminal. */
   whenSynced(timeoutMs: number): Promise<void>;
   /** Resolve true once the server has acked every local change; false on timeout. */
   whenFlushed(timeoutMs: number): Promise<boolean>;
@@ -138,6 +165,9 @@ export interface UploadFailure {
    * count toward the failure streak that pauses a run.
    */
   permanent?: boolean;
+  /** The terminal connection status behind a permanent refusal (`deleted`,
+   *  `no-access`), when that is what ended the push. */
+  status?: string;
 }
 
 export interface ContentUploaderOptions {
@@ -599,6 +629,18 @@ export class ContentUploader {
       this.progress.item("ok");
       return true;
     } catch (e) {
+      // A terminal status (deleted on the server, access gone, over the cap):
+      // retrying the same doc cannot help, so it fails ONCE and permanently —
+      // never re-queued by the session, never counted toward the pause streak.
+      const status = terminalStatusOf(e);
+      if (status !== null) {
+        this.fail(docId, relPath, terminalReason(status), {
+          permanent: true,
+          status,
+          ...(status === "too-large" ? { kind: "too-large" as const } : {}),
+        });
+        return false;
+      }
       this.fail(docId, relPath, msg(e));
       return false;
     } finally {
@@ -706,7 +748,7 @@ export class ContentUploader {
     docId: string,
     relPath: string,
     reason: string,
-    opts: { permanent?: boolean; kind?: UploadFailure["kind"] } = {},
+    opts: { permanent?: boolean; kind?: UploadFailure["kind"]; status?: string } = {},
   ): void {
     // A failure is always news, so a lazy run announces itself before reporting it.
     this.announce();
@@ -716,6 +758,7 @@ export class ContentUploader {
       reason,
       ...(opts.permanent ? { permanent: true } : {}),
       ...(opts.kind ? { kind: opts.kind } : {}),
+      ...(opts.status ? { status: opts.status } : {}),
     };
     this.failures.push(failure);
     // A listener must never be able to change what the run does next.
@@ -743,6 +786,13 @@ export class ContentUploader {
  *  drain and the inbound trash executor use. */
 function trashStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function terminalReason(status: string): string {
+  if (status === "deleted") return "this note was deleted on the server";
+  if (status === "no-access") return "you no longer have access to this note";
+  if (status === "too-large") return "too large to sync";
+  return `the server refused this note (${status})`;
 }
 
 function msg(e: unknown): string {

@@ -537,6 +537,14 @@ export function planInbound(input: InboundInput): InboundPlan {
   // below. `input.local` is docId → path, so its values are exactly that set.
   const localPaths = new Set([...input.local.values()].map((p) => p.toLowerCase()));
   const docIds = new Set<string>([...input.baseline.keys(), ...input.server.keys()]);
+  // A tombstoned id this disk still holds a note under, with NO baseline claim.
+  // Without it the loop below never visits the id at all (or leaves at "never
+  // agreed it was ours"), nothing suppresses the path, and the outbound half
+  // re-registers the dead id on every pass. That is what a device whose
+  // baseline entry had been released was doing (prod 2026-09-23).
+  if (input.tombstones) {
+    for (const docId of input.local.keys()) if (input.tombstones.has(docId)) docIds.add(docId);
+  }
   for (const docId of docIds) {
     const prev = input.baseline.get(docId);
     const srv = input.server.get(docId);
@@ -580,7 +588,23 @@ export function planInbound(input: InboundInput): InboundPlan {
     }
 
     // Gone from the server's listing.
-    if (prev === undefined) continue; // never agreed it was ours — not ours to touch
+    if (prev === undefined) {
+      // Never agreed it was ours, so it is not ours to REMOVE — but a tombstone
+      // on the very id this file carries is proof it is the deleted note, so it
+      // must not be re-registered either. Suppress only; the file stays on disk
+      // as a local-only copy (its content may exist nowhere else), and the
+      // refusal is reported so the user can see why it no longer syncs.
+      if (dead && loc !== undefined) {
+        plan.suppress.add(loc);
+        plan.rejected.push({
+          kind: "trash",
+          path: loc,
+          docId,
+          reason: "deleted on the server by another member — kept on this device, no longer synced",
+        });
+      }
+      continue; // never agreed it was ours — not ours to touch
+    }
 
     if (dead) {
       if (loc === undefined) {

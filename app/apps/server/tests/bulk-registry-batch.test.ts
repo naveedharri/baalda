@@ -135,6 +135,41 @@ describe("notes batch registration", () => {
     expect(rows.map((r) => r.rel_path)).toEqual(["keep.md"]);
   });
 
+  // Prod 2026-09-23: a device holding an unconfirmed local copy of a note a
+  // teammate deleted re-registered it under the same id every pass. The server
+  // answered "created" (deleted_at untouched) and broadcast `registry-changed`
+  // to the whole vault each time.
+  it("refuses a soft-deleted doc_id as note_deleted, writes nothing, broadcasts nothing", async () => {
+    const docId = randomUUID();
+    await noteBatch(owner, vault, [{ relPath: "gone.md", docId }]);
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [docId]);
+    rec.reset();
+    const { body } = await noteBatch(owner, vault, [
+      { relPath: "gone.md", docId },
+      { relPath: "moved/elsewhere.md", docId, folderPath: null },
+    ]);
+    expect(body.results[0].status).toBe("conflict");
+    expect(body.results[0].code).toBe("note_deleted");
+    expect(body.results[0].docId).toBe(docId);
+    expect(rec.registryBroadcasts.length).toBe(0);
+    const { rows } = await pool.query(
+      "SELECT rel_path, deleted_at IS NOT NULL AS dead FROM notes WHERE id = $1",
+      [docId],
+    );
+    expect(rows).toEqual([{ rel_path: "gone.md", dead: true }]);
+
+    // The single-item route is the same code: 409 with the same code, no broadcast.
+    const res = await req(owner, "POST", "/api/notes", { vaultId: vault, relPath: "gone.md", docId });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("note_deleted");
+    expect(rec.registryBroadcasts.length).toBe(0);
+
+    // A NEW id at the dead path is still an ordinary create.
+    const fresh = await noteBatch(owner, vault, [{ relPath: "gone.md" }]);
+    expect(fresh.body.results[0].status).toBe("created");
+    expect(fresh.body.results[0].docId).not.toBe(docId);
+  });
+
   it("refuses new ROOT notes at a frozen root, per item, and still takes nested ones", async () => {
     await seedFolder(vault, null, "Docs", "Docs");
     await freezeVaultRoot(vault);

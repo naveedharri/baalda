@@ -534,6 +534,12 @@ function registerCodeMeaning(code: string | null, kind: "folder" | "note"): stri
         `This ${kind}'s id already belongs to a different vault on the Remote Vault, so ` +
         `it cannot be created here under the same id.`
       );
+    case "note_deleted":
+      return (
+        `This ${kind} was deleted on the Remote Vault by another member. Your copy is ` +
+        `kept on this device but no longer syncs; delete it, or save its text as a new ` +
+        `${kind} to share it again.`
+      );
     default:
       return null;
   }

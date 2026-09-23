@@ -3300,7 +3300,7 @@ export class SyncManager implements InboundHost {
     // confirmation so the normal pull-first path compares again. Oversized
     // notes remain terminal because another identical encode cannot help them.
     for (const [docId, failure] of [...this.permanentFailures]) {
-      if (failure.kind !== "no-write-access") continue;
+      if (failure.kind !== "no-write-access" && failure.status !== "no-access") continue;
       this.permanentFailures.delete(docId);
       this.bulkFailures.delete(docId);
       this.invalidatedFailures.add(docId);
@@ -4993,7 +4993,9 @@ export class SyncManager implements InboundHost {
     if (!current()) return;
     // Up to 5s of waiting — easily long enough to span a vault switch. Seeding
     // then would read the NEW vault's file at this path into the OLD vault's doc.
-    await sync.whenSynced(5000);
+    // A terminal refusal (deleted / no access) rejects; it is handled exactly
+    // like "no pull landed" below rather than escaping this `void`ed call.
+    await sync.whenSynced(5000).catch(() => {});
     if (!current()) return;
     if (!sync.isSynced) {
       // No pull to wait for (offline, server down): the bridge has held its
