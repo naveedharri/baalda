@@ -1107,6 +1107,15 @@ export class SyncManager implements InboundHost {
     await this.attachments.downloadMissing(paths);
   }
 
+  /** Vault Health's Retry for files on this computer the server lacks. */
+  async retryLocalFiles(paths: readonly string[], epoch: number): Promise<void> {
+    const scope = this.scope;
+    if (!scope?.isCurrent() || scope.vaultEpoch !== epoch || !this.attachments) {
+      throw new Error("Connect this vault to the server before retrying files.");
+    }
+    await this.attachments.retryFiles(paths);
+  }
+
   async removeMissingServerFile(path: string, epoch: number): Promise<void> {
     const scope = this.scope;
     if (!scope?.isCurrent() || scope.vaultEpoch !== epoch) throw new Error("The open vault changed.");

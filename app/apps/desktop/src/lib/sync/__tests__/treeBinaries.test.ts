@@ -251,6 +251,23 @@ describe("tree binaries register as `files` rows", () => {
     expect(registerFile).toHaveBeenCalledTimes(1);
   });
 
+  it("asks again after a refusal once the user retries the file (Vault Health)", async () => {
+    let refuse = true;
+    const registerFile = vi.fn(async ({ id }: { relPath: string; id: string }) => {
+      if (refuse) throw serverError(403, "no_write_access");
+      return id;
+    });
+    const { sync, log } = makeVault([{ relPath: "Team/report.docx" }], { registerFile });
+    await sync.reconcile();
+    await sync.reconcile();
+    expect(registerFile).toHaveBeenCalledTimes(1);
+
+    refuse = false; // an owner granted access meanwhile
+    await sync.retryFiles(["Team/report.docx"]);
+    expect(registerFile).toHaveBeenCalledTimes(2);
+    expect(log.intents[log.intents.length - 1].docId).toBe("local-id-0");
+  });
+
   it("retries after a path_folder_mismatch — the registry pull that fixes it is already queued", async () => {
     const registerFile = vi.fn(async () => {
       throw serverError(400, "path_folder_mismatch");

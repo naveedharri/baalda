@@ -403,6 +403,13 @@ export interface NoteInspection {
 export interface HealthActions {
   downloadFiles(paths: readonly string[]): Promise<void>;
   removeServerFile(path: string): Promise<void>;
+  /** Run the file upload pass now for files on this computer the Remote Vault
+   *  lacks, forgetting any refusal this session remembered for them. */
+  retryLocalFiles(paths: readonly string[]): Promise<void>;
+  /** Delete files from this computer (the sidebar's delete, permanent on disk). */
+  deleteLocalFiles(
+    paths: readonly string[],
+  ): Promise<{ deleted: string[]; failed: Array<{ path: string; reason: string }> }>;
   /** Re-pull the registry and re-run the content pass for everything unconfirmed. */
   syncNow(): Promise<void>;
   /** Re-queue ONE note's content, clearing any remembered permanent failure. */
