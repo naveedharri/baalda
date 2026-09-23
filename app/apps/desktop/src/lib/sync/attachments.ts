@@ -811,6 +811,25 @@ export class AttachmentSync {
     if (this.fileStates.delete(relPath)) this.publishFileStates();
   }
 
+  /**
+   * The user asked to retry these files (Vault Health). Forget what this session
+   * decided never to try again for them — a refused registration, a permanent
+   * skip for their bytes — and run a pass now. Everything else a pass decides
+   * (the plan gate, the quota, the delete windows) still applies.
+   */
+  async retryFiles(paths: readonly string[]): Promise<ReconcileResult> {
+    const wanted = new Set(paths.map((p) => p.toLowerCase()));
+    for (const p of paths) this.registerRefused.delete(p);
+    try {
+      for (const a of await this.deps.listLocal()) {
+        if (wanted.has(a.relPath.toLowerCase())) this.permanentSkips.delete(a.sha256);
+      }
+    } catch {
+      // No listing, no shas to forgive; the pass below reports the same failure.
+    }
+    return this.reconcile();
+  }
+
   /** Run one full reconcile pass now. Coalesces if one is already in flight. */
   async reconcile(): Promise<ReconcileResult> {
     // A server can be upgraded while this desktop stays open. Re-probe old

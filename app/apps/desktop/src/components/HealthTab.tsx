@@ -32,6 +32,7 @@ import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { UpgradeDialog } from "./UpgradeDialog";
 import { MissingFileActions } from "./MissingFileActions";
+import { LocalOnlyFileActions } from "./LocalOnlyFileActions";
 import { HealthIssues } from "./HealthIssues";
 import { HealthChecks, type CheckFocus } from "./HealthChecks";
 import { useHealthIgnores } from "../lib/health/useHealthIgnores";
@@ -810,17 +811,12 @@ function InventoryComparison({
             actionLabel="Show"
             onAction={(path) => void handlers.actions.reveal(path)}
           />
-          <DifferenceList
-            title="Notes in other formats missing from the Remote Vault"
-            description={
-              standaloneFileSyncBlocked
-                ? "These notes stay on this computer because syncing these file types requires Pro. They remain available to preview locally."
-                : "These notes have no matching Remote Vault path yet. Check again to retry sync."
-            }
+          {inventory.deviceOnlyFiles.length > 0 && <LocalOnlyFileActions
             paths={inventory.deviceOnlyFiles}
-            actionLabel="Show"
-            onAction={(path) => void handlers.actions.reveal(path)}
-          />
+            actions={handlers.actions}
+            blocked={standaloneFileSyncBlocked}
+            onShow={(path) => void handlers.actions.reveal(path)}
+          />}
           <DifferenceList
             title="Text notes missing from this computer"
             description="The Remote Vault knows these paths but this computer has no matching note. Check again to download anything you can access."
