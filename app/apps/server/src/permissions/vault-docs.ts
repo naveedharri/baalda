@@ -139,6 +139,26 @@ async function deniedDocsInVault(
   return new Set(rows.map((r) => r.id));
 }
 
+/**
+ * Note/file ids in this vault that an item-level Private hides from `userId` —
+ * a per-member deny, or the team's (org) deny. The registry's adopt-by-path
+ * refuses exactly these when the caller cannot read them: answering with their
+ * id named private items to anyone who guessed the path.
+ */
+export async function listPrivateHiddenDocsInVault(
+  userId: string,
+  organizationId: string,
+  vaultId: string,
+  db: Queryable = defaultPool,
+): Promise<Set<string>> {
+  const [mine, team] = await Promise.all([
+    deniedDocsInVault(db, "user", userId, vaultId),
+    deniedDocsInVault(db, "org", organizationId, vaultId),
+  ]);
+  for (const id of team) mine.add(id);
+  return mine;
+}
+
 /** Folder ids denied to `principalId`, including everything below them. */
 async function deniedFolderIds(
   db: Queryable,

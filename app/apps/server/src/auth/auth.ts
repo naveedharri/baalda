@@ -92,6 +92,15 @@ export const auth = betterAuth({
     "http://tauri.localhost",
     "http://localhost:1420",
   ],
+  // Where the client IP comes from, for the per-IP rate limit. Better Auth's
+  // default reads only `x-forwarded-for`, and only when it holds exactly ONE
+  // address; behind a proxy chain (Railway's edge) it holds several, so no IP
+  // resolved and every user shared one bucket per auth route — a burst from one
+  // client could rate-limit everyone's sign-in (prod log, 2026-09-23).
+  // `x-real-ip` carries the single client address the edge saw.
+  advanced: {
+    ipAddress: { ipAddressHeaders: ["x-real-ip", "x-forwarded-for"] },
+  },
   // Desktop clients authenticate with a bearer token kept in the OS keychain,
   // so the session's sliding refresh only advances when the app actually calls
   // the server. Better Auth's 7-day default therefore logs people out if they

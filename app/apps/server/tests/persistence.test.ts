@@ -471,6 +471,17 @@ describe("listEmptyDocs", () => {
     expect(res.empty).toEqual([...res.empty].sort());
   });
 
+  it("names a different sample past the cap, so no empty doc is starved forever", async () => {
+    // The old `ORDER BY id LIMIT cap` answered the same lowest ids on every
+    // connect; a doc above that window was never named, however often asked.
+    const ids = Array.from({ length: 12 }, (_, i) => `empty-${String(i).padStart(2, "0")}`);
+    const seen = new Set<string>();
+    for (let i = 0; i < 40 && seen.size < ids.length; i++) {
+      for (const id of (await listEmptyDocs(ids, pool, 3)).empty) seen.add(id);
+    }
+    expect(seen.size).toBe(ids.length);
+  });
+
   it("is a no-op on an empty input", async () => {
     expect(await listEmptyDocs([])).toEqual({ empty: [], truncated: false });
   });

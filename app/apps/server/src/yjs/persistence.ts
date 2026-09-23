@@ -441,6 +441,13 @@ export async function loadDocDiff(
  *
  * `cap` bounds the answer so one enormous vault can't make the frame unbounded;
  * `truncated` tells the client the list is partial and another pass is needed.
+ *
+ * Past the cap the answer is a RANDOM `cap`-sized sample, not the lowest ids.
+ * It used to be `ORDER BY id LIMIT cap`, which named the same 2,000 docs on
+ * every connect: when that window filled with docs the client can never push
+ * (settled-empty files, permanent failures, notes whose file lives on another
+ * device), every doc above it was starved of its heal for good. Sampling costs
+ * the same one query per chunk, and a doc named twice is a no-op client-side.
  */
 export async function listEmptyDocs(
   docIds: string[],
@@ -452,16 +459,23 @@ export async function listEmptyDocs(
   // Postgres takes a large text[] fine, but a single param holding every doc id
   // in a 100k-note vault is a needlessly big bind — chunk it.
   const CHUNK = 20_000;
+  // Shuffled so that, when there are more empties than `cap`, which ones make
+  // the cut changes from one connect to the next (see above).
+  const order = [...docIds];
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
   const found: string[] = [];
-  for (let i = 0; i < docIds.length; i += CHUNK) {
+  for (let i = 0; i < order.length; i += CHUNK) {
     const { rows } = await db.query<{ id: string }>(
       `SELECT d.id
-         FROM unnest($1::text[]) AS d(id)
+         FROM unnest($1::text[]) WITH ORDINALITY AS d(id, n)
         WHERE NOT EXISTS (SELECT 1 FROM doc_updates u WHERE u.doc_id = d.id)
           AND NOT EXISTS (SELECT 1 FROM doc_snapshots s WHERE s.doc_id = d.id)
-        ORDER BY d.id
+        ORDER BY d.n
         LIMIT $2`,
-      [docIds.slice(i, i + CHUNK), cap + 1],
+      [order.slice(i, i + CHUNK), cap + 1],
     );
     for (const r of rows) found.push(r.id);
     // Already over the cap — the rest of the chunks can only add to a list we
@@ -469,11 +483,12 @@ export async function listEmptyDocs(
     if (found.length > cap) break;
   }
 
-  // Sort across chunks: each query orders within its own slice only, and a
-  // stable answer keeps the frame deterministic for tests and for the client.
-  found.sort();
-  if (found.length > cap) return { empty: found.slice(0, cap), truncated: true };
-  return { empty: found, truncated: false };
+  // The answer is sorted so the frame reads the same whatever order the chunks
+  // came back in — but trimmed BEFORE sorting: `found` is in shuffled order, so
+  // the cut is random, and sorting first would always drop the largest ids.
+  const truncated = found.length > cap;
+  const empty = (truncated ? found.slice(0, cap) : found).sort();
+  return { empty, truncated };
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {

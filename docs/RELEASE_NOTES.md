@@ -18,6 +18,12 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.66
+
+- Sync no longer gets stuck retrying items you do not have access to: folders and files that were made private after they reached your computer stay safely on your computer and stop being re-sent in the background.
+- Notes that never finished uploading are picked up more reliably, even in very large vaults.
+- Sign-in and AI connections are more robust: one busy client can no longer slow down everyone's sign-in, and scripts using an old AI token are asked to wait instead of retrying endlessly.
+
 ## 0.1.65
 
 - Files that stayed "syncing" forever now repair themselves: if a file was wrongly removed from the server while it was still on your computer, Baalda registers and uploads it again on its own.

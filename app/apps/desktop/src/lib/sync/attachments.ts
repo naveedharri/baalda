@@ -263,6 +263,19 @@ export interface PutResult {
  * remaining upload would fail the same way, and a hundred identical failures is
  * a hundred pointless round trips plus (without this) a hundred toasts.
  */
+/**
+ * This file's path already names a `files` row the user cannot see (an item set
+ * to Private after it reached their disk). The upload stops before a byte moves:
+ * without a row it would go as a doc-less tree blob the server refuses on every
+ * pass. The file itself is never touched — it stays on disk, local-only.
+ */
+class HiddenFile extends Error {
+  constructor() {
+    super("not_readable");
+    this.name = "HiddenFile";
+  }
+}
+
 class AbortPass extends Error {
   constructor(public readonly reason: string) {
     super(reason);
@@ -735,6 +748,10 @@ export class AttachmentSync {
    * pass.
    */
   private readonly registerRefused = new Set<string>();
+  /** Lower-cased paths the server answered `not_readable` for — see
+   *  {@link HiddenFile}. Left alone until the path leaves the disk, the listing
+   *  starts naming it (access came back), or the user retries it. */
+  private readonly unreadable = new Set<string>();
   /** sha256 → the blob the server holds for it. Rebuilt from each listing and
    *  extended by each upload, so the text pass can name a blob by content. */
   private readonly blobIdBySha = new Map<string, string>();
@@ -819,7 +836,10 @@ export class AttachmentSync {
    */
   async retryFiles(paths: readonly string[]): Promise<ReconcileResult> {
     const wanted = new Set(paths.map((p) => p.toLowerCase()));
-    for (const p of paths) this.registerRefused.delete(p);
+    for (const p of paths) {
+      this.registerRefused.delete(p);
+      this.unreadable.delete(p.toLowerCase());
+    }
     try {
       for (const a of await this.deps.listLocal()) {
         if (wanted.has(a.relPath.toLowerCase())) this.permanentSkips.delete(a.sha256);
@@ -971,6 +991,12 @@ export class AttachmentSync {
     // Rebuilt per pass, never accumulated: an adoption decided against a disk
     // two passes old would move a row onto a path that has since changed again.
     this.localPathKeys = new Set(local.map((a) => a.relPath.toLowerCase()));
+    if (this.unreadable.size > 0) {
+      const listed = new Set(server.flatMap((b) => (b.relPath ? [b.relPath.toLowerCase()] : [])));
+      for (const key of [...this.unreadable]) {
+        if (!this.localPathKeys.has(key) || listed.has(key)) this.unreadable.delete(key);
+      }
+    }
     const { toUpload, toDownload } = diffAttachments(local, server);
 
     // A local file the uploader did NOT queue is one whose sha the server's
@@ -1012,6 +1038,7 @@ export class AttachmentSync {
       this.fileStates = new Map<string, DocSyncState>();
       for (const a of local) {
         if (isUnderAttachments(a.relPath)) continue;
+        if (this.unreadable.has(a.relPath.toLowerCase())) continue;
         this.fileStates.set(
           a.relPath,
           this.permanentSkips.has(a.sha256)
@@ -1055,6 +1082,7 @@ export class AttachmentSync {
         // is skipped without a round trip — see `permanentSkips`.
         if (this.attachmentSyncBlocked && !isUnderAttachments(a.relPath)) return;
         if (this.permanentSkips.has(a.sha256)) return;
+        if (this.unreadable.has(a.relPath.toLowerCase())) return;
         // An unregistered path while the delete queue is still trying to settle a
         // window is very likely the arrival half of a rename it is about to pair.
         // The WHOLE file waits, not just its registration: uploading it now would
@@ -1077,6 +1105,10 @@ export class AttachmentSync {
             this.setFileState(a.relPath, "error");
           }
         } catch (e) {
+          if (e instanceof HiddenFile) {
+            if (this.fileStates.delete(a.relPath)) this.publishFileStates();
+            return;
+          }
           if (this.handleAttachmentSyncRequired(e)) return;
           if (e instanceof AbortPass && e.reason === "attachment_sync_requires_pro") return;
           if (e instanceof AbortPass) {
@@ -1196,6 +1228,7 @@ export class AttachmentSync {
     // permission resolver answers for. A failure here is not fatal — the bytes
     // still go, with the pre-Stage-A path heuristic deciding who may read them.
     const docId = await this.ensureFileRow(a);
+    if (this.unreadable.has(a.relPath.toLowerCase())) throw new HiddenFile();
     // Read lazily and at most once: the deduped path must move NO bytes and
     // must not even open the file, which is what makes a second device's first
     // sync a few JSON round trips instead of re-uploading the whole store.
@@ -1706,6 +1739,10 @@ export class AttachmentSync {
           continue;
         }
         if (res.code === "path_folder_mismatch") continue; // retried next pass
+        if (res.code === "not_readable") {
+          this.unreadable.add(c.relPath.toLowerCase());
+          continue;
+        }
         this.registerRefused.add(c.relPath);
         console.warn(
           `[attachments] ${c.relPath} — no files row (${res.code ?? res.error ?? "refused"}); uploading without a doc_id`,
@@ -1787,6 +1824,10 @@ export class AttachmentSync {
       //    asking again every pass is a guaranteed refusal every pass;
       //  • no status, or a 5xx — we never reached a decision. Offline, a
       //    restarting server. Those must not cost the file its doc_id forever.
+      if (code === "not_readable") {
+        this.unreadable.add(relPath.toLowerCase());
+        return undefined;
+      }
       const permanent = status != null && status >= 400 && status < 500 && status !== 400;
       if (permanent) this.registerRefused.add(relPath);
       console.warn(
