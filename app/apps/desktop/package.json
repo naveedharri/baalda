@@ -31,7 +31,7 @@
     "@codemirror/search": "^6.7.1",
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.6",
-    "@dicebear/collection": "^9.4.2",
+    "@dicebear/collection": "^9.4.3",
     "@dicebear/core": "^9.4.3",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@fontsource/radio-canada-big": "^5.2.7",
