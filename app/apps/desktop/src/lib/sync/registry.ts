@@ -557,6 +557,16 @@ export class VaultRegistry {
    */
   private aliasPaths = new Set<string>();
   /**
+   * Lower-cased local paths the server answered `not_readable` for: a folder or
+   * note already exists there, and this user cannot see it (an item set to
+   * Private after it reached their disk). Registering them again can only get
+   * the same answer, and before the server refused it the adopt-then-prune
+   * cycle re-sent ~3,900 folders every 10 s (prod 2026-09-23). Nothing on disk
+   * is touched. An entry leaves when the server lists the path again (access
+   * came back) or the path leaves the disk; wholesale on `reset`.
+   */
+  private hiddenPaths = new Set<string>();
+  /**
    * Paths THIS device just created as materialized placeholders, awaiting their
    * own watcher echo (see {@link consumeMaterialized}).
    *
@@ -809,6 +819,7 @@ export class VaultRegistry {
     this.byPathCi = null;
     // Paths, so they belong to the vault we are leaving.
     this.aliasPaths.clear();
+    this.hiddenPaths.clear();
     this.folderByPath.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
@@ -1225,7 +1236,15 @@ export class VaultRegistry {
    * same "N items not synced" surface as a failed create, or a refusal that
    * protected the user's notes would be invisible to them.
    */
-  recordFailure(f: RegistryFailure): void {
+  recordFailure(f: RegistryFailure): "ok" | "failed" {
+    // Something already exists at this path that this user cannot see (an item
+    // set to Private after it reached their disk). Not a failure and nothing to
+    // fix: the file stays exactly where it is, local-only, and the path is left
+    // out of every later pass until the server lists it again — see `hiddenPaths`.
+    if (f.code === "not_readable" && (f.kind === "folder" || f.kind === "note")) {
+      this.hiddenPaths.add(f.path.toLowerCase());
+      return "ok";
+    }
     this.failed.push(f);
     if (f.code === "vault_limit_reached" || f.code === "member_limit_reached") {
       this.limitReached = f.code;
@@ -1243,7 +1262,7 @@ export class VaultRegistry {
     if (f.docId) this.sink.doc(f.docId, "error");
     // Keep all diagnostics, but cap per-item logging and UI timeline emissions
     // during a mass refusal. Thousands of synchronous log renders can freeze it.
-    if (this.failed.length > 20) return;
+    if (this.failed.length > 20) return "failed";
     // Timeline only — a listener must never be able to change what a run does.
     try {
       this.onFailure?.(f);
@@ -1251,6 +1270,7 @@ export class VaultRegistry {
       console.warn("[registry] failure listener threw", e);
     }
     console.warn(`[registry] ${f.kind} ${f.path} failed — ${f.reason}`);
+    return "failed";
   }
 
   /** Stop the current bulk run? Either the vault moved on, or the server told us
@@ -1723,11 +1743,10 @@ export class VaultRegistry {
             cancelled = true;
             return;
           }
-          this.recordFailure({
+          this.sink.item(this.recordFailure({
             kind: "inbound", path: gone.path, docId: gone.docId,
             reason: reasonOf(e), code: null,
-          });
-          this.sink.item("failed");
+          }));
         }
       }, { concurrency: INBOUND_REMOVE_CONCURRENCY, shouldStop: () => cancelled || this.stopRun() });
       if (cancelled || this.stopRun()) return { changedDisk, suppress: plan.suppress };
@@ -1757,9 +1776,8 @@ export class VaultRegistry {
       for (const gone of ready) {
         const out = byPath.get(gone.path);
         if (!out || out.error) {
-          this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
-            reason: out?.error ?? "local cleanup did not return a result", code: null });
-          this.sink.item("failed");
+          this.sink.item(this.recordFailure({ kind: "inbound", path: gone.path, docId: gone.docId,
+            reason: out?.error ?? "local cleanup did not return a result", code: null }));
           continue;
         }
         changedDisk = true;
@@ -2525,7 +2543,17 @@ export class VaultRegistry {
         mutated = true;
       }
     }
-    const missingFolders = folders.filter((f) => !this.folderByPath.has(f.path));
+    // A hidden path the server now lists (access came back), or that left the
+    // disk, is an ordinary path again.
+    if (this.hiddenPaths.size > 0) {
+      const onDiskCi = new Set([...folders, ...notes].map((x) => x.path.toLowerCase()));
+      for (const key of [...this.hiddenPaths]) {
+        if (serverFolderByPathCi.has(key) || !onDiskCi.has(key)) this.hiddenPaths.delete(key);
+      }
+    }
+    const missingFolders = folders.filter(
+      (f) => !this.folderByPath.has(f.path) && !this.hiddenPaths.has(f.path.toLowerCase()),
+    );
 
     // 3. Notes: adopt by relPath, create missing. Any first-run seeding happened
     //    in reconcile before this runs; the seeded files register here as docs.
@@ -2579,11 +2607,15 @@ export class VaultRegistry {
         this.aliasPaths.delete(rp);
       }
     }
+    for (const key of [...this.hiddenPaths]) {
+      if (resolvedNotePathsCi.has(key)) this.hiddenPaths.delete(key);
+    }
     const missingNotes = notes.filter(
       (n) =>
         !resolvedNotePathsCi.has(n.path.toLowerCase()) &&
         !this.inboundSuppressed.has(n.path) &&
-        !this.aliasPaths.has(n.path),
+        !this.aliasPaths.has(n.path) &&
+        !this.hiddenPaths.has(n.path.toLowerCase()),
     );
 
     // Announce the phase only when there is something to create. A pull with
@@ -2649,14 +2681,13 @@ export class VaultRegistry {
             mutated = true;
             this.sink.item("ok");
           } else {
-            this.recordFailure({
+            this.sink.item(this.recordFailure({
               kind: "folder",
               path: f.path,
               docId: null,
               reason: reasonOf(out.error),
               code: errorCode(out.error),
-            });
-            this.sink.item("failed");
+            }));
           }
         },
         { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
@@ -2765,14 +2796,13 @@ export class VaultRegistry {
         // pass re-creates the folder and this note registers — belt to step 2's
         // braces, for a listing that changed between the two reads of one pass.
         if (code === "path_folder_mismatch") this.folderByPath.delete(parentDir(rp));
-        this.recordFailure({
+        this.sink.item(this.recordFailure({
           kind: "note",
           path: rp,
           docId,
           reason: reasonOf(out.error),
           code,
-        });
-        this.sink.item("failed");
+        }));
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
     );
@@ -2926,14 +2956,13 @@ export class VaultRegistry {
           this.sink.item("ok");
         } catch (e) {
           if (ipc.isVaultMismatch(e)) return; // the vault moved on — not a failure
-          this.recordFailure({
+          this.sink.item(this.recordFailure({
             kind: "materialize",
             path: rp,
             docId: this.byPath.get(rp)?.docId ?? null,
             reason: reasonOf(e),
             code: null,
-          });
-          this.sink.item("failed");
+          }));
         }
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
@@ -2995,14 +3024,13 @@ export class VaultRegistry {
           // A failed REQUEST is a failure of every folder in it: the run must
           // not claim work it cannot prove happened.
           for (const f of group) {
-            this.recordFailure({
+            this.sink.item(this.recordFailure({
               kind: "folder",
               path: f.path,
               docId: null,
               reason: reasonOf(out.error),
               code: errorCode(out.error),
-            });
-            this.sink.item("failed");
+            }));
           }
           return;
         }
@@ -3016,14 +3044,13 @@ export class VaultRegistry {
             this.sink.item("ok");
             continue;
           }
-          this.recordFailure({
+          this.sink.item(this.recordFailure({
             kind: "folder",
             path: f.path,
             docId: null,
             reason: res?.error ?? res?.code ?? "the server did not answer for this folder",
             code: res?.code ?? null,
-          });
-          this.sink.item("failed");
+          }));
         }
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
@@ -3094,14 +3121,13 @@ export class VaultRegistry {
         });
         if (!out.ok) {
           for (const n of group) {
-            this.recordFailure({
+            this.sink.item(this.recordFailure({
               kind: "note",
               path: n.path,
               docId: ctx.idByPath.get(n.path) ?? null,
               reason: reasonOf(out.error),
               code: errorCode(out.error),
-            });
-            this.sink.item("failed");
+            }));
           }
           return;
         }
@@ -3125,14 +3151,13 @@ export class VaultRegistry {
           const localDocId = ctx.idByPath.get(rp) ?? null;
           const res = byPath.get(rp);
           if (!res) {
-            this.recordFailure({
+            this.sink.item(this.recordFailure({
               kind: "note",
               path: rp,
               docId: localDocId,
               reason: "the server did not answer for this note",
               code: null,
-            });
-            this.sink.item("failed");
+            }));
             continue;
           }
           if (res.status === "created" || res.status === "adopted") {
@@ -3152,14 +3177,13 @@ export class VaultRegistry {
               continue;
             }
             if (!res.docId) {
-              this.recordFailure({
+              this.sink.item(this.recordFailure({
                 kind: "note",
                 path: rp,
                 docId: localDocId,
                 reason: "the server registered this note without an id",
                 code: null,
-              });
-              this.sink.item("failed");
+              }));
               continue;
             }
             // Keep `rp` (the local spelling) even when the server adopted a
@@ -3176,14 +3200,13 @@ export class VaultRegistry {
             continue;
           }
           if (res.code === "path_folder_mismatch") this.folderByPath.delete(parentDir(rp));
-          this.recordFailure({
+          this.sink.item(this.recordFailure({
             kind: "note",
             path: rp,
             docId: localDocId,
             reason: res.error ?? res.code ?? "the server refused this note",
             code: res.code ?? null,
-          });
-          this.sink.item("failed");
+          }));
         }
         this.announceCreated(createdInChunk);
       },
@@ -3218,14 +3241,13 @@ export class VaultRegistry {
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return mutated; // the vault moved on
         for (const rp of group) {
-          this.recordFailure({
+          this.sink.item(this.recordFailure({
             kind: "materialize",
             path: rp,
             docId: this.byPath.get(rp)?.docId ?? null,
             reason: reasonOf(e),
             code: null,
-          });
-          this.sink.item("failed");
+          }));
         }
         continue;
       }

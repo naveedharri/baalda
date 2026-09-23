@@ -5,6 +5,11 @@ import { pool as defaultPool } from "../db/pool.js";
 import { canCreateIn, canEditDoc } from "../permissions/http-gates.js";
 import { createResolverCache, type ResolverCache } from "../permissions/resolver.js";
 import {
+  listPrivateHiddenDocsInVault,
+  listReadableDocsInVault,
+  listVisibleFolders,
+} from "../permissions/vault-docs.js";
+import {
   TreeOpError,
   dirname,
   resolveFolderParent,
@@ -75,6 +80,7 @@ export type RegisterCode =
   | "no_write_access"
   | "note_limit_reached"
   | "root_frozen"
+  | "not_readable"
   | "doc_id_conflict";
 
 export interface FolderRow {
@@ -152,7 +158,37 @@ export interface RegisterCtx {
   resolverCache: ResolverCache;
   /** Per-request path→row caches. See {@link RegisterCache}. */
   cache: RegisterCache;
+  /**
+   * May the caller adopt this EXISTING folder / note / file by its path?
+   *
+   * Folders: exactly when the folder listing (`listVisibleFolders`) shows it.
+   * The two must agree: a folder the listing hides but a registration adopts is
+   * the 2026-09-23 loop — the client maps it, the next pull prunes it, and it
+   * re-registers ~3,900 folders every 10 s.
+   *
+   * Notes and files: refused only when an item-level Private hides the doc AND
+   * the caller cannot read it — the case where the adopt named private items.
+   * Deliberately narrower than "readable": a never-shared vault leaves an owner
+   * unable to read a file (files carry no author), and re-registering their own
+   * files must keep working there.
+   *
+   * Rows this request created are always adoptable. Every set is computed at
+   * most once per request, and only when an adopt asks.
+   */
+  canSeeFolder(folderId: string): Promise<boolean>;
+  canAdoptDoc(docId: string): Promise<boolean>;
+  /** Record a row this request inserted (see above). */
+  noteCreated(id: string): void;
 }
+
+/** Refusal for an adopt the caller cannot see. No id, no canonical path: the
+ *  adopt used to answer with both, naming private folders to anyone who sent
+ *  the right path. */
+const NOT_READABLE = {
+  status: "error" as const,
+  code: "not_readable" as const,
+  message: "Something already exists at this path that you do not have access to.",
+};
 
 /**
  * Per-request path→row lookup caches, written through by every insert.
@@ -198,6 +234,10 @@ export function registerCtx(
   const creates = new Map<string, Promise<boolean>>();
   const resolverCache = opts.resolverCache ?? createResolverCache();
   const cache = opts.cache ?? createRegisterCache();
+  let visibleFolders: Promise<Set<string>> | null = null;
+  let readableDocs: Promise<Set<string>> | null = null;
+  let hiddenDocs: Promise<Set<string>> | null = null;
+  const createdHere = new Set<string>();
   return {
     db,
     vaultId,
@@ -216,6 +256,39 @@ export function registerCtx(
         creates.set(key, hit);
       }
       return hit;
+    },
+    async canSeeFolder(folderId) {
+      if (createdHere.has(folderId)) return true;
+      visibleFolders ??= listVisibleFolders(userId, vaultId, db).then(
+        (rows) => new Set(rows.map((f) => f.id)),
+      );
+      return (await visibleFolders).has(folderId);
+    },
+    async canAdoptDoc(docId) {
+      if (createdHere.has(docId)) return true;
+      hiddenDocs ??= (async () => {
+        // One indexed probe answers the overwhelmingly common case — no Private
+        // row in this vault's org could hide anything from this user — without
+        // the recursive walk. This runs on every re-registration pass.
+        const { rows } = await db.query<{ org: string }>(
+          `SELECT s.org_id AS org FROM shares s
+             JOIN vaults v ON v.organization_id = s.org_id
+            WHERE v.id = $1 AND s.permission = 'denied'
+              AND s.resource_type IN ('folder', 'file')
+              AND (s.principal_type = 'org' OR (s.principal_type = 'user' AND s.principal_id = $2))
+            LIMIT 1`,
+          [vaultId, userId],
+        );
+        return rows[0]
+          ? listPrivateHiddenDocsInVault(userId, rows[0].org, vaultId, db)
+          : new Set<string>();
+      })();
+      if (!(await hiddenDocs).has(docId)) return true;
+      readableDocs ??= listReadableDocsInVault(userId, vaultId, db);
+      return (await readableDocs).has(docId);
+    },
+    noteCreated(id) {
+      createdHere.add(id);
     },
   };
 }
@@ -325,7 +398,10 @@ export async function registerFolder(
   // directory where Postgres would store two rows, and the desktop that then
   // maps its file to the twin's doc_id is the 2026-09-04 ping-pong.
   const existing = await folderByPath(ctx, input.path);
-  if (existing) return { status: "adopted", row: existing, wrote: false };
+  if (existing) {
+    if (!(await ctx.canSeeFolder(existing.id))) return NOT_READABLE;
+    return { status: "adopted", row: existing, wrote: false };
+  }
 
   // `path` is authoritative; `parentId` must be the folder at its dirname (or is
   // resolved from it when absent). `storedPath` is `path` rewritten onto the
@@ -385,11 +461,15 @@ export async function registerFolder(
     // and split a folder's notes across them.
     if ((err as { code?: string }).code === "23505") {
       const winner = await folderByPath(ctx, storedPath, true);
-      if (winner) return { status: "adopted", row: winner, wrote: false };
+      if (winner) {
+        if (!(await ctx.canSeeFolder(winner.id))) return NOT_READABLE;
+        return { status: "adopted", row: winner, wrote: false };
+      }
     }
     throw err;
   }
   const row = { id, parentId: resolvedParent, name: input.name, path: storedPath, color };
+  ctx.noteCreated(id);
   // Write through: the next item in this very batch resolves `a/b/c` against
   // the `a/b` we just inserted, which is what the depth sort assumes.
   ctx.cache.folders.set(pathKey(storedPath), row);
@@ -561,7 +641,9 @@ async function registerNotesWithinQuota(ctx: RegisterCtx, inputs: NoteInput[], r
     // could not see that: a case-only difference satisfies an exact-path index.
     const byPath = await liveNoteByPath(ctx, input.relPath);
     if (byPath) {
-      results[index] = { status: "adopted", row: byPath, wrote: false };
+      results[index] = (await ctx.canAdoptDoc(byPath.id))
+        ? { status: "adopted", row: byPath, wrote: false }
+        : NOT_READABLE;
       continue;
     }
 
@@ -698,7 +780,10 @@ async function applyNoteInserts(
         firsts.map((p) => p.color),
       ],
     );
-    for (const r of rows) inserted.add(r.id);
+    for (const r of rows) {
+      inserted.add(r.id);
+      ctx.noteCreated(r.id);
+    }
   } catch (err) {
     // Lost the race against a concurrent register of the same path
     // (`notes_live_path_uq` m021, or `notes_live_path_ci_uq` m023 for a
@@ -714,12 +799,17 @@ async function applyNoteInserts(
            RETURNING id`,
           [p.id, ctx.vaultId, p.folderId, p.title, p.storedRelPath, ctx.userId, p.color],
         );
-        if ((one.rowCount ?? 0) > 0) inserted.add(p.id);
+        if ((one.rowCount ?? 0) > 0) {
+          inserted.add(p.id);
+          ctx.noteCreated(p.id);
+        }
       } catch (rowErr) {
         if ((rowErr as { code?: string }).code !== "23505") throw rowErr;
         const winner = await liveNoteByPath(ctx, p.storedRelPath, true);
         if (winner) {
-          results[p.index] = { status: "adopted", row: winner, wrote: false };
+          results[p.index] = (await ctx.canAdoptDoc(winner.id))
+            ? { status: "adopted", row: winner, wrote: false }
+            : NOT_READABLE;
           ctx.cache.notes.set(pathKey(winner.relPath), winner);
           continue;
         }
@@ -865,7 +955,10 @@ export async function registerFile(
   // does not know yet, so a device one pass behind on folders would otherwise be
   // told `path_folder_mismatch` about a file that is already registered.
   const byPath = await fileByPath(ctx, input.path);
-  if (byPath) return { status: "adopted", row: byPath, wrote: false };
+  if (byPath) {
+    if (!(await ctx.canAdoptDoc(byPath.id))) return NOT_READABLE;
+    return { status: "adopted", row: byPath, wrote: false };
+  }
 
   let resolvedFolder: string | null;
   let storedPath: string;
@@ -890,7 +983,10 @@ export async function registerFile(
   // differently), so ask once more for the canonical form. Same adoption.
   if (!samePath(storedPath, input.path)) {
     const canonical = await fileByPath(ctx, storedPath);
-    if (canonical) return { status: "adopted", row: canonical, wrote: false };
+    if (canonical) {
+      if (!(await ctx.canAdoptDoc(canonical.id))) return NOT_READABLE;
+      return { status: "adopted", row: canonical, wrote: false };
+    }
   }
 
   // This id exists but not at this path: the file was renamed or moved on disk.
@@ -949,6 +1045,7 @@ export async function registerFile(
     [id, ctx.vaultId, resolvedFolder, storedPath],
   );
   const created = { id, folderId: resolvedFolder, path: storedPath };
+  ctx.noteCreated(id);
   ctx.cache.files.set(pathKey(storedPath), created);
   return { status: "created", wrote: true, row: created };
 }

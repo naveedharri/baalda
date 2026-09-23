@@ -3757,9 +3757,8 @@ export class SyncManager implements InboundHost {
       }
       this.completeRun(scope);
       // Same rule as the per-doc run below: ask for the next slice of a
-      // truncated `ready.empty` only after a pass that actually sent something
-      // and failed nothing.
-      if (this.serverEmptyTruncated && result.pushed > 0 && result.failures.length === 0) {
+      // truncated `ready.empty` only after a pass that made progress.
+      if (this.serverEmptyTruncated && result.pushed > 0) {
         this.serverEmptyTruncated = false;
         this.vaultEngine?.refresh();
       }
@@ -3835,10 +3834,14 @@ export class SyncManager implements InboundHost {
     if (result.cancelled) return;
     this.completeRun(scope);
     // The server had more empty docs than one `ready` frame names. Ask again —
-    // but only after a run that actually SENT something and failed nothing,
-    // otherwise a server that keeps naming docs we cannot push would spin the
-    // socket in a tight hello/ready loop.
-    if (this.serverEmptyTruncated && result.pushed > 0 && result.failed === 0) {
+    // but only after a run that actually SENT something: a server that keeps
+    // naming docs we cannot push would otherwise spin the socket in a tight
+    // hello/ready loop. Progress, not perfection, is the bar: requiring zero
+    // failures let ONE doc that can never be pushed stall paging for the rest of
+    // the session, and every refresh still has to push at least one doc, so it
+    // cannot spin. A slice with nothing pushable waits for the next connect,
+    // whose sample is a different one (`listEmptyDocs`).
+    if (this.serverEmptyTruncated && result.pushed > 0) {
       this.serverEmptyTruncated = false;
       this.vaultEngine?.refresh();
     }

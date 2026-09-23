@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { config } from "../../config.js";
@@ -57,6 +58,56 @@ const WWW_AUTHENTICATE = `Bearer resource_metadata="${config.betterAuthUrl}/.wel
  * the /api/mcp endpoint is token-authenticated (the AI client).
  */
 
+/**
+ * Backoff for a token that keeps failing.
+ *
+ * Prod 2026-09-23: scripts kept POSTing a revoked/unknown token every ~20 s,
+ * forever, each one a token lookup plus an OAuth lookup. After
+ * {@link BAD_TOKEN_LIMIT} rejections of the SAME token inside
+ * {@link BAD_TOKEN_WINDOW_MS}, it is answered 429 with `Retry-After` until the
+ * window ends — no lookups. Keyed by a hash of the token, never by IP: Claude's
+ * connector traffic arrives from shared egress addresses, and an OAuth client's
+ * first discovery request carries NO token and is never limited.
+ */
+const BAD_TOKEN_LIMIT = 20;
+const BAD_TOKEN_WINDOW_MS = 10 * 60_000;
+const BAD_TOKEN_MAX_KEYS = 10_000;
+const badTokens = new Map<string, { count: number; since: number }>();
+
+function tokenKey(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 32);
+}
+
+/** Seconds until this token may be tried again, or 0 when it may be now. */
+function badTokenRetryAfter(token: string, now = Date.now()): number {
+  const hit = badTokens.get(tokenKey(token));
+  if (!hit) return 0;
+  if (now - hit.since >= BAD_TOKEN_WINDOW_MS) {
+    badTokens.delete(tokenKey(token));
+    return 0;
+  }
+  return hit.count >= BAD_TOKEN_LIMIT ? Math.ceil((hit.since + BAD_TOKEN_WINDOW_MS - now) / 1000) : 0;
+}
+
+function noteBadToken(token: string, now = Date.now()): void {
+  const key = tokenKey(token);
+  const hit = badTokens.get(key);
+  if (hit && now - hit.since < BAD_TOKEN_WINDOW_MS) {
+    hit.count++;
+    return;
+  }
+  if (badTokens.size >= BAD_TOKEN_MAX_KEYS) {
+    for (const [k, v] of badTokens) if (now - v.since >= BAD_TOKEN_WINDOW_MS) badTokens.delete(k);
+    if (badTokens.size >= BAD_TOKEN_MAX_KEYS) badTokens.clear();
+  }
+  badTokens.set(key, { count: 1, since: now });
+}
+
+/** Test seam: forget every remembered failure. */
+export function resetMcpBadTokens(): void {
+  badTokens.clear();
+}
+
 export interface McpDeps {
   docWriter: DocWriter;
   disconnectDoc: (vaultId: string, docId: string) => void;
@@ -100,9 +151,22 @@ export function createMcpRoutes(deps: McpDeps): Hono {
   app.post("/mcp", async (c) => {
     const token = extractToken(c);
     const client = c.req.header("user-agent") ?? c.req.header("User-Agent") ?? null;
+    const wait = token ? badTokenRetryAfter(token) : 0;
+    if (wait > 0) {
+      c.header("Retry-After", String(wait));
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32001, message: "Too many failed attempts with this token. Mint a new one in Baalda." },
+        },
+        429,
+      );
+    }
     let auth = token ? await verifyMcpToken(token, undefined, { client }) : null;
     if (!auth) auth = await resolveOAuthMcpAuth(c.req.raw.headers);
     if (!auth) {
+      if (token) noteBadToken(token);
       c.header("WWW-Authenticate", WWW_AUTHENTICATE);
       c.header("Access-Control-Expose-Headers", "WWW-Authenticate");
       return c.json(

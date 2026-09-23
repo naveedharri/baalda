@@ -251,6 +251,29 @@ describe("tree binaries register as `files` rows", () => {
     expect(registerFile).toHaveBeenCalledTimes(1);
   });
 
+  it("never uploads a file whose path names a row this user cannot see, and gives it no dot", async () => {
+    const states: Array<Record<string, string>> = [];
+    const registerFile = vi.fn(async () => {
+      throw serverError(409, "not_readable");
+    });
+    const { sync, log } = makeVault([{ relPath: "Restricted/deck.pdf" }], {
+      registerFile,
+      onFileStates: (s) => states.push({ ...s }),
+    });
+    await sync.reconcile();
+    await sync.reconcile();
+
+    // Asked once; no bytes, no doc-less upload the server would refuse forever.
+    expect(registerFile).toHaveBeenCalledTimes(1);
+    expect(log.intents).toEqual([]);
+    expect(log.legacyUploads).toEqual([]);
+    expect(states[states.length - 1]).toEqual({});
+
+    // The user can still ask again from Vault Health.
+    await sync.retryFiles(["Restricted/deck.pdf"]);
+    expect(registerFile).toHaveBeenCalledTimes(2);
+  });
+
   it("asks again after a refusal once the user retries the file (Vault Health)", async () => {
     let refuse = true;
     const registerFile = vi.fn(async ({ id }: { relPath: string; id: string }) => {

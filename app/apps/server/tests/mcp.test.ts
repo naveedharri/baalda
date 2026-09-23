@@ -17,6 +17,7 @@ import {
   seedVaultGrant,
 } from "./helpers/seed.js";
 import { createMcpToken, listMcpTokens } from "../src/mcp/tokens.js";
+import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
 
 /**
  * End-to-end MCP surface: token auth, JSON-RPC dispatch, CRUD tools, and that
@@ -88,6 +89,25 @@ describe("MCP server", () => {
   it("rejects missing/invalid tokens with 401", async () => {
     expect((await rpc(null, "tools/list")).status).toBe(401);
     expect((await rpc("mcp_not-a-real-token", "tools/list")).status).toBe(401);
+  });
+
+  it("backs off a token that keeps failing, without touching token-less discovery or good tokens", async () => {
+    resetMcpBadTokens();
+    const owner = await seedUser("owner@mcp-backoff.com");
+    const org = await seedOrg("Backoff", "acme-mcp-backoff");
+    await seedMember(org, owner, "owner");
+    const good = await tokenFor(owner, org);
+
+    for (let i = 0; i < 20; i++) expect((await rpc("mcp_revoked-token", "tools/list")).status).toBe(401);
+    const limited = await rpc("mcp_revoked-token", "tools/list");
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
+
+    // An OAuth client's first request carries no token: always the 401 + metadata.
+    expect((await rpc(null, "tools/list")).status).toBe(401);
+    // Another token is judged on its own.
+    expect((await rpc(good, "tools/list")).status).toBe(200);
+    resetMcpBadTokens();
   });
 
   it("initialize + tools/list advertise the CRUD tools", async () => {

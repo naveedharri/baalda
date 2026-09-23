@@ -137,6 +137,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   happened drawn as dashed `data-future` cells that never take a heat level.
 
 ### Fixed
+- **A member re-registered thousands of hidden folders every ~10 s (server + desktop).** A path
+  whose folder/note/file the caller cannot see was "adopted" with its id — naming private items
+  to anyone who sent the path — and the next pull's ACL-filtered listing pruned it again, so the
+  client re-sent it forever (prod: ~3,900 folders per pass). Adopt-by-path now answers
+  `not_readable` (no id, no path): folders exactly when the folder listing hides them, notes and
+  files when an item-level Private hides them. The desktop remembers those paths (`hiddenPaths`,
+  `AttachmentSync.unreadable`), stops re-sending them, records no failure and touches no file;
+  a path becomes ordinary again once the server lists it or it leaves the disk.
+- **`ready.empty` starved docs above the lowest 2,000 ids (server + desktop).** `listEmptyDocs`
+  was `ORDER BY id LIMIT 2000`, so the same slice was named on every connect; it is now a random
+  sample past the cap. The client asks for the next slice after any pass that pushed something,
+  not only a pass with zero failures.
+- **Sign-in rate limiting shared one bucket for every user (server).** Behind Railway's proxy
+  chain `x-forwarded-for` holds several addresses and Better Auth resolved no IP; it now reads
+  `x-real-ip` first.
+- **MCP scripts retried a bad token forever (server).** After 20 rejections of the same token in
+  10 minutes, `POST /api/mcp` answers 429 with `Retry-After`; keyed by token hash, never by IP,
+  and a token-less OAuth discovery request is never limited.
 - **Free vaults retried standalone files forever (server).** A blob upload whose path resolved
   to neither a registered `files` row nor `attachments/` answered 400 `invalid_rel_path` BEFORE
   the plan check, hiding the 402 `attachment_sync_requires_pro` the desktop reacts to (notice +
