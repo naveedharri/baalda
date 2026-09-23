@@ -60,12 +60,25 @@ export interface CrdtPersistence {
     stateVector: Uint8Array,
     upTo?: number,
   ): Promise<void>;
+  /**
+   * The doc's DISK BASE (#200): sha256 of the bytes this device last synced
+   * between the doc's file and its CRDT — last written by egest (recorded by
+   * `writeFileAtomic` when it is given the doc id) or last read into the doc
+   * by an ingest or a seed. Null when none was ever recorded. Optional: a
+   * store without it leaves the bridge on its older rule (every differing
+   * file is diffed).
+   */
+  loadDiskBase?(docId: string): Promise<string | null>;
+  /** Record the disk base after the bridge read a file INTO the doc. */
+  saveDiskBase?(docId: string, sha256: string): Promise<void>;
 }
 
 /** All I/O the bridge depends on, injected so it is testable in isolation. */
 export interface BridgeIO {
   readFile(path: string): Promise<string>;
-  writeFileAtomic(path: string, content: string): Promise<void>;
+  /** Atomic write. `docId` is passed by the bridge's egest so the store can
+   *  record the written bytes as that doc's disk base with the write. */
+  writeFileAtomic(path: string, content: string, docId?: string): Promise<void>;
   /** SHA-256 hex of `text`. May be sync (Node) or async (Web Crypto). */
   sha256(text: string): Promise<string> | string;
   persistence: CrdtPersistence;
@@ -153,6 +166,14 @@ export interface BridgeConfig {
    * 0 disables trimming.
    */
   undoStackLimit: number;
+  /**
+   * Upper bound on how long a signed-in bridge waits for its first server pull
+   * before it reconciles the file anyway (#200). While the pull is pending the
+   * bridge neither ingests the file nor writes it; the sync layer normally
+   * ends the wait itself (`reconcileAfterPull`) within a few seconds, and this
+   * only guarantees no caller can leave a note unreconciled forever.
+   */
+  pullReconcileTimeoutMs: number;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -174,6 +195,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   // switching away — far past any realistic Ctrl+Z run (CodeMirror's own
   // history keeps ~100), while still bounding the stack.
   undoStackLimit: 500,
+  pullReconcileTimeoutMs: 20_000,
 };
 
 export interface NoteBridgeOptions {

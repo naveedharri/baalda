@@ -207,6 +207,10 @@ vi.mock("../vaultDocStore", () => ({
         doc: new Y.Doc(),
         serialize: () => "content",
         ingestNow: async () => false,
+        beginPull: () => {},
+        abandonPull: () => {},
+        hasUnmergedFileChange: async () => false,
+        reconcileAfterPull: async () => false,
         seedFromFileIfEmpty: async () => {},
         flushEgest: async () => {},
       };

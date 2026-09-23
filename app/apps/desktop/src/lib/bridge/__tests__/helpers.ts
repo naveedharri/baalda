@@ -64,6 +64,16 @@ export class FakePersistence implements CrdtPersistence {
   private nextRowId = 0;
   /** Every snapshot ever written, per doc — lets tests assert recovery points. */
   snapshotHistory = new Map<string, Uint8Array[]>();
+  /** The `yjs_disk_base` table (#200). */
+  diskBases = new Map<string, string>();
+
+  async loadDiskBase(docId: string): Promise<string | null> {
+    return this.diskBases.get(docId) ?? null;
+  }
+
+  async saveDiskBase(docId: string, sha256: string): Promise<void> {
+    this.diskBases.set(docId, sha256);
+  }
 
   private store(docId: string): DocStore {
     let d = this.docs.get(docId);
@@ -128,7 +138,11 @@ export function makeHarness(seed?: Record<string, string>): Harness {
   const errors: unknown[] = [];
   const io: BridgeIO = {
     readFile: (p) => fs.readFile(p),
-    writeFileAtomic: (p, c) => fs.writeFileAtomic(p, c),
+    // Like Rust's `write_note` given a doc id: the write records the disk base.
+    writeFileAtomic: async (p, c, docId) => {
+      await fs.writeFileAtomic(p, c);
+      if (docId) persistence.diskBases.set(docId, sha256Hex(c));
+    },
     sha256: sha256Hex,
     persistence,
     onError: (e) => {

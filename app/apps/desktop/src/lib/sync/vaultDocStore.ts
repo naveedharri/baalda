@@ -195,6 +195,34 @@ export class VaultDocStore implements DocUpdateSink {
     this.suppressed = docId;
   }
 
+  /**
+   * Hold every background writer for `docId` until `done` settles.
+   *
+   * The editor's bridge for a note outlives its provider by one flush: closing
+   * a note tears the provider down synchronously, but the bridge's final egest
+   * and persist (`bridgeManager.closeCurrent`) are still in flight. Lifting the
+   * open-note suppression at that moment let the background feed open a SECOND
+   * bridge on the same doc_id — two egests on one file, and a cold apply
+   * reading a local CRDT store the closing bridge had not finished writing
+   * (#200). The hold rides the per-doc cold chain, so a feed update, a
+   * `promote` and a `release` for this doc all wait behind it — delayed, never
+   * dropped.
+   */
+  holdUntil(docId: string, done: Promise<unknown>): void {
+    const prev = this.coldChains.get(docId) ?? Promise.resolve();
+    const run = prev
+      .catch(() => {})
+      .then(() => done)
+      .then(
+        () => {},
+        () => {},
+      );
+    const chain: Promise<void> = run.finally(() => {
+      if (this.coldChains.get(docId) === chain) this.coldChains.delete(docId);
+    });
+    this.coldChains.set(docId, chain);
+  }
+
   /** The doc whose provider is owned elsewhere (the open note), or null. The bulk
    *  upload consults this so it never becomes a second writer on that doc. */
   suppressedDoc(): string | null {
@@ -463,43 +491,6 @@ export class VaultDocStore implements DocUpdateSink {
     return this.hot.get(docId)?.bridge ?? null;
   }
 
-  /**
-   * Does the file hold an edit neither the doc nor the incoming update has?
-   *
-   * Three answers, and only the third is an edit worth ingesting:
-   *  - the file matches the doc ⇒ nothing to fold in;
-   *  - the file matches what the update alone would produce ⇒ the file is the
-   *    echo of an apply that already happened (this doc's local CRDT is simply
-   *    behind its own file), and ingesting it would re-create the update's text
-   *    under this bridge's fresh clientID — the doubling loop;
-   *  - anything else ⇒ a genuine out-of-band write, ingest it.
-   *
-   * The probe costs one doc copy and only runs when the file and the doc already
-   * disagree, which is the uncommon case. A read failure answers "not external",
-   * because the flush below is a no-op against a file we cannot read anyway.
-   */
-  private async isExternalEdit(
-    bridge: NoteBridge,
-    path: string,
-    update: Uint8Array,
-  ): Promise<boolean> {
-    let fileText: string;
-    try {
-      fileText = await this.io.readFile(path);
-    } catch {
-      return false;
-    }
-    if (fileText === bridge.serialize()) return false;
-    const probe = new Y.Doc();
-    try {
-      Y.applyUpdate(probe, Y.encodeStateAsUpdate(bridge.doc));
-      Y.applyUpdate(probe, update);
-      return fileText !== probe.getText("content").toString();
-    } finally {
-      probe.destroy();
-    }
-  }
-
   private async coldApply(docId: string, update: Uint8Array): Promise<void> {
     // The doc may have gone HOT since this update was queued (a promote that
     // ran while an earlier apply in this chain was in flight). Route it to the
@@ -526,40 +517,31 @@ export class VaultDocStore implements DocUpdateSink {
       // before the flush; NOT in `divergedDocs`, which only tracks out-of-band
       // file merges), and marking it pushed would strand exactly those bytes.
       const hadLocalState = bridge.doc.store.clients.size > 0;
-      // Fold in any external edit sitting on disk BEFORE the remote delta lands
-      // and gets egested: the flush below rewrites the file from the doc, and a
-      // file the doc has never ingested (an AI edited it while no bridge was
-      // alive) would be silently overwritten. Ingesting FIRST is what makes that
-      // a three-way merge — the file is diffed against the doc as it was, so the
-      // file's contribution and the server's both survive. The doc-non-empty
-      // guard keeps an unhydrated placeholder on the pull-before-seed path
-      // (never a pre-sync seed); converged content makes this a no-op read. A
-      // genuine merge is reported up so the session pushes it (`onExternalMerge`).
-      //
-      // But only for a file that really is an external edit. Ingest turns file
-      // bytes into ops attributed to THIS client, and this bridge is a brand-new
-      // Y.Doc with a brand-new clientID every time — so a file that already
-      // holds the text of the update about to be applied gets that text inserted
-      // TWICE, once as this client's fresh ops and once as the server's, and Yjs
-      // keeps both. `flushEgest` then writes the doubled text back to the file,
-      // and the next update through here doubles twice as much. That is the
-      // 16 MB `Map of Content.md` in a customer vault on 2026-09-04: eighteen
-      // updates, each from a different clientID, each re-inserting the whole
-      // current delta, ending at 2^16 copies of one added block.
-      //
-      // `isExternalEdit` is the distinction, and it is exact rather than
-      // heuristic: ask what the update ALONE would make the text, and if the
-      // file already says that, the file is this loop's own echo, not an edit.
+      // Apply the server's delta FIRST, then fold in any external edit sitting
+      // on disk — three-way, against the doc as it was BEFORE the delta. A
+      // signed-in bridge opens waiting for exactly this (`awaitingPull`): it
+      // neither ingests nor writes the file until `reconcileAfterPull`, which
+      //  - finds file == doc+delta ⇒ the file is the echo of an apply that
+      //    already happened (this doc's local CRDT is behind its own file), and
+      //    ingesting it would re-insert the delta's text under this bridge's
+      //    fresh clientID — the doubling loop that turned a 686-byte
+      //    `Map of Content.md` into 16 MB on 2026-09-04;
+      //  - finds file == doc (or == its disk base) ⇒ the file is merely behind:
+      //    the flush below writes the delta out;
+      //  - otherwise diffs doc → file on a branch of the pre-delta doc and
+      //    merges it, so an AI's edit made while no bridge was alive and the
+      //    server's both survive. That merge is local-only until a provider
+      //    pushes it, hence `onExternalMerge`.
+      // Before #200 the bridge also armed a DEBOUNCED ingest at open, which a
+      // slow hydrate (a load-time compaction) let fire before this ran — the
+      // same double insert through a timer. An empty doc (an unhydrated
+      // placeholder) does not wait: it stays on the pull-before-seed path.
+      bridge.applyRemote(update);
       let merged = false;
-      if (
-        bridge.serialize().length > 0 &&
-        (await this.isExternalEdit(bridge, path, update)) &&
-        (await bridge.ingestNow())
-      ) {
+      if (await bridge.reconcileAfterPull()) {
         merged = true;
         this.onExternalMerge?.(docId);
       }
-      bridge.applyRemote(update);
       await bridge.flushEgest();
       this.rememberSv(docId, Y.encodeStateVector(bridge.doc));
       // Converged: the server's state is on disk and the file had nothing of its
