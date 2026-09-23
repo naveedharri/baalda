@@ -401,13 +401,26 @@ export class BinaryDeleteQueue {
 
       // 2. Renames, by content. A pending delete whose bytes are sitting at a
       //    path that appeared in the same window is that file moving.
-      const deletes: Array<{ relPath: string; blob: RemoteBlob }> = [];
+      // `blob: null` ⇒ a registered `files` row the server never received bytes
+      // for (see below): only the row is removed.
+      const deletes: Array<{ relPath: string; blob: RemoteBlob | null }> = [];
       for (const item of gone) {
         const blob = blobByPath.get(key(item.relPath));
         if (!blob) {
-          // The server never held these bytes: nothing to delete, and nothing
-          // that could ever come back down. The note queue's `isPushed` refusal,
-          // stated in the only terms a binary has.
+          // The server never held these bytes: nothing that could ever come
+          // back down, and so no copy to protect. The note queue's `isPushed`
+          // refusal, stated in the only terms a binary has.
+          //
+          // But the `files` row may exist: it is minted BEFORE the bytes, so a
+          // file that vanished between registration and upload (a tool's
+          // scratch output, a folder regenerated mid-sync) used to leave a row
+          // with nothing behind it, forever — listed on every device, never
+          // downloadable. That row goes, through the same cap as any delete;
+          // with no row there is nothing to propagate.
+          if (this.deps.fileId(item.relPath)) {
+            deletes.push({ relPath: item.relPath, blob: null });
+            continue;
+          }
           console.info(
             `[attachments] ${item.relPath} was deleted on disk but the server holds no copy — nothing to propagate`,
           );
@@ -464,7 +477,7 @@ export class BinaryDeleteQueue {
           const id = this.deps.fileId(d.relPath);
           try {
             if (id) await this.deps.deleteFile(id);
-            else await this.deps.deleteBlob(d.blob.id);
+            else if (d.blob) await this.deps.deleteBlob(d.blob.id);
           } catch (e) {
             if (errStatus(e) === 409) {
               // `blob_referenced`: a note still embeds these bytes. The file is

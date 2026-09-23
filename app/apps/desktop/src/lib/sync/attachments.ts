@@ -997,7 +997,15 @@ export class AttachmentSync {
         if (!this.localPathKeys.has(key) || listed.has(key)) this.unreadable.delete(key);
       }
     }
-    const { toUpload, toDownload } = diffAttachments(local, server);
+    const diff = diffAttachments(local, server);
+    const { toDownload } = diff;
+    // A 0-byte file has nothing to upload: the server refuses an empty blob
+    // (`invalid_size`), and before this that refusal read as a transient error,
+    // so every pass registered the file, asked, failed and left it `syncing`
+    // forever — an empty `__init__.py` held a `files` row with no bytes behind
+    // it. The same reading `settleServerEmpty` gives an empty note: nothing to
+    // push, so it is settled, never registered and never queued.
+    const toUpload = diff.toUpload.filter((a) => a.size !== 0);
 
     // A local file the uploader did NOT queue is one whose sha the server's
     // listing already carries, which is the listing saying it holds these
@@ -1007,7 +1015,9 @@ export class AttachmentSync {
     // client load unconfirmed and settle on the next pass, without a byte
     // moving. Under `attachments/` there are no `files` rows to confirm.
     if (this.deps.confirmFileBytes) {
-      const queued = new Set(toUpload.map((a) => a.relPath));
+      // The diff's queue, empties included: an empty file is settled, but the
+      // server does not hold it, so it is never confirmed as held.
+      const queued = new Set(diff.toUpload.map((a) => a.relPath));
       for (const a of local) {
         if (isUnderAttachments(a.relPath) || queued.has(a.relPath)) continue;
         this.deps.confirmFileBytes(a.relPath);
@@ -1290,10 +1300,17 @@ export class AttachmentSync {
         this.forgetDeadFileId(a.relPath, docId);
         return this.uploadOneClaimed(a, true);
       }
-      if (status === 413 || status === 415) {
+      if (status === 413 || status === 415 || status === 400 || status === 403) {
         // Permanent for these bytes: the file is over the cap or of a type the
         // server refuses. Retrying it every pass is a guaranteed failure every
         // pass — mark it and move on.
+        //
+        // A 400 (a malformed intent, or a `files` id the heal above could not
+        // revive) and a 403 (no write access here) are answers too. Read as
+        // transient they were retried on every pass for the rest of the
+        // session, the file badged `syncing` with a registered row and no bytes
+        // behind it. As a skip they badge `error`, and Retry (`retryFiles`)
+        // or the next launch asks once more — bounded, and visible.
         this.permanentSkips.add(a.sha256);
         console.warn(
           `[attachments] ${a.relPath} refused permanently (${status} ${errCode(e) ?? "?"}) — skipping`,
