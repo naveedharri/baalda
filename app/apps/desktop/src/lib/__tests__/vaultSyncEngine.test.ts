@@ -374,7 +374,7 @@ describe("VaultSyncEngine — inbound queue", () => {
       sink,
       wsFactory: () => (ws = new FakeWs()),
     });
-    engine.start();
+    engine.start(); await tick(); await tick(); // the socket opens once the sink's manifest has loaded
     ws!.onopen?.(null);
     await awaitHello(ws!);
 
@@ -404,7 +404,7 @@ describe("VaultSyncEngine — inbound queue", () => {
       wsFactory: () => (ws = new FakeWs()),
       onInboundProgress: (done, total) => seen.push([done, total]),
     });
-    engine.start();
+    engine.start(); await tick(); await tick(); // the socket opens once the sink's manifest has loaded
     ws!.onopen?.(null);
     await awaitHello(ws!);
     ws!.onmessage?.({ data: updateFrame("a", [1]) });
@@ -556,7 +556,7 @@ describe("VaultSyncEngine — inbound queue", () => {
       },
       clearTimeoutImpl: () => {},
     });
-    engine.start();
+    engine.start(); await tick(); await tick(); // the socket opens once the sink's manifest has loaded
     created[0].onopen?.(null);
     await tick();
 
@@ -585,7 +585,7 @@ describe("VaultSyncEngine — inbound queue", () => {
       sink,
       wsFactory: () => (ws = new FakeWs()),
     });
-    engine.start();
+    engine.start(); await tick(); await tick(); // the socket opens once the sink's manifest has loaded
     ws!.onopen?.(null);
     await tick();
     for (let i = 0; i < 8; i++) ws!.onmessage?.({ data: updateFrame("d", [i]) });
@@ -607,11 +607,33 @@ describe("VaultSyncEngine — inbound queue", () => {
       wsFactory: () => (ws = new FakeWs()),
     });
     engine.start();
+    // No socket until the manifest has loaded: the server's hello window starts
+    // at the upgrade, so a slow load must never run inside it.
+    expect(ws).toBeNull();
+    for (let i = 0; i < 5 && !ws; i++) await tick();
+    expect(sink.ready).toBe(true);
     ws!.onopen?.(null);
     for (let i = 0; i < 5 && !ws!.helloText(); i++) await tick();
 
-    expect(sink.ready).toBe(true); // hello never precedes the manifest load
     expect((ws!.helloText()!.manifest as Record<string, string>).A).toBe("BQ==");
+  });
+
+  it("a stop() while the manifest loads never opens a socket", async () => {
+    const sink = new SlowSink();
+    let opened = 0;
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => {
+        opened++;
+        return new FakeWs();
+      },
+    });
+    engine.start();
+    engine.stop();
+    for (let i = 0; i < 5; i++) await tick();
+    expect(opened).toBe(0);
   });
 });
 

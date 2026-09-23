@@ -13,6 +13,7 @@ import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
 import { ApiClient, ApiError } from "../api";
 import { TokenRefreshScheduler } from "./tokenRefresh";
+import { TerminalSyncError } from "./contentUpload";
 
 export type SyncStatus =
   | "offline" // no network provider / signed out
@@ -226,6 +227,8 @@ export class DocSync {
   private readonly doc: Y.Doc;
   /** Waiters parked in {@link whenFlushed}. */
   private flushWaiters: Array<(ok: boolean) => void> = [];
+  /** In-flight {@link whenSynced} waiters, told of every status change. */
+  private statusWaiters = new Set<(s: SyncStatus) => void>();
   /**
    * Consecutive auth rejections, driving the backoff below. Reset the moment a
    * connection authenticates (onSynced/connected), so a single expiry still
@@ -458,7 +461,19 @@ export class DocSync {
     }
   }
 
-  /** Resolve once the initial server sync completes (or reject on no-access). */
+  /**
+   * Resolve once the initial server sync completes, or after `timeoutMs` either
+   * way (offline-first). Rejects with a {@link TerminalSyncError} as soon as the
+   * doc reaches a terminal status — whether it already had one at the call or
+   * reaches it DURING the wait.
+   *
+   * The second half is the one that was missing. A doc the server deleted gets
+   * its 404 from the token mint a moment AFTER the provider is created, so a
+   * waiter that only checked the status at call time sat out the full 10 s and
+   * then reported a transient "server did not respond" — never permanent, so
+   * the same doc was queued again on the next pass. Four upload slots doing
+   * that for ~25 deleted notes, every ~30 s, forever (prod 2026-09-23).
+   */
   whenSynced(timeoutMs = 10_000): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.provider.isSynced) return resolve();
@@ -468,13 +483,18 @@ export class DocSync {
         done = true;
         clearTimeout(timer);
         this.provider.off("synced", onSynced);
+        this.statusWaiters.delete(onStatus);
         fn();
       };
       const onSynced = () => finish(resolve);
+      const onStatus = (s: SyncStatus) => {
+        if (isTerminalSyncStatus(s)) finish(() => reject(new TerminalSyncError(s)));
+      };
       this.provider.on("synced", onSynced);
+      this.statusWaiters.add(onStatus);
       const timer = setTimeout(() => finish(resolve), timeoutMs); // resolve anyway → offline-first
       // If access was already refused, don't wait the full timeout.
-      if (isTerminalSyncStatus(this._status)) finish(() => reject(new Error(this._status)));
+      onStatus(this._status);
     });
   }
 
@@ -655,6 +675,7 @@ export class DocSync {
     if (this._status === s) return;
     this._status = s;
     this.onStatus?.(s);
+    for (const w of [...this.statusWaiters]) w(s);
   }
 
   private setPending(p: boolean): void {

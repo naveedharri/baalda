@@ -3300,7 +3300,7 @@ export class SyncManager implements InboundHost {
     // confirmation so the normal pull-first path compares again. Oversized
     // notes remain terminal because another identical encode cannot help them.
     for (const [docId, failure] of [...this.permanentFailures]) {
-      if (failure.kind !== "no-write-access") continue;
+      if (failure.kind !== "no-write-access" && failure.status !== "no-access") continue;
       this.permanentFailures.delete(docId);
       this.bulkFailures.delete(docId);
       this.invalidatedFailures.add(docId);
@@ -4744,9 +4744,9 @@ export class SyncManager implements InboundHost {
       listServer: () => api.listVaultBlobs(vaultId),
       // The legacy pair: still the whole flow for a server that predates the
       // intent route, and the fallback the client drops to on its 404.
-      uploadServer: (relPath, bytes, mime, docId) =>
+      uploadServer: (relPath, bytes, mime, docId, baseSha) =>
         api
-          .uploadBlob({ vaultId, relPath, bytes, mime, fileName: baseName(relPath), docId })
+          .uploadBlob({ vaultId, relPath, bytes, mime, fileName: baseName(relPath), docId, baseSha })
           .then(() => undefined),
       downloadServer: (id) => api.downloadBlob(id),
       // intent → PUT → complete. Bytes go through Rust (epoch-pinned, streamed
@@ -4760,6 +4760,7 @@ export class SyncManager implements InboundHost {
           relPath: input.relPath,
           filename: input.filename,
           docId: input.docId,
+          baseSha: input.baseSha,
         }),
       completeUpload: (completeUrl, body) =>
         api.completeBlob(completeUrl, body).then(() => undefined),
@@ -4819,6 +4820,13 @@ export class SyncManager implements InboundHost {
       // A row is not its bytes. This is the separate, stronger claim that lets a
       // revocation remove the file (`registry.confirmFileBytes`).
       confirmFileBytes: (relPath) => this.registry.confirmFileBytes(relPath),
+      // The three-way's base per `files` id, persisted in `.context/config.json`
+      // so a restart still knows a teammate's edit from our own.
+      fileBase: (docId) => this.registry.getFileBase(docId),
+      setFileBase: (docId, sha) => this.registry.setFileBase(docId, sha),
+      // The recovery copy a server version replaces a divergent local one after.
+      keepLocalCopy: (relPath) =>
+        ipc.copyToTrash(relPath, trashStamp(), epoch),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => this.registry.forgetFileId(relPath),
@@ -4993,7 +5001,9 @@ export class SyncManager implements InboundHost {
     if (!current()) return;
     // Up to 5s of waiting — easily long enough to span a vault switch. Seeding
     // then would read the NEW vault's file at this path into the OLD vault's doc.
-    await sync.whenSynced(5000);
+    // A terminal refusal (deleted / no access) rejects; it is handled exactly
+    // like "no pull landed" below rather than escaping this `void`ed call.
+    await sync.whenSynced(5000).catch(() => {});
     if (!current()) return;
     if (!sync.isSynced) {
       // No pull to wait for (offline, server down): the bridge has held its

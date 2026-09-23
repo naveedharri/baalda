@@ -2624,6 +2624,9 @@ export class ApiClient {
     /** The `files` row this blob's bytes belong to (tree binaries only) —
      *  stored as `blobs.doc_id` so the ACL resolves the file, not its path. */
     docId?: string | null;
+    /** The sha this device last agreed with the server on for `docId`. The
+     *  server answers 409 `stale_base` when the file has moved on since. */
+    baseSha?: string | null;
   }): Promise<BlobMeta> {
     const headers = this.baseHeaders();
     headers["Content-Type"] = input.mime ?? "application/octet-stream";
@@ -2636,7 +2639,12 @@ export class ApiClient {
     // Copy into a fresh ArrayBuffer so the fetch body is a clean BodyInit.
     const buf = input.bytes.slice().buffer;
     const res = await this.fetchImpl(
-      `${this.baseUrl}/api/vaults/${encodeURIComponent(input.vaultId)}/blobs`,
+      // `baseSha` rides the query, not a header: a server that predates it
+      // would refuse an unknown header at the CORS preflight and fail the
+      // upload outright, while an unknown query parameter is simply ignored.
+      `${this.baseUrl}/api/vaults/${encodeURIComponent(input.vaultId)}/blobs${
+        input.docId && input.baseSha ? `?baseSha=${encodeURIComponent(input.baseSha)}` : ""
+      }`,
       { method: "POST", headers, body: buf },
     );
     const text = await res.text();
@@ -2686,6 +2694,9 @@ export class ApiClient {
       /** The `files` row these bytes belong to — see {@link registerFile}. The
        *  server stores it as `blobs.doc_id`; an older one ignores it. */
       docId?: string | null;
+      /** See {@link uploadBlob}'s `baseSha`: 409 `stale_base` when the doc's
+       *  current bytes are not the ones this edit started from. */
+      baseSha?: string | null;
     },
   ): Promise<BlobIntent> {
     if (this.blobIntentSupported === false) {

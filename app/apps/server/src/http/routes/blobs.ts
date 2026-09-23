@@ -332,6 +332,15 @@ blobRoutes.post(
       const hit = await findBlob(vaultId, claimedSha, docId);
       if (hit) return c.json({ ...toMeta(await claimDoc(hit, docId)), deduped: true }, 200);
     }
+    // `x-base-sha256` / `?baseSha=`: the version this edit started from (see
+    // `staleBaseConflict`). Judged before the body is read.
+    const stale = await staleBaseConflict(
+      vaultId,
+      docId,
+      normalizeSha(c.req.header("x-base-sha256") ?? c.req.query("baseSha")),
+      claimedSha,
+    );
+    if (stale) return staleBase(c, stale);
 
     // Admission control, after auth (so anonymous callers can never occupy the
     // budget) and before the body is materialized. Reserve the declared size,
@@ -520,6 +529,52 @@ async function findBlob(
     [vaultId, sha256, docId],
   );
   return rows[0];
+}
+
+/**
+ * Optimistic concurrency for a registered file's content.
+ *
+ * The server keeps ONE version per doc ({@link retireSupersededDocBlobs}), so an
+ * upload from a device that never saw a teammate's newer version would retire
+ * that version — and the teammate's device, seeing its bytes gone, re-uploaded
+ * them: two devices flipping one file forever. A client that names the version
+ * its edit started from (`baseSha`) is refused when the doc has moved on, and
+ * downloads the current version instead.
+ *
+ * Answers the doc's current ready row when it conflicts, null otherwise. No
+ * base (an older client), no doc, no current row, or a current row whose sha is
+ * the base or the incoming content ⇒ no conflict, i.e. exactly the old behavior.
+ */
+async function staleBaseConflict(
+  vaultId: string,
+  docId: string | null,
+  baseSha: string | null,
+  incomingSha: string | null,
+): Promise<BlobRow | null> {
+  if (!docId || !baseSha) return null;
+  const { rows } = await pool.query<BlobRow>(
+    `SELECT ${BLOB_ROW_COLUMNS}
+       FROM blobs b
+      WHERE b.vault_id = $1 AND b.doc_id = $2 AND b.status = 'ready'
+      ORDER BY b.created_at DESC, b.id DESC`,
+    [vaultId, docId],
+  );
+  if (rows.length === 0) return null;
+  if (rows.some((r) => r.sha256 === baseSha || (incomingSha !== null && r.sha256 === incomingSha))) {
+    return null;
+  }
+  return rows[0];
+}
+
+function staleBase(c: Context, current: BlobRow) {
+  return c.json(
+    {
+      error: "This file changed on the server since your copy was synced",
+      code: "stale_base",
+      current: toMeta(current),
+    },
+    409,
+  );
 }
 
 /**
@@ -794,6 +849,16 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   // attachments settles them all with one round trip each.
   const hit = await findBlob(vaultId, sha256, docId);
   if (hit) return c.json({ deduped: true, blob: toMeta(await claimDoc(hit, docId)) }, 200);
+
+  // Optional `baseSha`: refuse an edit of a version the doc has moved on from,
+  // rather than retiring a teammate's newer bytes (see `staleBaseConflict`).
+  const stale = await staleBaseConflict(
+    vaultId,
+    docId,
+    normalizeSha(typeof body.baseSha === "string" ? body.baseSha : null),
+    sha256,
+  );
+  if (stale) return staleBase(c, stale);
 
   const quota = await checkStorageQuota(vaultId, org, size);
   if (quota) return c.json(quota, 402);

@@ -126,6 +126,15 @@ interface VaultSyncConfig {
    */
   filesConfirmed?: string[];
   /**
+   * `files` id → the sha256 this device last agreed with the server on for that
+   * file (uploaded, downloaded, or listed equal). The BASE of the blob mirror's
+   * three-way decision (`attachments.ts planBinarySync`): local == base while the
+   * server differs is a teammate's edit to download, local != base is a local
+   * edit to upload with `baseSha`. Keyed by id so a rename carries it. Absent
+   * means "no base", and a doc with no base never overwrites the server.
+   */
+  fileBases?: Record<string, string>;
+  /**
    * docIds whose CONTENT this device has confirmed on the server (the bulk
    * upload's resume point — see `ContentUploader`).
    *
@@ -518,6 +527,8 @@ export class VaultRegistry {
    *  binary counterpart of {@link pushed}, and unlike it a correctness gate.
    *  See {@link confirmFileBytes} and `VaultSyncConfig.filesConfirmed`. */
   private filesConfirmed = new Set<string>();
+  /** `files` id → last agreed sha256 (see `VaultSyncConfig.fileBases`). */
+  private fileBases = new Map<string, string>();
   /** docIds whose content this device has confirmed on the server. See
    *  `VaultSyncConfig.pushed` for why this is an optimization, not a guarantee. */
   private pushed = new Set<string>();
@@ -566,6 +577,24 @@ export class VaultRegistry {
    * came back) or the path leaves the disk; wholesale on `reset`.
    */
   private hiddenPaths = new Set<string>();
+  /**
+   * Lower-cased local note paths, and the doc_ids they carried, that the server
+   * refused with `note_deleted`: the id names a note a teammate DELETED, and
+   * this device still holds a copy it never confirmed uploading (so the inbound
+   * pass refused to remove it — it may be the only copy of that work).
+   *
+   * Asking again can only get the same answer, and before the server refused it
+   * the answer was a false "created": a vault-wide `registry-changed`
+   * broadcast, a content upload whose token mint 404'd, and 4 upload slots
+   * waiting 10 s each — every ~30 s, forever (prod 2026-09-23). The file is left
+   * exactly where it is, as an unsynced local note; it is deliberately NOT
+   * re-registered under a fresh id, which would silently undo a teammate's
+   * delete for the whole vault. A path leaves when it leaves the disk or the
+   * server lists it again (the note was restored); an id when the server lists
+   * it again; both wholesale on `reset`.
+   */
+  private deletedPaths = new Set<string>();
+  private deletedDocIds = new Set<string>();
   /**
    * Paths THIS device just created as materialized placeholders, awaiting their
    * own watcher echo (see {@link consumeMaterialized}).
@@ -820,10 +849,13 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving.
     this.aliasPaths.clear();
     this.hiddenPaths.clear();
+    this.deletedPaths.clear();
+    this.deletedDocIds.clear();
     this.folderByPath.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
     this.filesConfirmed.clear();
+    this.fileBases.clear();
     this.pushed.clear();
     // A surviving baseline is exactly the cross-vault confusion this method
     // exists to prevent — it would tell vault B that vault A's notes moved.
@@ -997,7 +1029,24 @@ export class VaultRegistry {
     // The row is gone, so the claim about its bytes goes with it. Leaving it
     // behind would let a path re-used later inherit a confirmation that was
     // made about a different file's content.
-    if (id) this.filesConfirmed.delete(id);
+    if (id) {
+      this.filesConfirmed.delete(id);
+      this.fileBases.delete(id);
+    }
+    this.persist();
+  }
+
+  /** The sha256 this device last agreed with the server on for a `files` id —
+   *  the base of the blob mirror's three-way decision. */
+  getFileBase(docId: string): string | null {
+    return this.fileBases.get(docId) ?? null;
+  }
+
+  /** Record that this device and the server agree on these bytes for `docId`. */
+  setFileBase(docId: string, sha256: string): void {
+    if (this.stale()) return;
+    if (!docId || !sha256 || this.fileBases.get(docId) === sha256) return;
+    this.fileBases.set(docId, sha256);
     this.persist();
   }
 
@@ -1081,11 +1130,18 @@ export class VaultRegistry {
    *  such key and every row loads UNCONFIRMED — the safe direction: the next
    *  pass whose listing matches the file's sha confirms it without moving a
    *  byte (`AttachmentSync.pass`). */
-  private adoptConfigFiles(files: Record<string, string>, confirmed: readonly string[]): void {
+  private adoptConfigFiles(
+    files: Record<string, string>,
+    confirmed: readonly string[],
+    bases: Record<string, string> = {},
+  ): void {
     for (const [rp, id] of Object.entries(files)) {
       if (typeof id === "string" && id) this.fileByPath.set(rp, id);
     }
     for (const id of confirmed) if (typeof id === "string" && id) this.filesConfirmed.add(id);
+    for (const [id, sha] of Object.entries(bases)) {
+      if (id && typeof sha === "string" && sha) this.fileBases.set(id, sha);
+    }
   }
 
   /** Adopt a bootstrap cursor read from `.context/config.json`, under the same
@@ -1245,6 +1301,19 @@ export class VaultRegistry {
       this.hiddenPaths.add(f.path.toLowerCase());
       return "ok";
     }
+    // The id names a note deleted on the server. Reported ONCE (the path is
+    // skipped from now on — see `deletedPaths`), with a reason that says the
+    // file is safe and why it no longer syncs.
+    if (f.code === "note_deleted" && f.kind === "note") {
+      const firstTime = !this.deletedPaths.has(f.path.toLowerCase());
+      this.deletedPaths.add(f.path.toLowerCase());
+      if (f.docId) this.deletedDocIds.add(f.docId);
+      if (!firstTime) return "failed";
+      f = {
+        ...f,
+        reason: "deleted on the server by another member — kept on this device, no longer synced",
+      };
+    }
     this.failed.push(f);
     if (f.code === "vault_limit_reached" || f.code === "member_limit_reached") {
       this.limitReached = f.code;
@@ -1310,6 +1379,7 @@ export class VaultRegistry {
       // Omitted while empty, so a vault with no tree binaries writes the same
       // bytes it always did and the identical-config memo keeps working.
       ...(this.filesConfirmed.size > 0 ? { filesConfirmed: [...this.filesConfirmed] } : {}),
+      ...(this.fileBases.size > 0 ? { fileBases: Object.fromEntries(this.fileBases) } : {}),
       pushed: [...this.pushed],
       ...(this.unhydratedPlaceholders.size > 0
         ? { unhydratedPlaceholders: [...this.unhydratedPlaceholders] }
@@ -1732,6 +1802,15 @@ export class VaultRegistry {
                 ? "access was removed, but this device never confirmed its content upstream — left on disk"
                 : "deleted on the server, but this device never confirmed its content — left on disk",
             });
+            // Releasing the claim lets a file that is really a NEW note at this
+            // path (re-imported under a fresh local id) register on a later
+            // pass. A file still carrying THIS doc_id stays suppressed without
+            // it: `planInbound` suppresses any local note whose own id is
+            // tombstoned, baseline or not, and the server refuses a dead id
+            // with `note_deleted` besides. Before both, the released claim
+            // re-registered the dead id every pass — a false "created", a
+            // vault-wide broadcast and an upload that could never mint a token
+            // (prod 2026-09-23).
             if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
             this.sink.item("failed");
             return;
@@ -2086,7 +2165,7 @@ export class VaultRegistry {
     for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
       if (typeof id === "string" && id) this.folderByPath.set(rp, id);
     }
-    this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? []);
+    this.adoptConfigFiles(cfg.files ?? {}, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     this.pushed = new Set(cfg.pushed ?? []);
     this.unhydratedPlaceholders = new Set(cfg.unhydratedPlaceholders ?? []);
     // Same collection guard as `reconcile`'s: the baseline describes the
@@ -2241,7 +2320,7 @@ export class VaultRegistry {
     // Same guard for the tree-binary map: an id minted against another
     // collection names nothing here.
     if (cfg.serverVaultId === vaultId && cfg.files) {
-      this.adoptConfigFiles(cfg.files, cfg.filesConfirmed ?? []);
+      this.adoptConfigFiles(cfg.files, cfg.filesConfirmed ?? [], cfg.fileBases ?? {});
     }
     this.adoptBootstrap(cfg, vaultId);
 
@@ -2610,12 +2689,22 @@ export class VaultRegistry {
     for (const key of [...this.hiddenPaths]) {
       if (resolvedNotePathsCi.has(key)) this.hiddenPaths.delete(key);
     }
+    // Restored on the server, or gone from this disk: no longer a refusal to
+    // remember (see `deletedPaths`).
+    for (const key of [...this.deletedPaths]) {
+      if (resolvedNotePathsCi.has(key) || !localNotePathCi.has(key)) this.deletedPaths.delete(key);
+    }
+    if (this.deletedDocIds.size > 0) {
+      const listed = new Set(serverNotes.map((n) => noteDocId(n)));
+      for (const id of [...this.deletedDocIds]) if (listed.has(id)) this.deletedDocIds.delete(id);
+    }
     const missingNotes = notes.filter(
       (n) =>
         !resolvedNotePathsCi.has(n.path.toLowerCase()) &&
         !this.inboundSuppressed.has(n.path) &&
         !this.aliasPaths.has(n.path) &&
-        !this.hiddenPaths.has(n.path.toLowerCase()),
+        !this.hiddenPaths.has(n.path.toLowerCase()) &&
+        !this.deletedPaths.has(n.path.toLowerCase()),
     );
 
     // Announce the phase only when there is something to create. A pull with
@@ -3308,6 +3397,11 @@ export class VaultRegistry {
     // doc_ids and start the ping-pong (see `canonicalNotePath`).
     const mappedAs = this.canonicalNotePath(relPath);
     if (mappedAs) return this.byPath.get(mappedAs) ?? null;
+    // Deleted on the server (see `deletedPaths`): opening the local copy must
+    // not ask again — the answer is known, and it stays a local-only note.
+    if ((docId && this.deletedDocIds.has(docId)) || this.deletedPaths.has(relPath.toLowerCase())) {
+      return null;
+    }
     try {
       const folderId = this.folderByPath.get(parentDir(relPath)) ?? null;
       const created = await this.api.createNote({

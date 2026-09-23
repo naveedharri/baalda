@@ -378,12 +378,31 @@ describe("planInbound — deletes", () => {
     expect([...p.suppress]).toEqual(["bye.md"]);
   });
 
-  it("ignores a tombstone for a doc we never agreed was ours", () => {
+  it("ignores a tombstone for a doc we never agreed was ours — removes nothing, but suppresses", () => {
+    // Prod 2026-09-23: the refused removal of an unconfirmed copy released its
+    // baseline claim, so the next pass reached "never agreed it was ours" before
+    // looking at the tombstone. Nothing suppressed the path, and the outbound
+    // half re-registered the DEAD id every pass. The file's own id is tombstoned,
+    // which is proof enough to stop re-registering it — not to delete it.
     const p = plan({
       local: new Map([["d1", "mine.md"]]),
       tombstones: new Set(["d1"]),
     });
     expect(p.trash).toEqual([]);
+    expect(p.stubs).toEqual([]);
+    expect([...p.suppress]).toEqual(["mine.md"]);
+    expect(p.rejected).toEqual([
+      expect.objectContaining({ kind: "trash", path: "mine.md", docId: "d1" }),
+    ]);
+  });
+
+  it("suppresses nothing for an un-baselined local note whose id is NOT tombstoned", () => {
+    const p = plan({
+      local: new Map([["d2", "new.md"]]),
+      tombstones: new Set(["d1"]),
+    });
+    expect([...p.suppress]).toEqual([]);
+    expect(p.rejected).toEqual([]);
   });
 
   it("is a no-op for a tombstoned note already gone from disk", () => {

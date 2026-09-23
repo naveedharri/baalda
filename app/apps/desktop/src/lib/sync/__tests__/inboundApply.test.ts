@@ -682,6 +682,40 @@ describe("inbound delete", () => {
     expect(ipc.trashNote).not.toHaveBeenCalled();
     expect(r.reg.failures().map((f) => f.kind)).toContain("orphan");
   });
+
+  it("never re-registers the dead id of a kept unconfirmed copy on later passes", async () => {
+    // Prod 2026-09-23: the refused removal released the baseline claim, the next
+    // pass never suppressed the path, and the file went back up under its own
+    // (dead) doc_id every ~30 s — each one a vault-wide registry broadcast and an
+    // upload that could never mint a token.
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    disk.bodies.set("mine.md", "words nobody else has");
+    const then = { notes: [], tombstones: ["d1"] };
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "mine.md" }] },
+      then,
+    });
+    expect(r.reg.failures().map((f) => f.kind)).toContain("orphan");
+
+    // Pass 3 and 4: a relaunch reading what pass 2 persisted, then a plain pull.
+    for (let pass = 0; pass < 2; pass++) {
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+      const api = fakeApi(then);
+      const reg = new VaultRegistry(api);
+      reg.setInboundHost(recordingHost().host);
+      await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+      expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
+      expect(reg.getMapping("mine.md")).toBeNull();
+      expect(reg.failures().map((f) => f.reason).join(" ")).toContain("no longer synced");
+    }
+    // The only copy of that text is still exactly where the user left it.
+    expect(disk.notes.get("mine.md")).toBe("d1");
+    expect(disk.bodies.get("mine.md")).toBe("words nobody else has");
+    expect(ipc.trashNote).not.toHaveBeenCalled();
+  });
 });
 
 

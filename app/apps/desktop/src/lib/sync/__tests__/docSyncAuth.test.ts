@@ -70,6 +70,7 @@ vi.mock("@hocuspocus/provider", () => {
 
 import { ApiClient } from "../../api";
 import { DocSync, isTerminalSyncStatus, mintFailureStatus } from "../syncManager";
+import { TerminalSyncError } from "../contentUpload";
 
 /** An ApiClient whose `POST /api/sync-token` answers with `status`. */
 function api(status: number, body: unknown = { token: "tok", readOnly: false }): ApiClient {
@@ -129,6 +130,33 @@ describe("DocSync — a doc the server cannot mint for", () => {
     captured.handlers!.onAuthenticationFailed?.({ reason: "invalid" });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(captured.connects).toBe(0);
+    vi.useRealTimers();
+    sync.destroy();
+  });
+
+  // Prod 2026-09-23: the 404 lands AFTER the uploader starts waiting. A waiter
+  // that only checked the status at call time sat out its full 10 s and then
+  // reported a transient failure — so the doc was re-queued every pass.
+  it("rejects a pending whenSynced the moment the doc turns terminal", async () => {
+    vi.useFakeTimers();
+    const sync = docSync(api(404, { error: "Unknown document" }));
+    const settled = vi.fn();
+    const waiting = sync.whenSynced(10_000).then(
+      () => settled("resolved"),
+      (e: unknown) => settled(e),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).not.toHaveBeenCalled(); // still waiting: not terminal yet
+
+    await captured.handlers!.token(); // the mint 404s → "deleted"
+    await waiting;
+    expect(settled).toHaveBeenCalledTimes(1);
+    const err = settled.mock.calls[0][0] as TerminalSyncError;
+    expect(err).toBeInstanceOf(TerminalSyncError);
+    expect(err.status).toBe("deleted");
+
+    // …and a later call rejects straight away too, without waiting out a timer.
+    await expect(sync.whenSynced(10_000)).rejects.toBeInstanceOf(TerminalSyncError);
     vi.useRealTimers();
     sync.destroy();
   });
