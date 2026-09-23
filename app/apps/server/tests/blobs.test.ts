@@ -98,6 +98,36 @@ describe("attachment blob store (spec 02 §2/§5A)", () => {
     expect(upload.status).toBe(402);
   });
 
+  it("answers the plan, not the path, for a tree file with no usable files row on Free", async () => {
+    // prod 2026-09-23: a Free vault's binaries sent intents with no (or a dead)
+    // docId; the 400 `invalid_rel_path` came before the plan check, so the
+    // desktop never saw the 402 that stops its retries and shows the notice.
+    process.env.POLAR_ACCESS_TOKEN = "test-token";
+    const owner = await signUp("owner@free-tree.com");
+    const org = await seedOrg("Free Tree", "free-tree");
+    await seedMember(org, owner.userId, "owner");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const intent = (body: Record<string, unknown>) =>
+      app.fetch(new Request(`http://local/api/vaults/${vault}/blobs/intent`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ sha256: "b".repeat(64), size: 3, mime: "image/jpeg", ...body }),
+      }));
+
+    for (const extra of [{}, { docId: "never-registered" }]) {
+      const res = await intent({ relPath: "Shots/review_1.jpg", ...extra });
+      expect(res.status).toBe(402);
+      expect(await res.json()).toMatchObject({ code: "attachment_sync_requires_pro" });
+    }
+
+    // Billing off (a self-host): the path is still wrong, and says so.
+    delete process.env.POLAR_ACCESS_TOKEN;
+    const res = await intent({ relPath: "Shots/review_1.jpg" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "invalid_rel_path" });
+  });
+
   it("keeps pre-update embedded images available to existing Free members without rewriting them", async () => {
     const owner = await signUp("owner@legacy-images.com");
     const member = await signUp("member@legacy-images.com");

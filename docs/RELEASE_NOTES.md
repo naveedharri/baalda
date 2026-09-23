@@ -22,6 +22,7 @@
 
 - Files that stayed "syncing" forever now repair themselves: if a file was wrongly removed from the server while it was still on your computer, Baalda registers and uploads it again on its own.
 - Health page: files on this computer that are not on the Remote Vault can now be selected and retried or deleted in bulk.
+- On plans without file sync, Baalda now explains that files stay on this computer instead of retrying them over and over.
 
 ## 0.1.64
 
