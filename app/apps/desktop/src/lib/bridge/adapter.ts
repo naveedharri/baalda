@@ -70,7 +70,8 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
     readFile: (path) => ipc.readNote(path, epoch),
     // write_note performs the atomic temp-file+rename AND re-indexes in Rust,
     // so egest gets FTS/backlink refresh for free — no separate reindex hook.
-    writeFileAtomic: (path, content) => ipc.writeNote(path, content, epoch),
+    // …and, given the doc id, records the bytes as the doc's disk base (#200).
+    writeFileAtomic: (path, content, docId) => ipc.writeNote(path, content, epoch, docId),
     sha256: sha256Hex,
     // A failed write is the one bridge error a person must see (#81): the .md is
     // the durable copy, and "nothing happened" is how it would otherwise read.
@@ -87,6 +88,8 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
       // keystroke appended while this save was in flight survives it.
       saveSnapshot: (docId, snapshot, stateVector, upTo) =>
         ipc.saveYjsSnapshot(docId, snapshot, stateVector, epoch, upTo),
+      loadDiskBase: (docId) => ipc.getDiskBase(docId, epoch),
+      saveDiskBase: (docId, sha256) => ipc.setDiskBase(docId, sha256, epoch),
     },
   };
 }

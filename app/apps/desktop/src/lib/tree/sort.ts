@@ -3,7 +3,8 @@
 //
 // Two layers, and the order between them is the whole design:
 //
-//   sortTree()  →  the base order, from a preference (recent / A–Z)
+//   sortTree()  →  the base order, from a preference (recent / A–Z / Z–A),
+//                  optionally overridden per folder (`FolderSorts`)
 //   applyOrder() →  the user's manual per-folder arrangement, pinned on top
 //
 // Because `applyOrder` ranks the items a folder has been arranged with and
@@ -19,12 +20,31 @@
 import type { TreeNode } from "../ipc";
 
 /** How the sidebar arranges anything the user hasn't arranged themselves. */
-export type TreeSort = "recent" | "name";
+export type TreeSort = "recent" | "name" | "name-desc";
 
 export const TREE_SORTS: Array<{ id: TreeSort; label: string; hint: string }> = [
   { id: "recent", label: "Recently modified", hint: "Newest notes first" },
   { id: "name", label: "Name (A–Z)", hint: "Alphabetical" },
+  {
+    id: "name-desc",
+    label: "Name (Z–A)",
+    hint: "Reverse alphabetical — dated notes like 2026-09-23 newest first",
+  },
 ];
+
+export function isTreeSort(v: unknown): v is TreeSort {
+  return v === "recent" || v === "name" || v === "name-desc";
+}
+
+/**
+ * Per-folder overrides of the base sort, keyed by folder path. A folder's entry
+ * applies to it and everything below it, until a deeper folder sets its own —
+ * so "Daily: Name (Z–A)" puts the latest daily note on top while the rest of
+ * the vault keeps the vault-wide sort. It REPLACES the base sort for that
+ * subtree rather than adding a layer: the hand-made arrangement (`applyOrder`)
+ * still sits on top of whatever this picks.
+ */
+export type FolderSorts = Record<string, TreeSort>;
 
 /** Sidebar rows are titles, so compare them the way a reader would: "note 10"
  *  after "note 9", case- and accent-insensitively. */
@@ -47,21 +67,52 @@ function byName(a: TreeNode, b: TreeNode): number {
  * Ties and missing mtimes (0/absent) fall back to name order, so the result is
  * total and stable rather than dependent on what `read_dir` happened to yield.
  */
-export function sortTree(nodes: TreeNode[], mode: TreeSort): TreeNode[] {
+export function sortTree(
+  nodes: TreeNode[],
+  mode: TreeSort,
+  folderSorts: FolderSorts = {},
+): TreeNode[] {
   const dirs: TreeNode[] = [];
   const files: TreeNode[] = [];
   for (const n of nodes) (n.isDir ? dirs : files).push(n);
 
-  dirs.sort(byName);
+  // Z–A reverses folders too: it is a name order, so it cannot shuffle the
+  // skeleton the way recency would, and a `2026/` above `2025/` is the point.
+  dirs.sort(mode === "name-desc" ? (a, b) => byName(b, a) : byName);
   files.sort(
     mode === "name"
       ? byName
-      : (a, b) => (b.modified ?? 0) - (a.modified ?? 0) || byName(a, b),
+      : mode === "name-desc"
+        ? (a, b) => byName(b, a)
+        : (a, b) => (b.modified ?? 0) - (a.modified ?? 0) || byName(a, b),
   );
 
   return [...dirs, ...files].map((n) =>
-    n.children ? { ...n, children: sortTree(n.children, mode) } : n,
+    n.children
+      ? { ...n, children: sortTree(n.children, folderSorts[n.path] ?? mode, folderSorts) }
+      : n,
   );
+}
+
+/** Re-key folder sorts after a rename or move, carrying the subtree with it. */
+export function renameInFolderSorts(
+  sorts: FolderSorts,
+  oldPath: string,
+  newPath: string,
+): FolderSorts {
+  let changed = false;
+  const out: FolderSorts = {};
+  for (const [path, sort] of Object.entries(sorts)) {
+    const moved =
+      path === oldPath
+        ? newPath
+        : path.startsWith(oldPath + "/")
+          ? newPath + path.slice(oldPath.length)
+          : path;
+    if (moved !== path) changed = true;
+    out[moved] = sort;
+  }
+  return changed ? out : sorts;
 }
 
 /**

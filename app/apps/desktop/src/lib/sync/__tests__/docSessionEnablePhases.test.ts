@@ -147,6 +147,10 @@ vi.mock("../vaultDocStore", () => ({
         doc: new Y.Doc(),
         serialize: () => "content",
         ingestNow: async () => false,
+        beginPull: () => {},
+        abandonPull: () => {},
+        hasUnmergedFileChange: async () => false,
+        reconcileAfterPull: async () => false,
         seedFromFileIfEmpty: async () => {},
         flushEgest: async () => {},
       };
@@ -207,6 +211,8 @@ function bridge(): NoteBridge {
     doc,
     serialize: () => "hello",
     seedFromFileIfEmpty: async () => {},
+    abandonPull: () => {},
+    reconcileAfterPull: async () => false,
   } as unknown as NoteBridge;
 }
 

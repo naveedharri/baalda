@@ -6,7 +6,7 @@
 
 import type { ServerChoice } from "./auth/serverChoice";
 import type { PropertiesMode } from "./editor/frontmatter";
-import type { TreeSort } from "./tree/sort";
+import { isTreeSort, type FolderSorts, type TreeSort } from "./tree/sort";
 
 export type ActivityStatus = "online" | "away" | "busy" | "invisible";
 
@@ -141,7 +141,7 @@ const TREE_SORT_KEY = "context.treeSort";
 export function readTreeSort(): TreeSort {
   try {
     const v = localStorage.getItem(TREE_SORT_KEY);
-    return v === "name" || v === "recent" ? v : "recent";
+    return isTreeSort(v) ? v : "recent";
   } catch {
     return "recent";
   }
@@ -150,6 +150,35 @@ export function readTreeSort(): TreeSort {
 export function writeTreeSort(sort: TreeSort): void {
   try {
     localStorage.setItem(TREE_SORT_KEY, sort);
+  } catch {
+    /* localStorage unavailable — the sort stays in-memory only */
+  }
+}
+
+const FOLDER_SORT_PREFIX = "context.folderSort:";
+
+/**
+ * Per-folder sort overrides for one vault (see `FolderSorts`). Per-VAULT, like
+ * item order and colors, because it describes one vault's folders — and
+ * device-local like the vault-wide sort, because it is a reading habit.
+ */
+export function readFolderSorts(vaultPath: string | undefined): FolderSorts {
+  if (!vaultPath) return {};
+  try {
+    const raw = JSON.parse(localStorage.getItem(FOLDER_SORT_PREFIX + vaultPath) ?? "{}");
+    const out: FolderSorts = {};
+    if (raw && typeof raw === "object") {
+      for (const [k, v] of Object.entries(raw)) if (isTreeSort(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function writeFolderSorts(vaultPath: string, sorts: FolderSorts): void {
+  try {
+    localStorage.setItem(FOLDER_SORT_PREFIX + vaultPath, JSON.stringify(sorts));
   } catch {
     /* localStorage unavailable — the sort stays in-memory only */
   }

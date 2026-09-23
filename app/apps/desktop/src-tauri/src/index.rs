@@ -100,6 +100,24 @@ pub struct BootstrapRow {
     pub snapshot: Vec<u8>,
     /// Its state vector, i.e. this doc's line in the durable `hello` manifest.
     pub state_vector: Vec<u8>,
+    /// sha256 of the content now on disk — recorded as the doc's disk base
+    /// (`yjs_disk_base`) in the same transaction as the snapshot.
+    pub content_sha: String,
+}
+
+/// Upsert one `yjs_disk_base` row on any connection or transaction.
+fn set_disk_base_on(conn: &Connection, doc_id: &str, sha256: &str) -> AppResult<()> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO yjs_disk_base (doc_id, sha256, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(doc_id) DO UPDATE SET sha256 = excluded.sha256,
+                                           updated_at = excluded.updated_at",
+        params![doc_id, sha256, now_ms],
+    )?;
+    Ok(())
 }
 
 pub struct Index {
@@ -359,6 +377,23 @@ impl Index {
                 seq          INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_yjs_updates_doc ON yjs_updates(doc_id);
+
+            -- The "disk base" of each CRDT doc (#200): the sha256 of the bytes
+            -- this device last wrote to the doc's `.md` (egest, bootstrap) or
+            -- last read INTO the doc (ingest, seed). A file whose hash still
+            -- equals it was never touched outside the app since we last synced
+            -- it, so a doc that differs is simply AHEAD of its file (a write
+            -- that failed or was cut short by a quit) — the doc must be written
+            -- out, never diffed against those older bytes, which would turn the
+            -- newest text into deletions. Keyed by doc_id like the other
+            -- `yjs_*` tables, untouched by `rebuild()`. `CREATE IF NOT EXISTS`
+            -- is the whole migration: an existing vault simply has no rows yet,
+            -- which the bridge reads as "unknown" (the old behaviour).
+            CREATE TABLE IF NOT EXISTS yjs_disk_base (
+                doc_id     TEXT PRIMARY KEY,
+                sha256     TEXT NOT NULL,
+                updated_at INTEGER
+            );
 
             -- Per-note editor UI state (Stage 3b: which sections are folded).
             -- Keyed by doc_id and NOT touched by `rebuild()`, exactly like the
@@ -2391,9 +2426,12 @@ impl Index {
                     state_vector=excluded.state_vector,
                     seq=yjs_snapshot.seq + 1",
             )?;
-            for row in committed {
+            for row in &committed {
                 stmt.execute(params![row.doc_id, row.snapshot, row.state_vector])?;
             }
+        }
+        for row in &committed {
+            set_disk_base_on(&tx, &row.doc_id, &row.content_sha)?;
         }
         tx.commit()?;
         log::info!(
@@ -2583,6 +2621,10 @@ impl Index {
             "DELETE FROM note_ui_state WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
             [],
         )?;
+        tx.execute(
+            "DELETE FROM yjs_disk_base WHERE doc_id NOT IN (SELECT doc_id FROM _live_docs)",
+            [],
+        )?;
         tx.execute_batch("DROP TABLE IF EXISTS _live_docs;")?;
         tx.commit()?;
         Ok(YjsPruneReport {
@@ -2607,6 +2649,26 @@ impl Index {
             )
             .optional()?
             .flatten())
+    }
+
+    /// The disk base recorded for a doc (see the `yjs_disk_base` table), or
+    /// `None` when this device has never recorded one — an ordinary answer for
+    /// a vault that predates the table.
+    pub fn get_disk_base(&self, doc_id: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT sha256 FROM yjs_disk_base WHERE doc_id = ?1",
+                params![doc_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Record a doc's disk base: the sha256 of the bytes that are now both on
+    /// disk and in the doc.
+    pub fn set_disk_base(&self, doc_id: &str, sha256: &str) -> AppResult<()> {
+        set_disk_base_on(&self.conn, doc_id, sha256)
     }
 
     /// Replace one note's editor UI state.
@@ -2635,6 +2697,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM yjs_updates WHERE doc_id = ?1", params![doc_id])?;
         tx.execute("DELETE FROM yjs_snapshot WHERE doc_id = ?1", params![doc_id])?;
+        tx.execute("DELETE FROM yjs_disk_base WHERE doc_id = ?1", params![doc_id])?;
         tx.commit()?;
         Ok(())
     }
@@ -3155,6 +3218,28 @@ mod tests {
             idx.get_note_ui_state(&alpha.id).unwrap().as_deref(),
             Some(r#"{"v":1,"folds":[]}"#),
         );
+    }
+
+    #[test]
+    fn disk_base_round_trips_and_is_cleared_with_the_doc() {
+        let idx = Index::open_in_memory().unwrap();
+        assert_eq!(idx.get_disk_base("d").unwrap(), None);
+        idx.set_disk_base("d", "aaa").unwrap();
+        assert_eq!(idx.get_disk_base("d").unwrap().as_deref(), Some("aaa"));
+        idx.set_disk_base("d", "bbb").unwrap();
+        assert_eq!(idx.get_disk_base("d").unwrap().as_deref(), Some("bbb"));
+        idx.clear_yjs_doc("d").unwrap();
+        assert_eq!(idx.get_disk_base("d").unwrap(), None);
+    }
+
+    #[test]
+    fn prune_yjs_docs_sweeps_orphan_disk_bases() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.set_disk_base("live", "l").unwrap();
+        idx.set_disk_base("dead", "x").unwrap();
+        idx.prune_yjs_docs(&["live".to_string()]).unwrap();
+        assert_eq!(idx.get_disk_base("live").unwrap().as_deref(), Some("l"));
+        assert_eq!(idx.get_disk_base("dead").unwrap(), None);
     }
 
     #[test]

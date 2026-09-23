@@ -216,6 +216,10 @@ vi.mock("../vaultDocStore", () => ({
           return true;
         },
         ingestNow: async () => false,
+        beginPull: () => {},
+        abandonPull: () => {},
+        hasUnmergedFileChange: async () => false,
+        reconcileAfterPull: async () => false,
         flushEgest: async () => {},
       };
     }

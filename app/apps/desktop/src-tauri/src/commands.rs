@@ -1303,14 +1303,48 @@ pub async fn write_note(
     path: String,
     content: String,
     expected_epoch: Option<u64>,
+    doc_id: Option<String>,
 ) -> AppResult<()> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     notefile::write_note(&vault, &path, &content)?;
     // Re-index immediately so search/backlinks are fresh without waiting for
     // the watcher echo.
     let abs = vault::resolve_in_vault(&vault, &path)?;
-    index.lock().unwrap().index_note(&vault, &abs)?;
+    let guard = index.lock().unwrap();
+    // The bridge's egest names its doc: record these bytes as the doc's disk
+    // base right after they landed (#200), so a later launch can tell "the
+    // file is exactly what we last wrote" from "someone edited the file".
+    if let Some(doc_id) = doc_id.as_deref() {
+        guard.set_disk_base(doc_id, &notefile::sha256_hex(&content))?;
+    }
+    guard.index_note(&vault, &abs)?;
     Ok(())
+}
+
+/// The doc's recorded disk base (sha256 of the bytes last synced between its
+/// file and its CRDT), or `None` when this device never recorded one.
+#[tauri::command]
+pub async fn get_disk_base(
+    state: State<'_, AppState>,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<String>> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.get_disk_base(&doc_id)
+}
+
+/// Record a doc's disk base after the bridge read a file INTO the doc.
+#[tauri::command]
+pub async fn set_disk_base(
+    state: State<'_, AppState>,
+    doc_id: String,
+    sha256: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (_, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.set_disk_base(&doc_id, &sha256)
 }
 
 /// Create a note only if it doesn't exist yet; returns true when it was created.
@@ -2193,6 +2227,7 @@ pub fn apply_bootstrap_entries(
                     rel_path: entry.rel_path.clone(),
                     snapshot: entry.snapshot.clone(),
                     state_vector: entry.state_vector.clone(),
+                    content_sha: notefile::sha256_hex(&entry.content),
                 });
             }
             Err(e) => {

@@ -202,6 +202,12 @@ vi.mock("../vaultDocStore", () => ({
       if (storeHooks.withContent.has(docId)) {
         doc.getText("content").insert(0, storeHooks.content.get(docId) ?? "doc text");
       }
+      const ingest = () => {
+        storeHooks.ingested.push(docId);
+        if (!storeHooks.ingestChanges.has(docId)) return false;
+        doc.getText("content").insert(0, "+");
+        return true;
+      };
       return {
         doc,
         serialize: () => doc.getText("content").toString(),
@@ -210,12 +216,12 @@ vi.mock("../vaultDocStore", () => ({
           doc.getText("content").insert(0, fakeDisk.files.get(relPath) ?? "file text");
           return true;
         },
-        ingestNow: async () => {
-          storeHooks.ingested.push(docId);
-          if (!storeHooks.ingestChanges.has(docId)) return false;
-          doc.getText("content").insert(0, "+");
-          return true;
-        },
+        ingestNow: async () => ingest(),
+        // The per-doc path probes before the pull and merges after it (#200).
+        beginPull: () => {},
+        abandonPull: () => {},
+        hasUnmergedFileChange: async () => storeHooks.ingestChanges.has(docId),
+        reconcileAfterPull: async () => ingest(),
         flushEgest: async () => {
           fakeDisk.files.set(relPath, doc.getText("content").toString());
         },

@@ -10,10 +10,12 @@
 // ── The idempotency guarantee (the single most important property) ────────────
 // Re-running this must NOT duplicate a note's text. It cannot, because the only
 // ways text ever enters a doc here are `NoteBridge.seedFromFileIfEmpty()` and —
-// on `ingestFromFile` runs — `NoteBridge.ingestNow()`, whose echo-hash +
+// on `ingestFromFile` runs — `NoteBridge.reconcileAfterPull()` (or
+// `ingestNow()` for a doc that was empty before the pull), whose echo-hash +
 // converged-content guards make a re-run of the same file bytes a no-op (it
-// applies a DIFF against the doc's current text, never an insert of the whole
-// file). For the seed path:
+// applies a DIFF, never an insert of the whole file; the reconcile diffs
+// against the doc as it was BEFORE the pull and skips a file that already
+// equals the pulled state, #200). For the seed path:
 //
 //   1. it inserts nothing when the Y.Text is already non-empty; and
 //   2. it is called ONLY after the provider's initial server sync has genuinely
@@ -491,14 +493,21 @@ export class ContentUploader {
     let preIngested = false;
     if (this.opts.ingestFromFile && bridge.serialize().length > 0) {
       preIngested = true;
-      // Diff-merge the file into the already-populated doc BEFORE any network
-      // work. When nothing changed (our own background egest echoing back
-      // through the watcher, or an edit a previous run already merged) and the
-      // server has confirmed this doc before, there is nothing to send — skip
-      // the socket entirely. That check is what keeps a teammate's every remote
+      // The file is merged into this already-populated doc AFTER the pull, not
+      // before it (#200): a local CRDT behind the server, next to a file that
+      // already holds the server's text (a sync folder, an egest from an
+      // earlier launch), would otherwise re-insert that text under this
+      // client's id and the pull would double it. `beginPull` fixes the base —
+      // the doc as it is now — and holds the file (no ingest, no write) until
+      // `reconcileAfterPull` below.
+      bridge.beginPull();
+      // When nothing changed (our own background egest echoing back through
+      // the watcher, or an edit a previous run already merged) and the server
+      // has confirmed this doc before, there is nothing to send — skip the
+      // socket entirely. That check is what keeps a teammate's every remote
       // update (which we egest to disk, which fires the watcher) from costing a
-      // provider connect apiece.
-      const changed = await bridge.ingestNow();
+      // provider connect apiece. A read-only probe: nothing is merged yet.
+      const changed = await bridge.hasUnmergedFileChange();
       const serverHasIt =
         this.opts.isPushed(docId) && !(this.opts.include?.(docId) ?? false);
       if (!changed && serverHasIt && !(this.opts.mustConnect?.(docId) ?? false)) {
@@ -530,6 +539,12 @@ export class ContentUploader {
       }
 
       if (!push.readOnly) {
+        // The pull has landed: fold the file in, three-way, against the pre-pull
+        // doc — on every run, because a signed-in bridge that opened with content
+        // has been holding its file since `hydrate` (a no-op for one that was
+        // not waiting, e.g. an empty doc). Before the flush wait below, so a
+        // genuine external edit is part of what the server acknowledges.
+        await bridge.reconcileAfterPull();
         // Seeds ONLY a genuine orphan (empty Y.Text) — see the module header.
         await bridge.seedFromFileIfEmpty();
         // A doc that was empty before the pull couldn't take the pre-connect
@@ -556,6 +571,9 @@ export class ContentUploader {
       // flush below and is unsendable besides. Keep a copy and say so.
       if (push.readOnly) {
         const safeToReplace = await this.keepUnsendableEdit(docId, relPath, bridge);
+        // Never merge the file into a doc this user cannot write; release the
+        // pull wait, and let its deferred write go ahead only when it is safe.
+        bridge.abandonPull(safeToReplace);
         if (!safeToReplace) {
           // The file is still the durable copy. Do not flush the Remote Vault's
           // state over it unless the differing bytes were preserved first.

@@ -163,6 +163,18 @@ fn bootstrap_applies_the_eligibility_table_end_to_end() {
         index.load_yjs_state("doc-mine").unwrap().snapshot.is_none(),
         "the conflicted doc got no CRDT rows"
     );
+    // The bytes now on disk are the doc's disk base (#200): a later launch
+    // must treat that file as "what we last synced", not as an external edit.
+    assert_eq!(
+        index.get_disk_base("doc-stub").unwrap(),
+        Some(notefile::sha256_hex("# Stub\n\nhydrated\n"))
+    );
+    assert_eq!(
+        index.get_disk_base("doc-same").unwrap(),
+        Some(notefile::sha256_hex("identical bytes"))
+    );
+    assert_eq!(index.get_disk_base("doc-mine").unwrap(), None);
+    assert_eq!(index.get_disk_base("doc-diverged").unwrap(), None);
     // The diverged doc's own log is intact and no snapshot was invented.
     let diverged = index.load_yjs_state("doc-diverged").unwrap();
     assert!(diverged.snapshot.is_none());

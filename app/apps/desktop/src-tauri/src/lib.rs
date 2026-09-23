@@ -227,6 +227,8 @@ pub fn run() {
             commands::list_yjs_state_vectors,
             commands::prune_yjs_docs,
             commands::clear_yjs_doc,
+            commands::get_disk_base,
+            commands::set_disk_base,
             commands::read_binary_file,
             commands::file_stat,
             commands::binary_exists,

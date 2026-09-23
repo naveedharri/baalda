@@ -181,3 +181,42 @@ describe("#104 — an in-place truncating write", () => {
     expect(r.server.text(DOC)).toBe("# note\n\nsecond\n"); // …but the server never got it
   });
 });
+
+describe("#200 — a local-change run merges the file AFTER the pull", () => {
+  /** A teammate edits the server's copy (their own client id). */
+  function peerEdit(server: FakeServer, edit: (t: Y.Text) => void): void {
+    const peer = new Y.Doc();
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(server.doc(DOC)));
+    edit(peer.getText("content"));
+    Y.applyUpdate(server.doc(DOC), Y.encodeStateAsUpdate(peer));
+  }
+
+  it("a file that already holds the server's edit is not re-inserted", async () => {
+    const r = rig({ file: "Price: 97\n" });
+    await r.run();
+    expect(r.server.text(DOC)).toBe("Price: 97\n");
+
+    // The teammate's edit reaches this disk before it reaches this device's
+    // CRDT (a synced folder, another app's copy) — the watcher reports it.
+    peerEdit(r.server, (t) => {
+      t.delete(7, 1);
+      t.insert(7, "12");
+    });
+    r.harness.fs.externalWrite(PATH, "Price: 127\n");
+    await r.run({ force: true, ingestFromFile: true });
+
+    expect(r.server.text(DOC)).toBe("Price: 127\n");
+    expect(r.harness.fs.get(PATH)).toBe("Price: 127\n");
+  });
+
+  it("still pushes a genuine external edit next to a teammate's", async () => {
+    const r = rig({ file: "A\nB\n" });
+    await r.run();
+    peerEdit(r.server, (t) => t.insert(0, "S\n"));
+    r.harness.fs.externalWrite(PATH, "A\nB\nC from the AI\n");
+    await r.run({ force: true, ingestFromFile: true });
+
+    expect(r.server.text(DOC)).toBe("S\nA\nB\nC from the AI\n");
+    expect(r.harness.fs.get(PATH)).toBe("S\nA\nB\nC from the AI\n");
+  });
+});

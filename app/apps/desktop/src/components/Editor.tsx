@@ -502,9 +502,15 @@ export function Editor() {
       // to be in hand by the time the view is constructed, so the folds can be
       // applied in the same tick and no unfolded frame ever paints.
       const uiEpoch = useStore.getState().vault?.epoch;
+      const storedUiStateP = ipc.getNoteUiState(docId, uiEpoch).catch(() => null);
+      // One writer per doc: the background feed stops delivering this doc and
+      // any bridge the background store holds for it is flushed and retired
+      // BEFORE ours opens (#200).
+      if (willSync) await syncManager.prepareOpen(notePath);
+      if (cancelled) return;
       const [bridge, storedUiState] = await Promise.all([
         bridgeManager.openNote(notePath, docId, { seedFromFile: !willSync }),
-        ipc.getNoteUiState(docId, uiEpoch).catch(() => null),
+        storedUiStateP,
       ]);
       if (cancelled || !hostRef.current) return;
 
@@ -717,9 +723,13 @@ export function Editor() {
       setReadOnly(false);
       setRosterOpen(false);
       setPingFrom(null);
-      // Tear down the network session, then flush + close the bridge.
-      syncManager.closeCurrent();
-      void bridgeManager.closeCurrent();
+      // Tear down the network session, then flush + close the bridge. The
+      // bridge's close only starts on a later microtask (it is queued), so the
+      // provider is still destroyed first; handing its promise to the session
+      // keeps the background feed off this doc until the final egest and
+      // persist have landed (#200).
+      const closing = bridgeManager.closeCurrent();
+      syncManager.closeCurrent(closing);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notePath, syncEnabled]);

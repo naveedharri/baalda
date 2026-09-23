@@ -4865,12 +4865,39 @@ export class SyncManager implements InboundHost {
    * Open a doc-session for a freshly-opened bridge. Assumes the caller opened the
    * bridge with `seedFromFile: !willSync(relPath)`.
    */
+  /**
+   * Settle every OTHER writer for a note before the editor opens its bridge.
+   *
+   * The editor's bridge used to open while the background store could still
+   * hold a resident bridge (or run a cold apply) for the same doc_id, and the
+   * feed was suppressed only once `openDoc` ran — two bridges on one doc: two
+   * egests on one file, two persist streams, each diffing what the other just
+   * wrote (#200). Call it (and await it) BEFORE `bridgeManager.openNote`: the
+   * feed stops delivering this doc to the store at once (its provider syncs
+   * whatever the server has), and `release` waits out any in-flight cold apply
+   * — including a hold left by this note's previous close — and retires a
+   * resident bridge after flushing it.
+   */
+  async prepareOpen(relPath: string): Promise<void> {
+    const store = this.docStore;
+    const mapping = store && this.syncable() ? this.registry.getMapping(relPath) : null;
+    if (!store || !mapping) return;
+    store.setSuppressedDoc(mapping.docId);
+    try {
+      await store.release(mapping.docId);
+    } catch (e) {
+      console.warn(`[sync] couldn't settle background writers for ${relPath}`, e);
+    }
+  }
+
   async openDoc(bridge: NoteBridge, relPath: string): Promise<OpenedDoc> {
     this.closeCurrent();
 
     const mapping = this.syncable() ? this.registry.getMapping(relPath) : null;
     if (!mapping) {
-      // Local-only: the bridge already seeded from disk on open.
+      // Local-only: the bridge already seeded from disk on open. A bridge that
+      // was opened expecting a pull has nothing to wait for.
+      if (bridge.awaitingPull) void bridge.reconcileAfterPull();
       this.docStore?.setSuppressedDoc(null);
       const awareness = new Awareness(bridge.doc);
       this.currentLocalAwareness = awareness;
@@ -4968,8 +4995,27 @@ export class SyncManager implements InboundHost {
     // then would read the NEW vault's file at this path into the OLD vault's doc.
     await sync.whenSynced(5000);
     if (!current()) return;
-    if (!sync.isSynced) return;
-    if (sync.readOnly) await this.keepUnsendableOpenEdit(bridge, docId, scope, fileBeforePull);
+    if (!sync.isSynced) {
+      // No pull to wait for (offline, server down): the bridge has held its
+      // file since open, so merge it now against what this device has. When
+      // the provider does sync later, those ops merge like any peer's.
+      await bridge.reconcileAfterPull();
+      return;
+    }
+    if (sync.readOnly) {
+      const safe = await this.keepUnsendableOpenEdit(bridge, docId, scope, fileBeforePull);
+      // A doc this user cannot write never takes the file in (the edit could
+      // not be sent); the server's copy is written out instead — unless the
+      // file's differing bytes could not be preserved, in which case the file
+      // stays the durable copy (the same rule as the uploader's read-only path).
+      bridge.abandonPull(safe);
+    } else {
+      // The pull has landed. NOW fold the file in — three-way, against the doc
+      // as it was before the pull (#200). A file that already holds the
+      // server's text is left alone instead of being re-inserted under this
+      // client's id (the `97` → `12127` growth).
+      await bridge.reconcileAfterPull();
+    }
     if (!current()) return;
     const decision = decideSeed({
       signedIn: true,
@@ -5000,30 +5046,33 @@ export class SyncManager implements InboundHost {
    * confirming — but never silent: an edit the app is about to overwrite is the
    * one thing a user must be told about. Once per doc per session, so reopening
    * a note that is still diverged doesn't fill the trash.
+   *
+   * Resolves true when the file may be replaced by the server's copy: nothing
+   * differed, or the differing bytes were saved.
    */
   private async keepUnsendableOpenEdit(
     bridge: NoteBridge,
     docId: string,
     scope: VaultScope | null,
     beforePull?: string,
-  ): Promise<void> {
-    if (this.unsendableReported.has(docId)) return;
+  ): Promise<boolean> {
+    if (this.unsendableReported.has(docId)) return true;
     const relPath = bridge.path;
     let fileText: string;
     try {
       fileText = beforePull ?? await ipc.readNote(relPath, scope?.vaultEpoch);
     } catch {
-      return; // nothing readable to lose
+      return true; // nothing readable to lose
     }
-    if (scope && !scope.isCurrent()) return;
-    if (fileText.length === 0) return; // a download placeholder has no edit to lose
-    if (fileText === bridge.serialize()) return; // converged — nothing to keep
+    if (scope && !scope.isCurrent()) return false;
+    if (fileText.length === 0) return true; // a download placeholder has no edit to lose
+    if (fileText === bridge.serialize()) return true; // converged — nothing to keep
     this.unsendableReported.add(docId);
     let dest: string | null = null;
     try {
       dest = await ipc.writeTrashCopy(relPath, trashStamp(), fileText, scope?.vaultEpoch);
     } catch (e) {
-      if (ipc.isVaultMismatch(e)) return;
+      if (ipc.isVaultMismatch(e)) return false;
       console.warn(`[sync] couldn't keep a copy of ${relPath}`, e);
     }
     this.registry.recordFailure({
@@ -5035,13 +5084,24 @@ export class SyncManager implements InboundHost {
         (dest ? `; copy saved to ${dest}` : "; the local copy could not be saved either"),
       code: null,
     });
+    return dest != null;
   }
 
   currentSync(): DocSync | null {
     return this.current;
   }
 
-  closeCurrent(): void {
+  /**
+   * Tear down the open note's network session.
+   *
+   * `closing` is the editor bridge's own teardown (`bridgeManager.closeCurrent`
+   * — its final egest and persist). While it is in flight the background feed
+   * must not open a second bridge on the same doc, so the doc is held in the
+   * store until it settles instead of being handed back at once (#200).
+   */
+  closeCurrent(closing?: Promise<unknown>): void {
+    const closedDoc = this.docStore?.suppressedDoc() ?? null;
+    if (closing && closedDoc && this.docStore) this.docStore.holdUntil(closedDoc, closing);
     if (this.current) {
       this.current.destroy();
       this.current = null;
