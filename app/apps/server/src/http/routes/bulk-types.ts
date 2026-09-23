@@ -172,6 +172,7 @@ export type BulkErrorCode =
   | "batch_too_large"
   | "invalid_body"
   | "doc_id_conflict"
+  | "note_deleted"
   | "path_folder_mismatch"
   | "note_limit_reached"
   | "root_frozen"

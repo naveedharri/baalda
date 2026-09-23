@@ -81,7 +81,8 @@ export type RegisterCode =
   | "note_limit_reached"
   | "root_frozen"
   | "not_readable"
-  | "doc_id_conflict";
+  | "doc_id_conflict"
+  | "note_deleted";
 
 export interface FolderRow {
   id: string;
@@ -119,8 +120,8 @@ export type RegisterResult<Row> =
    *  the ordinary adopts, which is why a repeat reconcile is silent. */
   | { status: "created"; row: Row; wrote: true }
   | { status: "adopted"; row: Row; wrote: boolean }
-  | { status: "conflict"; code: "doc_id_conflict"; message: string; id: string }
-  | { status: "error"; code: Exclude<RegisterCode, "doc_id_conflict">; message: string };
+  | { status: "conflict"; code: "doc_id_conflict" | "note_deleted"; message: string; id: string }
+  | { status: "error"; code: Exclude<RegisterCode, "doc_id_conflict" | "note_deleted">; message: string };
 
 /** A registration that cannot collide on id across vaults. Folders have no
  *  doc_id namespace at all, and a `files` id that turns up elsewhere in THIS
@@ -830,7 +831,13 @@ async function applyNoteInserts(
   );
   const existing = new Map<
     string,
-    { vault_id: string; rel_path: string; folder_id: string | null; title: string | null }
+    {
+      vault_id: string;
+      rel_path: string;
+      folder_id: string | null;
+      title: string | null;
+      deleted: boolean;
+    }
   >();
   if (undecided.length > 0) {
     const { rows } = await ctx.db.query<{
@@ -839,8 +846,10 @@ async function applyNoteInserts(
       rel_path: string;
       folder_id: string | null;
       title: string | null;
+      deleted: boolean;
     }>(
-      "SELECT id, vault_id, rel_path, folder_id, title FROM notes WHERE id = ANY($1::text[])",
+      `SELECT id, vault_id, rel_path, folder_id, title, (deleted_at IS NOT NULL) AS deleted
+         FROM notes WHERE id = ANY($1::text[])`,
       [[...new Set(undecided.map((p) => p.id))]],
     );
     for (const r of rows) existing.set(r.id, r);
@@ -864,6 +873,23 @@ async function applyNoteInserts(
         status: "conflict",
         code: "doc_id_conflict",
         message: "doc_id already belongs to another vault",
+        id: p.id,
+      };
+      continue;
+    }
+    // The id names a note in THIS vault that has been soft-deleted. `DO NOTHING`
+    // left `deleted_at` set, so answering "created" (as this used to) told the
+    // client a dead row was live: it mapped the file, queued a content upload
+    // whose token mint 404s, and — because "created" owes a `registry` broadcast
+    // — made every member of the vault re-pull its full lists, every pass, for
+    // as long as the refusing device kept its local copy (prod 2026-09-23).
+    // Resurrecting a note a teammate deleted is not something a background
+    // reconcile may do, so it is refused by name and writes nothing.
+    if (row && row.deleted) {
+      results[p.index] = {
+        status: "conflict",
+        code: "note_deleted",
+        message: "this note was deleted on the server",
         id: p.id,
       };
       continue;

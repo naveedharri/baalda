@@ -578,6 +578,24 @@ export class VaultRegistry {
    */
   private hiddenPaths = new Set<string>();
   /**
+   * Lower-cased local note paths, and the doc_ids they carried, that the server
+   * refused with `note_deleted`: the id names a note a teammate DELETED, and
+   * this device still holds a copy it never confirmed uploading (so the inbound
+   * pass refused to remove it — it may be the only copy of that work).
+   *
+   * Asking again can only get the same answer, and before the server refused it
+   * the answer was a false "created": a vault-wide `registry-changed`
+   * broadcast, a content upload whose token mint 404'd, and 4 upload slots
+   * waiting 10 s each — every ~30 s, forever (prod 2026-09-23). The file is left
+   * exactly where it is, as an unsynced local note; it is deliberately NOT
+   * re-registered under a fresh id, which would silently undo a teammate's
+   * delete for the whole vault. A path leaves when it leaves the disk or the
+   * server lists it again (the note was restored); an id when the server lists
+   * it again; both wholesale on `reset`.
+   */
+  private deletedPaths = new Set<string>();
+  private deletedDocIds = new Set<string>();
+  /**
    * Paths THIS device just created as materialized placeholders, awaiting their
    * own watcher echo (see {@link consumeMaterialized}).
    *
@@ -831,6 +849,8 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving.
     this.aliasPaths.clear();
     this.hiddenPaths.clear();
+    this.deletedPaths.clear();
+    this.deletedDocIds.clear();
     this.folderByPath.clear();
     // Server ids for vault A's binaries name nothing in vault B.
     this.fileByPath.clear();
@@ -1280,6 +1300,19 @@ export class VaultRegistry {
     if (f.code === "not_readable" && (f.kind === "folder" || f.kind === "note")) {
       this.hiddenPaths.add(f.path.toLowerCase());
       return "ok";
+    }
+    // The id names a note deleted on the server. Reported ONCE (the path is
+    // skipped from now on — see `deletedPaths`), with a reason that says the
+    // file is safe and why it no longer syncs.
+    if (f.code === "note_deleted" && f.kind === "note") {
+      const firstTime = !this.deletedPaths.has(f.path.toLowerCase());
+      this.deletedPaths.add(f.path.toLowerCase());
+      if (f.docId) this.deletedDocIds.add(f.docId);
+      if (!firstTime) return "failed";
+      f = {
+        ...f,
+        reason: "deleted on the server by another member — kept on this device, no longer synced",
+      };
     }
     this.failed.push(f);
     if (f.code === "vault_limit_reached" || f.code === "member_limit_reached") {
@@ -1769,6 +1802,15 @@ export class VaultRegistry {
                 ? "access was removed, but this device never confirmed its content upstream — left on disk"
                 : "deleted on the server, but this device never confirmed its content — left on disk",
             });
+            // Releasing the claim lets a file that is really a NEW note at this
+            // path (re-imported under a fresh local id) register on a later
+            // pass. A file still carrying THIS doc_id stays suppressed without
+            // it: `planInbound` suppresses any local note whose own id is
+            // tombstoned, baseline or not, and the server refuses a dead id
+            // with `note_deleted` besides. Before both, the released claim
+            // re-registered the dead id every pass — a false "created", a
+            // vault-wide broadcast and an upload that could never mint a token
+            // (prod 2026-09-23).
             if (gone.reason !== "revoked") this.baselineDocs.delete(gone.docId);
             this.sink.item("failed");
             return;
@@ -2647,12 +2689,22 @@ export class VaultRegistry {
     for (const key of [...this.hiddenPaths]) {
       if (resolvedNotePathsCi.has(key)) this.hiddenPaths.delete(key);
     }
+    // Restored on the server, or gone from this disk: no longer a refusal to
+    // remember (see `deletedPaths`).
+    for (const key of [...this.deletedPaths]) {
+      if (resolvedNotePathsCi.has(key) || !localNotePathCi.has(key)) this.deletedPaths.delete(key);
+    }
+    if (this.deletedDocIds.size > 0) {
+      const listed = new Set(serverNotes.map((n) => noteDocId(n)));
+      for (const id of [...this.deletedDocIds]) if (listed.has(id)) this.deletedDocIds.delete(id);
+    }
     const missingNotes = notes.filter(
       (n) =>
         !resolvedNotePathsCi.has(n.path.toLowerCase()) &&
         !this.inboundSuppressed.has(n.path) &&
         !this.aliasPaths.has(n.path) &&
-        !this.hiddenPaths.has(n.path.toLowerCase()),
+        !this.hiddenPaths.has(n.path.toLowerCase()) &&
+        !this.deletedPaths.has(n.path.toLowerCase()),
     );
 
     // Announce the phase only when there is something to create. A pull with
@@ -3345,6 +3397,11 @@ export class VaultRegistry {
     // doc_ids and start the ping-pong (see `canonicalNotePath`).
     const mappedAs = this.canonicalNotePath(relPath);
     if (mappedAs) return this.byPath.get(mappedAs) ?? null;
+    // Deleted on the server (see `deletedPaths`): opening the local copy must
+    // not ask again — the answer is known, and it stays a local-only note.
+    if ((docId && this.deletedDocIds.has(docId)) || this.deletedPaths.has(relPath.toLowerCase())) {
+      return null;
+    }
     try {
       const folderId = this.folderByPath.get(parentDir(relPath)) ?? null;
       const created = await this.api.createNote({

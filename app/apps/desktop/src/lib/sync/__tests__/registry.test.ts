@@ -667,6 +667,45 @@ describe("VaultRegistry.reconcile — paths the server says this user cannot see
   });
 });
 
+describe("VaultRegistry.reconcile — a doc_id the server says was deleted", () => {
+  // Prod 2026-09-23: a device re-registered the dead ids of ~25 notes a teammate
+  // deleted, every pass. The server now answers `note_deleted`; the client must
+  // stop asking (in the pull AND when the note is opened), map nothing, report it
+  // once, and never touch the file — it may be the only copy of that text.
+  it("asks once, maps nothing, reports once, and never asks again", async () => {
+    const { api, createNote } = fakeApi({ vaults: [{ id: "v1", name: "v", organization_id: ORG }] });
+    const { ApiError } = await import("../../api");
+    createNote.mockImplementation(async () => {
+      throw new ApiError(409, "this note was deleted on the server", { code: "note_deleted" });
+    });
+    vi.mocked(ipc.listNoteTitles).mockResolvedValue([{ id: "d1", path: "Gone.md", title: "Gone" }]);
+    const reg = new VaultRegistry(api);
+    const tree: TreeNode = {
+      id: "root", name: "v", path: "", isDir: true,
+      children: [{ id: "g", name: "Gone.md", path: "Gone.md", isDir: false }],
+    };
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    expect(createNote).toHaveBeenCalledTimes(1);
+    expect(reg.getMapping("Gone.md")).toBeNull();
+    expect(reg.failures()).toEqual([
+      expect.objectContaining({
+        path: "Gone.md",
+        docId: "d1",
+        code: "note_deleted",
+        reason: expect.stringContaining("kept on this device"),
+      }),
+    ]);
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    // Opening the note (the editor's direct path) must not ask either.
+    expect(await reg.registerNote("Gone.md", "Gone", "d1")).toBeNull();
+    expect(createNote).toHaveBeenCalledTimes(1);
+    expect(reg.getMapping("Gone.md")).toBeNull();
+    expect(vi.mocked(ipc.writeNote)).not.toHaveBeenCalled();
+    vi.mocked(ipc.listNoteTitles).mockResolvedValue([]);
+  });
+});
+
 describe("VaultRegistry tree-binary `files` map", () => {
   it("persists registered binaries under their own config key, never into `docs`", async () => {
     const { api } = fakeApi({
