@@ -79,6 +79,10 @@ describe("replacementOp", () => {
     expect(apply("abc", replacementOp("abc", "XYZabc"))).toBe("XYZabc");
     expect(apply("abcdef", replacementOp("abcdef", "abef"))).toBe("abef");
     expect(apply("aaa", replacementOp("aaa", "aa"))).toBe("aa");
+    // A shared high surrogate stays inside the replaced span (#200).
+    expect(replacementOp("a\u{1F600}b", "a\u{1F601}b")).toEqual([
+      { index: 1, deleteLength: 2, insert: "\u{1F601}" },
+    ]);
     expect(apply("", replacementOp("", "new"))).toBe("new");
     expect(apply("gone", replacementOp("gone", ""))).toBe("");
   });

@@ -159,19 +159,54 @@ describe("MCP doc writer (no client connected)", () => {
     expect(await persistedText("doc-g")).toBe(`${seen[0]}12`);
   });
 
-  it("announces a rewrite even when the text is unchanged", async () => {
-    // `setContent` is a wholesale replace — delete the whole Y.Text, insert the
-    // new one — so re-setting identical content is still a real CRDT change and
-    // is published as one. Worth pinning because it's easy to assume otherwise:
-    // the DOCUMENT is unchanged, but the doc's history isn't, and a subscriber
-    // that skipped this update would diverge from the server.
+  it("re-setting identical content writes nothing (#200)", async () => {
+    // `setContent` applies the minimal changed span, so identical content is no
+    // change at all: no update to persist, none to announce, and the doc's
+    // history is untouched (it used to delete and re-insert every character).
     const writer = writerThatRecords();
     await writer.setContent("vault-1", "doc-3", "same");
     published = [];
     await writer.setContent("vault-1", "doc-3", "same");
 
-    expect(published).toHaveLength(1);
+    expect(published).toHaveLength(0);
     expect(await persistedText("doc-3")).toBe("same");
+  });
+
+  it("replaces only the changed span, so an offline peer's anchored insert survives (#200)", async () => {
+    const writer = writerThatRecords();
+    const before = "# Plan\n\nIntro paragraph.\n\nPrice: 97\n\nOutro paragraph.\n";
+    await writer.setContent("vault-1", "doc-8", before);
+
+    // A peer that was offline holds the same state and types into the intro.
+    const peer = new Y.Doc();
+    for (const p of published) Y.applyUpdate(peer, p.update);
+    const at = before.indexOf("Intro paragraph.") + "Intro paragraph.".length;
+    peer.getText("content").insert(at, " Added offline.");
+    const offline = Y.encodeStateAsUpdate(peer);
+
+    // Meanwhile a server-side replace (a version revert, an MCP adopt) lands a
+    // body that differs only in the price.
+    const after = before.replace("Price: 97", "Price: 127");
+    await writer.setContent("vault-1", "doc-8", after);
+    expect(await persistedText("doc-8")).toBe(after);
+
+    // The offline insert still has its anchor, so it merges in place instead
+    // of surviving as a stray fragment next to a re-inserted copy of the note.
+    const merged = new Y.Doc();
+    Y.applyUpdate(merged, (await loadDocState("doc-8"))!);
+    Y.applyUpdate(merged, offline);
+    expect(merged.getText("content").toString()).toBe(
+      after.replace("Intro paragraph.", "Intro paragraph. Added offline."),
+    );
+    merged.destroy();
+    peer.destroy();
+  });
+
+  it("never splits a surrogate pair at the span boundary", async () => {
+    const writer = writerThatRecords();
+    await writer.setContent("vault-1", "doc-9", "a\u{1F600}b");
+    await writer.setContent("vault-1", "doc-9", "a\u{1F601}b");
+    expect(await persistedText("doc-9")).toBe("a\u{1F601}b");
   });
 
   it("still persists when publishing throws", async () => {
