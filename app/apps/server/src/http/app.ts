@@ -136,6 +136,8 @@ export function createApp(deps: AppDeps): Hono {
         // The `files` doc a legacy-POST upload's bytes belong to, so a tree
         // binary's blob carries the doc identity its ACL is resolved from.
         "x-doc-id",
+        // The version a tree binary's edit started from (409 `stale_base`).
+        "x-base-sha256",
         // Opaque per-client instance id on registry writes, so the vault channel
         // doesn't tell a client to re-pull its own structural change.
         ORIGIN_HEADER,

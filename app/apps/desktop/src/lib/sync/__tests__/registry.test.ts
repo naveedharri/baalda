@@ -770,6 +770,36 @@ describe("VaultRegistry tree-binary `files` map", () => {
     expect(older.fileDocIds()).toEqual([]);
   });
 
+  it("round-trips the three-way base per files id, and drops it with the row", async () => {
+    // The blob mirror's base (`attachments.ts planBinarySync`) must survive a
+    // restart, or a device that was closed while a teammate edited a file could
+    // not tell that edit from its own and would fall back to server-canonical.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    reg.setFileId("Team/report.docx", "file-1");
+    reg.setFileBase("file-1", "sha-v1");
+    expect(reg.getFileBase("file-1")).toBe("sha-v1");
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1][0] as string) as {
+      fileBases?: Record<string, string>;
+    };
+    expect(cfg.fileBases).toEqual({ "file-1": "sha-v1" });
+
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(cfg) as never);
+    const reloaded = new VaultRegistry(api);
+    await reconcileWithTree(reloaded, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(reloaded.getFileBase("file-1")).toBe("sha-v1");
+    // A rename keeps it (keyed by id); forgetting the row drops it.
+    reloaded.moveFileId("Team/report.docx", "Archive/report.docx");
+    expect(reloaded.getFileBase("file-1")).toBe("sha-v1");
+    reloaded.forgetFileId("Archive/report.docx");
+    expect(reloaded.getFileBase("file-1")).toBeNull();
+  });
+
   it("drops the confirmation with the row it was made about", async () => {
     // A path re-used by a different file must not inherit a claim made about
     // the bytes that used to live there.

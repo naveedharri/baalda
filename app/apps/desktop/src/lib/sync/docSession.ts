@@ -4744,9 +4744,9 @@ export class SyncManager implements InboundHost {
       listServer: () => api.listVaultBlobs(vaultId),
       // The legacy pair: still the whole flow for a server that predates the
       // intent route, and the fallback the client drops to on its 404.
-      uploadServer: (relPath, bytes, mime, docId) =>
+      uploadServer: (relPath, bytes, mime, docId, baseSha) =>
         api
-          .uploadBlob({ vaultId, relPath, bytes, mime, fileName: baseName(relPath), docId })
+          .uploadBlob({ vaultId, relPath, bytes, mime, fileName: baseName(relPath), docId, baseSha })
           .then(() => undefined),
       downloadServer: (id) => api.downloadBlob(id),
       // intent → PUT → complete. Bytes go through Rust (epoch-pinned, streamed
@@ -4760,6 +4760,7 @@ export class SyncManager implements InboundHost {
           relPath: input.relPath,
           filename: input.filename,
           docId: input.docId,
+          baseSha: input.baseSha,
         }),
       completeUpload: (completeUrl, body) =>
         api.completeBlob(completeUrl, body).then(() => undefined),
@@ -4819,6 +4820,13 @@ export class SyncManager implements InboundHost {
       // A row is not its bytes. This is the separate, stronger claim that lets a
       // revocation remove the file (`registry.confirmFileBytes`).
       confirmFileBytes: (relPath) => this.registry.confirmFileBytes(relPath),
+      // The three-way's base per `files` id, persisted in `.context/config.json`
+      // so a restart still knows a teammate's edit from our own.
+      fileBase: (docId) => this.registry.getFileBase(docId),
+      setFileBase: (docId, sha) => this.registry.setFileBase(docId, sha),
+      // The recovery copy a server version replaces a divergent local one after.
+      keepLocalCopy: (relPath) =>
+        ipc.copyToTrash(relPath, trashStamp(), epoch),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => this.registry.forgetFileId(relPath),

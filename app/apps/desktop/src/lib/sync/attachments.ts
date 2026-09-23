@@ -203,7 +203,10 @@ export function routesToAttachmentSync(path: string): boolean {
  * missing locally, whatever its bytes are: sha-only identity stays for paths
  * with NO local file (the genuine "this device doesn't have it" case), and a
  * disagreement at an occupied path is a conflict the uploader resolves the
- * other way (uploads run first in every pass), never an overwrite.
+ * other way (uploads run first in every pass), never an overwrite. That is the
+ * two-way rule; a doc-bound tree binary gets {@link planBinarySync}'s three-way
+ * instead, which CAN overwrite (after a recovery copy) because the server keeps
+ * only one version per doc.
  *
  * Compared case-insensitively, like `samePath`/`planInbound` and the server's
  * `lower(path)` unique indexes — on macOS `Report.docx` and `report.docx` are
@@ -213,13 +216,128 @@ export function diffAttachments(
   local: LocalAttachment[],
   server: ServerBlob[],
 ): AttachmentDiff {
+  const { toUpload, toDownload } = planBinarySync(local, server);
+  return { toUpload, toDownload };
+}
+
+/** A local upload, plus the base it was edited from (see {@link planBinarySync}). */
+export type PlannedUpload = LocalAttachment & { baseSha?: string | null };
+
+/**
+ * Replace a local tree binary with the server's version of the SAME file.
+ *
+ * `blob.relPath` is the LOCAL path (the bytes land where the file is on this
+ * disk, not wherever the server row says). `keepCopy`: the local bytes are not a
+ * version this device ever agreed with the server on, so they are copied to
+ * `.context/trash` before the download overwrites them.
+ */
+export interface BinaryReplace {
+  local: LocalAttachment;
+  blob: ServerBlob & { docId: string; relPath: string };
+  keepCopy: boolean;
+  reason: "teammate-edit" | "no-base" | "conflict" | "stale-base";
+}
+
+export interface BinaryPlan {
+  toUpload: PlannedUpload[];
+  toDownload: ServerBlob[];
+  /** Occupied local paths the server's version replaces (a teammate's edit). */
+  toReplace: BinaryReplace[];
+  /** Files whose local bytes equal the server's — the base to record. */
+  agreed: Array<{ relPath: string; docId: string; sha256: string }>;
+}
+
+/** What the three-way needs to know about this device's history. */
+export interface BinaryPlanContext {
+  /** The `files` id this device knows a local path by, if any. */
+  docIdFor: (relPath: string) => string | null;
+  /** The sha this device last agreed with the server on for a `files` id. */
+  baseFor: (docId: string) => string | null;
+}
+
+/**
+ * The mirror's plan for one pass: the content-hash diff, plus a THREE-WAY
+ * decision for every local tree binary the server holds a doc-bound row for.
+ *
+ * The server keeps ONE version per `files` row (`retireSupersededDocBlobs`), so
+ * "upload whatever the listing lacks" is a fight: two devices holding different
+ * bytes for one file each upload their own and retire the other's, forever, and
+ * a stale device reverts a teammate's newer edit. Per such file, with `base` the
+ * sha this device last agreed with the server on:
+ *
+ *   local == server                → agreed (record base)
+ *   local == base, server differs  → a teammate changed it: download over local
+ *   server == base, local differs  → a local edit: upload, sending `baseSha`
+ *   no base, or all three differ   → server is canonical: keep the local copy in
+ *                                    `.context/trash`, then download
+ *
+ * The server row is found by the local `files` id, or — for a path this device
+ * has no id for — by path. Everything else (the `attachments/` store, rows with
+ * no doc, paths the server holds nothing for) keeps the content-hash diff
+ * described on {@link diffAttachments}. Without `ctx` there is no three-way.
+ */
+export function planBinarySync(
+  local: LocalAttachment[],
+  server: ServerBlob[],
+  ctx?: BinaryPlanContext,
+): BinaryPlan {
   const localShas = new Set(local.map((a) => a.sha256));
   const localPaths = new Set(local.map((a) => a.relPath.toLowerCase()));
   const serverShas = new Set(server.map((b) => b.sha256));
 
-  const toUpload = local.filter((a) => !serverShas.has(a.sha256));
+  const toUpload: PlannedUpload[] = [];
+  const toReplace: BinaryReplace[] = [];
+  const agreed: BinaryPlan["agreed"] = [];
+  /** Server rows the three-way consumed: never also a plain download. */
+  const consumed = new Set<string>();
+  /** Local paths the three-way decided: never also a plain upload. */
+  const decided = new Set<string>();
+
+  if (ctx) {
+    const byDoc = new Map<string, ServerBlob[]>();
+    const byPath = new Map<string, ServerBlob[]>();
+    for (const b of server) {
+      if (!b.docId || !b.sha256 || !b.relPath || isUnderAttachments(b.relPath)) continue;
+      byDoc.set(b.docId, [...(byDoc.get(b.docId) ?? []), b]);
+      const key = b.relPath.toLowerCase();
+      byPath.set(key, [...(byPath.get(key) ?? []), b]);
+    }
+    for (const a of local) {
+      if (isUnderAttachments(a.relPath)) continue;
+      const knownId = ctx.docIdFor(a.relPath);
+      const rows = knownId ? byDoc.get(knownId) : byPath.get(a.relPath.toLowerCase());
+      if (!rows || rows.length === 0) continue;
+      decided.add(a.relPath);
+      for (const r of rows) consumed.add(r.id);
+      const same = rows.find((r) => r.sha256 === a.sha256);
+      if (same) {
+        agreed.push({ relPath: a.relPath, docId: same.docId as string, sha256: a.sha256 });
+        continue;
+      }
+      const current = rows[0];
+      const docId = current.docId as string;
+      const base = ctx.baseFor(docId);
+      if (base && rows.some((r) => r.sha256 === base)) {
+        // The server still holds what we last agreed on: the change is ours.
+        toUpload.push({ ...a, baseSha: base });
+        continue;
+      }
+      const blob = { ...current, docId, relPath: a.relPath };
+      if (base === a.sha256) {
+        toReplace.push({ local: a, blob, keepCopy: false, reason: "teammate-edit" });
+      } else {
+        toReplace.push({ local: a, blob, keepCopy: true, reason: base ? "conflict" : "no-base" });
+      }
+    }
+  }
+
+  for (const a of local) {
+    if (decided.has(a.relPath)) continue;
+    if (!serverShas.has(a.sha256)) toUpload.push(a);
+  }
   const toDownload = server.filter(
     (b) =>
+      !consumed.has(b.id) &&
       !!b.sha256 &&
       !!b.relPath &&
       isSafeBlobRelPath(b.relPath) &&
@@ -228,7 +346,7 @@ export function diffAttachments(
       (isUnderAttachments(b.relPath) || !localShas.has(b.sha256)) &&
       !localPaths.has(b.relPath.toLowerCase()),
   );
-  return { toUpload, toDownload };
+  return { toUpload, toDownload, toReplace, agreed };
 }
 
 /**
@@ -274,6 +392,37 @@ class HiddenFile extends Error {
     super("not_readable");
     this.name = "HiddenFile";
   }
+}
+
+/**
+ * The server refused an upload because this device's base is stale (409
+ * `stale_base`): a teammate uploaded a newer version since. `current` is the
+ * server's version, which the pass downloads instead (keeping the local bytes
+ * in `.context/trash`).
+ */
+class StaleBase extends Error {
+  constructor(public readonly current: ServerBlob) {
+    super("stale_base");
+    this.name = "StaleBase";
+  }
+}
+
+/** The server's current version from a 409 `stale_base`, or null. */
+function staleBaseCurrent(e: unknown): ServerBlob | null {
+  if (errStatus(e) !== 409 || errCode(e) !== "stale_base") return null;
+  const body = (e as { body?: unknown }).body;
+  const cur = body && typeof body === "object" ? (body as { current?: unknown }).current : null;
+  if (!cur || typeof cur !== "object") return null;
+  const c = cur as Partial<ServerBlob>;
+  if (typeof c.id !== "string" || typeof c.sha256 !== "string") return null;
+  return {
+    id: c.id,
+    sha256: c.sha256,
+    relPath: typeof c.relPath === "string" ? c.relPath : null,
+    size: typeof c.size === "number" ? c.size : undefined,
+    mime: c.mime ?? null,
+    docId: typeof c.docId === "string" ? c.docId : null,
+  };
 }
 
 class AbortPass extends Error {
@@ -502,6 +651,8 @@ export interface AttachmentSyncDeps {
     bytes: Uint8Array,
     mime: string,
     docId?: string | null,
+    /** The sha this edit started from (sent as `?baseSha=`). */
+    baseSha?: string | null,
   ) => Promise<void>;
   /** LEGACY download: GET `/api/blobs/:id` and hand back the bytes. */
   downloadServer: (id: string) => Promise<Uint8Array>;
@@ -520,6 +671,8 @@ export interface AttachmentSyncDeps {
     filename: string;
     /** The `files` row these bytes belong to (tree binaries only). */
     docId?: string | null;
+    /** The sha this edit started from — 409 `stale_base` if the file moved on. */
+    baseSha?: string | null;
   }) => Promise<BlobIntent>;
   /** POST the intent's `completeUrl` once every byte is in. Idempotent. */
   completeUpload?: (completeUrl: string, body: BlobCompleteBody) => Promise<void>;
@@ -660,6 +813,20 @@ export interface AttachmentSyncDeps {
    * file — and it is what lets a revocation take the file off this disk.
    */
   confirmFileBytes?: (relPath: string) => void;
+  /**
+   * The sha this device last agreed with the server on for a `files` id, and
+   * its setter (`registry.getFileBase` / `setFileBase`, persisted in
+   * `.context/config.json`). The base of {@link planBinarySync}'s three-way.
+   * Absent: the mirror keeps them for the session only.
+   */
+  fileBase?: (docId: string) => string | null;
+  setFileBase?: (docId: string, sha256: string) => void;
+  /**
+   * Copy a local binary into `.context/trash` before a server version replaces
+   * it (`ipc.copyToTrash`). Absent: a replacement that needs a recovery copy is
+   * not made — the local file is never overwritten without one.
+   */
+  keepLocalCopy?: (relPath: string) => Promise<string>;
   /** Forget a mapping whose path is not this file's any more — the other half
    *  of an adoption, so `.context/config.json` never names two ids for one
    *  file (`registry.forgetFileId`). */
@@ -773,6 +940,9 @@ export class AttachmentSync {
    *  separate from the byte mirror's, so extraction never delays an upload. */
   private pendingText = new Set<string>();
   private textTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `files` id → last agreed sha, for the session (write-through to
+   *  `deps.setFileBase`, which persists it). */
+  private readonly bases = new Map<string, string>();
 
   constructor(
     private readonly deps: AttachmentSyncDeps,
@@ -789,6 +959,23 @@ export class AttachmentSync {
   /** Is the vault this sync belongs to still the open one? */
   private current(): boolean {
     return this.deps.isCurrent?.() ?? true;
+  }
+
+  // ---- Three-way base (see `planBinarySync`) -----------------------------
+
+  private baseFor(docId: string): string | null {
+    return this.bases.get(docId) ?? this.deps.fileBase?.(docId) ?? null;
+  }
+
+  /** This device and the server agree on these bytes for `docId`. */
+  private setBase(docId: string | null | undefined, sha256: string): void {
+    if (!docId || !sha256) return;
+    this.bases.set(docId, sha256);
+    this.deps.setFileBase?.(docId, sha256);
+  }
+
+  private docIdFor(relPath: string): string | null {
+    return this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null;
   }
 
   // ---- The sidebar's file dots (see `deps.onFileStates`) -----------------
@@ -997,7 +1184,18 @@ export class AttachmentSync {
         if (!this.localPathKeys.has(key) || listed.has(key)) this.unreadable.delete(key);
       }
     }
-    const { toUpload, toDownload } = diffAttachments(local, server);
+    const plan = planBinarySync(local, server, {
+      docIdFor: (relPath) => this.docIdFor(relPath),
+      baseFor: (docId) => this.baseFor(docId),
+    });
+    const { toUpload, toDownload } = plan;
+    // Replacements grow during the upload phase: a 409 `stale_base` is one more.
+    const replacements: BinaryReplace[] = [...plan.toReplace];
+    for (const g of plan.agreed) {
+      this.fileIds.set(g.relPath, g.docId);
+      this.deps.rememberFileId?.(g.relPath, g.docId);
+      this.setBase(g.docId, g.sha256);
+    }
 
     // A local file the uploader did NOT queue is one whose sha the server's
     // listing already carries, which is the listing saying it holds these
@@ -1007,7 +1205,10 @@ export class AttachmentSync {
     // client load unconfirmed and settle on the next pass, without a byte
     // moving. Under `attachments/` there are no `files` rows to confirm.
     if (this.deps.confirmFileBytes) {
-      const queued = new Set(toUpload.map((a) => a.relPath));
+      const queued = new Set([
+        ...toUpload.map((a) => a.relPath),
+        ...replacements.map((r) => r.local.relPath),
+      ]);
       for (const a of local) {
         if (isUnderAttachments(a.relPath) || queued.has(a.relPath)) continue;
         this.deps.confirmFileBytes(a.relPath);
@@ -1034,7 +1235,10 @@ export class AttachmentSync {
     // vault's files on most passes, and the reason the column settles to quiet
     // dots without a single byte moving.
     if (this.deps.onFileStates) {
-      const queued = new Set(toUpload.map((a) => a.relPath));
+      const queued = new Set([
+        ...toUpload.map((a) => a.relPath),
+        ...replacements.map((r) => r.local.relPath),
+      ]);
       this.fileStates = new Map<string, DocSyncState>();
       for (const a of local) {
         if (isUnderAttachments(a.relPath)) continue;
@@ -1109,6 +1313,21 @@ export class AttachmentSync {
             if (this.fileStates.delete(a.relPath)) this.publishFileStates();
             return;
           }
+          if (e instanceof StaleBase) {
+            // A teammate's newer version landed first. Ours goes to the trash
+            // copy and theirs comes down — never a retry that retires theirs.
+            const docId = e.current.docId;
+            if (docId) {
+              replacements.push({
+                local: a,
+                blob: { ...e.current, docId, relPath: a.relPath },
+                keepCopy: true,
+                reason: "stale-base",
+              });
+            }
+            this.setFileState(a.relPath, "queued");
+            return;
+          }
           if (this.handleAttachmentSyncRequired(e)) return;
           if (e instanceof AbortPass && e.reason === "attachment_sync_requires_pro") return;
           if (e instanceof AbortPass) {
@@ -1134,10 +1353,22 @@ export class AttachmentSync {
       },
     );
     if (aborted) return { uploaded, downloaded };
+    const replaces = replacements.filter((r) => {
+      if (this.attachmentSyncBlocked) return false;
+      if (this.deps.isDeletePending?.(r.local.relPath)) return false;
+      if (r.keepCopy && !this.deps.keepLocalCopy) {
+        console.warn(
+          `[attachments] ${r.local.relPath} differs from the server's version and no recovery copy can be kept — leaving it alone`,
+        );
+        return false;
+      }
+      return true;
+    });
+    const total = downloads.length + replaces.length;
     // One announcement for the whole wave (see `deps.onDownloadsQueued`), and
     // then exactly one settle per file — including the tail a cut-short pass
     // never reaches, which is what keeps the header's counter from hanging.
-    if (downloads.length > 0) this.deps.onDownloadsQueued?.(downloads.length);
+    if (total > 0) this.deps.onDownloadsQueued?.(total);
     let settled = 0;
     await runProbeFirst(
       downloads,
@@ -1156,6 +1387,7 @@ export class AttachmentSync {
             this.deps.rememberFileId?.(b.relPath, b.docId);
             // These bytes came FROM the server, so it has them.
             this.deps.confirmFileBytes?.(b.relPath);
+            this.setBase(b.docId, b.sha256);
           }
           // It came FROM the server, so the server has it — and its row appears
           // in the sidebar on the watcher echo, before the next pass would say so.
@@ -1173,11 +1405,68 @@ export class AttachmentSync {
       },
       { concurrency: BINARY_CONCURRENCY, shouldStop: () => !this.current() },
     );
+    // The server's version of a file this disk holds a different one of (see
+    // `planBinarySync`). After the plain downloads, through the same budget.
+    const kept: string[] = [];
+    await runPool(
+      replaces,
+      async (r) => {
+        const relPath = r.local.relPath;
+        this.setFileState(relPath, "syncing");
+        try {
+          await bytes.run(r.blob.size ?? 0, () => this.replaceOne(r, kept));
+          downloaded++;
+          this.fileIds.set(relPath, r.blob.docId);
+          this.deps.rememberFileId?.(relPath, r.blob.docId);
+          this.deps.confirmFileBytes?.(relPath);
+          this.setBase(r.blob.docId, r.blob.sha256);
+          this.setFileState(relPath, "synced");
+          settled++;
+          this.deps.onDownloadSettled?.("ok");
+        } catch (e) {
+          this.handleAttachmentSyncRequired(e);
+          console.error("[attachments] replace failed", relPath, e);
+          settled++;
+          this.deps.onDownloadSettled?.("failed");
+        }
+      },
+      { concurrency: BINARY_CONCURRENCY, shouldStop: () => !this.current() },
+    );
+    if (kept.length > 0 && this.current()) {
+      this.deps.notify?.(
+        kept.length === 1
+          ? `A newer version of ${baseName(kept[0])} was synced from your team. Your local copy is saved in the vault's recovery folder.`
+          : `Newer versions of ${kept.length} files were synced from your team. Your local copies are saved in the vault's recovery folder.`,
+        "neutral",
+      );
+    }
     // A pass the vault switch cut short still owes the counter every file it
     // announced. Reported as failures rather than silently dropped: the work was
     // queued and did not happen.
-    for (let i = settled; i < downloads.length; i++) this.deps.onDownloadSettled?.("failed");
+    for (let i = settled; i < total; i++) this.deps.onDownloadSettled?.("failed");
     return { uploaded, downloaded };
+  }
+
+  /**
+   * Put the server's version of a file over the local one (see
+   * {@link BinaryReplace}). The recovery copy comes FIRST, and a failed copy
+   * stops the replacement: the local bytes are never overwritten without one.
+   */
+  private async replaceOne(r: BinaryReplace, kept: string[]): Promise<void> {
+    const relPath = r.local.relPath;
+    if (r.keepCopy) {
+      const keep = this.deps.keepLocalCopy;
+      if (!keep) throw new Error(`no recovery copy transport for ${relPath}`);
+      const dest = await keep(relPath);
+      console.info(
+        `[attachments] ${relPath} (${r.reason}) — local copy kept at ${dest}; downloading the server's version`,
+      );
+      kept.push(relPath);
+    } else {
+      console.info(`[attachments] ${relPath} changed on the server — downloading the newer version`);
+    }
+    if (!this.current()) throw new Error("vault changed");
+    await this.downloadOne(r.blob, { overwrite: true });
   }
 
   // ---- Upload ------------------------------------------------------------
@@ -1221,7 +1510,7 @@ export class AttachmentSync {
 
   /** {@link uploadOne}'s body, with this sha's claim already held. `healed`:
    *  this is the one retry after {@link forgetDeadFileId} dropped a dead id. */
-  private async uploadOneClaimed(a: LocalAttachment, healed = false): Promise<boolean> {
+  private async uploadOneClaimed(a: PlannedUpload, healed = false): Promise<boolean> {
     const mime = mimeForPath(a.relPath);
     // A tree binary is a `files` row FIRST: the id has to exist before the
     // bytes, because it is what the blob carries as `doc_id` and what the
@@ -1229,6 +1518,19 @@ export class AttachmentSync {
     // still go, with the pre-Stage-A path heuristic deciding who may read them.
     const docId = await this.ensureFileRow(a);
     if (this.unreadable.has(a.relPath.toLowerCase())) throw new HiddenFile();
+    // The version this edit started from. The server refuses (409 `stale_base`)
+    // when the file has moved on since, instead of retiring a teammate's edit.
+    const baseSha = docId ? (a.baseSha ?? this.baseFor(docId)) : null;
+    const legacyUpload = async (): Promise<void> => {
+      try {
+        await this.deps.uploadServer(a.relPath, await loadBytes(), mime, docId, baseSha);
+      } catch (e) {
+        const current = staleBaseCurrent(e);
+        if (current) throw new StaleBase(current);
+        throw e;
+      }
+      this.setBase(docId, a.sha256);
+    };
     // Read lazily and at most once: the deduped path must move NO bytes and
     // must not even open the file, which is what makes a second device's first
     // sync a few JSON round trips instead of re-uploading the whole store.
@@ -1239,7 +1541,7 @@ export class AttachmentSync {
     };
 
     if (!this.deps.createIntent || this.intentSupported === false) {
-      await this.deps.uploadServer(a.relPath, await loadBytes(), mime, docId);
+      await legacyUpload();
       // The legacy route answers with the blob, but through a dep that reports
       // nothing — so the text for this path waits for the next listing to name
       // its blob, which is exactly what the pass already does.
@@ -1255,6 +1557,7 @@ export class AttachmentSync {
         mime,
         filename: baseName(a.relPath),
         docId,
+        ...(baseSha ? { baseSha } : {}),
       });
       this.intentSupported = true;
     } catch (e) {
@@ -1263,9 +1566,11 @@ export class AttachmentSync {
         // A server from before this flow. Remembered, so the NEXT file skips
         // the probe entirely rather than paying a 404 each time.
         this.intentSupported = false;
-        await this.deps.uploadServer(a.relPath, await loadBytes(), mime, docId);
+        await legacyUpload();
         return true;
       }
+      const current = staleBaseCurrent(e);
+      if (current) throw new StaleBase(current);
       if (status === 402) {
         if (errCode(e) === "attachment_sync_requires_pro") {
           this.handleAttachmentSyncRequired(e);
@@ -1314,6 +1619,7 @@ export class AttachmentSync {
       // server has held it all along. Reconciled before anything else believes
       // our id.
       await this.reconcileDedupedRow(a, docId, intent.blob);
+      this.setBase(intent.blob?.docId ?? docId, a.sha256);
       return true;
     }
     if (!("upload" in intent)) throw new Error("intent answered with no upload target");
@@ -1330,6 +1636,7 @@ export class AttachmentSync {
         });
       await put();
       await this.completeUpload(completeUrl, () => ({}), put);
+      this.setBase(docId, a.sha256);
       return true;
     }
 
@@ -1405,6 +1712,7 @@ export class AttachmentSync {
         parts = await runParts();
       },
     );
+    this.setBase(docId, a.sha256);
     return true;
   }
 
@@ -1538,7 +1846,7 @@ export class AttachmentSync {
    * request that carries one. `direct` then decides the headers, and that is the
    * whole rule: presign ⇒ nothing, our own route ⇒ the bearer.
    */
-  private async downloadOne(b: ServerBlob): Promise<void> {
+  private async downloadOne(b: ServerBlob, opts: { overwrite?: boolean } = {}): Promise<void> {
     const relPath = b.relPath as string;
     // Last line of the "never overwrite an occupied path" invariant
     // ({@link diffAttachments}). The diff already subtracts every path this
@@ -1547,7 +1855,9 @@ export class AttachmentSync {
     // are not the bytes at that path, and a download is a conflict, never an
     // overwrite: it is refused, reported as a failed download, and the next
     // pass uploads the local file instead (uploads run first).
-    if (this.localPathKeys.has(relPath.toLowerCase())) {
+    // `overwrite` is the three-way's replacement (`replaceOne`), which decided
+    // the server's version wins and kept any copy it needed first.
+    if (!opts.overwrite && this.localPathKeys.has(relPath.toLowerCase())) {
       throw new Error(`${relPath} is occupied on disk — refusing to overwrite it with a download`);
     }
     const tree = !isUnderAttachments(relPath);

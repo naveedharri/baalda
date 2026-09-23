@@ -341,6 +341,47 @@ pub fn write_trash_copy(vault: &Path, rel: &str, stamp: &str, content: &str) -> 
     Ok(dest_rel)
 }
 
+/// COPY an existing file's bytes into `.context/trash/<stamp>/<rel>`, leaving
+/// the source in place. The blob mirror's recovery copy before it replaces a
+/// local binary with the server's version — the file itself is about to be
+/// overwritten by a download, so moving it (`trash_note`) would leave a gap.
+/// Streamed (`fs::copy`), never loaded whole: a binary can be gigabytes.
+pub fn copy_to_trash(vault: &Path, rel: &str, stamp: &str) -> AppResult<String> {
+    validate_trash_stamp(stamp)?;
+    if crate::vault::rel_path_is_ignored(rel) {
+        return Err(AppError::new(
+            "refusing to trash a path inside an ignored dir",
+        ));
+    }
+    let abs = resolve_in_vault(vault, rel)?;
+    if !abs.is_file() {
+        return Err(AppError::new("path is not a file"));
+    }
+    let dest_rel = unique_trash_dest(vault, &format!(".context/trash/{stamp}/{rel}"))?;
+    let dest = resolve_in_vault(vault, &dest_rel)?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| AppError::new("target has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| AppError::new("invalid file name"))?;
+    let tmp = temp_sibling(parent, file_name);
+    let result = (|| -> AppResult<()> {
+        std::fs::copy(&abs, &tmp)?;
+        // This IS the only copy of the local version once the download lands.
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, &dest)?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(dest_rel)
+}
+
 /// The stamp is joined into a path, so it must be exactly one ordinary segment.
 fn validate_trash_stamp(stamp: &str) -> AppResult<()> {
     if stamp.is_empty()
@@ -785,6 +826,22 @@ mod tests {
         // stops a trashed note being re-registered as a ghost).
         let moved = std::fs::read_to_string(tmp.path().join(dest)).unwrap();
         assert_eq!(moved, "real content");
+    }
+
+    #[test]
+    fn copy_to_trash_keeps_the_source_and_copies_the_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Team")).unwrap();
+        std::fs::write(tmp.path().join("Team/r.docx"), [1u8, 2, 3]).unwrap();
+        let dest = copy_to_trash(tmp.path(), "Team/r.docx", "s1").unwrap();
+        assert_eq!(dest, ".context/trash/s1/Team/r.docx");
+        assert_eq!(std::fs::read(tmp.path().join("Team/r.docx")).unwrap(), vec![1, 2, 3]);
+        assert_eq!(std::fs::read(tmp.path().join(&dest)).unwrap(), vec![1, 2, 3]);
+        // A second copy in the same stamp never overwrites the first.
+        let again = copy_to_trash(tmp.path(), "Team/r.docx", "s1").unwrap();
+        assert_ne!(again, dest);
+        assert!(copy_to_trash(tmp.path(), ".context/config.json", "s1").is_err());
+        assert!(copy_to_trash(tmp.path(), "Team/missing.docx", "s1").is_err());
     }
 
     #[test]

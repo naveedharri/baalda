@@ -453,6 +453,13 @@ export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch)
 export const ensureFolder = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("ensure_folder", { path, expectedEpoch: expectedEpoch ?? null });
 /**
+ * COPY a binary into `.context/trash/<stamp>/…` (the source stays) and return
+ * the destination — the blob mirror's recovery copy before a server version
+ * replaces a local one.
+ */
+export const copyToTrash = (path: string, stamp: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string>("copy_to_trash", { path, stamp, expectedEpoch: expectedEpoch ?? null });
+/**
  * Move a file into `.context/trash/<stamp>/…` and return the destination.
  * Kept for compatibility with legacy recovery flows; confirmed sync deletions
  * now use {@link deleteFile}.

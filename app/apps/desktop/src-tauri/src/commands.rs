@@ -1280,6 +1280,19 @@ pub async fn write_trash_copy(
     notefile::write_trash_copy(&vault, &path, &stamp, &content)
 }
 
+/// Copy a local binary into `.context/trash/<stamp>/…` before the blob mirror
+/// replaces it with the server's version (see `notefile::copy_to_trash`).
+#[tauri::command]
+pub async fn copy_to_trash(
+    state: State<'_, AppState>,
+    path: String,
+    stamp: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<String> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    notefile::copy_to_trash(&vault, &path, &stamp)
+}
+
 /// Re-key the index row at `path` to `doc_id` after an out-of-app rename (see
 /// `Index::rebind_note_id`). Returns false when there is no row there, or when
 /// the id already belongs to another path.
