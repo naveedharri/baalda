@@ -7,6 +7,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Security
+- **Dependency updates.** All 40 open Dependabot alerts resolved by bumping `nodemailer` (7 → 9),
+  `hono`, `undici`, `vitest`, `@dicebear/initials`, `nanoid`, `postcss`, `browserslist` and
+  `baseline-browser-mapping`; no source changes.
+
 ### Fixed
 - **Shared binaries flipped between teammates' versions (desktop + server).** Doc-bound tree
   binaries now sync three-way against a per-file base persisted in `.context/config.json`
