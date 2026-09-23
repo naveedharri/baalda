@@ -33,6 +33,7 @@ import { ofmDecorations, ofmMarkdown, tagCompletions, type TagSuggestion } from 
 import { richNoteCopy, type ReadCopyAttachment } from "./copy";
 import { smartPaste, type SaveAttachment } from "./paste";
 import { tableAtomicRanges } from "./table/atomic";
+import { minimalInputChanges } from "./minimalChanges";
 import { tripleClickLine } from "./selection";
 import { slashCompletions } from "./slash";
 import { checkboxes, taskKeymap } from "./tasks";
@@ -146,6 +147,9 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
     // Local history only for the non-CRDT path; yCollab supplies undo otherwise.
     ...(collab ? [] : [history()]),
     drawSelection(),
+    // Typing over a selection changes only what differs, never a delete and
+    // re-insert of text (frontmatter, hidden markers) that came back unchanged.
+    minimalInputChanges,
     // Triple-click selects a line's content without its trailing newline, so
     // the selection highlight doesn't bleed onto the next line.
     tripleClickLine,
