@@ -8,6 +8,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Changed
+- **AI (Beta) settings page hidden (desktop).** Removed from the Vault Settings menu behind a
+  `SHOW_AI_TAB` flag; any request for it opens Health instead. The code is unchanged.
 - **Calmer sync status (desktop).** The "N notes didn't sync" banner is gone, and the top pill only
   reads "Synced" or "Syncing N/M": per-note failures no longer turn it amber or leave it stuck. A
   mapped note the server did not name on connect counts as synced everywhere. Sidebar folders show
