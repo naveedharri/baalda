@@ -7,6 +7,7 @@ import { appendUpdate, loadDocState } from "../yjs/persistence.js";
 import { scheduleIndex } from "../index/indexer.js";
 import { formatDocName, parseDocName } from "./doc-name.js";
 import { redisExtensions } from "./redis-extension.js";
+import { reportShrink } from "../versions/shrink-guard.js";
 
 /**
  * Hocuspocus sync server (spec 03 §3, 04 §4).
@@ -22,6 +23,13 @@ import { redisExtensions } from "./redis-extension.js";
 // Origin used when we hydrate a freshly-loaded doc, so onChange can tell our own
 // load echo apart from real client edits and skip persisting it.
 const LOAD_ORIGIN = "hocuspocus:load";
+
+/**
+ * The note text as `onChange` last saw it, per loaded doc — the "before" side
+ * of the sharp-shrink check (`versions/shrink-guard.ts`). Weak, so an unloaded
+ * doc takes its entry with it.
+ */
+const lastSeenText = new WeakMap<Y.Doc, string>();
 
 /**
  * WebSocket close code for "this doc's Yjs state is over `MAX_NOTE_MB`".
@@ -257,6 +265,7 @@ export function createSyncServer(
         if (state) {
           Y.applyUpdate(data.document, state, LOAD_ORIGIN);
         }
+        lastSeenText.set(data.document, data.document.getText("content").toString());
       } catch (err) {
         // Destroy-then-rethrow is load-bearing; Hocuspocus cannot clean this up
         // for us. It only inserts the Document into its `documents` map AFTER
@@ -287,10 +296,19 @@ export function createSyncServer(
     },
 
     async onChange(data) {
+      // Read the text BEFORE any await, so the before/after pair brackets
+      // exactly the updates seen so far.
+      const text = data.document.getText("content").toString();
+      const before = lastSeenText.get(data.document);
+      lastSeenText.set(data.document, text);
       // Skip the echo from our own onLoadDocument hydration.
       if (data.transactionOrigin === LOAD_ORIGIN) return;
       const parsed = parseDocName(data.documentName);
       if (!parsed) return;
+      if (before !== undefined) {
+        const ctx = data.context as Partial<SyncContext> | undefined;
+        reportShrink(parsed.vaultId, parsed.docId, before, text, ctx?.userId ?? null);
+      }
       // NEVER let this reject. Hocuspocus calls `onChange` unawaited AND
       // uncaught (`handleDocumentUpdate` → `this.hooks("onChange", …)`), so a
       // rejection here is an unhandled rejection, which Node 22 turns into a

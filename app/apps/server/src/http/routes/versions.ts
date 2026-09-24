@@ -5,7 +5,7 @@ import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
 import { vaultAccess } from "../../permissions/vault-docs.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
-import { recordVersion, sha256Hex, stampLastEdited } from "../../versions/capture.js";
+import { recordVersion, sha256Hex, stampLastEdited, type VersionCause } from "../../versions/capture.js";
 import {
   captureCheckpoint,
   getCheckpointSummary,
@@ -17,6 +17,13 @@ import {
   RevertError,
   RevertTooDestructiveError,
 } from "../../versions/revert.js";
+import {
+  applyRecovery,
+  listRecoveryCandidates,
+  RECOVERY_APPLY_MAX,
+  type RecoveryCandidate,
+  type RecoveryItem,
+} from "../../versions/recovery.js";
 import { getSession } from "../session.js";
 
 /**
@@ -29,6 +36,8 @@ import { getSession } from "../session.js";
  *   POST   /api/vaults/:vaultId/checkpoints           create (owner/admin)
  *   DELETE /api/vaults/:vaultId/checkpoints/:id       delete (owner/admin)
  *   POST   /api/vaults/:vaultId/checkpoints/:id/revert  revert the vault (owner/admin)
+ *   GET    /api/vaults/:vaultId/recovery          damaged notes + proposals (owner/admin; ?format=csv)
+ *   POST   /api/vaults/:vaultId/recovery/apply    restore reviewed {docId, versionId} pairs (owner/admin)
  *
  * Gates mirror the rest of the app: per-doc `effectivePermission` for note
  * versions (so a `locked` share caps at view and a revert 403s), org role for
@@ -46,7 +55,7 @@ interface VersionRow {
   id: string;
   doc_id: string;
   created_at: Date;
-  cause: "idle" | "pre-revert";
+  cause: VersionCause;
   author_id: string | null;
   author_name: string | null;
   sha256: string;
@@ -63,6 +72,33 @@ function versionSummary(r: VersionRow) {
     sha256: r.sha256,
     size: r.size,
   };
+}
+
+function csvCell(value: string | number): string {
+  const s = String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** One row per candidate; `apply` is prefilled yes only for a lossless restore. */
+function recoveryCsv(candidates: RecoveryCandidate[]): string {
+  const head = "apply,docId,versionId,path,kind,status,currentChars,proposedChars,proposedAt,novelLines";
+  const rows = candidates.map((r) =>
+    [
+      r.status === "restore" ? "yes" : "no",
+      r.docId,
+      r.proposedVersionId,
+      r.path,
+      r.kind,
+      r.status,
+      r.currentChars,
+      r.proposedChars,
+      r.proposedAt,
+      r.novelLines.join(" | "),
+    ]
+      .map(csvCell)
+      .join(","),
+  );
+  return [head, ...rows].join("\n") + "\n";
 }
 
 /** Live note → its collection id, or null when the note is gone. */
@@ -177,6 +213,64 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (!org) return undefined; // unknown vault
     return orgRole(org, userId);
   }
+
+  // ── recovery of damaged notes (#200) ────────────────────────────────────────
+  // Propose, never apply: the listing is for a person to review, and apply takes
+  // back only the pairs they kept. Each restore is a forward write with a
+  // pre-revert version, so it is undoable from the note's Version History.
+
+  routes.get("/vaults/:vaultId/recovery", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const role = await vaultRole(vaultId, session.userId);
+    if (role === undefined) return c.json({ error: "Unknown vault" }, 404);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Only a vault owner/admin can review recovery" }, 403);
+    }
+    const candidates = await listRecoveryCandidates(vaultId, {
+      docWriter: deps.docWriter,
+      canEdit: (docId) => canEditDoc(session.userId, docId),
+    });
+    if (c.req.query("format") === "csv") {
+      c.header("Content-Type", "text/csv; charset=utf-8");
+      c.header("Content-Disposition", `attachment; filename="recovery-${vaultId}.csv"`);
+      return c.body(recoveryCsv(candidates));
+    }
+    return c.json({ candidates });
+  });
+
+  routes.post("/vaults/:vaultId/recovery/apply", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const role = await vaultRole(vaultId, session.userId);
+    if (role === undefined) return c.json({ error: "Unknown vault" }, 404);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Only a vault owner/admin can apply recovery" }, 403);
+    }
+    const body = (await c.req.json().catch(() => null)) as { items?: unknown } | null;
+    const raw = Array.isArray(body?.items) ? body.items : null;
+    const items: RecoveryItem[] = [];
+    for (const it of raw ?? []) {
+      const docId = (it as { docId?: unknown })?.docId;
+      const versionId = Number((it as { versionId?: unknown })?.versionId);
+      if (typeof docId !== "string" || !Number.isInteger(versionId)) {
+        return c.json({ error: "Each item needs a docId and an integer versionId" }, 400);
+      }
+      items.push({ docId, versionId });
+    }
+    if (!raw || items.length === 0) return c.json({ error: "items required" }, 400);
+    if (items.length > RECOVERY_APPLY_MAX) {
+      return c.json({ error: `At most ${RECOVERY_APPLY_MAX} items per call` }, 400);
+    }
+    const results = await applyRecovery(vaultId, items, session.userId, {
+      docWriter: deps.docWriter,
+      canEdit: (docId) => canEditDoc(session.userId, docId),
+    });
+    if (results.some((r) => r.ok)) deps.onRegistryChanged(vaultId, null);
+    return c.json({ results });
+  });
 
   routes.get("/vaults/:vaultId/checkpoints", async (c) => {
     const session = await getSession(c);

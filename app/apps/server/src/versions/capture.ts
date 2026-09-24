@@ -67,7 +67,7 @@ const VAULT_STAMP_SOURCES = new Set<string>([BULK_ORIGIN, BULK_SEED_ORIGIN]);
 /** Per-vault ceiling on how often the lazy daily-checkpoint check runs. */
 const CHECKPOINT_CHECK_INTERVAL_MS = 5 * 60_000;
 
-export type VersionCause = "idle" | "pre-revert";
+export type VersionCause = "idle" | "pre-revert" | "pre-shrink";
 
 export function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -164,6 +164,12 @@ export interface VersionCapture {
    *  write's origin tag when the server itself wrote it — see
    *  {@link NO_VERSION_SOURCES}. */
   touch(vaultId: string, docId: string, userId: string | null, source?: string | null): void;
+  /**
+   * One update just removed most of a doc's text (`versions/shrink-guard.ts`):
+   * keep `previousText` — the note as it stood right before — as a
+   * `pre-shrink` version. Authored by whoever edited the doc before the shrink.
+   */
+  preShrink(vaultId: string, docId: string, previousText: string): Promise<void>;
   /** Run a doc's pending idle capture NOW (test hook / shutdown). */
   flush(docId: string): Promise<void>;
   /** Drop every pending timer. */
@@ -315,6 +321,22 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
             console.error(`[versions] daily checkpoint check failed for ${vaultId}:`, err);
           });
         }
+      }
+    },
+
+    async preShrink(vaultId, docId, previousText) {
+      // Read the author synchronously: the shrinking edit's own `touch` follows
+      // this call and would overwrite it.
+      const authorId = sessions.get(docId)?.userId ?? null;
+      try {
+        const { rows } = await db.query<{ id: string }>(
+          "SELECT id FROM notes WHERE id = $1 AND vault_id = $2 AND deleted_at IS NULL",
+          [docId, vaultId],
+        );
+        if (!rows[0]) return;
+        await recordVersion({ vaultId, docId, content: previousText, cause: "pre-shrink", authorId }, db);
+      } catch (err) {
+        console.error(`[versions] pre-shrink capture failed for ${docId}:`, err);
       }
     },
 

@@ -42,6 +42,10 @@ describe("versionCauseLabel", () => {
     expect(versionCauseLabel("pre-revert")).toBe("Before revert");
   });
 
+  it("names the copy kept before a large deletion", () => {
+    expect(versionCauseLabel("pre-shrink")).toBe("Before large deletion");
+  });
+
   it("treats anything else as the ordinary idle capture", () => {
     expect(versionCauseLabel("idle")).toBe("Auto-saved");
     // A cause added server-side later must not render blank.

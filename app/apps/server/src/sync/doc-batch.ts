@@ -4,6 +4,7 @@ import { formatDocName } from "./doc-name.js";
 import type { SyncContext } from "./hocuspocus.js";
 import { appendUpdate, compareStateVectors, loadDocState } from "../yjs/persistence.js";
 import { indexDoc, scheduleIndex } from "../index/indexer.js";
+import { reportShrink } from "../versions/shrink-guard.js";
 
 /**
  * The server-side CRDT write path, shared by the MCP tools (`mcp/doc-writer.ts`)
@@ -193,6 +194,7 @@ export async function applyDetached(
   try {
     if (state) Y.applyUpdate(doc, state);
     if (opts.precondition && !opts.precondition(doc)) return "conflict";
+    const before = doc.getText(CONTENT_FIELD).toString();
     // Register AFTER hydration so we capture only our own edit.
     doc.on("update", capture);
     try {
@@ -203,6 +205,7 @@ export async function applyDetached(
     if (updates.length === 0) return "skipped";
     const merged = updates.length === 1 ? updates[0] : Y.mergeUpdates(updates);
     await appendUpdate(docId, merged);
+    reportShrink(vaultId, docId, before, doc.getText(CONTENT_FIELD).toString(), userId);
     // Fan out to background subscribers, which the live path gets free from
     // Hocuspocus's onChange. Best-effort like the re-index: the write is already
     // durable, and failing it here would turn a delivery problem into a lost

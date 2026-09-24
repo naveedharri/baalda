@@ -7,7 +7,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **A version before any large deletion (server).** When one edit removes most of a note, the
+  server first keeps the note as it was, shown in Version History as "Before large deletion".
+  Owners and admins can also list notes damaged by past sync bugs (emptied, or full of repeated
+  punctuation), review the proposed version for each and restore the ones they choose
+  (`GET/POST /api/vaults/:vaultId/recovery`, `pnpm run recover:notes`). Every restore can be
+  undone from Version History (#200).
+
 ### Fixed
+- **MCP connectors now always ask which vault to use (server).** A client that was already signed
+  in in the browser skipped the vault picker, so its connection failed on every call for anyone
+  in more than one vault. Such a connection now also returns a clear "no vault selected" error (#211).
 - **Crash when copying from a note (macOS).** Rich copies wrote the system clipboard from a
   background thread while the webview wrote it on the main thread; the race could crash the app.
   The native write now runs on the main thread (the clipboard plugin is replaced by a write-only
