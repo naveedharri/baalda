@@ -28,6 +28,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   layer's z-index inline, which overrode the theme and hid the highlight under the code-block well.
 
 ### Changed
+- **Cleaner banner buttons (desktop).** Banner actions are compact pills of one height; secondary
+  actions such as "Keep as local vault" and "Open Health" are outlined instead of a grey box, and
+  the banner text is softer so the heading stands out.
 - **AI (Beta) settings page hidden (desktop).** Removed from the Vault Settings menu behind a
   `SHOW_AI_TAB` flag; any request for it opens Health instead. The code is unchanged.
 - **Calmer sync status (desktop).** The "N notes didn't sync" banner is gone, and the top pill only
