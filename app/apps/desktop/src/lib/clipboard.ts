@@ -1,3 +1,5 @@
+import { clipboardWrite } from "./ipc";
+
 /**
  * Clipboard write that survives an `await` before it.
  *
@@ -6,13 +8,12 @@
  * outlive it — the write then rejects even though the user really did click.
  * The native Tauri clipboard has no such rule, so it goes first; the web API
  * and the hidden-textarea `execCommand("copy")` path are fallbacks (and what
- * runs under vitest, where the plugin import fails). Returns whether ANY path
+ * runs under vitest, where there is no Tauri runtime). Returns whether ANY path
  * succeeded; callers decide what to show when all fail.
  */
 export async function copyText(text: string): Promise<boolean> {
   try {
-    const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
-    await writeText(text);
+    await clipboardWrite(text);
     return true;
   } catch {
     /* not running under Tauri (tests, plain browser) — fall through */

@@ -93,8 +93,11 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // tint, and 28% accent over dark text still reads. (A `multiply` blend was
   // tried first: it kept text crisper but barely tinted grey chips, so a
   // selection across inline code looked incomplete.)
+  // `!important` because drawSelection writes the layer's z-index INLINE
+  // (`-1 - position`, i.e. -2), which silently beats a plain theme rule and
+  // left selections inside a code block invisible under the well.
   ".cm-selectionLayer": {
-    zIndex: "1",
+    zIndex: "1 !important",
     pointerEvents: "none",
   },
 

@@ -15,15 +15,10 @@
       "comment": "Open a vault's folder in the OS file manager. `open_path` enforces a path scope INDEPENDENTLY of this permission — listing the identifier alone leaves that scope empty, which rejects every call as ForbiddenPath. Scoped to the home directory so a webview compromise can't reach /Applications or /usr; vaults kept outside $HOME fall back to reveal_item_in_dir, which is unscoped.",
       "allow": [{ "path": "$HOME/**" }]
     },
-    "clipboard-manager:allow-write-html",
     "dialog:default",
     "fs:default",
     "updater:default",
     "process:default",
-    {
-      "identifier": "clipboard-manager:allow-write-text",
-      "comment": "Write-only clipboard for copy-link actions. navigator.clipboard rejects writes once an await has outlived WebKit's transient user activation (exactly what happens when the click first mints the link server-side); the native call is gesture-free. Read stays ungranted — the app never needs to see the clipboard."
-    },
     {
       "identifier": "core:window:allow-set-focus",
       "comment": "A `baalda://` note link has to bring the window forward — a link that navigates a window the user can't see is the same as a link that did nothing. `core:default` grants only read-only window commands, so the three commands the deep-link handler needs are listed explicitly rather than by widening it."

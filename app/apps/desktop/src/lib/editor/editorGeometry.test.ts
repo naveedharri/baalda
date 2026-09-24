@@ -47,7 +47,7 @@ describe("editor theme geometry", () => {
 
   it("keeps the selection layer lifted over opaque line backgrounds", () => {
     // The code-block well is opaque; a layer painted behind it swallows the wash.
-    expect(editorThemeSpec[".cm-selectionLayer"].zIndex).toBe("1");
+    expect(editorThemeSpec[".cm-selectionLayer"].zIndex).toBe("1 !important");
   });
 
   it("hands the table's selection to CodeMirror's layer, not the browser's", () => {

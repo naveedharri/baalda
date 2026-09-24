@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { portableNoteCopy } from "./copy";
+import { plainNoteCopy, portableNoteCopy } from "./copy";
 import { importClipboardAttachments } from "./paste";
 
 describe("portable note clipboard", () => {
@@ -46,5 +46,11 @@ describe("portable note clipboard", () => {
 
   it("reports missing bytes", async () => {
     await expect(portableNoteCopy('![a](/attachments/missing.png)', "note.md", async () => { throw new Error("Missing image"); })).rejects.toThrow("Missing image");
+  });
+
+  it("builds attachment-free copies synchronously, identical to the async path", async () => {
+    const markdown = "# Hi\n\n**bold** [site](https://example.com) <script>x</script>";
+    expect(plainNoteCopy(markdown, "note.md")).toEqual(await portableNoteCopy(markdown, "note.md", vi.fn()));
+    expect(plainNoteCopy("![a](/attachments/a.png)", "note.md")).toBeNull();
   });
 });

@@ -275,6 +275,12 @@ export interface ImportSummary {
   skipped: number;
 }
 
+// ---- Clipboard ------------------------------------------------------------
+
+/** Write-only native clipboard; Rust performs the write on the main thread. */
+export const clipboardWrite = (text: string, html?: string) =>
+  invoke<void>("clipboard_write", { text, html: html ?? null });
+
 // ---- Vault ----------------------------------------------------------------
 
 export const pickVault = () => invoke<VaultInfo | null>("pick_vault");
