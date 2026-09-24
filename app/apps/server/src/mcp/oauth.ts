@@ -62,16 +62,21 @@ async function soleVault(
   return rows.length === 1 ? rows[0].organizationId : null;
 }
 
+/** Why an OAuth bearer did not resolve: signed in, but no vault chosen. */
+export type OAuthMcpFailure = "no_vault_selected" | null;
+
 /**
  * Resolve an incoming request carrying an OAuth `Authorization: Bearer` access
  * token to an `McpAuth`, or null if the token is missing/invalid/expired, no
  * vault can be determined, or the user is no longer a member of it
  * (membership can be revoked out from under a live token — re-checked here,
- * exactly like verifyMcpToken does for mcp_ tokens).
+ * exactly like verifyMcpToken does for mcp_ tokens). `onFailure` learns when
+ * the token itself was valid but no vault was bound, so the 401 can say so.
  */
 export async function resolveOAuthMcpAuth(
   headers: Headers,
   db: Queryable = defaultPool,
+  onFailure?: (reason: OAuthMcpFailure) => void,
 ): Promise<McpAuth | null> {
   const session = await auth.api.getMcpSession({ headers });
   if (!session?.userId || !session.clientId) return null;
@@ -79,7 +84,10 @@ export async function resolveOAuthMcpAuth(
   const organizationId =
     (await getVaultBinding(session.clientId, session.userId, db)) ??
     (await soleVault(session.userId, db));
-  if (!organizationId) return null;
+  if (!organizationId) {
+    onFailure?.("no_vault_selected");
+    return null;
+  }
 
   if (!(await orgRole(organizationId, session.userId, db))) return null;
 

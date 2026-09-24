@@ -164,7 +164,12 @@ export function createMcpRoutes(deps: McpDeps): Hono {
       );
     }
     let auth = token ? await verifyMcpToken(token, undefined, { client }) : null;
-    if (!auth) auth = await resolveOAuthMcpAuth(c.req.raw.headers);
+    let noVault = false;
+    if (!auth) {
+      auth = await resolveOAuthMcpAuth(c.req.raw.headers, undefined, (reason) => {
+        noVault = reason === "no_vault_selected";
+      });
+    }
     if (!auth) {
       if (token) noteBadToken(token);
       c.header("WWW-Authenticate", WWW_AUTHENTICATE);
@@ -173,7 +178,12 @@ export function createMcpRoutes(deps: McpDeps): Hono {
         {
           jsonrpc: "2.0",
           id: null,
-          error: { code: -32001, message: "Unauthorized: authentication required" },
+          error: {
+            code: -32001,
+            message: noVault
+              ? "Unauthorized: signed in, but no vault is selected for this connection. Log in to the connector again and pick a vault."
+              : "Unauthorized: authentication required",
+          },
         },
         401,
       );

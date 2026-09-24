@@ -368,6 +368,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `onChange` appends the binary update + schedules re-index. `disconnectDoc` force-closes sockets on revoke.
 - `yjs/persistence.ts` — binary-only store: `doc_updates` append log + `doc_snapshots` (compact past
   `COMPACTION_THRESHOLD`).
+- `versions/shrink-guard.ts` — both write paths (Hocuspocus `onChange`, `applyDetached`) report an
+  update that leaves ≤20% of a ≥200-char note; the prior text becomes a `pre-shrink` version (#200).
+  It never refuses the update: a CRDT client keeps its op, so a refusal would re-push forever.
+  `versions/recovery.ts` proposes (never applies) restores for already-damaged notes; apply is a
+  forward write with a `pre-revert` version, owner/admin only.
 - `permissions/resolver.ts` — `effectivePermission(userId, docId)`: owner/admin → edit; a note's
   **creator** → edit on their own note; else max of file/folder shares (walk `parent_id` up) — either
   per-user or an org-wide "share with team" grant — plus any vault-wide grant; a `locked` share caps at

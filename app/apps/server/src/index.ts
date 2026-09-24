@@ -11,6 +11,7 @@ import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
+import { setShrinkHook } from "./versions/shrink-guard.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
 
 /**
@@ -107,6 +108,11 @@ async function main() {
     (vaultId, docId, update) => vaultChannel.publishDocUpdate(vaultId, docId, update),
     noteEdited,
   );
+
+  // A single update that wipes most of a note keeps the text it replaced (#200).
+  setShrinkHook((vaultId, docId, previousText) => {
+    void versionCapture?.preShrink(vaultId, docId, previousText);
+  });
 
   versionCapture = createVersionCapture({
     docWriter,

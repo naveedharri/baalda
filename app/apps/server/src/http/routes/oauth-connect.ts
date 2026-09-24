@@ -36,6 +36,19 @@ async function clientName(clientId: string | undefined): Promise<string> {
 
 export const oauthConnectRoutes = new Hono();
 
+// ── Force the vault picker on every authorize (issue #211) ──────────────────
+// The mcp plugin issues a code straight away unless prompt=consent, and a
+// client whose user is already signed in in the browser never passes through
+// /oauth/login (where we used to add it). Its token then had no vault binding
+// and every call 401'd once the user belonged to two vaults. Mounted ahead of
+// Better Auth's /api/auth/* handler, so this runs first.
+oauthConnectRoutes.get(AUTHORIZE_PATH, async (c, next) => {
+  const url = new URL(c.req.url);
+  if (url.searchParams.get("prompt") === "consent") return next();
+  url.searchParams.set("prompt", "consent");
+  return c.redirect(`${config.betterAuthUrl}${AUTHORIZE_PATH}?${url.searchParams.toString()}`, 302);
+});
+
 // ── Sign-in page (Better Auth mcp plugin's loginPage) ───────────────────────
 oauthConnectRoutes.get("/oauth/login", async (c) => {
   const url = new URL(c.req.url);

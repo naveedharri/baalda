@@ -3161,7 +3161,37 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 }
 .banner-actions {
   display: flex;
+  align-items: center;
+  flex-shrink: 0;
   gap: var(--sp-2);
+}
+/* Banner buttons are compact pills of one height. The primary keeps its accent
+   fill; everything else (an unclassed button was the browser's grey box) is a
+   quiet outlined pill that picks up the strip's own tint. */
+.banner .banner-actions button:not(.link-btn) {
+  height: 30px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.banner .banner-actions button:not(.primary):not(.link-btn) {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.banner .banner-actions button:not(.primary):not(.link-btn):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  border-color: color-mix(in srgb, currentColor 36%, transparent);
+}
+.banner .banner-actions button:not(.primary):not(.link-btn):disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 /* Update banner: same shape as the removed-note banner, but an accent tint so
    it reads as informational rather than a warning. */
@@ -3196,6 +3226,17 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 }
 .not-syncing-banner strong {
   color: var(--warning);
+}
+.not-syncing-banner > span {
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+.not-syncing-banner .banner-actions button:not(.primary):not(.link-btn) {
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.not-syncing-banner .banner-actions button:not(.primary):not(.link-btn):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 55%, transparent);
 }
 
 .attachment-sync-notice {
