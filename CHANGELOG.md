@@ -7,6 +7,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Crash when copying from a note (macOS).** Rich copies wrote the system clipboard from a
+  background thread while the webview wrote it on the main thread; the race could crash the app.
+  The native write now runs on the main thread (the clipboard plugin is replaced by a write-only
+  `clipboard_write` command), and selections without attachments are copied synchronously with no
+  native write at all, which also removes the spurious "Could not copy attachments" toast.
+- **Selections inside code blocks are visible again (desktop).** CodeMirror sets the selection
+  layer's z-index inline, which overrode the theme and hid the highlight under the code-block well.
+
 ### Changed
 - **AI (Beta) settings page hidden (desktop).** Removed from the Vault Settings menu behind a
   `SHOW_AI_TAB` flag; any request for it opens Health instead. The code is unchanged.
