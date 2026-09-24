@@ -3,34 +3,19 @@
    argument for one note, and every row must be able to answer "why is this not
    synced?" without a console, a log file or a support thread.
 
-   The collapsed row carries the one-line cause and the one action most likely
-   to fix it. Everything else — what it means, what Baalda will do on its own,
-   what the reader can do, where their content actually is right now, and the
-   raw facts a bug report needs — is one keystroke away in the expanded panel.
-   None of it is computed here: `lib/health/model.ts` already reasoned about it,
-   so the screen and the clipboard can never disagree. */
-import { useEffect, useMemo, useRef, useState } from "react";
+   Each row is ONE line: badge, title, the path with a few words of cause, the
+   action most likely to fix it, and Ignore. The full reasoning (what it means,
+   what Baalda does next, where the content is, the raw facts) is not painted;
+   Copy details puts it on the clipboard, and the full sentence is the row's
+   tooltip. None of it is computed here: `lib/health/model.ts` reasoned about
+   it, so the screen and the clipboard can never disagree. */
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { HealthIssue, HealthIssueKind, HealthRemedy } from "../lib/health/types";
-import { safetyLabel } from "../lib/health/model";
-import { kindLabel } from "../lib/health/format";
+import { issueGroupTitle, issueRowSentence } from "../lib/health/attention";
 import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
-import { Chip, CopyButton, Eyebrow, Glyph, PathText, type HealthHandlers } from "./HealthShared";
-
-/** Past this many issues the list needs a text box as well as chips. */
-const SEARCH_AT = 8;
-
-type Filter = "all" | "error" | "warn" | { kind: HealthIssueKind };
-
-function filterKey(f: Filter): string {
-  return typeof f === "string" ? f : `kind:${f.kind}`;
-}
-
-function matches(issue: HealthIssue, f: Filter): boolean {
-  if (f === "all") return true;
-  if (f === "error" || f === "warn") return issue.severity === f;
-  return issue.kind === f.kind;
-}
+import { Spinner } from "./Spinner";
+import { Glyph, PathText, type HealthHandlers } from "./HealthShared";
 
 const NO_DISMISSED: ReadonlySet<string> = new Set();
 
@@ -42,7 +27,14 @@ export function HealthIssues({
   dismissed = NO_DISMISSED,
   onDismiss,
   onRestore,
+  before,
+  hasOtherItems = false,
 }: {
+  /** Groups rendered first in the SAME list (the inventory differences), so
+   *  Needs attention is one continuous list of one kind of group. */
+  before?: ReactNode;
+  /** `before` lists something, so the all-clear card must not show. */
+  hasOtherItems?: boolean;
   issues: HealthIssue[];
   handlers: HealthHandlers;
   /** A local vault has no server to be behind, so its empty state says so. */
@@ -55,16 +47,7 @@ export function HealthIssues({
   onDismiss?: (key: string) => void;
   onRestore?: (key: string) => void;
 }) {
-  const [filter, setFilter] = useState<Filter>("all");
-  const [query, setQuery] = useState("");
   const [pageSize, setPageSize] = useState(100);
-  useEffect(() => setPageSize(100), [filter, query]);
-  // Seeded from `focusKey` rather than opened by the effect below, so a row
-  // asked for at mount is already open in the FIRST render — an effect would
-  // leave it shut under `renderToStaticMarkup`, which is how the page is tested.
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
-    () => new Set<string>(focusKey ? [focusKey] : []),
-  );
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [bulk, setBulk] = useState<{ verb: string; done: number; total: number } | null>(null);
   const rows = useRef(new Map<string, HTMLLIElement>());
@@ -74,23 +57,8 @@ export function HealthIssues({
   const live = useMemo(() => issues.filter((i) => !dismissed.has(i.key)), [issues, dismissed]);
   const hidden = useMemo(() => issues.filter((i) => dismissed.has(i.key)), [issues, dismissed]);
 
-  const errors = live.filter((i) => i.severity === "error").length;
-  const kinds = useMemo(() => {
-    const counts = new Map<HealthIssueKind, number>();
-    for (const i of live) counts.set(i.kind, (counts.get(i.kind) ?? 0) + 1);
-    return [...counts.entries()];
-  }, [live]);
-
-  const matching = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return live.filter((i) => {
-      if (!matches(i, filter)) return false;
-      if (q === "") return true;
-      return (
-        (i.path ?? "").toLowerCase().includes(q) || i.title.toLowerCase().includes(q)
-      );
-    });
-  }, [live, filter, query]);
+  // Every live row, paged below; groups replaced the chips and the search box.
+  const matching = live;
 
   const shown = useMemo(() => {
     const page = matching.slice(0, pageSize);
@@ -99,30 +67,38 @@ export function HealthIssues({
     return page;
   }, [matching, pageSize, focusKey]);
 
-  // A focus request from the inspector opens the row and brings it into view.
+  // A focus request from the inspector brings the row into view.
   // Deliberately keyed on the request rather than on the row: asking for the
   // same row twice should scroll to it again.
   useEffect(() => {
     if (!focusKey) return;
-    setExpanded((prev) => new Set(prev).add(focusKey));
     const el = rows.current.get(focusKey);
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [focusKey]);
 
-  // A filter that hides a selected row must not leave it queued for a bulk
+  // A row paged out of view must not stay queued for a bulk
   // action the reader can no longer see.
   const visibleKeys = useMemo(() => new Set(shown.map((i) => i.key)), [shown]);
   const picked = useMemo(
     () => shown.filter((i) => selected.has(i.key)),
     [shown, selected],
   );
+  const leftBehindPaths = useMemo(
+    () =>
+      live
+        .filter((i) => i.kind === "left-behind" && i.path != null && i.path !== "")
+        .map((i) => i.path as string),
+    [live],
+  );
   const retryable = picked.filter((i) => i.remedies.includes("retry") && i.docId);
   const deletable = picked.filter((i) => i.remedies.includes("delete") && i.path);
 
   if (live.length === 0) {
     return (
-      <>
-        <div className="health-allclear">
+      <div className="health-attention-list">
+        {before}
+        <LeftBehindErrors handlers={handlers} standalone />
+        {!hasOtherItems && <div className="health-allclear">
           <span className="health-allclear-badge" aria-hidden="true">
             <Glyph name="check" size={18} />
           </span>
@@ -136,9 +112,9 @@ export function HealthIssues({
                   : "Sync is off, so there is nothing to report here."}
             </p>
           </div>
-        </div>
+        </div>}
         {hidden.length > 0 && <DismissedIssues rows={hidden} onRestore={onRestore} />}
-      </>
+      </div>
     );
   }
 
@@ -176,50 +152,8 @@ export function HealthIssues({
   };
 
   return (
-    <>
-      <div className="health-issue-toolbar">
-        <div className="health-chips" role="group" aria-label="Filter issues">
-          <Chip active={filter === "all"} onClick={() => setFilter("all")} count={live.length}>
-            All
-          </Chip>
-          {errors > 0 && (
-            <Chip active={filter === "error"} onClick={() => setFilter("error")} count={errors}>
-              Errors
-            </Chip>
-          )}
-          {live.length - errors > 0 && (
-            <Chip
-              active={filter === "warn"}
-              onClick={() => setFilter("warn")}
-              count={live.length - errors}
-            >
-              Warnings
-            </Chip>
-          )}
-          {kinds.length > 1 &&
-            kinds.map(([kind, n]) => (
-              <Chip
-                key={kind}
-                active={filterKey(filter) === `kind:${kind}`}
-                onClick={() => setFilter({ kind })}
-                count={n}
-              >
-                {kindLabel(kind)}
-              </Chip>
-            ))}
-        </div>
-        {live.length > SEARCH_AT && (
-          <input
-            type="search"
-            className="health-search"
-            placeholder="Filter by name or path…"
-            aria-label="Filter issues by name or path"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        )}
-      </div>
-
+    <div className="health-attention-list">
+      {before}
       {(picked.length > 0 || bulk) && (
         <div className="health-bulkbar" role="group" aria-label="Actions for selected issues">
           <span className="health-bulk-count">
@@ -293,36 +227,133 @@ export function HealthIssues({
         </label>
       )}
 
-      {shown.length === 0 ? (
-        <p className="muted">Nothing matches this filter.</p>
-      ) : (
-        <ul className="health-issues">
-          {shown.map((issue) => (
-            <IssueRow
-              key={issue.key}
-              issue={issue}
-              handlers={handlers}
-              open={expanded.has(issue.key)}
-              onToggle={() => toggle(issue.key, expanded, setExpanded)}
-              selected={selected.has(issue.key)}
-              onSelect={() => toggle(issue.key, selected, setSelected)}
-              register={(el) => {
-                if (el) rows.current.set(issue.key, el);
-                else rows.current.delete(issue.key);
-              }}
-              onDismiss={onDismiss ? () => onDismiss(issue.key) : undefined}
-            />
-          ))}
-        </ul>
+      {(
+        groupByKind(shown).map(([kind, rowsOfKind]) => {
+          const total = matching.filter((i) => i.kind === kind).length;
+          return (
+            <div className="health-difference-group health-issue-group" key={kind}>
+              <div className="health-difference-grouphead">
+                <h4>{issueGroupTitle(kind, total)}</h4>
+                {kind === "left-behind" && (
+                  <LeftBehindActions paths={leftBehindPaths} handlers={handlers} />
+                )}
+              </div>
+              {kind === "left-behind" && <LeftBehindErrors handlers={handlers} />}
+              <ul className="health-issues">
+                {rowsOfKind.map((issue) => (
+                  <IssueRow
+                    key={issue.key}
+                    issue={issue}
+                    handlers={handlers}
+                    selected={selected.has(issue.key)}
+                    onSelect={() => toggle(issue.key, selected, setSelected)}
+                    register={(el) => {
+                      if (el) rows.current.set(issue.key, el);
+                      else rows.current.delete(issue.key);
+                    }}
+                    onDismiss={onDismiss ? () => onDismiss(issue.key) : undefined}
+                  />
+                ))}
+              </ul>
+            </div>
+          );
+        })
       )}
+      {leftBehindPaths.length === 0 && <LeftBehindErrors handlers={handlers} standalone />}
       {shown.length < matching.length && (
         <button type="button" onClick={() => setPageSize((size) => size + 100)}>
           {`Show more (${matching.length - shown.length} remaining)`}
         </button>
       )}
       {hidden.length > 0 && <DismissedIssues rows={hidden} onRestore={onRestore} />}
-    </>
+    </div>
   );
+}
+
+/** Issues grouped by kind, in the order each kind first appears. */
+function groupByKind(issues: HealthIssue[]): Array<[HealthIssueKind, HealthIssue[]]> {
+  const groups = new Map<HealthIssueKind, HealthIssue[]>();
+  for (const i of issues) {
+    const g = groups.get(i.kind);
+    if (g) g.push(i);
+    else groups.set(i.kind, [i]);
+  }
+  return [...groups.entries()];
+}
+
+/** The Left-on-disk group's header actions: re-register or delete every file
+ *  the Remote Vault dropped before this device confirmed it. Each item goes
+ *  through the same action its own row button runs; deleting asks first (the
+ *  page raises that confirm), because these may be the only copies. Progress
+ *  is the pressed button's own spinner — never a status line in the list. */
+function LeftBehindActions({
+  paths,
+  handlers,
+}: {
+  paths: string[];
+  handlers: HealthHandlers;
+}) {
+  const group = handlers.leftBehind;
+  if (!group || paths.length === 0) return null;
+  const running = group.run?.running ? group.run.verb : null;
+  return (
+    <span className="health-group-actions" role="group" aria-label="Left on disk">
+      <AsyncButton
+        className="ghost-pill sm"
+        disabled={running != null}
+        onClick={() => group.start("reregister", paths)}
+      >
+        Re-register all
+      </AsyncButton>
+      <button
+        type="button"
+        className={`ghost-pill sm danger${running === "delete" ? " is-busy" : ""}`}
+        disabled={running != null}
+        aria-busy={running === "delete" || undefined}
+        onClick={() => handlers.confirm({ kind: "delete-left-behind", paths })}
+      >
+        <span className="async-btn-label">Delete all local copies</span>
+        {running === "delete" && <Spinner size="xs" tone="inherit" />}
+      </button>
+    </span>
+  );
+}
+
+/** What a finished bulk run could not do, by path. Success is a toast; only
+ *  failures earn space in the list. `standalone` wraps them in their own group
+ *  for when every row resolved and the Left-on-disk group is gone. */
+function LeftBehindErrors({
+  handlers,
+  standalone = false,
+}: {
+  handlers: HealthHandlers;
+  standalone?: boolean;
+}) {
+  const run = handlers.leftBehind?.run;
+  if (!run || run.running || run.failed.length === 0) return null;
+  const verbed = run.verb === "delete" ? "Deleted" : "Re-registered";
+  const list = (
+    <ul className="health-group-errors" role="alert">
+      <li className="health-group-status">
+        {`${verbed} ${(run.done - run.failed.length).toLocaleString()} of ${run.done.toLocaleString()}; ${run.failed.length.toLocaleString()} failed`}
+      </li>
+      {run.failed.slice(0, 20).map((f) => (
+        <li key={f.path}>
+          <PathText path={f.path} />
+          <small>{f.reason}</small>
+        </li>
+      ))}
+      {run.failed.length > 20 && (
+        <li className="muted">And {(run.failed.length - 20).toLocaleString()} more.</li>
+      )}
+    </ul>
+  );
+  return standalone ? (
+    <div className="health-difference-group health-issue-group">
+      <div className="health-difference-grouphead"><h4>Left on disk</h4></div>
+      {list}
+    </div>
+  ) : list;
 }
 
 /** Where dismissed rows wait. One quiet line until opened; each row has its
@@ -369,11 +400,22 @@ function DismissedIssues({
 
 // ── One row ───────────────────────────────────────────────────────────────────
 
+/** Remedies worth a button on the one-line row. Everything the old expanded
+ *  panel explained is still on the clipboard through Copy details. */
+const ROW_ACTIONS: ReadonlySet<HealthRemedy> = new Set<HealthRemedy>([
+  "retry",
+  "open",
+  "reregister",
+  "upgrade",
+  "sign-in",
+  "reset-history",
+  "reclaim",
+  "contact-owner",
+]);
+
 function IssueRow({
   issue,
   handlers,
-  open,
-  onToggle,
   selected,
   onSelect,
   register,
@@ -381,16 +423,23 @@ function IssueRow({
 }: {
   issue: HealthIssue;
   handlers: HealthHandlers;
-  open: boolean;
-  onToggle: () => void;
   selected: boolean;
   onSelect: () => void;
   register: (el: HTMLLIElement | null) => void;
   /** Hide this row (per vault, this device). Absent ⇒ no button. */
   onDismiss?: () => void;
 }) {
-  const panelId = `health-panel-${encodeURIComponent(issue.key)}`;
-  const primary = issue.remedies.find((r) => hasData(issue, r)) ?? null;
+  // The first remedy the issue can act on, plus a Re-register or Open beside
+  // it when the issue offers one — at most two buttons on the line.
+  const usable = issue.remedies.filter((r) => hasData(issue, r));
+  const primary = usable[0] ?? null;
+  const second = usable.find(
+    (r) => r !== primary && ROW_ACTIONS.has(r) && (r === "reregister" || r === "retry"),
+  );
+  const actions = [primary, second].filter(
+    (r): r is HealthRemedy => r != null && r !== "copy-details",
+  );
+  const canCopy = usable.includes("copy-details");
 
   return (
     <li
@@ -407,36 +456,29 @@ function IssueRow({
           onChange={onSelect}
           aria-label={`Select ${issue.title}${issue.path ? ` — ${issue.path}` : ""}`}
         />
-        <button
-          type="button"
-          className="health-issue-summary"
-          aria-expanded={open}
-          aria-controls={panelId}
-          onClick={onToggle}
-        >
-          {/* A filled badge in the severity colour, not a 8px dot: a row that
-              needs a person has to read as a warning from across the page. */}
+        <span className="health-issue-summary" title={issue.why}>
           <span
             className="health-issue-badge"
             aria-label={issue.severity === "error" ? "Error" : "Warning"}
           >
             <Glyph name="alert" size={13} />
           </span>
-          <span className="health-issue-main">
-            <span className="health-issue-title">{issue.title}</span>
-            {issue.path && <PathText path={issue.path} />}
-            {/* One line. The whole of `why` is in the panel, under the chevron. */}
-            <span className="health-why">{issue.why}</span>
+          {/* The group header names the kind; the row is just WHICH one. A
+              row with no path says one short sentence instead. */}
+          <span className="health-issue-main health-issue-oneline">
+            {issue.path ? (
+              <span className="health-issue-meta"><PathText path={issue.path} /></span>
+            ) : (
+              <span className="health-issue-sentence">{issueRowSentence(issue)}</span>
+            )}
           </span>
-          <span className="health-chevron" data-open={open ? "" : undefined} aria-hidden="true">
-            <Glyph name="chevron" />
-          </span>
-        </button>
-        {primary && (
-          <div className="health-issue-primary">
-            <Remedy remedy={primary} issue={issue} handlers={handlers} emphasis />
-          </div>
-        )}
+        </span>
+        <div className="health-issue-primary">
+          {actions.map((r) => (
+            <Remedy key={r} remedy={r} issue={issue} handlers={handlers} emphasis />
+          ))}
+          {canCopy && <Remedy remedy="copy-details" issue={issue} handlers={handlers} />}
+        </div>
         {onDismiss && (
           <button
             type="button"
@@ -448,65 +490,6 @@ function IssueRow({
           </button>
         )}
       </div>
-
-      {open && (
-        <div className="health-issue-panel" id={panelId}>
-          {issue.kind === "orphan-history" ? (
-            <p>{issue.explanation.meaning}</p>
-          ) : <>
-          <div className="health-reasoning">
-            <div className="health-block">
-              <Eyebrow>What this means</Eyebrow>
-              <p>{issue.explanation.meaning}</p>
-            </div>
-            <div className="health-block">
-              <Eyebrow>What Baalda does next</Eyebrow>
-              <p>
-                <span className="health-tag" data-auto={issue.autoRetries ? "" : undefined}>
-                  {issue.autoRetries ? "Retries by itself" : "Needs you"}
-                </span>
-                {issue.explanation.next}
-              </p>
-            </div>
-            <div className="health-block">
-              <Eyebrow>What you can do</Eyebrow>
-              <ol className="health-fixes">
-                {issue.explanation.fixes.map((fix, i) => (
-                  <li key={i}>{fix}</li>
-                ))}
-              </ol>
-            </div>
-          </div>
-
-          <p className="health-safety" data-safety={issue.explanation.safety}>
-            <Eyebrow>Where your content is</Eyebrow>
-            <span>{safetyLabel(issue.explanation.safety)}</span>
-          </p>
-
-          {issue.facts.length > 0 && (
-            <dl className="health-facts">
-              {issue.facts.map((f, i) => (
-                <div className="health-fact" key={`${f.label}-${i}`}>
-                  <dt>{f.label}</dt>
-                  <dd>
-                    <span className="health-fact-value">{f.value}</span>
-                    {f.copyable && <CopyButton value={f.value} label={`Copy ${f.label}`} />}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          )}
-
-          <div className="health-remedies">
-            {issue.remedies.map((r) =>
-              hasData(issue, r) ? (
-                <Remedy key={r} remedy={r} issue={issue} handlers={handlers} />
-              ) : null,
-            )}
-          </div>
-          </>}
-        </div>
-      )}
     </li>
   );
 }
@@ -545,7 +528,6 @@ function Remedy({
 }) {
   const { actions, confirm, openNote, reclaim } = handlers;
   const [copied, setCopied] = useState(false);
-  const [owner, setOwner] = useState<{ name: string; email: string } | null | undefined>();
   const pill = emphasis ? "ghost-pill sm" : "link-btn";
 
   switch (remedy) {
@@ -643,31 +625,21 @@ function Remedy({
         </button>
       );
     case "contact-owner":
+      // Feedback is a toast, never a card inside the one-line row.
       return (
-        <>
-          <AsyncButton
-            className={pill}
-            onClick={async () => {
-              const out = await actions.contactOwner();
-              setOwner(out.owner);
-            }}
-          >
-            Contact the owner
-          </AsyncButton>
-          {owner !== undefined && (
-            <div className="health-owner-card">
-              {owner ? (
-                <>
-                  <strong>{owner.name}</strong>
-                  <a href={`mailto:${owner.email}`}>{owner.email}</a>
-                </>
-              ) : (
-                <strong>This vault&rsquo;s owner is not known on this device yet.</strong>
-              )}
-              <span className="muted">Request copied to clipboard</span>
-            </div>
-          )}
-        </>
+        <AsyncButton
+          className={pill}
+          onClick={async () => {
+            const out = await actions.contactOwner();
+            toast(
+              out.owner
+                ? `Request copied — send it to ${out.owner.name} (${out.owner.email})`
+                : "Request copied to clipboard. This vault's owner is not known on this device yet.",
+            );
+          }}
+        >
+          Contact the owner
+        </AsyncButton>
       );
     default:
       return null;

@@ -243,14 +243,38 @@ describe("BinaryDeleteQueue", () => {
     expect(h.queue.isPending("Team/guide.pdf")).toBe(false);
   });
 
-  it("propagates nothing for a file the server never held", async () => {
-    const h = harness({ server: [], onDisk: [], fileIds: { "Team/local.pdf": "file-1" } });
+  it("propagates nothing for an unregistered file the server never held", async () => {
+    const h = harness({ server: [], onDisk: [] });
     h.queue.noteChanged("Team/local.pdf");
     await h.queue.drain();
 
     expect(h.deleted).toEqual([]);
     expect(h.blobsDeleted).toEqual([]);
     expect(h.forgotten).toEqual(["Team/local.pdf"]);
+  });
+
+  it("removes the byte-less files row of a file that vanished before its upload", async () => {
+    // Registered (the row is minted before the bytes), then gone from disk
+    // before the upload ran: the row used to outlive it forever, with nothing
+    // behind it for any device to download.
+    const h = harness({ server: [], onDisk: [], fileIds: { "Team/local.pdf": "file-1" } });
+    h.queue.noteChanged("Team/local.pdf");
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual(["file-1"]);
+    expect(h.blobsDeleted).toEqual([]);
+    expect(h.forgotten).toEqual(["Team/local.pdf"]);
+  });
+
+  it("holds byte-less rows to the same blast-radius cap", async () => {
+    const fileIds: Record<string, string> = {};
+    for (let i = 0; i < 6; i++) fileIds[`scratch/t${i}.jpg`] = `file-${i}`;
+    const h = harness({ server: [], onDisk: [], fileIds });
+    for (const p of Object.keys(fileIds)) h.queue.noteChanged(p);
+    await h.queue.drain();
+
+    expect(h.deleted).toEqual([]);
+    expect(h.toasts).toHaveLength(1);
   });
 
   it("holds the path against downloads until its window closes", async () => {

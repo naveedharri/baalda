@@ -651,3 +651,17 @@ describe("listNoteRegistryPaged — the keyset listing the reconciler pulls", ()
     expect(out.notes.length).toBeGreaterThan(0);
   });
 });
+
+describe("vaultStorage", () => {
+  it("reads the vault's file/attachment bytes and keeps an unlimited cap as null", async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      json: { usedBytes: 3072, pendingBytes: 0, blobCount: 2, limitBytes: null },
+    }));
+    const api = new ApiClient({ baseUrl: "http://localhost:3010", token: "t", fetchImpl: impl });
+    await expect(api.vaultStorage("v 1")).resolves.toEqual({
+      usedBytes: 3072, pendingBytes: 0, blobCount: 2, limitBytes: null,
+    });
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("http://localhost:3010/api/vaults/v%201/storage");
+  });
+});

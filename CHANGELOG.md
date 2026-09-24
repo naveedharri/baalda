@@ -7,7 +7,48 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **AI (Beta) settings page hidden (desktop).** Removed from the Vault Settings menu behind a
+  `SHOW_AI_TAB` flag; any request for it opens Health instead. The code is unchanged.
+- **Calmer sync status (desktop).** The "N notes didn't sync" banner is gone, and the top pill only
+  reads "Synced" or "Syncing N/M": per-note failures no longer turn it amber or leave it stuck. A
+  mapped note the server did not name on connect counts as synced everywhere. Sidebar folders show
+  x/y only during a run and settle to green dots, with tooltips matching the badge. The Health page
+  drops the status card, stat row and "Copy diagnostics"; its comparison counts text notes, files,
+  folders and file storage on the same basis on both sides; and "Needs attention" is one
+  de-duplicated list ("Only on this computer", "Only on the Remote Vault", then issue groups with
+  one-line rows and bulk actions). The Health entry carries a grey count for failures that need the
+  user. The Cloud note-limit upgrade strip is kept.
+
+### Security
+- **Dependency updates.** All 40 open Dependabot alerts resolved by bumping `nodemailer` (7 → 9),
+  `hono`, `undici`, `vitest`, `@dicebear/initials`, `nanoid`, `postcss`, `browserslist` and
+  `baseline-browser-mapping`; no source changes.
+
 ### Fixed
+- **Setting whole-vault access for specific people returned HTTP 500 (server).** The vault branch
+  of `clearResourceOverrides` skipped parameter `$2`, which Postgres cannot type (`42P18`); it now
+  numbers its parameters without a gap. Everyone, folder and file selections were unaffected.
+- **Shared binaries flipped between teammates' versions (desktop + server).** Doc-bound tree
+  binaries now sync three-way against a per-file base persisted in `.context/config.json`
+  (`fileBases`): only-server-changed downloads, only-local-changed uploads with `baseSha`, and no
+  base / all-differ keeps the server copy after saving the local one to `.context/trash`
+  (`copy_to_trash`). Intent and the legacy POST refuse a stale base with 409 `stale_base`; clients
+  sending no base are unchanged. Two devices holding different bytes used to re-upload over each
+  other forever because `retireSupersededDocBlobs` keeps one version per doc.
+- **Deleted notes re-registered forever (desktop + server).** Registering an id the server holds
+  soft-deleted now answers `note_deleted` (409 / per-item conflict, no `registry-changed`
+  broadcast) instead of a no-op `created`; `planInbound` keeps suppressing a tombstoned id whose
+  local copy was kept; `whenSynced` rejects as soon as a doc turns terminal and `ContentUploader`
+  records it as a permanent failure instead of waiting 10 s per slot.
+- **Binary upload refusals (desktop).** 0-byte files are settled instead of registered and refused
+  (`invalid_size`) every pass; 400/403 upload refusals are surfaced like 413/415 instead of retried;
+  a file deleted from disk before its bytes uploaded now removes its bare `files` row.
+- **Vault channel hello timeout.** The desktop loads its manifest before opening the socket so
+  `hello` goes out immediately; the server's `HELLO_TIMEOUT_MS` is 30 s (was 10 s).
+- **Billing: live subscriptions on deleted vaults.** A webhook that leaves a live, non-cancelling
+  subscription on a tombstoned vault owned by a local user requests cancel-at-period-end at the
+  provider (best-effort, idempotent, logged).
 - **Shared-note sync reliability (desktop + server).** A note's file is merged only after the first
   server pull (three-way against the pre-pull state), so an edit already on the server can no longer
   be re-inserted; a persisted per-note disk base stops an older file from undoing newer text; the

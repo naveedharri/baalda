@@ -191,7 +191,7 @@ describe("buildTreeSyncIndex", () => {
     // does, because those images sync.
     const index = withFiles({}, { "Media/a.png": "synced", "Media/b.mp4": "queued" });
     expect(index.folders.get("Media")).toMatchObject({ total: 2, synced: 1, pending: 1 });
-    expect(rowSyncMark(dir("Media"), index)).toMatchObject({ state: "syncing" });
+    expect(rowSyncMark(dir("Media"), index, true)).toMatchObject({ state: "syncing" });
   });
 
   it("never counts a file twice, or one the registry claims as a note", () => {
@@ -212,7 +212,7 @@ describe("buildTreeSyncIndex", () => {
     const waves = new FolderWaveTracker();
     const index = withFiles({}, { "Media/a.png": "synced", "Media/b.mp4": "queued" });
     waves.apply(index);
-    expect(rowSyncMark(dir("Media"), index)!.progress).toEqual({ done: 0, total: 1 });
+    expect(rowSyncMark(dir("Media"), index, true)!.progress).toEqual({ done: 0, total: 1 });
   });
 
   it("has no notes, no folders and no vault roll-up for an empty vault", () => {
@@ -236,12 +236,53 @@ describe("buildTreeSyncIndex", () => {
     expect(index.notes.size).toBe(1);
     expect(index.vault).toMatchObject({ total: 1, failed: 0, state: "synced" });
   });
+
+  it("counts unreported-but-not-named notes as synced once the server has answered", () => {
+    // After `ready`, silence is a verdict: every doc the server named, or this
+    // device has not confirmed, is in the run and reports its own state.
+    const input = {
+      docIdByPath: { "A/a.md": "d1", "A/b.md": "d2", "A/c.md": "d3" },
+      docSyncState: { d3: "queued" } as Record<string, DocSyncState>,
+      localNotePaths: ["A/a.md", "A/b.md", "A/c.md", "A/local.md"],
+    };
+    const before = buildTreeSyncIndex(input);
+    expect(before.folders.get("A")).toMatchObject({ synced: 0, unreported: 2 });
+    expect(before.notes.get("A/a.md")).toBe("unsynced");
+
+    const after = buildTreeSyncIndex({ ...input, serverSettled: true });
+    expect(after.notes.get("A/a.md")).toBe("synced");
+    expect(after.notes.get("A/b.md")).toBe("synced");
+    expect(after.notes.get("A/c.md")).toBe("queued"); // in the run
+    // Never mapped at all ⇒ still honestly not on the server.
+    expect(after.notes.get("A/local.md")).toBe("unsynced");
+    expect(after.folders.get("A")).toMatchObject({
+      total: 4,
+      synced: 2,
+      pending: 1,
+      unreported: 0,
+    });
+  });
+
+  it("keeps failure counts unless asked to fold them into synced", () => {
+    const input = {
+      docIdByPath: { "a.md": "d1", "b.md": "d2" },
+      docSyncState: { d1: "error", d2: "synced" } as Record<string, DocSyncState>,
+      localNotePaths: ["a.md", "b.md"],
+      fileSyncState: { "c.pdf": "error" } as Record<string, DocSyncState>,
+    };
+    // Default: unchanged — the Health page still counts failures.
+    expect(buildTreeSyncIndex(input).vault).toMatchObject({ failed: 2, state: "error" });
+    const folded = buildTreeSyncIndex({ ...input, failuresAsSynced: true });
+    expect(folded.vault).toMatchObject({ total: 3, synced: 3, failed: 0, state: "synced" });
+    expect(folded.notes.get("a.md")).toBe("synced");
+    expect(folded.files.get("c.pdf")).toBe("synced");
+  });
 });
 
 describe("rowSyncMark", () => {
   it("shows a dot for a note and never a fraction", () => {
     const index = indexOf({ "a.md": "syncing" });
-    expect(rowSyncMark(file("a.md"), index)).toEqual({
+    expect(rowSyncMark(file("a.md"), index, true)).toEqual({
       state: "syncing",
       progress: null,
       title: "Syncing…",
@@ -259,16 +300,18 @@ describe("rowSyncMark", () => {
 
   it("gives a file the mirror HAS spoken for the same dot, in a file's words", () => {
     const index = withFiles({ "a.md": "synced" }, { "Team/report.docx": "syncing" });
-    expect(rowSyncMark(file("Team/report.docx"), index)).toEqual({
+    expect(rowSyncMark(file("Team/report.docx"), index, true)).toEqual({
       state: "syncing",
       progress: null,
       title: "Uploading…",
     });
-    expect(rowSyncMark(file("Media/clip.mp4"), withFiles({}, { "Media/clip.mp4": "error" }))).
-      toMatchObject({
-        state: "error",
-        title: "Couldn't upload — this file is only on this device",
-      });
+    // A failed upload is the Health page's to explain; the sidebar never shows
+    // an error, mid-run or after.
+    for (const runActive of [true, false]) {
+      expect(
+        rowSyncMark(file("Media/clip.mp4"), withFiles({}, { "Media/clip.mp4": "error" }), runActive),
+      ).toMatchObject({ state: "synced", title: "Synced" });
+    }
   });
 
   it("shows a folder's wave counts (not its population), and a dot once settled", () => {
@@ -276,26 +319,61 @@ describe("rowSyncMark", () => {
     // that needs syncing), not the folder's whole population — a single new
     // file in a 1114-note folder must read "0/1", never "1113/1114".
     const busy = indexOf({ "A/a.md": "synced", "A/b.md": "syncing" });
-    expect(rowSyncMark(dir("A"), busy)).toMatchObject({
+    expect(rowSyncMark(dir("A"), busy, true)).toMatchObject({
       state: "syncing",
       progress: { done: 0, total: 1 },
     });
 
     const done = indexOf({ "A/a.md": "synced", "A/b.md": "synced" });
-    expect(rowSyncMark(dir("A"), done)).toMatchObject({ state: "synced", progress: null });
+    expect(rowSyncMark(dir("A"), done, true)).toMatchObject({ state: "synced", progress: null });
 
+    // A failure is not outstanding work (nothing is moving it) and never a tone.
     const broken = indexOf({ "A/a.md": "synced", "A/b.md": "error" });
-    expect(rowSyncMark(dir("A"), broken)).toMatchObject({ state: "error", progress: null });
+    expect(rowSyncMark(dir("A"), broken, true)).toMatchObject({ state: "synced", progress: null });
   });
 
-  it("shows the counts for a stalled partial folder too", () => {
-    // Nothing in flight, not everything synced: the number is the only honest
-    // answer, and it is what tells the user which folder to look at.
-    const index = indexOf({ "A/a.md": "synced" }, ["A/b.md", "A/c.md"]);
-    expect(rowSyncMark(dir("A"), index)).toMatchObject({
-      state: "unsynced",
-      progress: { done: 0, total: 2 },
+  it("drops every wave the moment the run ends — no stuck 0/N", () => {
+    // THE bug: a run ended with leftovers (a failed note, two never reached)
+    // and the folder sat at an amber "0/3" forever. With no run moving, every
+    // row with an indicator is the green dot.
+    const index = indexOf({ "A/a.md": "synced", "A/b.md": "error", "A/c.md": "queued" }, [
+      "A/d.md",
+    ]);
+    const waves = new FolderWaveTracker();
+    waves.apply(index);
+    expect(rowSyncMark(dir("A"), index, true)!.progress).toEqual({ done: 0, total: 2 });
+
+    for (const row of [dir("A"), dir(""), file("A/b.md"), file("A/c.md"), file("A/d.md")]) {
+      expect(rowSyncMark(row, index, false)).toMatchObject({ state: "synced", progress: null });
+    }
+    expect(rowSyncMark(dir("A"), index, false)!.title).toBe("All 4 files synced");
+  });
+
+  it("reads the run flag off the index when the caller does not pass one", () => {
+    const index = indexOf({ "A/a.md": "synced", "A/b.md": "syncing" });
+    expect(rowSyncMark(dir("A"), index)!.progress).toBeNull();
+    index.runActive = true;
+    expect(rowSyncMark(dir("A"), index)!.progress).toEqual({ done: 0, total: 1 });
+  });
+
+  it("never draws an error tone anywhere in the sidebar", () => {
+    const index = buildTreeSyncIndex({
+      docIdByPath: { "A/a.md": "d1", "A/B/b.md": "d2" },
+      docSyncState: { d1: "error", d2: "error" },
+      localNotePaths: ["A/a.md", "A/B/b.md"],
+      fileSyncState: { "A/c.pdf": "error" },
+      failuresAsSynced: true,
     });
+    const rows = [dir(""), dir("A"), dir("A/B"), file("A/a.md"), file("A/B/b.md"), file("A/c.pdf")];
+    for (const runActive of [true, false]) {
+      for (const row of rows) {
+        expect(rowSyncMark(row, index, runActive)!.state).not.toBe("error");
+      }
+    }
+    // …and without the flag, rowSyncMark still refuses to draw one.
+    const raw = indexOf({ "A/a.md": "error" });
+    expect(rowSyncMark(file("A/a.md"), raw, true)!.state).toBe("synced");
+    expect(rowSyncMark(dir("A"), raw, true)!.state).toBe("synced");
   });
 
   it("resolves the vault root folder to the whole-vault roll-up", () => {
@@ -311,12 +389,12 @@ describe("FolderWaveTracker", () => {
     // Two new files land: wave is 0/2.
     const start = indexOf({ "A/a.md": "queued", "A/b.md": "queued", "A/c.md": "synced" });
     waves.apply(start);
-    expect(rowSyncMark(dir("A"), start)!.progress).toEqual({ done: 0, total: 2 });
+    expect(rowSyncMark(dir("A"), start, true)!.progress).toEqual({ done: 0, total: 2 });
 
     // One of them syncs: 1/2 — NOT 0/1, which would erase the progress made.
     const half = indexOf({ "A/a.md": "synced", "A/b.md": "syncing", "A/c.md": "synced" });
     waves.apply(half);
-    expect(rowSyncMark(dir("A"), half)!.progress).toEqual({ done: 1, total: 2 });
+    expect(rowSyncMark(dir("A"), half, true)!.progress).toEqual({ done: 1, total: 2 });
   });
 
   it("forgets a settled folder, so the next wave starts fresh at 0/1", () => {
@@ -327,12 +405,12 @@ describe("FolderWaveTracker", () => {
     // Everything lands — the folder settles (dot; no progress stamped).
     const done = indexOf({ "A/a.md": "synced", "A/b.md": "synced" });
     waves.apply(done);
-    expect(rowSyncMark(dir("A"), done)!.progress).toBeNull();
+    expect(rowSyncMark(dir("A"), done, true)!.progress).toBeNull();
 
     // One NEW file later: a fresh 0/1 wave, not a resumed 2/3.
     const next = indexOf({ "A/a.md": "synced", "A/b.md": "synced", "A/c.md": "queued" });
     waves.apply(next);
-    expect(rowSyncMark(dir("A"), next)!.progress).toEqual({ done: 0, total: 1 });
+    expect(rowSyncMark(dir("A"), next, true)!.progress).toEqual({ done: 0, total: 1 });
   });
 
   it("does not pin the wave on notes nobody has reported yet (fresh launch)", () => {
@@ -348,7 +426,7 @@ describe("FolderWaveTracker", () => {
     waves.apply(launch);
     expect(launch.folders.get("A")!.unreported).toBe(3);
     expect(launch.folders.get("A")!.state).toBe("unsynced"); // still honest
-    expect(rowSyncMark(dir("A"), launch)!.progress).toBeNull(); // no "0/3"
+    expect(rowSyncMark(dir("A"), launch, true)!.progress).toBeNull(); // no "0/3"
 
     // The run's batch lands: two confirmed, and one NEW file appears queued.
     const busy = buildTreeSyncIndex({
@@ -357,8 +435,10 @@ describe("FolderWaveTracker", () => {
       localNotePaths: ["A/a.md", "A/b.md", "A/c.md", "A/new.md"],
     });
     waves.apply(busy);
-    expect(rowSyncMark(dir("A"), busy)!.progress).toEqual({ done: 0, total: 1 }); // not 3/4
-    expect(folderSyncTitle(busy.folders.get("A")!)).toBe("3 of 4 files synced");
+    const mark = rowSyncMark(dir("A"), busy, true)!;
+    expect(mark.progress).toEqual({ done: 0, total: 1 }); // not 3/4
+    // The tooltip counts the same wave the badge does.
+    expect(mark.title).toBe("Syncing 0 of 1 file");
   });
 
   it("grows the wave when more work arrives mid-flight", () => {
@@ -390,14 +470,22 @@ describe("FolderWaveTracker", () => {
 describe("folderSyncTitle", () => {
   // The unit is "file", not "note": these counts hold the folder's binaries
   // too, and a folder of three PDFs must not claim "All 3 notes synced".
-  it("states the real counts rather than a rounded claim", () => {
-    const index = indexOf({ "A/a.md": "synced", "A/b.md": "syncing", "A/c.md": "syncing" });
-    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 of 3 files synced");
+  it("uses the badge's numbers while a run moves the folder", () => {
+    // The old mismatch: "0/14" on the row, "11 of 25 files synced" on hover.
+    const waves = new FolderWaveTracker();
+    const start = indexOf({ "A/a.md": "synced", "A/b.md": "queued", "A/c.md": "queued" });
+    waves.apply(start);
+    const half = indexOf({ "A/a.md": "synced", "A/b.md": "synced", "A/c.md": "syncing" });
+    waves.apply(half);
+    const mark = rowSyncMark(dir("A"), half, true)!;
+    expect(mark.progress).toEqual({ done: 1, total: 2 });
+    expect(mark.title).toBe("Syncing 1 of 2 files");
+    expect(folderSyncTitle(half.folders.get("A")!, mark.progress)).toBe(mark.title);
   });
 
-  it("names the failures when there are any", () => {
+  it("does not name failures — that is the Health page's job", () => {
     const index = indexOf({ "A/a.md": "error", "A/b.md": "synced" });
-    expect(folderSyncTitle(index.folders.get("A")!)).toBe("1 file of 2 couldn't sync");
+    expect(folderSyncTitle(index.folders.get("A")!)).toBe("All 2 files synced");
   });
 
   it("says so plainly when everything is synced", () => {

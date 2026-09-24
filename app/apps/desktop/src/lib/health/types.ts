@@ -457,6 +457,13 @@ export interface HealthActions {
 }
 
 /** What `useVaultHealth()` hands the tab. */
+/** Server-side bytes for the vault's files and attachments. */
+export interface ServerStorage {
+  usedBytes: number;
+  /** Null ⇒ this vault's plan has no storage cap. */
+  limitBytes: number | null;
+}
+
 export interface VaultHealthSnapshot {
   report: HealthReport;
   inventory: HealthInventory;
@@ -465,6 +472,10 @@ export interface VaultHealthSnapshot {
   hasLocalAttachments?: boolean | null;
   stats: VaultStats | null;
   statsError: string | null;
+  /** The Remote Vault's attachment/file bytes (`GET /vaults/:id/storage`).
+   *  Null when sync is off, the read failed or it has not landed — the page
+   *  shows "—" and never waits on it. */
+  serverStorage?: ServerStorage | null;
   /** The integrity checks; null until the first pass lands or when it failed. */
   checks: VaultChecks | null;
   /** True while the first census is in flight. */

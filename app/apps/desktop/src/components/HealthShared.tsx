@@ -22,6 +22,9 @@ export type ConfirmState =
   | { kind: "delete"; path: string }
   | { kind: "reset"; docId: string; path: string | null }
   | { kind: "reregister"; path: string }
+  /** "Delete all local copies" on the Left-on-disk group: names the count,
+   *  because these files may be the only copies there are. */
+  | { kind: "delete-left-behind"; paths: string[] }
   | { kind: "empty-trash" }
   | { kind: "rebuild-index" }
   /** A check's heal or bulk action that asked to be confirmed. The plan carries
@@ -44,9 +47,26 @@ export interface HealthHandlers {
   /** What each check's action is doing, or last did. Keyed by check id and kept
    *  on the page, not in the row, for the same reason. */
   checkRuns: Partial<Record<VaultCheckId, CheckRun>>;
+  /** The Left-on-disk group's bulk run ("Re-register all" / "Delete all local
+   *  copies"). Owned by the page like `checkRuns`, so the group emptying as its
+   *  rows resolve cannot drop the result. Absent ⇒ no bulk actions offered. */
+  leftBehind?: {
+    run: LeftBehindRun | null;
+    /** Resolves when the run ends, so the pressed button can carry the spinner. */
+    start: (verb: "reregister" | "delete", paths: string[]) => Promise<void>;
+  };
   /** A slowly-ticking clock, so relative times do not go stale in an open
    *  dialog and every section agrees on "now". */
   now: number;
+}
+
+/** The Left-on-disk bulk run, in flight or finished. */
+export interface LeftBehindRun {
+  verb: "reregister" | "delete";
+  running: boolean;
+  done: number;
+  total: number;
+  failed: Array<{ path: string; reason: string }>;
 }
 
 /** One check's action, in flight or finished. */

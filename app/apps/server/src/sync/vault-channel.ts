@@ -312,6 +312,18 @@ interface ConnDeps {
   onGone: (conn: VaultConnection) => void;
 }
 
+/**
+ * How long an upgraded socket may stay silent before its `hello`.
+ *
+ * The window is not just the wire: a desktop client mints its vault token over
+ * HTTP against this same server, and builds up to 0.1.67 also load their whole
+ * durable state-vector manifest AFTER the upgrade. On a large vault's first
+ * launch that could run past the old 10 s, and the socket was dropped and the
+ * whole connect paid again. 30 s still reaps sockets that never authenticate — the
+ * idle-protection point — while leaving slack for a slow mint under load.
+ */
+export const HELLO_TIMEOUT_MS = 30_000;
+
 class VaultConnection {
   private userId: string | null = null;
   private vaultId: string | null = null;
@@ -380,7 +392,7 @@ class VaultConnection {
     // Drop connections that never authenticate (spec 05 §4 idle protection).
     this.helloTimer = setTimeout(() => {
       if (!this.helloSeen) this.fail("hello timeout");
-    }, 10_000);
+    }, HELLO_TIMEOUT_MS);
 
     ws.on("message", (data, isBinary) => {
       this.alive = true; // traffic from the peer is proof of life, like a pong

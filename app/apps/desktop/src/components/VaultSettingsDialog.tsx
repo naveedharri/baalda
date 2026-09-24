@@ -41,6 +41,7 @@ import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { AiSettingsTab } from "./AiSettingsTab";
 import { HealthTab } from "./HealthTab";
+import { useHealthAttentionCount } from "../lib/health/useHealthAttention";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
 // Static, not via ./Face: this module is itself a lazy chunk, so it pays for
@@ -97,6 +98,10 @@ const HEALTH_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
     </MenuIcon>
   ),
 };
+
+/** The AI (Beta) page is hidden for now; flip to bring it back. Anything that
+ *  asks for the "ai" tab while it is hidden lands on Health instead. */
+const SHOW_AI_TAB = false;
 
 const AI_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
   id: "ai", label: "AI", icon: <MenuIcon><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></MenuIcon>,
@@ -224,9 +229,12 @@ export function VaultSettingsDialog({
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locals = useLocalVaults();
+  const healthAttention = useHealthAttentionCount();
 
   const [diagnosticFocus, setDiagnosticFocus] = useState<import("./HealthChecks").CheckFocus | null>(null);
-  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
+  const visibleTab = (t: SettingsTab): SettingsTab => (!SHOW_AI_TAB && t === "ai" ? "health" : t);
+  const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
+  const setTab = (t: SettingsTab) => setTabRaw(visibleTab(t));
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
   const activeOrg =
@@ -241,7 +249,7 @@ export function VaultSettingsDialog({
   // are local folders to list — that's what "View all" opens into.
   const showVaults = !!session || locals.length > 0;
   const tabs = useMemo(() => {
-    const out = [GENERAL_TAB, HEALTH_TAB, AI_TAB];
+    const out = SHOW_AI_TAB ? [GENERAL_TAB, HEALTH_TAB, AI_TAB] : [GENERAL_TAB, HEALTH_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
@@ -292,6 +300,15 @@ export function VaultSettingsDialog({
               >
                 {t.icon}
                 <span className="menu-item-label">{t.id === "ai" ? "AI (Beta)" : t.label}</span>
+                {t.id === "health" && healthAttention > 0 && (
+                  <span
+                    className="nav-count"
+                    aria-label={`${healthAttention} ${healthAttention === 1 ? "item needs" : "items need"} your action`}
+                    title="Sync items that need your action"
+                  >
+                    {healthAttention > 99 ? "99+" : healthAttention}
+                  </span>
+                )}
                 {locked && (
                   <svg
                     className="nav-lock"
@@ -313,7 +330,8 @@ export function VaultSettingsDialog({
         </nav>
 
         <section className="settings-content" aria-label={activeTab.label}>
-          <h2 className="settings-section-title">{activeTab.label}</h2>
+          {/* Health sets its own title, on one row with its page actions. */}
+          {tab !== "health" && <h2 className="settings-section-title">{activeTab.label}</h2>}
           {tab === "general" ? (
             <GeneralTab
               isSynced={isSynced}

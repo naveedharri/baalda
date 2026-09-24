@@ -197,6 +197,7 @@ pub fn run() {
             commands::read_note,
             commands::note_exists,
             commands::write_trash_copy,
+            commands::copy_to_trash,
             commands::rebind_note_id,
             commands::write_note,
             commands::write_note_if_missing,

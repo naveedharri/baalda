@@ -18,6 +18,13 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.68
+
+- Clearer sync status: the indicator at the top now simply tells you when your vault is synced or syncing, without false alarms.
+- A simpler Health page: see what's on this computer and on the Remote Vault at a glance, with anything that needs you in one tidy list.
+- Smoother teamwork: shared files and notes stay in step between teammates more reliably.
+- Improvements and bug fixes, plus security updates to the libraries Baalda uses.
+
 ## 0.1.67
 
 - Sidebar sorting: sort by Name (Z–A) so your latest daily note sits on top, and give any folder its own sort from its right-click menu.

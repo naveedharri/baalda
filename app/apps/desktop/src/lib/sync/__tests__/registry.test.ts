@@ -667,6 +667,45 @@ describe("VaultRegistry.reconcile — paths the server says this user cannot see
   });
 });
 
+describe("VaultRegistry.reconcile — a doc_id the server says was deleted", () => {
+  // Prod 2026-09-23: a device re-registered the dead ids of ~25 notes a teammate
+  // deleted, every pass. The server now answers `note_deleted`; the client must
+  // stop asking (in the pull AND when the note is opened), map nothing, report it
+  // once, and never touch the file — it may be the only copy of that text.
+  it("asks once, maps nothing, reports once, and never asks again", async () => {
+    const { api, createNote } = fakeApi({ vaults: [{ id: "v1", name: "v", organization_id: ORG }] });
+    const { ApiError } = await import("../../api");
+    createNote.mockImplementation(async () => {
+      throw new ApiError(409, "this note was deleted on the server", { code: "note_deleted" });
+    });
+    vi.mocked(ipc.listNoteTitles).mockResolvedValue([{ id: "d1", path: "Gone.md", title: "Gone" }]);
+    const reg = new VaultRegistry(api);
+    const tree: TreeNode = {
+      id: "root", name: "v", path: "", isDir: true,
+      children: [{ id: "g", name: "Gone.md", path: "Gone.md", isDir: false }],
+    };
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    expect(createNote).toHaveBeenCalledTimes(1);
+    expect(reg.getMapping("Gone.md")).toBeNull();
+    expect(reg.failures()).toEqual([
+      expect.objectContaining({
+        path: "Gone.md",
+        docId: "d1",
+        code: "note_deleted",
+        reason: expect.stringContaining("kept on this device"),
+      }),
+    ]);
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree);
+    // Opening the note (the editor's direct path) must not ask either.
+    expect(await reg.registerNote("Gone.md", "Gone", "d1")).toBeNull();
+    expect(createNote).toHaveBeenCalledTimes(1);
+    expect(reg.getMapping("Gone.md")).toBeNull();
+    expect(vi.mocked(ipc.writeNote)).not.toHaveBeenCalled();
+    vi.mocked(ipc.listNoteTitles).mockResolvedValue([]);
+  });
+});
+
 describe("VaultRegistry tree-binary `files` map", () => {
   it("persists registered binaries under their own config key, never into `docs`", async () => {
     const { api } = fakeApi({
@@ -768,6 +807,36 @@ describe("VaultRegistry tree-binary `files` map", () => {
     expect(older.getFileId("Team/report.docx")).toBe("file-1");
     expect(older.fileBytesConfirmed("file-1")).toBe(false);
     expect(older.fileDocIds()).toEqual([]);
+  });
+
+  it("round-trips the three-way base per files id, and drops it with the row", async () => {
+    // The blob mirror's base (`attachments.ts planBinarySync`) must survive a
+    // restart, or a device that was closed while a teammate edited a file could
+    // not tell that edit from its own and would fall back to server-canonical.
+    const { api } = fakeApi({ vaults: [{ id: "v1", name: "laptop", organization_id: ORG }] });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    reg.setFileId("Team/report.docx", "file-1");
+    reg.setFileBase("file-1", "sha-v1");
+    expect(reg.getFileBase("file-1")).toBe("sha-v1");
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    await reg.flushCheckpoint();
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1][0] as string) as {
+      fileBases?: Record<string, string>;
+    };
+    expect(cfg.fileBases).toEqual({ "file-1": "sha-v1" });
+
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(JSON.stringify(cfg) as never);
+    const reloaded = new VaultRegistry(api);
+    await reconcileWithTree(reloaded, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+    expect(reloaded.getFileBase("file-1")).toBe("sha-v1");
+    // A rename keeps it (keyed by id); forgetting the row drops it.
+    reloaded.moveFileId("Team/report.docx", "Archive/report.docx");
+    expect(reloaded.getFileBase("file-1")).toBe("sha-v1");
+    reloaded.forgetFileId("Archive/report.docx");
+    expect(reloaded.getFileBase("file-1")).toBeNull();
   });
 
   it("drops the confirmation with the row it was made about", async () => {

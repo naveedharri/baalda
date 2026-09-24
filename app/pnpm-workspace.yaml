@@ -10,7 +10,7 @@ packages:
 catalog:
   "@hocuspocus/provider": ^4.4.0
   typescript: ~5.8.3
-  vitest: ^4.1.10
+  vitest: ^4.1.11
   y-protocols: ^1.0.7
   yjs: ^13.6.31
 

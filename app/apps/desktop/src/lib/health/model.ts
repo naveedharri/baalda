@@ -71,6 +71,9 @@ export interface HealthFailures {
 export interface HealthInput {
   /** `store.syncEnabled` — is the sync layer live for this vault? */
   syncEnabled: boolean;
+  /** `store.vaultReadySeen` — the one "synced" rule (`TreeSyncInput.serverSettled`):
+   *  after the server's first `ready`, a mapped note it did not name is synced. */
+  serverSettled?: boolean;
   /** `store.vaultSyncStatus` — the vault channel, independent of note permissions. */
   syncStatus: SyncStatus;
   /** `store.authStatus`. */
@@ -534,6 +537,12 @@ function registerCodeMeaning(code: string | null, kind: "folder" | "note"): stri
         `This ${kind}'s id already belongs to a different vault on the Remote Vault, so ` +
         `it cannot be created here under the same id.`
       );
+    case "note_deleted":
+      return (
+        `This ${kind} was deleted on the Remote Vault by another member. Your copy is ` +
+        `kept on this device but no longer syncs; delete it, or save its text as a new ` +
+        `${kind} to share it again.`
+      );
     default:
       return null;
   }
@@ -788,6 +797,7 @@ export function buildHealthReport(input: HealthInput): HealthReport {
     docIdByPath: input.docIdByPath,
     docSyncState: input.docSyncState,
     localNotePaths: input.localNotePaths,
+    serverSettled: input.serverSettled === true,
   });
   const v = index.vault;
   const counts: HealthCounts = v

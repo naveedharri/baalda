@@ -26,6 +26,26 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
 }
 
 /**
+ * The run as the pill sees it: one that ENDED with per-note failures reads as a
+ * finished run. The pill speaks two words when sync is on and connected —
+ * "Syncing" and "Synced" — and a note the server refused is not news that
+ * belongs on it (nor is a stuck amber "N not synced" that never resolves): the
+ * Health page names each failure and its fix, reading
+ * `syncManager.syncFailures()`, which this leaves untouched.
+ *
+ * An `error` run with NO failed note is kept as it is: that is the channel
+ * never connecting (the download watchdog), a genuine connectivity state.
+ */
+export function pillProgress(
+  progress: SyncProgress | null | undefined,
+): SyncProgress | null | undefined {
+  if (progress?.phase === "error" && progress.failed > 0) {
+    return { ...progress, phase: "done" };
+  }
+  return progress;
+}
+
+/**
  * Pure label for the sync pill. Extracted so the (surprisingly load-bearing)
  * "Syncing…" vs "Synced · just now" logic is unit-testable without a DOM.
  *
@@ -42,7 +62,8 @@ export function syncRunPercent(progress: SyncProgress | null | undefined): numbe
  *
  * `noteOpen: false` puts the pill in vault-wide mode: `status` belongs to a
  * socket that doesn't exist, so the label is derived from `progress` alone —
- * counter while running, "Synced" once done, the failure count on error.
+ * counter while running, "Synced" once done (failures included, see
+ * {@link pillProgress}).
  */
 export function syncBadgeLabel(args: {
   status: string;
@@ -55,7 +76,8 @@ export function syncBadgeLabel(args: {
   /** False when the pill stands for the vault, not an open note. */
   noteOpen?: boolean;
 }): string {
-  const { status, pending, lastSyncedAt, now, enabled, progress, noteOpen } = args;
+  const { status, pending, lastSyncedAt, now, enabled, noteOpen } = args;
+  const progress = pillProgress(args.progress);
   if (progress?.phase === "removing") {
     return `Updating access · ${Math.max(0, progress.total - progress.done).toLocaleString()} remaining`;
   }
@@ -84,13 +106,11 @@ export function syncBadgeLabel(args: {
     // an impossible "585/164".
     return `Syncing ${Math.min(progress.done, progress.total)}/${progress.total} updates`;
   }
-  // A run that finished with failures must not read "Synced". `failed` is the
-  // number of notes that are still only on this device.
+  // Only a run with NO failed note is still `error` here (see `pillProgress`):
+  // the run itself could not proceed because the vault channel never connected
+  // (the download-phase watchdog). Name the situation the user can act on, not
+  // a mystery "incomplete".
   if (progress?.phase === "error") {
-    if (progress.failed > 0) return `${progress.failed} not synced`;
-    // No note failed — the run itself could not proceed because the vault
-    // channel never connected (the download-phase watchdog). Name the situation
-    // the user can act on, not a mystery "incomplete".
     if (status === "connecting" || status === "error") return "Retrying…";
     return "Sync incomplete";
   }
@@ -117,7 +137,8 @@ export function syncBadgeTone(args: {
   /** False when the pill stands for the vault, not an open note. */
   noteOpen?: boolean;
 }): string {
-  const { status, progress, noteOpen } = args;
+  const { status, noteOpen } = args;
+  const progress = pillProgress(args.progress);
   if (progress?.phase === "removing") return "connecting";
   if (noteOpen !== false && (status === "no-access" || status === "read-only")) {
     return status;
@@ -139,10 +160,11 @@ export function syncBadgeTone(args: {
  * the same treatment `syncBadgeLabel` gets, and for the same reason: this is a
  * remedy the user will click while worried about their notes.
  *
- * `explain` outranks `retry` whenever the caller can open the Health page. A
- * blind retry is the wrong first move on a failed run — the commonest failure
- * is a note over the server's size cap, where retrying re-fails it and tells the
- * user nothing. The reason comes first; the retry is one click further in.
+ * Only a run that could not proceed at all (`error` with no failed note — the
+ * channel never connected) offers anything. `explain` outranks `retry` whenever
+ * the caller can open the Health page: the reason comes first; the retry is one
+ * click further in. A run that ended with failed NOTES offers nothing — the
+ * pill reads "Synced" there (see {@link pillProgress}).
  *
  * `none` covers a run still moving (the counter is the honest report) and a
  * caller that gave us no action at all, which is what keeps the pill a plain
@@ -156,17 +178,16 @@ export function syncBadgeAction(args: {
   hasHealth: boolean;
 }): { kind: "none" | "retry" | "explain"; cta: string; title?: string } {
   const { running, phase, failed = 0, hasRetry, hasHealth } = args;
-  if (running || phase !== "error" || (!hasRetry && !hasHealth)) {
+  // A run that ended with failed notes reads "Synced" (see `pillProgress`) and
+  // offers nothing: the failures live on the Health page, not on the pill.
+  if (running || phase !== "error" || failed > 0 || (!hasRetry && !hasHealth)) {
     return { kind: "none", cta: "" };
   }
   if (hasHealth) {
     return {
       kind: "explain",
       cta: "See why",
-      title:
-        failed > 0
-          ? `${failed} notes didn't sync — open Health to see why`
-          : "Sync didn't finish — open Health to see why",
+      title: "Sync didn't finish — open Health to see why",
     };
   }
   return { kind: "retry", cta: "Sync now", title: "Click to sync now" };
@@ -204,15 +225,13 @@ export function SyncBadge({
   /** False when the pill stands for the vault, not an open note: socket-derived
    *  states are skipped and the label comes from `progress` alone. */
   noteOpen?: boolean;
-  /** When set, a run that ended with failures ("N not synced") renders as a
-   *  button that retries the whole sync — the remedy lives on the message. */
+  /** When set, a run that could not proceed ("Sync incomplete" / "Retrying…")
+   *  renders as a button that retries the whole sync. */
   onRetry?: () => void;
   /**
-   * Opens the Health page. When given, a failed run's pill offers "See why"
-   * instead of "Sync now": a user looking at "12 not synced" wants the reason
-   * before the remedy, and blind-retrying a note the server refused for its size
-   * only re-fails it. Falls back to {@link onRetry} when absent, so every
-   * existing caller keeps the button it had.
+   * Opens the Health page. When given, a run that could not proceed offers
+   * "See why" instead of "Sync now" — the reason before the remedy. Falls back
+   * to {@link onRetry} when absent.
    */
   onOpenHealth?: () => void;
 }) {
@@ -240,9 +259,9 @@ export function SyncBadge({
     running && progress && percent != null
       ? `${progress.done} of ${progress.total} ${progress.phase === "removing" ? "items checked" : "updates"} · ${percent}%`
       : undefined;
-  // A run that ended with failures is actionable when the caller gave us the
-  // action: the pill becomes a button and one click either explains the failure
-  // (Health) or retries everything.
+  // A run that could not proceed is actionable when the caller gave us the
+  // action: the pill becomes a button and one click either explains (Health) or
+  // retries everything.
   const action = syncBadgeAction({
     running,
     phase: progress?.phase,

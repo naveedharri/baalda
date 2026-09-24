@@ -175,6 +175,88 @@ describe("subscription lifecycle", () => {
       expect(row?.status).toBe("active");
       expect(row?.interval).toBe("year");
       expect(Number(row?.amount)).toBe(9700);
+      // The owner is not a user on this server — most likely another
+      // deployment sharing the provider org — so nothing is canceled.
+      expect(fakeProvider.canceled).toEqual([]);
+    });
+
+    function orphanEvent(
+      ownerUserId: string,
+      over: Partial<import("../src/billing/provider.js").NormalizedBillingEvent> = {},
+    ) {
+      return {
+        eventId: `evt_orphan_${Math.random().toString(36).slice(2)}`,
+        occurredAt: new Date(),
+        type: "subscription_active" as const,
+        organizationId: "org_deleted_here",
+        userId: ownerUserId,
+        providerCustomerId: "cus_orphan",
+        providerSubscriptionId: "sub_orphan",
+        plan: "pro",
+        status: "active",
+        currentPeriodEnd: new Date(Date.now() + 30 * 86400_000),
+        cancelAtPeriodEnd: false,
+        interval: "month" as const,
+        amount: 0,
+        currency: "usd",
+        ...over,
+      };
+    }
+
+    it("cancels a live subscription on a deleted vault at period end, once", async () => {
+      const owner = await signUp("orphan-owner@billing.com");
+      fakeProvider.nextEvent = orphanEvent(owner.userId);
+      expect((await req("POST", "/api/billing/webhook", { body: {} })).status).toBe(200);
+
+      expect(fakeProvider.canceled).toEqual([{ id: "sub_orphan", mode: "period_end" }]);
+      const row = await readSub("org_deleted_here");
+      expect(row?.deleted_at).not.toBeNull();
+      expect(row?.status).toBe("active"); // access runs to the end of the paid period
+      expect(row?.cancel_at_period_end).toBe(true);
+
+      // The provider's follow-up webhook describes the canceled schedule: no
+      // second cancel request.
+      fakeProvider.nextEvent = orphanEvent(owner.userId, {
+        type: "subscription_canceled",
+        occurredAt: new Date(Date.now() + 1000),
+        cancelAtPeriodEnd: true,
+      });
+      expect((await req("POST", "/api/billing/webhook", { body: {} })).status).toBe(200);
+      expect(fakeProvider.canceled).toHaveLength(1);
+    });
+
+    it("leaves an already-canceling tombstone alone", async () => {
+      const owner = await signUp("orphan-owner2@billing.com");
+      fakeProvider.nextEvent = orphanEvent(owner.userId, { cancelAtPeriodEnd: true });
+      expect((await req("POST", "/api/billing/webhook", { body: {} })).status).toBe(200);
+      expect(fakeProvider.canceled).toEqual([]);
+    });
+
+    it("never cancels a subscription whose vault still exists", async () => {
+      const owner = await signUp("orphan-live@billing.com");
+      const org = await createOrg(owner, "Alive", "orphan-alive");
+      fakeProvider.nextEvent = orphanEvent(owner.userId, { organizationId: org.id });
+      expect((await req("POST", "/api/billing/webhook", { body: {} })).status).toBe(200);
+      expect(fakeProvider.canceled).toEqual([]);
+      expect((await readSub(org.id))?.deleted_at).toBeNull();
+    });
+
+    it("still answers 200 when the provider refuses the cancel", async () => {
+      const owner = await signUp("orphan-fail@billing.com");
+      fakeProvider.failCancel = new Error("polar is down");
+      fakeProvider.nextEvent = orphanEvent(owner.userId);
+      expect((await req("POST", "/api/billing/webhook", { body: {} })).status).toBe(200);
+      const row = await readSub("org_deleted_here");
+      expect(row?.status).toBe("active");
+      expect(row?.cancel_at_period_end).toBe(false);
+      // The event is still recorded as processed; the next one retries.
+      fakeProvider.failCancel = null;
+      fakeProvider.nextEvent = orphanEvent(owner.userId, {
+        type: "subscription_updated",
+        occurredAt: new Date(Date.now() + 1000),
+      });
+      expect((await req("POST", "/api/billing/webhook", { body: {} })).status).toBe(200);
+      expect(fakeProvider.canceled).toEqual([{ id: "sub_orphan", mode: "period_end" }]);
     });
 
     it("is idempotent on replay", async () => {

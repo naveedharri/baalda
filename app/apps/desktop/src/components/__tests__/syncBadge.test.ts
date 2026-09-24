@@ -26,11 +26,11 @@ describe("syncBadgeLabel", () => {
     const stalled: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0 };
     expect(syncBadgeLabel({ status: "connecting", now, progress: stalled })).toBe("Retrying…");
     expect(syncBadgeLabel({ status: "error", now, progress: stalled })).toBe("Retrying…");
-    // A note that actually failed still names the count; a connected channel
-    // with an errored run still reads incomplete.
+    // Failed NOTES are not a connectivity state: the pill reads Synced (see
+    // below); a connected channel with an errored run still reads incomplete.
     expect(
       syncBadgeLabel({ status: "synced", now, progress: { ...stalled, failed: 2 } }),
-    ).toBe("2 not synced");
+    ).toBe("Synced");
     expect(syncBadgeLabel({ status: "synced", now, progress: stalled })).toBe("Sync incomplete");
   });
 
@@ -131,15 +131,33 @@ describe("syncBadgeLabel with a bulk sync run", () => {
     ).toBe("Syncing…");
   });
 
-  it("names the notes left behind when a run ends with failures", () => {
+  it("reads Synced — never 'N not synced' — when a run ends with failed notes", () => {
+    // Per-note failures belong to the Health page. On the pill a finished run
+    // is a finished run: no count, no amber, no stuck state.
+    const failedRun = run({ phase: "error", done: 500, total: 500, failed: 20 });
     expect(
-      syncBadgeLabel({
-        status: "synced",
-        lastSyncedAt: now,
-        now,
-        progress: run({ phase: "error", done: 500, total: 500, failed: 20 }),
-      }),
-    ).toBe("20 not synced");
+      syncBadgeLabel({ status: "synced", lastSyncedAt: now, now, progress: failedRun }),
+    ).toBe("Synced · just now");
+    expect(syncBadgeTone({ status: "synced", progress: failedRun })).toBe("synced");
+    expect(
+      syncBadgeLabel({ status: "offline", now, noteOpen: false, progress: failedRun }),
+    ).toBe("Synced");
+    expect(syncBadgeTone({ status: "offline", noteOpen: false, progress: failedRun })).toBe(
+      "synced",
+    );
+    // …and it offers no "See why" button either.
+    expect(
+      syncBadgeAction({
+        running: false,
+        phase: failedRun.phase,
+        failed: failedRun.failed,
+        hasRetry: true,
+        hasHealth: true,
+      }).kind,
+    ).toBe("none");
+    // Genuine connectivity states still win over the settled run.
+    expect(syncBadgeLabel({ status: "error", now, progress: failedRun })).toBe("Retrying…");
+    expect(syncBadgeLabel({ status: "offline", now, progress: failedRun })).toBe("Offline");
     expect(
       syncBadgeLabel({ status: "synced", now, progress: run({ phase: "error" }) }),
     ).toBe("Sync incomplete");
@@ -217,7 +235,7 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         noteOpen: false,
         progress: run({ phase: "error", done: 480, total: 500, failed: 20 }),
       }),
-    ).toBe("20 not synced");
+    ).toBe("Synced");
     // Stale grant facts from the last open note don't apply either.
     expect(
       syncBadgeLabel({
@@ -246,7 +264,7 @@ describe("syncBadgeLabel with a bulk sync run", () => {
         noteOpen: false,
         progress: run({ phase: "error", failed: 3 }),
       }),
-    ).toBe("error");
+    ).toBe("synced");
     expect(
       syncBadgeTone({
         status: "no-access",
@@ -266,17 +284,23 @@ describe("syncBadgeLabel with a bulk sync run", () => {
   });
 });
 
-/** What the pill offers after a run stops. The point of the split: a failed run
- *  should EXPLAIN before it retries — the commonest failure is a note the server
- *  refused for its size, where another attempt only re-fails it. */
+/** What the pill offers after a run stops. Only a run that could not proceed
+ *  (the channel never connected) offers anything, and it EXPLAINS before it
+ *  retries. Failed notes are the Health page's and never reach the pill. */
 describe("syncBadgeAction", () => {
   const base = { running: false, hasRetry: true, hasHealth: true };
 
-  it("offers 'See why' over 'Sync now' once a run has failed", () => {
-    const a = syncBadgeAction({ ...base, phase: "error", failed: 12 });
+  it("offers nothing for a run that ended with failed notes (the pill reads Synced)", () => {
+    expect(syncBadgeAction({ ...base, phase: "error", failed: 12 })).toEqual({
+      kind: "none",
+      cta: "",
+    });
+  });
+
+  it("offers 'See why' over 'Sync now' when the run could not proceed", () => {
+    const a = syncBadgeAction({ ...base, phase: "error", failed: 0 });
     expect(a.kind).toBe("explain");
     expect(a.cta).toBe("See why");
-    expect(a.title).toBe("12 notes didn't sync — open Health to see why");
   });
 
   it("still explains when the run failed without naming a single note", () => {
@@ -287,7 +311,7 @@ describe("syncBadgeAction", () => {
   });
 
   it("falls back to the retry when the caller has no Health page to open", () => {
-    const a = syncBadgeAction({ ...base, hasHealth: false, phase: "error", failed: 3 });
+    const a = syncBadgeAction({ ...base, hasHealth: false, phase: "error", failed: 0 });
     expect(a).toEqual({ kind: "retry", cta: "Sync now", title: "Click to sync now" });
   });
 

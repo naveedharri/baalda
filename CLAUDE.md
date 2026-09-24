@@ -228,6 +228,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   its 2000 as the allow-list for older peers. Clients advertising `revocation-batches` receive all
   named revocations in frames of at most 2000 ids (before `ready` on connect, before `reauth` live).
   `hello.held` includes mapped notes without a local state vector; `hello.files` carries binaries.
+  Doc-bound tree binaries sync three-way (`attachments.ts planBinarySync`) against a per-`files`-id
+  base sha persisted as `config.json fileBases`: local==base ⇒ download the teammate's version,
+  server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
+  changed ⇒ server canonical, local copy to `.context/trash` (`copy_to_trash`) first — never a flip.
   Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
   notes, then pull the registry and use the HTTP bulk downloader. Bootstrap pages are
   gzip without `Content-Encoding`; the desktop explicitly inflates before decoding.
