@@ -18,6 +18,10 @@
     in. If that section does not exist yet, create it at the top.
 -->
 
+## 0.1.70
+
+- Linked folders and files inside a vault no longer create duplicate notes or overwrite the original.
+
 ## 0.1.68
 
 - Clearer sync status: the indicator at the top now simply tells you when your vault is synced or syncing, without false alarms.
