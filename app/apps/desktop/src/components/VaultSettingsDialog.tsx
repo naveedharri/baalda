@@ -613,7 +613,6 @@ function UnsyncDangerZone() {
           </button>
         </div>
       )}
-      {reset.dialog}
       <div className="vault-local-only-card">
         <span className="vault-local-only-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -649,6 +648,7 @@ function UnsyncDangerZone() {
           Make local only
         </button>
       </div>
+      {reset.dialog}
       {confirming && (
         <UnsyncConfirmDialog
           orgId={orgId}

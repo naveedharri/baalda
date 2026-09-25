@@ -6635,6 +6635,10 @@ button.secondary:disabled {
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--danger-soft) 48%, var(--bg-surface));
 }
+/* Stacked Danger zone cards (Reset local copy, then Make local only). */
+.vault-local-only-card + .vault-local-only-card {
+  margin-top: var(--sp-3);
+}
 .vault-local-only-icon {
   width: 30px;
   height: 30px;
