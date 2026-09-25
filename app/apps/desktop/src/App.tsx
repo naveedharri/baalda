@@ -6,6 +6,12 @@ import { Banner } from "./components/Banner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { NoteLimitBannerView, noteLimitBanner } from "./components/NoteLimitBanner";
+import {
+  LOCATE_FOLDER,
+  RESTORE_HERE,
+  SWITCH_VAULT,
+  VaultFolderMissingBannerView,
+} from "./components/VaultFolderMissing";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
@@ -256,24 +262,37 @@ function NoteLimitBanner() {
 }
 
 /**
- * The vault folder itself moved, was renamed or its drive was unmounted while
- * the app was open (#221). The sync layer has already stopped every structural
- * step for it; the only way forward is to open the folder where it now lives,
- * which binds the same vault back through its `.context/config.json`.
+ * The vault folder itself moved, was renamed, was deleted or its drive was
+ * unmounted (#221, #228). The sync layer has already stopped every structural
+ * step for it and the tabs are closed; the banner offers the recovery directly:
+ * Restore here (recreate the folder where it was and sync it down — a synced
+ * vault only) or Locate folder… (bind the folder where it now lives). Both run
+ * the same store actions as the Set-up prompt, and both reopen the vault, which
+ * clears the missing state and resumes sync.
  */
 function VaultRootMissingBanner() {
   const missing = useStore((s) => s.structureNotice.rootMissing);
+  const synced = useStore((s) => s.syncEnabled && !!s.session?.activeOrganizationId);
+  const [busy, setBusy] = useState(false);
+  const run = (fn: () => Promise<void>) => async () => {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      toast(`Couldn't recover the vault folder — ${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <Banner show={missing} role="alert">
-      <span>
-        <strong>This vault folder moved or was renamed.</strong> Reopen it from its new location.
-      </span>
-      <div className="banner-actions">
-        <button className="primary" onClick={() => useStore.getState().requestSettings("vaults")}>
-          Reopen vault
-        </button>
-      </div>
-    </Banner>
+    <VaultFolderMissingBannerView
+      show={missing}
+      synced={synced}
+      busy={busy}
+      onRestore={run(() => useStore.getState().restoreVaultFolder())}
+      onLocate={run(() => useStore.getState().locateVaultFolder())}
+      onSwitch={() => useStore.getState().requestSettings("vaults")}
+    />
   );
 }
 
@@ -415,6 +434,8 @@ function VaultFolderPrompt() {
   const [error, setError] = useState<string | null>(null);
 
   if (!pending) return null;
+  // The folder is GONE (#228): same wording and actions as the in-vault banner.
+  const missing = pending.reason?.missing === true;
 
   const run = (fn: () => Promise<void>) => async () => {
     setBusy(true);
@@ -427,6 +448,36 @@ function VaultFolderPrompt() {
       setBusy(false);
     }
   };
+
+  const pickBtn = (
+    <AsyncButton
+      key="pick"
+      className={`wf-btn ${missing ? "wf-btn-ghost" : "wf-btn-primary"}`}
+      disabled={busy}
+      spinnerTone={missing ? undefined : "on-accent"}
+      onClick={run(() => useStore.getState().chooseVaultFolder())}
+    >
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.6.8l.9 1.2a2 2 0 0 0 1.6.8H19a2 2 0 0 1 2 2" />
+        <path d="M3 10h16.5a2 2 0 0 1 1.95 2.46l-1.1 5A2 2 0 0 1 18.4 19H5a2 2 0 0 1-2-2z" />
+      </svg>
+      <span>{missing ? LOCATE_FOLDER : "Open a folder…"}</span>
+    </AsyncButton>
+  );
+  const emptyBtn = (
+    <AsyncButton
+      key="empty"
+      className={`wf-btn ${missing ? "wf-btn-primary" : "wf-btn-ghost"}`}
+      disabled={busy}
+      spinnerTone={missing ? "on-accent" : undefined}
+      onClick={run(() => useStore.getState().startEmptyVault())}
+    >
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M12 5v14M5 12h14" />
+      </svg>
+      <span>{missing ? RESTORE_HERE : "Start with an empty folder"}</span>
+    </AsyncButton>
+  );
 
   return (
     <div className="modal-backdrop vault-folder-backdrop">
@@ -469,29 +520,19 @@ function VaultFolderPrompt() {
         <div className="vault-folder-actions">
           {/* Both of these open a vault: a native picker, then a full vault open
               + reconcile. Easily a second or two, so each reports for itself. */}
-          <AsyncButton
-            className="wf-btn wf-btn-primary"
-            disabled={busy}
-            spinnerTone="on-accent"
-            onClick={run(() => useStore.getState().chooseVaultFolder())}
-          >
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.6.8l.9 1.2a2 2 0 0 0 1.6.8H19a2 2 0 0 1 2 2" />
-              <path d="M3 10h16.5a2 2 0 0 1 1.95 2.46l-1.1 5A2 2 0 0 1 18.4 19H5a2 2 0 0 1-2-2z" />
-            </svg>
-            <span>Open a folder…</span>
-          </AsyncButton>
-          <AsyncButton
-            className="wf-btn wf-btn-ghost"
-            disabled={busy}
-            onClick={run(() => useStore.getState().startEmptyVault())}
-          >
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            <span>Start with an empty folder</span>
-          </AsyncButton>
+          {/* A missing folder leads with Restore here, like the banner (#228). */}
+          {missing ? [emptyBtn, pickBtn] : [pickBtn, emptyBtn]}
         </div>
+        {missing && (
+          <button
+            type="button"
+            className="link-btn wf-switch"
+            disabled={busy}
+            onClick={run(() => useStore.getState().cancelVaultFolder())}
+          >
+            {SWITCH_VAULT}
+          </button>
+        )}
         {error && <p className="error">{error}</p>}
       </div>
     </div>
@@ -763,6 +804,17 @@ function SyncIndicator({
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   const pending = useStore((s) => s.syncPending);
   const progress = useStore((s) => s.syncProgress);
+  const rootMissing = useStore((s) => s.structureNotice.rootMissing);
+  // The folder is gone (#228): nothing syncs until it is back, so the pill
+  // must not claim "Synced". Neutral, not an error — the banner has the fix.
+  if (rootMissing) {
+    return (
+      <span className="sync-badge offline" title="Sync is paused until the vault folder is back">
+        <span className="sync-dot" aria-hidden="true" />
+        Paused
+      </span>
+    );
+  }
   if (attachmentLocalOnly) {
     return <SyncBadge status="offline" enabled={false} noteOpen />;
   }

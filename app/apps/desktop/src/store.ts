@@ -135,7 +135,13 @@ export interface PendingVaultFolder {
   /** Why the prompt appeared, when it wasn't a plain "new vault needs a folder"
    *  (e.g. the vault's bound folder exists but failed to open). The folder path
    *  is kept separate so the UI can typeset it on its own line. */
-  reason?: { text: string; path: string | null } | null;
+  reason?: {
+    text: string;
+    path: string | null;
+    /** The vault's folder is GONE (not merely failed to open): the prompt then
+     *  offers Restore here / Locate folder…, like the in-vault banner (#228). */
+    missing?: boolean;
+  } | null;
   /** The vault was JUST created, so the folder it lands in may receive
    *  first-run starter content if empty. Never set for existing vaults. */
   seedIfEmpty?: boolean;
@@ -189,6 +195,11 @@ interface AppStore {
    * while the app was closed. Mirrored for the banners; the sync layer owns it.
    */
   structureNotice: StructureNotice;
+  /**
+   * Mirror the sync layer's notice. The moment the vault folder goes missing
+   * (#228) the open tabs close: every one of them names a file that is gone.
+   */
+  applyStructureNotice: (notice: StructureNotice) => void;
   /** Answer the held bulk delete: delete for everyone, or restore. */
   resolveBulkDelete: (answer: "delete" | "restore") => Promise<void>;
   /** Hide the closed-app change notice for this open. */
@@ -765,6 +776,23 @@ interface AppStore {
   startEmptyVault: () => Promise<void>;
   /** Abandon the pending switch; revert to the previous vault if any. */
   cancelVaultFolder: () => Promise<void>;
+  /**
+   * The vault's folder is missing (#228) — the banner, the Settings → Vaults
+   * row and the Set-up prompt all recover through these two, so there is ONE
+   * recovery path. "Restore here" recreates the folder at its old path and
+   * syncs everything down (a synced vault only); "Locate folder…" binds the
+   * folder the user picks. Both clear the missing state by reopening the vault.
+   */
+  restoreVaultFolder: () => Promise<void>;
+  locateVaultFolder: () => Promise<void>;
+  /**
+   * Reset local copy (#228): permanently delete this device's folder of the
+   * open synced vault, then run Restore here. Sync stops first; the deliberate
+   * absence never raises the folder-missing banner.
+   */
+  resetLocalVaultCopy: () => Promise<void>;
+  /** Notes with changes the server has not confirmed — the reset warning. */
+  unsyncedNotePaths: () => string[];
 
   // Locks (RBAC deny overlay)
   refreshLocks: () => Promise<void>;
@@ -1150,6 +1178,43 @@ function forgetLastVault(orgId?: string): void {
  * destination rather than a dead end, and the app never invents a vault the
  * user didn't ask for.
  */
+/**
+ * Which vault a folder recovery (#228) is for. The Set-up prompt wins when it
+ * is up — it names the vault being set up — otherwise it is the open vault
+ * whose folder the sync layer found missing. `orgId` is null for a local-only
+ * vault (nothing to restore from; only Locate folder… applies). `path` is the
+ * folder to recreate for Restore here, null when there never was one.
+ */
+interface FolderRecoveryTarget {
+  orgId: string | null;
+  orgName: string;
+  path: string | null;
+  seedIfEmpty?: boolean;
+  stillCurrent: () => boolean;
+}
+
+function folderRecoveryTarget(get: () => AppStore): FolderRecoveryTarget | null {
+  const pending = get().pendingVaultFolder;
+  if (pending) {
+    return {
+      orgId: pending.orgId,
+      orgName: pending.orgName,
+      path: pending.reason?.missing ? (pending.reason.path ?? null) : null,
+      seedIfEmpty: pending.seedIfEmpty,
+      stillCurrent: () => get().pendingVaultFolder?.orgId === pending.orgId,
+    };
+  }
+  const v = get().vault;
+  if (!v || !get().structureNotice.rootMissing) return null;
+  const orgId = get().syncEnabled ? (get().session?.activeOrganizationId ?? null) : null;
+  return {
+    orgId,
+    orgName: v.name,
+    path: v.path,
+    stillCurrent: () => get().vault?.epoch === v.epoch,
+  };
+}
+
 async function landInLastVault(get: () => AppStore): Promise<void> {
   const openPath = get().vault?.path ?? null;
   const action = planLanding({
@@ -1635,6 +1700,12 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
   structureNotice: { rootMissing: false, pendingDelete: null, closedAppChanges: false },
+  applyStructureNotice: (notice) => {
+    const wasMissing = get().structureNotice.rootMissing;
+    set({ structureNotice: notice });
+    if (notice.rootMissing && !wasMissing) get().closeAllTabs();
+  },
+
   resolveBulkDelete: async (answer) => {
     await syncManager.resolveDeleteDecision(answer);
   },
@@ -2548,7 +2619,7 @@ export const useStore = create<AppStore>((set, get) => ({
     );
     // The vault folder moved, a bulk delete is waiting, or the closed-app notice
     // (#221). Optional for the same narrow-shim reason as the line above.
-    syncManager.setStructureNoticeListener?.((notice) => set({ structureNotice: notice }));
+    syncManager.setStructureNoticeListener?.((notice) => get().applyStructureNotice(notice));
     // The path→docId index the sidebar needs to attach a docId-keyed sync state
     // to a path-keyed row. Coalesced by SyncManager on the same ~10/second budget.
     syncManager.setRegistryMapListener((map) => get().setDocIdByPath(map));
@@ -3300,8 +3371,9 @@ export const useStore = create<AppStore>((set, get) => ({
       // surprise-duplicate this flow used to produce. Ask for the new location.
       if (bound) {
         askForFolder({
-          text: "This vault's folder is no longer there — it may have been moved or renamed.",
+          text: "This vault's folder is missing. It was moved, renamed or deleted.",
           path: bound,
+          missing: true,
         });
         return;
       }
@@ -3832,35 +3904,64 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  chooseVaultFolder: async () => {
-    const pending = get().pendingVaultFolder;
-    if (!pending) return;
+  // The Set-up prompt's two buttons ARE the #228 recovery pair: with a prompt
+  // up, `folderRecoveryTarget` names its vault, so there is one code path.
+  chooseVaultFolder: () => get().locateVaultFolder(),
+
+  startEmptyVault: () => get().restoreVaultFolder(),
+
+  restoreVaultFolder: async () => {
+    const target = folderRecoveryTarget(get);
+    if (!target) return;
+    if (!target.orgId) throw new Error("This vault isn't synced, so there is nothing to restore it from.");
+    // A missing folder comes back where it was; a vault that never had one
+    // ("Start with an empty folder") gets a fresh folder under the vaults root.
+    const folder = target.path ?? (await freeVaultFolder(target.orgName));
+    // A switch during that read would replace the prompt; binding a folder for the
+    // superseded vault would point the Rust slot at the wrong folder.
+    if (!target.stillCurrent()) return;
+    await get().applyVaultFolder(target.orgId, folder, {
+      create: true,
+      seedIfEmpty: target.seedIfEmpty,
+    });
+  },
+
+  locateVaultFolder: async () => {
+    const target = folderRecoveryTarget(get);
+    if (!target) return;
     const picked = await ipc.pickFolder();
     if (!picked) return; // cancelled the native dialog — keep the prompt up
     // The native picker is the longest await in the app (the user browsing their
     // filesystem), so the prompt can be superseded or dismissed while it is open.
     // Binding this folder then would point the Rust vault slot at it on behalf of
-    // a vault that is no longer the one being resolved. Same guard as
-    // `startEmptyVault`, which has a far shorter window.
-    if (get().pendingVaultFolder?.orgId !== pending.orgId) return;
+    // a vault that is no longer the one being resolved.
+    if (!target.stillCurrent()) return;
     // Deliberately no `seedIfEmpty` passthrough: the user native-picked an
     // EXISTING folder of their own, and a picked folder is adopted exactly as
     // it is (same rule as "Open existing") — even for a just-created vault.
-    await get().applyVaultFolder(pending.orgId, picked);
+    if (target.orgId) await get().applyVaultFolder(target.orgId, picked);
+    else await get().openLocalVault(picked);
   },
 
-  startEmptyVault: async () => {
-    const pending = get().pendingVaultFolder;
-    if (!pending) return;
-    const folder = await freeVaultFolder(pending.orgName);
-    // A switch during that read would replace the prompt; binding a folder for the
-    // superseded vault would point the Rust slot at the wrong folder.
-    if (get().pendingVaultFolder?.orgId !== pending.orgId) return;
-    await get().applyVaultFolder(pending.orgId, folder, {
-      create: true,
-      seedIfEmpty: pending.seedIfEmpty,
+  resetLocalVaultCopy: async () => {
+    const v = get().vault;
+    const orgId = get().session?.activeOrganizationId ?? null;
+    if (!v || !get().syncEnabled || !orgId) {
+      throw new Error("Only a synced vault can be reset — a local vault has no other copy.");
+    }
+    // Every tab names a file about to be deleted.
+    get().closeAllTabs();
+    await syncManager.withDeliberateRootChange(async () => {
+      // Stop sync before the folder goes: nothing may push, pull or drain
+      // against it, and Rust stops the watcher before it deletes.
+      leaveVaultSync();
+      await ipc.resetVaultLocalCopy(v.path, v.epoch);
+      // …then exactly Restore here: the same folder, recreated, synced down.
+      await get().applyVaultFolder(orgId, v.path, { create: true });
     });
   },
+
+  unsyncedNotePaths: () => syncManager.unsyncedNotePaths?.() ?? [],
 
   cancelVaultFolder: async () => {
     const pending = get().pendingVaultFolder;

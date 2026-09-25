@@ -198,7 +198,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   looks exactly like a bulk delete. A mapped FOLDER that vanishes while an unmapped folder appears is
   paired first (`drainFolderMoves`: ≥80% of its notes present at the same sub-path with matching content
   ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A vanished vault
-  root pauses every materialize/register/delete step and asks to reopen the vault. The ingest side is
+  root pauses every materialize/register/delete step, closes the tabs and offers Restore here (recreate
+  it at the old path and sync down — the Set-up prompt's empty-folder path) or Locate folder… (its
+  open-folder path) from the banner, Settings → Vaults and the launch prompt (#228). The ingest side is
   guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false).
 - **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
   readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing

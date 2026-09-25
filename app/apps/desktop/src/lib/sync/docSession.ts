@@ -590,6 +590,12 @@ export class SyncManager implements InboundHost {
    */
   private rootMissing = false;
   /**
+   * > 0 while the app itself removes and recreates the vault root (#228, Reset
+   * local copy). The folder is briefly absent on purpose, so the root check
+   * must not latch "missing" and raise the banner for it.
+   */
+  private deliberateRootChange = 0;
+  /**
    * A live disk delete above the blast-radius cap, waiting for the user
    * (#221): "delete for everyone" or "restore". Until answered these docs are
    * neither re-materialized nor deleted. Memory only: a restart falls back to
@@ -1676,7 +1682,14 @@ export class SyncManager implements InboundHost {
     }>,
   ): void {
     const scope = this.scope;
-    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (!this.enabled || !scope || !scope.isCurrent()) {
+      // A local-only vault syncs nothing, but its root can still vanish, and
+      // the watcher saying so is the moment to find out (#228).
+      if (changes.some((c) => c.path === "" && c.kind === "tree" && c.gone === true)) {
+        void this.checkVaultRoot();
+      }
+      return;
+    }
     // The vault root itself vanished (#221): Rust reports it as one entry for
     // the empty path and plans nothing else. Every other batch still asks the
     // disk, cheaply and off the hot path, because a renamed root may report
@@ -2592,8 +2605,13 @@ export class SyncManager implements InboundHost {
    * structural step when it is not (#221). Answers true when it could not ask:
    * an IPC hiccup must never read as "the vault vanished".
    */
-  async checkVaultRoot(scope: VaultScope | null = this.scope): Promise<boolean> {
+  async checkVaultRoot(
+    // A local-only vault has no sync scope of its own, only the vault-wide one
+    // every open claims (#228) — its root can vanish just the same.
+    scope: VaultScope | null = this.scope ?? vaultScopes.current(),
+  ): Promise<boolean> {
     if (this.rootMissing) return false;
+    if (this.deliberateRootChange > 0) return true;
     if (!scope || !scope.isCurrent()) return true;
     let state: ipc.VaultRootState;
     try {
@@ -2601,7 +2619,7 @@ export class SyncManager implements InboundHost {
     } catch {
       return true;
     }
-    if (!scope.isCurrent()) return true;
+    if (!scope.isCurrent() || this.deliberateRootChange > 0) return true;
     if (state === "dir" || state == null) return true;
     this.markRootMissing();
     return false;
@@ -2630,8 +2648,43 @@ export class SyncManager implements InboundHost {
     // An unanswered bulk delete is now the unmounted case: never asked.
     this.deleteDecision = null;
     this.deleteDecisionIds = new Set();
-    this.note("warn", "vault-root-missing", "The vault folder moved or was renamed — reopen it from its new location");
+    this.note("warn", "vault-root-missing", "The vault folder is missing — restore it here or locate where it moved");
     this.emitStructureNotice();
+  }
+
+  /**
+   * Run `fn` while the app itself removes and recreates the vault root (#228,
+   * Reset local copy): the root check answers "present" for the duration, so a
+   * deliberate reset never raises the folder-missing banner.
+   */
+  async withDeliberateRootChange<T>(fn: () => Promise<T>): Promise<T> {
+    this.deliberateRootChange++;
+    try {
+      return await fn();
+    } finally {
+      this.deliberateRootChange--;
+    }
+  }
+
+  /**
+   * Notes this device holds changes for that the server has not confirmed
+   * (#228, the Reset local copy warning): never pushed, a local edit still
+   * queued, an out-of-band merge not yet sent, or the server named it behind.
+   * Paths, sorted; empty when everything is on the server.
+   */
+  unsyncedNotePaths(): string[] {
+    const out: string[] = [];
+    for (const n of this.registry.mappedNotes()) {
+      if (
+        !this.registry.isPushed(n.docId) ||
+        this.localChanges.has(n.docId) ||
+        this.divergedDocs.has(n.docId) ||
+        this.serverBehind.has(n.docId)
+      ) {
+        out.push(n.relPath);
+      }
+    }
+    return out.sort();
   }
 
   /** True while the vault root is known to be gone (tests / diagnostics). */

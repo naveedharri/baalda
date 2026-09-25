@@ -14,8 +14,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   punctuation), review the proposed version for each and restore the ones they choose
   (`GET/POST /api/vaults/:vaultId/recovery`, `pnpm run recover:notes`). Every restore can be
   undone from Version History (#200).
+- **Reset local copy (desktop).** Settings → Vaults (on the open synced vault's row) and the Health
+  diagnostic tools offer "Reset local copy": after a confirm that names any notes whose changes
+  haven't reached the server, Baalda stops sync, permanently deletes this device's folder of the
+  vault and restores it from the Remote Vault. Nothing changes for the team. Rust refuses anything
+  but the open vault root itself (no link, home folder, vaults folder or folder without `.context`)
+  (#228).
 
 ### Fixed
+- **A missing vault folder can be recovered in place (desktop).** When the open vault's folder is
+  moved, renamed or deleted, the banner now says "This vault's folder is missing. It was moved,
+  renamed or deleted." and offers **Restore here** (recreate it at the same path and sync
+  everything down) and **Locate folder…** (pick where it went), plus **Switch vault**. A local-only
+  vault gets Locate folder… only. While the folder is missing the open tabs close, the sidebar
+  shows "Folder missing" instead of the path, the sync pill reads "Paused" instead of "Synced",
+  and Settings → Vaults shows a "Folder missing" badge with the same two actions. Launching with a
+  synced vault's folder already gone shows the same wording and actions in the Set-up prompt; both
+  paths run the existing set-up logic. A local-only vault's vanished folder is now detected too (#228).
 - **The Access panel no longer says "Shared" for a person in a Private vault (desktop).** Viewing
   one person's access now shows a level (Can edit / Can view / No access) instead of the vault-mode
   words, so an owner who keeps full access in a Private vault reads "Can edit", not "Shared". The

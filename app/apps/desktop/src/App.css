@@ -6635,6 +6635,10 @@ button.secondary:disabled {
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--danger-soft) 48%, var(--bg-surface));
 }
+/* Stacked Danger zone cards (Reset local copy, then Make local only). */
+.vault-local-only-card + .vault-local-only-card {
+  margin-top: var(--sp-3);
+}
 .vault-local-only-icon {
   width: 30px;
   height: 30px;
@@ -7840,4 +7844,55 @@ button.secondary:active:not(:disabled),
 
 .settings-nav .settings-ai-item .menu-icon svg {
   fill: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* #228 — the open vault's folder is missing. */
+.member-role.folder-missing {
+  color: var(--danger);
+  background: var(--danger-soft);
+  text-transform: none;
+}
+.vault-line .vault-path.is-missing {
+  color: var(--danger);
+}
+.wf-switch {
+  display: block;
+  margin: var(--sp-3) auto 0;
+}
+.reset-unsynced-list {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-4);
+}
+
+/* ---- Row overflow menu (⋯): a row keeps one primary action visible and puts
+   the rest behind this trigger (Settings → Vaults). */
+.row-more {
+  display: inline-flex;
+}
+.row-more-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.row-more-btn:hover:not(:disabled),
+.row-more-btn.open {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.row-more-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.row-more-menu {
+  min-width: 200px;
 }

@@ -192,6 +192,7 @@ pub fn run() {
             commands::get_recent_vaults,
             commands::remove_recent_vault,
             commands::delete_vault,
+            commands::reset_vault_local_copy,
             commands::create_vault,
             commands::is_vault,
             commands::list_tree,

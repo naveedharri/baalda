@@ -1854,6 +1854,56 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     vi.useRealTimers();
   });
 
+  it("#228: a deliberate reset never latches the root as missing", async () => {
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Keep"]);
+    await live(sm);
+    const notices: Array<{ rootMissing: boolean }> = [];
+    sm.setStructureNoticeListener((n) => notices.push(n));
+    await sm.withDeliberateRootChange(async () => {
+      fakeDisk.root = "missing";
+      sm.handleLocalFilesChanged([{ path: "", kind: "tree", gone: true }]);
+      await drain(4);
+      expect(await sm.checkVaultRoot()).toBe(true);
+    });
+    expect(sm.isVaultRootMissing()).toBe(false);
+    expect(notices.some((n) => n.rootMissing)).toBe(false);
+    // Outside the window the same disk answer latches as before.
+    expect(await sm.checkVaultRoot()).toBe(false);
+    expect(sm.isVaultRootMissing()).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("#228: a local-only vault's vanished root is detected too", async () => {
+    const sm = new SyncManager();
+    // No `enable`: only the vault-wide scope every open claims.
+    vaultScopes.ensure({ orgId: null, vaultPath: "/v", vaultEpoch: 1 });
+    const notices: Array<{ rootMissing: boolean }> = [];
+    sm.setStructureNoticeListener((n) => notices.push(n));
+    fakeDisk.root = "missing";
+    sm.handleLocalFilesChanged([{ path: "", kind: "tree", gone: true }]);
+    await drain(4);
+    expect(sm.isVaultRootMissing()).toBe(true);
+    expect(notices[notices.length - 1]?.rootMissing).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("#228: unsyncedNotePaths names every note the server has not confirmed", async () => {
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Keep"]);
+    await live(sm);
+    const all = [...oldNotes, ...others];
+    for (const n of all) fakeRegistry.pushed.add(n.docId);
+    expect(sm.unsyncedNotePaths()).toEqual([]);
+    fakeRegistry.pushed.delete(all[0].docId);
+    (sm as unknown as { localChanges: Map<string, string> }).localChanges.set(
+      all[1].docId,
+      all[1].relPath,
+    );
+    expect(sm.unsyncedNotePaths()).toEqual([all[0].relPath, all[1].relPath].sort());
+    vi.useRealTimers();
+  });
+
   describe("a live delete above the cap asks instead of undoing", () => {
     const notes = Array.from({ length: 50 }, (_, i) => ({ docId: `x${i}`, relPath: `X${i}.md` }));
 
