@@ -121,9 +121,22 @@ Yes, and it is a supported way to work. Create, edit, delete, rename and move `.
 tool — Finder, a script, an AI agent — and Baalda picks the change up and syncs it, merging an
 outside edit with whatever a teammate is typing rather than overwriting it. A delete on disk takes
 a couple of seconds to reach the team (long enough that an editor's save or a rename is not
-mistaken for one) and your copy of the text is kept in the vault's hidden trash folder first. The
+mistaken for one); no extra local copy is kept, but the note's Version History still has it. The
 one folder to leave alone is the hidden `.context` folder inside the vault: that is Baalda's own
-index, sync state and trash.
+index and sync state.
+
+## Can I rename, move or delete files and folders outside Baalda?
+Editing the text of notes from any tool is fine at any time, even while Baalda is closed. For
+renaming, moving and deleting, keep Baalda open (or use the sidebar, or the AI tools `move_note`,
+`move_folder`, `delete_note` and `delete_folder`):
+- With Baalda open, a note or a whole folder renamed or moved in Finder or by a script keeps its
+  history, links and permissions.
+- Removing a lot of notes at once makes Baalda ask: delete them for everyone, or restore them.
+- If you rename or move the vault folder itself, Baalda stops syncing it and asks you to reopen it
+  from its new location.
+- Renames, moves and deletes made while Baalda is closed are not applied: the old names come back
+  and the new ones appear as new notes. Baalda shows a notice when this happens.
+- Symbolic links (aliases made with `ln -s`) inside a vault are not supported; Baalda ignores them.
 
 ## How does the AI part work?
 Two ways. (1) Local: because notes are plain files, any tool on your computer, for example
