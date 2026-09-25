@@ -139,7 +139,10 @@ export function makeHarness(seed?: Record<string, string>): Harness {
   const io: BridgeIO = {
     readFile: (p) => fs.readFile(p),
     // Like Rust's `write_note` given a doc id: the write records the disk base.
-    writeFileAtomic: async (p, c, docId) => {
+    // And like it given `expectedSha` (#216): a file that no longer hashes to
+    // it (missing = the empty string) is left alone and the answer is "stale".
+    writeFileAtomic: async (p, c, docId, expectedSha) => {
+      if (expectedSha != null && sha256Hex(fs.get(p) ?? "") !== expectedSha) return "stale";
       await fs.writeFileAtomic(p, c);
       if (docId) persistence.diskBases.set(docId, sha256Hex(c));
     },

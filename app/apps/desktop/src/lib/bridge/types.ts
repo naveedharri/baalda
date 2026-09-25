@@ -73,12 +73,28 @@ export interface CrdtPersistence {
   saveDiskBase?(docId: string, sha256: string): Promise<void>;
 }
 
+/** What a compare-and-swap write did. */
+export type WriteResult = "written" | "stale";
+
 /** All I/O the bridge depends on, injected so it is testable in isolation. */
 export interface BridgeIO {
   readFile(path: string): Promise<string>;
-  /** Atomic write. `docId` is passed by the bridge's egest so the store can
-   *  record the written bytes as that doc's disk base with the write. */
-  writeFileAtomic(path: string, content: string, docId?: string): Promise<void>;
+  /**
+   * Atomic write. `docId` is passed by the bridge's egest so the store can
+   * record the written bytes as that doc's disk base with the write.
+   *
+   * Compare-and-swap (#216): with `expectedSha` (sha256 of the file bytes this
+   * bridge last observed; the empty-string hash for "no file"), the store must
+   * NOT write when the file no longer hashes to it, and resolve `"stale"`
+   * instead. `undefined`/`null` is an unconditional write. Resolving nothing
+   * (`void`) means written, so a store without CAS support stays valid.
+   */
+  writeFileAtomic(
+    path: string,
+    content: string,
+    docId?: string,
+    expectedSha?: string | null,
+  ): Promise<void | WriteResult>;
   /** SHA-256 hex of `text`. May be sync (Node) or async (Web Crypto). */
   sha256(text: string): Promise<string> | string;
   persistence: CrdtPersistence;
