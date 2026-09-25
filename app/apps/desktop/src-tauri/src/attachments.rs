@@ -5,7 +5,10 @@
 
 use crate::error::{AppError, AppResult};
 use crate::notefile::sha256_file;
-use crate::vault::{is_allowed_file, is_ignored_name, is_note_file, rel_path_is_ignored, resolve_in_vault};
+use crate::vault::{
+    is_allowed_file, is_ignored_name, is_note_file, rel_path_is_ignored, require_vault_root,
+    resolve_in_vault,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -163,6 +166,7 @@ pub fn write_binary_file(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()>
 /// nothing can reach it without passing one of the two guards above.
 fn write_bytes_atomic(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
     let abs = resolve_in_vault(vault, rel)?;
+    require_vault_root(vault)?;
     let parent = abs
         .parent()
         .ok_or_else(|| AppError::new("attachment has no parent directory"))?;
@@ -625,6 +629,7 @@ pub async fn download_file(
         ensure_attachment_rel(rel)?;
     }
     let abs = resolve_in_vault(vault, rel)?;
+    require_vault_root(vault)?;
     let parent = abs
         .parent()
         .ok_or_else(|| AppError::new("attachment has no parent directory"))?;

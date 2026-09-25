@@ -635,6 +635,7 @@ mod tests {
     fn a_vanished_root_is_reported_once_and_plans_no_index_work() {
         let tmp = tempfile::tempdir().unwrap();
         let v = tmp.path().join("vault");
+        std::fs::create_dir_all(&v).unwrap();
         write_note(&v, "a.md", "# A").unwrap();
         write_note(&v, "sub/b.md", "# B").unwrap();
         std::fs::rename(&v, tmp.path().join("moved")).unwrap();
@@ -675,6 +676,7 @@ mod tests {
     fn a_linked_root_is_not_reported_as_vanished() {
         let tmp = tempfile::tempdir().unwrap();
         let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
         write_note(&real, "a.md", "# A").unwrap();
         let link = tmp.path().join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
