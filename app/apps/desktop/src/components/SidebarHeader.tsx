@@ -24,6 +24,8 @@ export function SidebarHeader() {
   const organizations = useStore((s) => s.organizations);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const switching = useStore((s) => s.switchingVault);
+  // The folder is gone (#228): the path below names nothing, so say so.
+  const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const reduceMotion = useReducedMotion();
 
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
@@ -97,7 +99,9 @@ export function SidebarHeader() {
             }
           }}
         >
-          <span className="vault-path">{switching ? "Switching…" : displayPath(vault.path)}</span>
+          <span className={`vault-path${rootMissing && !switching ? " is-missing" : ""}`}>
+            {sidebarPathLabel(vault.path, { switching: !!switching, rootMissing })}
+          </span>
           {copiedPath === vault.path && !switching && (
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
               className="vault-path-copied" role="img" aria-label="Path copied">
@@ -134,6 +138,16 @@ export function SidebarHeader() {
       </div>
     </div>
   );
+}
+
+/** What the path line reads: the switch, the missing folder (#228), or the path. */
+export function sidebarPathLabel(
+  path: string,
+  state: { switching: boolean; rootMissing: boolean },
+): string {
+  if (state.switching) return "Switching…";
+  if (state.rootMissing) return "Folder missing";
+  return displayPath(path);
 }
 
 /**

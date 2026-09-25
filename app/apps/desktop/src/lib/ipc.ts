@@ -313,6 +313,15 @@ export const removeRecentVault = (path: string) =>
  *  it from recents. Destructive — the on-disk files are the only copy. */
 export const deleteVault = (path: string) =>
   invoke<void>("delete_vault", { path });
+/**
+ * Reset local copy (#228): PERMANENTLY delete the open vault's folder on this
+ * device (never the Trash) after stopping its watcher. Rust refuses anything
+ * but the open vault root itself — no symlink, no home, no vaults-root or its
+ * ancestor, and it must hold a `.context`. The caller then recreates the folder
+ * and syncs it down from the server.
+ */
+export const resetVaultLocalCopy = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("reset_vault_local_copy", { path, expectedEpoch: expectedEpoch ?? null });
 /** Create a new empty vault folder `<parent>/<name>` and open it. */
 export const createVault = (parent: string, name: string) =>
   invoke<VaultInfo>("create_vault", { parent, name });

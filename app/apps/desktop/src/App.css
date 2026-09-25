@@ -7841,3 +7841,21 @@ button.secondary:active:not(:disabled),
 .settings-nav .settings-ai-item .menu-icon svg {
   fill: color-mix(in srgb, var(--accent) 22%, transparent);
 }
+
+/* #228 — the open vault's folder is missing. */
+.member-role.folder-missing {
+  color: var(--danger);
+  background: var(--danger-soft);
+  text-transform: none;
+}
+.vault-line .vault-path.is-missing {
+  color: var(--danger);
+}
+.wf-switch {
+  display: block;
+  margin: var(--sp-3) auto 0;
+}
+.reset-unsynced-list {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-4);
+}

@@ -39,6 +39,8 @@ import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
+import { ResetLocalCopyButton } from "./ResetLocalCopyButton";
 import { AiSettingsTab } from "./AiSettingsTab";
 import { HealthTab } from "./HealthTab";
 import { useHealthAttentionCount } from "../lib/health/useHealthAttention";
@@ -907,6 +909,9 @@ function VaultsTab() {
   const members = useStore((s) => s.members);
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
+  // The open vault's folder is gone (#228): its row says so instead of
+  // "Current" and offers the banner's recovery actions.
+  const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const billingEnabled = useStore((s) => s.billingConfig?.enabled === true);
   // Bumped after a local remove/delete so the recents list re-fetches.
   const [localsNonce, setLocalsNonce] = useState(0);
@@ -1196,6 +1201,23 @@ function VaultsTab() {
     }
   };
 
+  // Restore here / Locate folder… for the open vault whose folder is missing —
+  // the same store actions as the banner and the Set-up prompt.
+  const recover = (fn: () => Promise<void>) => async () => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await fn();
+      setBound(readOrgVaults());
+      setLocalsNonce((n) => n + 1);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const changeRoot = async () => {
     try {
       const picked = await ipc.pickVaultsRoot();
@@ -1265,7 +1287,14 @@ function VaultsTab() {
                 </span>
               ) : (
                 <span className="vault-row-actions">
-                  {isActive ? (
+                  {isActive && rootMissing ? (
+                    <VaultFolderMissingRowActions
+                      synced={syncEnabled}
+                      busy={busy}
+                      onRestore={recover(() => useStore.getState().restoreVaultFolder())}
+                      onLocate={recover(() => useStore.getState().locateVaultFolder())}
+                    />
+                  ) : isActive ? (
                     <span className="member-role">Current</span>
                   ) : (
                     <AsyncButton
@@ -1284,6 +1313,9 @@ function VaultsTab() {
                   >
                     Remove from device
                   </AsyncButton>
+                  {/* Only the open synced vault, and only while its folder is
+                      there (a missing one has Restore here above). */}
+                  {isActive && <ResetLocalCopyButton />}
                   {canLeave(o.id) && (
                     <button
                       className="link-btn danger"
@@ -1493,7 +1525,14 @@ function VaultsTab() {
                     </span>
                   ) : (
                     <span className="vault-row-actions">
-                      {isCurrent ? (
+                      {isCurrent && rootMissing ? (
+                        <VaultFolderMissingRowActions
+                          synced={false}
+                          busy={busy}
+                          onRestore={() => undefined}
+                          onLocate={recover(() => useStore.getState().locateVaultFolder())}
+                        />
+                      ) : isCurrent ? (
                         <span className="member-role">Current</span>
                       ) : (
                         <AsyncButton
