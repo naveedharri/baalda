@@ -314,10 +314,12 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       localNotePaths,
       failures,
       stats,
+      checks,
       members,
     };
     return buildHealthReport(input);
   }, [
+    checks,
     vaultReadySeen,
     syncEnabled,
     syncStatus,

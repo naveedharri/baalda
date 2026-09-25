@@ -388,6 +388,52 @@ describe("registry failures", () => {
     expect(issue.why).not.toContain("could not be written");
   });
 
+  // #216: symbolic links.
+  it("says a linked path was refused in plain words", () => {
+    const r = buildHealthReport(input({ failures: {
+      registry: [{ kind: "inbound-blocked", path: "Old/n.md", docId: "old-id",
+        reason: "This path is a symbolic link. Baalda does not sync through links.", code: "symlink" }],
+      content: [], limitCode: null,
+    } }));
+    const issue = r.issues.find((i) => i.path === "Old/n.md")!;
+    expect(issue.kind).toBe("inbound-blocked");
+    expect(issue.title).toBe("Linked path not synced");
+    expect(issue.why).toBe("This path is a symbolic link. Baalda does not sync through links.");
+    expect(issue.code).toBe("symlink");
+  });
+
+  it("warns about linked paths and flags two notes sharing one file as an error", () => {
+    const r = buildHealthReport(input({
+      checks: {
+        computedAt: NOW,
+        results: [],
+        linkedPaths: {
+          id: "linked-paths",
+          count: 2,
+          items: [
+            { path: "Alias.md", detail: "links to /v/Solo.md" },
+            { path: "Old", detail: "links to /v/Business/Old" },
+          ],
+        },
+        sharedFiles: [{ paths: ["Business/Old/n.md", "Old/n.md"], docIds: ["new-id", "old-id"] }],
+      },
+    }));
+    const linked = r.issues.find((i) => i.kind === "linked-paths")!;
+    expect(linked.severity).toBe("warn");
+    expect(linked.title).toBe("2 linked paths are ignored by sync");
+    expect(linked.facts.map((f) => f.value)).toContain("Old (links to /v/Business/Old)");
+    const shared = r.issues.find((i) => i.kind === "shared-file")!;
+    expect(shared.severity).toBe("error");
+    expect(shared.title).toBe("Two notes share one file on disk");
+    expect(shared.why).toContain("Business/Old/n.md, Old/n.md");
+    expect(r.verdict).toBe("attention");
+    // Nothing to say for a vault without links.
+    const clean = buildHealthReport(input({
+      checks: { computedAt: NOW, results: [], linkedPaths: { id: "linked-paths", count: 0, items: [] }, sharedFiles: [] },
+    }));
+    expect(clean.issues.filter((i) => i.kind === "linked-paths" || i.kind === "shared-file")).toEqual([]);
+  });
+
   it("maps note/folder failures to `register-failed` and materialize/inbound to `materialize-failed`", () => {
     const r = buildHealthReport(
       input({

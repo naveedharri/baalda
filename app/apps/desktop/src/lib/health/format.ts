@@ -152,6 +152,10 @@ export function kindLabel(kind: HealthIssueKind): string {
       return "Couldn't write";
     case "orphan-history":
       return "Leftover history";
+    case "linked-paths":
+      return "Linked path";
+    case "shared-file":
+      return "Shared file";
   }
 }
 
