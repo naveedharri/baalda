@@ -389,6 +389,16 @@ export interface RegistryFailure {
  *  retry clicks re-hit the same 403, and one sticky explanation is enough. */
 const frozenRootNotified = new Set<string>();
 
+/** Whether this session already toasted a `no_write_access` create refusal.
+ *  Once per session, not per path: a Read-only vault refuses every new item at
+ *  once, and one toast pointing at Health is the whole message (#217). */
+let writeRefusalNotified = false;
+
+/** Tests only: forget the once-per-session toast. */
+export function resetWriteRefusalNotice(): void {
+  writeRefusalNotified = false;
+}
+
 /**
  * How many inbound REMOVALS run at once.
  *
@@ -1336,6 +1346,17 @@ export class VaultRegistry {
       frozenRootNotified.add(f.path);
       toast(
         `"${f.path}" can't sync — this vault's root is frozen. Move it into a folder to sync it.`,
+        "error",
+      );
+    }
+    // A write refusal used to be recorded silently: the item stayed local-only
+    // with nothing on screen saying why. Health has the full explanation
+    // (worded for the viewer's role), so the toast only has to point there.
+    if (f.code === "no_write_access" && !writeRefusalNotified) {
+      writeRefusalNotified = true;
+      toast(
+        `"${f.path}" can't sync — you don't have edit access there. ` +
+          "Vault Settings → Health explains why and how to fix it.",
         "error",
       );
     }

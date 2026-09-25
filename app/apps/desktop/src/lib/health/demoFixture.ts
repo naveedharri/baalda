@@ -162,6 +162,7 @@ function demoActions(): HealthActions {
     async copyIssue(issue) { log("copyIssue")(issue.key); return ""; },
     reregister: logAsync("reregister"),
     async contactOwner() { log("contactOwner")(); return { owner: null, message: "" }; },
+    openAccess: log("openAccess"),
     async inspectNote(path): Promise<NoteInspection> {
       log("inspectNote")(path);
       return {
