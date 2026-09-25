@@ -1334,9 +1334,14 @@ export class SyncManager implements InboundHost {
       this.registryPullBurstAt = 0;
       if (!scope.isCurrent() || this.rootMissing) return;
       // A registered folder vanished and the drain has not paired it yet
-      // (#221): pulling now would register the moved notes as brand-new ones
-      // and re-materialize the old paths. The drain runs this pull when done.
-      if (this.goneFolders.size > 0) {
+      // (#221), or a note did (a rename's departure half, inside its 2.5 s
+      // grace): pulling now would register the moved notes as brand-new ones
+      // and re-materialize the old paths. The frame that lands here is often
+      // OURS — the server announces `registry-changed` after a content edit,
+      // and an agent that edits one note and renames another in the same
+      // second sends both — so this hold is what keeps a live rename paired.
+      // The drain runs this pull when done.
+      if (this.goneFolders.size > 0 || this.pendingDiskDeletes.size > 0) {
         this.pullAfterDiskDeletes = true;
         return;
       }
