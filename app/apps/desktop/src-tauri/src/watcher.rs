@@ -69,6 +69,12 @@ pub struct FileChanged {
     /// `DISK_DELETE_GRACE_MS` window is what cancels a pending disk delete. The
     /// flag only tells it to skip the work that would have no effect.
     pub unchanged: bool,
+    /// The path is no longer on disk (or is now a link, which sync treats as
+    /// absent). Always true for `removed`; for `tree` it separates a folder
+    /// that went away from one that appeared or changed — the half of a folder
+    /// move the sync layer pairs by sub-path (#221). The vault root itself is
+    /// reported as `{ path: "", kind: "tree", gone: true }` when it vanishes.
+    pub gone: bool,
 }
 
 /// Payload of the single `files-changed` event emitted per batch.
@@ -324,6 +330,27 @@ pub struct Plan {
 /// Turn a dirty set into a [`Plan`]: drop ignored paths, sort for determinism,
 /// and split note-family writes from note-family deletions from structural changes.
 pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Plan {
+    let mut batch = batch.into_iter().peekable();
+    if batch.peek().is_none() {
+        return Plan::default();
+    }
+    // The vault root itself went away: renamed, moved, or its volume unmounted
+    // (#221). Following links on purpose — a vault opened through a linked
+    // folder is still a vault while the link resolves. Report ONLY the root, and
+    // plan no index work at all: every child path would read as removed, and
+    // pruning the whole index for a folder that merely moved is the one thing
+    // that would make reopening it from its new location lose its identities.
+    if !vault.is_dir() {
+        return Plan {
+            changes: vec![PlannedChange {
+                abs: vault.to_path_buf(),
+                rel: String::new(),
+                kind: "tree",
+                gone: true,
+            }],
+            ..Plan::default()
+        };
+    }
     let mut planned: Vec<PlannedChange> = Vec::new();
     for abs in batch {
         let Ok(rel) = rel_from_abs(vault, &abs) else {
@@ -499,6 +526,7 @@ pub(crate) fn mark_unchanged(
         .into_iter()
         .map(|c| FileChanged {
             unchanged: c.kind == "modified" && unchanged.contains(&c.abs),
+            gone: c.gone,
             path: c.rel,
             kind: c.kind.to_string(),
         })
@@ -561,6 +589,97 @@ mod tests {
             plan.removed,
             vec![v.join("Gone.md"), v.join("deleted-folder")]
         );
+    }
+
+    /// #221: a folder moved outside the app (Finder, `mv`, a script) reaches the
+    /// plan as the folder itself, never per child: the old path `tree` + gone,
+    /// the new path `tree` and present. The sync layer pairs those two by
+    /// sub-path, so the `gone` flag has to survive onto the wire.
+    #[test]
+    fn a_folder_move_arrives_as_a_gone_and_a_present_tree_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Old/a.md", "# A").unwrap();
+        write_note(&v, "Old/sub/b.md", "# B").unwrap();
+        std::fs::rename(v.join("Old"), v.join("Archive")).unwrap();
+
+        let plan = plan_batch(&v, [v.join("Old"), v.join("Archive")]);
+        let wire = mark_unchanged(plan.changes.clone(), &HashSet::new());
+        assert_eq!(
+            wire,
+            vec![
+                FileChanged {
+                    path: "Archive".into(),
+                    kind: "tree".into(),
+                    unchanged: false,
+                    gone: false,
+                },
+                FileChanged {
+                    path: "Old".into(),
+                    kind: "tree".into(),
+                    unchanged: false,
+                    gone: true,
+                },
+            ]
+        );
+        // The old prefix is pruned; the moved notes are left for the sync layer
+        // to index under their kept ids.
+        assert_eq!(plan.removed, vec![v.join("Old")]);
+        assert!(plan.modified.is_empty());
+    }
+
+    /// #221: the vault root vanishing (renamed, moved, volume unmounted) is
+    /// reported as ONE root change and nothing else — no index pruning, which
+    /// would strip every identity from a folder that merely moved.
+    #[test]
+    fn a_vanished_root_is_reported_once_and_plans_no_index_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().join("vault");
+        write_note(&v, "a.md", "# A").unwrap();
+        write_note(&v, "sub/b.md", "# B").unwrap();
+        std::fs::rename(&v, tmp.path().join("moved")).unwrap();
+
+        let plan = plan_batch(&v, [v.clone(), v.join("a.md"), v.join("sub/b.md")]);
+        assert_eq!(kinds(&plan), vec![(String::new(), "tree")]);
+        assert!(plan.changes[0].gone);
+        assert!(plan.removed.is_empty(), "nothing is pruned from the index");
+        assert!(plan.modified.is_empty());
+        assert!(plan.indexable_files.is_empty());
+        let wire = mark_unchanged(plan.changes, &HashSet::new());
+        assert_eq!(
+            wire,
+            vec![FileChanged {
+                path: String::new(),
+                kind: "tree".into(),
+                unchanged: false,
+                gone: true,
+            }]
+        );
+    }
+
+    /// A present root never produces the root entry: an event for the root
+    /// path itself is dropped as before.
+    #[test]
+    fn a_present_root_event_is_still_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "a.md", "# A").unwrap();
+        let plan = plan_batch(&v, [v.clone()]);
+        assert!(plan.changes.is_empty());
+    }
+
+    /// The root check follows links: a vault opened through a linked folder is
+    /// still a vault while the link resolves (#216).
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_root_is_not_reported_as_vanished() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        write_note(&real, "a.md", "# A").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let plan = plan_batch(&link, [link.join("a.md")]);
+        assert_eq!(kinds(&plan), vec![("a.md".to_string(), "modified")]);
     }
 
     /// Watch `root` exactly as [`start`] does, make an edit inside it, and plan
@@ -812,21 +931,25 @@ mod tests {
                     path: "Edited.md".into(),
                     kind: "modified".into(),
                     unchanged: false,
+                    gone: false,
                 },
                 FileChanged {
                     path: "Gone.md".into(),
                     kind: "removed".into(),
                     unchanged: false,
+                    gone: true,
                 },
                 FileChanged {
                     path: "Same.md".into(),
                     kind: "modified".into(),
                     unchanged: true,
+                    gone: false,
                 },
                 FileChanged {
                     path: "folder".into(),
                     kind: "tree".into(),
                     unchanged: false,
+                    gone: false,
                 },
             ],
             "every path is still reported; only the modified match is flagged"
@@ -860,6 +983,7 @@ mod tests {
                 path: "Alpha.md".into(),
                 kind: "modified".into(),
                 unchanged: true,
+                gone: false,
             }]
         );
     }

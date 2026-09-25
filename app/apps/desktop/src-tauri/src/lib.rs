@@ -198,6 +198,7 @@ pub fn run() {
             commands::list_children,
             commands::read_note,
             commands::note_exists,
+            commands::vault_root_state,
             commands::write_trash_copy,
             commands::copy_to_trash,
             commands::rebind_note_id,
