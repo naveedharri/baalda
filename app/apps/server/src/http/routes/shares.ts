@@ -52,8 +52,8 @@ type TeamAccessMode = "open" | "readonly" | "private";
  * shared, where people keep the notes they wrote (`created_by`,
  * private-by-default). Those two want opposite answers about authorship, so
  * they cannot be the same state. `denied` is the one the resolver reads as
- * `sealed`: nobody reaches anything, the owner who pressed it included, until
- * something is shared by name.
+ * `sealed`: owners and admins keep full access, and members reach nothing
+ * until something is shared with them by name or with the team (#217).
  */
 const MODE_PERMISSION: Record<TeamAccessMode, "edit" | "view" | "denied"> = {
   open: "edit",

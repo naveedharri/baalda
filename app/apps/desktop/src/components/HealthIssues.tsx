@@ -411,6 +411,7 @@ const ROW_ACTIONS: ReadonlySet<HealthRemedy> = new Set<HealthRemedy>([
   "reset-history",
   "reclaim",
   "contact-owner",
+  "open-access",
 ]);
 
 function IssueRow({
@@ -640,6 +641,12 @@ function Remedy({
         >
           Contact the owner
         </AsyncButton>
+      );
+    case "open-access":
+      return (
+        <button type="button" className={pill} onClick={() => actions.openAccess()}>
+          Open Access
+        </button>
       );
     default:
       return null;

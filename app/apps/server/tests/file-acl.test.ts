@@ -89,13 +89,14 @@ describe("file ACL (blobs with a doc_id)", () => {
     expect(await readFile(member)).toBe(false);
   });
 
-  it("a sealed vault refuses the file to everyone, owner included", async () => {
+  it("a sealed vault refuses the file to a member and keeps it for the owner", async () => {
     await seedVaultGrant(org, "edit");
     expect(await readFile(member)).toBe(true);
     await pool.query("DELETE FROM shares WHERE resource_type = 'vault'");
     await sealVault(org);
     expect(await readFile(member)).toBe(false);
-    expect(await readFile(owner)).toBe(false);
+    expect(await readFile(owner)).toBe(true);
+    expect(await readOrphan(owner)).toBe(true);
   });
 
   it("an org grant on the folder lifts a file out of a sealed vault", async () => {

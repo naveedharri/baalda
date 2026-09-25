@@ -379,11 +379,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   view even for admins. **The vault posture is a baseline for everyone** (`vaultBaseline`): Read-only
   caps every shortcut at view; a vault that was never shared withdraws the owner/admin shortcut but
   keeps authorship (the private-by-default space); and **`sealed`** — an org `denied` row on the
-  vault resource, which is what the Access panel's Private now writes — withdraws authorship too, so
-  nobody reads anything until a grant lifts it. An org grant on a folder/note still lifts out of a
+  vault resource, which is what the Access panel's Private now writes — keeps owners/admins at full
+  access (root creates included, ahead of any join snapshot) and withdraws authorship from members, so
+  a member reads nothing until a grant lifts it (#217). An org grant on a folder/note still lifts out of a
   sealed vault (a floor, not a wall); an *item* set to Private drops those too, because there the
   point is withdrawing one item from a team that can otherwise reach it. Creation follows reading:
-  `vaultRootWritable` refuses a root create in a sealed vault, since a note you cannot read is not
+  `vaultRootWritable` refuses a MEMBER's root create in a sealed vault, since a note you cannot read is not
   worth making. Keep
   `vault-docs.ts vaultAccess` in lockstep: it reads the same grant rather than short-circuiting on the
   role, which is what makes the readable set, the folder tree, blob reads, the graph, MCP search, the

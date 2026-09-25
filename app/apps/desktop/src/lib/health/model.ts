@@ -108,6 +108,11 @@ export interface HealthInput {
    *  needs no value import from `lib/api.ts`; absent ⇒ the explanations fall
    *  back to "the vault's owner". */
   members?: HealthMember[];
+  /** The signed-in account's role in this vault (`owner` | `admin` | `member`),
+   *  or null/absent when unknown. An owner or admin is never told to "ask the
+   *  owner": the only thing that can still refuse them a write is a Read-only
+   *  setting they can change themselves in Access (#217). */
+  viewerRole?: string | null;
 }
 
 /** The one shape the model needs out of `api.Member`. */
@@ -216,7 +221,16 @@ function censusSizes(
 interface IssueContext {
   stats: VaultStats | null;
   owner: { name: string; email: string } | null;
+  /** The viewer runs this vault (owner or admin). */
+  privileged: boolean;
 }
+
+/** Why a write was refused to an owner or admin. After #217 only a Read-only
+ *  setting — on the vault, or a lock on a folder — refuses them; Private does
+ *  not. Said instead of "ask the owner", which from that seat is nonsense. */
+const PRIVILEGED_READ_ONLY =
+  "Read-only applies to owners and admins too: this vault, or a folder above " +
+  "this item, is set to Read-only in Access";
 
 function pathFact(path: string | null): HealthFact[] {
   return path ? [{ label: "Path", value: path }] : [];
@@ -457,7 +471,7 @@ function uploadFailedIssue(f: HealthContentFailure): HealthIssue {
   };
 }
 
-function noWriteAccessIssue(f: HealthContentFailure): HealthIssue {
+function noWriteAccessIssue(f: HealthContentFailure, ctx: IssueContext): HealthIssue {
   const saved = f.reason.includes("copy saved to ");
   return {
     key: f.docId,
@@ -469,11 +483,14 @@ function noWriteAccessIssue(f: HealthContentFailure): HealthIssue {
     why: saved
       ? "The Remote Vault refused this note as read-only. Baalda kept a recovery copy before restoring the Remote Vault's version."
       : "The Remote Vault refused this note as read-only. Check again to verify whether its current local and remote text already match.",
-    remedies: ["retry", "open", "reveal", "export-copy", "copy-details"],
+    remedies: ctx.privileged
+      ? ["retry", "open", "open-access", "reveal", "export-copy", "copy-details"]
+      : ["retry", "open", "reveal", "export-copy", "copy-details"],
     code: null,
     explanation: {
       meaning:
-        "The Remote Vault still has its confirmed copy, but it did not accept this device's submitted state because you do not have write access.",
+        "The Remote Vault still has its confirmed copy, but it did not accept this device's submitted state because you do not have write access." +
+        (ctx.privileged ? ` ${PRIVILEGED_READ_ONLY}.` : ""),
       next:
         "Check again. If the current text already matches the Remote Vault, the warning clears without changing the note.",
       fixes: saved
@@ -483,7 +500,9 @@ function noWriteAccessIssue(f: HealthContentFailure): HealthIssue {
           ]
         : [
             "Check again to compare the current read-only copy with the Remote Vault.",
-            "If the warning remains, ask the vault owner for edit access before making changes.",
+            ctx.privileged
+              ? "If the warning remains, open Access and change the Read-only setting before making changes."
+              : "If the warning remains, ask the vault owner for edit access before making changes.",
           ],
       safety: "only-here",
     },
@@ -502,7 +521,7 @@ function contentIssue(f: HealthContentFailure, ctx: IssueContext): HealthIssue {
   if (f.kind === "too-large" || f.reason.toLowerCase().includes("too large")) {
     return tooLargeIssue(f, ctx);
   }
-  if (f.kind === "no-write-access") return noWriteAccessIssue(f);
+  if (f.kind === "no-write-access") return noWriteAccessIssue(f, ctx);
   return uploadFailedIssue(f);
 }
 
@@ -518,13 +537,17 @@ function capitalize(s: string): string {
  * the only codes the server emits with a body (`http/routes/registry.ts`), and
  * the desktop's `registry.ts errorCode` is what puts them on the failure.
  */
-function registerCodeMeaning(code: string | null, kind: "folder" | "note"): string | null {
+function registerCodeMeaning(
+  code: string | null,
+  kind: "folder" | "note",
+  privileged = false,
+): string | null {
   switch (code) {
     case "no_write_access":
-      return (
-        `Your access to this folder is view-only, so the Remote Vault refused to create ` +
-        `the ${kind}.`
-      );
+      return privileged
+        ? `${PRIVILEGED_READ_ONLY}, so the Remote Vault refused to create the ${kind}.`
+        : `Your access to this folder is view-only, so the Remote Vault refused to create ` +
+            `the ${kind}.`;
     case "root_frozen":
       return (
         `This vault's top level is locked, so new items can only be created inside ` +
@@ -731,11 +754,11 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
   }
   const isFolder = f.kind === "folder";
   const what = isFolder ? "folder" : "note";
-  const coded = registerCodeMeaning(f.code, isFolder ? "folder" : "note");
+  const coded = registerCodeMeaning(f.code, isFolder ? "folder" : "note", ctx.privileged);
   const remedies: HealthRemedy[] = isFolder
     ? ["retry", "reveal", "copy-details"]
     : ["retry", "open", "reveal", "copy-details"];
-  if (f.code === "no_write_access") remedies.push("contact-owner");
+  if (f.code === "no_write_access") remedies.push(ctx.privileged ? "open-access" : "contact-owner");
   return {
     key,
     docId: f.docId,
@@ -757,16 +780,21 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
           (f.code
             ? `The Remote Vault answered with "${f.code}".`
             : "The Remote Vault did not say why.")) +
-        (f.code === "no_write_access"
+        (f.code === "no_write_access" && !ctx.privileged
           ? ` Ask ${ownerPhrase(ctx.owner)} for edit access.`
           : ""),
       next: "Baalda tries again on the next registry pass, which runs on every sync and whenever the folder changes.",
       fixes:
         f.code === "no_write_access"
-          ? [
-              `Ask ${ownerPhrase(ctx.owner)} to give you edit access to this folder.`,
-              "Until then, move the note to a folder you can write to and it will sync from there.",
-            ]
+          ? ctx.privileged
+            ? [
+                "Open Access and set the vault, or the folder above this item, back to Shared or Private.",
+                "Until then, move the note to a folder you can write to and it will sync from there.",
+              ]
+            : [
+                `Ask ${ownerPhrase(ctx.owner)} to give you edit access to this folder.`,
+                "Until then, move the note to a folder you can write to and it will sync from there.",
+              ]
           : f.code === "root_frozen"
             ? [`Move this ${what} into a folder instead of the top level of the vault.`]
             : f.code === "path_folder_mismatch"
@@ -916,7 +944,11 @@ function buildIssues(
     issues.push(issue);
   };
   const owner = ownerOf(input.members);
-  const issueCtx: IssueContext = { stats: input.stats, owner };
+  const issueCtx: IssueContext = {
+    stats: input.stats,
+    owner,
+    privileged: input.viewerRole === "owner" || input.viewerRole === "admin",
+  };
 
   // Content first: these are the failures that name a specific note whose only
   // copy is here.

@@ -5,9 +5,10 @@ import { pool as defaultPool } from "../db/pool.js";
  * Effective-permission resolver (spec 04 §3, plus locks).
  *
  *   1. Vault owner/admin  -> `edit` on everything in the vault, UNLESS the
- *      vault's posture withdraws it: Read-only and `sealed` take the shortcut
- *      AND the creator rule from everyone alike, and a vault that was simply
- *      never shared takes the shortcut only.
+ *      vault's posture withdraws it: Read-only takes the shortcut AND the
+ *      creator rule from everyone alike, and a vault that was simply never
+ *      shared takes the shortcut only. `sealed` (Private) keeps the shortcut —
+ *      it withdraws the TEAM, not the people who run the vault.
  *   2. Else take the MAX of: a share on the file itself, a share on a
  *      containing folder (walking parent_id up to the root), and a
  *      vault-scoped grant (org-wide "Open"/"Read-only", or per-user).
@@ -19,8 +20,9 @@ import { pool as defaultPool } from "../db/pool.js";
  * grant at all (one created while private-by-default was the rule) people keep
  * the notes they created and nothing else — owners and admins included, since
  * nobody is exempt from a vault that was never shared. A vault someone actually
- * SET to Private is a different row and a stricter rule: see `sealed` in
- * {@link vaultBaseline}.
+ * SET to Private is a different row and a different rule: owners and admins
+ * keep everything, members keep only what is shared with them — see `sealed`
+ * in {@link vaultBaseline}.
  *
  * Denies (permission = 'denied') come in two flavours, both resolved BEFORE the
  * rules above and both applying to owners and admins: a per-USER deny is
@@ -496,17 +498,24 @@ export async function isLocked(
  * individual out of it. That is exactly what the panel offers.
  *
  * `sealed` — an org-principal `denied` row on the vault resource — is the
- * Access panel's **Private**, and it is the same rule with nothing left at the
- * bottom: the role shortcut and authorship are both skipped and the vault
- * confers nothing, so only a GRANT reaches a doc. Nobody reads anything, the
- * person who created the vault and wrote every note in it included, until
- * something is shared by name or a folder is shared with the team.
+ * Access panel's **Private**. Private is about the TEAM: owners and admins keep
+ * the role shortcut (full read and write, root creates included), while for a
+ * plain member the vault confers nothing and authorship is withdrawn, so only a
+ * GRANT reaches a doc — a folder or note shared by name or with the team.
+ *
+ * It used to seal the vault for everyone, the owner who pressed the button
+ * included, on the theory that an owner could otherwise never observe that
+ * Private took effect. In practice that locked people out of the vault they
+ * run and then told them to "ask the owner" for access (#217). The owner
+ * observes Private the way they observe any access setting: in the Access
+ * panel's per-member view, not by losing their own notes. Read-only is the
+ * posture that applies to the person who chose it — it is the lock.
  *
  * It is a row rather than the ABSENCE of one because absence already means
  * something else. "Never shared" and "deliberately sealed" were the same state
- * — no row — and they want opposite answers about the notes people wrote: the
+ * — no row — and they want opposite answers about the notes members wrote: the
  * first is the private-by-default space `created_by` exists for, the second is
- * a setting whose whole point is that it applies to the person who chose it.
+ * a setting that withdraws the team from everything not shared with it.
  * Writing the row is also what lets an old vault keep working until someone
  * presses the button, at which point it means what it says.
  *
@@ -613,6 +622,22 @@ export async function effectivePermission(
   const role = cache
     ? await cache.role(db, loc.organizationId, userId)
     : await memberRole(db, loc.organizationId, userId);
+  const baseline = cache
+    ? await cache.baseline(db, loc.organizationId)
+    : await vaultBaseline(db, loc.organizationId);
+  const privileged = role === "owner" || role === "admin";
+
+  // Private (`sealed`) withdraws the TEAM. The people who run the vault keep
+  // all of it — read, write and root creates — or pressing Private locks its
+  // owner out of their own vault and then tells them to ask the owner for
+  // access (#217). Ahead of the join snapshot, because an admin's snapshot is
+  // about what the team could see when they joined, and Private is the one
+  // posture that promises admins everything. An item set Private still applies
+  // (below), and so does a lock; Read-only is the posture that caps an owner.
+  if (baseline === "sealed" && privileged && !itemPrivate) {
+    return (await isLocked(db, userId, docId, folderIds)) ? "view" : "edit";
+  }
+
   const snapshot = cache
     ? await cache.snapshot(db, loc.organizationId, userId)
     : await memberAccessSnapshot(db, loc.organizationId, userId);
@@ -644,13 +669,10 @@ export async function effectivePermission(
     if (snapped !== "none" && (await isLocked(db, userId, docId, folderIds))) return "view";
     return snapped;
   }
-  // The vault's posture caps EVERY shortcut below it (see `vaultBaseline`).
-  // Read-only and Private both skip the role AND the creator rule; they differ
-  // only in what the vault itself then confers — `view` for one, nothing at all
-  // for the other.
-  const baseline = cache
-    ? await cache.baseline(db, loc.organizationId)
-    : await vaultBaseline(db, loc.organizationId);
+  // The vault's posture caps the shortcuts below it (see `vaultBaseline`).
+  // Read-only skips the role AND the creator rule for everyone. Private skips
+  // the creator rule for members (owners and admins returned above, unless the
+  // item itself is Private).
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;
@@ -674,14 +696,10 @@ export async function effectivePermission(
       false,
     );
   } else if (readOnlyVault || sealedVault) {
-    // The two postures that take BOTH shortcuts away from everyone: the
-    // owner/admin blanket edit, and authorship.
-    //
-    // `sealed` is the Private button, and it had to stop sparing the author to
-    // mean anything. In a vault you set up yourself you wrote nearly every note
-    // in it, so a Private that spares the author is one you can never observe —
-    // press it and the vault looks untouched, which from the seat that pressed
-    // it is indistinguishable from a control that does not work.
+    // Read-only takes BOTH shortcuts away from everyone: the owner/admin
+    // blanket edit, and authorship. It is the lock, and it applies to whoever
+    // set it. Private (`sealed`) reaches here only for members, and takes
+    // authorship from them: a member keeps nothing they were not given.
     //
     // What still reaches through is a GRANT: a per-user share, or an org share
     // on a folder or note ("share this one folder with the team"). That is the
@@ -860,6 +878,18 @@ export async function resolveAccessForUser(
     return { permission: "none", capped: false, denied: true };
   }
   const itemPrivate = await denied("org", ctx.organizationId);
+  // Mirrors `effectivePermission` branch for branch. They MUST agree: this one
+  // renders the "who can access" list, and a list that disagrees with the
+  // enforcer is worse than no list.
+  const baseline = cache
+    ? await cache.baseline(db, ctx.organizationId)
+    : await vaultBaseline(db, ctx.organizationId);
+  if (baseline === "sealed" && (role === "owner" || role === "admin") && !itemPrivate) {
+    // Private withdraws the team, not the people who run the vault (#217).
+    return (await lockedFor())
+      ? { permission: "view", capped: true }
+      : { permission: "edit", capped: false };
+  }
   const snapshot = cache
     ? await cache.snapshot(db, ctx.organizationId, userId)
     : await memberAccessSnapshot(db, ctx.organizationId, userId);
@@ -891,12 +921,6 @@ export async function resolveAccessForUser(
     if (locked) return { permission: "view", capped: false };
     return { permission, capped: false };
   }
-  // Mirrors `effectivePermission` branch for branch. They MUST agree: this one
-  // renders the "who can access" list, and a list that disagrees with the
-  // enforcer is worse than no list.
-  const baseline = cache
-    ? await cache.baseline(db, ctx.organizationId)
-    : await vaultBaseline(db, ctx.organizationId);
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;
@@ -905,8 +929,9 @@ export async function resolveAccessForUser(
     ? // Private: only explicit per-user grants survive — authorship included.
       await sharePermission(db, userId, ctx.docId, ctx.folderIds, ctx.organizationId, false, false, undefined, undefined, index)
     : readOnlyVault || sealedVault
-      ? // Both postures skip the role AND authorship; only a grant reaches
-        // through. Mirrors `effectivePermission` branch for branch.
+      ? // Read-only for everyone, Private for members: skip the role AND
+        // authorship; only a grant reaches through. Mirrors
+        // `effectivePermission` branch for branch.
         await sharePermission(
           db,
           userId,

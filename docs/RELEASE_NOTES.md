@@ -21,6 +21,7 @@
 ## 0.1.70
 
 - Linked folders and files inside a vault no longer create duplicate notes or overwrite the original.
+- Private vaults: setting the entire vault to Private no longer locks out the owner or admins; only the team's access is removed.
 
 ## 0.1.68
 
