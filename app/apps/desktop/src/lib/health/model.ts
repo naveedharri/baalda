@@ -649,6 +649,33 @@ function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue
       autoRetries: true,
     };
   }
+  if (f.kind === "inbound-blocked" && f.code === "delete_decision") {
+    return {
+      key,
+      docId: f.docId,
+      path: f.path,
+      kind: "inbound-blocked",
+      severity: "warn",
+      title: "Removed on disk, waiting for your answer",
+      why: "This note was removed from the vault folder together with many others at once.",
+      remedies: ["copy-details"],
+      code: f.code,
+      explanation: {
+        meaning:
+          "Many notes disappeared from this folder in one go while Baalda was open. Baalda held " +
+          "the change instead of syncing it, so the note is still on the Remote Vault and nothing " +
+          "was deleted for your team.",
+        next: "Nothing happens to this note until you answer the banner at the top of the window.",
+        fixes: [
+          "Choose Delete for everyone if you meant to remove these notes.",
+          "Or choose Restore to bring them back from the Remote Vault.",
+        ],
+        safety: "on-server",
+      },
+      facts: [...pathFact(f.path), ...docIdFact(f.docId)],
+      autoRetries: false,
+    };
+  }
   if (f.kind === "inbound-blocked") {
     return {
       key,

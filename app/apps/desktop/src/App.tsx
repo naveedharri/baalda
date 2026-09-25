@@ -256,6 +256,83 @@ function NoteLimitBanner() {
 }
 
 /**
+ * The vault folder itself moved, was renamed or its drive was unmounted while
+ * the app was open (#221). The sync layer has already stopped every structural
+ * step for it; the only way forward is to open the folder where it now lives,
+ * which binds the same vault back through its `.context/config.json`.
+ */
+function VaultRootMissingBanner() {
+  const missing = useStore((s) => s.structureNotice.rootMissing);
+  return (
+    <Banner show={missing} role="alert">
+      <span>
+        <strong>This vault folder moved or was renamed.</strong> Reopen it from its new location.
+      </span>
+      <div className="banner-actions">
+        <button className="primary" onClick={() => useStore.getState().requestSettings("vaults")}>
+          Reopen vault
+        </button>
+      </div>
+    </Banner>
+  );
+}
+
+/**
+ * Many notes were removed from the vault folder at once with the app open
+ * (#221). Past the blast-radius cap the change is held instead of undone:
+ * nothing is deleted for the team and nothing is put back until one of these
+ * two answers. Everything else keeps syncing meanwhile.
+ */
+function BulkDeleteBanner() {
+  const pending = useStore((s) => s.structureNotice.pendingDelete);
+  const [busy, setBusy] = useState(false);
+  const answer = (a: "delete" | "restore") => {
+    setBusy(true);
+    void useStore
+      .getState()
+      .resolveBulkDelete(a)
+      .catch((e) => console.warn("[sync] bulk delete answer failed", e))
+      .finally(() => setBusy(false));
+  };
+  const n = pending?.count ?? 0;
+  return (
+    <Banner show={pending != null} role="alert">
+      <span>
+        You removed {n} {n === 1 ? "note" : "notes"}. Delete them for everyone, or restore them?
+      </span>
+      <div className="banner-actions">
+        <button className="primary" disabled={busy} onClick={() => answer("delete")}>
+          Delete for everyone
+        </button>
+        <button disabled={busy} onClick={() => answer("restore")}>
+          Restore
+        </button>
+      </div>
+    </Banner>
+  );
+}
+
+/**
+ * Renames, moves or deletes were made while the app was closed (#221). Edits
+ * were merged as always; the structure changes were not applied, and this is
+ * the one place that says so. Shown once per open.
+ */
+function ClosedAppChangesBanner() {
+  const show = useStore((s) => s.structureNotice.closedAppChanges);
+  return (
+    <Banner show={show} role="status">
+      <span>
+        Files changed while Baalda was closed. Edits were merged; renames, moves and deletes made
+        while closed were not applied. Keep Baalda open when reorganising.
+      </span>
+      <div className="banner-actions">
+        <button onClick={() => useStore.getState().dismissClosedAppChanges()}>Dismiss</button>
+      </div>
+    </Banner>
+  );
+}
+
+/**
  * Celebrates a teammate joining the vault: a soft top banner (auto-fades
  * after a few seconds) plus a one-shot confetti burst over the whole window.
  * The chime is played by the store when the celebration is triggered.
@@ -914,6 +991,16 @@ export default function App() {
     void useStore.getState().openNoteByPath(rel);
   }), []);
 
+  // A vault folder renamed in Finder may report nothing at all to the watcher
+  // (FSEvents follows the path, not the folder), and coming back to the window
+  // is the moment the user expects to find out (#221). One cheap disk question;
+  // the sync layer latches the answer and raises the reopen banner.
+  useEffect(() => {
+    const onFocus = () => void syncManager.checkVaultRoot();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
   // Subscribe to Rust events: tree refresh + open-note reconciliation.
   useEffect(() => {
     let unlistenFile: (() => void) | undefined;
@@ -1316,6 +1403,9 @@ export default function App() {
             </button>
           </header>
           <VaultUnsyncedBanner />
+          <VaultRootMissingBanner />
+          <BulkDeleteBanner />
+          <ClosedAppChangesBanner />
           <NotSyncingBanner />
           <NoteLimitBanner />
           <RemovedBanner />

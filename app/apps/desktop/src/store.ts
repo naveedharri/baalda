@@ -41,7 +41,7 @@ import { vaultScopes } from "./lib/sync/vaultScope";
 import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
-import type { VoiceSpeaker } from "./lib/sync/docSession";
+import type { StructureNotice, VoiceSpeaker } from "./lib/sync/docSession";
 import { MicPermissionError } from "./lib/voice/capture";
 import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
@@ -182,6 +182,17 @@ interface AppStore {
    * (a Finder delete) and offers no recovery hint.
    */
   noteRemovedByTeammate: { reason: "deleted" | "revoked"; trashedTo: string | null } | null;
+  /**
+   * What the sync layer says about the vault's STRUCTURE while it is open
+   * (#221, `SyncManager.structureNotice`): the vault folder vanished, a live
+   * bulk delete is waiting for an answer, or renames/moves/deletes were made
+   * while the app was closed. Mirrored for the banners; the sync layer owns it.
+   */
+  structureNotice: StructureNotice;
+  /** Answer the held bulk delete: delete for everyone, or restore. */
+  resolveBulkDelete: (answer: "delete" | "restore") => Promise<void>;
+  /** Hide the closed-app change notice for this open. */
+  dismissClosedAppChanges: () => void;
   /** Follow an inbound rename: re-point the open note (and its descendants). */
   followNoteRename: (from: string, to: string) => void;
   /**
@@ -1623,6 +1634,11 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemoved: false,
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
+  structureNotice: { rootMissing: false, pendingDelete: null, closedAppChanges: false },
+  resolveBulkDelete: async (answer) => {
+    await syncManager.resolveDeleteDecision(answer);
+  },
+  dismissClosedAppChanges: () => syncManager.dismissClosedChangesNotice(),
   revealRequest: null,
   settingsRequest: null,
   accountSettingsRequest: null,
@@ -2530,6 +2546,9 @@ export const useStore = create<AppStore>((set, get) => ({
     syncManager.setAttachmentEntitlementListener?.((blocked) =>
       get().setAttachmentSyncBlocked(blocked),
     );
+    // The vault folder moved, a bulk delete is waiting, or the closed-app notice
+    // (#221). Optional for the same narrow-shim reason as the line above.
+    syncManager.setStructureNoticeListener?.((notice) => set({ structureNotice: notice }));
     // The path→docId index the sidebar needs to attach a docId-keyed sync state
     // to a path-keyed row. Coalesced by SyncManager on the same ~10/second budget.
     syncManager.setRegistryMapListener((map) => get().setDocIdByPath(map));
