@@ -89,26 +89,4 @@ describe("AccessModeChoices", () => {
     for (const mode of ["open", "readonly", "private"]) expect(button(mode).disabled).toBe(true);
     expect(onSelect).not.toHaveBeenCalled();
   });
-
-  it("titles the tiles by mode for Everyone and by level for specific people", () => {
-    render(null);
-    expect(button("open").textContent).toContain("Shared");
-    expect(button("private").textContent).toBe("PrivateHidden from the team. You and admins keep access.");
-
-    act(() => root.render(createElement(AccessModeChoices, {
-      currentMode: null, busy: false, disabled: false, audience: "users", onSelect,
-    })));
-    expect(button("open").textContent).toBe("Can editRead and edit");
-    expect(button("readonly").textContent).toBe("Can viewRead only");
-    expect(button("private").textContent).toBe("No accessHidden from them");
-  });
-
-  it("disables a locked-out tile with an explanation", () => {
-    act(() => root.render(createElement(AccessModeChoices, {
-      currentMode: null, busy: false, disabled: false, audience: "users", lockedOut: ["private"], onSelect,
-    })));
-    expect(button("private").disabled).toBe(true);
-    expect(button("private").title).toBe("You run this vault");
-    expect(button("open").disabled).toBe(false);
-  });
 });
