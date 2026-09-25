@@ -192,9 +192,14 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
   that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
   startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
-  FIRST, before any server call, and abandoning the whole batch, because an unmounted
-  volume looks exactly like a bulk delete. The ingest side is guarded too: a 0-byte file never clears a populated doc
-  (`allowTruncateFromDisk`, default false).
+  FIRST, before any server call. Over the cap with the root present and the session live, the batch is
+  HELD, not abandoned (#221): a banner asks "Delete for everyone / Restore", the pull skips the held docs
+  and Health lists them; with the root gone it is still refused silently, because an unmounted volume
+  looks exactly like a bulk delete. A mapped FOLDER that vanishes while an unmapped folder appears is
+  paired first (`drainFolderMoves`: ≥80% of its notes present at the same sub-path with matching content
+  ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A vanished vault
+  root pauses every materialize/register/delete step and asks to reopen the vault. The ingest side is
+  guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false).
 - **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
   readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing
   to push — it is marked pushed + badged synced and never queued (a vault with 307 zero-byte `_Index.md`
