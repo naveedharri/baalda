@@ -639,6 +639,89 @@ pub async fn delete_vault(
     write_config(&app, &state, &cfg)
 }
 
+/// Reset local copy (#228): PERMANENTLY delete the open vault's folder on this
+/// device so the caller can recreate it and sync a fresh copy down from the
+/// server. Not the Trash, by product decision: the server copy is the backup,
+/// and the UI names every unsynced note before it lets this run.
+///
+/// Guarded by [`check_reset_target`]; the watcher and index are released
+/// before the delete so nothing re-creates files inside the folder mid-way.
+#[tauri::command]
+pub async fn reset_vault_local_copy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (open, _) = require_vault_at(&state, expected_epoch)?;
+    let vaults_root = read_config(&app, &state)
+        .vaults_root
+        .map(PathBuf::from)
+        .or_else(|| default_vaults_root(&app).ok());
+    let home = app.path().home_dir().ok();
+    let target = check_reset_target(Path::new(&path), &open, vaults_root.as_deref(), home.as_deref())?;
+    // Stop the watcher and let go of the index first. Taken out under the lock,
+    // dropped outside it: the watcher's drop joins its threads, which may need
+    // the index lock themselves.
+    let (watcher, index) = {
+        let mut inner = state.inner.lock().unwrap();
+        (inner.watcher.take(), inner.index.take())
+    };
+    drop(watcher);
+    drop(index);
+    std::fs::remove_dir_all(&target).map_err(io_ctx("delete the vault folder", &target))
+}
+
+/// The refusals of [`reset_vault_local_copy`], pure so each one is testable.
+/// Returns the canonical folder to delete.
+pub fn check_reset_target(
+    target: &Path,
+    open_vault: &Path,
+    vaults_root: Option<&Path>,
+    home: Option<&Path>,
+) -> AppResult<PathBuf> {
+    let refuse = |why: &str| -> AppResult<PathBuf> {
+        Err(AppError::new(format!("Refusing to reset {}: {why}", target.display())))
+    };
+    let meta = match std::fs::symlink_metadata(target) {
+        Ok(m) => m,
+        Err(_) => return refuse("the folder doesn't exist"),
+    };
+    if meta.file_type().is_symlink() {
+        return refuse("it is a link, not the vault folder itself");
+    }
+    if !meta.is_dir() {
+        return refuse("it isn't a folder");
+    }
+    let canon = match std::fs::canonicalize(target) {
+        Ok(p) => p,
+        Err(_) => return refuse("its location can't be resolved"),
+    };
+    let open_canon = std::fs::canonicalize(open_vault).unwrap_or_else(|_| open_vault.to_path_buf());
+    if canon != open_canon {
+        return refuse("it isn't the vault that is open");
+    }
+    if canon.parent().is_none() {
+        return refuse("it is a filesystem root");
+    }
+    if let Some(home) = home {
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        if canon == home {
+            return refuse("it is your home folder");
+        }
+    }
+    if let Some(root) = vaults_root {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if root.starts_with(&canon) {
+            return refuse("it is the vaults folder or contains it");
+        }
+    }
+    if !canon.join(".context").is_dir() {
+        return refuse("it has no .context folder, so it doesn't look like a vault");
+    }
+    Ok(canon)
+}
+
 /// Create a brand-new empty vault folder `<parent>/<name>` and open it. A name
 /// whose folder is taken gets a numeric suffix (see `free_vault_dir`) rather
 /// than an error — duplicate vault names are allowed.
@@ -2767,6 +2850,66 @@ pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_target_deletes_only_the_open_vault_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let root = home.join("Documents").join("Baalda Vaults");
+        let vault = root.join("Team");
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+        std::fs::write(vault.join("a.md"), "x").unwrap();
+        let ok = check_reset_target(&vault, &vault, Some(&root), Some(&home)).unwrap();
+        std::fs::remove_dir_all(&ok).unwrap();
+        assert!(!vault.exists());
+        assert!(root.is_dir(), "the vaults root survives");
+    }
+
+    #[test]
+    fn reset_target_refusals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let root = home.join("Documents").join("Baalda Vaults");
+        let vault = root.join("Team");
+        let other = root.join("Other");
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+        std::fs::create_dir_all(other.join(".context")).unwrap();
+        let no_ctx = tmp.path().join("plain");
+        std::fs::create_dir_all(&no_ctx).unwrap();
+        let err = |t: &Path, open: &Path| {
+            check_reset_target(t, open, Some(&root), Some(&home)).unwrap_err().to_string()
+        };
+        // Missing.
+        assert!(err(&tmp.path().join("nope"), &vault).contains("doesn't exist"));
+        // Not the open vault.
+        assert!(err(&other, &vault).contains("isn't the vault that is open"));
+        // A symlink to the open vault.
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&vault, &link).unwrap();
+            assert!(err(&link, &vault).contains("link"));
+        }
+        // A file.
+        let file = tmp.path().join("f.txt");
+        std::fs::write(&file, "x").unwrap();
+        assert!(err(&file, &file).contains("isn't a folder"));
+        // Filesystem root.
+        assert!(err(Path::new("/"), Path::new("/")).contains("filesystem root"));
+        // Home.
+        std::fs::create_dir_all(home.join(".context")).unwrap();
+        assert!(err(&home, &home).contains("home folder"));
+        // The vaults root itself, and an ancestor of it.
+        std::fs::create_dir_all(root.join(".context")).unwrap();
+        assert!(err(&root, &root).contains("vaults folder"));
+        let docs = home.join("Documents");
+        std::fs::create_dir_all(docs.join(".context")).unwrap();
+        assert!(err(&docs, &docs).contains("vaults folder"));
+        // No `.context`.
+        assert!(err(&no_ctx, &no_ctx).contains(".context"));
+        // Nothing was deleted by any refusal.
+        assert!(vault.is_dir() && other.is_dir() && root.is_dir() && no_ctx.is_dir());
+    }
 
     #[test]
     fn vault_root_state_reports_a_vanished_or_replaced_root() {
