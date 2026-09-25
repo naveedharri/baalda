@@ -40,7 +40,7 @@ import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
-import { useResetLocalCopy } from "./ResetLocalCopyButton";
+import { useResetLocalCopy } from "./useResetLocalCopy";
 import { RowActionsMenu } from "./RowActionsMenu";
 import { AiSettingsTab } from "./AiSettingsTab";
 import { HealthTab } from "./HealthTab";
@@ -568,6 +568,7 @@ function UnsyncDangerZone() {
   const serverUrl = useStore((s) => s.serverUrl);
   const [preview, setPreview] = useState<UnsyncPreview | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const reset = useResetLocalCopy();
 
   useEffect(() => {
     if (!orgId) return;
@@ -592,6 +593,27 @@ function UnsyncDangerZone() {
     <>
       <div className="menu-sep" />
       <div className="subhead">Danger zone</div>
+      {reset.available && (
+        <div className="vault-local-only-card">
+          <span className="vault-local-only-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 3-6.7" />
+              <path d="M3 4v5h5" />
+            </svg>
+          </span>
+          <div className="vault-local-only-copy">
+            <strong>Reset local copy</strong>
+            <span className="field-hint">
+              Delete {folder ? <>the <strong>{folder}</strong> folder</> : "this vault's folder"} on this
+              device and download a fresh copy from {serverHost(serverUrl)}. Nothing changes for your team.
+            </span>
+          </div>
+          <button className="vault-local-only-action" onClick={reset.start}>
+            Reset
+          </button>
+        </div>
+      )}
+      {reset.dialog}
       <div className="vault-local-only-card">
         <span className="vault-local-only-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

@@ -33,7 +33,6 @@ import { dedupeDifferences, localFilesBytes, runEach } from "../lib/health/atten
 import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { ResetLocalCopyButton } from "./ResetLocalCopyButton";
 import { UpgradeDialog } from "./UpgradeDialog";
 import { LocalOnlyGroup, RemoteOnlyGroup } from "./HealthPlaceGroups";
 import { HealthIssues } from "./HealthIssues";
@@ -523,9 +522,6 @@ function DiagnosticsToolbar({ snapshot }: { snapshot: VaultHealthSnapshot }) {
         >
           Copy report
         </AsyncButton>
-        {/* The last resort for a copy that will not converge (#228). The button
-            hides itself unless the open vault is synced and its folder present. */}
-        {syncAvailable && <ResetLocalCopyButton className="ghost-pill sm danger" />}
       </div>
       {!syncAvailable && (
         <p className="health-diagnostics-hint">

@@ -50,21 +50,3 @@ export function useResetLocalCopy(): {
   ) : null;
   return { available: available || unsynced != null, start, dialog };
 }
-
-export function ResetLocalCopyButton({ className = "link-btn danger" }: { className?: string }) {
-  const reset = useResetLocalCopy();
-  if (!reset.available) return null;
-  return (
-    <>
-      <button
-        type="button"
-        className={className}
-        title="Delete this device's copy of the vault and download a fresh one"
-        onClick={reset.start}
-      >
-        Reset local copy
-      </button>
-      {reset.dialog}
-    </>
-  );
-}
