@@ -23,6 +23,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   file. Egest is now a compare-and-swap: a file that changed since the doc last saw it is merged in
   rather than overwritten. Vaults opened through a symlinked or non-canonical root (such as
   `/var` on macOS) receive watcher events again (#216).
+- **Private no longer locks out the vault's owner and admins (server, desktop).** Setting the
+  entire vault to Private withdrew everyone's access, the owner's included, refused their new
+  top-level items and told them to ask the owner. Owners and admins now keep full access; members
+  see only what is shared with them. Read-only still applies to owners. In a vault that was never
+  shared, owners and admins can again create inside any folder. Health names the Read-only
+  setting for owners instead of "ask the owner", and a refused create now shows a toast (#217).
 - **MCP connectors now always ask which vault to use (server).** A client that was already signed
   in in the browser skipped the vault picker, so its connection failed on every call for anyone
   in more than one vault. Such a connection now also returns a clear "no vault selected" error (#211).
