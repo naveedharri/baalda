@@ -47,6 +47,22 @@ export class NoteBridge {
    */
   private diskBase: string | null = null;
   /**
+   * The compare-and-swap base for egest (#216): the hash of the file bytes this
+   * bridge last OBSERVED on disk — last read by an ingest or seed, or last
+   * written by an egest — plus, when known, the doc state whose text equals
+   * those bytes. Egest passes the hash to `writeFileAtomic`, which refuses to
+   * replace a file that moved on since ("stale"): someone else wrote it — an
+   * external editor inside the 300 ms egest window, or a second doc on the same
+   * file (a symbolic link, a case variant). The bridge then merges the newer
+   * file in, three-way against `state` when it has one, instead of clobbering.
+   * Null = never observed (or the last read failed): the write is unconditional,
+   * as every write was before.
+   */
+  private observed: { hash: string; state: Uint8Array | null } | null = null;
+  /** `writeThrough`: the next egest writes unconditionally (a placeholder the
+   *  caller knows it is filling), whatever this bridge last observed. */
+  private blindNextWrite = false;
+  /**
    * Pull-before-merge (#200). Non-null while a signed-in bridge waits for its
    * first server pull: the doc's state as it was BEFORE that pull, encoded.
    *
@@ -274,6 +290,10 @@ export class NoteBridge {
         : Promise.resolve(null),
     ]);
     this.diskBase = base ?? null;
+    // Until this session reads the file, the disk base is the last thing this
+    // device knows was on disk for the doc: a file that moved on since is not
+    // overwritten by the first egest, it is read first (#216).
+    if (this.diskBase) this.observed = { hash: this.diskBase, state: null };
     const hasPersisted = state.snapshot != null || state.updates.length > 0;
 
     if (hasPersisted) {
@@ -330,8 +350,10 @@ export class NoteBridge {
       // genuine orphan (spec 03 §5 startup ordering).
       this.subscribe();
       let fileText = "";
+      let fileRead = false;
       try {
         fileText = await this.io.readFile(this._path);
+        fileRead = true;
       } catch (e) {
         this.reportError(e, "seed:readFile");
         fileText = "";
@@ -353,7 +375,22 @@ export class NoteBridge {
       if (this.seedOnOpen && fileText.length > 0 && this.text.toString() === fileText) {
         this.recordDiskBase(this.lastWrittenHash);
       }
+      if (fileRead) this.observe(this.lastWrittenHash, this.stateIfText(fileText));
+      else this.observed = null;
     }
+  }
+
+  /** Record what this bridge just saw on disk (see {@link observed}). A state
+   *  of `undefined` keeps the known base when the hash did not move. */
+  private observe(hash: string, state?: Uint8Array | null): void {
+    if (state === undefined && this.observed?.hash === hash) return;
+    this.observed = { hash, state: state ?? null };
+  }
+
+  /** The doc's full state iff its text is exactly `text` right now — the only
+   *  moment that state is a valid three-way base for those bytes. */
+  private stateIfText(text: string, doc: Y.Doc = this.doc): Uint8Array | null {
+    return doc.getText("content").toString() === text ? Y.encodeStateAsUpdate(doc) : null;
   }
 
   /**
@@ -391,6 +428,7 @@ export class NoteBridge {
     if (!seeded) return false;
     this.lastWrittenHash = await this.hash(fileText);
     this.recordDiskBase(this.lastWrittenHash);
+    this.observe(this.lastWrittenHash, this.stateIfText(fileText));
     return true;
   }
 
@@ -657,6 +695,9 @@ export class NoteBridge {
       fileText = await this.io.readFile(this._path);
     } catch (e) {
       this.reportError(e, "ingest:readFile");
+      // What is on disk is unknown now (usually: nothing), so the next write is
+      // unconditional again, exactly as before the compare-and-swap existed.
+      this.observed = null;
       return false;
     }
 
@@ -675,11 +716,17 @@ export class NoteBridge {
           "ingest:oversize",
         );
       }
+      // Seen, and deliberately NOT merged: the doc's text is still meant to
+      // replace this damage, so the compare-and-swap must not stop that write.
+      this.observe(await this.hash(fileText));
       return false;
     }
     this.oversizeReported = false;
 
     const fileHash = await this.hash(fileText);
+    // Every refusal below still SAW these bytes; the doc either holds them, is
+    // meant to replace them, or was merged with them.
+    this.observe(fileHash);
     if (fileHash === this.lastWrittenHash || fileHash === this.pendingMergedFileHash) {
       return false; // our own write or an already-merged disk input
     }
@@ -688,6 +735,7 @@ export class NoteBridge {
       // Already converged (e.g. we ingested this exact change already).
       this.lastWrittenHash = fileHash;
       this.recordDiskBase(fileHash);
+      this.observe(fileHash, Y.encodeStateAsUpdate(this.doc));
       return false;
     }
     if (this.diskBase != null && fileHash === this.diskBase) {
@@ -787,6 +835,9 @@ export class NoteBridge {
     target.transact(() => {
       applyDiff(target.getText("content"), diffs);
     }, ORIGIN_DISK);
+    // `target` now reads exactly the file: the three-way base for a later
+    // stale write (the branch's ops are all merged into the live doc below).
+    this.observe(fileHash, this.stateIfText(fileText, target));
     if (vector) {
       Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(target, vector), ORIGIN_DISK);
       // The peer's previous egest may already have finished while the read was
@@ -898,8 +949,16 @@ export class NoteBridge {
       this.clearWriteFailure();
       return;
     }
+    // Compare-and-swap (#216): only replace the bytes this bridge last saw.
+    const blind = this.blindNextWrite;
+    this.blindNextWrite = false;
+    const expected = blind ? null : (this.observed?.hash ?? null);
+    // The state these bytes come from, taken synchronously with the check that
+    // the doc still reads `content` (the awaits above may have let an edit in).
+    const writtenState = this.stateIfText(content);
+    let result: Awaited<ReturnType<BridgeIO["writeFileAtomic"]>>;
     try {
-      await this.io.writeFileAtomic(this._path, content, this.docId);
+      result = await this.io.writeFileAtomic(this._path, content, this.docId, expected);
     } catch (e) {
       // The .md on disk is the durable source of truth, so a lost write is a
       // data-safety event, not a log line: tell the UI, and retry with backoff
@@ -914,9 +973,14 @@ export class NoteBridge {
       this.scheduleEgestRetry();
       return;
     }
+    if (result === "stale") {
+      this.mergeStaleFile();
+      return;
+    }
     this.lastWrittenHash = hash;
     // `writeFileAtomic` recorded it durably along with the write.
     this.diskBase = hash;
+    this.observe(hash, writtenState);
     if (this.text.toString() === content) this.pendingMergedFileHash = null;
     this.clearWriteFailure();
     // Indexing is derived state: a failure here is worth a log, not a re-write.
@@ -927,6 +991,28 @@ export class NoteBridge {
         this.reportError(e, "egest:reindex");
       }
     }
+  }
+
+  /**
+   * The compare-and-swap refused: the file moved on since this bridge last saw
+   * it, so writing would have replaced someone else's newer text (#216). Nothing
+   * was written. Merge the file in instead — three-way against the doc state
+   * that last matched the file when there is one (the doc's own edits since then
+   * and the file's both survive), else the ordinary ingest — and let that merge
+   * schedule the fresh egest if the doc still differs from the file. Not a
+   * write FAILURE: no toast, no backoff. Timings are the ingest's own.
+   */
+  private mergeStaleFile(): void {
+    if (this.destroyed) return;
+    // The echo guard named bytes that are no longer on disk.
+    this.lastWrittenHash = null;
+    const base = this.observed?.state ?? undefined;
+    if (this.ingestTimer != null) {
+      this.clearT(this.ingestTimer);
+      this.ingestTimer = null;
+    }
+    this.ingestDirty = true;
+    void this.drainIngest(base).catch((e) => this.reportError(e, "egest:stale"));
   }
 
   /** Retract a standing write failure: the file on disk now holds what the doc
@@ -1033,7 +1119,12 @@ export class NoteBridge {
     // that answer comes from `lastWrittenHash`, which hydrate set from the DOC,
     // not from the file.
     this.lastWrittenHash = null;
+    // Unconditional (#216): the caller is filling a file it just created.
+    this.blindNextWrite = true;
     await this.drainEgest();
+    // A pass that returned before writing must not leave a later, ordinary
+    // egest unconditional.
+    this.blindNextWrite = false;
     return this.egestFailures === 0;
   }
 

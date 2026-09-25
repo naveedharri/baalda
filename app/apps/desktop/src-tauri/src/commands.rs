@@ -1262,8 +1262,11 @@ pub async fn note_exists(
     // one runs 2.5 s after the event that armed it, which is easily long enough
     // for a vault switch.
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    let abs = vault::resolve_in_vault(&vault, &path)?;
-    Ok(abs.is_file())
+    vault::resolve_in_vault(&vault, &path)?;
+    // Not `is_file()`, which follows links (#216): a link at a note path is
+    // invisible to the tree walk, so the delete drain must see it as gone too,
+    // or a moved note keeps its stale identity alive behind the link.
+    Ok(vault::vault_path_state(&vault, &path) == vault::PathState::Regular)
 }
 
 /// Save a recovery copy of local text that could not be synced
@@ -1317,9 +1320,17 @@ pub async fn write_note(
     content: String,
     expected_epoch: Option<u64>,
     doc_id: Option<String>,
-) -> AppResult<()> {
+    expected_sha: Option<String>,
+) -> AppResult<&'static str> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
-    notefile::write_note(&vault, &path, &content)?;
+    // Compare-and-swap (#216): the bridge passes the hash of the file it last
+    // agreed with. A file that moved on since is NOT overwritten — the answer
+    // is "stale" (a value, not an error) and the bridge re-ingests instead.
+    if notefile::write_note_cas(&vault, &path, &content, expected_sha.as_deref())?
+        == notefile::WriteNoteOutcome::Stale
+    {
+        return Ok("stale");
+    }
     // Re-index immediately so search/backlinks are fresh without waiting for
     // the watcher echo.
     let abs = vault::resolve_in_vault(&vault, &path)?;
@@ -1331,7 +1342,7 @@ pub async fn write_note(
         guard.set_disk_base(doc_id, &notefile::sha256_hex(&content))?;
     }
     guard.index_note(&vault, &abs)?;
-    Ok(())
+    Ok("written")
 }
 
 /// The doc's recorded disk base (sha256 of the bytes last synced between its
@@ -2338,6 +2349,9 @@ pub struct MaterializeOutcome {
     pub created: bool,
     /// The index row at this path now carries the server's `doc_id`.
     pub rebound: bool,
+    /// Why the placeholder could not be written, when it could not — e.g. the
+    /// path is a symbolic link (#216), which the desktop surfaces in Health.
+    pub error: Option<String>,
 }
 
 /// Materialize N server-only notes as create-only placeholders, then index and
@@ -2372,6 +2386,7 @@ pub fn materialize_notes(
                 rel_path: item.rel_path.clone(),
                 created: false,
                 rebound: false,
+                error: None,
             });
             continue;
         }
@@ -2385,6 +2400,7 @@ pub fn materialize_notes(
                     rel_path: item.rel_path.clone(),
                     created: false,
                     rebound: false,
+                    error: Some(e.0),
                 });
                 continue;
             }
@@ -2394,6 +2410,7 @@ pub fn materialize_notes(
             rel_path: item.rel_path.clone(),
             created,
             rebound: false,
+            error: None,
         });
         rows.push((item.rel_path.clone(), item.doc_id.clone()));
     }

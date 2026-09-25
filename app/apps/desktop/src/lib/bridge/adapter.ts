@@ -4,6 +4,7 @@
 
 import * as ipc from "../ipc";
 import { currentVaultEpoch } from "../sync/vaultScope";
+import { clearLinkRefusal, isSymlinkRefusal, noteLinkRefusal } from "../sync/linkRefusals";
 import { dismissToast, toast } from "../toast";
 import { NoteBridge } from "./noteBridge";
 import type { BridgeIO } from "./types";
@@ -71,7 +72,20 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
     // write_note performs the atomic temp-file+rename AND re-indexes in Rust,
     // so egest gets FTS/backlink refresh for free — no separate reindex hook.
     // …and, given the doc id, records the bytes as the doc's disk base (#200).
-    writeFileAtomic: (path, content, docId) => ipc.writeNote(path, content, epoch, docId),
+    // `expectedSha` is the compare-and-swap (#216): Rust answers "stale" instead
+    // of replacing a file that moved on since the bridge last saw it. A symbolic
+    // link at or above the path is refused outright; that refusal is recorded
+    // for Health (`linkRefusals`) and still reported as a failed save.
+    writeFileAtomic: async (path, content, docId, expectedSha) => {
+      try {
+        const result = await ipc.writeNote(path, content, epoch, docId, expectedSha);
+        clearLinkRefusal(path);
+        return result;
+      } catch (e) {
+        if (isSymlinkRefusal(e)) noteLinkRefusal(path, docId ?? null);
+        throw e;
+      }
+    },
     sha256: sha256Hex,
     // A failed write is the one bridge error a person must see (#81): the .md is
     // the durable copy, and "nothing happened" is how it would otherwise read.

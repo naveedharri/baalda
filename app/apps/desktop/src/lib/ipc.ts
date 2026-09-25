@@ -410,17 +410,26 @@ export const rebindNoteId = (path: string, docId: string, expectedEpoch?: VaultE
   invoke<boolean>("rebind_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
 /** Atomic write + re-index. `docId` (the bridge's egest) also records the
  *  written bytes as that doc's disk base in the same Rust call (#200). */
+/** What `write_note` did. `stale` = the compare-and-swap refused: the file no
+ *  longer hashes to `expectedSha`, so nothing was written (#216). */
+export type WriteNoteResult = "written" | "stale";
+/** Atomic note write. With `expectedSha` (sha256 hex of the file the caller
+ *  last observed; the empty-string hash for "no file") Rust refuses to replace a
+ *  file that moved on since and answers `"stale"` instead of writing. Refuses a
+ *  symbolic link at or above the path (error containing "symbolic link"). */
 export const writeNote = (
   path: string,
   content: string,
   expectedEpoch?: VaultEpoch,
   docId?: string,
+  expectedSha?: string | null,
 ) =>
-  invoke<void>("write_note", {
+  invoke<WriteNoteResult>("write_note", {
     path,
     content,
     expectedEpoch: expectedEpoch ?? null,
     docId: docId ?? null,
+    expectedSha: expectedSha ?? null,
   });
 /** The sha256 of the bytes this device last synced between a doc's file and
  *  its CRDT, or null when none was ever recorded (see `yjs_disk_base`). */
@@ -797,6 +806,8 @@ export interface MaterializeOutcome {
   created: boolean;
   /** The index row at this path now carries the server's `docId`. */
   rebound: boolean;
+  /** Why the placeholder could not be written (e.g. a symbolic link, #216). */
+  error?: string | null;
 }
 
 /**

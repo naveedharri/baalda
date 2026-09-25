@@ -52,6 +52,7 @@ import {
   type VaultScope,
 } from "./vaultScope";
 import { SyncLog } from "./syncLog";
+import { linkRefusals, resetLinkRefusals, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import type { SyncLogEntry, SyncLogLevel } from "../health/types";
 import {
   VaultSyncEngine,
@@ -4060,8 +4061,22 @@ export class SyncManager implements InboundHost {
       if (this.localChanges.has(f.docId)) continue;
       content.push(f);
     }
+    // Bridge writes Rust refused as symbolic links (#216), beside the registry's
+    // own materialize refusals — one row per path.
+    const registry = [...this.registry.failures()];
+    const listed = new Set(registry.map((f) => f.path.toLowerCase()));
+    for (const r of linkRefusals()) {
+      if (listed.has(r.path.toLowerCase())) continue;
+      registry.push({
+        kind: "inbound-blocked",
+        path: r.path,
+        docId: r.docId,
+        reason: SYMLINK_REFUSAL_REASON,
+        code: "symlink",
+      });
+    }
     return {
-      registry: this.registry.failures(),
+      registry,
       content,
       limitCode: this.registry.limitCode(),
     };
@@ -4088,6 +4103,8 @@ export class SyncManager implements InboundHost {
   private teardown(): void {
     this.enabled = false;
     this.primed = false;
+    // Link refusals name paths in the vault we are leaving.
+    resetLinkRefusals();
     // A pending badge hold belongs to the vault we are leaving; letting it fire
     // would paint that vault's status over the next one's.
     this.clearStatusHold();

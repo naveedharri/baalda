@@ -27,7 +27,10 @@
 
 use crate::extract_worker::{self, ExtractQueue, ExtractWorker};
 use crate::index::Index;
-use crate::vault::{is_indexable_file, is_note_file, rel_from_abs, rel_path_is_ignored};
+use crate::vault::{
+    is_indexable_file, is_note_file, rel_from_abs, rel_path_is_ignored, vault_path_state,
+    PathState,
+};
 use notify::event::{AccessKind, AccessMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -185,6 +188,19 @@ pub(crate) fn should_forward(event: &notify::Event) -> bool {
     }
 }
 
+/// Map an event path reported under the CANONICAL vault root back onto the
+/// root the vault was opened as. A path already under the typed root (inotify,
+/// ReadDirectoryChangesW, or a canonical vault) passes through unchanged.
+pub(crate) fn rebase_event_path(typed_root: &Path, canon_root: &Path, p: PathBuf) -> PathBuf {
+    if typed_root == canon_root || p.starts_with(typed_root) {
+        return p;
+    }
+    match p.strip_prefix(canon_root) {
+        Ok(rest) => typed_root.join(rest),
+        Err(_) => p,
+    }
+}
+
 /// Start watching `vault`. Returns a handle that must be kept alive.
 pub fn start(
     vault: PathBuf,
@@ -193,13 +209,27 @@ pub fn start(
 ) -> crate::error::AppResult<VaultWatcher> {
     let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
 
+    // FSEvents canonicalises the watched path and reports REAL paths (#216,
+    // pinned by `a_vault_opened_through_a_symlinked_root_still_receives_events`):
+    // a vault opened as `/var/...` (really `/private/var/...`) or through a
+    // linked folder got events that `rel_from_abs` could not strip, so
+    // `plan_batch` dropped every one and external edits went unseen. Events are
+    // rebased onto the root as opened, so the rest of the app — state, index,
+    // recents, display — keeps the path the user chose.
+    let canon_root = std::fs::canonicalize(&vault).unwrap_or_else(|_| vault.clone());
+    let typed_root = vault.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
             if !should_forward(&event) {
                 return;
             }
             // Forward the event's paths; the drain thread decides what to do.
-            let _ = tx.send(event.paths);
+            let paths = event
+                .paths
+                .into_iter()
+                .map(|p| rebase_event_path(&typed_root, &canon_root, p))
+                .collect();
+            let _ = tx.send(paths);
         }
     })?;
     watcher.watch(&vault, RecursiveMode::Recursive)?;
@@ -308,17 +338,22 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         // file NAME, so a dot in a directory (`a.b/notes`) cannot answer for it.
         let name = rel.rsplit('/').next().unwrap_or(rel.as_str());
         let is_note = is_note_file(name);
-        let exists = abs.exists();
+        // `symlink_metadata`, per component (#216): a link at or above this path
+        // is invisible to the tree walk and the index rebuild, so the live path
+        // treats it exactly like a missing one. `exists()` followed the link and
+        // kept a moved note's old path "present".
+        let state = vault_path_state(vault, &rel);
         let (kind, gone) = if is_note {
-            if exists && abs.is_file() {
+            if state == PathState::Regular {
                 ("modified", false)
             } else {
                 ("removed", true)
             }
         } else {
             // Directory or non-note file → structural refresh. If it's gone
-            // it may have been a folder, so prune its notes from the index too.
-            ("tree", !exists)
+            // (or now a link, which the walk skips) it may have been a folder,
+            // so prune its notes from the index too.
+            ("tree", state.is_absent())
         };
         planned.push(PlannedChange {
             abs,
@@ -526,6 +561,115 @@ mod tests {
             plan.removed,
             vec![v.join("Gone.md"), v.join("deleted-folder")]
         );
+    }
+
+    /// Watch `root` exactly as [`start`] does, make an edit inside it, and plan
+    /// whatever `notify` reported against `root` the way the drain thread does.
+    #[cfg(unix)]
+    fn plan_live_edit(root: &Path) -> Plan {
+        let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
+        // The same rebasing `start` applies.
+        let canon = std::fs::canonicalize(root).unwrap();
+        let typed = root.to_path_buf();
+        let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if should_forward(&event) {
+                    let paths = event
+                        .paths
+                        .into_iter()
+                        .map(|p| rebase_event_path(&typed, &canon, p))
+                        .collect();
+                    let _ = tx.send(paths);
+                }
+            }
+        })
+        .unwrap();
+        w.watch(root, RecursiveMode::Recursive).unwrap();
+        // FSEvents needs a moment before the stream delivers.
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(root.join("Edited.md"), "# edited").unwrap();
+        let mut paths: HashSet<PathBuf> = HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(batch) = rx.recv_timeout(Duration::from_millis(200)) {
+                paths.extend(batch);
+                if !paths.is_empty() {
+                    // Drain whatever else arrives in the debounce window.
+                    while let Ok(more) = rx.recv_timeout(DEBOUNCE) {
+                        paths.extend(more);
+                    }
+                    break;
+                }
+            }
+        }
+        assert!(!paths.is_empty(), "notify reported nothing for {}", root.display());
+        plan_batch(root, paths)
+    }
+
+    /// #216 step 4, answered empirically: a vault opened through a symlinked
+    /// root (and through the macOS temp dir, itself `/var` → `/private/var`)
+    /// must still turn a live edit into a `files-changed` entry. Measured on
+    /// macOS without `rebase_event_path`: FSEvents reported
+    /// `/private/var/.../real-vault/Edited.md` for BOTH roots, `rel_from_abs`
+    /// could not strip either, and both plans were empty.
+    #[cfg(unix)]
+    #[test]
+    fn a_vault_opened_through_a_symlinked_root_still_receives_events() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let linked = tmp.path().join("linked-vault");
+        symlink(&real, &linked).unwrap();
+
+        let plan = plan_live_edit(&linked);
+        assert!(
+            plan.changes.iter().any(|c| c.rel == "Edited.md" && c.kind == "modified"),
+            "linked root: {:?}",
+            plan.changes
+        );
+        let plan = plan_live_edit(&real);
+        assert!(
+            plan.changes.iter().any(|c| c.rel == "Edited.md" && c.kind == "modified"),
+            "non-canonical temp root: {:?}",
+            plan.changes
+        );
+    }
+
+    /// #216: a link at a note path, or a folder link above it, is gone for
+    /// identity purposes — exactly what the tree walk and the index rebuild see.
+    #[cfg(unix)]
+    #[test]
+    fn plan_treats_linked_paths_as_removed() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Business/Old/n.md", "# moved").unwrap();
+        write_note(&v, "Real.md", "# real").unwrap();
+        symlink(v.join("Business/Old"), v.join("Old")).unwrap();
+        symlink(v.join("Real.md"), v.join("Link.md")).unwrap();
+
+        let batch: HashSet<PathBuf> = [
+            v.join("Old/n.md"),
+            v.join("Link.md"),
+            v.join("Old"),
+            v.join("Business/Old/n.md"),
+        ]
+        .into_iter()
+        .collect();
+        let plan = plan_batch(&v, batch);
+        assert_eq!(
+            kinds(&plan),
+            vec![
+                ("Business/Old/n.md".to_string(), "modified"),
+                ("Link.md".to_string(), "removed"),
+                ("Old".to_string(), "tree"),
+                ("Old/n.md".to_string(), "removed"),
+            ]
+        );
+        assert_eq!(plan.modified, vec![v.join("Business/Old/n.md")]);
+        // The folder link prunes whatever the index still holds under `Old/`.
+        assert_eq!(plan.removed, vec![v.join("Link.md"), v.join("Old"), v.join("Old/n.md")]);
     }
 
     /// A rename from OUTSIDE the app is two unpaired `notify` events — measured

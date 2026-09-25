@@ -9,6 +9,37 @@ use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// #216: the index walk never follows a symbolic link, so a folder moved and
+/// left behind as a link (`Old -> Business/Old`) yields ONE row per real file,
+/// at its real path — and a write through the link is refused.
+#[cfg(unix)]
+#[test]
+fn rebuild_indexes_real_paths_only_under_a_symlinked_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().to_path_buf();
+    notefile::write_note(&vault, "Business/Old/n.md", "# Moved\n\nreal text\n").unwrap();
+    notefile::write_note(&vault, "Keep.md", "# Keep\n").unwrap();
+    std::os::unix::fs::symlink(vault.join("Business/Old"), vault.join("Old")).unwrap();
+    std::os::unix::fs::symlink(vault.join("Keep.md"), vault.join("Alias.md")).unwrap();
+
+    let index = Index::open(&vault).unwrap();
+    index.rebuild(&vault).unwrap();
+    let mut paths: Vec<String> = index
+        .list_note_titles()
+        .unwrap()
+        .into_iter()
+        .map(|t| t.path)
+        .collect();
+    paths.sort();
+    assert_eq!(paths, vec!["Business/Old/n.md".to_string(), "Keep.md".to_string()]);
+
+    assert!(notefile::write_note(&vault, "Old/n.md", "stale").is_err());
+    assert_eq!(
+        notefile::read_note(&vault, "Business/Old/n.md").unwrap(),
+        "# Moved\n\nreal text\n"
+    );
+}
+
 fn scratch_vault() -> PathBuf {
     std::env::temp_dir().join("context-test-vault")
 }

@@ -16,6 +16,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   undone from Version History (#200).
 
 ### Fixed
+- **Symbolic links no longer fork notes or overwrite newer text (desktop).** A link inside a vault
+  is treated as absent by every identity check (materialize, the delete drain, the watcher), and
+  note writes are refused at or through a link instead of landing on the real file; refusals show
+  in Health, which also warns about links in the vault and flags two notes that resolve to one
+  file. Egest is now a compare-and-swap: a file that changed since the doc last saw it is merged in
+  rather than overwritten. Vaults opened through a symlinked or non-canonical root (such as
+  `/var` on macOS) receive watcher events again (#216).
 - **MCP connectors now always ask which vault to use (server).** A client that was already signed
   in in the browser skipped the vault picker, so its connection failed on every call for anyone
   in more than one vault. Such a connection now also returns a clear "no vault selected" error (#211).

@@ -3,7 +3,7 @@
 //! (temp file + rename) so a crash mid-save never truncates a note.
 
 use crate::error::{io_ctx, AppError, AppResult};
-use crate::vault::resolve_in_vault;
+use crate::vault::{resolve_in_vault, vault_path_state, PathState};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,10 +39,59 @@ pub fn read_note(vault: &Path, rel: &str) -> AppResult<String> {
     std::fs::read_to_string(&abs).map_err(io_ctx("read the note", &abs))
 }
 
+/// The one refusal every note write gives for a linked path (#216). The desktop
+/// matches on "symbolic link" to raise an `inbound-blocked` Health issue.
+pub fn symlink_refusal(rel: &str) -> AppError {
+    AppError::new(format!(
+        "This path is a symbolic link. Baalda does not sync through links. ({rel})"
+    ))
+}
+
+/// What [`write_note_cas`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteNoteOutcome {
+    /// The content is on disk.
+    Written,
+    /// The file no longer hashes to what the caller expected: nothing was
+    /// written. The caller must read the newer file and merge it first.
+    Stale,
+}
+
 /// Atomic write: write to a temp file in the same dir, then rename over the
 /// target so readers never observe a half-written file.
 pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
+    write_note_cas(vault, rel, content, None).map(|_| ())
+}
+
+/// [`write_note`] with an optional compare-and-swap (#216).
+///
+/// With `expected_sha = Some(h)`, the current file is hashed first (a missing
+/// file hashes as the empty string) and the write is skipped with
+/// [`WriteNoteOutcome::Stale`] when it differs: the caller's doc last agreed
+/// with a different file, so someone else — an external editor, or a second
+/// doc on the same inode — wrote newer bytes that a blind rename would lose.
+/// The hash-then-rename is not atomic against other processes; it closes the
+/// 300 ms window between the bridge's read and its egest, not a microsecond one.
+///
+/// Links are refused, never written through: a link at the target (the rename
+/// would replace it with a second, regular copy) or in any folder above it (the
+/// kernel would resolve through it and land on the REAL file, under another
+/// note's identity). As defence in depth the canonical parent must also sit
+/// inside the canonical vault root — canonicalising BOTH sides keeps a vault
+/// opened as `/var/...` (really `/private/var/...` on macOS) writable.
+pub fn write_note_cas(
+    vault: &Path,
+    rel: &str,
+    content: &str,
+    expected_sha: Option<&str>,
+) -> AppResult<WriteNoteOutcome> {
     let abs = resolve_in_vault(vault, rel)?;
+    let state = vault_path_state(vault, rel);
+    match state {
+        PathState::Symlink => return Err(symlink_refusal(rel)),
+        PathState::Dir => return Err(AppError::new("refusing to write a note over a directory")),
+        PathState::Missing | PathState::Regular => {}
+    }
     let parent = abs
         .parent()
         .ok_or_else(|| AppError::new("note has no parent directory"))?;
@@ -50,6 +99,22 @@ pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
     // the join path that #128 failed on, where an unnamed os error 2 could have
     // been any of half a dozen calls.
     std::fs::create_dir_all(parent).map_err(io_ctx("create the folder", parent))?;
+    let canon_root = std::fs::canonicalize(vault).map_err(io_ctx("resolve the vault", vault))?;
+    let canon_parent =
+        std::fs::canonicalize(parent).map_err(io_ctx("resolve the folder", parent))?;
+    if !canon_parent.starts_with(&canon_root) {
+        return Err(symlink_refusal(rel));
+    }
+
+    if let Some(expected) = expected_sha {
+        let current = match state {
+            PathState::Regular => sha256_file(&abs).map_err(io_ctx("read the note", &abs))?,
+            _ => sha256_hex(""),
+        };
+        if current != expected {
+            return Ok(WriteNoteOutcome::Stale);
+        }
+    }
 
     let file_name = abs
         .file_name()
@@ -60,7 +125,7 @@ pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
     std::fs::write(&tmp, content.as_bytes()).map_err(io_ctx("write the note", &abs))?;
     // rename is atomic on the same filesystem.
     std::fs::rename(&tmp, &abs).map_err(io_ctx("save the note", &abs))?;
-    Ok(())
+    Ok(WriteNoteOutcome::Written)
 }
 
 /// Atomic write of an absolute path, with the data **fsync'd** before the
@@ -117,9 +182,15 @@ pub fn write_atomic_fsync(target: &Path, content: &[u8]) -> AppResult<()> {
 /// that races here is the same app, and the failure mode this guards against is a
 /// wrong *decision*, not a concurrent one.
 pub fn write_note_if_missing(vault: &Path, rel: &str, content: &str) -> AppResult<bool> {
-    let abs = resolve_in_vault(vault, rel)?;
-    if abs.exists() {
-        return Ok(false);
+    resolve_in_vault(vault, rel)?;
+    // `symlink_metadata`, not `exists()` (#216): a link at (or above) this path
+    // is invisible to the tree walk, so "already there" would keep a stale doc
+    // id mapped to whatever the link points at. Refused outright — never
+    // written through and never claimed as created.
+    match vault_path_state(vault, rel) {
+        PathState::Symlink => return Err(symlink_refusal(rel)),
+        PathState::Missing => {}
+        PathState::Regular | PathState::Dir => return Ok(false),
     }
     write_note(vault, rel, content)?;
     Ok(true)
@@ -769,6 +840,99 @@ mod tests {
     fn write_note_if_missing_rejects_traversal() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(write_note_if_missing(tmp.path(), "../escape.md", "x").is_err());
+    }
+
+    /// The #216 move-and-link: notes moved from `Old/` to `Business/Old/`, with
+    /// `Old -> Business/Old` left behind. A write for the stale identity at
+    /// `Old/n.md` used to resolve through the link and replace the REAL file.
+    #[cfg(unix)]
+    #[test]
+    fn write_through_a_folder_link_is_refused_and_leaves_the_real_file() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        write_note(v, "Business/Old/n.md", "newer text").unwrap();
+        symlink(v.join("Business/Old"), v.join("Old")).unwrap();
+
+        let err = write_note(v, "Old/n.md", "older text").unwrap_err();
+        assert!(err.0.contains("symbolic link"), "{err}");
+        let err = write_note(v, "Old/sub/new.md", "x").unwrap_err();
+        assert!(err.0.contains("symbolic link"), "{err}");
+        assert_eq!(read_note(v, "Business/Old/n.md").unwrap(), "newer text");
+        assert!(!v.join("Business/Old/sub").exists());
+
+        let err = write_note_if_missing(v, "Old/n.md", "").unwrap_err();
+        assert!(err.0.contains("symbolic link"), "{err}");
+        let err = write_note_if_missing(v, "Old/other.md", "").unwrap_err();
+        assert!(err.0.contains("symbolic link"), "{err}");
+        assert!(!v.join("Business/Old/other.md").exists());
+        assert_eq!(read_note(v, "Business/Old/n.md").unwrap(), "newer text");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_at_a_file_link_neither_replaces_the_link_nor_writes_through_it() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        write_note(v, "Real.md", "real").unwrap();
+        symlink(v.join("Real.md"), v.join("Link.md")).unwrap();
+        symlink(v.join("Gone.md"), v.join("Dangling.md")).unwrap();
+
+        assert!(write_note(v, "Link.md", "stale").unwrap_err().0.contains("symbolic link"));
+        assert!(std::fs::symlink_metadata(v.join("Link.md")).unwrap().file_type().is_symlink());
+        assert_eq!(read_note(v, "Real.md").unwrap(), "real");
+
+        // A link is never "already there" for materialize: it is an error.
+        assert!(write_note_if_missing(v, "Link.md", "").is_err());
+        assert!(write_note_if_missing(v, "Dangling.md", "").is_err());
+        assert!(!v.join("Gone.md").exists());
+    }
+
+    /// A folder link that escapes the vault is refused even when the leaf name
+    /// is fresh, and a vault opened through a non-canonical root (the macOS
+    /// temp dir is `/var` → `/private/var`) still writes.
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_parent_outside_the_canonical_root_but_accepts_a_linked_root() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-vault");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(outside.path(), real.join("Out")).unwrap();
+        assert!(write_note(&real, "Out/n.md", "x").is_err());
+        assert!(!outside.path().join("n.md").exists());
+
+        let linked_root = tmp.path().join("linked-vault");
+        symlink(&real, &linked_root).unwrap();
+        write_note(&linked_root, "a/b.md", "ok").unwrap();
+        assert_eq!(std::fs::read_to_string(real.join("a/b.md")).unwrap(), "ok");
+    }
+
+    #[test]
+    fn cas_write_refuses_a_file_that_moved_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        // Never observed + missing: the empty-string hash matches.
+        assert_eq!(
+            write_note_cas(v, "n.md", "first", Some(&sha256_hex(""))).unwrap(),
+            WriteNoteOutcome::Written
+        );
+        // The doc last agreed with "first"; someone wrote "second" since.
+        write_note(v, "n.md", "second").unwrap();
+        assert_eq!(
+            write_note_cas(v, "n.md", "stale", Some(&sha256_hex("first"))).unwrap(),
+            WriteNoteOutcome::Stale
+        );
+        assert_eq!(read_note(v, "n.md").unwrap(), "second");
+        assert_eq!(
+            write_note_cas(v, "n.md", "merged", Some(&sha256_hex("second"))).unwrap(),
+            WriteNoteOutcome::Written
+        );
+        assert_eq!(read_note(v, "n.md").unwrap(), "merged");
+        // None = the unconditional write every other caller makes.
+        assert_eq!(write_note_cas(v, "n.md", "blind", None).unwrap(), WriteNoteOutcome::Written);
     }
 
     #[test]

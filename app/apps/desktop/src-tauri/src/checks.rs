@@ -151,6 +151,27 @@ pub struct VaultCheckResult {
 pub struct VaultChecks {
     pub computed_at: i64,
     pub results: Vec<VaultCheckResult>,
+    /// Symbolic links under the vault (outside `.context` and the other ignored
+    /// dirs). Sync never follows them (#216), so each is a path the user can see
+    /// in Finder that Baalda treats as absent. Id `linked-paths`; items are the
+    /// link paths with their target as `detail`. Reported beside `results`, not
+    /// in it, because it feeds the Health issue list rather than the checks list.
+    pub linked_paths: VaultCheckResult,
+    /// Groups of two or more MAPPED notes (registry `docId → relPath`) whose
+    /// paths resolve to one file on disk — same device and inode. Each group is
+    /// one physical file carrying several identities, the state a stale id
+    /// behind a link used to overwrite newer text from (#216).
+    pub shared_files: Vec<SharedFileGroup>,
+}
+
+/// One file on disk that several mapped notes resolve to.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedFileGroup {
+    /// Vault-relative paths, sorted.
+    pub paths: Vec<String>,
+    /// The doc id mapped at each path, in `paths` order.
+    pub doc_ids: Vec<String>,
 }
 
 /// What one note's bytes turned out to be. Built once, read by three checks.
@@ -210,7 +231,80 @@ pub fn collect(
     Ok(VaultChecks {
         computed_at,
         results,
+        linked_paths: linked_paths(vault),
+        shared_files: shared_files(vault, live_docs),
     })
+}
+
+// ---- Links and shared files (#216) ----------------------------------------
+
+/// Every symbolic link under the vault, walked WITHOUT following links, with
+/// the same ignore rules as the tree walk (so `.context`, dot-folders and
+/// `node_modules` are never entered). A link to a folder is one entry: the walk
+/// does not descend into it, exactly as sync does not.
+fn linked_paths(vault: &Path) -> VaultCheckResult {
+    let mut items = Vec::new();
+    let walker = WalkDir::new(vault)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|e| !crate::vault::is_ignored_name(&e.file_name().to_string_lossy()));
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.path_is_symlink() {
+            continue;
+        }
+        let Ok(rel) = crate::vault::rel_from_abs(vault, entry.path()) else {
+            continue;
+        };
+        let target = std::fs::read_link(entry.path())
+            .map(|t| t.to_string_lossy().to_string())
+            .unwrap_or_default();
+        items.push(VaultCheckItem::new(rel, format!("links to {target}")));
+    }
+    tally("linked-paths", items)
+}
+
+/// Mapped notes whose paths resolve to one physical file. Resolved with
+/// `metadata` (which FOLLOWS links) on purpose: the question is "which real file
+/// would a write for this identity land on", and a stale path behind a folder
+/// link answers with the moved file's inode.
+#[cfg(unix)]
+fn shared_files(vault: &Path, live_docs: &HashMap<String, String>) -> Vec<SharedFileGroup> {
+    use std::os::unix::fs::MetadataExt;
+    let mut by_inode: BTreeMap<(u64, u64), Vec<(String, String)>> = BTreeMap::new();
+    for (doc_id, rel) in live_docs {
+        let Ok(abs) = resolve_in_vault(vault, rel) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&abs) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        by_inode
+            .entry((meta.dev(), meta.ino()))
+            .or_default()
+            .push((rel.clone(), doc_id.clone()));
+    }
+    let mut groups: Vec<SharedFileGroup> = by_inode
+        .into_values()
+        .filter(|g| g.len() > 1)
+        .map(|mut g| {
+            g.sort();
+            SharedFileGroup {
+                paths: g.iter().map(|(p, _)| p.clone()).collect(),
+                doc_ids: g.into_iter().map(|(_, d)| d).collect(),
+            }
+        })
+        .collect();
+    groups.sort_by(|a, b| a.paths.cmp(&b.paths));
+    groups
+}
+
+#[cfg(not(unix))]
+fn shared_files(_vault: &Path, _live_docs: &HashMap<String, String>) -> Vec<SharedFileGroup> {
+    Vec::new()
 }
 
 fn empty_result(id: &'static str) -> VaultCheckResult {
@@ -1087,6 +1181,52 @@ mod tests {
         collect(tmp.path(), index, &HashMap::new()).unwrap()
     }
 
+    /// #216: links are counted (never followed, never inside `.context`), and
+    /// two mapped identities behind one physical file are named together.
+    #[cfg(unix)]
+    #[test]
+    fn reports_linked_paths_and_notes_sharing_one_file() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Business/Old")).unwrap();
+        fs::write(root.join("Business/Old/n.md"), "# moved").unwrap();
+        fs::write(root.join("Solo.md"), "# solo").unwrap();
+        symlink(root.join("Business/Old"), root.join("Old")).unwrap();
+        symlink(root.join("Solo.md"), root.join("Alias.md")).unwrap();
+        fs::create_dir_all(root.join(".context")).unwrap();
+        symlink(root.join("Solo.md"), root.join(".context/ignored.md")).unwrap();
+        let index = Index::open(root).unwrap();
+        index.rebuild(root).unwrap();
+
+        let live: HashMap<String, String> = [
+            ("old-id", "Old/n.md"),
+            ("new-id", "Business/Old/n.md"),
+            ("solo-id", "Solo.md"),
+            ("gone-id", "Nowhere.md"),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        let checks = collect(root, &index, &live).unwrap();
+
+        assert_eq!(checks.linked_paths.count, 2);
+        let linked: Vec<&str> = checks.linked_paths.items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(linked, vec!["Alias.md", "Old"]);
+        assert_eq!(
+            checks.shared_files,
+            vec![SharedFileGroup {
+                paths: vec!["Business/Old/n.md".into(), "Old/n.md".into()],
+                doc_ids: vec!["new-id".into(), "old-id".into()],
+            }]
+        );
+        // A clean vault reports neither.
+        let (tmp2, index2) = fixture();
+        let clean = run(&tmp2, &index2);
+        assert_eq!(clean.linked_paths.count, 0);
+        assert!(clean.shared_files.is_empty());
+    }
+
     #[test]
     fn every_id_is_reported_in_union_order() {
         let (tmp, index) = fixture();
@@ -1597,7 +1737,9 @@ mod tests {
 
         assert!(json.get("computedAt").is_some());
         assert!(json.get("results").is_some());
-        assert_eq!(json.as_object().unwrap().len(), 2);
+        assert!(json.get("linkedPaths").is_some());
+        assert!(json.get("sharedFiles").is_some());
+        assert_eq!(json.as_object().unwrap().len(), 4);
 
         let results = json["results"].as_array().unwrap();
         assert_eq!(results.len(), 15);
