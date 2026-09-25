@@ -1073,6 +1073,68 @@ describe("SyncManager — a burst of registry frames is ONE pull", () => {
   });
 });
 
+describe("SyncManager — leftover CRDT history is reclaimed while idle", () => {
+  it("a pull in a live session arms ONE debounced sweep over the registry ids and the open doc", async () => {
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    fakeRegistry.allDocIds.mockReturnValue(["reg-1", "reg-2"]);
+    await enable(sm);
+    engineHooks.opts!.onStatus?.("synced");
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sm.isLive()).toBe(true);
+    // Let anything the startup/catch-up path armed run out first.
+    await vi.advanceTimersByTimeAsync(6_000);
+    const prune = vi.mocked(ipc.pruneYjsDocs);
+    prune.mockClear();
+    storeHooks.open = OPEN_DOC;
+
+    // Two pulls a second apart: the second re-arms the same timer.
+    engineHooks.opts!.onRegistryChanged?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+    engineHooks.opts!.onRegistryChanged?.();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sm.hasPendingCrdtSweep()).toBe(true);
+    await vi.advanceTimersByTimeAsync(4_500);
+    expect(prune).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600);
+    await flush();
+    expect(prune).toHaveBeenCalledTimes(1);
+    const live = prune.mock.calls[0][0] as string[];
+    expect(live).toEqual(expect.arrayContaining(["reg-1", "reg-2", OPEN_DOC]));
+
+    // Nothing further without another trigger.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(prune).toHaveBeenCalledTimes(1);
+    fakeRegistry.allDocIds.mockReturnValue([]);
+    vi.useRealTimers();
+  });
+
+  it("arms nothing before the session is live, and nothing after a vault switch", async () => {
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    fakeRegistry.allDocIds.mockReturnValue(["reg-1"]);
+    await enable(sm);
+    const prune = vi.mocked(ipc.pruneYjsDocs);
+    prune.mockClear();
+    engineHooks.opts!.onRegistryChanged?.();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sm.isLive()).toBe(false);
+    expect(sm.hasPendingCrdtSweep()).toBe(false);
+
+    engineHooks.opts!.onStatus?.("synced");
+    await vi.advanceTimersByTimeAsync(300);
+    engineHooks.opts!.onRegistryChanged?.();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sm.hasPendingCrdtSweep()).toBe(true);
+    sm.disable();
+    expect(sm.hasPendingCrdtSweep()).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(prune).not.toHaveBeenCalled();
+    fakeRegistry.allDocIds.mockReturnValue([]);
+    vi.useRealTimers();
+  });
+});
+
 describe("SyncManager — disk deletes propagate under a grace window", () => {
   /** Sync enabled AND live: the channel is `synced` and a pull has landed, which
    *  is the point from which a vanished file is news rather than a disk still
@@ -1123,6 +1185,27 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     await drain();
     expect(fakeDisk.trashed).toEqual([]);
     expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Notes/Gone.md");
+    vi.useRealTimers();
+  });
+
+  it("sweeps leftover CRDT history right after a delete drain removed a note", async () => {
+    const sm = new SyncManager();
+    mapOne("Notes/Gone.md");
+    fakeRegistry.allDocIds.mockReturnValue(["other"]);
+    await live(sm);
+    await vi.advanceTimersByTimeAsync(6_000);
+    const prune = vi.mocked(ipc.pruneYjsDocs);
+    prune.mockClear();
+
+    sm.handleLocalFilesChanged([{ path: "Notes/Gone.md", kind: "removed" }]);
+    await drain();
+    expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Notes/Gone.md");
+    // Immediate, but never within 5 s of the previous sweep.
+    expect(sm.hasPendingCrdtSweep() || prune.mock.calls.length > 0).toBe(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flush();
+    expect(prune).toHaveBeenCalledTimes(1);
+    fakeRegistry.allDocIds.mockReturnValue([]);
     vi.useRealTimers();
   });
 

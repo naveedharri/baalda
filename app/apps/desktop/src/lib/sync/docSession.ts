@@ -120,6 +120,11 @@ const LOCAL_CHANGE_RETRY_MS = 2_000;
  */
 const DISK_DELETE_GRACE_MS = 2_500;
 /**
+ * Minimum spacing of the idle CRDT sweep (`requestCrdtSweep`), and the quiet
+ * period a completed pull waits before it sweeps.
+ */
+export const CRDT_SWEEP_INTERVAL_MS = 5_000;
+/**
  * Cap on how many notes ONE grace window may delete on the server: a fifth of
  * the vault, never fewer than five.
  *
@@ -726,6 +731,13 @@ export class SyncManager implements InboundHost {
   /** Resolves when the current bulk run finishes (tests). */
   private bulkRun: Promise<void> | null = null;
   private bulkDownloadPending = false;
+  /**
+   * The idle CRDT sweep ({@link requestCrdtSweep}): armed by a completed pull,
+   * a delete drain or a revocation, fired at most once per
+   * {@link CRDT_SWEEP_INTERVAL_MS}. Cleared on teardown.
+   */
+  private crdtSweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastCrdtSweepAt = 0;
 
   // The UI shows ONE connection indicator, but two things can drive it: the
   // open note's provider (authoritative for that doc, incl. read-only grants)
@@ -2104,6 +2116,7 @@ export class SyncManager implements InboundHost {
       }
       this.progress?.flush();
       await this.registry.flushCheckpoint();
+      if (propagated.length > 0 && scope.isCurrent()) this.requestCrdtSweep(scope, { immediate: true });
     }
   }
 
@@ -3103,6 +3116,7 @@ export class SyncManager implements InboundHost {
       // removal loop.
       const epoch = this.scope?.vaultEpoch ?? undefined;
       if (!crdtCleared) void ipc.clearYjsDoc(docId, epoch).catch(() => {});
+      if (this.scope) this.requestCrdtSweep(this.scope, { immediate: true });
     }
     this.onNoteRemoved?.(docId, path, trashedTo, reason);
   }
@@ -3138,6 +3152,9 @@ export class SyncManager implements InboundHost {
    * the vault channel's backfill if one is still arriving.
    */
   private settleAfterPull(scope: VaultScope): void {
+    // Checked BEFORE this pass may start a content run: the sweep waits for an
+    // idle session, and a run started below re-checks at fire time anyway.
+    if (!this.bulkDownloadPending && !this.contentRunInFlight()) this.requestCrdtSweep(scope);
     if (this.bulkDownloadPending && !this.bulkPhase && !this.contentRunInFlight()) {
       this.bulkDownloadPending = false;
       this.vaultEngineLiveOnly = true;
@@ -3252,6 +3269,77 @@ export class SyncManager implements InboundHost {
    * writes a placeholder and hydrates lazily), so "in this list" is literally
    * "somebody does not have the content" — not a bookkeeping detail.
    */
+  /**
+   * Every doc id this session still has work in flight for — the sweep's
+   * `pinned` set. Most are already in the registry or the local index; the
+   * point is the ones that might not be (a note mid-rename, a delete still in
+   * its grace window, a held bulk delete awaiting the user). A few extra ids
+   * cost nothing; one missing id costs a note's history.
+   */
+  private crdtSweepPinned(): string[] {
+    const pinned = new Set<string>();
+    if (this.currentDocId) pinned.add(this.currentDocId);
+    const open = this.docStore?.suppressedDoc() ?? null;
+    if (open) pinned.add(open);
+    for (const id of this.pendingDiskDeletes.keys()) pinned.add(id);
+    for (const id of this.deleteDecisionIds) pinned.add(id);
+    for (const d of this.deleteDecision ?? []) pinned.add(d.docId);
+    for (const id of this.localChanges.keys()) pinned.add(id);
+    for (const id of this.divergedDocs) pinned.add(id);
+    return [...pinned];
+  }
+
+  /**
+   * Reclaim leftover CRDT history while the app runs, not only at vault open.
+   *
+   * The open-time sweep sees only what was orphaned before this session; a
+   * delete, a revocation or a duplicate cleanup later in the session used to
+   * wait for a manual "Reclaim" in Health. This re-runs the SAME sweep — the
+   * registry ids ∪ the local index ∪ {@link crdtSweepPinned} allow-list — once
+   * the session is idle.
+   *
+   * Debounced: every request re-arms one timer, a normal request waits
+   * {@link CRDT_SWEEP_INTERVAL_MS}, an `immediate` one (a delete drain or a
+   * revocation that removed something) fires as soon as the interval since the
+   * last sweep allows. Never more than one sweep per interval. Gated at arm
+   * time AND at fire time on a live, current session with the root present, no
+   * content run in flight and no bulk download pending — a skipped fire is not
+   * retried, the next pull re-arms it. Fire-and-forget; `collectCrdtGarbage`
+   * never throws and logs what it removed.
+   */
+  private requestCrdtSweep(scope: VaultScope, opts: { immediate?: boolean } = {}): void {
+    const ready = () =>
+      this.enabled &&
+      scope.isCurrent() &&
+      this.scope === scope &&
+      this.isLive() &&
+      !this.rootMissing &&
+      !this.bulkDownloadPending &&
+      !this.bulkPhase &&
+      !this.contentRunInFlight();
+    if (!ready()) return;
+    if (this.crdtSweepTimer) clearTimeout(this.crdtSweepTimer);
+    const now = Date.now();
+    const sinceLast = this.lastCrdtSweepAt ? now - this.lastCrdtSweepAt : Infinity;
+    const floor = Math.max(0, CRDT_SWEEP_INTERVAL_MS - sinceLast);
+    const delay = opts.immediate ? floor : Math.max(CRDT_SWEEP_INTERVAL_MS, floor);
+    this.crdtSweepTimer = setTimeout(() => {
+      this.crdtSweepTimer = null;
+      if (!ready()) return;
+      this.lastCrdtSweepAt = Date.now();
+      console.info("[crdt-gc] idle sweep");
+      void collectCrdtGarbage(
+        { registryDocIds: () => this.registry.allDocIds() },
+        { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
+      );
+    }, delay);
+  }
+
+  /** True while an idle CRDT sweep is armed (tests / teardown assertions). */
+  hasPendingCrdtSweep(): boolean {
+    return this.crdtSweepTimer != null;
+  }
+
   /**
    * Is a content run — per-doc OR batched — in flight right now?
    *
@@ -3693,9 +3781,10 @@ export class SyncManager implements InboundHost {
       // begun to create docs. Fire-and-forget — a vault that cannot be tidied
       // must still open. See `crdtGc.ts` for why the allow-list is built from
       // two id spaces.
+      this.lastCrdtSweepAt = Date.now();
       void collectCrdtGarbage(
         { registryDocIds: () => this.registry.allDocIds() },
-        { epoch: scope.vaultEpoch ?? undefined, pinned: this.currentDocId ? [this.currentDocId] : [] },
+        { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
       );
       this.setupAttachments(scope);
       // Initial attachment reconcile (fire-and-forget; errors are logged rather
@@ -4721,6 +4810,11 @@ export class SyncManager implements InboundHost {
       clearTimeout(this.diskDeleteTimer);
       this.diskDeleteTimer = null;
     }
+    if (this.crdtSweepTimer) {
+      clearTimeout(this.crdtSweepTimer);
+      this.crdtSweepTimer = null;
+    }
+    this.lastCrdtSweepAt = 0;
     this.localChanges.clear();
     // A pending disk delete belongs to the vault we are leaving, and its paths
     // would name a DIFFERENT file in the next one. Dropping them is also the

@@ -36,7 +36,7 @@ import type {
   VaultHealthSnapshot,
   VaultStats,
 } from "../../lib/health/types";
-import { CHECK_DEFINITIONS } from "../../lib/health/checks";
+import { AUTOMATIC_CHECK_IDS, CHECK_DEFINITIONS } from "../../lib/health/checks";
 import { localAttachmentPresence } from "../../lib/health/useVaultHealth";
 
 function actions(): HealthActions {
@@ -97,7 +97,6 @@ function handlers(over: Partial<HealthHandlers> = {}): HealthHandlers {
     actions: actions(),
     openNote: vi.fn(),
     confirm: vi.fn(),
-    reclaim: vi.fn(async () => {}),
     runCheck: vi.fn(),
     checkRuns: {},
     now: 1_700_000_000_000,
@@ -615,7 +614,11 @@ describe("HealthView — checks", () => {
 
   it("renders every check without a second summary or rerun control", () => {
     const html = render(snapshot({ checks: allPassing() }));
-    for (const def of CHECK_DEFINITIONS) expect(html).toContain(def.label);
+    for (const def of CHECK_DEFINITIONS) {
+      // Leftover history is reclaimed automatically, so it is never listed.
+      if (AUTOMATIC_CHECK_IDS.has(def.id)) expect(html).not.toContain(def.label);
+      else expect(html).toContain(def.label);
+    }
     expect(html).not.toContain(`All ${CHECK_DEFINITIONS.length} checks passed`);
     expect(html).not.toContain("Re-run file checks");
     expect(html).not.toContain("health-checks-head");

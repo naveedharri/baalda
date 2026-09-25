@@ -611,7 +611,7 @@ describe("stats-derived issues and stages", () => {
     };
   }
 
-  it("raises one `orphan-history` warning with a reclaim remedy, and warns the history stage", () => {
+  it("never raises leftover history as an issue: the history stage mentions it, still ok", () => {
     const r = buildHealthReport(
       input({
         ...healthyVault(4),
@@ -626,12 +626,11 @@ describe("stats-derived issues and stages", () => {
         }),
       }),
     );
-    const i = r.issues.find((x) => x.kind === "orphan-history");
-    expect(i?.severity).toBe("warn");
-    expect(i?.remedies).toEqual(["reclaim"]);
-    expect(i?.facts).toContainEqual({ label: "Leftover notes", value: "953" });
-    expect(stage(r, "history").state).toBe("warn");
-    // A warning is not a reason to stop calling the vault healthy.
+    // The sync layer reclaims it on its own, so nothing offers a Reclaim.
+    expect(r.issues.filter((x) => x.kind === "orphan-history")).toHaveLength(0);
+    expect(r.issues.some((x) => x.remedies.some((m) => (m as string) === "reclaim"))).toBe(false);
+    expect(stage(r, "history").state).toBe("ok");
+    expect(stage(r, "history").detail).toContain("of which 953 belong to notes this vault no longer has");
     expect(r.verdict).toBe("healthy");
   });
 
@@ -743,7 +742,6 @@ describe("issue ordering", () => {
       ["error", "limit", null],
       ["error", "upload-failed", "a.md"],
       ["error", "upload-failed", "b.md"],
-      ["warn", "orphan-history", null],
       ["warn", "unregistered", "zzz.md"],
     ]);
   });
@@ -844,7 +842,6 @@ describe("explanations", () => {
       "left-behind",
       "limit",
       "no-access",
-      "orphan-history",
     ]) {
       expect(kinds).toContain(want);
     }
@@ -967,21 +964,6 @@ describe("explanations", () => {
     expect(i.facts.find((f) => f.label === "Doc id")?.copyable).toBe(true);
     expect(i.facts.find((f) => f.label === "Raw reason")?.copyable).toBe(true);
     expect(i.facts.find((f) => f.label === "Limit")?.value).toBe("10 MB per note");
-  });
-
-  it("orphan history is leftover storage, not a risk to anything", () => {
-    const i = issueOf(
-      {
-        stats: statsWith({
-          history: { docs: 5, updates: 20, bytes: 5_000, orphanDocs: 3, orphanBytes: 2_048 },
-        }),
-      },
-      "orphan-history",
-    );
-    expect(i.explanation.safety).toBe("both");
-    expect(i.explanation.meaning).toContain("Safe to reclaim or ignore");
-    expect(i.remedies).toEqual(["reclaim"]);
-    expect(i.facts.find((f) => f.label === "Space used")?.value).toBe("2 KB");
   });
 });
 
