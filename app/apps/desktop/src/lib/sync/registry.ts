@@ -53,6 +53,7 @@ import {
   withRetry,
 } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
+import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
@@ -485,6 +486,16 @@ function reasonOf(err: unknown): string {
   if (err instanceof ApiError) return `${err.status}: ${err.message}`;
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** A server note that could not be materialized. A symbolic link at the path is
+ *  not a disk-write failure but a deliberate refusal, so it is recorded as an
+ *  `inbound-blocked` safety issue (code `symlink`) rather than `materialize`. */
+function materializeFailure(path: string, docId: string | null, err: unknown): RegistryFailure {
+  if (isSymlinkRefusal(err)) {
+    return { kind: "inbound-blocked", path, docId, reason: SYMLINK_REFUSAL_REASON, code: "symlink" };
+  }
+  return { kind: "materialize", path, docId, reason: reasonOf(err), code: null };
 }
 
 /** The shapes `listFolderRegistry` / `listNoteRegistry` resolve to, named here so
@@ -3045,13 +3056,9 @@ export class VaultRegistry {
           this.sink.item("ok");
         } catch (e) {
           if (ipc.isVaultMismatch(e)) return; // the vault moved on — not a failure
-          this.sink.item(this.recordFailure({
-            kind: "materialize",
-            path: rp,
-            docId: this.byPath.get(rp)?.docId ?? null,
-            reason: reasonOf(e),
-            code: null,
-          }));
+          this.sink.item(
+            this.recordFailure(materializeFailure(rp, this.byPath.get(rp)?.docId ?? null, e)),
+          );
         }
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
@@ -3344,6 +3351,15 @@ export class VaultRegistry {
       const created: string[] = [];
       for (const rp of group) {
         const out = byPath.get(rp);
+        // A link at the path is refused per item by Rust (#216) and must be
+        // said, not counted "ok". Other per-item write errors keep their
+        // existing quiet behaviour here.
+        if (out?.error && isSymlinkRefusal(out.error)) {
+          this.sink.item(
+            this.recordFailure(materializeFailure(rp, this.byPath.get(rp)?.docId ?? null, out.error)),
+          );
+          continue;
+        }
         if (out?.created) {
           mutated = true;
           // One owed watcher echo, so the sync layer does not treat our own

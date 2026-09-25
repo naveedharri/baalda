@@ -402,6 +402,54 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
     expect(reg.hasFailures()).toBe(false);
   });
 
+  // #216: the tree walk skips symbolic links, so a mapped path left behind as a
+  // link (`Old -> Business/Old` after a move) reads as server-only. Rust refuses
+  // the create-only write there instead of calling it "already present"; the
+  // path is neither materialized, nor hydrated, nor claimed as its own echo,
+  // and Health gets an `inbound-blocked` row saying why.
+  it("a mapped path that is a symbolic link is neither materialized nor treated as present", async () => {
+    vi.mocked(ipc.writeNoteIfMissing).mockImplementation(async (path: string) => {
+      if (path === "Old/n.md") {
+        throw new Error("This path is a symbolic link. Baalda does not sync through links. (Old/n.md)");
+      }
+      return true;
+    });
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [
+        { id: "old-id", rel_path: "Old/n.md" },
+        { id: "other", rel_path: "Other.md" },
+      ],
+    });
+    const reg = new VaultRegistry(api);
+    const hydrated: string[] = [];
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async (_docId, path) => {
+        hydrated.push(path);
+        return true;
+      },
+    });
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    expect(hydrated).toEqual(["Other.md"]);
+    expect(vi.mocked(ipc.rebindNoteId)).not.toHaveBeenCalledWith("Old/n.md", "old-id", null);
+    expect(reg.consumeMaterialized("Old/n.md")).toBe(false);
+    expect(reg.consumeMaterialized("Other.md")).toBe(true);
+    expect(reg.isPushed("old-id")).toBe(false);
+    expect(reg.failures()).toEqual([
+      {
+        kind: "inbound-blocked",
+        path: "Old/n.md",
+        docId: "old-id",
+        reason: "This path is a symbolic link. Baalda does not sync through links.",
+        code: "symlink",
+      },
+    ]);
+  });
+
   // ── Materializing WITH content (#93) ──────────────────────────────────────
   // A placeholder is a real file write, so the watcher reports it and the sync
   // layer treats it as an external edit. On a device that already holds the

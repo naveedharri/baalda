@@ -274,7 +274,7 @@ beforeEach(() => {
   vi.mocked(ipc.getVaultConfig).mockResolvedValue(null);
   vi.mocked(ipc.setVaultConfig).mockResolvedValue(undefined);
   vi.mocked(ipc.listNoteTitles).mockResolvedValue([]);
-  vi.mocked(ipc.writeNote).mockResolvedValue(undefined);
+  vi.mocked(ipc.writeNote).mockResolvedValue("written");
   vi.mocked(ipc.writeNoteIfMissing).mockClear().mockResolvedValue(true);
 });
 

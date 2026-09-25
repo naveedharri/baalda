@@ -2349,6 +2349,9 @@ pub struct MaterializeOutcome {
     pub created: bool,
     /// The index row at this path now carries the server's `doc_id`.
     pub rebound: bool,
+    /// Why the placeholder could not be written, when it could not — e.g. the
+    /// path is a symbolic link (#216), which the desktop surfaces in Health.
+    pub error: Option<String>,
 }
 
 /// Materialize N server-only notes as create-only placeholders, then index and
@@ -2383,6 +2386,7 @@ pub fn materialize_notes(
                 rel_path: item.rel_path.clone(),
                 created: false,
                 rebound: false,
+                error: None,
             });
             continue;
         }
@@ -2396,6 +2400,7 @@ pub fn materialize_notes(
                     rel_path: item.rel_path.clone(),
                     created: false,
                     rebound: false,
+                    error: Some(e.0),
                 });
                 continue;
             }
@@ -2405,6 +2410,7 @@ pub fn materialize_notes(
             rel_path: item.rel_path.clone(),
             created,
             rebound: false,
+            error: None,
         });
         rows.push((item.rel_path.clone(), item.doc_id.clone()));
     }
