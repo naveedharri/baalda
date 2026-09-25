@@ -101,48 +101,13 @@ describe("Access panel during sync and permission changes", () => {
     await render();
     await viewPerson("Member");
     expect(host.querySelector(".access-vault-row .access-badge")?.textContent).toBe("Mixed");
-    expect(host.querySelector(".access-item .access-badge")?.textContent).toBe("No access");
+    expect(host.querySelector(".access-item .access-badge")?.textContent).toBe("Private");
     expect(host.querySelector(".access-bulk-card")).toBeNull();
     expect(api.setBulkAccess).not.toHaveBeenCalled();
     await click(host.querySelector(".access-item input"));
     expect(host.querySelector(".access-member-choice input")?.getAttribute("checked")).not.toBeNull();
     await viewPerson("Everyone");
     expect(host.querySelector(".access-item .access-badge")?.textContent).toBe("Shared");
-  });
-
-  it("shows an owner as Can edit in a Private vault instead of reusing the mode word", async () => {
-    patchStore({ members: [{ userId: "u1", role: "owner", user: { name: "Owner" } }] });
-    api.getTeamAccess.mockResolvedValue({ mode: "private", grantId: null, overrides: [] });
-    api.listAccessTree.mockResolvedValue({ folders: [], notes: [{ id: "n1", relPath: "Note.md" }] });
-    api.resolveAccessSummary.mockResolvedValue({ mode: "open" });
-    await render();
-    await settle();
-    expect(host.querySelector(".access-item .access-badge")?.textContent).toBe("Private");
-    await viewPerson("Owner");
-    expect(host.querySelector(".access-vault-row .access-badge")?.textContent).toBe("Can edit");
-    expect(host.querySelector(".access-item .access-badge")?.textContent).toBe("Can edit");
-  });
-
-  it("disables No access when the only person chosen is the signed-in owner", async () => {
-    patchStore({ members: [
-      { userId: "u1", role: "owner", user: { name: "Owner" } },
-      { userId: "u2", role: "member", user: { name: "Bob" } },
-    ] });
-    await render();
-    await click(host.querySelector(".access-vault-row input"));
-    await click(button("Specific people"));
-    const choices = [...host.querySelectorAll<HTMLInputElement>(".access-member-choice input")];
-    await click(choices[0]);
-    await settle();
-    const noAccess = host.querySelector<HTMLButtonElement>('[data-mode="private"]')!;
-    expect(noAccess.textContent).toContain("No access");
-    expect(noAccess.disabled).toBe(true);
-    expect(noAccess.title).toBe("You run this vault");
-    expect(host.querySelector<HTMLButtonElement>('[data-mode="open"]')!.textContent).toContain("Can edit");
-    // Adding a teammate makes it a group change again, which is allowed.
-    await click(choices[1]);
-    await settle();
-    expect(host.querySelector<HTMLButtonElement>('[data-mode="private"]')!.disabled).toBe(false);
   });
 
   it("discards stale person responses and never substitutes team access on failure", async () => {

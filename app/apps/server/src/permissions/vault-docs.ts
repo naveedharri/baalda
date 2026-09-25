@@ -16,13 +16,11 @@ type Queryable = Pick<pg.Pool, "query">;
  *   - a vault-scoped view/edit grant (org-wide "Open"/"Read-only" for
  *     members, or per-user) -> every (non-deleted) note + file in the vault.
  *     Owner and admin reach this through the org-wide grant like anyone else,
- *     and in a SEALED vault (the Access panel's Private) through their role,
- *     because Private withdraws the team and not the people who run the vault.
- *     A vault that was never shared (no row at all) leaves them scoped;
+ *     so a Private vault (no grant) leaves them scoped too;
  *   - otherwise             -> docs reachable via a share (view/edit) on the doc
  *     itself or any ancestor folder (folder grants inherit down), plus the docs
- *     the caller created — except in a SEALED vault, which drops authorship for
- *     members and leaves only the shares.
+ *     the caller created — except in a SEALED vault (the Access panel's
+ *     Private), which drops authorship for everyone and leaves only the shares.
  *
  * `locked` is a cap overlay that only takes edit->view; it never grants read, so
  * it's absent here. `denied` (per-member "No access") IS here: it removes read,
@@ -34,29 +32,21 @@ type Queryable = Pick<pg.Pool, "query">;
  * Resolve a user's vault-level posture: their org, role, and whether they have
  * vault-wide read (a vault-scoped Open/Read-only grant, org-wide or per-user).
  *
- * This one boolean feeds the readable set, the folder tree, blob reads, the
- * graph, MCP search, the registry pull and the live channel's `ready.revoked`,
- * so it must buy exactly what the resolver buys: the org-wide grant (which
- * Shared and Read-only write), a per-user vault grant, and — in a SEALED vault
- * (Private) only — the owner/admin role, because Private withdraws the team and
- * never the people who run the vault (#217). That last case is also what keeps
- * an owner who seals a vault they wrote from being named in `ready.revoked` for
- * their own notes. A vault that was never shared gives the role nothing here,
- * exactly as the resolver's never-shared branch does. See [[resolver]]
- * `vaultBaseline`.
+ * Owner and admin used to answer `vaultWide: true` outright, before any grant
+ * was read. That made a Private vault mean "private from the team" to a member
+ * and nothing at all to the person who set it, and it was the single widest
+ * bypass in the system: this one boolean feeds the readable set, the folder
+ * tree, blob reads, the graph, MCP search, the registry pull and the live
+ * channel's `ready.revoked`. The role now buys exactly what it buys everywhere
+ * else — the org-wide grant, which Shared and Read-only write and Private does
+ * not — so all eight surfaces follow the posture without a line of their own.
+ * See [[resolver]] `vaultBaseline`.
  */
 export async function vaultAccess(
   db: Queryable,
   userId: string,
   vaultId: string,
-): Promise<{
-  organizationId: string;
-  role: string | null;
-  vaultWide: boolean;
-  /** An owner/admin of a SEALED (Private) vault: reads everything, ahead of
-   *  any join snapshot, exactly as the resolver's first posture branch. */
-  sealedPrivileged: boolean;
-} | null> {
+): Promise<{ organizationId: string; role: string | null; vaultWide: boolean } | null> {
   const org = await db.query<{ organization_id: string; role: string | null }>(
     `SELECT v.organization_id, m.role
        FROM vaults v
@@ -77,11 +67,7 @@ export async function vaultAccess(
       LIMIT 1`,
     [row.organization_id, userId],
   );
-  // Mirrors the resolver's `sealed && owner/admin` branch.
-  const privileged = row.role === "owner" || row.role === "admin";
-  const sealedPrivileged =
-    privileged && (await vaultBaseline(db, row.organization_id)) === "sealed";
-  return { ...base, vaultWide: sealedPrivileged || (grant.rowCount ?? 0) > 0, sealedPrivileged };
+  return { ...base, vaultWide: (grant.rowCount ?? 0) > 0 };
 }
 
 /**
@@ -369,13 +355,12 @@ async function listDocsInVault(
   const userDenied = await deniedDocsInVault(db, "user", userId, vaultId);
   const orgDenied = await deniedDocsInVault(db, "org", organizationId, vaultId);
 
-  // A SEALED vault (the Access panel's Private) stops authorship keeping a doc
-  // for a MEMBER, exactly as an item set Private does — the resolver's posture
-  // branch skips the creator rule, so `creatorCounts` has to go with it or the
-  // set and the resolver disagree about every note its author wrote. Owners and
-  // admins never get here in a sealed vault: `vaultAccess` answers vaultWide.
-  // Org and per-user grants still lift, which is what makes "sealed vault, one
-  // folder shared with the team" work. A vault that was merely never shared is NOT
+  // A SEALED vault (the Access panel's Private) stops authorship keeping a doc,
+  // exactly as an item set Private does — the resolver's posture branch skips
+  // both the role and the creator rule, so `creatorCounts` has to go with it or
+  // the set and the resolver disagree about every note its author wrote. Org and
+  // per-user grants still lift, which is what makes "sealed vault, one folder
+  // shared with the team" work. A vault that was merely never shared is NOT
   // this: there, people keep what they wrote.
   const sealed = (await vaultBaseline(db, organizationId)) === "sealed";
 
@@ -394,11 +379,7 @@ async function listDocsInVault(
     reachable = await scopedDocs(true, !sealed);
   }
 
-  // A sealed vault's owners and admins are ahead of any join snapshot, as in
-  // the resolver: Private promises them the whole vault.
-  const snapshot = access.sealedPrivileged
-    ? null
-    : await memberAccessSnapshot(db, organizationId, userId);
+  const snapshot = await memberAccessSnapshot(db, organizationId, userId);
   if (snapshot) {
     const existingRows = await db.query<{ id: string }>(
       opts.deleted
@@ -540,7 +521,7 @@ export interface VaultFolderRow {
 /**
  * Folders a user may SEE in the tree (private-by-default). An Open/Read-only
  * vault shows every folder to everyone who holds its grant, owners and admins
- * included — and a Private vault shows them to its owners and admins only;
+ * included — and a Private vault shows them no more than anyone else;
  * otherwise a member sees folders
  * they created, folders shared to them or the team (+ their subtrees, since
  * grants inherit down), and the ANCESTORS of anything visible so the path to a
@@ -565,9 +546,7 @@ export async function listVisibleFolders(
   const orgDenied = await deniedFolderIds(db, "org", access.organizationId);
   // Neither deny is undone by authorship — see `listDocsInVault`.
   const hidden = (id: string) => userDenied.has(id) || orgDenied.has(id);
-  const snapshot = access.sealedPrivileged
-    ? null
-    : await memberAccessSnapshot(db, access.organizationId, userId);
+  const snapshot = await memberAccessSnapshot(db, access.organizationId, userId);
   if (access.vaultWide && snapshot?.mode !== "private") {
     return all.rows.filter((f) => !hidden(f.id));
   }
@@ -575,7 +554,7 @@ export async function listVisibleFolders(
   const readable = await listReadableDocsInVault(userId, vaultId, db);
   const isMember = access.role !== null;
   // Authorship seeds the tree everywhere EXCEPT in a SEALED vault, which drops
-  // it for members (see `listDocsInVault`). Leaving it in would show a folder
+  // it for everyone (see `listDocsInVault`). Leaving it in would show a folder
   // whose every note has gone — the tree and the notes in it disagreeing about
   // the same setting.
   const authorSeeds = (await vaultBaseline(db, access.organizationId)) !== "sealed";

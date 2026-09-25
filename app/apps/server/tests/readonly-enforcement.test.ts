@@ -1026,15 +1026,12 @@ class FakeWs extends EventEmitter {
 
 
 /**
- * The sealed vault's write contract. Private withdraws the TEAM (#217): a
- * member creates nothing at the root (a note they could not open) unless named,
- * while owners and admins keep full write, root and folders included. A vault
- * that was never shared keeps the owner shortcut inside every folder.
+ * The sealed vault's write contract — the same shape as the read-only one, for
+ * the same reason: "nobody can read this" has to close the create door too, or
+ * the first thing you make in a sealed vault is a note you cannot open.
  */
-describe("a sealed vault refuses a member's creates and keeps the owner's; a never-shared one refuses neither", () => {
+describe("a sealed vault refuses creation, a never-shared one does not", () => {
   let owner: TestUser;
-  let admin: TestUser;
-  let member: TestUser;
   let org: string;
   let vault: string;
 
@@ -1042,28 +1039,17 @@ describe("a sealed vault refuses a member's creates and keeps the owner's; a nev
     await resetDb();
     owner = await signUp("owner@sealed-writes.test");
     org = (await createOrg(owner, "Sealed Co", "sealed-co")).id;
-    admin = await signUp("admin@sealed-writes.test");
-    await seedMember(org, admin.userId, "admin");
-    member = await signUp("member@sealed-writes.test");
-    await seedMember(org, member.userId, "member");
     vault = await seedVault(org);
   });
 
   const createRootNote = async (user: TestUser) =>
-    req(user, "POST", "/api/notes", { vaultId: vault, relPath: `n-${randomUUID()}.md` });
-  const createInFolder = async (user: TestUser, folderId: string, folderPath: string) => [
-    await req(user, "POST", "/api/notes", {
-      vaultId: vault,
-      relPath: `${folderPath}/n-${randomUUID()}.md`,
-      folderId,
-    }),
-    await req(user, "POST", "/api/folders", {
-      vaultId: vault,
-      name: `sub-${randomUUID()}`,
-      path: `${folderPath}/sub-${randomUUID()}`,
-      parentId: folderId,
-    }),
-  ];
+    app.fetch(
+      new Request("http://local/api/notes", {
+        method: "POST",
+        headers: { ...authHeaders(user), "content-type": "application/json" },
+        body: JSON.stringify({ vaultId: vault, relPath: `n-${randomUUID()}.md` }),
+      }),
+    );
 
   it("lets the owner create at the root of a never-shared vault", async () => {
     // No posture row: the private-by-default space, where what you make is
@@ -1071,58 +1057,16 @@ describe("a sealed vault refuses a member's creates and keeps the owner's; a nev
     expect((await createRootNote(owner)).status).toBeLessThan(300);
   });
 
-  it("lets the owner and an admin create inside a never-shared folder someone else made, or nobody is recorded as making", async () => {
-    // #217: the owner shortcut used to be withdrawn inside folders of a
-    // never-shared vault, leaving only the creator rule — so an owner was
-    // refused in a teammate's folder and in every folder predating migration
-    // 012 (NULL created_by). A folder nobody owns is not "someone else's".
-    const legacy = await seedFolder(vault, null, "Legacy", "Legacy", null);
-    const theirs = await seedFolder(vault, null, "Theirs", "Theirs", member.userId);
-    for (const who of [owner, admin]) {
-      for (const [id, path] of [[legacy, "Legacy"], [theirs, "Theirs"]] as const) {
-        for (const r of await createInFolder(who, id, path)) {
-          expect(r.status, `${path} must accept the ${who === owner ? "owner" : "admin"}`).toBeLessThan(300);
-        }
-      }
-    }
-    // A plain member keeps only the creator rule there.
-    for (const r of await createInFolder(member, legacy, "Legacy")) {
-      expect(r.status).toBe(403);
-    }
-    for (const r of await createInFolder(member, theirs, "Theirs")) {
-      expect(r.status).toBeLessThan(300);
-    }
-  });
-
-  it("owner seals a vault they authored: still creates at the root and inside folders; a member is refused", async () => {
-    const folder = await seedFolder(vault, null, "Docs", "Docs", owner.userId);
-    const legacy = await seedFolder(vault, null, "Legacy", "Legacy", null);
+  it("refuses once the vault is sealed, and lets a named person back in", async () => {
     await sealVault(org);
-
-    for (const who of [owner, admin]) {
-      expect((await createRootNote(who)).status).toBeLessThan(300);
-      for (const [id, path] of [[folder, "Docs"], [legacy, "Legacy"]] as const) {
-        for (const r of await createInFolder(who, id, path)) {
-          expect(r.status).toBeLessThan(300);
-        }
-      }
-    }
-
-    const refused = await createRootNote(member);
+    const refused = await createRootNote(owner);
     expect(refused.status).toBe(403);
     expect(((await refused.json()) as { code?: string }).code).toBe("no_write_access");
-    for (const r of await createInFolder(member, folder, "Docs")) {
-      expect(r.status).toBe(403);
-    }
-  });
 
-  it("lets a named member back in to create at the root of a sealed vault", async () => {
-    await sealVault(org);
-    expect((await createRootNote(member)).status).toBe(403);
     // The way back that does not involve unsealing: a vault-scoped grant for
     // one person, which is the one thing the posture branch still honours where
     // there is no folder for a share to hang on.
-    await seedUserVaultGrant(org, member.userId, "edit");
-    expect((await createRootNote(member)).status).toBeLessThan(300);
+    await seedUserVaultGrant(org, owner.userId, "edit");
+    expect((await createRootNote(owner)).status).toBeLessThan(300);
   });
 });

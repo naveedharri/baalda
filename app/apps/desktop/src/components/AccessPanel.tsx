@@ -20,7 +20,7 @@ import {
   type AccessEntry,
   type AccessRow,
 } from "../lib/accessTree";
-import { CHOICE_HINT, LEVEL_LABEL, MODE_LABEL, buildOrgRowsByPath, peopleChangeAction, peopleChangeTitle, peopleCount, effectiveTeamMode, effectiveVaultMode, type OrgRow } from "../lib/accessMode";
+import { MODE_LABEL, buildOrgRowsByPath, effectiveTeamMode, effectiveVaultMode, type OrgRow } from "../lib/accessMode";
 import { readTeamAccessCache, writeTeamAccessCache } from "../lib/teamAccessCache";
 import { itemLockRows, resourceIdsByPath } from "../lib/locks";
 import { scrollPaneIntoContainer } from "../lib/scrollPlan";
@@ -333,10 +333,6 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     [entries, selectedKeys],
   );
   const selectedUserIds = [...selectedUsers];
-  const selfId = session?.user.id ?? null;
-  const selfRole = members.find((member) => member.userId === selfId)?.role;
-  const selectedOnlySelfManager = selectedUserIds.length === 1 && selectedUserIds[0] === selfId
-    && (selfRole === "owner" || selfRole === "admin");
   const viewedUsersNow = audienceType === "users" ? JSON.stringify([...selectedUsers].sort()) : "[]";
   const viewedUsers = useSettled(viewedUsersNow, PEOPLE_SETTLE_MS);
   const peopleSettled = viewedUsers === viewedUsersNow;
@@ -534,11 +530,7 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
       // views together instead of re-downloading and re-sorting the whole vault.
       await Promise.all([useStore.getState().refreshLocks(), reloadVault(false)]);
       if (scope !== scopeGen.current) return;
-      const resourcesPhrase = `${result.resourcesChanged} ${result.resourcesChanged === 1 ? "resource" : "resources"}`;
-      const applied = audienceType === "users"
-        ? `${result.mode === "open" ? "Edit access given on" : result.mode === "readonly" ? "View access given on" : "Access removed from"} ${resourcesPhrase}`
-        : `${MODE_LABEL[result.mode]} applied to ${resourcesPhrase}`;
-      toast(`${applied}${result.overridesCleared > 0 ? ` · ${result.overridesCleared} custom settings replaced` : ""}`);
+      toast(`${MODE_LABEL[result.mode]} applied to ${result.resourcesChanged} ${result.resourcesChanged === 1 ? "resource" : "resources"}${result.overridesCleared > 0 ? ` · ${result.overridesCleared} custom settings replaced` : ""}`);
     } catch (cause) {
       if (scope !== scopeGen.current) return;
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -568,19 +560,14 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
     const people = audienceType === "org"
       ? "Everyone in the vault"
       : `${selectedUserIds.length} selected ${selectedUserIds.length === 1 ? "person" : "people"}`;
-    const forPeople = audienceType === "users";
     setConfirm({
-      title: forPeople ? peopleChangeTitle(mode, selectedUserIds.length, scope) : `Set ${scope} to ${MODE_LABEL[mode]}?`,
-      label: forPeople ? peopleChangeAction(mode) : `Set ${MODE_LABEL[mode]}`,
+      title: `Set ${scope} to ${MODE_LABEL[mode]}?`,
+      label: `Set ${MODE_LABEL[mode]}`,
       tone: mode === "private" ? "danger" : "accent",
       apply: () => applyBulk(mode),
       body: (
         <>
-          {forPeople ? (
-            <p><strong>{peopleCount(selectedUserIds.length)}</strong> {mode === "open" ? "will be able to read and edit" : mode === "readonly" ? "will be able to read, but not edit," : "will no longer see"} {scope}. Selected folders include everything currently inside them.</p>
-          ) : (
-            <p><strong>{people}</strong> will receive {MODE_LABEL[mode]} access to {scope}. Selected folders include everything currently inside them.</p>
-          )}
+          <p><strong>{people}</strong> will receive {MODE_LABEL[mode]} access to {scope}. Selected folders include everything currently inside them.</p>
           {audienceType === "org" ? (
             <p>This replaces every team and per-person exception in the selected scope. Access for people who join later is still controlled by <strong>Access by default</strong>.</p>
           ) : (
@@ -797,8 +784,6 @@ export function AccessPanel({ canManage }: { canManage: boolean }) {
             currentMode={selectedCurrentMode}
             busy={busy}
             disabled={audienceType === "users" && selectedUsers.size === 0}
-            audience={audienceType}
-            lockedOut={audienceType === "users" && selectedOnlySelfManager ? ["private"] : undefined}
             containerRef={accessChoicesRef}
             statusMessage={currentAccessMessage}
             onSelect={requestBulk}
@@ -813,8 +798,6 @@ export function AccessModeChoices({
   currentMode,
   busy,
   disabled,
-  audience = "org",
-  lockedOut,
   containerRef,
   statusMessage,
   onSelect,
@@ -822,14 +805,6 @@ export function AccessModeChoices({
   currentMode: CurrentAccessMode;
   busy: boolean;
   disabled: boolean;
-  /** Everyone reads modes (Shared/Read-only/Private); Specific people reads levels. */
-  audience?: "org" | "users";
-  /**
-   * Tiles that must not be offered — "No access" when the only person chosen
-   * is the signed-in owner/admin: a per-user deny outranks the owner shortcut,
-   * so it is the one click that locks a manager out of their own vault.
-   */
-  lockedOut?: readonly Mode[];
   containerRef?: React.Ref<HTMLDivElement>;
   statusMessage?: string | null;
   onSelect: (mode: Mode) => void;
@@ -837,24 +812,20 @@ export function AccessModeChoices({
   return (
     <>
       <div className={`access-seg${busy ? " busy" : ""}`} ref={containerRef}>
-        {(["open", "readonly", "private"] as Mode[]).map((mode) => {
-          const locked = lockedOut?.includes(mode) ?? false;
-          return (
-            <button
-              key={mode}
-              type="button"
-              className={`access-segbtn${currentMode === mode ? " active" : ""}`}
-              data-mode={mode}
-              aria-pressed={currentMode === mode}
-              disabled={busy || disabled || locked}
-              title={locked ? "You run this vault" : undefined}
-              onClick={() => onSelect(mode)}
-            >
-              <span className="access-st-top">{mode === "open" ? ICON.open : mode === "readonly" ? ICON.lock : ICON.shield}{audience === "users" ? LEVEL_LABEL[mode] : MODE_LABEL[mode]}</span>
-              <span className="access-st-sub">{CHOICE_HINT[audience][mode]}</span>
-            </button>
-          );
-        })}
+        {(["open", "readonly", "private"] as Mode[]).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            className={`access-segbtn${currentMode === mode ? " active" : ""}`}
+            data-mode={mode}
+            aria-pressed={currentMode === mode}
+            disabled={busy || disabled}
+            onClick={() => onSelect(mode)}
+          >
+            <span className="access-st-top">{mode === "open" ? ICON.open : mode === "readonly" ? ICON.lock : ICON.shield}{MODE_LABEL[mode]}</span>
+            <span className="access-st-sub">{mode === "open" ? "Can read and edit" : mode === "readonly" ? "Can read, cannot edit" : "Cannot see this content"}</span>
+          </button>
+        ))}
       </div>
       {statusMessage && (
         <p className="access-current-state" role="status">{statusMessage}</p>
@@ -868,12 +839,11 @@ function rowGlyph(resource: Resource): React.ReactNode {
   return resource.kind === "file" ? iconForPath(resource.path) : ICON.note;
 }
 
-/** A mode badge for the team; with `person`, a level badge for one person. */
-function AccessBadge({ mode, person = false }: { mode: Mode; person?: boolean }) {
+function AccessBadge({ mode }: { mode: Mode }) {
   return (
     <span className={`access-badge ${mode === "private" ? "priv" : mode === "readonly" ? "ro" : "open"}`}>
       {mode === "private" ? ICON.shield : mode === "readonly" ? ICON.lock : ICON.open}
-      {person ? LEVEL_LABEL[mode] : MODE_LABEL[mode]}
+      {MODE_LABEL[mode]}
     </span>
   );
 }
@@ -946,7 +916,7 @@ function PersonAccessBadge({ orgId, resourceType, resourceId, users, revision }:
       {users === "[]" ? <span className="access-badge">Choose a person</span>
         : mode === "mixed" ? <span className="access-badge ro" title="Access differs between people or items in this folder">Mixed</span>
           : mode === "unavailable" ? <span className="access-badge" title="Could not load this person's access">Unavailable</span>
-            : mode ? <AccessBadge mode={mode} person /> : <LoadingBadge />}
+            : mode ? <AccessBadge mode={mode} /> : <LoadingBadge />}
     </span>
   );
 }

@@ -31,55 +31,6 @@ export const MODE_LABEL: Record<TeamMode, string> = {
   private: "Private",
 };
 
-/**
- * The label a PERSON's access shows — a level, never a mode.
- *
- * "Shared" names what the team gets; reused for one person it read as a
- * contradiction ("the vault is Private, so why does my row say Shared?"). An
- * owner in a Private vault still reads everything, and "Can edit" says so.
- */
-export const LEVEL_LABEL: Record<TeamMode, string> = {
-  open: "Can edit",
-  readonly: "Can view",
-  private: "No access",
-};
-
-/** The sub-line under each Set-access tile, per audience. */
-export const CHOICE_HINT: Record<"org" | "users", Record<TeamMode, string>> = {
-  org: {
-    open: "Can read and edit",
-    readonly: "Can read, cannot edit",
-    private: "Hidden from the team. You and admins keep access.",
-  },
-  users: {
-    open: "Read and edit",
-    readonly: "Read only",
-    private: "Hidden from them",
-  },
-};
-
-/** "1 person" / "3 people". */
-export function peopleCount(n: number): string {
-  return `${n} ${n === 1 ? "person" : "people"}`;
-}
-
-/**
- * The confirm-dialog title for a Specific-people change:
- * "Give 1 person edit access to the entire vault?" /
- * "Remove 2 people's access to “Notes”?".
- */
-export function peopleChangeTitle(mode: TeamMode, count: number, scope: string): string {
-  if (mode === "private") {
-    return `Remove ${count === 1 ? "1 person's" : `${count} people's`} access to ${scope}?`;
-  }
-  return `Give ${peopleCount(count)} ${mode === "open" ? "edit" : "view"} access to ${scope}?`;
-}
-
-/** The confirm button / toast verb for a Specific-people change. */
-export function peopleChangeAction(mode: TeamMode): string {
-  return mode === "open" ? "Give edit access" : mode === "readonly" ? "Give view access" : "Remove access";
-}
-
 export interface EffectiveTeamModeInput {
   /** The vault-wide mode (the org grant on the vault resource). */
   vaultMode: TeamMode;

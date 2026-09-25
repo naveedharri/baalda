@@ -51,17 +51,11 @@ export async function canEditDoc(
  * any ancestor makes it read-only for everyone (owners/admins included),
  * matching `folderWritePermission` in the MCP service.
  *
- * The vault posture, exactly as the resolver applies it ([[resolver]]
- * `vaultBaseline`):
- *   · Read-only withdraws the owner/admin shortcut AND the creator rule for
- *     everyone — it is the lock — and only an edit grant lifts someone out.
- *   · Private (`sealed`) keeps the owner/admin shortcut and withdraws the
- *     creator rule from members — you cannot restructure what you cannot read,
- *     and there authorship no longer lets a member read it (#217).
- *   · A vault that was never shared keeps the owner/admin shortcut too: a
- *     folder nobody has been given cannot be "someone else's" to its owner, and
- *     withdrawing it refused owners inside every folder a teammate made or that
- *     predates `created_by` (#217). Members keep the creator rule there.
+ * A SEALED vault (the Access panel's Private) withdraws the owner/admin
+ * shortcut AND the creator rule, exactly as the resolver does ([[resolver]]
+ * `vaultBaseline`) — you cannot restructure what you cannot read, and there
+ * authorship no longer lets you read it. A vault that was merely never shared
+ * withdraws the role shortcut only, and its folders' creators keep them.
  */
 export async function canEditFolder(
   userId: string,
@@ -101,18 +95,19 @@ export async function canEditFolder(
     : await vaultBaseline(db, row.organization_id);
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
-  const privileged = role === "owner" || role === "admin";
+  const ungrantedVault = baseline === null;
 
-  // An item set Private, a Read-only vault and (for members) a sealed vault all
-  // skip the shortcuts AND the creator rule, and let the share lookup decide —
-  // that is how a folder marked Shared still lifts someone out of any of them.
-  if (itemPrivate || readOnlyVault || (sealedVault && !privileged)) {
+  // An item set Private, a Read-only vault and a sealed vault all skip the
+  // shortcuts AND the creator rule, and let the share lookup decide — that is
+  // how a folder marked Shared still lifts someone out of any of the three.
+  if (itemPrivate || readOnlyVault || sealedVault) {
     const ctx = await buildAccessContext("folder", folderId, db, cache);
     if (!ctx) return false;
     return (await resolveAccessForUser(ctx, userId, role, db, cache)).permission === "edit";
   }
-  // Shared, Private and never-shared all keep the owner/admin shortcut here.
-  if (privileged) return true;
+  // A never-shared vault skips only the role shortcut; the creator rule below
+  // is the private-by-default space, so it has to stay ordered this way round.
+  if (!ungrantedVault && (role === "owner" || role === "admin")) return true;
   if (row.created_by && row.created_by === userId) return true;
 
   // Else: an explicit user/team edit share on the folder or an ancestor.
@@ -337,21 +332,18 @@ export async function canCreateIn(
 /**
  * Is the vault ROOT writable for `userId` at all?
  *
- * True unless the vault posture is Read-only, or sealed (Private) for a caller
- * who is not an owner or admin. In those cases only an explicit per-user
- * vault-scoped `edit` grant survives — the one thing the resolver's posture
- * branch still honours where there is no folder for a share to hang on. Says
- * nothing about membership; callers add that. A vault that was never shared
- * stays writable: that is the private-by-default space, where what you create
- * is yours.
+ * True unless the vault posture is Read-only **or sealed**, in which case only
+ * an explicit per-user vault-scoped `edit` grant survives — the one thing the
+ * resolver's posture branch still honours where there is no folder for a share
+ * to hang on. Says nothing about membership or role; callers add that. A vault
+ * that was never shared stays writable: that is the private-by-default space,
+ * where what you create is yours.
  *
- * Read-only refuses owners and admins too: it is the lock. Private does not:
- * it withdraws the team, and its owners and admins keep full access, root
- * creates included (#217). For a MEMBER, sealed belongs here for the same
- * reason Read-only does, and the failure it prevents is sharper: a member in a
- * sealed vault cannot read a note that was not shared with them, authorship
- * included, so a root create would hand them a note that vanished from their
- * own disk the moment it synced.
+ * Sealed belongs here for the same reason Read-only does, and the failure it
+ * prevents is sharper: in a sealed vault nobody can read a note they did not
+ * have shared with them, authorship included, so a root create would have
+ * handed someone a note that vanished from their own disk the moment it synced.
+ * Creating in a vault you cannot read is not a lesser write, it is a worse one.
  *
  * Shared with the MCP layer (`folderWritePermission`), whose root branch is
  * admin-only and so was the one place a restricted vault still let writes
@@ -368,13 +360,6 @@ export async function vaultRootWritable(
     ? await cache.baseline(db, organizationId)
     : await vaultBaseline(db, organizationId);
   if (posture !== "view" && posture !== "sealed") return true;
-  if (posture === "sealed") {
-    // Private keeps the people who run the vault — mirrors the resolver.
-    const role = cache
-      ? await cache.role(db, organizationId, userId)
-      : await orgRole(organizationId, userId, db);
-    if (role === "owner" || role === "admin") return true;
-  }
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM shares
       WHERE resource_type = 'vault' AND resource_id = $1

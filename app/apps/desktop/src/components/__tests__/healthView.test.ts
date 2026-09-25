@@ -59,7 +59,6 @@ function actions(): HealthActions {
     copyIssue: vi.fn(async () => ""),
     reregister: vi.fn(async () => {}),
     contactOwner: vi.fn(async () => ({ owner: null, message: "" })),
-    openAccess: vi.fn(),
     inspectNote: vi.fn(
       async (path: string): Promise<NoteInspection> => ({
         path,
