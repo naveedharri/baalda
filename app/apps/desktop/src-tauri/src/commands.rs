@@ -706,8 +706,8 @@ pub fn check_reset_target(
     }
     if let Some(home) = home {
         let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-        if canon == home {
-            return refuse("it is your home folder");
+        if home.starts_with(&canon) {
+            return refuse("it is your home folder or contains it");
         }
     }
     if let Some(root) = vaults_root {
