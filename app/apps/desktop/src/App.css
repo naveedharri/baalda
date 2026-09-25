@@ -7859,3 +7859,36 @@ button.secondary:active:not(:disabled),
   margin: 0 0 var(--sp-2);
   padding-left: var(--sp-4);
 }
+
+/* ---- Row overflow menu (⋯): a row keeps one primary action visible and puts
+   the rest behind this trigger (Settings → Vaults). */
+.row-more {
+  display: inline-flex;
+}
+.row-more-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.row-more-btn:hover:not(:disabled),
+.row-more-btn.open {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.row-more-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.row-more-menu {
+  min-width: 200px;
+}
