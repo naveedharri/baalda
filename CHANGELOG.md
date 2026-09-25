@@ -67,6 +67,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   drain or a revocation removes a note (at most once per 5 s, pinning every doc still in flight).
   Health no longer lists "Leftover edit history" or offers Reclaim; the Local history summary
   still reports the amount.
+- Wiki-links to notes that do not exist are greyed out and no longer create a note when clicked (desktop).
 - **Cleaner banner buttons (desktop).** Banner actions are compact pills of one height; secondary
   actions such as "Keep as local vault" and "Open Health" are outlined instead of a grey box, and
   the banner text is softer so the heading stands out.

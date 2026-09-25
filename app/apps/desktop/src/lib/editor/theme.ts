@@ -131,6 +131,18 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     backgroundColor: "var(--accent-soft)",
     textDecoration: "none",
   },
+  // A link to a note that does not exist: greyed out, and inert to the mouse
+  // (a click places the caret; it never creates the note). `--text-tertiary`
+  // rather than `--text-faint`, because this is prose to read, not a marker —
+  // and it is the tier the dark palette pins above 4.5:1 (theme.test.ts).
+  ".cm-wikilink.cm-wikilink-unresolved": {
+    color: "var(--text-tertiary)",
+    cursor: "default",
+  },
+  ".cm-wikilink.cm-wikilink-unresolved:hover": {
+    backgroundColor: "transparent",
+    textDecoration: "none",
+  },
 
   // Live-preview decorations (added by ./livePreview).
   // The • that replaces a `-`/`*`/`+` list marker.
