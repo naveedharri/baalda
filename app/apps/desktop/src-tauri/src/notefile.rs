@@ -3,7 +3,7 @@
 //! (temp file + rename) so a crash mid-save never truncates a note.
 
 use crate::error::{io_ctx, AppError, AppResult};
-use crate::vault::{resolve_in_vault, vault_path_state, PathState};
+use crate::vault::{require_vault_root, resolve_in_vault, vault_path_state, PathState};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -86,6 +86,7 @@ pub fn write_note_cas(
     expected_sha: Option<&str>,
 ) -> AppResult<WriteNoteOutcome> {
     let abs = resolve_in_vault(vault, rel)?;
+    require_vault_root(vault)?;
     let state = vault_path_state(vault, rel);
     match state {
         PathState::Symlink => return Err(symlink_refusal(rel)),
@@ -274,6 +275,7 @@ pub fn create_note(vault: &Path, parent_rel: &str, name: &str) -> AppResult<Stri
     let name = ensure_md_extension(name)?;
     let rel = join_rel(parent_rel, &name);
     let abs = resolve_in_vault(vault, &rel)?;
+    require_vault_root(vault)?;
     if abs.exists() {
         return Err(AppError::new("a note with that name already exists"));
     }
@@ -293,6 +295,7 @@ pub fn create_note(vault: &Path, parent_rel: &str, name: &str) -> AppResult<Stri
 pub fn create_folder(vault: &Path, parent_rel: &str, name: &str) -> AppResult<String> {
     let rel = join_rel(parent_rel, name);
     let abs = resolve_in_vault(vault, &rel)?;
+    require_vault_root(vault)?;
     if abs.exists() {
         return Err(AppError::new("a folder with that name already exists"));
     }
@@ -338,6 +341,7 @@ pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<bool> {
         ));
     }
     let abs = resolve_in_vault(vault, rel)?;
+    require_vault_root(vault)?;
     if abs.is_dir() {
         return Ok(false);
     }
@@ -638,6 +642,25 @@ fn join_rel(parent_rel: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #221: a vault root that moved away while the app was open is never
+    /// re-created by a late write — every writer that creates parent folders
+    /// refuses instead.
+    #[test]
+    fn writes_refuse_a_vault_root_that_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().join("vault");
+        std::fs::create_dir_all(&v).unwrap();
+        write_note(&v, "Notes/a.md", "# A").unwrap();
+        std::fs::rename(&v, tmp.path().join("moved")).unwrap();
+
+        assert!(write_note(&v, "Notes/a.md", "late egest").is_err());
+        assert!(write_note_if_missing(&v, "Notes/b.md", "").is_err());
+        assert!(create_note(&v, "Notes", "c").is_err());
+        assert!(create_folder(&v, "", "New").is_err());
+        assert!(ensure_folder(&v, "Other").is_err());
+        assert!(!v.exists(), "the old vault folder was not re-created");
+    }
 
     #[test]
     fn delete_file_removes_a_file_and_refuses_a_directory() {

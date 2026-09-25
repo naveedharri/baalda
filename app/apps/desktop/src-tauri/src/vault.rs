@@ -240,6 +240,23 @@ pub fn vault_path_state(vault: &Path, rel: &str) -> PathState {
     PathState::Missing
 }
 
+/// Refuse a write whose vault root is no longer a folder (#221).
+///
+/// Every write path below creates missing parent folders, which is right inside
+/// a vault and exactly wrong when the vault itself moved, was renamed or its
+/// drive unmounted while the app was open: a late egest, placeholder or
+/// download would quietly re-create the OLD folder with a stray file in it.
+/// Follows links, like the watcher's root check.
+pub fn require_vault_root(vault: &Path) -> AppResult<()> {
+    if vault.is_dir() {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "the vault folder is missing: it moved, was renamed or its drive was unmounted",
+        ))
+    }
+}
+
 /// Lexical normalization (collapse `.` / `..`) without filesystem access.
 fn normalize_lexically(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();

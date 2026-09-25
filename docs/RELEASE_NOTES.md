@@ -25,6 +25,7 @@
 - A safety net for large deletions: when one edit removes most of a note, the previous text is kept in Version History as "Before large deletion". Owners and admins can also review and restore notes that were emptied by earlier sync problems.
 - Copying stability: copying text from a note no longer risks crashing the app on macOS, and selecting text inside a code block is visible again.
 - AI connectors and tidier banners: MCP clients always ask which vault to use, banner buttons are compact and consistent, and the AI (Beta) settings page is hidden for now.
+- Reorganising with the app open: folders moved from Finder or a script keep their notes' history and permissions, a moved vault folder asks to be reopened, and removing many notes at once asks before syncing the change.
 
 ## 0.1.68
 

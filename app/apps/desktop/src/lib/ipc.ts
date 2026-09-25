@@ -226,6 +226,14 @@ export interface FileChanged {
    * not do is re-index, re-render or re-upload anything.
    */
   unchanged?: boolean;
+  /**
+   * The path is no longer on disk (or is now a link, which sync treats as
+   * absent). Always true for `removed`; on `tree` it tells a folder that went
+   * away from one that appeared or changed — the two halves of a folder moved
+   * outside the app (#221). The vault ROOT vanishing is reported as
+   * `{ path: "", kind: "tree", gone: true }`. Optional for older Rust builds.
+   */
+  gone?: boolean;
 }
 
 /** One attachment file's metadata (mirrors the Rust `AttachmentMeta`). */
@@ -382,6 +390,14 @@ export const readNote = (path: string, expectedEpoch?: VaultEpoch) =>
  */
 export const noteExists = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("note_exists", { path, expectedEpoch: expectedEpoch ?? null });
+/**
+ * Is the open vault's root folder still a folder (#221)? A root renamed, moved
+ * or unmounted while the app is open leaves the watcher on a dead path; the sync
+ * layer asks this before every structural pass and on every watcher batch.
+ */
+export type VaultRootState = "dir" | "missing" | "not-dir";
+export const vaultRootState = (expectedEpoch?: VaultEpoch) =>
+  invoke<VaultRootState>("vault_root_state", { expectedEpoch: expectedEpoch ?? null });
 /**
  * Save local text that could not be synced into `.context/trash/<stamp>/<rel>`
  * and return the trash-relative destination.

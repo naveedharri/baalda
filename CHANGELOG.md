@@ -16,6 +16,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   undone from Version History (#200).
 
 ### Fixed
+- **Reorganising a vault with the app open (desktop).** A folder moved or renamed outside the app
+  (Finder, `mv`, a script) arrives as one watcher event for the folder, so it used to be missed:
+  every note under it got a second identity. The watcher now reports `gone` on `tree` changes, and
+  the delete drain pairs a vanished registered folder with a new one by sub-path and content hash
+  (at least 80% byte-identical) and applies ONE server folder move, keeping every id. A vault root
+  that is renamed, moved or unmounted now stops every structural step, refuses Rust writes that
+  would re-create it, and shows a banner to reopen it. A live delete above the blast-radius cap asks
+  "Delete for everyone" or "Restore" instead of being silently undone. The first pass after opening
+  shows a one-time notice when renames, moves or deletes were made while the app was closed (#221).
 - **Symbolic links no longer fork notes or overwrite newer text (desktop).** A link inside a vault
   is treated as absent by every identity check (materialize, the delete drain, the watcher), and
   note writes are refused at or through a link instead of landing on the real file; refusals show

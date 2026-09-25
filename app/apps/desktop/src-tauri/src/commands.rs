@@ -1269,6 +1269,33 @@ pub async fn note_exists(
     Ok(vault::vault_path_state(&vault, &path) == vault::PathState::Regular)
 }
 
+/// Is the open vault's root folder still a folder? `"dir"`, `"missing"`, or
+/// `"not-dir"` (a file now sits where the folder was).
+///
+/// The sync layer asks before every structural pass and on every watcher batch
+/// (#221): a vault root renamed, moved or unmounted while the app is open leaves
+/// the watcher on a dead path, and any pull or delete drain that ran against it
+/// would re-create the old folder from the server or read the whole vault as
+/// deleted. Follows links, like the watcher's own root check — a vault opened
+/// through a linked folder is still a vault while the link resolves.
+#[tauri::command]
+pub async fn vault_root_state(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<String> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    Ok(vault_root_state_of(&vault).to_string())
+}
+
+/// The pure half of [`vault_root_state`].
+pub fn vault_root_state_of(vault: &Path) -> &'static str {
+    match std::fs::metadata(vault) {
+        Ok(m) if m.is_dir() => "dir",
+        Ok(_) => "not-dir",
+        Err(_) => "missing",
+    }
+}
+
 /// Save a recovery copy of local text that could not be synced
 /// (see `notefile::write_trash_copy`). The file itself is already gone.
 #[tauri::command]
@@ -2740,6 +2767,24 @@ pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_root_state_reports_a_vanished_or_replaced_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().join("vault");
+        std::fs::create_dir(&v).unwrap();
+        assert_eq!(vault_root_state_of(&v), "dir");
+        std::fs::rename(&v, tmp.path().join("moved")).unwrap();
+        assert_eq!(vault_root_state_of(&v), "missing");
+        std::fs::write(&v, "x").unwrap();
+        assert_eq!(vault_root_state_of(&v), "not-dir");
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(tmp.path().join("moved"), &link).unwrap();
+            assert_eq!(vault_root_state_of(&link), "dir", "a linked root is still a vault");
+        }
+    }
 
     #[test]
     fn inbound_batch_file_removal_preserves_directories_and_metadata() {

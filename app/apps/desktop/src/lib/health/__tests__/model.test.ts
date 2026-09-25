@@ -402,6 +402,21 @@ describe("registry failures", () => {
     expect(issue.code).toBe("symlink");
   });
 
+  // #221: a live bulk delete held for the user's answer.
+  it("lists a note held by an unanswered bulk delete as waiting, not failed", () => {
+    const r = buildHealthReport(input({ failures: {
+      registry: [{ kind: "inbound-blocked", path: "Team/x.md", docId: "x-id",
+        reason: "removed from this folder in a bulk delete", code: "delete_decision" }],
+      content: [], limitCode: null,
+    } }));
+    const issue = r.issues.find((i) => i.path === "Team/x.md")!;
+    expect(issue.kind).toBe("inbound-blocked");
+    expect(issue.severity).toBe("warn");
+    expect(issue.title).toBe("Removed on disk, waiting for your answer");
+    expect(issue.remedies).not.toContain("retry");
+    expect(issue.code).toBe("delete_decision");
+  });
+
   it("warns about linked paths and flags two notes sharing one file as an error", () => {
     const r = buildHealthReport(input({
       checks: {
