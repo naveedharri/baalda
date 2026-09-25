@@ -260,20 +260,14 @@ describe("MCP access-management HTTP surface", () => {
         })
       ).isError,
     ).toBe(false);
-    // Private withdraws the team, never the people who run the vault (#217).
-    expect(await effectivePermission(member, nestedDoc)).toBe("none");
-    expect(await listReadableDocsInVault(member, vault)).toEqual(new Set());
-    for (const userId of [owner, admin]) {
-      expect(await effectivePermission(userId, nestedDoc)).toBe("edit");
-      const readable = await listReadableDocsInVault(userId, vault);
-      expect(readable.has(nestedDoc)).toBe(true);
-      expect(readable.has(rootDoc)).toBe(true);
+    for (const userId of [owner, admin, member]) {
+      expect(await effectivePermission(userId, nestedDoc)).toBe("none");
+      expect(await listReadableDocsInVault(userId, vault)).toEqual(new Set());
     }
-    expect(
-      (await call(ownerToken, "list_notes", { vaultId: vault })).data.results.length,
-    ).toBeGreaterThan(0);
+    expect((await call(ownerToken, "list_notes", { vaultId: vault })).data.results).toEqual([]);
 
-    // Management is role-based, so an admin can undo Private.
+    // Management is role-based, so an admin can undo Private even while the
+    // sealed vault gives that admin no content access.
     const reopened = await call(adminToken, "manage_access", {
       resources: resources(["vault", org]),
       audience: { type: "org" },

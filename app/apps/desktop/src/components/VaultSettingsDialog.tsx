@@ -348,7 +348,6 @@ export function VaultSettingsDialog({
               onOpenDiagnostics={id => { setDiagnosticFocus(id ? { id, n: Date.now() } : null); setTab("ai"); }}
               onRequestSignIn={onRequestSignIn}
               onGoToGeneral={() => setTab("general")}
-              onOpenAccess={() => setTab("access")}
               onClose={onClose}
             />
           ) : tab === "ai" ? (

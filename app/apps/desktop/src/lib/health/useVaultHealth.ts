@@ -50,8 +50,6 @@ export interface UseVaultHealthOptions {
   onOpenUpgrade?: () => void;
   /** Put the sign-in card up. Absent ⇒ the `sign-in` remedy no-ops. */
   onRequestSignIn?: () => void;
-  /** Switch to the Access tab. Absent ⇒ the `open-access` remedy no-ops. */
-  onOpenAccess?: () => void;
 }
 
 /** Merge the hidden attachment store and surfaced binary-file census without
@@ -319,7 +317,6 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       stats,
       checks,
       members,
-      viewerRole: myRole ?? null,
     };
     return buildHealthReport(input);
   }, [
@@ -339,7 +336,6 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     failures,
     stats,
     members,
-    myRole,
   ]);
 
   const inventory = useMemo<HealthInventory>(() => {
@@ -519,10 +515,6 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
 
       requestSignIn() {
         optionsRef.current.onRequestSignIn?.();
-      },
-
-      openAccess() {
-        optionsRef.current.onOpenAccess?.();
       },
 
       async copyDiagnostics() {

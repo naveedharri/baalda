@@ -1104,50 +1104,6 @@ describe("naming the owner", () => {
     expect(byPath.get("Other/N.md")?.remedies).not.toContain("contact-owner");
   });
 
-  it("never tells an owner or admin to ask the owner: names Read-only and offers Access", () => {
-    for (const viewerRole of ["owner", "admin"]) {
-      const r = buildHealthReport(
-        input({
-          members: [owner],
-          viewerRole,
-          failures: {
-            registry: [
-              { kind: "folder", path: "Team", docId: null, reason: "403", code: "no_write_access" },
-            ],
-            content: [
-              { docId: "d1", relPath: "Team/N.md", reason: "read-only", kind: "no-write-access" },
-            ],
-            limitCode: null,
-          },
-        }),
-      );
-      const folder = r.issues.find((i) => i.path === "Team");
-      expect(folder?.remedies).toContain("open-access");
-      expect(folder?.remedies).not.toContain("contact-owner");
-      expect(folder?.explanation.meaning).toContain("Read-only");
-      expect(folder?.explanation.meaning).not.toContain("view-only");
-      expect(folder?.explanation.meaning).not.toContain("Sam");
-      expect(folder?.explanation.fixes.join(" ")).not.toMatch(/ask/i);
-      const note = r.issues.find((i) => i.path === "Team/N.md");
-      expect(note?.remedies).toContain("open-access");
-      expect(note?.explanation.fixes.join(" ")).not.toMatch(/ask the vault owner/i);
-    }
-    // A member keeps the old wording.
-    const member = buildHealthReport(
-      input({
-        members: [owner],
-        viewerRole: "member",
-        failures: {
-          registry: [{ kind: "folder", path: "Team", docId: null, reason: "403", code: "no_write_access" }],
-          content: [],
-          limitCode: null,
-        },
-      }),
-    );
-    expect(member.issues[0]?.remedies).toContain("contact-owner");
-    expect(member.issues[0]?.remedies).not.toContain("open-access");
-  });
-
   it("explains each registration code in its own words", () => {
     const codes: Record<string, string> = {
       root_frozen: "top level is locked",

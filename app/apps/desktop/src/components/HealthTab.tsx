@@ -63,8 +63,6 @@ export interface HealthTabProps {
   /** Close settings — opening a note has to get the dialog out of the way. */
   onClose?: () => void;
   onOpenDiagnostics?: (id?: VaultCheckId) => void;
-  /** Jump to Access, where an owner/admin lifts a Read-only refusal. */
-  onOpenAccess?: () => void;
 }
 
 export function HealthTab({
@@ -73,7 +71,6 @@ export function HealthTab({
   onGoToGeneral,
   onClose,
   onOpenDiagnostics,
-  onOpenAccess,
 }: HealthTabProps) {
   // Same shape as the Billing and Members tabs: the dialog is rendered by the
   // tab that needs it rather than hoisted into VaultSettingsDialog, so the
@@ -83,7 +80,6 @@ export function HealthTab({
   const liveSnapshot = useVaultHealth({
     onOpenUpgrade: onOpenUpgrade ?? (() => setUpgradeOpen(true)),
     onRequestSignIn,
-    onOpenAccess,
   });
   // DEV-only fixture mode (see `lib/health/demoFixture.ts`). `import.meta.env.DEV`
   // folds to false in production, so the fixture never replaces live data there.

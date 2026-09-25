@@ -344,12 +344,11 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     }
     // …and only someone the whole vault is actually readable to. This rewrites
     // every note at once, so it cannot be done from a seat that can only see
-    // some of them: the role does not imply vault-wide read in a vault that
-    // was never shared, and a partial revert is worse than none — the
-    // structure would come back whole while the contents did not. Such an
-    // owner reverts per note instead (the routes above, gated on
-    // `effectivePermission`), or shares the vault first. A vault set to
-    // Private is not this case: its owners and admins read everything (#217).
+    // some of them: the role stopped implying vault-wide read when the Private
+    // posture stopped exempting owners, and a partial revert is worse than
+    // none — the structure would come back whole while the contents did not.
+    // A Private vault's owner reverts per note instead (the routes above,
+    // gated on `effectivePermission`), or opens the vault first.
     const access = await vaultAccess(pool, session.userId, vaultId);
     if (!access?.vaultWide) {
       return c.json(

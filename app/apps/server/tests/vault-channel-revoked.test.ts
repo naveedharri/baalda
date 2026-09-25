@@ -160,20 +160,19 @@ describe("vault channel — ready.revoked", () => {
     expect(ready.revoked).toEqual([rootNote]);
   });
 
-  it("never names a sealing owner's or admin's own docs — Private withdraws the team only", async () => {
-    const admin = await signUp("admin@ready-revoked.test");
-    await seedMember(orgId, admin.userId, "admin");
+  it("names the owner's losses too — Private is not a setting they sit above", async () => {
     expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
       200,
     );
 
-    // #217: the owner who pressed Private, holding the notes they wrote, must
-    // never be told to remove them from their own disk on the next connect.
-    for (const who of [owner, admin]) {
-      const ready = await readyFor(who.userId, vault, [rootNote, folderNote, ownNote]);
-      expect(ready.revoked).toBeUndefined();
-      expect(ready.revokedTruncated).toBeUndefined();
-    }
+    // All three, the two the owner wrote included. The list is NAMED rather
+    // than left to the client's "absent from both listings" guess, because
+    // being named is what safely lifts the removal cap — and a seal that takes
+    // the whole vault is exactly the case where the cap would otherwise bite.
+    const ready = await readyFor(owner.userId, vault, [rootNote, folderNote, ownNote]);
+    expect(new Set(ready.revoked as string[])).toEqual(
+      new Set([rootNote, folderNote, ownNote]),
+    );
   });
 
   it("caps the list and flags it, rather than framing an unbounded one", async () => {

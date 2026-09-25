@@ -261,9 +261,7 @@ export type HealthRemedy =
   /** Register this path with the server again as a note (left-behind files). */
   | "reregister"
   /** Show who owns the vault and copy a ready-to-send access request. */
-  | "contact-owner"
-  /** Jump to the Access tab — offered to owners/admins instead of contact-owner. */
-  | "open-access";
+  | "contact-owner";
 
 /**
  * The reasoning behind an issue, in the user's terms. This is the point of the
@@ -456,8 +454,6 @@ export interface HealthActions {
   /** Who owns this vault, plus a ready-to-send access request copied to the
    *  clipboard. Null owner when unknown. */
   contactOwner(): Promise<{ owner: { name: string; email: string } | null; message: string }>;
-  /** Open this vault's Access settings (owners/admins fix a Read-only refusal there). */
-  openAccess(): void;
   /** Everything known about one note's sync position. */
   inspectNote(path: string): Promise<NoteInspection>;
   /** Delete every recovery copy under `.context/trash`; returns bytes freed. */
