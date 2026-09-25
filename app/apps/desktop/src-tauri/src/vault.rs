@@ -173,6 +173,73 @@ pub fn resolve_in_vault(vault: &Path, rel: &str) -> AppResult<PathBuf> {
     Ok(normalized)
 }
 
+/// What sits at a path, WITHOUT following a symbolic link at it (#216).
+///
+/// The tree walk and the index both skip links (`DirEntry::file_type()` /
+/// WalkDir with `follow_links` off), so every check that decides whether a note
+/// is still there must agree with them: a link at a note path is NOT the note.
+/// `Path::exists()` / `is_file()` follow links and used to answer "present" for
+/// a path the sidebar and the registry saw as gone, which kept a stale doc id
+/// mapped and live beside the real file's new identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathState {
+    Missing,
+    Regular,
+    Symlink,
+    Dir,
+}
+
+impl PathState {
+    /// Identity checks treat a link exactly like nothing: Baalda never syncs
+    /// through links.
+    pub fn is_absent(self) -> bool {
+        matches!(self, PathState::Missing | PathState::Symlink)
+    }
+}
+
+/// The state of the LAST component of `abs`, on `symlink_metadata`. A dangling
+/// link is `Symlink`, not `Missing`. Anything else that is neither a link nor a
+/// folder (a socket, a fifo) reads as `Regular`.
+pub fn path_state(abs: &Path) -> PathState {
+    match std::fs::symlink_metadata(abs) {
+        Ok(m) if m.file_type().is_symlink() => PathState::Symlink,
+        Ok(m) if m.is_dir() => PathState::Dir,
+        Ok(_) => PathState::Regular,
+        Err(_) => PathState::Missing,
+    }
+}
+
+/// [`path_state`] for a vault-relative path, where a link in ANY component
+/// below the vault root also counts: with `Old -> Business/Old`, `Old/n.md` is
+/// `Symlink`, because `symlink_metadata` only declines to follow the FINAL
+/// component and would report the real file behind the folder link as
+/// `Regular`. The walk never descends into `Old`, so the identity checks must
+/// not either. The vault root itself is not inspected (a vault opened through a
+/// link is still a vault). A missing or non-folder ancestor is `Missing`.
+pub fn vault_path_state(vault: &Path, rel: &str) -> PathState {
+    let segs: Vec<&str> = rel
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if segs.is_empty() {
+        return path_state(vault);
+    }
+    let mut cur = vault.to_path_buf();
+    for (i, seg) in segs.iter().enumerate() {
+        cur.push(seg);
+        let st = path_state(&cur);
+        if i + 1 == segs.len() {
+            return st;
+        }
+        match st {
+            PathState::Dir => {}
+            PathState::Symlink => return PathState::Symlink,
+            PathState::Missing | PathState::Regular => return PathState::Missing,
+        }
+    }
+    PathState::Missing
+}
+
 /// Lexical normalization (collapse `.` / `..`) without filesystem access.
 fn normalize_lexically(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -281,6 +348,39 @@ mod tests {
         for no in ["img.png", "doc.pdf", "clip.mp4", "sheet.xlsx", "data.csv", ".gitignore", "Makefile"] {
             assert!(!is_note_file(no), "{no} should not be a note");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_state_sees_links_without_following_them() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        std::fs::create_dir_all(v.join("Business/Old")).unwrap();
+        std::fs::write(v.join("Business/Old/n.md"), "real").unwrap();
+        std::fs::write(v.join("real.md"), "x").unwrap();
+        symlink(v.join("real.md"), v.join("link.md")).unwrap();
+        symlink(v.join("Business/Old"), v.join("Old")).unwrap();
+        symlink(v.join("nowhere.md"), v.join("dangling.md")).unwrap();
+
+        assert_eq!(path_state(&v.join("real.md")), PathState::Regular);
+        assert_eq!(path_state(&v.join("link.md")), PathState::Symlink);
+        assert_eq!(path_state(&v.join("Old")), PathState::Symlink);
+        assert_eq!(path_state(&v.join("dangling.md")), PathState::Symlink);
+        assert_eq!(path_state(&v.join("Business")), PathState::Dir);
+        assert_eq!(path_state(&v.join("absent.md")), PathState::Missing);
+
+        // Through a folder link the leaf alone looks regular; the vault-aware
+        // check does not.
+        assert_eq!(path_state(&v.join("Old/n.md")), PathState::Regular);
+        assert_eq!(vault_path_state(v, "Old/n.md"), PathState::Symlink);
+        assert_eq!(vault_path_state(v, "Business/Old/n.md"), PathState::Regular);
+        assert_eq!(vault_path_state(v, "link.md"), PathState::Symlink);
+        assert_eq!(vault_path_state(v, "dangling.md"), PathState::Symlink);
+        assert_eq!(vault_path_state(v, "Nope/n.md"), PathState::Missing);
+        assert_eq!(vault_path_state(v, "real.md/n.md"), PathState::Missing);
+        assert!(PathState::Symlink.is_absent() && PathState::Missing.is_absent());
+        assert!(!PathState::Regular.is_absent() && !PathState::Dir.is_absent());
     }
 
     #[test]

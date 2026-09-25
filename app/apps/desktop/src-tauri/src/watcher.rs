@@ -27,7 +27,10 @@
 
 use crate::extract_worker::{self, ExtractQueue, ExtractWorker};
 use crate::index::Index;
-use crate::vault::{is_indexable_file, is_note_file, rel_from_abs, rel_path_is_ignored};
+use crate::vault::{
+    is_indexable_file, is_note_file, rel_from_abs, rel_path_is_ignored, vault_path_state,
+    PathState,
+};
 use notify::event::{AccessKind, AccessMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -308,17 +311,22 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         // file NAME, so a dot in a directory (`a.b/notes`) cannot answer for it.
         let name = rel.rsplit('/').next().unwrap_or(rel.as_str());
         let is_note = is_note_file(name);
-        let exists = abs.exists();
+        // `symlink_metadata`, per component (#216): a link at or above this path
+        // is invisible to the tree walk and the index rebuild, so the live path
+        // treats it exactly like a missing one. `exists()` followed the link and
+        // kept a moved note's old path "present".
+        let state = vault_path_state(vault, &rel);
         let (kind, gone) = if is_note {
-            if exists && abs.is_file() {
+            if state == PathState::Regular {
                 ("modified", false)
             } else {
                 ("removed", true)
             }
         } else {
             // Directory or non-note file → structural refresh. If it's gone
-            // it may have been a folder, so prune its notes from the index too.
-            ("tree", !exists)
+            // (or now a link, which the walk skips) it may have been a folder,
+            // so prune its notes from the index too.
+            ("tree", state.is_absent())
         };
         planned.push(PlannedChange {
             abs,
@@ -526,6 +534,42 @@ mod tests {
             plan.removed,
             vec![v.join("Gone.md"), v.join("deleted-folder")]
         );
+    }
+
+    /// #216: a link at a note path, or a folder link above it, is gone for
+    /// identity purposes — exactly what the tree walk and the index rebuild see.
+    #[cfg(unix)]
+    #[test]
+    fn plan_treats_linked_paths_as_removed() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "Business/Old/n.md", "# moved").unwrap();
+        write_note(&v, "Real.md", "# real").unwrap();
+        symlink(v.join("Business/Old"), v.join("Old")).unwrap();
+        symlink(v.join("Real.md"), v.join("Link.md")).unwrap();
+
+        let batch: HashSet<PathBuf> = [
+            v.join("Old/n.md"),
+            v.join("Link.md"),
+            v.join("Old"),
+            v.join("Business/Old/n.md"),
+        ]
+        .into_iter()
+        .collect();
+        let plan = plan_batch(&v, batch);
+        assert_eq!(
+            kinds(&plan),
+            vec![
+                ("Business/Old/n.md".to_string(), "modified"),
+                ("Link.md".to_string(), "removed"),
+                ("Old".to_string(), "tree"),
+                ("Old/n.md".to_string(), "removed"),
+            ]
+        );
+        assert_eq!(plan.modified, vec![v.join("Business/Old/n.md")]);
+        // The folder link prunes whatever the index still holds under `Old/`.
+        assert_eq!(plan.removed, vec![v.join("Link.md"), v.join("Old"), v.join("Old/n.md")]);
     }
 
     /// A rename from OUTSIDE the app is two unpaired `notify` events — measured
