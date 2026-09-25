@@ -440,6 +440,19 @@ export const CHECK_GROUP_LABELS: Record<CheckDefinition["group"], string> = {
   storage: "Storage",
 };
 
+/**
+ * Checks the app resolves on its own, so they are never listed. Leftover edit
+ * history is swept automatically while sync is idle (`requestCrdtSweep`); the
+ * definition stays so the check action it names keeps its wording.
+ */
+export const AUTOMATIC_CHECK_IDS: ReadonlySet<VaultCheckId> = new Set<VaultCheckId>(["orphan-history"]);
+
+/** Drop the results of {@link AUTOMATIC_CHECK_IDS} before anything renders or
+ *  reports them: the Health list, its summary and the assistant's evidence. */
+export function withoutAutomaticChecks(checks: VaultChecks): VaultChecks {
+  return { ...checks, results: checks.results.filter((r) => !AUTOMATIC_CHECK_IDS.has(r.id)) };
+}
+
 /** One check joined to its result, ready to render. */
 export interface CheckRow {
   def: CheckDefinition;
@@ -454,7 +467,7 @@ export interface CheckRow {
  */
 export function checkRows(checks: VaultChecks | null): CheckRow[] {
   const byId = new Map(checks?.results.map((r) => [r.id, r]) ?? []);
-  return CHECK_DEFINITIONS.map((def) => {
+  return CHECK_DEFINITIONS.filter((def) => !AUTOMATIC_CHECK_IDS.has(def.id)).map((def) => {
     const result = byId.get(def.id) ?? { id: def.id, count: 0, items: [] };
     return { def, result, passed: result.count === 0 };
   });

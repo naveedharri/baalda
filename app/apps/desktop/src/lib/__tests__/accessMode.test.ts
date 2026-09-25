@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { ancestorPaths } from "../accessTree";
 import {
+  LEVEL_LABEL,
   MODE_LABEL,
+  peopleChangeTitle,
   buildOrgRowsByPath,
   clearedCountPhrase,
   effectiveTeamMode,
@@ -294,6 +296,24 @@ describe("MODE_LABEL", () => {
       readonly: "Read-only",
       private: "Private",
     });
+  });
+});
+
+describe("LEVEL_LABEL", () => {
+  it("names a person's access as a level, never as a mode", () => {
+    expect(LEVEL_LABEL).toEqual({ open: "Can edit", readonly: "Can view", private: "No access" });
+    for (const mode of ["open", "readonly", "private"] as const) {
+      expect(LEVEL_LABEL[mode]).not.toBe(MODE_LABEL[mode]);
+    }
+  });
+});
+
+describe("peopleChangeTitle", () => {
+  it("words a people change as giving or removing access", () => {
+    expect(peopleChangeTitle("open", 1, "the entire vault")).toBe("Give 1 person edit access to the entire vault?");
+    expect(peopleChangeTitle("readonly", 2, "“Notes”")).toBe("Give 2 people view access to “Notes”?");
+    expect(peopleChangeTitle("private", 1, "the entire vault")).toBe("Remove 1 person's access to the entire vault?");
+    expect(peopleChangeTitle("private", 3, "3 selected items")).toBe("Remove 3 people's access to 3 selected items?");
   });
 });
 

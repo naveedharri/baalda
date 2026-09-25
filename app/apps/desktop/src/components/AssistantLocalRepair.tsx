@@ -51,7 +51,7 @@ export function AssistantLocalRepair({ id, snapshot, onClose }: { id: string; sn
         if (!renames.length) throw new Error("These paths require a folder move or individual naming choice; no safe file-only rename was found.");
         next = { title: "Review distinct file names", description: "Preserve every file and its identity. Links using the old paths may need repair after renaming. Folders are left alone.", label: "Apply renames", paths: renames.map(r => `${r.from} → ${r.to}`), renames };
       } else {
-        const action: CheckAction | undefined = ({ "illegal-names": "rename-legal", "oversized-notes": "export-all", "unreadable-notes": "export-all", "trash": "export-all", "heavy-history": "reset-history-all", "orphan-history": "reclaim" } as Record<string, CheckAction>)[id];
+        const action: CheckAction | undefined = ({ "illegal-names": "rename-legal", "oversized-notes": "export-all", "unreadable-notes": "export-all", "trash": "export-all", "heavy-history": "reset-history-all" } as Record<string, CheckAction>)[id];
         const def = CHECK_DEFINITIONS.find(c => c.id === id);
         if (!action || !def || !finding?.count) throw new Error("The finding changed. Scan again.");
         const check = planCheckAction(def, finding, action, "heal");

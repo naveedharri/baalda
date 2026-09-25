@@ -1094,32 +1094,10 @@ function buildIssues(
     }
   }
 
-  const orphanDocs = input.stats?.history.orphanDocs ?? 0;
-  if (orphanDocs > 0) {
-    const orphanBytes = input.stats?.history.orphanBytes ?? 0;
-    push({
-      key: "history:orphans",
-      docId: null,
-      path: null,
-      kind: "orphan-history",
-      severity: "warn",
-      title: "Unused edit history",
-      why: `${formatBytes(orphanBytes)} can be freed. Your notes stay unchanged.`,
-      remedies: ["reclaim"],
-      code: null,
-      explanation: {
-        meaning: "Old history from notes no longer in this vault. Safe to reclaim or ignore.",
-        next: "Kept until you reclaim it.",
-        fixes: ["Reclaim to free space."],
-        safety: "both",
-      },
-      facts: [
-        { label: "Leftover notes", value: num(orphanDocs) },
-        { label: "Space used", value: formatBytes(orphanBytes) },
-      ],
-      autoRetries: false,
-    });
-  }
+  // Leftover edit history (CRDT rows for notes this vault no longer has) is no
+  // longer an issue: the sync layer reclaims it on its own once the session is
+  // idle (`SyncManager.requestCrdtSweep`). The history stage below still says
+  // how much there is.
 
   for (const issue of linkIssues(input.checks)) push(issue);
 
@@ -1266,7 +1244,8 @@ function buildStages(
   const history: HealthStage = {
     id: "history",
     label: "Local history",
-    state: orphanDocs > 0 ? "warn" : "ok",
+    // Informational only: reclaimed automatically, never something to act on.
+    state: "ok",
     headline: stats ? num(stats.history.docs) : "—",
     detail: stats
       ? `${plural(stats.history.docs, "note")} have edit history stored on this device` +

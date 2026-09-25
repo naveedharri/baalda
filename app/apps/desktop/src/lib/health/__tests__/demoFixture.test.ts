@@ -21,7 +21,6 @@ const EVERY_KIND: HealthIssueKind[] = [
   "left-behind",
   "materialize-failed",
   "inbound-blocked",
-  "orphan-history",
 ];
 
 afterEach(() => localStorage.clear());
@@ -32,6 +31,8 @@ describe("Health demo fixture", () => {
     const kinds = new Set(report.issues.map((i) => i.kind));
     for (const kind of EVERY_KIND) expect(kinds, kind).toContain(kind);
     expect(report.issues.filter((i) => i.kind === "left-behind")).toHaveLength(3);
+    // Leftover history is reclaimed automatically and never listed.
+    expect(kinds.has("orphan-history")).toBe(false);
   });
 
   it("populates every difference group, both cards and a capped server size", () => {

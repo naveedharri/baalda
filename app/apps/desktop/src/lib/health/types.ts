@@ -253,7 +253,6 @@ export type HealthRemedy =
   | "delete"
   | "upgrade"
   | "reset-history"
-  | "reclaim"
   | "sign-in"
   /** Save a copy of the file outside the vault (native save dialog). */
   | "export-copy"

@@ -22,10 +22,12 @@
 // EMPTY live set, because "I know of no live docs" is what a caller looks like
 // when its map failed to load, not a request to erase the vault.
 //
-// Runs at most once per vault open, immediately after the registry reconcile and
-// before the download phase — the one moment when the registry map is complete
-// and no backfill has begun. Anything created afterwards is therefore younger
-// than the sweep and cannot be caught by it.
+// Runs once per vault open, immediately after the registry reconcile and before
+// the download phase — the one moment when the registry map is complete and no
+// backfill has begun — and again whenever a live session goes idle after a pull,
+// a delete drain or a revocation (`SyncManager.requestCrdtSweep`, at most once
+// per 5 s). Those later sweeps pin every doc the session still has in flight, so
+// history orphaned mid-session is reclaimed without a manual "Reclaim".
 
 import * as ipc from "../ipc";
 import type { VaultEpoch } from "../ipc";

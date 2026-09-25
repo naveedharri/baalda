@@ -16,6 +16,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   undone from Version History (#200).
 
 ### Fixed
+- **The Access panel no longer says "Shared" for a person in a Private vault (desktop).** Viewing
+  one person's access now shows a level (Can edit / Can view / No access) instead of the vault-mode
+  words, so an owner who keeps full access in a Private vault reads "Can edit", not "Shared". The
+  Set-access tiles for Specific people use the same words, Everyone's Private tile says "Hidden
+  from the team. You and admins keep access.", and "No access" is disabled when the only person
+  chosen is you and you own or administer the vault.
 - **A note renamed outside the app in the same second as an edit kept its identity (desktop).** The
   edit's push made the server announce `registry-changed`, and that frame ran a registry pull inside
   the rename's 2.5 s grace window: the new name registered as a brand-new note and the old one was
@@ -55,6 +61,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   layer's z-index inline, which overrode the theme and hid the highlight under the code-block well.
 
 ### Changed
+- **Leftover edit history is reclaimed automatically (desktop).** Local history for notes the vault
+  no longer has used to wait for a manual Reclaim in Health. The same sweep that runs at vault open
+  now also runs while a live session is idle: 5 s after a registry pull, and right after a delete
+  drain or a revocation removes a note (at most once per 5 s, pinning every doc still in flight).
+  Health no longer lists "Leftover edit history" or offers Reclaim; the Local history summary
+  still reports the amount.
 - **Cleaner banner buttons (desktop).** Banner actions are compact pills of one height; secondary
   actions such as "Keep as local vault" and "Open Health" are outlined instead of a grey box, and
   the banner text is softer so the heading stands out.
