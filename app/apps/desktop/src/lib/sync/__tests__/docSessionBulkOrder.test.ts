@@ -1641,6 +1641,36 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     vi.useRealTimers();
   });
 
+  it("holds a registry frame's pull while a renamed NOTE is still inside its grace window", async () => {
+    // `mv Old/a.md Old/a2.md` plus an edit to another note in the same second:
+    // the edit's push makes the server announce `registry-changed`, and that
+    // frame used to run a pull inside the 2.5 s grace — registering a2.md as a
+    // brand-new note and re-materializing a.md at the old path (0.1.69-staging).
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    fakeRegistry.pull.mockClear();
+    fakeDisk.dirs = new Set(["Old", "Old/sub", "Keep"]);
+    fakeDisk.files.set("Old/a2.md", textOf("fa"));
+    // The new path's index row carries the file hash the per-note pairing reads.
+    fakeDisk.shas.set("Old/a2.md", createHash("sha256").update(textOf("fa"), "utf8").digest("hex"));
+
+    sm.handleLocalFilesChanged([
+      { path: "Old/a.md", kind: "removed" },
+      { path: "Old/a2.md", kind: "modified" },
+    ]);
+    // Our own content push echoes back as a server frame inside the window.
+    engineHooks.opts!.onRegistryChanged?.();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(fakeRegistry.pull).not.toHaveBeenCalled();
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old/a.md", "Old/a2.md"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.pull).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
   it("below 80% it is not a folder move: the notes fall to per-note pairing and the delete drain", async () => {
     const sm = new SyncManager();
     mapNotes([...oldNotes, ...others], ["Old", "Keep"]);

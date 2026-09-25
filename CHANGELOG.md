@@ -16,6 +16,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   undone from Version History (#200).
 
 ### Fixed
+- **A note renamed outside the app in the same second as an edit kept its identity (desktop).** The
+  edit's push made the server announce `registry-changed`, and that frame ran a registry pull inside
+  the rename's 2.5 s grace window: the new name registered as a brand-new note and the old one was
+  re-materialized from the server. The frame's pull now waits for the delete drain whenever a note
+  delete is pending, exactly as it already did for a vanished folder (#221).
 - **Reorganising a vault with the app open (desktop).** A folder moved or renamed outside the app
   (Finder, `mv`, a script) arrives as one watcher event for the folder, so it used to be missed:
   every note under it got a second identity. The watcher now reports `gone` on `tree` changes, and
