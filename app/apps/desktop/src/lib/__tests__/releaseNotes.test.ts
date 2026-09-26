@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { notesForVersion, releaseNoteLines } from "../releaseNotes";
+import {
+  SILENT_RELEASE_MARKER,
+  isSilentRelease,
+  notesForVersion,
+  releaseNoteLines,
+} from "../releaseNotes";
 
 /** A body shaped like docs/RELEASE_NOTES.md: comment header, newest-first sections. */
 const MULTI = `<!--
@@ -142,5 +147,26 @@ describe("releaseNoteLines", () => {
       "Baalda now updates itself at a quiet moment.",
       "What's New covers only the version you were given.",
     ]);
+  });
+});
+
+describe("isSilentRelease", () => {
+  it("is silent when the workflow marked the body", () => {
+    const body = `See the assets below to download and install this version.\n${SILENT_RELEASE_MARKER}`;
+    expect(isSilentRelease(body, "0.1.70")).toBe(true);
+  });
+
+  it("is silent when a staging body carries the marker under its warning", () => {
+    const body = `**This is a STAGING build.**\n\n- Staging version: x\n\n${SILENT_RELEASE_MARKER}`;
+    expect(isSilentRelease(body, "0.1.70-staging.3")).toBe(true);
+  });
+
+  it("is silent when there is nothing to list", () => {
+    expect(isSilentRelease(null, "0.1.70")).toBe(true);
+    expect(isSilentRelease("See the assets below to download and install this version.", "0.1.70")).toBe(true);
+  });
+
+  it("announces a release with notes", () => {
+    expect(isSilentRelease(MULTI, "0.1.60")).toBe(false);
   });
 });

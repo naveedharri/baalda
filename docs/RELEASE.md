@@ -49,15 +49,26 @@ the points to tauri-action as the GitHub release body. That body becomes
 `latest.json`'s `notes`, which the desktop shows in the **What's New** modal on
 the first launch after an update — so a user sees the version they just got and
 nothing else. (It used to `cat` the whole file, which is why every update opened
-on a dozen bullets from releases already installed.) Two fallbacks keep a
-release shippable: an unmatched version falls back to the topmost section, and a
-missing file to a one-line placeholder. The desktop side is the backstop:
+on a dozen bullets from releases already installed.) A version with no section
+of its own, or an empty one, gets a one-line placeholder and ships silently. The desktop side is the backstop:
 `src/lib/releaseNotes.ts` re-selects the section for the received version and
 caps the modal at five points.
 
 `staging-release.yml` always appends the **topmost** section under its
 tester-facing warning, because the version bump only happens at promotion — the
 base version there still names the release that already shipped.
+
+**Silent updates are the default.** A release announces itself only when its
+own section has points; with no section or an empty one both workflows add a
+`<!-- baalda:silent -->` marker to the release body (invisible on GitHub), and
+the desktop skips the What's New modal (`isSilentRelease`). The update still
+installs and restarts everywhere exactly as usual.
+
+**Background restarts.** An update that restarts the app while Baalda is behind
+another app keeps it there: the old process records its focus
+(`lib/backgroundRelaunch.ts` → Rust `set_background_relaunch`) and the new one
+hides itself again in `setup` on macOS, before its window is ever shown
+(`src-tauri/src/relaunch.rs`). What's New waits for the user's return.
 
 ### What triggers a release, and what doesn't
 

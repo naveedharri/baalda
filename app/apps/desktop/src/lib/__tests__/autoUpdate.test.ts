@@ -23,6 +23,10 @@ vi.mock("@tauri-apps/api/app", () => ({
 vi.mock("../bridge", () => ({
   bridgeManager: { currentBridge: () => ({ flushEgest }) },
 }));
+vi.mock("../backgroundRelaunch", () => ({
+  recordRelaunchFocus: async () => {},
+  clearRelaunchFocus: async () => {},
+}));
 vi.mock("../quietMoment", () => ({
   waitForQuietMoment: () => waitForQuietMoment(),
 }));
