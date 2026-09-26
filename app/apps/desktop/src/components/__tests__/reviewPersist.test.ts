@@ -29,12 +29,13 @@ function memory() {
 }
 
 describe("review persistence", () => {
-  it("round-trips reviewable items and their resolutions, dropping notices", () => {
+  it("round-trips reviewable items and their resolutions, never saving notices", () => {
     const { kv } = memory();
     const resolved = new Map([[reviewKey(copyE), "skipped" as const], ["stale", "kept" as const]]);
     writePersisted("/v", serializeReview([copyA, copyE, restored, folder], resolved), kv);
     const back = readPersisted("/v", kv)!;
-    expect(back.items.map((i) => i.path)).toEqual(["a.md", "e.md", "d.md"]);
+    // The restored note and the kept folder are notices: never persisted.
+    expect(back.items.map((i) => i.path)).toEqual(["a.md", "e.md"]);
     expect(back.items[0]).toEqual(copyA);
     expect(back.resolved).toEqual([[reviewKey(copyE), "skipped"]]);
   });
@@ -43,17 +44,17 @@ describe("review persistence", () => {
     const { kv, m } = memory();
     writePersisted("/v", serializeReview([copyA], new Map()), kv);
     expect(m.has(REVIEW_STORAGE_PREFIX + "/v")).toBe(true);
-    writePersisted("/v", serializeReview([folder], new Map()), kv);
+    writePersisted("/v", serializeReview([folder, restored], new Map()), kv);
     expect(m.has(REVIEW_STORAGE_PREFIX + "/v")).toBe(false);
   });
 
   it("seeds only pending items whose copy still exists", () => {
     const p = serializeReview([copyA, copyE, restored], new Map([[reviewKey(copyA), "kept" as const]]));
-    // a.md resolved, e.md's copy deleted outside the app, d.md has no copy.
-    expect(prunePersisted(p, new Set()).map((i) => i.path)).toEqual(["d.md"]);
-    expect(prunePersisted(p, new Set([`${S}/e.md`])).map((i) => i.path)).toEqual(["e.md", "d.md"]);
+    // a.md resolved, e.md's copy deleted outside the app, d.md is a notice.
+    expect(prunePersisted(p, new Set()).map((i) => i.path)).toEqual([]);
+    expect(prunePersisted(p, new Set([`${S}/e.md`])).map((i) => i.path)).toEqual(["e.md"]);
     // Copy check unavailable: nothing is pruned for a missing copy.
-    expect(prunePersisted(p, null).map((i) => i.path)).toEqual(["e.md", "d.md"]);
+    expect(prunePersisted(p, null).map((i) => i.path)).toEqual(["e.md"]);
   });
 
   it("parses malformed storage to null or drops bad entries, never throws", () => {

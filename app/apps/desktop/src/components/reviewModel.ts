@@ -25,9 +25,10 @@ export function reviewKey(it: Pick<ReconcileItem, "kind" | "docId" | "path">): s
 }
 
 /**
- * The reviewable items, newest first: every item with a local copy, every
- * clash rename (two sibling notes to compare), and every note restored from the
- * server (shown on its own). Folder notices have nothing to compare.
+ * The reviewable items, newest first: every item with a local copy and every
+ * clash rename (two sibling notes to compare). Notes restored from the server
+ * and kept folders are NOTICES: nothing to compare, so they stay in the banner
+ * sentence and Health's list but never in the review, its counts or storage.
  */
 export function reviewItems(items: readonly ReconcileItem[]): ReviewItem[] {
   const out: ReviewItem[] = [];
@@ -37,8 +38,6 @@ export function reviewItems(items: readonly ReconcileItem[]): ReviewItem[] {
       out.push({ key: reviewKey(it), kind: it.kind, path: it.path, copy, otherPath: null, at: it.at });
     } else if (it.kind === "renamedConflict" && it.newPath) {
       out.push({ key: reviewKey(it), kind: it.kind, path: it.path, copy: null, otherPath: it.newPath, at: it.at });
-    } else if (it.kind === "restoredFromServer") {
-      out.push({ key: reviewKey(it), kind: it.kind, path: it.path, copy: null, otherPath: null, at: it.at });
     }
   }
   return out.reverse();

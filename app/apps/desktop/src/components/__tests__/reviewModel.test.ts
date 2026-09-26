@@ -24,20 +24,30 @@ const items: ReconcileItem[] = [
 describe("review model", () => {
   beforeEach(() => reviewState.reset());
 
-  it("lists copies, clash renames and restores, newest first, deduped", () => {
+  it("lists copies and clash renames, newest first, deduped; notices are left out", () => {
     const list = reviewItems(items);
-    expect(list.map((i) => i.path)).toEqual(["a.md", "e.md", "d.md", "c.md"]);
+    expect(list.map((i) => i.path)).toEqual(["a.md", "e.md", "c.md"]);
     expect(list.find((i) => i.path === "c.md")?.otherPath).toBe("c (2).md");
     expect(list.find((i) => i.path === "a.md")?.copy).toEqual({ stamp: S, relPath: "a.md" });
-    expect(list.find((i) => i.path === "d.md")?.copy).toBeNull();
+    // Restored notes and kept folders are notices, never review items.
+    expect(list.some((i) => i.kind === "restoredFromServer" || i.kind === "folderKept")).toBe(false);
+  });
+
+  it("a launch with only notices has nothing to review", () => {
+    const notices: ReconcileItem[] = [
+      { kind: "restoredFromServer", docId: "d4", path: "d.md", at: 1 },
+      { kind: "folderKept", path: "F", at: 2 },
+    ];
+    expect(reviewItems(notices)).toEqual([]);
+    expect(pendingItems(reviewItems(notices), new Map())).toHaveLength(0);
   });
 
   it("moves items from pending to resolved", () => {
     const list = reviewItems(items);
     let resolved = withResolution(new Map(), list[0].key, "skipped");
-    expect(pendingItems(list, resolved)).toHaveLength(3);
+    expect(pendingItems(list, resolved)).toHaveLength(2);
     resolved = withResolution(resolved, list[1].key, "restored");
-    expect(pendingItems(list, resolved).map((i) => i.path)).toEqual(["d.md", "c.md"]);
+    expect(pendingItems(list, resolved).map((i) => i.path)).toEqual(["c.md"]);
   });
 
   it("resolve all keeps current for every pending item and counts only their copies", () => {
@@ -54,7 +64,7 @@ describe("review model", () => {
     const list = reviewItems(items);
     const resolved = withResolution(new Map(), list[1].key, "kept");
     expect(nextPendingKey(list, resolved, list[0].key)).toBe(list[2].key);
-    expect(nextPendingKey(list, resolved, list[3].key)).toBe(list[0].key);
+    expect(nextPendingKey(list, resolved, list[2].key)).toBe(list[0].key);
     expect(nextPendingKey(list, planResolveAll(list, resolved).next, list[0].key)).toBeNull();
   });
 

@@ -63,7 +63,9 @@ export function ReconcileBanner() {
   const lines = useMemo(() => summarizeReconcile(unresolved), [unresolved]);
   const reviewable = useMemo(() => reviewItems(items), [items]);
   const pendingReview = pendingItems(reviewable, resolved).length;
-  const allResolved = items.length > 0 && reviewable.length > 0 && lines.length === 0;
+  // Notices (restored notes, kept folders) are never reviewable: a launch with
+  // only notices shows its sentences with Details/Dismiss and no Compare.
+  const allResolved = reviewable.length > 0 && pendingReview === 0;
 
   const dismiss = () => {
     reconcileReport.drain();

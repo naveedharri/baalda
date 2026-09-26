@@ -74,9 +74,25 @@ export function HealthReconciled({ now }: { now: number }) {
                   </span>
                   {(() => {
                     const copy = reconcileCopyRef(it);
-                    return copy ? (
-                      <RecoveryCopyActions copy={copy} notePath={it.path} />
-                    ) : null;
+                    if (copy) return <RecoveryCopyActions copy={copy} notePath={it.path} />;
+                    // A restored note is a notice: nothing to compare, only the note.
+                    if (it.kind === "restoredFromServer") {
+                      return (
+                        <span className="health-missing-actions">
+                          <button
+                            type="button"
+                            className="ghost-pill sm"
+                            onClick={() => {
+                              useStore.getState().dismissSettings();
+                              void useStore.getState().openNoteByPath(it.path);
+                            }}
+                          >
+                            Open note
+                          </button>
+                        </span>
+                      );
+                    }
+                    return null;
                   })()}
                 </li>
               ))}

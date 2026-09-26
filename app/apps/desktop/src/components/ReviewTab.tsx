@@ -35,15 +35,6 @@ import {
 } from "./reviewModel";
 import type { TextSource } from "./virtualTabs";
 
-/** The one-line header of a "Restored" row, which has nothing to diff. */
-export const RESTORED_NOTICE =
-  "Restored from the server on launch. Nothing to compare: this note was missing on this device and came back unchanged. Delete it again to remove it for everyone.";
-
-/** A clash rename has two notes to keep; a restored note has one. */
-export function keepLabel(kind: ReviewItem["kind"]): string {
-  return kind === "renamedConflict" ? "Keep both" : "Keep";
-}
-
 /** Line counts are computed for at most this many rows up front. */
 const COUNT_LIMIT = 200;
 
@@ -146,26 +137,16 @@ function ItemView({
         <ReadOnlyText source={{ type: "copy", ...item.copy }} nonce={nonce} />
       </div>
     );
-  } else if (item.otherPath) {
+  } else {
+    // A clash rename: the two sibling notes (the only other reviewable kind).
+    const other = item.otherPath ?? item.path;
     body = (
       <CompareBody
         key={item.key}
         left={{ label: noteLabel(item.path), source: { type: "note", path: item.path } }}
-        right={{ label: noteLabel(item.otherPath), source: { type: "note", path: item.otherPath } }}
+        right={{ label: noteLabel(other), source: { type: "note", path: other } }}
         nonce={nonce}
       />
-    );
-  } else {
-    body = (
-      <div className="vtab-view">
-        <div className="vtab-header">
-          <span className="vtab-label" title={RESTORED_NOTICE}>
-            <strong>{noteLabel(item.path)}</strong>
-            {` · ${RESTORED_NOTICE}`}
-          </span>
-        </div>
-        <ReadOnlyText source={{ type: "note", path: item.path }} nonce={nonce} />
-      </div>
     );
   }
 
@@ -241,7 +222,7 @@ function ItemView({
               </button>
             )}
             <AsyncButton className="ghost-pill sm" onClick={() => run(async () => "kept")}>
-              {keepLabel(item.kind)}
+              Keep both
             </AsyncButton>
           </>
         )}
