@@ -275,6 +275,8 @@ jobs:
       # user had already installed. Two fallbacks keep a release shippable: an
       # unmatched version falls back to the topmost section (someone forgot to
       # rename the heading), and a missing file to the one-line placeholder.
+      # A matched section with no points is a SILENT release (see below), so a
+      # match is tracked on its own rather than inferred from having lines.
       #
       # The leading HTML comment (the authoring rules) is stripped, and the
       # `## <version>` heading line itself is not emitted — GitHub already
@@ -295,16 +297,19 @@ jobs:
               BEGIN { want = "## " ver }
               incomment { if (index($0, "-->")) incomment = 0; next }
               index($0, "<!--") { if (!index($0, "-->")) incomment = 1; next }
-              /^##[ \t]/ { nsec++; cur = ($0 == want) ? 2 : (nsec == 1 ? 1 : 0); next }
+              /^##[ \t]/ { nsec++; if ($0 == want) matched = 1; cur = ($0 == want) ? 2 : (nsec == 1 ? 1 : 0); next }
               cur == 1 { first[++nfirst] = $0 }
               cur == 2 { hit[++nhit] = $0 }
-              END { if (nhit > 0) emit(hit, nhit); else emit(first, nfirst) }
+              END { if (matched) emit(hit, nhit); else emit(first, nfirst) }
             ' docs/RELEASE_NOTES.md)
           else
             body=''
           fi
+          # An EMPTY section is the "silent update" switch: the release still
+          # ships and installs everywhere, but the marker (an HTML comment, so
+          # the GitHub page never shows it) keeps the in-app What's New closed.
           if [ -z "$body" ]; then
-            body='See the assets below to download and install this version.'
+            body=$'See the assets below to download and install this version.\n<!-- baalda:silent -->'
           fi
           echo "Release notes for v$VERSION:"
           echo "$body"

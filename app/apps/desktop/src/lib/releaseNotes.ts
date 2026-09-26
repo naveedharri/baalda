@@ -88,3 +88,24 @@ export function releaseNoteLines(
     .map((line) => line.replace(/\*\*(.+?)\*\*/g, "$1"))
     .slice(0, max);
 }
+
+/**
+ * The release workflows append this to a release body whose version section in
+ * `docs/RELEASE_NOTES.md` was left empty: "ship it, but don't announce it". It
+ * is an HTML comment, so the GitHub release page never shows it.
+ */
+export const SILENT_RELEASE_MARKER = "<!-- baalda:silent -->";
+
+/**
+ * Should the What's New modal stay closed for this update? Yes when the
+ * workflow marked it silent, and yes when there is nothing to list anyway — a
+ * modal that says "here's what changed" over an empty list tells the user an
+ * update happened and nothing else.
+ */
+export function isSilentRelease(
+  body: string | null | undefined,
+  version?: string | null,
+): boolean {
+  if (body?.includes(SILENT_RELEASE_MARKER)) return true;
+  return releaseNoteLines(notesForVersion(body, version)).length === 0;
+}

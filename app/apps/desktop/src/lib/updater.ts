@@ -25,6 +25,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useSyncExternalStore } from "react";
 
+import { clearRelaunchFocus, recordRelaunchFocus } from "./backgroundRelaunch";
 import { bridgeManager } from "./bridge";
 import { waitForQuietMoment } from "./quietMoment";
 
@@ -152,6 +153,9 @@ export async function installUpdate(
   }
   // See the Windows note above: this is the flush that is guaranteed to run.
   await flushOpenNote();
+  // Windows restarts from inside `install`, so its focus record is taken now;
+  // macOS/Linux take a fresh one right before `relaunch()` below.
+  await recordRelaunchFocus();
   let total = 0;
   let downloaded = 0;
   try {
@@ -178,9 +182,11 @@ export async function installUpdate(
     if (options.waitForQuiet !== false) await waitForQuietMoment();
     // Catch anything typed during the download and the wait.
     await flushOpenNote();
+    await recordRelaunchFocus();
     await relaunch();
     return true;
   } catch (e) {
+    await clearRelaunchFocus();
     setState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     return false;
   }
@@ -231,6 +237,8 @@ async function autoInstall(): Promise<void> {
  */
 export async function relaunchForUpdate(): Promise<void> {
   await flushOpenNote();
+  // A deliberate click: the restart may come back to the front.
+  await clearRelaunchFocus();
   await relaunch();
 }
 

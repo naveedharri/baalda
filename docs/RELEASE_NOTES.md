@@ -16,6 +16,9 @@
     reappear under a new version.
   - Every staging PR adds or edits ONLY the section for the version it will ship
     in. If that section does not exist yet, create it at the top.
+  - SILENT UPDATE: leave the version's section empty (the `## <version>` heading
+    and no points). The release still ships and every app installs it, but no
+    What's New modal appears.
 -->
 
 ## 0.1.69

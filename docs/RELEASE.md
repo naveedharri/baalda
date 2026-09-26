@@ -59,6 +59,18 @@ caps the modal at five points.
 tester-facing warning, because the version bump only happens at promotion — the
 base version there still names the release that already shipped.
 
+**Silent updates.** To ship a release without announcing it, leave its section
+empty — the `## <version>` heading and no points. Both workflows then add a
+`<!-- baalda:silent -->` marker to the release body (invisible on GitHub), and
+the desktop skips the What's New modal (`isSilentRelease`). The update still
+installs and restarts everywhere exactly as usual.
+
+**Background restarts.** An update that restarts the app while Baalda is behind
+another app keeps it there: the old process records its focus
+(`lib/backgroundRelaunch.ts` → Rust `set_background_relaunch`) and the new one
+hides itself again in `setup` on macOS, before its window is ever shown
+(`src-tauri/src/relaunch.rs`). What's New waits for the user's return.
+
 ### What triggers a release, and what doesn't
 
 | Event | Releases? |

@@ -43,7 +43,7 @@ import {
   justUpdatedTo,
   useUpdateState,
 } from "./lib/updater";
-import { notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
+import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
 import { onOpenFileRequest } from "./lib/openFileRequest";
@@ -686,6 +686,11 @@ function WhatsNewModal() {
     let cancelled = false;
     void justUpdatedTo().then((stash) => {
       if (cancelled || !stash) return;
+      // A silent release (its notes section left empty) updates without a word.
+      if (isSilentRelease(stash.notes, stash.version)) {
+        clearJustUpdated();
+        return;
+      }
       // Only the section for the version we were actually given, and at most
       // five points of it. The body used to be the whole cumulative notes file,
       // so every update opened on twelve bullets from releases already
