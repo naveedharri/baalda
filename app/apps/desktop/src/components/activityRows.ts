@@ -161,10 +161,10 @@ export function buildActivity(input: {
       text: shrinkText(e),
     });
   }
-  (input.access ?? []).forEach((e, i) => {
+  (input.access ?? []).forEach((e) => {
     rows.push({
       type: "access",
-      key: e.kind === "removed" ? `a:r:${e.docId}:${e.at}` : `a:g:${e.at}:${i}`,
+      key: e.kind === "removed" ? `a:r:${e.docId}:${e.at}` : `a:g:${e.at}`,
       at: e.at,
       label: "Access",
       path: e.kind === "removed" ? e.path : "",

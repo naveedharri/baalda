@@ -20,6 +20,8 @@ export interface ActivityLogEntry {
   newPath?: string;
   /** Kind-specific text: the failure reason, the access wording, the held count. */
   detail?: string;
+  /** A grant's note paths (capped at ACTIVITY_LOG_MAX_PATHS). */
+  paths?: string[];
   /** Doc id where there is one (Open / Retry resolve by it). */
   docId?: string;
   at: number;
@@ -27,6 +29,7 @@ export interface ActivityLogEntry {
 
 export const ACTIVITY_LOG_MAX_AGE_MS = 30 * 86_400_000;
 export const ACTIVITY_LOG_MAX = 500;
+export const ACTIVITY_LOG_MAX_PATHS = 50;
 const KEY_PREFIX = "baalda.activity.v1:";
 
 export const activityLogKey = (vaultRoot: string) => `${KEY_PREFIX}${vaultRoot}`;

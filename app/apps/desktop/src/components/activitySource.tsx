@@ -13,7 +13,7 @@ import { syncManager } from "../lib/sync/docSession";
 import { reconcileReport, type ReconcileItem, type ReconcileKind } from "../lib/sync/reconcileReport";
 import * as ipc from "../lib/ipc";
 import { buildActivity, failureEntries, type ActivityRow, type FailedEntry } from "./activityRows";
-import { appendLog, loadLog, removeFromLog, saveLog, type ActivityLogEntry } from "./activityLog";
+import { ACTIVITY_LOG_MAX_PATHS, appendLog, loadLog, removeFromLog, saveLog, type ActivityLogEntry } from "./activityLog";
 import { loadReadState, markAllRead, saveReadState, unreadCount, type ReadState } from "./activityUnread";
 
 /** Last Trash listing per server vault id, this app session. Never authorises. */
@@ -266,7 +266,7 @@ function reconcileFromLog(e: ActivityLogEntry): ReconcileItem {
 
 function accessFromLog(e: ActivityLogEntry, vaultId: string | null): AccessEvent | null {
   if (e.detail?.startsWith("granted:")) {
-    return { kind: "granted", at: e.at, vaultId, count: Number(e.detail.slice(8)) || 0 };
+    return { kind: "granted", at: e.at, vaultId, count: Number(e.detail.slice(8)) || 0, paths: e.paths };
   }
   if (!e.docId) return null;
   return { kind: "removed", at: e.at, vaultId, docId: e.docId, path: e.path };
@@ -275,7 +275,14 @@ function accessFromLog(e: ActivityLogEntry, vaultId: string | null): AccessEvent
 function accessLogEntry(e: AccessEvent): ActivityLogEntry {
   return e.kind === "removed"
     ? { id: `a:r:${e.docId}@${e.at}`, kind: "access", path: e.path, docId: e.docId, detail: "removed", at: e.at }
-    : { id: `a:g@${e.at}`, kind: "access", path: "", detail: `granted:${e.count}`, at: e.at };
+    : {
+        id: `a:g@${e.at}`,
+        kind: "access",
+        path: "",
+        detail: `granted:${e.count}`,
+        paths: e.paths?.slice(0, ACTIVITY_LOG_MAX_PATHS),
+        at: e.at,
+      };
 }
 
 /** Renders nothing. Mount once, above the panel. */

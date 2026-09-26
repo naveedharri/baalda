@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ReconcileItem } from "../../lib/sync/reconcileReport";
-import { buildActivity, failureEntries, heldText, shrinkText } from "../activityRows";
+import { accessText, buildActivity, failureEntries, heldText, shrinkText } from "../activityRows";
 
 const S = "2026-09-26T10-00-00-000Z";
 const T = Date.parse("2026-09-26T10:00:00.000Z");
@@ -119,5 +119,16 @@ describe("activity feed: held, shrunk, access, failed", () => {
       ["f", false],
     ]);
     expect(failureEntries(null)).toEqual([]);
+  });
+});
+
+describe("activity feed: grants", () => {
+  it("lists a grant as one Access row with a stable key", () => {
+    const ev = { kind: "granted" as const, at: T, vaultId: "v", count: 3, paths: ["a.md", "b.md", "c.md"] };
+    const rows = buildActivity({ reconcile: [], trash: [], copies: [], access: [ev] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ type: "access", key: `a:g:${T}`, label: "Access", path: "" });
+    expect(accessText(ev)).toBe("3 notes became available to you");
+    expect(accessText({ ...ev, count: 1 })).toBe("1 note became available to you");
   });
 });

@@ -214,6 +214,17 @@ function OpenNoteButton({ path }: { path: string }) {
   );
 }
 
+function GrantRowActions({ paths }: { paths: readonly string[] }) {
+  const first = paths[0] ?? null;
+  const readable = useNoteExists(first) === true;
+  if (!first || !readable) return null;
+  return (
+    <span className="health-missing-actions">
+      <OpenNoteButton path={first} />
+    </span>
+  );
+}
+
 function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: () => void }) {
   const exists = useNoteExists(failure.path || null) === true;
   if (!exists && !failure.retryable) return null;
@@ -257,7 +268,14 @@ function rowTitle(row: ActivityRow): string {
   if (row.type === "shrunk") {
     return `${ACTIVITY_HINT.shrunk}${row.event.deleted ? "\nThe note is deleted now." : ""}\n${row.path}`;
   }
-  if (row.type === "access") return `${ACTIVITY_HINT.access}${row.path ? `\n${row.path}` : ""}`;
+  if (row.type === "access") {
+    if (row.event.kind === "granted") {
+      const paths = row.event.paths ?? [];
+      const more = row.event.count - paths.length;
+      return [ACTIVITY_HINT.access, ...paths, ...(more > 0 ? [`and ${more.toLocaleString()} more`] : [])].join("\n");
+    }
+    return `${ACTIVITY_HINT.access}\n${row.path}`;
+  }
   if (row.type === "failed") return `${ACTIVITY_HINT.failed}\n${row.text}`;
   return `${ACTIVITY_HINT.copy}\n.context/trash/${row.copy.stamp}/${row.copy.relPath}`;
 }
@@ -385,7 +403,9 @@ export function ActivityFeed() {
                     <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
                   ) : row.type === "failed" ? (
                     activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
-                  ) : row.type === "access" ? null : row.type === "trash" ? (
+                  ) : row.type === "access" ? (
+                    row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
+                  ) : row.type === "trash" ? (
                     <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
                   ) : (
                     <RecoveryCopyActions
