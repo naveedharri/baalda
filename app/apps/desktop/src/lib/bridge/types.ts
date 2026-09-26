@@ -98,6 +98,14 @@ export interface BridgeIO {
   /** SHA-256 hex of `text`. May be sync (Node) or async (Web Crypto). */
   sha256(text: string): Promise<string> | string;
   persistence: CrdtPersistence;
+  /**
+   * Optional: preserve `content` (bytes found at `path`) as a recovery copy
+   * under `.context/trash`, resolving to where it landed. Used before a
+   * signed-in open whose file the doc cannot take in yet — no local CRDT, and
+   * bytes that differ from the disk base — so the first pull's egest can never
+   * be the only thing that ever happened to them.
+   */
+  saveRecoveryCopy?(path: string, content: string): Promise<string | null>;
   /** Optional: re-index a written file if `writeFileAtomic` doesn't itself. */
   reindex?(path: string): Promise<void> | void;
   /** Optional error sink (defaults to console.error). */

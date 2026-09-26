@@ -25,6 +25,7 @@ import {
   type RecoveryItem,
 } from "../../versions/recovery.js";
 import { getSession } from "../session.js";
+import { trashedNotePermission } from "../../trash/access.js";
 
 /**
  * Version history API (session-authenticated).
@@ -110,6 +111,20 @@ async function noteVaultId(docId: string): Promise<string | null> {
   return rows[0]?.vault_id ?? null;
 }
 
+/** Any note row, live or in Trash. Version READS work on a deleted note so the
+ *  Trash can show its history; a revert stays refused (409 `note_deleted`). */
+async function anyNote(docId: string): Promise<{ vaultId: string; deleted: boolean } | null> {
+  const { rows } = await pool.query<{ vault_id: string; deleted: boolean }>(
+    "SELECT vault_id, deleted_at IS NOT NULL AS deleted FROM notes WHERE id = $1",
+    [docId],
+  );
+  return rows[0] ? { vaultId: rows[0].vault_id, deleted: rows[0].deleted } : null;
+}
+
+async function readPermission(userId: string, docId: string, deleted: boolean) {
+  return deleted ? trashedNotePermission(userId, docId) : effectivePermission(userId, docId);
+}
+
 export function createVersionRoutes(deps: VersionRouteDeps): Hono {
   const routes = new Hono();
 
@@ -119,8 +134,9 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const docId = c.req.param("id");
-    if (!(await noteVaultId(docId))) return c.json({ error: "Unknown note" }, 404);
-    if ((await effectivePermission(session.userId, docId)) === "none") {
+    const note = await anyNote(docId);
+    if (!note) return c.json({ error: "Unknown note" }, 404);
+    if ((await readPermission(session.userId, docId, note.deleted)) === "none") {
       return c.json({ error: "No access to this note" }, 403);
     }
 
@@ -140,8 +156,9 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const docId = c.req.param("id");
-    if (!(await noteVaultId(docId))) return c.json({ error: "Unknown note" }, 404);
-    if ((await effectivePermission(session.userId, docId)) === "none") {
+    const note = await anyNote(docId);
+    if (!note) return c.json({ error: "Unknown note" }, 404);
+    if ((await readPermission(session.userId, docId, note.deleted)) === "none") {
       return c.json({ error: "No access to this note" }, 403);
     }
 
@@ -167,7 +184,13 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const docId = c.req.param("id");
     const vaultId = await noteVaultId(docId);
-    if (!vaultId) return c.json({ error: "Unknown note" }, 404);
+    if (!vaultId) {
+      const gone = await anyNote(docId);
+      if (gone?.deleted) {
+        return c.json({ error: "Restore the note from Trash before reverting it", code: "note_deleted" }, 409);
+      }
+      return c.json({ error: "Unknown note" }, 404);
+    }
     if (!(await canEditDoc(session.userId, docId))) {
       return c.json({ error: "You cannot edit this note" }, 403);
     }

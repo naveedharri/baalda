@@ -271,6 +271,9 @@ export interface FileStat {
   size: number;
   /** Milliseconds since the Unix epoch, or null when the OS won't say. */
   modified: number | null;
+  /** Creation (birth) time, ms since the Unix epoch; null/absent where the
+   *  platform doesn't record one (fall back to `modified`). */
+  created?: number | null;
 }
 
 /** Outcome of an import (mirrors the Rust `ImportSummary`). */

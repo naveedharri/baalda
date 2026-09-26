@@ -372,6 +372,25 @@ export class NoteBridge {
       // later egest of server content is seen as a genuine change and no
       // spurious ingest fires before we've seeded.
       this.lastWrittenHash = await this.hash(fileText);
+      // Signed in, no local CRDT, and the file holds bytes this device never
+      // agreed on (no disk base, or one they moved on from): an external
+      // writer edited a note this device never opened. The pull is about to
+      // decide the doc's text, and the orphan seed only runs when the server
+      // turns out empty — so save the file aside first. Nothing below may be
+      // the only record of those bytes.
+      if (
+        !this.seedOnOpen &&
+        fileRead &&
+        fileText.trim().length > 0 &&
+        this.diskBase !== this.lastWrittenHash &&
+        this.io.saveRecoveryCopy
+      ) {
+        try {
+          await this.io.saveRecoveryCopy(this._path, fileText);
+        } catch (e) {
+          this.reportError(e, "hydrate:saveRecoveryCopy");
+        }
+      }
       if (this.seedOnOpen && fileText.length > 0 && this.text.toString() === fileText) {
         this.recordDiskBase(this.lastWrittenHash);
       }

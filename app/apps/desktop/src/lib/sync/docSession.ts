@@ -60,7 +60,9 @@ import {
   type VaultPeer,
   type VaultSyncStatus,
 } from "./vaultSyncEngine";
-import type { VoiceFrame } from "./vaultProtocol";
+import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
+import { svFromBase64 } from "./ackedSv";
+import { ReadOnlyRejections } from "./readOnlyRejections";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
@@ -1617,13 +1619,30 @@ export class SyncManager implements InboundHost {
    * wholesale would have left the biggest revocations as the only ones with no
    * cross-check at all.
    */
+  /**
+   * `ready.tombstones`: docs this device holds that a teammate DELETED. Fed to
+   * the registry as tombstones for the next pull (exactly what the listing's
+   * last page would say), and taken OUT of the named-revocation set, so a
+   * deletion can never be executed as a revocation (the D1 recovery copy and
+   * the server-trash push only happen on the deletion path).
+   */
+  handleServerTombstones(docIds: string[], scope: VaultScope): void {
+    if (!scope.isCurrent() || docIds.length === 0) return;
+    for (const docId of docIds) this.serverRevoked.delete(docId);
+    this.registry.noteServerTombstones?.(docIds);
+    console.info(`[sync] server says ${docIds.length} doc(s) we hold were deleted`);
+    this.handleRegistryChanged("registry-frame"); // a server-stated structural change
+  }
+
   handleServerRevoked(docIds: string[], truncated: boolean, scope: VaultScope): void {
     if (!scope.isCurrent() || docIds.length === 0) return;
     this.aclChangedAt = Date.now();
     // Unioned, never replaced: a later connect's list is bounded by whatever is
     // still in the manifest, and a doc already removed from disk has left it.
     // Replacing would quietly widen the authority back out for the rest.
-    for (const docId of docIds) this.serverRevoked.add(docId);
+    for (const docId of docIds) {
+      if (!this.registry.isServerTombstoned?.(docId)) this.serverRevoked.add(docId);
+    }
     console.info(
       `[sync] server revoked ${docIds.length} doc(s) we hold${truncated ? " (truncated)" : ""}`,
     );
@@ -3072,6 +3091,74 @@ export class SyncManager implements InboundHost {
    * echo hash is set: the watcher event for this write is then recognised as our
    * own and no content push is queued for it.
    */
+  /**
+   * This device's local state vector for `docId`: the bridge that owns it if
+   * one is resident (it may hold ops not yet in SQLite), else the persisted
+   * CRDT. Null when the device holds no CRDT for the doc. Read-only: never
+   * opens a bridge, so it is safe inside the inbound removal loop.
+   */
+  async localStateVector(docId: string): Promise<Uint8Array | null> {
+    const open = bridgeManager.currentBridge();
+    if (open && open.docId === docId) return Y.encodeStateVector(open.doc);
+    const resident = this.docStore?.peekResident(docId);
+    if (resident) return Y.encodeStateVector(resident.doc);
+    const scope = this.scope;
+    if (!scope || !scope.isCurrent()) return null;
+    const state = await ipc.loadYjsState(docId, scope.vaultEpoch);
+    const parts = [...(state.snapshot ? [state.snapshot] : []), ...state.updates];
+    if (parts.length === 0) return null;
+    return Y.encodeStateVectorFromUpdate(parts.length === 1 ? parts[0] : Y.mergeUpdates(parts));
+  }
+
+  /**
+   * D1 + D6: `docId` was deleted on the server while this device held unseen
+   * work. Offer this device's whole CRDT state to the server's soft-deleted copy
+   * (the server accepts pushes while the note's trash window is open), so the
+   * team's Trash restores the merged text. One item through the batch route —
+   * deliberately NOT through the pusher: its bridges egest to the note's path,
+   * which would recreate the file the removal is about to take away, and taking
+   * the pusher slot would cancel a running content run.
+   *
+   * Any refusal (404 / 403 / `note_deleted` / an older server) is final: the
+   * `.context/trash` copy the registry made first is the guarantee.
+   */
+  async recoverDeletedDoc(docId: string, _path: string): Promise<void> {
+    const scope = this.scope;
+    const vaultId = this.registry.vaultId;
+    if (!scope || !scope.isCurrent() || !vaultId || this.serverTooOld) return;
+    const state = await ipc.loadYjsState(docId, scope.vaultEpoch);
+    const parts = [...(state.snapshot ? [state.snapshot] : []), ...state.updates];
+    if (parts.length === 0) return;
+    const update = parts.length === 1 ? parts[0] : Y.mergeUpdates(parts);
+    if (!scope.isCurrent()) return;
+    try {
+      const [res] = await api.batchPushDocs(vaultId, [{ docId, update: bytesToBase64(update) }]);
+      console.info(`[sync] recovery push for deleted ${docId}: ${res?.status ?? "no answer"}${res?.code ? ` (${res.code})` : ""}`);
+    } catch (e) {
+      console.info(`[sync] recovery push for deleted ${docId} refused — the local trash copy stands`, e);
+    }
+  }
+
+  /** The markdown this device's local CRDT holds for `docId`, or null (read-only). */
+  async localText(docId: string): Promise<string | null> {
+    const open = bridgeManager.currentBridge();
+    if (open && open.docId === docId) return open.serialize();
+    const resident = this.docStore?.peekResident(docId);
+    if (resident) return resident.serialize();
+    const scope = this.scope;
+    if (!scope || !scope.isCurrent()) return null;
+    const state = await ipc.loadYjsState(docId, scope.vaultEpoch);
+    const parts = [...(state.snapshot ? [state.snapshot] : []), ...state.updates];
+    if (parts.length === 0) return null;
+    const doc = new Y.Doc();
+    try {
+      for (const u of parts) Y.applyUpdate(doc, u);
+      return doc.getText("content").toString();
+    } finally {
+      doc.destroy();
+    }
+  }
+
   async materializeContent(docId: string, path: string): Promise<boolean> {
     const scope = this.scope;
     const store = this.docStore;
@@ -4235,6 +4322,7 @@ export class SyncManager implements InboundHost {
         this.serverEmpty.delete(docId);
         this.serverBehind.delete(docId);
       },
+      markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
       // Never touch the open note: its editor session owns that doc's provider.
       skip: (docId) => store.suppressedDoc() === docId,
       onFailure: (f) => this.recordBulkFailure(f),
@@ -5237,6 +5325,13 @@ export class SyncManager implements InboundHost {
     // would cold-apply to that same Y.Doc: two writers on one doc, the one thing
     // this layer is built to avoid.
     if (this.currentDocId) store.setSuppressedDoc(this.currentDocId);
+    // Read-only pushes the server dropped: keep the edit, once per doc per minute.
+    const readOnlyRejections = new ReadOnlyRejections({
+      pathOf: (docId) => this.registry.pathForDocId(docId),
+      localText: (docId) => this.localText(docId),
+      writeTrashCopy: (path, stamp, content) =>
+        ipc.writeTrashCopy(path, stamp, content, scope.vaultEpoch),
+    });
     this.vaultEngine = new VaultSyncEngine({
       api,
       vaultId,
@@ -5303,6 +5398,19 @@ export class SyncManager implements InboundHost {
       // The live half of the same statement: `refreshAcl` names each lost doc
       // with a `drop` just before the `reauth`, so both paths carry a list.
       onServerDrop: (docId) => this.handleServerDrop(docId, scope),
+      // Deleted docs we hold (never revocations, even if `revoked` names them).
+      onServerTombstones: (docIds) => this.handleServerTombstones(docIds, scope),
+      onServerRejected: (docId) => {
+        if (scope.isCurrent()) void readOnlyRejections.handle(docId);
+      },
+      // The server fully covers these hello vectors: record them as acks.
+      onServerCovered: (acks) => {
+        if (!scope.isCurrent()) return;
+        for (const [docId, b64] of acks) {
+          const sv = svFromBase64(b64);
+          if (sv) this.registry.recordAck?.(docId, sv);
+        }
+      },
       liveOnly,
       // The tree binaries this device holds. Not in the manifest — a binary has
       // no CRDT and so no state vector — but announced all the same, because
@@ -5807,6 +5915,9 @@ export class SyncManager implements InboundHost {
     if (!sync.readOnly && !(await sync.whenFlushed(30_000))) return;
     if (!current()) return;
     this.registry.markPushed(docId);
+    // Flushed and editable: the server holds every op this doc had. (A view-only
+    // doc is confirmed without a flush, so it proves nothing about local ops.)
+    if (!sync.readOnly && bridge.doc) this.registry.recordAck?.(docId, Y.encodeStateVector(bridge.doc));
     this.progress?.doc(docId, "synced");
   }
 

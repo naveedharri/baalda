@@ -7896,3 +7896,11 @@ button.secondary:active:not(:disabled),
 .row-more-menu {
   min-width: 200px;
 }
+
+/* Reconnect summary: one line per kind, stacked. */
+.reconcile-banner-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}

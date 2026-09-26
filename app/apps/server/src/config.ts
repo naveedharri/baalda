@@ -82,6 +82,8 @@ export const config = {
   hocuspocusPort: int("HOCUSPOCUS_PORT", 3011),
   syncTokenTtlSeconds: int("SYNC_TOKEN_TTL_SECONDS", 600),
   compactionThreshold: int("COMPACTION_THRESHOLD", 50),
+  /** Days a soft-deleted note stays in Trash before purge (`src/trash/retention.ts`). */
+  trashRetentionDays: int("TRASH_RETENTION_DAYS", 30),
   /** Quiet time after a note's last edit before a version is captured.
    *  Lower it locally to test the history panel without the 10-minute wait. */
   versionIdleMs: int("VERSION_IDLE_MS", 10 * 60_000),

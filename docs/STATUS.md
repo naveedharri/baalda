@@ -22,6 +22,11 @@ tags: [baalda, status, roadmap]
 - **Billing:** 🟢 Per-vault Pro via Polar, with the full subscription lifecycle (2026-09-09, #109–#111):
   deleting a vault cancels at period end before it deletes, subscriptions survive as tombstones, and an
   owner can transfer one between their vaults from Vault Settings → Billing.
+- **Offline reconciliation:** 🟡 In review (2026-09-26, branch `feat/offline-reconciliation`): inbound
+  deletes/revocations gate on a server-acknowledged state vector (unsent edits get a recovery copy
+  first), same-path creates become two notes, closed-app renames keep their id, a once-per-session
+  summary banner, and a server-side 30-day per-vault Trash (Restore, pushes into deleted notes
+  accepted, purge keeps a tombstone row).
 - **Next action:** Phase 4 polish / launch decisions (WYSIWYG, vector search, OAuth, iOS).
 
 > **Requirement coverage:** Phases 0–3 deliver **10 of the 12** core requirements,

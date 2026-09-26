@@ -43,6 +43,7 @@ import {
   type AccessResource,
 } from "../permissions/access-management.js";
 import { buildAccessContext, resolveAccessForUser } from "../permissions/resolver.js";
+import { softDeleteSet } from "../trash/retention.js";
 
 /**
  * The CRUD operations the MCP exposes, each one gated by the SAME ACL the rest
@@ -382,7 +383,7 @@ export async function deleteFolder(
       );
     }
   }
-  const { deletedNoteIds } = await deleteFolderCascade(pool, folderId);
+  const { deletedNoteIds } = await deleteFolderCascade(pool, folderId, ctx.auth.userId ?? null);
   // Same trailing work as `delete_note`: drop derived index rows and kick anyone
   // whose editor is still attached to a doc that no longer exists.
   await purgeNoteIndex(deletedNoteIds);
@@ -937,7 +938,10 @@ export async function editNote(
 /** Soft-delete a note (matches the app: sets deleted_at, keeps CRDT history). */
 export async function deleteNote(ctx: McpContext, docId: string) {
   const note = await requireEditableNote(ctx.auth, docId);
-  await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [docId]);
+  await pool.query(`UPDATE notes SET ${softDeleteSet("$2")} WHERE id = $1`, [
+    docId,
+    ctx.auth.userId ?? null,
+  ]);
   // Drop derived index rows and kick any live editors off the now-gone doc.
   await purgeNoteIndex([docId]);
   ctx.disconnectDoc(note.vault_id, docId);

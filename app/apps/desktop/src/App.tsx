@@ -3,6 +3,7 @@ import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
+import { ReconcileBanner } from "./components/ReconcileBanner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { NoteLimitBannerView, noteLimitBanner } from "./components/NoteLimitBanner";
@@ -1463,6 +1464,7 @@ export default function App() {
           <VaultRootMissingBanner />
           <BulkDeleteBanner />
           <ClosedAppChangesBanner />
+          <ReconcileBanner />
           <NotSyncingBanner />
           <NoteLimitBanner />
           <RemovedBanner />

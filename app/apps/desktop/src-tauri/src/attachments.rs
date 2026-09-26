@@ -37,6 +37,12 @@ pub struct FileStat {
     pub size: u64,
     /// Milliseconds since the Unix epoch, or `None` when the OS won't say.
     pub modified: Option<i64>,
+    /// Creation ("birth") time in ms since the Unix epoch, or `None` where the
+    /// platform/filesystem doesn't record one (many Linux filesystems). The
+    /// sync layer's same-path conflict rule orders a local file against the
+    /// server note's `created_at` with it, falling back to `modified`.
+    #[serde(default)]
+    pub created: Option<i64>,
 }
 
 /// Stat a vault-relative file. Read-scoped like `read_binary_file` (the whole
@@ -52,7 +58,12 @@ pub fn file_stat(vault: &Path, rel: &str) -> AppResult<FileStat> {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64);
-    Ok(FileStat { size: meta.len(), modified })
+    let created = meta
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+    Ok(FileStat { size: meta.len(), modified, created })
 }
 
 /// Is there a FILE at this vault-relative path?

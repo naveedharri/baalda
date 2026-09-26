@@ -164,6 +164,35 @@ export interface Vault {
   root_frozen?: boolean;
 }
 
+/** One soft-deleted note in `GET /api/vaults/:vaultId/trash`. */
+export interface TrashItem {
+  docId: string;
+  relPath: string;
+  /** ISO timestamp. */
+  deletedAt: string;
+  /** Null when the deleter is unknown (an older delete, a removed account). */
+  deletedBy: { id: string; name: string } | null;
+  /** ISO timestamp after which the server purges it for good. */
+  purgeAfter: string;
+  sizeBytes: number;
+  /** Someone's edits reached the server after the delete, or never got a
+   *  chance to: the version in Trash may hold work nobody else has seen. */
+  hasUnsyncedContributions: boolean;
+}
+
+export interface TrashListing {
+  items: TrashItem[];
+  truncated: boolean;
+}
+
+/** `POST /api/notes/:docId/restore`. `renamed` ⇒ `relPath` differs from the
+ *  original because that path was taken. */
+export interface RestoredNote {
+  docId: string;
+  relPath: string;
+  renamed: boolean;
+}
+
 export interface RegisteredNote {
   id: string;
   docId?: string;
@@ -189,6 +218,10 @@ export interface RegisteredNote {
   /** Who created the note, retained for attribution and config compatibility. */
   createdBy?: string | null;
   created_by?: string | null;
+  /** When the server row was created (ISO). `GET /api/notes` sends the raw
+   *  column, `created_at`; the camel spelling is accepted for other routes. */
+  createdAt?: string | null;
+  created_at?: string | null;
 }
 
 /** The normalized "last edited by" fact for one note (see {@link noteLastEdited}). */
@@ -2022,6 +2055,33 @@ export class ApiClient {
   /** Soft-delete a note (keeps its doc_id row; drops it from the registry list). */
   async deleteNote(id: string): Promise<void> {
     await this.request<unknown>("DELETE", `/api/notes/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * The vault's Trash: soft-deleted notes the caller can read, newest first,
+   * with who deleted each one and when the server will purge it.
+   * `truncated` means the server capped the list; the UI says so rather than
+   * implying the rows shown are all there is.
+   */
+  async listTrash(vaultId: string): Promise<TrashListing> {
+    const { data } = await this.request<Partial<TrashListing>>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/trash`,
+    );
+    return { items: data.items ?? [], truncated: data.truncated === true };
+  }
+
+  /**
+   * Undo a soft delete. The server may land it at a different path when the
+   * original is taken (`renamed: true`). 404 = unknown or not deleted, 403 = no
+   * permission; both surface as an `ApiError` for the caller to show inline.
+   */
+  async restoreNote(docId: string): Promise<RestoredNote> {
+    const { data } = await this.request<RestoredNote>(
+      "POST",
+      `/api/notes/${encodeURIComponent(docId)}/restore`,
+    );
+    return data;
   }
 
   /**

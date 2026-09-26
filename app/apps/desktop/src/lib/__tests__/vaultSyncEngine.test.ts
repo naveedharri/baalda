@@ -875,6 +875,108 @@ describe("VaultSyncEngine — server-empty reporting", () => {
     expect(events).toHaveLength(1);
   });
 
+  it("a doc in ready.tombstones is a deletion, never a revocation", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const order: string[] = [];
+    const revoked: string[][] = [];
+    const tombstones: string[][] = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onServerTombstones: (ids) => {
+        tombstones.push(ids);
+        order.push("tombstones");
+      },
+      onServerRevoked: (ids) => {
+        revoked.push(ids);
+        order.push("revoked");
+      },
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+    ws!.onmessage?.({
+      data: JSON.stringify({ t: "ready", revoked: ["gone", "private"], tombstones: ["gone"] }),
+    });
+    expect(tombstones).toEqual([["gone"]]);
+    expect(revoked).toEqual([["private"]]);
+    expect(order).toEqual(["tombstones", "revoked"]);
+
+    // Named ONLY as tombstoned: nothing reaches the revocation path at all.
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready", revoked: ["gone"], tombstones: ["gone"] }) });
+    expect(revoked).toHaveLength(1);
+    // An older server omits the field: behaviour is unchanged.
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready", revoked: ["x"] }) });
+    expect(revoked[1]).toEqual(["x"]);
+    expect(tombstones).toHaveLength(2);
+  });
+
+  it("parses and dispatches a read-only rejection; ignores malformed ones", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const got: Array<[string, string]> = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onServerRejected: (docId, reason) => got.push([docId, reason]),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+    ws!.onmessage?.({ data: JSON.stringify({ t: "rejected", docId: "d1", reason: "read_only" }) });
+    ws!.onmessage?.({ data: JSON.stringify({ t: "rejected", docId: "d2", reason: "something_new" }) });
+    ws!.onmessage?.({ data: JSON.stringify({ t: "rejected", reason: "read_only" }) });
+    expect(got).toEqual([["d1", "read_only"]]);
+    expect(sink.dropped).toEqual([]); // a rejection is not a revocation
+  });
+
+  it("no rejected frame, no dispatch", async () => {
+    const sink = new MemSink();
+    let ws: FakeWs | null = null;
+    const got: string[] = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(), vaultId: "v1", sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onServerRejected: (docId) => got.push(docId),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready", revoked: ["x"] }) });
+    ws!.onmessage?.({ data: JSON.stringify({ t: "drop", docId: "y" }) });
+    expect(got).toEqual([]);
+  });
+
+  it("ready.covered acks the EXACT state vector the hello sent", async () => {
+    const sent = Uint8Array.from([1, 7, 3]); // opaque to the engine
+    const sink = new MemSink({ a: sent, b: Uint8Array.from([1, 9, 9]) });
+    let ws: FakeWs | null = null;
+    const acks: Array<Array<[string, string]>> = [];
+    const engine = new VaultSyncEngine({
+      api: tokenApi(),
+      vaultId: "v1",
+      sink,
+      wsFactory: () => (ws = new FakeWs()),
+      onServerCovered: (a) => acks.push(a),
+    });
+    engine.start();
+    ws!.onopen?.(null);
+    await awaitHello(ws!);
+    const hello = ws!.helloText() as unknown as { manifest: Record<string, string> };
+    // A doc the hello never named ("zzz") cannot be acked from this frame.
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready", covered: ["a", "zzz"] }) });
+    expect(acks).toEqual([[["a", hello.manifest.a]]]);
+    // No `covered` (older server, or live-only mode): nothing is acked.
+    ws!.onmessage?.({ data: JSON.stringify({ t: "ready" }) });
+    expect(acks).toHaveLength(1);
+  });
+
   it("consumes bounded revocation batches before ready and rejects malformed batches", async () => {
     const sink = new MemSink();
     let ws: FakeWs | null = null;
