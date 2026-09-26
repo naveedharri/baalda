@@ -7962,15 +7962,23 @@ button.secondary:active:not(:disabled),
 .panel-btn {
   position: relative;
 }
+/* Unread Activity rows: the same pill as the panel's tab count
+   (.right-panel-count), ringed so it reads over the icon. */
 .panel-btn-badge {
   position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  top: 0;
+  right: -2px;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
   background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
   box-shadow: 0 0 0 2px var(--bg-surface);
+  pointer-events: none;
 }
 .right-panel-tab.active,
 .panel-btn.active {

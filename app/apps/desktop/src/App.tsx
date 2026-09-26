@@ -14,6 +14,8 @@ import {
   VaultFolderMissingBannerView,
 } from "./components/VaultFolderMissing";
 import { TalkButton } from "./components/TalkButton";
+import { ActivityHost, useActivitySnapshot } from "./components/activitySource";
+import { badgeText } from "./components/activityUnread";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -915,6 +917,8 @@ export default function App() {
   const rightPanelOpen = useStore((s) => s.rightPanel != null);
   const versionsTabOpen = useStore((s) => s.rightPanel?.tab === "versions");
   const pendingReview = usePendingReviewCount();
+  // Unread Activity rows (all kinds), counted by the always-mounted ActivityHost.
+  const activityUnread = useActivitySnapshot().unread;
   const editorMeasure = useStore((s) => s.editorMeasure);
   // An open preview (image, PDF, video, spreadsheet, code…) isn't a synced
   // note — hide the save/sync chrome. The registry decides, so this cannot
@@ -1448,8 +1452,20 @@ export default function App() {
                 its header now). */}
             <button
               className={`icon-btn panel-btn${rightPanelOpen ? " active" : ""}`}
-              title={pendingReview > 0 ? `Panel (${pendingReview} to review)` : "Panel"}
-              aria-label={pendingReview > 0 ? `Panel, ${pendingReview} changes to review` : "Panel"}
+              title={
+                activityUnread > 0
+                  ? `Panel (${activityUnread} new in Activity${pendingReview > 0 ? `, ${pendingReview} to review` : ""})`
+                  : pendingReview > 0
+                    ? `Panel (${pendingReview} to review)`
+                    : "Panel"
+              }
+              aria-label={
+                activityUnread > 0
+                  ? `Panel, ${activityUnread} new in Activity`
+                  : pendingReview > 0
+                    ? `Panel, ${pendingReview} changes to review`
+                    : "Panel"
+              }
               aria-pressed={rightPanelOpen}
               onClick={() => {
                 if (rightPanelOpen) useStore.getState().closeRightPanel();
@@ -1468,7 +1484,11 @@ export default function App() {
                 <rect x="3" y="4" width="18" height="16" rx="3" />
                 <path d="M15 4v16" />
               </svg>
-              {pendingReview > 0 && <span className="panel-btn-badge" aria-hidden="true" />}
+              {activityUnread > 0 && (
+                <span className="panel-btn-badge" aria-hidden="true">
+                  {badgeText(activityUnread)}
+                </span>
+              )}
             </button>
           </header>
           <VaultUnsyncedBanner />
@@ -1527,6 +1547,7 @@ export default function App() {
           </div>
           <BacklinksPanel />
           {/* Slides in over the editor from the right; anchored to .main. */}
+          <ActivityHost />
           <RightPanel />
         </main>
   

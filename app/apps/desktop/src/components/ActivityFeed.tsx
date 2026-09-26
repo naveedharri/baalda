@@ -1,20 +1,18 @@
 /* The right panel's Activity tab (RightPanel.tsx): ONE chronological feed of
-   what happened to this vault's notes — the reconnect report, the server's
-   Trash, and local recovery copies — merged by `activityRows.ts`. It replaces
-   the three headed sections that used to live in Vault Settings → Health.
+   what happened to this vault's notes, merged by `activityRows.ts`. This file
+   only renders; the data, fetch schedule, notice log and unread state live in
+   `activitySource.tsx`, mounted once so the toolbar badge works while closed.
 
    The server Trash keeps its old rules: only a connected vault is current;
    offline or signed out it shows the last listing it fetched (per vault id,
    this app session) and Restore waits for the connection. */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
-import { ApiError, type ShrinkEvent, type TrashItem, type TrashListing } from "../lib/api";
-import type { HealthFailures } from "../lib/health/model";
+import type { ShrinkEvent, TrashItem } from "../lib/api";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
-import { reconcileReport, type ReconcileItem } from "../lib/sync/reconcileReport";
-import * as ipc from "../lib/ipc";
+import type { ReconcileItem } from "../lib/sync/reconcileReport";
 import { clockTime, formatBytes, relativeTime } from "../lib/health/format";
 import { AsyncButton } from "./AsyncButton";
 import { PathText } from "./HealthShared";
@@ -24,29 +22,16 @@ import { compareTrash, openReviewTab, openTrashPreview } from "./recoveryActions
 import { usePendingReviewCount } from "./ReviewTab";
 import {
   ACTIVITY_HINT,
-  buildActivity,
-  failureEntries,
   type ActivityRow,
   type FailedEntry,
 } from "./activityRows";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { trashErrorMessage, useActivitySnapshot } from "./activitySource";
 import { openCompare } from "./recoveryActions";
 import { noteLabel } from "../lib/notePath";
 
 /** Rows shown before "Show more", like the Health lists. */
 const PAGE = 20;
-
-/** Last Trash listing per server vault id, this app session. Never authorises. */
-const lastTrash = new Map<string, { listing: TrashListing; at: number }>();
-
-export function trashErrorMessage(e: unknown): string {
-  if (e instanceof ApiError) {
-    if (e.status === 404) return "This note is no longer in Trash.";
-    if (e.status === 403) return "You don't have permission to restore this note.";
-    return e.message || `The server refused (${e.status}).`;
-  }
-  return e instanceof Error ? e.message : String(e);
-}
 
 function formatDate(iso: string): string {
   const ms = Date.parse(iso);
@@ -61,125 +46,6 @@ function useNow(): number {
     return () => window.clearInterval(id);
   }, []);
   return now;
-}
-
-/** Quiet-period before a refresh runs, so a burst of triggers is one fetch. */
-const REFRESH_DEBOUNCE_MS = 250;
-/** Background refresh while the tab is visible. */
-const REFRESH_INTERVAL_MS = 60_000;
-/** "Updating…" appears only for a fetch slower than this. */
-const SLOW_FETCH_MS = 400;
-
-/** One debounced refresh counter: every trigger calls `schedule`, and a burst
- *  of them bumps `nonce` once. */
-function useAutoRefresh() {
-  const [nonce, setNonce] = useState(0);
-  const timer = useRef<number | null>(null);
-  const schedule = useCallback(() => {
-    if (timer.current != null) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => {
-      timer.current = null;
-      setNonce((n) => n + 1);
-    }, REFRESH_DEBOUNCE_MS);
-  }, []);
-  useEffect(
-    () => () => {
-      if (timer.current != null) window.clearTimeout(timer.current);
-    },
-    [],
-  );
-  return { nonce, schedule };
-}
-
-/** True once `busy` has held for SLOW_FETCH_MS; false as soon as it clears. */
-function useSlow(busy: boolean): boolean {
-  const [slow, setSlow] = useState(false);
-  useEffect(() => {
-    if (!busy) {
-      setSlow(false);
-      return;
-    }
-    const id = window.setTimeout(() => setSlow(true), SLOW_FETCH_MS);
-    return () => window.clearTimeout(id);
-  }, [busy]);
-  return slow;
-}
-
-/** The server Trash for the open synced vault, or null (local vault / never fetched).
- *  Fetches on `nonce` only; the parent bumps it when the vault comes online. */
-function useTrash(nonce: number) {
-  const syncEnabled = useStore((s) => s.syncEnabled);
-  const hasSession = useStore((s) => s.session != null);
-  const syncStatus = useStore((s) => s.vaultSyncStatus);
-  const vaultId = syncManager.registry.vaultId;
-  const online = hasSession && syncStatus === "synced";
-  const onlineRef = useRef(online);
-  onlineRef.current = online;
-  const cached = vaultId ? lastTrash.get(vaultId) : undefined;
-  const [listing, setListing] = useState<TrashListing | null>(cached?.listing ?? null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    setListing(vaultId ? (lastTrash.get(vaultId)?.listing ?? null) : null);
-  }, [vaultId]);
-
-  useEffect(() => {
-    if (!syncEnabled || !vaultId || !onlineRef.current) return;
-    let cancelled = false;
-    setBusy(true);
-    authManager.api.listTrash(vaultId).then(
-      (l) => {
-        if (cancelled) return;
-        lastTrash.set(vaultId, { listing: l, at: Date.now() });
-        setListing(l);
-        setError(null);
-        setBusy(false);
-      },
-      (e) => {
-        if (cancelled) return;
-        setError(trashErrorMessage(e));
-        setBusy(false);
-      },
-    );
-    return () => {
-      cancelled = true;
-      setBusy(false);
-    };
-  }, [syncEnabled, vaultId, nonce]);
-
-  return { listing: syncEnabled && vaultId ? listing : null, error, online, busy };
-}
-
-function useCopies(nonce: number) {
-  const epoch = useStore((s) => s.vault?.epoch);
-  const hasVault = useStore((s) => s.vault != null);
-  const [copies, setCopies] = useState<ipc.TrashCopy[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (!hasVault) return;
-    let cancelled = false;
-    setBusy(true);
-    ipc.listTrashCopies(epoch).then(
-      (list) => {
-        if (cancelled) return;
-        setCopies(list);
-        setError(null);
-        setBusy(false);
-      },
-      (e) => {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
-        setBusy(false);
-      },
-    );
-    return () => {
-      cancelled = true;
-      setBusy(false);
-    };
-  }, [hasVault, epoch, nonce]);
-  return { copies, error, busy };
 }
 
 function ReconcileRowActions({ item, onChanged }: { item: ReconcileItem; onChanged: () => void }) {
@@ -248,84 +114,6 @@ function TrashRowActions({
       )}
     </>
   );
-}
-
-/** Server `pre-shrink` captures of the last SHRINK_DAYS, on the same schedule
- *  as Trash. Last listing per vault id is kept for offline, like Trash. */
-const SHRINK_DAYS = 30;
-const lastShrinks = new Map<string, ShrinkEvent[]>();
-
-function useShrinks(nonce: number) {
-  const syncEnabled = useStore((s) => s.syncEnabled);
-  const hasSession = useStore((s) => s.session != null);
-  const syncStatus = useStore((s) => s.vaultSyncStatus);
-  const vaultId = syncManager.registry.vaultId;
-  const onlineRef = useRef(hasSession && syncStatus === "synced");
-  onlineRef.current = hasSession && syncStatus === "synced";
-  const [items, setItems] = useState<ShrinkEvent[]>(() => (vaultId ? (lastShrinks.get(vaultId) ?? []) : []));
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    setItems(vaultId ? (lastShrinks.get(vaultId) ?? []) : []);
-  }, [vaultId]);
-  useEffect(() => {
-    if (!syncEnabled || !vaultId || !onlineRef.current) return;
-    let cancelled = false;
-    setBusy(true);
-    const since = new Date(Date.now() - SHRINK_DAYS * 86_400_000).toISOString();
-    authManager.api.listShrinkEvents(vaultId, since).then(
-      (l) => {
-        if (cancelled) return;
-        lastShrinks.set(vaultId, l.items);
-        setItems(l.items);
-        setBusy(false);
-      },
-      // An older server without the route (404) or a refusal: no Shrunk rows,
-      // and no error line; the rest of the feed is unaffected.
-      (e) => {
-        if (cancelled) return;
-        console.warn("[activity] shrink events unavailable", e);
-        setBusy(false);
-      },
-    );
-    return () => {
-      cancelled = true;
-      setBusy(false);
-    };
-  }, [syncEnabled, vaultId, nonce]);
-  return { items: syncEnabled && vaultId ? items : [], busy };
-}
-
-/** Stable "first seen" stamps for entries that carry no time of their own
- *  (the held batch, sync failures), so they sort where they appeared. */
-function useFirstSeen() {
-  const seen = useRef(new Map<string, number>());
-  return useCallback((key: string) => {
-    let at = seen.current.get(key);
-    if (at == null) {
-      at = Date.now();
-      seen.current.set(key, at);
-    }
-    return at;
-  }, []);
-}
-
-/** The failures Health's Needs attention reads, re-read on the same signals. */
-function useFailures(nonce: number): FailedEntry[] {
-  const syncEnabled = useStore((s) => s.syncEnabled);
-  const syncStatus = useStore((s) => s.vaultSyncStatus);
-  const syncProgress = useStore((s) => s.syncProgress);
-  const docSyncState = useStore((s) => s.docSyncState);
-  return useMemo(() => {
-    if (!syncEnabled) return [];
-    let f: HealthFailures | null = null;
-    try {
-      f = syncManager.syncFailures();
-    } catch {
-      return [];
-    }
-    return failureEntries(f);
-    // `nonce` re-reads on the feed's own schedule too.
-  }, [syncEnabled, syncStatus, syncProgress, docSyncState, nonce]);
 }
 
 function HeldRowActions({ onDone }: { onDone: () => void }) {
@@ -498,64 +286,17 @@ function ActivityLogIcon({ size = 28 }: { size?: number }) {
 
 export function ActivityFeed() {
   const now = useNow();
-  const { nonce, schedule } = useAutoRefresh();
   const [limit, setLimit] = useState(PAGE);
-  const [reconcile, setReconcile] = useState<ReconcileItem[]>(() => reconcileReport.items());
-  const trash = useTrash(nonce);
-  const { copies, error: copiesError, busy: copiesBusy } = useCopies(nonce);
-  const shrinks = useShrinks(nonce);
-  const failures = useFailures(nonce);
-  const firstSeen = useFirstSeen();
-  const pendingDelete = useStore((s) => s.structureNotice.pendingDelete);
-  const accessEvents = useStore((s) => s.accessEvents);
-  const vaultId = syncManager.registry.vaultId ?? null;
+  const snap = useActivitySnapshot();
+  const { rows, schedule, updating, activeFailures } = snap;
   const pending = usePendingReviewCount();
-  const updating = useSlow(trash.busy || copiesBusy || shrinks.busy);
+  const trash = { online: snap.trashOnline };
 
-  // A new reconcile item usually means a recovery copy was just written, and
-  // a resolved one may have restored or deleted a copy: either way, refetch.
-  useEffect(
-    () =>
-      reconcileReport.subscribe((items) => {
-        setReconcile(items);
-        schedule();
-      }),
-    [schedule],
-  );
-
-  // The vault channel reaching "synced" (connect, reconnect, a finished pull).
-  const vaultSyncStatus = useStore((s) => s.vaultSyncStatus);
+  // Opening the panel on Activity refreshes (the host also schedules on the
+  // tab switch; the debounce makes the two one fetch).
   useEffect(() => {
-    if (vaultSyncStatus === "synced") schedule();
-  }, [vaultSyncStatus, schedule]);
-
-  // A gentle background refresh while the app window is visible. Mounting
-  // (the panel opening on Activity) fetches through the hooks' first run.
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") schedule();
-    }, REFRESH_INTERVAL_MS);
-    const onVisible = () => document.visibilityState === "visible" && schedule();
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.clearInterval(id);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
+    schedule();
   }, [schedule]);
-
-  const rows = useMemo(
-    () =>
-      buildActivity({
-        reconcile,
-        trash: trash.listing?.items ?? [],
-        copies: copies ?? [],
-        held: pendingDelete ? { count: pendingDelete.count, at: firstSeen("held") } : null,
-        shrinks: shrinks.items,
-        access: accessEvents.filter((e) => e.vaultId === vaultId),
-        failures: failures.map((f) => ({ ...f, at: firstSeen(f.key) })),
-      }),
-    [reconcile, trash.listing, copies, pendingDelete, shrinks.items, accessEvents, vaultId, failures, firstSeen],
-  );
 
   const showToolbar = pending > 0 || updating;
   return (
@@ -574,12 +315,12 @@ export function ActivityFeed() {
           )}
         </div>
       )}
-      {!trash.online && trash.listing && (
+      {!snap.trashOnline && snap.trashCached && (
         <p className="muted activity-note">Deleted notes are the last known list. Reconnect to restore.</p>
       )}
-      {(trash.error || copiesError) && (
+      {snap.error && (
         <p role="alert" className="auth-error health-missing-error">
-          {trash.error ?? copiesError}
+          {snap.error}
         </p>
       )}
       {rows.length === 0 ? (
@@ -643,7 +384,7 @@ export function ActivityFeed() {
                   ) : row.type === "shrunk" ? (
                     <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
                   ) : row.type === "failed" ? (
-                    <FailedRowActions failure={row.failure} onDone={schedule} />
+                    activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
                   ) : row.type === "access" ? null : row.type === "trash" ? (
                     <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
                   ) : (
@@ -662,7 +403,7 @@ export function ActivityFeed() {
               {`Show more (${(rows.length - limit).toLocaleString()} remaining)`}
             </button>
           )}
-          {trash.listing?.truncated && (
+          {snap.trashTruncated && (
             <p className="muted activity-note">Only the most recent deleted notes are listed.</p>
           )}
         </>
