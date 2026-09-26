@@ -8,7 +8,9 @@
 export type TextSource =
   | { type: "copy"; stamp: string; relPath: string }
   | { type: "trash"; docId: string }
-  | { type: "note"; path: string };
+  | { type: "note"; path: string }
+  /** One stored server version of a note (Activity's "Shrunk" compare). */
+  | { type: "version"; docId: string; versionId: number };
 
 export type VirtualTab =
   | { kind: "text"; id: string; title: string; source: TextSource; subtitle?: string }
@@ -31,6 +33,8 @@ export function sourceKey(s: TextSource): string {
       return `trash:${s.docId}`;
     case "note":
       return `note:${s.path}`;
+    case "version":
+      return `version:${s.docId}@${s.versionId}`;
   }
 }
 

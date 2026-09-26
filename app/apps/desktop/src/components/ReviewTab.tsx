@@ -137,26 +137,16 @@ function ItemView({
         <ReadOnlyText source={{ type: "copy", ...item.copy }} nonce={nonce} />
       </div>
     );
-  } else if (item.otherPath) {
+  } else {
+    // A clash rename: the two sibling notes (the only other reviewable kind).
+    const other = item.otherPath ?? item.path;
     body = (
       <CompareBody
         key={item.key}
         left={{ label: noteLabel(item.path), source: { type: "note", path: item.path } }}
-        right={{ label: noteLabel(item.otherPath), source: { type: "note", path: item.otherPath } }}
+        right={{ label: noteLabel(other), source: { type: "note", path: other } }}
         nonce={nonce}
       />
-    );
-  } else {
-    body = (
-      <div className="vtab-view">
-        <div className="vtab-header">
-          <span className="vtab-label">
-            <strong>{noteLabel(item.path)}</strong>
-            {" · Restored from the server. Delete it again to remove it for everyone."}
-          </span>
-        </div>
-        <ReadOnlyText source={{ type: "note", path: item.path }} nonce={nonce} />
-      </div>
     );
   }
 
@@ -369,4 +359,11 @@ export function ReviewTab() {
       )}
     </div>
   );
+}
+
+/** Pending review items across this session's whole report (the panel badge). */
+export function usePendingReviewCount(): number {
+  const report = useReportItems();
+  const resolved = useReviewState();
+  return useMemo(() => pendingItems(reviewItems(report), resolved).length, [report, resolved]);
 }

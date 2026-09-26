@@ -14,6 +14,8 @@ import {
   VaultFolderMissingBannerView,
 } from "./components/VaultFolderMissing";
 import { TalkButton } from "./components/TalkButton";
+import { ActivityBadge, ActivityHost } from "./components/activitySource";
+import { SilentBoundary } from "./components/SilentBoundary";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -28,7 +30,8 @@ import { TabBar } from "./components/TabBar";
 import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
-import { VersionPanel } from "./components/VersionPanel";
+import { RightPanel } from "./components/RightPanel";
+import { usePendingReviewCount } from "./components/ReviewTab";
 import { bridgeManager } from "./lib/bridge";
 import { BRAND_NAME } from "./lib/brand";
 import * as ipc from "./lib/ipc";
@@ -911,7 +914,9 @@ export default function App() {
     const path = s.openNote?.path;
     return path && s.syncEnabled ? (s.docIdByPath[path] ?? null) : null;
   });
-  const versionPanelOpen = useStore((s) => s.versionPanelDocId != null);
+  const rightPanelOpen = useStore((s) => s.rightPanel != null);
+  const versionsTabOpen = useStore((s) => s.rightPanel?.tab === "versions");
+  const pendingReview = usePendingReviewCount();
   const editorMeasure = useStore((s) => s.editorMeasure);
   // An open preview (image, PDF, video, spreadsheet, code…) isn't a synced
   // note — hide the save/sync chrome. The registry decides, so this cannot
@@ -947,9 +952,13 @@ export default function App() {
 
   // The history panel is about ONE note; switching notes under it would leave a
   // list of versions that no longer belong to what's in the editor.
+  // The Versions tab follows the open note: switch notes and it shows the new
+  // note's history (or its empty state for a note the server does not know).
   useEffect(() => {
-    useStore.getState().closeVersionPanel();
-  }, [openNote?.path]);
+    if (!versionsTabOpen) return;
+    if (versionDocId) void useStore.getState().openVersionPanel(versionDocId);
+    else useStore.getState().closeVersionPanel();
+  }, [versionsTabOpen, versionDocId]);
 
   // `baalda://` links, from a teammate's chat window into this app. Mounted for
   // the app's whole life (not gated on a vault being open) because the very
@@ -1414,32 +1423,6 @@ export default function App() {
             {/* Same gate as history: a link is a doc_id, so it only exists for a
                 note the server knows about. */}
             {versionDocId && !isPreview && <ShareNoteButton docId={versionDocId} />}
-            {versionDocId && !isPreview && (
-              <button
-                className={`icon-btn history-btn${versionPanelOpen ? " active" : ""}`}
-                title="Version history"
-                aria-label="Version history"
-                aria-pressed={versionPanelOpen}
-                onClick={() => {
-                  if (versionPanelOpen) useStore.getState().closeVersionPanel();
-                  else void useStore.getState().openVersionPanel(versionDocId);
-                }}
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M3 12a9 9 0 1 0 2.6-6.4" />
-                  <path d="M3 4v4h4" />
-                  <path d="M12 8v4l3 2" />
-                </svg>
-              </button>
-            )}
             <button
               className="icon-btn graph-btn"
               title="Graph view (⌘G)"
@@ -1463,12 +1446,42 @@ export default function App() {
                 <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
               </svg>
             </button>
+            {/* Far right: the Activity / Versions panel (push-to-talk lives in
+                its header now). */}
+            <button
+              className={`icon-btn panel-btn${rightPanelOpen ? " active" : ""}`}
+              title={pendingReview > 0 ? `Panel (${pendingReview} to review)` : "Panel"}
+              aria-label={pendingReview > 0 ? `Panel, ${pendingReview} changes to review` : "Panel"}
+              aria-pressed={rightPanelOpen}
+              onClick={() => {
+                if (rightPanelOpen) useStore.getState().closeRightPanel();
+                else useStore.getState().openRightPanel();
+              }}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="4" width="18" height="16" rx="3" />
+                <path d="M15 4v16" />
+              </svg>
+              <SilentBoundary label="Activity badge">
+                <ActivityBadge />
+              </SilentBoundary>
+            </button>
           </header>
           <VaultUnsyncedBanner />
           <VaultRootMissingBanner />
           <BulkDeleteBanner />
           <ClosedAppChangesBanner />
-          <ReconcileBanner />
+          <SilentBoundary label="Reconcile banner">
+            <ReconcileBanner />
+          </SilentBoundary>
           <NotSyncingBanner />
           <NoteLimitBanner />
           <RemovedBanner />
@@ -1520,7 +1533,12 @@ export default function App() {
           </div>
           <BacklinksPanel />
           {/* Slides in over the editor from the right; anchored to .main. */}
-          <VersionPanel />
+          <SilentBoundary label="Activity host">
+            <ActivityHost />
+          </SilentBoundary>
+          <SilentBoundary label="Right panel">
+            <RightPanel />
+          </SilentBoundary>
         </main>
   
         {graphOpen && (

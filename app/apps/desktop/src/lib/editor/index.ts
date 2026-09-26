@@ -236,3 +236,28 @@ export function baseExtensions(opts: CreateEditorOptions): Extension[] {
 export function createEditorState(opts: CreateEditorOptions): EditorState {
   return EditorState.create({ doc: opts.doc, extensions: baseExtensions(opts) });
 }
+
+/**
+ * The note editor's LOOK without its editing machinery, for read-only views
+ * (the compare panes, an opened recovery copy, a Trash preview): the same
+ * theme, font, measure, wrapping, markdown grammar and syntax highlighting as
+ * `baseExtensions`, in SOURCE form. Live preview is deliberately left out: it
+ * hides markers off the active line, and a diff must show every character that
+ * changed. Line numbers follow the editor's own setting. Adds nothing to
+ * `baseExtensions`, so the note editor's behaviour is unchanged.
+ */
+export function readOnlyEditorExtensions(opts: { path?: string; lineNumbers?: boolean } = {}): Extension[] {
+  const plain = opts.path ? !isMarkdownNote(opts.path) : false;
+  return [
+    EditorState.readOnly.of(true),
+    EditorView.editable.of(false),
+    drawSelection(),
+    EditorView.lineWrapping,
+    plain
+      ? []
+      : markdown({ base: markdownLanguage, extensions: [GFM, ...ofmMarkdown], codeLanguages }),
+    markdownHighlight,
+    editorTheme,
+    lineNumberExtension(opts.lineNumbers ?? false),
+  ];
+}

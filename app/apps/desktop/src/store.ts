@@ -84,6 +84,7 @@ import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
 import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
+import { readLastTab, writeLastTab, type RightPanelTab } from "./components/rightPanelTab";
 import {
   neighbourAfterClose,
   upsertTab,
@@ -110,6 +111,12 @@ import {
 /** Notes already toasted about a failed sync registration — one sticky
  *  explanation per note is enough; the retry is automatic. */
 const registerFailureToasted = new Set<string>();
+
+/** One access change the Activity feed lists (session-only). */
+export type AccessEvent =
+  | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string }
+  | { kind: "granted"; at: number; vaultId: string | null; count: number; paths?: string[] };
+const ACCESS_EVENTS_MAX = 200;
 
 export interface OpenNote {
   path: string;
@@ -202,6 +209,12 @@ interface AppStore {
    * (a Finder delete) and offers no recovery hint.
    */
   noteRemovedByTeammate: { reason: "deleted" | "revoked"; trashedTo: string | null } | null;
+  /**
+   * Access changes this session, newest last, for the Activity feed. Fed by the
+   * sync layer's `onNoteRemoved(reason: "revoked")`. Session-only, never persisted,
+   * tagged with the server vault id so the feed shows only the open vault's. Capped at ACCESS_EVENTS_MAX.
+   */
+  accessEvents: AccessEvent[];
   /**
    * What the sync layer says about the vault's STRUCTURE while it is open
    * (#221, `SyncManager.structureNotice`): the vault folder vanished, a live
@@ -825,6 +838,14 @@ interface AppStore {
   /** Open the history panel for a note and load its versions. */
   openVersionPanel: (docId: string) => Promise<void>;
   closeVersionPanel: () => void;
+  /** The right-side panel (Sync / Versions / What's new), or null when closed.
+   *  The Versions tab drives `versionPanelDocId` (App.tsx keeps it on the open
+   *  note); every other tab, and closing, clears it and its preview. */
+  rightPanel: { tab: RightPanelTab } | null;
+  /** Open on `tab`, or the last tab used on this device. */
+  openRightPanel: (tab?: RightPanelTab) => void;
+  closeRightPanel: () => void;
+  setRightPanelTab: (tab: RightPanelTab) => void;
   /** Load one version's markdown for the read-only editor overlay. */
   previewVersion: (versionId: number) => Promise<void>;
   clearVersionPreview: () => void;
@@ -1731,6 +1752,7 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemoved: false,
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
+  accessEvents: [],
   structureNotice: { rootMissing: false, pendingDelete: null, closedAppChanges: false },
   applyStructureNotice: (notice) => {
     const wasMissing = get().structureNotice.rootMissing;
@@ -1744,6 +1766,18 @@ export const useStore = create<AppStore>((set, get) => ({
   dismissClosedAppChanges: () => syncManager.dismissClosedChangesNotice(),
   revealRequest: null,
   settingsRequest: null,
+  rightPanel: null,
+  openRightPanel: (tab) => {
+    const t = tab ?? readLastTab();
+    writeLastTab(t);
+    set({
+      rightPanel: { tab: t },
+      ...(t === "versions" ? {} : { versionPanelDocId: null, noteVersions: null, versionPreview: null }),
+    });
+  },
+  closeRightPanel: () =>
+    set({ rightPanel: null, versionPanelDocId: null, noteVersions: null, versionPreview: null }),
+  setRightPanelTab: (tab) => get().openRightPanel(tab),
   settingsDismissToken: 0,
   dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
   accountSettingsRequest: null,
@@ -2614,7 +2648,28 @@ export const useStore = create<AppStore>((set, get) => ({
     // CodeMirror bound to a destroyed Y.Doc throws on the next keystroke.
     syncManager.setInboundListeners({
       onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
-      onNoteRemoved: (_docId, path, trashedTo, reason) => {
+      // Notes that became readable since the previous pull (a grant).
+      onAccessGranted: ({ count, paths }) => {
+        const ev: AccessEvent = {
+          kind: "granted",
+          at: Date.now(),
+          vaultId: syncManager.registry.vaultId ?? null,
+          count,
+          paths,
+        };
+        set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
+      },
+      onNoteRemoved: (docId, path, trashedTo, reason) => {
+        if (reason === "revoked") {
+          const ev: AccessEvent = {
+            kind: "removed",
+            at: Date.now(),
+            vaultId: syncManager.registry.vaultId ?? null,
+            docId,
+            path,
+          };
+          set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
+        }
         get().pruneTabs([path]);
         const open = get().openNote;
         if (open && (open.path === path || open.path.startsWith(path + "/"))) {

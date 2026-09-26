@@ -398,6 +398,7 @@ export class SyncManager implements InboundHost {
   private onRegistryChanged?: () => void;
   private onAclChangedListener?: () => void;
   private onNotePathChanged?: (docId: string, from: string, to: string) => void;
+  private onAccessGranted?: (info: { count: number; paths: string[] }) => void;
   private onNoteRemoved?: (
     docId: string,
     path: string,
@@ -3270,9 +3271,16 @@ export class SyncManager implements InboundHost {
       trashedTo: string | null,
       reason: "deleted" | "revoked",
     ) => void;
+    onAccessGranted?: (info: { count: number; paths: string[] }) => void;
   }): void {
     this.onNotePathChanged = listeners.onNotePathChanged;
     this.onNoteRemoved = listeners.onNoteRemoved;
+    this.onAccessGranted = listeners.onAccessGranted;
+  }
+
+  /** Registry host hook: forward a pass's access grants to the UI listener. */
+  accessGranted(info: { count: number; paths: string[] }): void {
+    this.onAccessGranted?.(info);
   }
 
   /**

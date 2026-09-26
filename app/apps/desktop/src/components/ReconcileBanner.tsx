@@ -6,6 +6,7 @@ import { summarizeReconcile } from "../lib/reconcileSummary";
 import { pendingItems, reviewItems, reviewKey } from "./reviewModel";
 import { useReviewState } from "./ReviewTab";
 import { openReviewTab } from "./recoveryActions";
+import { useReviewPersistence } from "./useReviewPersistence";
 
 /** A burst of records (one reconnect reconciles many notes) settles into ONE
  *  banner instead of re-rendering a growing one per note. */
@@ -16,20 +17,17 @@ export const RECONCILE_BANNER_DEBOUNCE_MS = 600;
  *  chrome) must not re-announce what was dismissed. */
 let dismissedUpTo = 0;
 
-/**
- * Asks Vault Health to scroll to the "Reconciled on reconnect" section when it
- * next mounts. Set by the banner's Details button, consumed once by
- * `HealthReconciled`.
- */
-export const reconcileFocusRequest = { pending: false };
 
 /**
  * What sync did on the user's behalf when it reconnected: a note put back, a
  * teammate's delete that sent offline edits to Trash, a clash rename. One line
  * per kind, one banner at a time. Dismiss drains the report; anything recorded
- * later raises the banner again with only the new items.
+ * later raises the banner again with only the new items. Compare opens the
+ * review tab WITHOUT draining: the banner stays while anything is pending, and
+ * only Dismiss hides it for this session.
  */
 export function ReconcileBanner() {
+  useReviewPersistence();
   const [items, setItems] = useState<ReconcileItem[]>(() =>
     reconcileReport.items().slice(dismissedUpTo),
   );
@@ -59,7 +57,9 @@ export function ReconcileBanner() {
   const lines = useMemo(() => summarizeReconcile(unresolved), [unresolved]);
   const reviewable = useMemo(() => reviewItems(items), [items]);
   const pendingReview = pendingItems(reviewable, resolved).length;
-  const allResolved = items.length > 0 && reviewable.length > 0 && lines.length === 0;
+  // Notices (restored notes, kept folders) are never reviewable: a launch with
+  // only notices shows its sentences with Details/Dismiss and no Compare.
+  const allResolved = reviewable.length > 0 && pendingReview === 0;
 
   const dismiss = () => {
     reconcileReport.drain();
@@ -67,16 +67,26 @@ export function ReconcileBanner() {
     setItems([]);
   };
 
+  // Details opens the right panel's Activity tab, where every item is listed with
+  // its actions. Like before, it also dismisses the banner for this session.
   const details = () => {
-    reconcileFocusRequest.pending = true;
-    useStore.getState().requestSettings("health");
+    useStore.getState().openRightPanel("activity");
     dismiss();
   };
 
   return (
-    <Banner show={lines.length > 0 || allResolved} role="status" className="reconcile-banner">
+    <Banner
+      show={lines.length > 0 || pendingReview > 0 || allResolved}
+      role="status"
+      className="reconcile-banner"
+    >
       <span className="reconcile-banner-lines">
         {allResolved && <span className="reconcile-banner-line">All resolved.</span>}
+        {pendingReview > 0 && (
+          <span className="reconcile-banner-line">
+            {`${pendingReview.toLocaleString()} ${pendingReview === 1 ? "change" : "changes"} to review.`}
+          </span>
+        )}
         {lines.map((l) => (
           <span key={l.kind} className="reconcile-banner-line">
             {l.text}

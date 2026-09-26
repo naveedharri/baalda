@@ -70,11 +70,18 @@
   min-height: 0;
   overflow: auto;
 }
+/* Font, size, measure and padding come from the note editor's own theme
+   (`readOnlyEditorExtensions`); only the height is adapted, because a pane
+   here grows with its text instead of filling a fixed host. */
 .vtab-body .cm-editor {
   height: auto;
   min-height: 100%;
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
+}
+/* Two panes each carry the editor's side inset; halve it so the text column
+   is not squeezed. */
+.vtab-body .cm-mergeView .cm-line {
+  padding-left: calc(var(--editor-pad-x, 24px) / 2);
+  padding-right: calc(var(--editor-pad-x, 24px) / 2);
 }
 .vtab-body .cm-mergeView {
   min-height: 100%;

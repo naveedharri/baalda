@@ -7904,3 +7904,212 @@ button.secondary:active:not(:disabled),
   gap: var(--sp-1);
   min-width: 0;
 }
+
+/* ---- Right panel (RightPanel.tsx): Activity / Versions ----
+   Same container as the old version panel (`.version-panel`), wider because
+   the Activity feed holds Health-style rows with actions. */
+.version-panel.right-panel {
+  width: min(420px, 92vw);
+}
+.right-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-3) var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+}
+.right-panel-tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+.right-panel-tabs {
+  align-items: center;
+}
+.right-panel-tab {
+  position: relative;
+}
+.right-panel-tab-name {
+  margin-left: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.right-panel-count {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  text-align: center;
+}
+.right-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.version-tab {
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.panel-btn {
+  position: relative;
+}
+/* Unread Activity rows: the same pill as the panel's tab count
+   (.right-panel-count), ringed so it reads over the icon. */
+.panel-btn-badge {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--bg-surface);
+  pointer-events: none;
+}
+.right-panel-tab.active,
+.panel-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+/* Activity feed (ActivityFeed.tsx). Same side inset as VersionPanel's head
+   (--sp-4), so the header, the list and the empty state share one left edge. */
+.activity-feed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-height: 100%;
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  container-type: inline-size;
+}
+.activity-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 24px;
+}
+.activity-updating {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+}
+.activity-note {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+/* Rows share one grid, so every chip, path and action column lines up. */
+.activity-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.activity-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: start;
+  column-gap: var(--sp-3);
+  row-gap: var(--sp-1);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.activity-row:last-child {
+  border-bottom: none;
+}
+.activity-row-chip {
+  justify-self: start;
+  margin-top: 1px;
+}
+.activity-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.activity-row-path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  color: var(--text-primary);
+}
+.activity-row-path > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.activity-row-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.activity-row-actions .health-missing-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-1) var(--sp-2);
+}
+/* Narrow panel: actions drop under the path, still on the path's left edge. */
+@container (max-width: 360px) {
+  .activity-row-actions {
+    grid-column: 2 / -1;
+    align-items: flex-start;
+  }
+  .activity-row-actions .health-missing-actions {
+    justify-content: flex-start;
+  }
+}
+.activity-more {
+  align-self: flex-start;
+}
+.activity-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+}
+.activity-empty-icon {
+  display: inline-flex;
+  margin-bottom: var(--sp-1);
+  color: var(--text-tertiary);
+}
+.activity-empty-title {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.activity-empty-hint {
+  max-width: 28ch;
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
+}
