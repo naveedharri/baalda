@@ -2130,3 +2130,35 @@ describe("offline reconciliation — ready.tombstones", () => {
     expect(disk.notes.has("n.md")).toBe(true);
   });
 });
+
+describe("access grants", () => {
+  it("the first pull fires nothing; a later pull adding two readable notes fires once with count 2", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    install(disk);
+    const old = "2020-01-01T00:00:00Z";
+    const state: ServerState = { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] };
+    const reg = new VaultRegistry(fakeApi(state));
+    const grants: Array<{ count: number; paths: string[] }> = [];
+    const host = recordingHost();
+    (host.host as InboundHost).accessGranted = (info) => grants.push(info);
+    reg.setInboundHost(host.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(grants).toEqual([]);
+
+    // Shared with us since: two OLD notes are readable now, and a teammate's
+    // brand-new note arrived too (new content, not a grant).
+    state.notes = [
+      ...state.notes,
+      { id: "g1", rel_path: "shared/one.md", created_at: old } as ServerState["notes"][number],
+      { id: "g2", rel_path: "shared/two.md", created_at: old } as ServerState["notes"][number],
+      { id: "n1", rel_path: "fresh.md", created_at: new Date(Date.now() + 60_000).toISOString() } as ServerState["notes"][number],
+    ];
+    await reg.pull();
+    expect(grants).toEqual([{ count: 2, paths: ["shared/one.md", "shared/two.md"] }]);
+
+    // Nothing new: nothing fires.
+    await reg.pull();
+    expect(grants).toHaveLength(1);
+  });
+});

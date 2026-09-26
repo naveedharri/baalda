@@ -115,7 +115,7 @@ const registerFailureToasted = new Set<string>();
 /** One access change the Activity feed lists (session-only). */
 export type AccessEvent =
   | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string }
-  | { kind: "granted"; at: number; vaultId: string | null; count: number };
+  | { kind: "granted"; at: number; vaultId: string | null; count: number; paths?: string[] };
 const ACCESS_EVENTS_MAX = 200;
 
 export interface OpenNote {
@@ -2648,6 +2648,17 @@ export const useStore = create<AppStore>((set, get) => ({
     // CodeMirror bound to a destroyed Y.Doc throws on the next keystroke.
     syncManager.setInboundListeners({
       onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
+      // Notes that became readable since the previous pull (a grant).
+      onAccessGranted: ({ count, paths }) => {
+        const ev: AccessEvent = {
+          kind: "granted",
+          at: Date.now(),
+          vaultId: syncManager.registry.vaultId ?? null,
+          count,
+          paths,
+        };
+        set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
+      },
       onNoteRemoved: (docId, path, trashedTo, reason) => {
         if (reason === "revoked") {
           const ev: AccessEvent = {

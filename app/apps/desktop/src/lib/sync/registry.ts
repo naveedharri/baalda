@@ -308,6 +308,9 @@ export interface InboundHost {
   recoverDeletedDoc?(docId: string, path: string): Promise<void>;
   /** The markdown this device's local CRDT holds for `docId`, or null. */
   localText?(docId: string): Promise<string | null>;
+  /** Notes that were not readable on the previous pass are readable now (a
+   *  grant). Once per pass, never on the first pass after a vault opens. */
+  accessGranted?(info: { count: number; paths: string[] }): void;
   /**
    * Resolve only once NOTHING can still write to `docId`'s current path — the
    * editor's bridge, the background hot bridge, and any in-flight cold apply.
@@ -665,6 +668,44 @@ export class VaultRegistry {
     return this.serverTombstones.has(docId);
   }
 
+  /**
+   * The note ids the previous pass's listing held, and when it was taken.
+   * Null until the first pass after a vault is opened, which only seeds it
+   * (everything is "new" to a first listing). Cleared on a vault switch.
+   */
+  private lastListed: { ids: Set<string>; at: number } | null = null;
+
+  /**
+   * Fire `InboundHost.accessGranted` once for the notes that became readable
+   * since the previous pass. A note counts only when it is newly LISTED, not
+   * already mapped on this device (this device's own creations are mapped the
+   * moment they register), and CREATED before the previous listing was taken:
+   * a teammate's brand-new note is new content, not a grant. A row whose
+   * creation time the server does not send is not counted.
+   */
+  private detectAccessGrants(serverNotes: RegisteredNote[]): void {
+    const now = Date.now();
+    const ids = new Set(serverNotes.map((n) => noteDocId(n)));
+    const prev = this.lastListed;
+    this.lastListed = { ids, at: now };
+    if (!prev) return;
+    const paths: string[] = [];
+    for (const n of serverNotes) {
+      const id = noteDocId(n);
+      if (prev.ids.has(id) || this.byDocId.has(id)) continue;
+      const created = Date.parse(noteCreatedAtOf(n) ?? "");
+      if (!Number.isFinite(created) || created >= prev.at) continue;
+      const rp = noteRelPath(n);
+      if (rp) paths.push(rp);
+    }
+    if (paths.length === 0) return;
+    try {
+      this.host?.accessGranted?.({ count: paths.length, paths });
+    } catch (e) {
+      console.warn("[registry] accessGranted listener threw", e);
+    }
+  }
+
   /** Paths (lower-cased) this pass may re-create that were mapped before it. */
   private restoreCandidatesCi = new Set<string>();
 
@@ -1013,6 +1054,7 @@ export class VaultRegistry {
     this.pushed.clear();
     this.ackedSvs.clear();
     this.serverTombstones.clear();
+    this.lastListed = null;
     // A surviving baseline is exactly the cross-vault confusion this method
     // exists to prevent — it would tell vault B that vault A's notes moved.
     this.baselineDocs.clear();
@@ -3002,6 +3044,9 @@ export class VaultRegistry {
     // captured while the row is still LISTED — once access to it is taken away
     // the listing omits it, which is precisely the moment the answer is needed.
     this.learnAuthorship(serverNotes);
+    // Access GRANTS: notes readable now that were not in the previous pass's
+    // listing. Measured against the listing, before anything below maps them.
+    this.detectAccessGrants(serverNotes);
 
     // 1. Inbound: apply the server's structural changes to disk. Runs first so the
     //    outbound steps below see a tree that already agrees about paths.
