@@ -64,10 +64,32 @@ export function removeFromLog(log: readonly ActivityLogEntry[], ids: readonly st
   return log.filter((e) => !drop.has(e.id));
 }
 
-function isEntry(v: unknown): v is ActivityLogEntry {
-  if (!v || typeof v !== "object") return false;
+const KINDS: ReadonlySet<string> = new Set<ActivityLogKind>([
+  "restoredFromServer",
+  "folderKept",
+  "access",
+  "failed",
+  "held",
+]);
+
+/** A stored value as an entry, or null. Unknown kinds (a newer or older app
+ *  version), wrong types and non-finite times are dropped; optional fields of
+ *  the wrong type are stripped rather than trusted by the renderer. */
+export function sanitizeEntry(v: unknown): ActivityLogEntry | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const e = v as Record<string, unknown>;
-  return typeof e.id === "string" && typeof e.kind === "string" && typeof e.path === "string" && typeof e.at === "number";
+  if (typeof e.id !== "string" || e.id === "") return null;
+  if (typeof e.kind !== "string" || !KINDS.has(e.kind)) return null;
+  if (typeof e.path !== "string") return null;
+  if (typeof e.at !== "number" || !Number.isFinite(e.at)) return null;
+  const out: ActivityLogEntry = { id: e.id, kind: e.kind as ActivityLogKind, path: e.path, at: e.at };
+  if (typeof e.newPath === "string") out.newPath = e.newPath;
+  if (typeof e.detail === "string") out.detail = e.detail;
+  if (typeof e.docId === "string") out.docId = e.docId;
+  if (Array.isArray(e.paths)) {
+    out.paths = e.paths.filter((p): p is string => typeof p === "string").slice(0, ACTIVITY_LOG_MAX_PATHS);
+  }
+  return out;
 }
 
 /** Parse a stored value; anything malformed is dropped entry by entry. */
@@ -75,7 +97,14 @@ export function parseLog(raw: string | null, now: number): ActivityLogEntry[] {
   if (!raw) return [];
   try {
     const v = JSON.parse(raw) as unknown;
-    return Array.isArray(v) ? pruneLog(v.filter(isEntry), now) : [];
+    if (!Array.isArray(v)) return [];
+    const ok: ActivityLogEntry[] = [];
+    for (const x of v) {
+      const e = sanitizeEntry(x);
+      if (e) ok.push(e);
+    }
+    // Dedupe too: a hand-edited or merged value can repeat an id.
+    return appendLog([], ok, now);
   } catch {
     return [];
   }

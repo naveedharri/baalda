@@ -14,7 +14,14 @@ import { reconcileReport, type ReconcileItem, type ReconcileKind } from "../lib/
 import * as ipc from "../lib/ipc";
 import { buildActivity, failureEntries, type ActivityRow, type FailedEntry } from "./activityRows";
 import { ACTIVITY_LOG_MAX_PATHS, appendLog, loadLog, removeFromLog, saveLog, type ActivityLogEntry } from "./activityLog";
-import { loadReadState, markAllRead, saveReadState, unreadCount, type ReadState } from "./activityUnread";
+import {
+  badgeText,
+  loadReadState,
+  markAllRead,
+  saveReadState,
+  unreadCount,
+  type ReadState,
+} from "./activityUnread";
 
 /** Last Trash listing per server vault id, this app session. Never authorises. */
 const lastTrash = new Map<string, { listing: TrashListing; at: number }>();
@@ -153,6 +160,7 @@ function useCopies(nonce: number) {
  *  as Trash. Last listing per vault id is kept for offline, like Trash. */
 const SHRINK_DAYS = 30;
 const lastShrinks = new Map<string, ShrinkEvent[]>();
+const NO_SHRINKS: ShrinkEvent[] = [];
 
 function useShrinks(nonce: number) {
   const syncEnabled = useStore((s) => s.syncEnabled);
@@ -161,10 +169,10 @@ function useShrinks(nonce: number) {
   const vaultId = syncManager.registry.vaultId;
   const onlineRef = useRef(hasSession && syncStatus === "synced");
   onlineRef.current = hasSession && syncStatus === "synced";
-  const [items, setItems] = useState<ShrinkEvent[]>(() => (vaultId ? (lastShrinks.get(vaultId) ?? []) : []));
+  const [items, setItems] = useState<ShrinkEvent[]>(() => (vaultId ? (lastShrinks.get(vaultId) ?? NO_SHRINKS) : NO_SHRINKS));
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    setItems(vaultId ? (lastShrinks.get(vaultId) ?? []) : []);
+    setItems(vaultId ? (lastShrinks.get(vaultId) ?? NO_SHRINKS) : NO_SHRINKS);
   }, [vaultId]);
   useEffect(() => {
     if (!syncEnabled || !vaultId || !onlineRef.current) return;
@@ -191,7 +199,10 @@ function useShrinks(nonce: number) {
       setBusy(false);
     };
   }, [syncEnabled, vaultId, nonce]);
-  return { items: syncEnabled && vaultId ? items : [], busy };
+  // NEVER a fresh `[]` here: this feeds the rows memo, and a new array on every
+  // render re-published the snapshot, which re-rendered App, which re-rendered
+  // this host: "Maximum update depth exceeded" on every signed-out/local load.
+  return { items: syncEnabled && vaultId ? items : NO_SHRINKS, busy };
 }
 
 /** The failures Health's Needs attention reads, re-read on the same signals. */
@@ -217,6 +228,7 @@ function useFailures(nonce: number): FailedEntry[] {
 /** Reconcile kinds that are notices with no durable source of their own. */
 const LOGGED_RECONCILE: ReadonlySet<ReconcileKind> = new Set(["restoredFromServer", "folderKept"]);
 const HELD_ID = "h:bulk-delete";
+const NO_ACCESS: AccessEvent[] = [];
 
 export interface ActivitySnapshot {
   rows: ActivityRow[];
@@ -245,19 +257,53 @@ const EMPTY: ActivitySnapshot = {
 
 let snapshot: ActivitySnapshot = EMPTY;
 const listeners = new Set<() => void>();
-function publish(next: ActivitySnapshot): void {
-  snapshot = next;
-  for (const l of listeners) l();
+function sameSnapshot(a: ActivitySnapshot, b: ActivitySnapshot): boolean {
+  return (Object.keys(a) as (keyof ActivitySnapshot)[]).every((k) => Object.is(a[k], b[k]));
 }
 
-export function useActivitySnapshot(): ActivitySnapshot {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    () => snapshot,
+/** Notify only on a real change: a republish of equal fields is a no-op, so
+ *  a subscriber's re-render can never feed back into another publish. */
+function publish(next: ActivitySnapshot): void {
+  if (sameSnapshot(snapshot, next)) return;
+  snapshot = next;
+  for (const l of listeners) {
+    try {
+      l();
+    } catch (e) {
+      console.warn("[activity] listener threw", e);
+    }
+  }
+}
+
+const subscribe = (cb: () => void) => {
+  listeners.add(cb);
+  return () => {
+    listeners.delete(cb);
+  };
+};
+
+/** Just the unread count, for the toolbar: App re-renders only when the NUMBER
+ *  changes, never on a row refresh. */
+export function useActivityUnread(): number {
+  return useSyncExternalStore(subscribe, () => snapshot.unread, () => 0);
+}
+
+/** The toolbar panel toggle's unread pill (renders inside the button). Its own
+ *  component, so a throw here is caught by a boundary instead of taking <App>. */
+export function ActivityBadge() {
+  const unread = useActivityUnread();
+  if (unread <= 0) return null;
+  return (
+    // The number joins the button's accessible name ("Panel 3").
+    <span className="panel-btn-badge" title={`${unread} new in Activity`}>
+      {badgeText(unread)}
+    </span>
   );
+}
+
+
+export function useActivitySnapshot(): ActivitySnapshot {
+  return useSyncExternalStore(subscribe, () => snapshot, () => EMPTY);
 }
 
 function reconcileFromLog(e: ActivityLogEntry): ReconcileItem {
@@ -294,8 +340,8 @@ export function ActivityHost(): null {
   const { copies, error: copiesError, busy: copiesBusy } = useCopies(nonce);
   const shrinks = useShrinks(nonce);
   const failures = useFailures(nonce);
-  const pendingDelete = useStore((s) => s.structureNotice.pendingDelete);
-  const accessEvents = useStore((s) => s.accessEvents);
+  const pendingDelete = useStore((s) => s.structureNotice?.pendingDelete ?? null);
+  const accessEvents = useStore((s) => s.accessEvents ?? NO_ACCESS);
   const vaultSyncStatus = useStore((s) => s.vaultSyncStatus);
   const onActivity = useStore((s) => s.rightPanel?.tab === "activity");
   const vaultId = syncManager.registry.vaultId ?? null;

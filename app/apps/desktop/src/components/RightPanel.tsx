@@ -145,6 +145,11 @@ function PanelBody({ tab }: { tab: RightPanelTab }) {
 }
 
 export function RightPanel() {
-  const panel = useStore((s) => s.rightPanel);
-  return <AnimatePresence>{panel && <PanelBody tab={panel.tab} />}</AnimatePresence>;
+  // A missing or unknown tab (older state, a bad write) opens Activity rather than throwing.
+  const tab = useStore((s) => {
+    const t = s.rightPanel?.tab;
+    if (s.rightPanel == null) return null;
+    return (RIGHT_PANEL_TABS as readonly string[]).includes(t ?? "") ? (t as RightPanelTab) : "activity";
+  });
+  return <AnimatePresence>{tab && <PanelBody tab={tab} />}</AnimatePresence>;
 }

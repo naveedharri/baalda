@@ -61,8 +61,9 @@ export function badgeText(n: number): string {
 export function parseReadState(raw: string | null): ReadState | null {
   if (!raw) return null;
   try {
-    const v = JSON.parse(raw) as Partial<ReadState>;
-    if (typeof v?.since !== "number" || !Array.isArray(v.read)) return null;
+    const v = JSON.parse(raw) as Partial<ReadState> | null;
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+    if (typeof v.since !== "number" || !Number.isFinite(v.since) || !Array.isArray(v.read)) return null;
     return { since: v.since, read: v.read.filter((x): x is string => typeof x === "string").slice(0, READ_STATE_MAX) };
   } catch {
     return null;
