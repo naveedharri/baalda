@@ -10,7 +10,7 @@ import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "../permissions/lookup.js";
 import { listDeletedReadableDocsInVault } from "../permissions/vault-docs.js";
 import { basename, dirname, findFolderByPath, joinPath } from "../registry/tree-ops.js";
-import { purgeNoteIndex } from "../index/indexer.js";
+import { extractDocText, purgeNoteIndex } from "../index/indexer.js";
 import { trashedNotePermission } from "./access.js";
 
 type Queryable = Pick<typeof defaultPool, "query">;
@@ -97,6 +97,40 @@ export async function listTrash(
     hasUnsyncedContributions: r.unsynced,
   }));
   return { items, truncated };
+}
+
+/**
+ * The current text of a note in Trash, from its stored CRDT (the indexer's
+ * `extractDocText`, so it matches what search and reads derive). Readable by
+ * anyone with read on the tombstoned doc, or owner/admin. Like restore, it is
+ * available until the purge has actually run (`purged_at`), not merely until
+ * `purge_after`: the content is intact until then.
+ */
+export async function trashContent(
+  userId: string,
+  docId: string,
+): Promise<{ docId: string; relPath: string; text: string; deletedAt: string }> {
+  const { rows } = await defaultPool.query<{
+    vault_id: string;
+    rel_path: string;
+    deleted_at: Date | null;
+    purged_at: Date | null;
+  }>("SELECT vault_id, rel_path, deleted_at, purged_at FROM notes WHERE id = $1", [docId]);
+  const note = rows[0];
+  if (!note || !note.deleted_at) throw new TrashError(404, "not_in_trash", "Unknown or not deleted note");
+  if (note.purged_at) throw new TrashError(410, "purged", "This note was permanently removed from Trash");
+  const org = await vaultOrg(note.vault_id);
+  const role = org ? await orgRole(org, userId) : null;
+  const manager = role === "owner" || role === "admin";
+  if (!manager && (await trashedNotePermission(userId, docId)) === "none") {
+    throw new TrashError(403, "no_access", "No access to this note");
+  }
+  return {
+    docId,
+    relPath: note.rel_path,
+    text: await extractDocText(docId),
+    deletedAt: note.deleted_at.toISOString(),
+  };
 }
 
 /** `<stem> (restored YYYY-MM-DD[ n]).<ext>` — the path a restore lands on when

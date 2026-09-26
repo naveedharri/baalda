@@ -267,6 +267,32 @@ describe("note trash", () => {
     expect(tombs).toHaveLength(0);
   });
 
+  it("trash-content returns a deleted note's text to readers; 403 / 404 / 410 otherwise", async () => {
+    const doc = await seedNote(vault, null, "a.md", owner.userId);
+    const live = await seedNote(vault, null, "live.md", owner.userId);
+    await appendUpdate(doc, updateFor("kept in trash"));
+    await softDelete(owner, doc);
+    // A view-only member can read it.
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedVaultGrant(org, "view");
+    const res = await req(member, "GET", `/api/notes/${doc}/trash-content`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { docId: string; relPath: string; text: string; deletedAt: string };
+    expect(body).toMatchObject({ docId: doc, relPath: "a.md", text: "kept in trash" });
+    expect(Number.isNaN(Date.parse(body.deletedAt))).toBe(false);
+
+    expect((await req(outsider, "GET", `/api/notes/${doc}/trash-content`)).status).toBe(403);
+    const liveRes = await req(member, "GET", `/api/notes/${live}/trash-content`);
+    expect(liveRes.status).toBe(404);
+    expect(((await liveRes.json()) as { code: string }).code).toBe("not_in_trash");
+
+    await expire(doc);
+    await purgeExpiredTrash();
+    const purged = await req(member, "GET", `/api/notes/${doc}/trash-content`);
+    expect(purged.status).toBe(410);
+    expect(((await purged.json()) as { code: string }).code).toBe("purged");
+  });
+
   it("restore refuses members without edit (403) and unknown ids (404)", async () => {
     const doc = await seedNote(vault, null, "a.md", owner.userId);
     await softDelete(owner, doc);
