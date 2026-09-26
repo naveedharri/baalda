@@ -35,6 +35,15 @@ import {
 } from "./reviewModel";
 import type { TextSource } from "./virtualTabs";
 
+/** The one-line header of a "Restored" row, which has nothing to diff. */
+export const RESTORED_NOTICE =
+  "Restored from the server on launch. Nothing to compare: this note was missing on this device and came back unchanged. Delete it again to remove it for everyone.";
+
+/** A clash rename has two notes to keep; a restored note has one. */
+export function keepLabel(kind: ReviewItem["kind"]): string {
+  return kind === "renamedConflict" ? "Keep both" : "Keep";
+}
+
 /** Line counts are computed for at most this many rows up front. */
 const COUNT_LIMIT = 200;
 
@@ -150,9 +159,9 @@ function ItemView({
     body = (
       <div className="vtab-view">
         <div className="vtab-header">
-          <span className="vtab-label">
+          <span className="vtab-label" title={RESTORED_NOTICE}>
             <strong>{noteLabel(item.path)}</strong>
-            {" · Restored from the server. Delete it again to remove it for everyone."}
+            {` · ${RESTORED_NOTICE}`}
           </span>
         </div>
         <ReadOnlyText source={{ type: "note", path: item.path }} nonce={nonce} />
@@ -232,7 +241,7 @@ function ItemView({
               </button>
             )}
             <AsyncButton className="ghost-pill sm" onClick={() => run(async () => "kept")}>
-              Keep both
+              {keepLabel(item.kind)}
             </AsyncButton>
           </>
         )}

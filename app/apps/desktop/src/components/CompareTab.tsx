@@ -5,7 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import "./compare.css";
 import { useStore } from "../store";
-import { mountCompare, mountReadOnly, UNIFIED_BELOW_PX } from "../lib/editor/compareView";
+import { mountCompare, mountReadOnly, UNIFIED_BELOW_PX, type ViewLook } from "../lib/editor/compareView";
 import { loadSource, sourceErrorMessage } from "./textSources";
 import { sourceKey, type TextSource, type VirtualTab } from "./virtualTabs";
 import { lineChanges, formatLineChanges } from "./lineChanges";
@@ -32,6 +32,19 @@ function useSourceText(source: TextSource, nonce: number): Loaded {
   return loaded;
 }
 
+/** The grammar follows the file type; `.txt` gets none. */
+function pathOf(s: TextSource): string | undefined {
+  if (s.type === "note") return s.path;
+  if (s.type === "copy") return s.relPath;
+  return undefined;
+}
+
+/** Line numbers follow the note editor's own setting. */
+function useLook(source: TextSource): ViewLook {
+  const lineNumbers = useStore((s) => s.lineNumbers);
+  return { path: pathOf(source), lineNumbers };
+}
+
 /** Split when the host is wide enough, unified otherwise. */
 function useCompareMode(ref: React.RefObject<HTMLElement | null>): "split" | "unified" {
   const [mode, setMode] = useState<"split" | "unified">("split");
@@ -52,11 +65,12 @@ export function ReadOnlyText({ source, nonce = 0 }: { source: TextSource; nonce?
   const loaded = useSourceText(source, nonce);
   const host = useRef<HTMLDivElement | null>(null);
   const text = loaded.state === "ok" ? loaded.text : null;
+  const look = useLook(source);
   useEffect(() => {
     if (text == null || !host.current) return;
-    const h = mountReadOnly(host.current, text);
+    const h = mountReadOnly(host.current, text, look);
     return () => h.destroy();
-  }, [text]);
+  }, [text, look.path, look.lineNumbers]);
   if (loaded.state === "loading") return <p className="muted vtab-status">Loading…</p>;
   if (loaded.state === "error")
     return (
@@ -84,6 +98,7 @@ export function CompareBody({ left, right, actions, nonce = 0, onCounts }: Compa
   const b = useSourceText(right.source, nonce + localNonce);
   const host = useRef<HTMLDivElement | null>(null);
   const mode = useCompareMode(host);
+  const look = useLook(right.source);
   const aText = a.state === "ok" ? a.text : null;
   const bText = b.state === "ok" ? b.text : null;
   const counts = aText != null && bText != null ? lineChanges(aText, bText) : null;
@@ -95,9 +110,9 @@ export function CompareBody({ left, right, actions, nonce = 0, onCounts }: Compa
 
   useEffect(() => {
     if (aText == null || bText == null || !host.current) return;
-    const h = mountCompare(host.current, aText, bText, mode);
+    const h = mountCompare(host.current, aText, bText, mode, look);
     return () => h.destroy();
-  }, [aText, bText, mode]);
+  }, [aText, bText, mode, look.path, look.lineNumbers]);
 
   const error = a.state === "error" ? a.message : b.state === "error" ? b.message : null;
   return (

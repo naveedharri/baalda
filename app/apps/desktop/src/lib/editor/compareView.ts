@@ -4,21 +4,22 @@
    characters highlighted, with a gutter marker per changed line. Colours come
    from the `--diff-*` variables in `components/compare.css`. */
 import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView, lineNumbers } from "@codemirror/view";
-import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { EditorView } from "@codemirror/view";
 import { MergeView, unifiedMergeView } from "@codemirror/merge";
+import { readOnlyEditorExtensions } from "./index";
 
 /** Below this width the two panes stack into one unified view. */
 export const UNIFIED_BELOW_PX = 720;
 
-function readOnlyExtensions(): Extension[] {
-  return [
-    EditorState.readOnly.of(true),
-    EditorView.editable.of(false),
-    EditorView.lineWrapping,
-    lineNumbers(),
-    markdown({ base: markdownLanguage }),
-  ];
+/** Look options shared by every read-only pane: the note path picks the
+ *  grammar (a `.txt` gets none), `lineNumbers` mirrors the editor's pref. */
+export interface ViewLook {
+  path?: string;
+  lineNumbers?: boolean;
+}
+
+function looks(look: ViewLook): Extension[] {
+  return readOnlyEditorExtensions(look);
 }
 
 export interface CompareHandle {
@@ -30,11 +31,12 @@ export function mountCompare(
   left: string,
   right: string,
   mode: "split" | "unified",
+  look: ViewLook = {},
 ): CompareHandle {
   if (mode === "split") {
     const view = new MergeView({
-      a: { doc: left, extensions: readOnlyExtensions() },
-      b: { doc: right, extensions: readOnlyExtensions() },
+      a: { doc: left, extensions: looks(look) },
+      b: { doc: right, extensions: looks(look) },
       parent,
       highlightChanges: true,
       gutter: true,
@@ -47,7 +49,7 @@ export function mountCompare(
     state: EditorState.create({
       doc: right,
       extensions: [
-        ...readOnlyExtensions(),
+        ...looks(look),
         unifiedMergeView({
           original: left,
           highlightChanges: true,
@@ -63,10 +65,10 @@ export function mountCompare(
 }
 
 /** A plain read-only viewer, for an opened copy or a Trash preview. */
-export function mountReadOnly(parent: HTMLElement, text: string): CompareHandle {
+export function mountReadOnly(parent: HTMLElement, text: string, look: ViewLook = {}): CompareHandle {
   const view = new EditorView({
     parent,
-    state: EditorState.create({ doc: text, extensions: readOnlyExtensions() }),
+    state: EditorState.create({ doc: text, extensions: looks(look) }),
   });
   return { destroy: () => view.destroy() };
 }

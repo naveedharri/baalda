@@ -117,3 +117,129 @@ export const reviewState = {
     reviewState.set(new Map());
   },
 };
+
+// ── Persistence (per vault, this device) ─────────────────────────────────────
+//
+// Pending review items must survive a restart: the report itself is in-memory.
+// What is saved is the REVIEWABLE report items recorded since this vault
+// opened, plus their resolutions. On the next open, resolved items are dropped
+// (they are done), items whose local copy is gone from .context/trash are
+// pruned, and the rest are re-recorded into the report so the banner and the
+// review tab show them again.
+
+export const REVIEW_STORAGE_PREFIX = "baalda.review.v1:";
+
+export interface PersistedReview {
+  items: ReconcileItem[];
+  resolved: [string, Resolution][];
+}
+
+const KINDS: ReadonlySet<string> = new Set([
+  "restoredFromServer",
+  "deletedByTeammate",
+  "renamedConflict",
+  "keptLocally",
+  "folderKept",
+  "externalEditSaved",
+]);
+const RESOLUTIONS: ReadonlySet<string> = new Set(["kept", "restored", "restoredSibling", "skipped"]);
+
+/** Only reviewable items are worth saving; everything else is a notice. */
+export function serializeReview(items: readonly ReconcileItem[], resolved: ResolvedMap): PersistedReview {
+  const reviewable = new Set(reviewItems(items).map((it) => it.key));
+  const kept = new Map<string, ReconcileItem>();
+  for (const it of items) {
+    const k = reviewKey(it);
+    if (reviewable.has(k)) kept.set(k, it);
+  }
+  return {
+    items: [...kept.values()],
+    resolved: [...resolved].filter(([k]) => kept.has(k)),
+  };
+}
+
+/** Parse whatever storage held; anything malformed is dropped, never thrown. */
+export function parseReview(raw: string | null): PersistedReview | null {
+  if (!raw) return null;
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
+  const d = data as { items?: unknown; resolved?: unknown };
+  const items: ReconcileItem[] = [];
+  for (const it of Array.isArray(d.items) ? d.items : []) {
+    if (!it || typeof it !== "object") continue;
+    const x = it as Record<string, unknown>;
+    if (typeof x.kind !== "string" || !KINDS.has(x.kind) || typeof x.path !== "string") continue;
+    items.push({
+      kind: x.kind as ReconcileKind,
+      path: x.path,
+      at: typeof x.at === "number" ? x.at : 0,
+      ...(typeof x.docId === "string" ? { docId: x.docId } : {}),
+      ...(typeof x.newPath === "string" ? { newPath: x.newPath } : {}),
+      ...(typeof x.detail === "string" ? { detail: x.detail } : {}),
+    });
+  }
+  const resolved: [string, Resolution][] = [];
+  for (const r of Array.isArray(d.resolved) ? d.resolved : []) {
+    if (Array.isArray(r) && typeof r[0] === "string" && RESOLUTIONS.has(r[1])) {
+      resolved.push([r[0], r[1] as Resolution]);
+    }
+  }
+  return { items, resolved };
+}
+
+/**
+ * What to seed on the next open: pending items only, minus any whose local
+ * copy no longer exists (`existingCopies` holds `<stamp>/<relPath>`; null
+ * means the check could not run, so nothing is pruned for a missing copy).
+ */
+export function prunePersisted(
+  p: PersistedReview,
+  existingCopies: ReadonlySet<string> | null,
+): ReconcileItem[] {
+  const done = new Set(p.resolved.map(([k]) => k));
+  const out: ReconcileItem[] = [];
+  for (const it of p.items) {
+    if (done.has(reviewKey(it))) continue;
+    const copy = reconcileCopyRef(it);
+    if (copy && existingCopies && !existingCopies.has(`${copy.stamp}/${copy.relPath}`)) continue;
+    out.push(it);
+  }
+  return out;
+}
+
+interface KV {
+  getItem(k: string): string | null;
+  setItem(k: string, v: string): void;
+  removeItem(k: string): void;
+}
+
+function storage(): KV | null {
+  try {
+    return (globalThis as { localStorage?: KV }).localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function readPersisted(vaultKey: string, kv: KV | null = storage()): PersistedReview | null {
+  try {
+    return parseReview(kv?.getItem(REVIEW_STORAGE_PREFIX + vaultKey) ?? null);
+  } catch {
+    return null;
+  }
+}
+
+export function writePersisted(vaultKey: string, p: PersistedReview, kv: KV | null = storage()): void {
+  try {
+    if (!kv) return;
+    if (p.items.length === 0) kv.removeItem(REVIEW_STORAGE_PREFIX + vaultKey);
+    else kv.setItem(REVIEW_STORAGE_PREFIX + vaultKey, JSON.stringify(p));
+  } catch {
+    // Storage full or blocked: the review still works for this session.
+  }
+}
