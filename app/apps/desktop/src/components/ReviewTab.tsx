@@ -360,3 +360,10 @@ export function ReviewTab() {
     </div>
   );
 }
+
+/** Pending review items across this session's whole report (the panel badge). */
+export function usePendingReviewCount(): number {
+  const report = useReportItems();
+  const resolved = useReviewState();
+  return useMemo(() => pendingItems(reviewItems(report), resolved).length, [report, resolved]);
+}

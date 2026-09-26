@@ -84,6 +84,7 @@ import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
 import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
+import { readLastTab, writeLastTab, type RightPanelTab } from "./components/rightPanelTab";
 import {
   neighbourAfterClose,
   upsertTab,
@@ -825,6 +826,14 @@ interface AppStore {
   /** Open the history panel for a note and load its versions. */
   openVersionPanel: (docId: string) => Promise<void>;
   closeVersionPanel: () => void;
+  /** The right-side panel (Sync / Versions / What's new), or null when closed.
+   *  The Versions tab drives `versionPanelDocId` (App.tsx keeps it on the open
+   *  note); every other tab, and closing, clears it and its preview. */
+  rightPanel: { tab: RightPanelTab } | null;
+  /** Open on `tab`, or the last tab used on this device. */
+  openRightPanel: (tab?: RightPanelTab) => void;
+  closeRightPanel: () => void;
+  setRightPanelTab: (tab: RightPanelTab) => void;
   /** Load one version's markdown for the read-only editor overlay. */
   previewVersion: (versionId: number) => Promise<void>;
   clearVersionPreview: () => void;
@@ -1744,6 +1753,18 @@ export const useStore = create<AppStore>((set, get) => ({
   dismissClosedAppChanges: () => syncManager.dismissClosedChangesNotice(),
   revealRequest: null,
   settingsRequest: null,
+  rightPanel: null,
+  openRightPanel: (tab) => {
+    const t = tab ?? readLastTab();
+    writeLastTab(t);
+    set({
+      rightPanel: { tab: t },
+      ...(t === "versions" ? {} : { versionPanelDocId: null, noteVersions: null, versionPreview: null }),
+    });
+  },
+  closeRightPanel: () =>
+    set({ rightPanel: null, versionPanelDocId: null, noteVersions: null, versionPreview: null }),
+  setRightPanelTab: (tab) => get().openRightPanel(tab),
   settingsDismissToken: 0,
   dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
   accountSettingsRequest: null,

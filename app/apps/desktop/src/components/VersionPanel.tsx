@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { AsyncButton } from "./AsyncButton";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Face } from "./Face";
@@ -26,7 +25,8 @@ import { useStore } from "../store";
 const PREVIEW_GRACE_MS = 140;
 
 /**
- * Version history for the open note — a slide-in over the main pane rather than
+ * Version history for the open note, the right panel's Versions tab (the
+ * slide-in container lives in `RightPanel.tsx`) — a slide-in rather than
  * a modal, because the point of it is to be read *against* the editor: hovering
  * a row previews that version in place, and the live note is still there
  * underneath, still syncing, the moment the pointer leaves.
@@ -34,27 +34,25 @@ const PREVIEW_GRACE_MS = 140;
  * Wrapped in an ErrorBoundary (as the graph view is): a panel that throws while
  * formatting one bad row must not take the editor down with it.
  */
-export function VersionPanel() {
+export function VersionsTab() {
   const docId = useStore((s) => s.versionPanelDocId);
+  if (!docId) {
+    return (
+      <p className="muted version-panel-empty">
+        Open a synced note to see its version history.
+      </p>
+    );
+  }
   return (
-    <AnimatePresence>
-      {docId && (
-        <ErrorBoundary
-          label="Version history"
-          resetKeys={[docId]}
-          onError={() => useStore.getState().closeVersionPanel()}
-        >
-          <VersionPanelBody key={docId} docId={docId} />
-        </ErrorBoundary>
-      )}
-    </AnimatePresence>
+    <ErrorBoundary label="Version history" resetKeys={[docId]}>
+      <VersionPanelBody key={docId} docId={docId} />
+    </ErrorBoundary>
   );
 }
 
 function VersionPanelBody({ docId }: { docId: string }) {
   const versions = useStore((s) => s.noteVersions);
   const noteTitle = useStore((s) => s.openNote?.title ?? null);
-  const reduceMotion = useReducedMotion();
 
   // Row 0 is the "Current" pseudo-entry; version i lives at index i + 1.
   const [active, setActive] = useState(0);
@@ -63,7 +61,7 @@ function VersionPanelBody({ docId }: { docId: string }) {
   // screen can say so instead of inviting a revert that would change nothing.
   const [liveSha, setLiveSha] = useState<string | null>(null);
 
-  const asideRef = useRef<HTMLElement | null>(null);
+  const asideRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
   const graceRef = useRef<number | null>(null);
 
@@ -82,21 +80,6 @@ function VersionPanelBody({ docId }: { docId: string }) {
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(id);
-  }, []);
-
-  // Click anywhere outside → close, same convention as every popover here
-  // (AccountMenu, PeerRoster). The header's history button is exempt: it is a
-  // toggle, and closing on its pointerdown would make its click re-open the
-  // panel it just closed.
-  useEffect(() => {
-    const onPointerDown = (e: PointerEvent) => {
-      const target = e.target as Node;
-      if (asideRef.current?.contains(target)) return;
-      if (target instanceof Element && target.closest(".history-btn")) return;
-      useStore.getState().closeVersionPanel();
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
   }, []);
 
   // Track the live text's hash. Re-hashing on every keystroke would be silly, so
@@ -180,7 +163,7 @@ function VersionPanelBody({ docId }: { docId: string }) {
 
   const close = () => {
     cancelGrace();
-    useStore.getState().closeVersionPanel();
+    useStore.getState().closeRightPanel();
   };
 
   const doRevert = async (v: NoteVersion) => {
@@ -220,38 +203,18 @@ function VersionPanelBody({ docId }: { docId: string }) {
   };
 
   return (
-    <motion.aside
+    <div
       ref={asideRef}
-      className="version-panel"
+      className="version-tab"
       tabIndex={-1}
-      role="dialog"
       aria-label="Version history"
       onKeyDown={onKeyDown}
-      initial={reduceMotion ? { opacity: 0 } : { x: "100%" }}
-      animate={reduceMotion ? { opacity: 1 } : { x: 0 }}
-      exit={reduceMotion ? { opacity: 0 } : { x: "100%" }}
-      // A deceleration tween, not a spring: the panel slides over a live
-      // CodeMirror, where a spring's overshoot + settling frames read as jitter.
-      // Pure transform (no opacity ramp) keeps it compositor-only and smooth.
-      transition={
-        reduceMotion
-          ? { duration: 0.12 }
-          : { duration: 0.28, ease: [0.32, 0.72, 0, 1] }
-      }
     >
       <header className="version-panel-head">
         <div className="version-panel-title">
           <span className="settings-eyebrow">Version history</span>
           <strong>{noteTitle ?? "This note"}</strong>
         </div>
-        <button
-          className="icon-btn"
-          onClick={close}
-          aria-label="Close version history"
-          title="Close (Esc)"
-        >
-          ✕
-        </button>
       </header>
 
       <p className="muted version-panel-hint">
@@ -300,7 +263,7 @@ function VersionPanelBody({ docId }: { docId: string }) {
           )}
         </ul>
       )}
-    </motion.aside>
+    </div>
   );
 }
 

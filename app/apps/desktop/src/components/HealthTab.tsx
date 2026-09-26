@@ -42,7 +42,6 @@ import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
 import { HealthActivity, HealthLargest } from "./HealthStats";
 import { AttachmentSyncNotice } from "./AttachmentSyncNotice";
-import { HealthReconciled, HealthRecoveryCopies, HealthTrash } from "./HealthReconcile";
 import {
   Glyph,
   Section,
@@ -330,9 +329,6 @@ export function HealthView({
         />
       </Section>
 
-      <HealthReconciled now={now} />
-      {!demo && <HealthTrash now={now} />}
-      {!demo && <HealthRecoveryCopies now={now} />}
 
       </>}
       {mode !== "overview" && <details className="health-advanced" open={mode === "diagnostics" ? true : undefined}>

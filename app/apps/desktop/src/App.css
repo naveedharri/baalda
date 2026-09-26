@@ -7904,3 +7904,90 @@ button.secondary:active:not(:disabled),
   gap: var(--sp-1);
   min-width: 0;
 }
+
+/* ---- Right panel (RightPanel.tsx): Activity / Versions ----
+   Same container as the old version panel (`.version-panel`), wider because
+   the Activity feed holds Health-style rows with actions. */
+.version-panel.right-panel {
+  width: min(420px, 92vw);
+}
+.right-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-3) var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+}
+.right-panel-tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+.right-panel-tabs {
+  align-items: center;
+}
+.right-panel-tab {
+  position: relative;
+}
+.right-panel-tab-name {
+  margin-left: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.right-panel-count {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  text-align: center;
+}
+.right-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.version-tab {
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.panel-btn {
+  position: relative;
+}
+.panel-btn-badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+.right-panel-tab.active,
+.panel-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.activity-feed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+}
+.activity-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.activity-toolbar .activity-refresh {
+  margin-left: auto;
+}

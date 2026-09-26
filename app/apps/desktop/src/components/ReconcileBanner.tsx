@@ -17,12 +17,6 @@ export const RECONCILE_BANNER_DEBOUNCE_MS = 600;
  *  chrome) must not re-announce what was dismissed. */
 let dismissedUpTo = 0;
 
-/**
- * Asks Vault Health to scroll to the "Reconciled on reconnect" section when it
- * next mounts. Set by the banner's Details button, consumed once by
- * `HealthReconciled`.
- */
-export const reconcileFocusRequest = { pending: false };
 
 /**
  * What sync did on the user's behalf when it reconnected: a note put back, a
@@ -73,9 +67,10 @@ export function ReconcileBanner() {
     setItems([]);
   };
 
+  // Details opens the right panel's Activity tab, where every item is listed with
+  // its actions. Like before, it also dismisses the banner for this session.
   const details = () => {
-    reconcileFocusRequest.pending = true;
-    useStore.getState().requestSettings("health");
+    useStore.getState().openRightPanel("activity");
     dismiss();
   };
 
