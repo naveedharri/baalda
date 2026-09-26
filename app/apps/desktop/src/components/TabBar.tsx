@@ -31,20 +31,24 @@ interface TabMenu {
  */
 export function TabBar() {
   const openTabs = useStore((s) => s.openTabs);
-  const activePath = useStore((s) => s.openNote?.path ?? null);
+  const notePath = useStore((s) => s.openNote?.path ?? null);
+  const virtualTabs = useStore((s) => s.virtualTabs);
+  const activeVirtual = useStore((s) => s.activeVirtualTab);
+  // A virtual tab on screen takes the highlight; the note keeps its tab.
+  const activePath = activeVirtual ? null : notePath;
   const openingPath = useStore((s) => s.openingNotePath);
   const reduceMotion = useReducedMotion();
 
   // Vault machinery can reset the list while a note is still open (see
   // `vaultScopedSyncReset`) — the file on screen always earns a tab.
   const tabs =
-    activePath && !openTabs.includes(activePath) ? [...openTabs, activePath] : openTabs;
+    notePath && !openTabs.includes(notePath) ? [...openTabs, notePath] : openTabs;
 
   // Keep the active tab in view when it changes off-screen (many tabs open).
   const activeRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     activeRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [activePath]);
+  }, [activePath, activeVirtual]);
 
   // Context menu, same placement dance as the file tree's row menu: render
   // hidden at the anchor, measure, then let `placeMenu` flip/clamp it on-screen.
@@ -142,6 +146,62 @@ export function TabBar() {
                 onClick={(e) => {
                   e.stopPropagation();
                   useStore.getState().closeTab(path);
+                }}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  aria-hidden="true"
+                >
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+          );
+        })}
+        {virtualTabs.map((tab) => {
+          const active = tab.id === activeVirtual;
+          return (
+            <div
+              key={`v:${tab.id}`}
+              className={`tab virtual-tab${active ? " active" : ""}`}
+              role="tab"
+              aria-selected={active}
+              title={tab.title}
+              onAuxClick={(e) => {
+                if (e.button === 1) useStore.getState().closeVirtualTab(tab.id);
+              }}
+            >
+              {active && (
+                <motion.span
+                  className="tab-active-bg"
+                  layoutId="tab-active-bg"
+                  aria-hidden="true"
+                  transition={
+                    reduceMotion
+                      ? { duration: 0 }
+                      : { type: "spring", stiffness: 380, damping: 34, mass: 0.9 }
+                  }
+                />
+              )}
+              <button
+                ref={active ? activeRef : undefined}
+                className="tab-label"
+                tabIndex={active ? 0 : -1}
+                onClick={() => useStore.getState().activateVirtualTab(tab.id)}
+              >
+                {tab.title}
+              </button>
+              <button
+                className="tab-close"
+                title="Close tab"
+                aria-label={`Close ${tab.title}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  useStore.getState().closeVirtualTab(tab.id);
                 }}
               >
                 <svg

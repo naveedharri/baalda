@@ -77,3 +77,22 @@ describe("ApiClient — trash", () => {
     }
   });
 });
+
+describe("ApiClient — trash content", () => {
+  it("GETs a deleted note's text by its encoded doc id", async () => {
+    const body = { docId: "d/1", relPath: "Notes/plan.md", text: "# Plan", deletedAt: ITEM.deletedAt };
+    const { api, calls } = client(() => ({ json: body }));
+    expect(await api.trashContent("d/1")).toEqual(body);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("http://localhost:3010/api/notes/d%2F1/trash-content");
+  });
+
+  it("surfaces 404 not_in_trash, 410 purged and 403 as ApiError", async () => {
+    for (const status of [404, 410, 403]) {
+      const { api } = client(() => ({ status, json: { error: "x" } }));
+      const err = await api.trashContent("d1").catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).status).toBe(status);
+    }
+  });
+});

@@ -17,6 +17,11 @@ import { relativeTime, clockTime } from "../lib/health/format";
 import { AsyncButton } from "./AsyncButton";
 import { PathText, Section } from "./HealthShared";
 import { reconcileFocusRequest } from "./ReconcileBanner";
+import * as ipc from "../lib/ipc";
+import { formatBytes } from "../lib/health/format";
+import { RecoveryCopyActions, TrashPreviewActions } from "./RecoveryCopyActions";
+import { groupCopies, reconcileCopyRef, stampTime } from "./recoveryCopies";
+import { compareTrash, openTrashPreview } from "./recoveryActions";
 
 /** Rows shown before "Show more", like the other Health lists. */
 const PAGE = 20;
@@ -67,6 +72,12 @@ export function HealthReconciled({ now }: { now: number }) {
                   <span className="health-missing-actions muted" title={clockTime(it.at)}>
                     {relativeTime(it.at, now)}
                   </span>
+                  {(() => {
+                    const copy = reconcileCopyRef(it);
+                    return copy ? (
+                      <RecoveryCopyActions copy={copy} notePath={it.path} />
+                    ) : null;
+                  })()}
                 </li>
               ))}
             </ul>
@@ -218,6 +229,14 @@ export function HealthTrash({ now }: { now: number }) {
                   </span>
                 </span>
                 <span className="health-missing-actions">
+                  {online && (
+                    <TrashPreviewActions
+                      docId={item.docId}
+                      relPath={item.relPath}
+                      onPreview={openTrashPreview}
+                      onCompare={compareTrash}
+                    />
+                  )}
                   <AsyncButton
                     className="ghost-pill sm"
                     disabled={!online}
@@ -241,6 +260,95 @@ export function HealthTrash({ now }: { now: number }) {
           )}
           {listing.truncated && (
             <p className="muted">Only the most recent deleted notes are listed.</p>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// ── Recovery copies (.context/trash on this device) ─────────────────────────
+
+export function HealthRecoveryCopies({ now }: { now: number }) {
+  const vault = useStore((s) => s.vault);
+  const [copies, setCopies] = useState<ipc.TrashCopy[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
+  const [limit, setLimit] = useState(PAGE);
+  const epoch = vault?.epoch;
+
+  useEffect(() => {
+    if (!vault) return;
+    let cancelled = false;
+    setError(null);
+    ipc.listTrashCopies(epoch).then(
+      (list) => !cancelled && setCopies(list),
+      (e) => !cancelled && setError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [epoch, nonce]);
+
+  const groups = useMemo(() => groupCopies(copies ?? []), [copies]);
+  if (!vault) return null;
+  const refresh = () => setNonce((n) => n + 1);
+
+  let shown = 0;
+  return (
+    <Section
+      title="Recovery copies"
+      description="Local text sync set aside on this device, in .context/trash. They never sync. Open, compare or restore one, or delete it."
+      right={
+        <AsyncButton className="ghost-pill sm" onClick={refresh}>
+          Refresh
+        </AsyncButton>
+      }
+    >
+      {error && (
+        <p role="alert" className="auth-error health-missing-error">
+          {error}
+        </p>
+      )}
+      {copies == null ? (
+        <p className="muted">Loading…</p>
+      ) : copies.length === 0 ? (
+        <p className="muted">No recovery copies on this device.</p>
+      ) : (
+        <div className="health-difference-group health-place-group">
+          {groups.map((g) => {
+            if (shown >= limit) return null;
+            const at = stampTime(g.stamp) ?? g.at;
+            const rows = g.copies.slice(0, limit - shown);
+            shown += rows.length;
+            return (
+              <div key={g.stamp}>
+                <p className="muted" title={g.stamp}>
+                  {`Saved ${relativeTime(at, now)} · ${clockTime(at)}`}
+                </p>
+                <ul>
+                  {rows.map((c) => (
+                    <li key={`${c.stamp}/${c.relPath}`}>
+                      <span className="health-place-row" title={`.context/trash/${c.stamp}/${c.relPath}`}>
+                        <PathText path={c.relPath} />
+                        <span className="muted">{formatBytes(c.bytes)}</span>
+                      </span>
+                      <RecoveryCopyActions
+                        copy={{ stamp: c.stamp, relPath: c.relPath }}
+                        modified={c.modified}
+                        onChanged={refresh}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+          {copies.length > limit && (
+            <button type="button" className="link-btn" onClick={() => setLimit(limit + PAGE)}>
+              {`Show more (${(copies.length - limit).toLocaleString()} remaining)`}
+            </button>
           )}
         </div>
       )}

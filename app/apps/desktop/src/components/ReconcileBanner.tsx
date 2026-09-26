@@ -3,6 +3,9 @@ import { Banner } from "./Banner";
 import { useStore } from "../store";
 import { reconcileReport, type ReconcileItem } from "../lib/sync/reconcileReport";
 import { summarizeReconcile } from "../lib/reconcileSummary";
+import { pendingItems, reviewItems, reviewKey } from "./reviewModel";
+import { useReviewState } from "./ReviewTab";
+import { openReviewTab } from "./recoveryActions";
 
 /** A burst of records (one reconnect reconciles many notes) settles into ONE
  *  banner instead of re-rendering a growing one per note. */
@@ -46,7 +49,17 @@ export function ReconcileBanner() {
     };
   }, []);
 
-  const lines = useMemo(() => summarizeReconcile(items), [items]);
+  const resolved = useReviewState();
+  // Resolved items leave the summary, so the banner counts down as the user
+  // works through the review; what has nothing to review stays as it was.
+  const unresolved = useMemo(
+    () => items.filter((it) => !resolved.has(reviewKey(it))),
+    [items, resolved],
+  );
+  const lines = useMemo(() => summarizeReconcile(unresolved), [unresolved]);
+  const reviewable = useMemo(() => reviewItems(items), [items]);
+  const pendingReview = pendingItems(reviewable, resolved).length;
+  const allResolved = items.length > 0 && reviewable.length > 0 && lines.length === 0;
 
   const dismiss = () => {
     reconcileReport.drain();
@@ -61,8 +74,9 @@ export function ReconcileBanner() {
   };
 
   return (
-    <Banner show={lines.length > 0} role="status" className="reconcile-banner">
+    <Banner show={lines.length > 0 || allResolved} role="status" className="reconcile-banner">
       <span className="reconcile-banner-lines">
+        {allResolved && <span className="reconcile-banner-line">All resolved.</span>}
         {lines.map((l) => (
           <span key={l.kind} className="reconcile-banner-line">
             {l.text}
@@ -70,6 +84,9 @@ export function ReconcileBanner() {
         ))}
       </span>
       <div className="banner-actions">
+        {pendingReview > 0 && (
+          <button onClick={openReviewTab}>{`Compare (${pendingReview.toLocaleString()})`}</button>
+        )}
         <button onClick={details}>Details</button>
         <button className="secondary" onClick={dismiss}>
           Dismiss

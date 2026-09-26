@@ -1209,3 +1209,27 @@ export const onFilesIndexed = (
   cb: (paths: string[]) => void,
 ): Promise<UnlistenFn> =>
   listen<FilesIndexed>("files-indexed", (event) => cb(event.payload?.paths ?? []));
+
+// ---- Local recovery copies (`.context/trash`, Rust `trash.rs`) ------------
+
+/** One file under `.context/trash/<stamp>/`. `relPath` is its path under the
+ *  stamp (the note's original vault path, maybe with a ` (2)` suffix). */
+export interface TrashCopy {
+  stamp: string;
+  relPath: string;
+  bytes: number;
+  /** Milliseconds since the Unix epoch. */
+  modified: number;
+}
+
+/** Every recovery copy, newest first. Rust refuses a symlinked trash. */
+export const listTrashCopies = (expectedEpoch?: VaultEpoch) =>
+  invoke<TrashCopy[]>("list_trash_copies", { expectedEpoch: expectedEpoch ?? null });
+
+/** One copy's text. Rust confines `stamp`/`relPath` to `.context/trash`. */
+export const readTrashCopy = (stamp: string, relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<string>("read_trash_copy", { stamp, relPath, expectedEpoch: expectedEpoch ?? null });
+
+/** Delete one copy (and any stamp directory it leaves empty). */
+export const deleteTrashCopy = (stamp: string, relPath: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("delete_trash_copy", { stamp, relPath, expectedEpoch: expectedEpoch ?? null });

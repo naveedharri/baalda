@@ -165,6 +165,15 @@ export interface Vault {
 }
 
 /** One soft-deleted note in `GET /api/vaults/:vaultId/trash`. */
+/** `GET /api/notes/:docId/trash-content`. */
+export interface TrashContent {
+  docId: string;
+  relPath: string;
+  text: string;
+  /** ISO timestamp. */
+  deletedAt: string;
+}
+
 export interface TrashItem {
   docId: string;
   relPath: string;
@@ -2076,6 +2085,18 @@ export class ApiClient {
    * original is taken (`renamed: true`). 404 = unknown or not deleted, 403 = no
    * permission; both surface as an `ApiError` for the caller to show inline.
    */
+  /**
+   * The text of a note in the server's Trash, for a read-only preview.
+   * 404 `not_in_trash`, 410 `purged`, 403 without read access.
+   */
+  async trashContent(docId: string): Promise<TrashContent> {
+    const { data } = await this.request<TrashContent>(
+      "GET",
+      `/api/notes/${encodeURIComponent(docId)}/trash-content`,
+    );
+    return data;
+  }
+
   async restoreNote(docId: string): Promise<RestoredNote> {
     const { data } = await this.request<RestoredNote>(
       "POST",
