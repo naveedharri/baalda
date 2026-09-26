@@ -52,6 +52,7 @@ export function AccountMenu() {
   // sync banner and the sync pill both point at Health). This component owns the
   // only settings dialog, so it is the only place that can answer.
   const settingsRequest = useStore((s) => s.settingsRequest);
+  const settingsDismissToken = useStore((s) => s.settingsDismissToken);
   const accountSettingsRequest = useStore((s) => s.accountSettingsRequest);
 
   const [open, setOpen] = useState(false);
@@ -107,6 +108,10 @@ export function AccountMenu() {
   // showing — which is why the dialog below is keyed on it: `initialTab` is read
   // once, on mount, so a request that arrives while settings are already open
   // has to remount the dialog to land on its page.
+  useEffect(() => {
+    if (settingsDismissToken > 0) setMembersOpen(false);
+  }, [settingsDismissToken]);
+
   useEffect(() => {
     if (!settingsRequest) return;
     setOpen(false);

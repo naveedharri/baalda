@@ -113,6 +113,13 @@ export class NoteBridge {
    *  both report their merge (`divergedDocs` via `handleLocalFileChanged` and
    *  `onExternalMerge`); this flag is how the hydrate one does. */
   private diskMergedUnreported = false;
+  /**
+   * The file bytes a signed-in, CRDT-less open found with no disk base: not yet
+   * known to differ from the server's text. The first egest that would replace
+   * them with DIFFERENT text saves them aside first; one that would write the
+   * same bytes (or a merge / seed that takes them in) just forgets them.
+   */
+  private unagreedFile: { text: string; hash: string } | null = null;
   /** True once a recovery snapshot has been taken for a large diff. */
   private recoverySnapshotTaken = false;
   /** True once this doc has held non-empty text in this session. Guards egest:
@@ -372,23 +379,21 @@ export class NoteBridge {
       // later egest of server content is seen as a genuine change and no
       // spurious ingest fires before we've seeded.
       this.lastWrittenHash = await this.hash(fileText);
-      // Signed in, no local CRDT, and the file holds bytes this device never
-      // agreed on (no disk base, or one they moved on from): an external
-      // writer edited a note this device never opened. The pull is about to
+      // Signed in, no local CRDT, and a non-empty file: the pull is about to
       // decide the doc's text, and the orphan seed only runs when the server
-      // turns out empty — so save the file aside first. Nothing below may be
-      // the only record of those bytes.
-      if (
-        !this.seedOnOpen &&
-        fileRead &&
-        fileText.trim().length > 0 &&
-        this.diskBase !== this.lastWrittenHash &&
-        this.io.saveRecoveryCopy
-      ) {
-        try {
-          await this.io.saveRecoveryCopy(this._path, fileText);
-        } catch (e) {
-          this.reportError(e, "hydrate:saveRecoveryCopy");
+      // turns out empty. Two cases, deliberately different:
+      //  - a disk base exists and the file no longer hashes to it: PROVEN
+      //    changed since this device last synced it (an external writer) —
+      //    save it aside now, before anything can egest;
+      //  - no base at all (every note of a vault that predates the base, or
+      //    that never egested): NOT evidence of anything. Remember the bytes,
+      //    and decide at the first egest — copy only if what would be written
+      //    actually differs from them. Identical text produces nothing.
+      if (!this.seedOnOpen && fileRead && fileText.trim().length > 0) {
+        if (this.diskBase !== null && this.diskBase !== this.lastWrittenHash) {
+          await this.saveAside(fileText);
+        } else if (this.diskBase === null) {
+          this.unagreedFile = { text: fileText, hash: this.lastWrittenHash };
         }
       }
       if (this.seedOnOpen && fileText.length > 0 && this.text.toString() === fileText) {
@@ -445,6 +450,7 @@ export class NoteBridge {
       seeded = true;
     }, ORIGIN_DISK);
     if (!seeded) return false;
+    this.unagreedFile = null; // seeded FROM the file: nothing to preserve
     this.lastWrittenHash = await this.hash(fileText);
     this.recordDiskBase(this.lastWrittenHash);
     this.observe(this.lastWrittenHash, this.stateIfText(fileText));
@@ -568,6 +574,19 @@ export class NoteBridge {
     const fileHash = await this.hash(fileText);
     if (fileHash === this.lastWrittenHash || fileHash === this.pendingMergedFileHash) return false;
     return fileText !== this.text.toString();
+  }
+
+  /** Save `text` (this note's file bytes) as a recovery copy. Resolves true
+   *  when it landed or there is no store to put it in; false on a failure. */
+  private async saveAside(text: string): Promise<boolean> {
+    if (!this.io.saveRecoveryCopy) return true;
+    try {
+      await this.io.saveRecoveryCopy(this._path, text);
+      return true;
+    } catch (e) {
+      this.reportError(e, "saveRecoveryCopy");
+      return false;
+    }
   }
 
   /** Persist the disk base. Fire-and-forget: a lost record only means the next
@@ -872,6 +891,7 @@ export class NoteBridge {
     // no-socket fast path in `ContentUploader.pushOne` keeps firing for our own
     // egest echoes — the flag is set strictly for merges that really happened.
     this.diskMergedUnreported = true;
+    this.unagreedFile = null; // the file's bytes are in the doc now
     this.recordDiskBase(fileHash);
     return true;
   }
@@ -963,10 +983,27 @@ export class NoteBridge {
     // the user's pointer for nothing. A failed write does NOT set the guard, so
     // a retry still writes.
     if (hash === this.lastWrittenHash) {
+      // The doc already reads exactly the file's bytes: nothing unproven left.
+      this.unagreedFile = null;
       // A write that had been failing no longer needs to land: the bytes it was
       // retrying to put on disk are already there.
       this.clearWriteFailure();
       return;
+    }
+    // A CRDT-less open's unproven file bytes are about to be replaced by
+    // DIFFERENT text: that difference is the proof. Save them aside first, and
+    // refuse this write if that fails (the next egest retries).
+    const unagreed = this.unagreedFile;
+    if (unagreed) {
+      if (content === unagreed.text) {
+        this.unagreedFile = null;
+      } else if (this.observed?.hash === unagreed.hash) {
+        if (!(await this.saveAside(unagreed.text))) return;
+        if (this.unagreedFile === unagreed) this.unagreedFile = null;
+        if (this.destroyed || this.text.toString() !== content) return; // re-run picks it up
+      } else {
+        this.unagreedFile = null; // the file moved on; CAS below guards it
+      }
     }
     // Compare-and-swap (#216): only replace the bytes this bridge last saw.
     const blind = this.blindNextWrite;

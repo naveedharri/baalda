@@ -25,6 +25,7 @@ import { Spinner } from "./components/Spinner";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { SidebarToggle } from "./components/SidebarToggle";
 import { TabBar } from "./components/TabBar";
+import { VirtualTabHost } from "./components/VirtualTabHost";
 import { Toasts } from "./components/Toasts";
 import { toast } from "./lib/toast";
 import { VersionPanel } from "./components/VersionPanel";
@@ -899,6 +900,9 @@ function PromptedAuthDialog() {
 export default function App() {
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
+  const activeVirtual = useStore(
+    (s) => s.virtualTabs.find((t) => t.id === s.activeVirtualTab) ?? null,
+  );
   const openingNotePath = useStore((s) => s.openingNotePath);
   const switchingVault = useStore((s) => s.switchingVault);
   // Version history is a synced-vault feature: it needs the note's docId on the
@@ -1471,6 +1475,11 @@ export default function App() {
           <DeletedByTeammateBanner />
           {attachmentLocalOnly && <AttachmentSyncNotice />}
           <div className="editor-wrap">
+            {activeVirtual && <VirtualTabHost tab={activeVirtual} />}
+            {/* Stays MOUNTED under a virtual tab (display toggles, the tree does
+                not), so the note's live editor is still there for Compare's
+                right side and for "Replace current note". */}
+            <div className="editor-slot" style={{ display: activeVirtual ? "none" : "contents" }}>
             {openNote ? (
               <Suspense
                 fallback={
@@ -1507,6 +1516,7 @@ export default function App() {
             ) : (
               <EditorEmpty />
             )}
+            </div>
           </div>
           <BacklinksPanel />
           {/* Slides in over the editor from the right; anchored to .main. */}

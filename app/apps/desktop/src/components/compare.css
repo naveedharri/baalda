@@ -1,0 +1,238 @@
+/* Compare / read-only virtual tabs (CompareTab.tsx, lib/editor/compareView.ts).
+   Diff colours are derived from the danger/success tokens, VS Code style: the
+   whole changed line tinted, the exact changed characters stronger, a gutter
+   bar per changed line. Light on :root, dark overrides below. */
+:root {
+  --diff-removed-line: color-mix(in srgb, var(--danger) 10%, transparent);
+  --diff-removed-text: color-mix(in srgb, var(--danger) 30%, transparent);
+  --diff-added-line: color-mix(in srgb, var(--success) 11%, transparent);
+  --diff-added-text: color-mix(in srgb, var(--success) 32%, transparent);
+  --diff-removed-gutter: var(--danger);
+  --diff-added-gutter: var(--success);
+  --diff-collapsed-bg: color-mix(in srgb, var(--text-secondary) 8%, transparent);
+}
+[data-theme="dark"] {
+  --diff-removed-line: color-mix(in srgb, var(--danger) 16%, transparent);
+  --diff-removed-text: color-mix(in srgb, var(--danger) 42%, transparent);
+  --diff-added-line: color-mix(in srgb, var(--success) 16%, transparent);
+  --diff-added-text: color-mix(in srgb, var(--success) 42%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --diff-removed-line: color-mix(in srgb, var(--danger) 16%, transparent);
+    --diff-removed-text: color-mix(in srgb, var(--danger) 42%, transparent);
+    --diff-added-line: color-mix(in srgb, var(--success) 16%, transparent);
+    --diff-added-text: color-mix(in srgb, var(--success) 42%, transparent);
+  }
+}
+
+.vtab-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-surface);
+}
+.vtab-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+.vtab-header .vtab-labels {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 12px;
+}
+.vtab-header .vtab-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vtab-header .vtab-label strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.vtab-header .vtab-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.vtab-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.vtab-body .cm-editor {
+  height: auto;
+  min-height: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.vtab-body .cm-mergeView {
+  min-height: 100%;
+}
+.vtab-status {
+  padding: 16px;
+}
+.vtab-error {
+  margin: 8px 16px;
+}
+
+/* ---- @codemirror/merge classes ----
+   Names checked against @codemirror/merge 6.12 dist/index.js: the editor
+   element itself carries `cm-merge-a` (left) / `cm-merge-b` (right, and the
+   unified editor); changed lines are `cm-changedLine`, changed characters
+   `cm-changedText` (marks), a unified deletion is a `cm-deletedChunk` block
+   of `cm-deletedLine` rows with `cm-deletedText` inside; gutter markers are
+   `cm-changedLineGutter` / `cm-deletedLineGutter` in `cm-changeGutter`;
+   collapsed runs are `cm-collapsedLines`; the pane divider `cm-mergeSpacer`.
+   The package's base theme scopes these at three to four classes, so every
+   rule here starts `.vtab-view .vtab-body .cm-editor` to win regardless of
+   stylesheet order. */
+.vtab-view .vtab-body .cm-editor.cm-merge-a .cm-changedLine,
+.vtab-view .vtab-body .cm-editor .cm-deletedChunk {
+  background: var(--diff-removed-line);
+}
+.vtab-view .vtab-body .cm-editor.cm-merge-b .cm-changedLine,
+.vtab-view .vtab-body .cm-editor .cm-inlineChangedLine {
+  background: var(--diff-added-line);
+}
+.vtab-view .vtab-body .cm-editor.cm-merge-a .cm-changedText,
+.vtab-view .vtab-body .cm-editor .cm-deletedChunk .cm-deletedText,
+.vtab-view .vtab-body .cm-editor.cm-merge-b .cm-deletedText {
+  background: var(--diff-removed-text);
+  border-radius: 2px;
+}
+.vtab-view .vtab-body .cm-editor.cm-merge-b .cm-changedText {
+  background: var(--diff-added-text);
+  border-radius: 2px;
+}
+.vtab-view .vtab-body .cm-editor .cm-insertedLine,
+.vtab-view .vtab-body .cm-editor .cm-deletedLine,
+.vtab-view .vtab-body .cm-editor .cm-deletedLine del {
+  text-decoration: none;
+}
+.vtab-view .vtab-body .cm-editor .cm-changeGutter {
+  width: 3px;
+}
+.vtab-view .vtab-body .cm-editor.cm-merge-a .cm-changedLineGutter,
+.vtab-view .vtab-body .cm-editor .cm-deletedLineGutter {
+  background: var(--diff-removed-gutter);
+}
+.vtab-view .vtab-body .cm-editor.cm-merge-b .cm-changedLineGutter {
+  background: var(--diff-added-gutter);
+}
+.vtab-view .vtab-body .cm-editor .cm-collapsedLines {
+  background: var(--diff-collapsed-bg);
+  color: var(--text-secondary);
+}
+.vtab-view .vtab-body .cm-mergeSpacer {
+  background: var(--diff-collapsed-bg);
+}
+
+/* ---- Review changes tab (ReviewTab.tsx) ---- */
+.review-tab {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-surface);
+}
+.review-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.review-main {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.review-compare {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.review-compare > .vtab-view {
+  flex: 1;
+  min-height: 0;
+}
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+.review-list {
+  width: 300px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  overflow: auto;
+  font-size: var(--fs-sm);
+}
+.review-list-header {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.review-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+}
+.review-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.review-row:hover {
+  background: var(--diff-collapsed-bg);
+}
+.review-row.active {
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
+}
+.review-row.resolved {
+  opacity: 0.6;
+}
+.review-row-meta {
+  font-size: var(--fs-sm);
+}
+@media (max-width: 720px) {
+  .review-tab {
+    flex-direction: column-reverse;
+  }
+  .review-list {
+    width: auto;
+    max-height: 40%;
+    border-left: none;
+    border-bottom: 1px solid var(--border);
+  }
+}

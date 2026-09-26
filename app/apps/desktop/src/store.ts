@@ -85,6 +85,11 @@ import { parseInviteDeepLink } from "./lib/inviteLink";
 import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
 import {
+  neighbourAfterClose,
+  upsertTab,
+  type VirtualTab,
+} from "./components/virtualTabs";
+import {
   acceptInviteFailureMessage,
   clearPendingInvite,
   INVITE_GONE_MESSAGE,
@@ -167,6 +172,15 @@ interface AppStore {
    *  `openNote.path`; this list is only which tabs exist, so the two never
    *  disagree about what's on screen. Session-only, vault-scoped. */
   openTabs: string[];
+  /** Non-note tabs (recovery copy, trash preview, compare, review). See
+   *  `components/virtualTabs.ts`. Session-only, vault-scoped. */
+  virtualTabs: VirtualTab[];
+  /** The virtual tab on screen, or null when the note editor is. Opening a note
+   *  clears it; `openNote` is never touched by a virtual tab. */
+  activeVirtualTab: string | null;
+  openVirtualTab: (tab: VirtualTab) => void;
+  activateVirtualTab: (id: string | null) => void;
+  closeVirtualTab: (id: string) => void;
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
   /**
@@ -554,6 +568,10 @@ interface AppStore {
    */
   settingsRequest: { tab: SettingsTab; token: number } | null;
   requestSettings: (tab: SettingsTab) => void;
+  /** Bumped to ask the open Settings dialog to close (an action in it opened
+   *  something in the editor area behind it). */
+  settingsDismissToken: number;
+  dismissSettings: () => void;
   /** Open Account Settings on a particular page (for links such as the
    * sidebar colour explanation). Owned and consumed by `AccountMenu`. */
   accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
@@ -1607,6 +1625,8 @@ function vaultScopedSyncReset() {
     // Tabs are paths, and paths only mean something inside the vault that
     // minted them — every vault leave/switch spreads this reset.
     openTabs: [] as string[],
+    virtualTabs: [] as VirtualTab[],
+    activeVirtualTab: null as string | null,
     // A folder's own stamp says nothing about the next folder.
     openFolderIsSynced: null as boolean | null,
     // Same rule: the "this vault was made local only" verdict belongs to ONE
@@ -1696,6 +1716,18 @@ export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
   openNote: null,
+  openVirtualTab: (tab) =>
+    set((s) => ({ virtualTabs: upsertTab(s.virtualTabs, tab), activeVirtualTab: tab.id })),
+  activateVirtualTab: (id) => set({ activeVirtualTab: id }),
+  closeVirtualTab: (id) =>
+    set((s) => {
+      const next = s.virtualTabs.filter((t) => t.id !== id);
+      if (next.length === s.virtualTabs.length) return {};
+      // Closing the one on screen falls back to a neighbour, then the note.
+      const active =
+        s.activeVirtualTab === id ? neighbourAfterClose(s.virtualTabs, id) : s.activeVirtualTab;
+      return { virtualTabs: next, activeVirtualTab: active };
+    }),
   noteRemoved: false,
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
@@ -1712,6 +1744,8 @@ export const useStore = create<AppStore>((set, get) => ({
   dismissClosedAppChanges: () => syncManager.dismissClosedChangesNotice(),
   revealRequest: null,
   settingsRequest: null,
+  settingsDismissToken: 0,
+  dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
   accountSettingsRequest: null,
   revealedPath: null,
   backlinks: [],
@@ -2076,6 +2110,8 @@ export const useStore = create<AppStore>((set, get) => ({
 
   openNoteByPath: async (path) => {
     const epoch = get().vault?.epoch;
+    // A note opened from anywhere takes the editor area back from a virtual tab.
+    if (get().activeVirtualTab) set({ activeVirtualTab: null });
     // Name the note being opened before the first await. In a synced vault this
     // function makes a network call (`registerNote`) before `openNote` is set,
     // so the row stays unselected and the editor keeps showing the previous note
