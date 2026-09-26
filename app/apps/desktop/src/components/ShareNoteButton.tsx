@@ -179,10 +179,11 @@ export function ShareNoteButton({ docId }: { docId: string }) {
             strokeLinejoin="round"
             aria-hidden="true"
           >
-            {/* Curved forward arrow: the shaft rises from bottom-left, the
-                head points right. */}
-            <path d="M4 19v-2a7 7 0 0 1 7-7h9" />
-            <path d="M16 6l4 4-4 4" />
+            {/* Share glyph: an open tray with an arrow rising out of its
+                centre through the open top. */}
+            <path d="M4 12v7a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 19v-7" />
+            <path d="M12 15V3" />
+            <path d="M8 7l4-4 4 4" />
           </svg>
         )}
       </button>
