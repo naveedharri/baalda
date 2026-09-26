@@ -9,18 +9,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
-import { ApiError, type TrashItem, type TrashListing } from "../lib/api";
+import { ApiError, type ShrinkEvent, type TrashItem, type TrashListing } from "../lib/api";
+import type { HealthFailures } from "../lib/health/model";
+import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
 import { reconcileReport, type ReconcileItem } from "../lib/sync/reconcileReport";
 import * as ipc from "../lib/ipc";
 import { clockTime, formatBytes, relativeTime } from "../lib/health/format";
 import { AsyncButton } from "./AsyncButton";
 import { PathText } from "./HealthShared";
-import { RecoveryCopyActions, TrashPreviewActions } from "./RecoveryCopyActions";
+import { RecoveryCopyActions, TrashPreviewActions, useNoteExists } from "./RecoveryCopyActions";
 import { reconcileCopyRef } from "./recoveryCopies";
 import { compareTrash, openReviewTab, openTrashPreview } from "./recoveryActions";
 import { usePendingReviewCount } from "./ReviewTab";
-import { ACTIVITY_HINT, buildActivity, type ActivityRow } from "./activityRows";
+import {
+  ACTIVITY_HINT,
+  buildActivity,
+  failureEntries,
+  type ActivityRow,
+  type FailedEntry,
+} from "./activityRows";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { openCompare } from "./recoveryActions";
+import { noteLabel } from "../lib/notePath";
 
 /** Rows shown before "Show more", like the Health lists. */
 const PAGE = 20;
@@ -239,6 +250,204 @@ function TrashRowActions({
   );
 }
 
+/** Server `pre-shrink` captures of the last SHRINK_DAYS, on the same schedule
+ *  as Trash. Last listing per vault id is kept for offline, like Trash. */
+const SHRINK_DAYS = 30;
+const lastShrinks = new Map<string, ShrinkEvent[]>();
+
+function useShrinks(nonce: number) {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const hasSession = useStore((s) => s.session != null);
+  const syncStatus = useStore((s) => s.vaultSyncStatus);
+  const vaultId = syncManager.registry.vaultId;
+  const onlineRef = useRef(hasSession && syncStatus === "synced");
+  onlineRef.current = hasSession && syncStatus === "synced";
+  const [items, setItems] = useState<ShrinkEvent[]>(() => (vaultId ? (lastShrinks.get(vaultId) ?? []) : []));
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setItems(vaultId ? (lastShrinks.get(vaultId) ?? []) : []);
+  }, [vaultId]);
+  useEffect(() => {
+    if (!syncEnabled || !vaultId || !onlineRef.current) return;
+    let cancelled = false;
+    setBusy(true);
+    const since = new Date(Date.now() - SHRINK_DAYS * 86_400_000).toISOString();
+    authManager.api.listShrinkEvents(vaultId, since).then(
+      (l) => {
+        if (cancelled) return;
+        lastShrinks.set(vaultId, l.items);
+        setItems(l.items);
+        setBusy(false);
+      },
+      // An older server without the route (404) or a refusal: no Shrunk rows,
+      // and no error line; the rest of the feed is unaffected.
+      (e) => {
+        if (cancelled) return;
+        console.warn("[activity] shrink events unavailable", e);
+        setBusy(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+      setBusy(false);
+    };
+  }, [syncEnabled, vaultId, nonce]);
+  return { items: syncEnabled && vaultId ? items : [], busy };
+}
+
+/** Stable "first seen" stamps for entries that carry no time of their own
+ *  (the held batch, sync failures), so they sort where they appeared. */
+function useFirstSeen() {
+  const seen = useRef(new Map<string, number>());
+  return useCallback((key: string) => {
+    let at = seen.current.get(key);
+    if (at == null) {
+      at = Date.now();
+      seen.current.set(key, at);
+    }
+    return at;
+  }, []);
+}
+
+/** The failures Health's Needs attention reads, re-read on the same signals. */
+function useFailures(nonce: number): FailedEntry[] {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const syncStatus = useStore((s) => s.vaultSyncStatus);
+  const syncProgress = useStore((s) => s.syncProgress);
+  const docSyncState = useStore((s) => s.docSyncState);
+  return useMemo(() => {
+    if (!syncEnabled) return [];
+    let f: HealthFailures | null = null;
+    try {
+      f = syncManager.syncFailures();
+    } catch {
+      return [];
+    }
+    return failureEntries(f);
+    // `nonce` re-reads on the feed's own schedule too.
+  }, [syncEnabled, syncStatus, syncProgress, docSyncState, nonce]);
+}
+
+function HeldRowActions({ onDone }: { onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  // Exactly the banner's handler (App.tsx BulkDeleteBanner).
+  const answer = (a: "delete" | "restore") => {
+    setBusy(true);
+    void useStore
+      .getState()
+      .resolveBulkDelete(a)
+      .catch((e) => console.warn("[sync] bulk delete answer failed", e))
+      .finally(() => {
+        setBusy(false);
+        onDone();
+      });
+  };
+  return (
+    <span className="health-missing-actions">
+      <button type="button" className="ghost-pill sm danger" disabled={busy} onClick={() => answer("delete")}>
+        Delete for everyone
+      </button>
+      <button type="button" className="ghost-pill sm" disabled={busy} onClick={() => answer("restore")}>
+        Restore
+      </button>
+    </span>
+  );
+}
+
+function ShrunkRowActions({
+  event,
+  online,
+  onDone,
+}: {
+  event: ShrinkEvent;
+  online: boolean;
+  onDone: () => void;
+}) {
+  const [confirm, setConfirm] = useState(false);
+  const compare = () =>
+    openCompare(
+      {
+        label: `${noteLabel(event.relPath)} before it shrank`,
+        source: { type: "version", docId: event.docId, versionId: event.versionId },
+      },
+      event.relPath,
+    );
+  const restore = async () => {
+    setConfirm(false);
+    try {
+      await authManager.api.revertNoteToVersion(event.docId, event.versionId);
+      toast(`Restored ${noteLabel(event.relPath)} to its text from before it shrank.`, "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+    onDone();
+  };
+  if (event.deleted) return null;
+  return (
+    <>
+      <span className="health-missing-actions">
+        <button type="button" className="ghost-pill sm" disabled={!online} onClick={compare}>
+          Compare
+        </button>
+        <button
+          type="button"
+          className="ghost-pill sm"
+          disabled={!online}
+          title={online ? "Put the text from before back, for everyone." : "Reconnect to restore."}
+          onClick={() => setConfirm(true)}
+        >
+          Restore version
+        </button>
+      </span>
+      {confirm && (
+        <ConfirmDialog
+          title="Restore this version?"
+          confirmLabel="Restore version"
+          onConfirm={restore}
+          onCancel={() => setConfirm(false)}
+        >
+          The note goes back to its text from before it shrank, for everyone. The current text is
+          kept as a version, so this can be undone from Version history.
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
+function OpenNoteButton({ path }: { path: string }) {
+  return (
+    <button
+      type="button"
+      className="ghost-pill sm"
+      onClick={() => void useStore.getState().openNoteByPath(path)}
+    >
+      Open note
+    </button>
+  );
+}
+
+function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: () => void }) {
+  const exists = useNoteExists(failure.path || null) === true;
+  if (!exists && !failure.retryable) return null;
+  return (
+    <span className="health-missing-actions">
+      {exists && <OpenNoteButton path={failure.path} />}
+      {failure.retryable && failure.docId && (
+        // Health's retry handler (useVaultHealth `retryDoc`).
+        <AsyncButton
+          className="ghost-pill sm"
+          onClick={async () => {
+            await syncManager.retryDoc(failure.docId as string);
+            onDone();
+          }}
+        >
+          Retry
+        </AsyncButton>
+      )}
+    </span>
+  );
+}
+
 function rowMeta(row: ActivityRow, now: number): string {
   const when = relativeTime(row.at, now);
   if (row.type === "trash") {
@@ -246,12 +455,22 @@ function rowMeta(row: ActivityRow, now: number): string {
     return `${by}${when} · purges on ${formatDate(row.item.purgeAfter)}`;
   }
   if (row.type === "copy") return `${when} · ${formatBytes(row.copy.bytes)}`;
+  if (row.type === "held") return "Waiting for your answer";
+  if (row.type === "shrunk" || row.type === "access" || row.type === "failed") {
+    return row.path ? `${row.text} · ${when}` : when;
+  }
   return when;
 }
 
 function rowTitle(row: ActivityRow): string {
   if (row.type === "reconcile") return `${ACTIVITY_HINT.reconcile}\n${row.item.detail ?? row.path}`;
   if (row.type === "trash") return `${ACTIVITY_HINT.trash}\n${row.path}`;
+  if (row.type === "held") return ACTIVITY_HINT.held;
+  if (row.type === "shrunk") {
+    return `${ACTIVITY_HINT.shrunk}${row.event.deleted ? "\nThe note is deleted now." : ""}\n${row.path}`;
+  }
+  if (row.type === "access") return `${ACTIVITY_HINT.access}${row.path ? `\n${row.path}` : ""}`;
+  if (row.type === "failed") return `${ACTIVITY_HINT.failed}\n${row.text}`;
   return `${ACTIVITY_HINT.copy}\n.context/trash/${row.copy.stamp}/${row.copy.relPath}`;
 }
 
@@ -284,8 +503,14 @@ export function ActivityFeed() {
   const [reconcile, setReconcile] = useState<ReconcileItem[]>(() => reconcileReport.items());
   const trash = useTrash(nonce);
   const { copies, error: copiesError, busy: copiesBusy } = useCopies(nonce);
+  const shrinks = useShrinks(nonce);
+  const failures = useFailures(nonce);
+  const firstSeen = useFirstSeen();
+  const pendingDelete = useStore((s) => s.structureNotice.pendingDelete);
+  const accessEvents = useStore((s) => s.accessEvents);
+  const vaultId = syncManager.registry.vaultId ?? null;
   const pending = usePendingReviewCount();
-  const updating = useSlow(trash.busy || copiesBusy);
+  const updating = useSlow(trash.busy || copiesBusy || shrinks.busy);
 
   // A new reconcile item usually means a recovery copy was just written, and
   // a resolved one may have restored or deleted a copy: either way, refetch.
@@ -319,8 +544,17 @@ export function ActivityFeed() {
   }, [schedule]);
 
   const rows = useMemo(
-    () => buildActivity({ reconcile, trash: trash.listing?.items ?? [], copies: copies ?? [] }),
-    [reconcile, trash.listing, copies],
+    () =>
+      buildActivity({
+        reconcile,
+        trash: trash.listing?.items ?? [],
+        copies: copies ?? [],
+        held: pendingDelete ? { count: pendingDelete.count, at: firstSeen("held") } : null,
+        shrinks: shrinks.items,
+        access: accessEvents.filter((e) => e.vaultId === vaultId),
+        failures: failures.map((f) => ({ ...f, at: firstSeen(f.key) })),
+      }),
+    [reconcile, trash.listing, copies, pendingDelete, shrinks.items, accessEvents, vaultId, failures, firstSeen],
   );
 
   const showToolbar = pending > 0 || updating;
@@ -365,13 +599,20 @@ export function ActivityFeed() {
               <li key={row.key} className="activity-row">
                 <span
                   className="health-pill activity-row-chip"
-                  data-tone={row.type === "trash" && row.item.hasUnsyncedContributions ? "warn" : undefined}
+                  data-tone={
+                    (row.type === "trash" && row.item.hasUnsyncedContributions) ||
+                    row.type === "held" ||
+                    row.type === "shrunk" ||
+                    row.type === "failed"
+                      ? "warn"
+                      : undefined
+                  }
                 >
                   {row.label}
                 </span>
                 <span className="activity-row-main" title={rowTitle(row)}>
                   <span className="activity-row-path">
-                    <PathText path={row.path} />
+                    {row.path ? <PathText path={row.path} /> : "text" in row ? <span>{row.text}</span> : null}
                     {row.type === "reconcile" && row.item.newPath && (
                       <>
                         <span className="muted" aria-label="renamed to">
@@ -397,7 +638,13 @@ export function ActivityFeed() {
                 <div className="activity-row-actions">
                   {row.type === "reconcile" ? (
                     <ReconcileRowActions item={row.item} onChanged={schedule} />
-                  ) : row.type === "trash" ? (
+                  ) : row.type === "held" ? (
+                    <HeldRowActions onDone={schedule} />
+                  ) : row.type === "shrunk" ? (
+                    <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
+                  ) : row.type === "failed" ? (
+                    <FailedRowActions failure={row.failure} onDone={schedule} />
+                  ) : row.type === "access" ? null : row.type === "trash" ? (
                     <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
                   ) : (
                     <RecoveryCopyActions

@@ -1,4 +1,3 @@
-import { TalkButton } from "./components/TalkButton";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
@@ -14,6 +13,7 @@ import {
   SWITCH_VAULT,
   VaultFolderMissingBannerView,
 } from "./components/VaultFolderMissing";
+import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";

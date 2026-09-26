@@ -557,6 +557,24 @@ export interface NoteVersion {
   size: number;
 }
 
+/** One `GET /api/vaults/:id/shrink-events` row. */
+export interface ShrinkEvent {
+  versionId: number;
+  docId: string;
+  relPath: string;
+  capturedAt: string;
+  beforeChars: number;
+  afterChars: number;
+  deleted: boolean;
+}
+
+export interface ShrinkEventListing {
+  items: ShrinkEvent[];
+  truncated: boolean;
+  /** `afterChars` is the note's length now, not right after the shrink. */
+  afterIsCurrent: boolean;
+}
+
 export interface NoteVersionDetail extends NoteVersion {
   content: string;
 }
@@ -2385,6 +2403,23 @@ export class ApiClient {
       `/api/notes/${encodeURIComponent(docId)}/versions`,
     );
     return data.versions ?? [];
+  }
+
+  /**
+   * `pre-shrink` versions (an update that left at most 20% of a note) on notes the
+   * caller can read, deleted ones included, newest first. `afterChars` is the
+   * note's CURRENT length (`afterIsCurrent`): the capture keeps only the before.
+   */
+  async listShrinkEvents(vaultId: string, since?: string, limit?: number): Promise<ShrinkEventListing> {
+    const q = new URLSearchParams();
+    if (since) q.set("since", since);
+    if (limit != null) q.set("limit", String(limit));
+    const qs = q.toString();
+    const { data } = await this.request<ShrinkEventListing>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/shrink-events${qs ? `?${qs}` : ""}`,
+    );
+    return { items: data.items ?? [], truncated: !!data.truncated, afterIsCurrent: data.afterIsCurrent ?? true };
   }
 
   /** One version *with* its markdown — the preview/revert payload. */

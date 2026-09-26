@@ -112,6 +112,12 @@ import {
  *  explanation per note is enough; the retry is automatic. */
 const registerFailureToasted = new Set<string>();
 
+/** One access change the Activity feed lists (session-only). */
+export type AccessEvent =
+  | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string }
+  | { kind: "granted"; at: number; vaultId: string | null; count: number };
+const ACCESS_EVENTS_MAX = 200;
+
 export interface OpenNote {
   path: string;
   /** doc_id from the index — the stable Yjs document id for this note. */
@@ -203,6 +209,12 @@ interface AppStore {
    * (a Finder delete) and offers no recovery hint.
    */
   noteRemovedByTeammate: { reason: "deleted" | "revoked"; trashedTo: string | null } | null;
+  /**
+   * Access changes this session, newest last, for the Activity feed. Fed by the
+   * sync layer's `onNoteRemoved(reason: "revoked")`. Session-only, never persisted,
+   * tagged with the server vault id so the feed shows only the open vault's. Capped at ACCESS_EVENTS_MAX.
+   */
+  accessEvents: AccessEvent[];
   /**
    * What the sync layer says about the vault's STRUCTURE while it is open
    * (#221, `SyncManager.structureNotice`): the vault folder vanished, a live
@@ -1740,6 +1752,7 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemoved: false,
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
+  accessEvents: [],
   structureNotice: { rootMissing: false, pendingDelete: null, closedAppChanges: false },
   applyStructureNotice: (notice) => {
     const wasMissing = get().structureNotice.rootMissing;
@@ -2635,7 +2648,17 @@ export const useStore = create<AppStore>((set, get) => ({
     // CodeMirror bound to a destroyed Y.Doc throws on the next keystroke.
     syncManager.setInboundListeners({
       onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
-      onNoteRemoved: (_docId, path, trashedTo, reason) => {
+      onNoteRemoved: (docId, path, trashedTo, reason) => {
+        if (reason === "revoked") {
+          const ev: AccessEvent = {
+            kind: "removed",
+            at: Date.now(),
+            vaultId: syncManager.registry.vaultId ?? null,
+            docId,
+            path,
+          };
+          set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
+        }
         get().pruneTabs([path]);
         const open = get().openNote;
         if (open && (open.path === path || open.path.startsWith(path + "/"))) {

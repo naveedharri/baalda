@@ -13,6 +13,8 @@ export async function loadSource(source: TextSource, epoch?: ipc.VaultEpoch): Pr
       return ipc.readTrashCopy(source.stamp, source.relPath, epoch);
     case "trash":
       return (await authManager.api.trashContent(source.docId)).text;
+    case "version":
+      return (await authManager.api.getNoteVersion(source.docId, source.versionId)).content;
     case "note": {
       const view = liveView(source.path);
       if (view) return view.state.doc.toString();
