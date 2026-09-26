@@ -256,6 +256,21 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `ipc.clearYjsDoc`s, so `ready` stops re-naming it. The deletion cap is never lifted. Separate
   read-only reconciliation preserves a divergent local edit in `.context/trash` before replacing it
   with the server's canonical content; deletion and revocation never create those recovery copies.
+- **Offline reconciliation** (`sync/ackedSv.ts`, `registry.ts`, `reconcileReport.ts`): the gate for an
+  inbound delete / revocation is UNSEEN WORK, not `pushed` (a badge). `ackedSv` is the per-doc Yjs state
+  vector the server is known to cover — recorded on Hocuspocus `synced`, a batch-push ack and
+  `ready.covered` (NOT on a backfill/bootstrap apply: a server diff proves nothing about local ops),
+  merged by max, persisted as `config.json ackedSv` — and
+  `registry.unseenWorkVerdict` answers `none` (stale device: accept outright), `unseen` (local ops or a
+  file hash ≠ `diskBase` the server never saw: recovery copy under `.context/trash` FIRST, then apply)
+  or `unknown` (unprovable: the old "left on disk" refusal). A same-path create from two devices stays
+  two notes: the later one by `created_at` is renamed `<stem> (conflict YYYY-MM-DD).<ext>`
+  (`conflictPath`) and registered as its own note — never adopted onto the other's id. A rename made
+  while the app was closed is paired back by content hash at startup (`pairClosedAppRenames`) so the
+  `doc_id` survives. Every such action is recorded as a `ReconcileKind` (`restoredFromServer`,
+  `deletedByTeammate`, `renamedConflict`, `keptLocally`, `folderKept`, `externalEditSaved`) and shown
+  once per session as one plain-words summary (`ReconcileBanner`, details in Health's
+  `HealthReconcile`); nothing in the report persists.
 - **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
   the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
   said `Projects/community` while the server said `Projects/Community` (with empty server folders under
@@ -445,6 +460,26 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   hard-deleted folder's ancestry from `folder_tombstones` (`d.deleted_at >= n.created_at`, so a dead
   tombstone cannot claim a note created later) — without it a folder delete reaches a share-only
   member as a REVOCATION (no tombstone) instead of a deletion.
+- `trash/` — per-vault note Trash (migration 035). Every soft delete (`softDeleteSet` in
+  `trash/retention.ts`: single, batch, folder cascade, MCP, checkpoint revert) stamps `deleted_by` and
+  `purge_after = now() + TRASH_RETENTION_DAYS` (30). Inside that window pushes into the deleted doc are
+  ACCEPTED — token mint, `onAuthenticate` and the batch push resolve through `trash/access.ts
+  syncPermission` (live resolver first, then `effectivePermission(..., { includeDeleted: true })`; a
+  hard-deleted folder's shares no longer reach it) — and the note stays deleted. `DELETE /notes/:id`
+  now evicts live sockets like MCP. `GET /vaults/:id/trash` (member; `listDeletedReadableDocsInVault`;
+  `hasUnsyncedContributions` = a `doc_updates` row after `deleted_at`; cap 2000) and
+  `POST /notes/:id/restore` (edit on the tombstoned doc or owner/admin; taken path ⇒
+  `<stem> (restored YYYY-MM-DD).<ext>`; recreates a hard-deleted parent chain under its
+  `folder_tombstones` ids; 410 `purged` once purged; still allowed past `purge_after` until the job runs)
+  live in `trash/service.ts`. Version list/read work on a deleted note; revert is 409 `note_deleted`.
+  `purgeExpiredTrash` (hourly, `trash/scheduler.ts`, started only from `index.ts`) stamps `purged_at` and
+  drops CRDT, versions, index/links/blob_refs and per-note shares but KEEPS the `notes` row as a permanent
+  tombstone, so a device offline past the window still hears "deleted" rather than an absent id (which
+  would land on the revocation path). The vault channel's `ready` names `tombstones` (held ids that are
+  soft-deleted, purged included; never also in `revoked`) and `covered` (manifest docs whose state vector
+  the server covers; omitted in live-only), and `refreshAcl` keeps deleted docs out of live
+  `revoked`/`drop`. A read-only socket's dropped edit is reported to its user as a `rejected` frame
+  (`beforeSync` hook, throttled).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
   `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text`.
@@ -480,7 +515,7 @@ plaintext token per note; revoke = DELETE).
 ## Server env vars (`app/apps/server/.env`)
 `DATABASE_URL` (Docker host port **5439**→5432) · `JWT_SECRET` (Better Auth crypto **and** sync JWTs —
 change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011) · `SYNC_TOKEN_TTL_SECONDS`
-(600) · `COMPACTION_THRESHOLD` (50) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
+(600) · `COMPACTION_THRESHOLD` (50) · `TRASH_RETENTION_DAYS` (30) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
 `EMAIL_FROM` + `SMTP_URL` | `RESEND_API_KEY` (optional; turns on password reset, sign-up verification
 and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth).
 

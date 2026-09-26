@@ -183,6 +183,23 @@ export interface VaultSyncEngineOptions {
    */
   onServerRevoked?: (docIds: string[], truncated: boolean) => void;
   /**
+   * The server named docs we hold that are soft-DELETED (`ready.tombstones`).
+   * Fired before {@link onServerRevoked}, whose list never carries these ids.
+   * Never fired with an empty list; never fired by an older server.
+   */
+  onServerTombstones?: (docIds: string[], truncated: boolean) => void;
+  /**
+   * The server dropped ops this device pushed for `docId` over a READ-ONLY
+   * connection (`{ t: "rejected", reason: "read_only" }`).
+   */
+  onServerRejected?: (docId: string, reason: "read_only") => void;
+  /**
+   * The server fully covers these docs' hello state vectors (`ready.covered`):
+   * each entry pairs the doc with the EXACT vector this connection's hello
+   * sent for it. Never fired with an empty list.
+   */
+  onServerCovered?: (acks: Array<[docId: string, stateVector: string]>) => void;
+  /**
    * The server dropped a doc from our readable set mid-session (`drop`).
    *
    * `refreshAcl` sends one of these per lost doc immediately before the `reauth`
@@ -309,6 +326,11 @@ export class VaultSyncEngine {
   private readonly onServerEmpty?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerBehind?: (docIds: string[]) => void;
   private readonly onServerRevoked?: (docIds: string[], truncated: boolean) => void;
+  private readonly onServerTombstones?: (docIds: string[], truncated: boolean) => void;
+  private readonly onServerRejected?: (docId: string, reason: "read_only") => void;
+  private readonly onServerCovered?: (acks: Array<[docId: string, stateVector: string]>) => void;
+  /** The manifest this connection's hello sent (docId → base64 state vector). */
+  private sentManifest: Record<string, string> = {};
   private readonly onServerDrop?: (docId: string) => void;
   private readonly fileDocIds?: () => string[];
   private readonly heldNoteIds?: () => string[];
@@ -408,6 +430,9 @@ export class VaultSyncEngine {
     this.onServerEmpty = opts.onServerEmpty;
     this.onServerBehind = opts.onServerBehind;
     this.onServerRevoked = opts.onServerRevoked;
+    this.onServerTombstones = opts.onServerTombstones;
+    this.onServerRejected = opts.onServerRejected;
+    this.onServerCovered = opts.onServerCovered;
     this.onServerDrop = opts.onServerDrop;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
     this.wsFactory =
@@ -691,6 +716,7 @@ export class VaultSyncEngine {
     } catch {
       manifest = {};
     }
+    this.sentManifest = manifest;
     const priority = this.sink.recentDocs();
     // Tree binaries, alongside the manifest's notes. Read here rather than
     // cached: the registry's `files` map moves with every upload, rename and
@@ -769,8 +795,27 @@ export class VaultSyncEngine {
         // reconnect's registry pull. Recording the authority after arming the
         // pull it is meant to authorise would be one pull too late — which, on a
         // cold launch, is the entire gap this frame exists to close.
-        if (control.revoked && control.revoked.length > 0) {
-          this.onServerRevoked?.(control.revoked, control.revokedTruncated === true);
+        // A deleted doc also leaves the readable set, so a server may name it in
+        // both lists. It is a DELETION, never a revocation: tombstones first,
+        // and stripped from the revoked list before anything acts on it.
+        const tombstoned = new Set(control.tombstones ?? []);
+        if (tombstoned.size > 0) {
+          this.onServerTombstones?.([...tombstoned], control.tombstonesTruncated === true);
+        }
+        const revoked = (control.revoked ?? []).filter((d) => !tombstoned.has(d));
+        if (revoked.length > 0) {
+          this.onServerRevoked?.(revoked, control.revokedTruncated === true);
+        }
+        // The server holds every op these docs' hello vectors named: record THAT
+        // vector (never a fresh one, which may carry ops typed since).
+        if (control.covered && control.covered.length > 0) {
+          const acks: Array<[string, string]> = [];
+          for (const docId of control.covered) {
+            if (tombstoned.has(docId)) continue;
+            const sv = this.sentManifest[docId];
+            if (sv) acks.push([docId, sv]);
+          }
+          if (acks.length > 0) this.onServerCovered?.(acks);
         }
         this.onServerBehind?.(control.behind ?? []);
         // BEFORE the idle signal: `maybeSignalIdle` is what starts the content
@@ -793,6 +838,8 @@ export class VaultSyncEngine {
       } else if (control.t === "revoked") {
         for (const docId of control.docIds) this.sink.drop(docId);
         this.onServerRevoked?.(control.docIds, false);
+      } else if (control.t === "rejected") {
+        this.onServerRejected?.(control.docId, control.reason);
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
         // …and tell the session WHICH doc left, so the live revocation path

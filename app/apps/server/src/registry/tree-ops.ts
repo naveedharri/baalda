@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { softDeleteSet } from "../trash/retention.js";
 
 /**
  * Structural operations on a vault's folder/note tree, shared by the
@@ -553,6 +554,8 @@ export async function folderIsEmpty(db: Queryable, folderId: string): Promise<bo
 export async function deleteFolderCascade(
   db: Queryable,
   folderId: string,
+  /** Acting user, recorded as each cascaded note's `deleted_by` (NULL = unknown). */
+  deletedBy: string | null = null,
 ): Promise<{
   vaultId: string;
   path: string;
@@ -571,7 +574,7 @@ export async function deleteFolderCascade(
         UNION
         SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
      )
-     UPDATE notes SET deleted_at = now()
+     UPDATE notes SET ${softDeleteSet("$5")}
       WHERE vault_id = $4 AND deleted_at IS NULL
         AND (
           folder_id IN (SELECT id FROM subtree)
@@ -579,7 +582,7 @@ export async function deleteFolderCascade(
           OR rel_path LIKE $3 || '/%' ESCAPE '\\'
         )
       RETURNING id`,
-    [folderId, folder.path, likeEscape(folder.path), folder.vault_id],
+    [folderId, folder.path, likeEscape(folder.path), folder.vault_id, deletedBy],
   );
   // Tombstone EVERY folder in the subtree before the cascade removes the rows.
   // Notes soft-delete and therefore announce their own deletion; folders were

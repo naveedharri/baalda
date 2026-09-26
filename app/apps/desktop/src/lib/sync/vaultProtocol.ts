@@ -118,10 +118,32 @@ export type ServerControl =
       revoked?: string[];
       /** More than one frame would name (cap 2000). */
       revokedTruncated?: boolean;
+      /**
+       * Docs our hello claims (manifest or `held`) that are SOFT-DELETED in this
+       * vault. Treated exactly like the registry pull's tombstones, and never
+       * as a revocation even when `revoked` names the same id (a deleted doc
+       * also leaves the readable set). Absent from older servers.
+       */
+      tombstones?: string[];
+      /** More than one frame would name (cap 2000). */
+      tombstonesTruncated?: boolean;
+      /**
+       * Manifest docs whose hello state vector the server FULLY covers — the
+       * server holds every op we said we had. The acknowledgement the inbound
+       * destruction gate reads (`VaultRegistry.recordAck`), recorded as the
+       * exact vector we sent. Omitted in live-only mode and by older servers;
+       * never overlaps `tombstones`/`revoked`.
+       */
+      covered?: string[];
+      /** More than one frame would name. */
+      coveredTruncated?: boolean;
     }
   | { t: "revoked"; docIds: string[] }
   | { t: "bootstrap" }
   | { t: "drop"; docId: string }
+  /** Our READ-ONLY connection tried to push ops for `docId`, and the server
+   *  dropped them (throttled server-side, ~5 s per connection). */
+  | { t: "rejected"; docId: string; reason: "read_only" }
   | { t: "reauth" }
   | { t: "registry" }
   | { t: "member"; name: string }
@@ -164,6 +186,8 @@ export function parseServerControl(text: string): ServerControl | null {
     const empty = ids(o.empty);
     const behind = ids(o.behind);
     const revoked = ids(o.revoked);
+    const tombstones = ids(o.tombstones);
+    const covered = ids(o.covered);
     return {
       t: "ready",
       ...(empty && empty.length > 0 ? { empty } : {}),
@@ -172,6 +196,10 @@ export function parseServerControl(text: string): ServerControl | null {
       ...(o.behindTruncated === true ? { behindTruncated: true } : {}),
       ...(revoked && revoked.length > 0 ? { revoked } : {}),
       ...(o.revokedTruncated === true ? { revokedTruncated: true } : {}),
+      ...(tombstones && tombstones.length > 0 ? { tombstones } : {}),
+      ...(o.tombstonesTruncated === true ? { tombstonesTruncated: true } : {}),
+      ...(covered && covered.length > 0 ? { covered } : {}),
+      ...(o.coveredTruncated === true ? { coveredTruncated: true } : {}),
     };
   }
   if (t === "bootstrap") return { t: "bootstrap" };
@@ -203,6 +231,15 @@ export function parseServerControl(text: string): ServerControl | null {
         color: o.color,
         status: o.status,
       };
+    }
+    return null;
+  }
+  if (t === "rejected") {
+    const r = v as { docId?: unknown; reason?: unknown };
+    // Only the reason this build understands; anything else is ignored like
+    // any unknown frame.
+    if (typeof r.docId === "string" && r.docId.length > 0 && r.reason === "read_only") {
+      return { t: "rejected", docId: r.docId, reason: "read_only" };
     }
     return null;
   }

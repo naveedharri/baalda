@@ -9,6 +9,7 @@ import { VaultChannel } from "./sync/vault-channel.js";
 import { setMemberJoinedPublisher } from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
+import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
 import { setShrinkHook } from "./versions/shrink-guard.js";
@@ -94,6 +95,10 @@ async function main() {
         .catch(broadcastFailed("doc-update"));
     },
     noteEdited,
+    // A read-only socket's dropped edit becomes a `rejected` frame for its user.
+    (vaultId, docId, userId) => {
+      void vaultChannel.publishRejected(vaultId, userId, docId).catch(broadcastFailed("rejected"));
+    },
   );
   await sync.listen();
 
@@ -172,11 +177,14 @@ async function main() {
   //     already removed without knowing an object store exists;
   //   · unreferenced attachments, only when BLOB_GC_ENABLED says so.
   startBlobGc();
+  // Trash retention: notes past `purge_after` lose their CRDT, versions and row.
+  startTrashPurge();
 
   const shutdown = async () => {
     console.log("Shutting down…");
     versionCapture?.stop();
     stopBlobGc();
+    stopTrashPurge();
     syncWss.close();
     vaultWss.close();
     await pubsub.close();

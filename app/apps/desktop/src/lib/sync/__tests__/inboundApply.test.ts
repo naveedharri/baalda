@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 
 vi.mock("../../ipc", () => ({
   getVaultConfig: vi.fn(),
@@ -17,6 +18,10 @@ vi.mock("../../ipc", () => ({
   deleteFilesBatch: vi.fn(),
   deleteFolderIfEmpty: vi.fn(),
   fileStat: vi.fn(),
+  getDiskBase: vi.fn(),
+  copyToTrash: vi.fn(),
+  writeTrashCopy: vi.fn(),
+  rebindNoteId: vi.fn(async () => true),
   isVaultMismatch: vi.fn(() => false),
 }));
 vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
@@ -25,6 +30,8 @@ import { ACCESS_CHECK_MAX, type ApiClient } from "../../api";
 import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
 import { VaultRegistry, type InboundHost } from "../registry";
+import { sha256Hex } from "../../bridge/adapter";
+import { reconcileReport } from "../reconcileReport";
 
 /**
  * Inbound reconciliation, wired end to end against a fake disk.
@@ -57,6 +64,11 @@ class FakeDisk {
    *  row, no CRDT and no `GET /api/notes` entry — their only identity here is
    *  the registry's `files` map. */
   binaries = new Set<string>();
+  /** docIds whose file moved on since the last agreed disk base: UNSEEN WORK
+   *  (offline reconciliation). Everything else is in sync with its base. */
+  unseen = new Set<string>();
+  /** Recovery copies made before an inbound removal. */
+  copies: Array<{ from: string; to: string }> = [];
 
   tree(): TreeNode {
     const dirs = [...this.folders].map((f) => ({
@@ -159,6 +171,17 @@ function install(disk: FakeDisk) {
   vi.mocked(ipc.fileStat).mockImplementation((async (p: string) => {
     if (!disk.notes.has(p) && !disk.binaries.has(p)) throw new Error("no such file");
     return { size: 1 };
+  }) as never);
+  vi.mocked(ipc.getDiskBase).mockImplementation((async (docId: string) => {
+    if (disk.unseen.has(docId)) return "base-before-the-offline-edit";
+    const path = [...disk.notes].find(([, id]) => id === docId)?.[0];
+    return path === undefined ? null : sha256Hex(disk.bodies.get(path) ?? "");
+  }) as never);
+  vi.mocked(ipc.copyToTrash).mockImplementation((async (p: string, stamp: string) => {
+    if (!disk.notes.has(p) && !disk.binaries.has(p)) throw new Error("path does not exist");
+    const dest = `.context/trash/${stamp}/${p}`;
+    disk.copies.push({ from: p, to: dest });
+    return dest;
   }) as never);
   vi.mocked(ipc.trashNote).mockImplementation((async (p: string, stamp: string) => {
     // `trash_note` is a rename, so it moves any bytes — a binary needs no twin.
@@ -666,9 +689,47 @@ describe("inbound delete", () => {
     expect(ipc.trashNote).not.toHaveBeenCalled();
   });
 
-  it("leaves an unconfirmed, non-empty note alone and records it as an orphan", async () => {
-    // This device never confirmed the note's content upstream, so its text may
-    // exist nowhere else — removing it could destroy the only copy.
+  it("copies a note with unseen work to the trash before a teammate's delete removes it (D1)", async () => {
+    // Delete wins for the team; this device's unsent version stays recoverable.
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    disk.bodies.set("mine.md", "words nobody else has");
+    disk.unseen.add("d1");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "mine.md" }] },
+      then: { notes: [], tombstones: ["d1"] },
+    });
+
+    expect(disk.notes.has("mine.md")).toBe(false);
+    expect(disk.copies.map((c) => c.from)).toEqual(["mine.md"]);
+    expect(disk.deleted).toEqual(["mine.md"]);
+    expect(r.reg.failures().map((f) => f.kind)).not.toContain("orphan");
+    const items = reconcileReport.items();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "deletedByTeammate", docId: "d1", path: "mine.md" });
+    expect(items[0].detail).toBe(disk.copies[0].to);
+  });
+
+  it("removes a stale device's copy outright, with no recovery copy", async () => {
+    // Nothing new since the last agreement with the server: accept the delete.
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    disk.notes.set("old.md", "d1");
+    disk.bodies.set("old.md", "the text everyone already has");
+    await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "old.md" }] },
+      then: { notes: [], tombstones: ["d1"] },
+    });
+    expect(disk.deleted).toEqual(["old.md"]);
+    expect(disk.copies).toEqual([]);
+    expect(reconcileReport.items()).toEqual([]);
+  });
+
+  it("leaves a non-empty file alone when nothing proves it is the deleted note", async () => {
+    // No local CRDT and no disk base for the doc: its identity is unprovable.
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.bodies.set("mine.md", "words nobody else has");
@@ -676,30 +737,29 @@ describe("inbound delete", () => {
       disk,
       first: { notes: [{ id: "d1", rel_path: "mine.md" }] },
       then: { notes: [], tombstones: ["d1"] },
+      patch: () => vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never),
     });
-
     expect(disk.notes.has("mine.md")).toBe(true);
-    expect(ipc.trashNote).not.toHaveBeenCalled();
+    expect(disk.copies).toEqual([]);
     expect(r.reg.failures().map((f) => f.kind)).toContain("orphan");
   });
 
-  it("never re-registers the dead id of a kept unconfirmed copy on later passes", async () => {
-    // Prod 2026-09-23: the refused removal released the baseline claim, the next
-    // pass never suppressed the path, and the file went back up under its own
-    // (dead) doc_id every ~30 s — each one a vault-wide registry broadcast and an
-    // upload that could never mint a token.
+  it("never re-registers the dead id after its unseen work was copied aside", async () => {
+    // Prod 2026-09-23 shape: a dead doc_id going back up every ~30 s. With the
+    // recovery copy made and the file gone, later passes must stay quiet.
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.bodies.set("mine.md", "words nobody else has");
+    disk.unseen.add("d1");
     const then = { notes: [], tombstones: ["d1"] };
-    const r = await twoPasses({
+    await twoPasses({
       disk,
       first: { notes: [{ id: "d1", rel_path: "mine.md" }] },
       then,
     });
-    expect(r.reg.failures().map((f) => f.kind)).toContain("orphan");
+    expect(disk.copies.map((c) => c.from)).toEqual(["mine.md"]);
+    expect(disk.notes.has("mine.md")).toBe(false);
 
-    // Pass 3 and 4: a relaunch reading what pass 2 persisted, then a plain pull.
     for (let pass = 0; pass < 2; pass++) {
       const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
       vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
@@ -709,12 +769,8 @@ describe("inbound delete", () => {
       await reg.reconcile({ organizationId: ORG, vaultName: "v" });
       expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
       expect(reg.getMapping("mine.md")).toBeNull();
-      expect(reg.failures().map((f) => f.reason).join(" ")).toContain("no longer synced");
     }
-    // The only copy of that text is still exactly where the user left it.
-    expect(disk.notes.get("mine.md")).toBe("d1");
-    expect(disk.bodies.get("mine.md")).toBe("words nobody else has");
-    expect(ipc.trashNote).not.toHaveBeenCalled();
+    expect(disk.copies).toHaveLength(1);
   });
 });
 
@@ -743,13 +799,14 @@ describe("inbound folder deletion", () => {
     expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
   });
 
-  it("keeps a deleted folder that still holds content, re-registering it fresh", async () => {
-    // An unconfirmed note blocks its folder's removal — content must live
-    // somewhere — so the folder stays and goes back up under a NEW id.
+  it("removes a deleted folder once its mapped notes' unseen work is copied aside", async () => {
+    // Delete wins: every note inside was a MAPPED doc, so after the recovery
+    // copies the folder has nothing of this device's left and goes too.
     const disk = new FakeDisk();
     disk.folders.add("Team");
     disk.notes.set("Team/mine.md", "d1");
     disk.bodies.set("Team/mine.md", "words nobody else has");
+    disk.unseen.add("d1");
     const { api } = await twoPasses({
       disk,
       first: {
@@ -759,8 +816,9 @@ describe("inbound folder deletion", () => {
       then: { notes: [], tombstones: ["d1"], folders: [], folderTombstones: ["f1"] },
     });
 
-    expect(disk.folders.has("Team")).toBe(true);
-    expect(vi.mocked(api.createFolder)).toHaveBeenCalledWith(
+    expect(disk.copies.map((c) => c.from)).toEqual(["Team/mine.md"]);
+    expect(disk.folders.has("Team")).toBe(false);
+    expect(vi.mocked(api.createFolder)).not.toHaveBeenCalledWith(
       expect.objectContaining({ path: "Team" }),
     );
   });
@@ -790,13 +848,13 @@ describe("inbound folder deletion", () => {
     expect(vi.mocked(api.createFolder)).not.toHaveBeenCalled();
   });
 
-  it("keeps a private folder that still holds unconfirmed content", async () => {
-    // Access can be taken away mid-edit. The note pass refuses to trash work this
-    // device never confirmed upstream, and the folder around it must then stay too.
+  it("removes a private folder once its mapped notes' unsent edits are kept locally (D7)", async () => {
+    reconcileReport.clear();
     const disk = new FakeDisk();
     disk.folders.add("Getting Started");
     disk.notes.set("Getting Started/mine.md", "d1");
     disk.bodies.set("Getting Started/mine.md", "words nobody else has");
+    disk.unseen.add("d1");
     await twoPasses({
       disk,
       first: {
@@ -806,8 +864,9 @@ describe("inbound folder deletion", () => {
       then: { notes: [], tombstones: [], folders: [], folderTombstones: [] },
     });
 
-    expect(disk.trashed).toEqual([]);
-    expect(disk.folders.has("Getting Started")).toBe(true);
+    expect(disk.copies.map((c) => c.from)).toEqual(["Getting Started/mine.md"]);
+    expect(disk.folders.has("Getting Started")).toBe(false);
+    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["keptLocally"]);
   });
 
   it("removes the emptied old directory after a server-side folder move, and does not re-register it", async () => {
@@ -1095,6 +1154,9 @@ describe("whole-vault Private reaches the member's disk", () => {
     reg.setInboundHost(host.host);
     const pushed = opts.pushed ?? N;
     for (let i = 0; i < pushed; i++) reg.markPushed(`d${i}`);
+    // "Never confirmed upstream" is now modelled as what it always stood for:
+    // work on this device the server has not seen.
+    for (let i = pushed; i < N; i++) disk.unseen.add(`d${i}`);
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
     if (opts.thenAuthoritative !== undefined) {
       live = opts.thenAuthoritative;
@@ -1162,18 +1224,21 @@ describe("whole-vault Private reaches the member's disk", () => {
     ).toBe(true);
   });
 
-  it("keeps a revoked file whose content this device never confirmed upstream", async () => {
-    // The last guard before an authoritative pass destroys work that exists
-    // nowhere else. Half the vault is unpushed, and those files have text in
-    // them, so they stay and are reported as orphans.
+  it("keeps a recovery copy of a revoked file holding unseen work, then removes it (D7)", async () => {
+    // Never destroy unsent edits because of someone else's permission change:
+    // the half with unseen work is copied to `.context/trash` first and
+    // reported as kept locally; the stale half is removed outright.
+    reconcileReport.clear();
     const half = N / 2;
     const r = await afterPrivate(true, { pushed: half });
 
-    expect(r.disk.notes.size).toBe(N - half);
-    expect(r.disk.deleted).toHaveLength(half);
-    const orphans = r.reg.failures().filter((f) => f.kind === "orphan");
-    expect(orphans).toHaveLength(N - half);
-    expect(orphans[0].reason).toContain("never confirmed its content upstream");
+    expect(r.disk.notes.size).toBe(0);
+    expect(r.disk.deleted).toHaveLength(N);
+    expect(r.disk.copies).toHaveLength(N - half);
+    expect(r.reg.failures().filter((f) => f.kind === "orphan")).toHaveLength(0);
+    const kept = reconcileReport.items().filter((i) => i.kind === "keptLocally");
+    expect(kept.map((i) => i.path).sort()).toEqual(r.disk.copies.map((c) => c.from).sort());
+    expect(kept[0].detail).toMatch(/^\.context\/trash\//);
   });
 
   it("permanently removes an author's revoked note too", async () => {
@@ -1730,5 +1795,338 @@ describe("inbound removals are pooled", () => {
     // Recorded, not swallowed — and it is the only failure.
     expect(reg.hasFailures()).toBe(true);
     expect(reg.failures().map((f) => f.path)).toEqual(["n7.md"]);
+  });
+});
+
+describe("offline reconciliation — the acknowledged state vector gate", () => {
+  /** Pass 1 syncs d1; pass 2 sees it tombstoned with this device's CRDT at `localSv`
+   *  and the server's acknowledgement at `acked`. */
+  async function deleteWith(
+    localSv: Uint8Array,
+    acked: Uint8Array | null,
+    opts: { body?: string; crdtText?: string } = {},
+  ) {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    disk.notes.set("n.md", "d1");
+    disk.bodies.set("n.md", opts.body ?? "text on disk");
+    install(disk);
+    const textCopies: Array<{ path: string; content: string }> = [];
+    vi.mocked(ipc.writeTrashCopy).mockImplementation((async (p: string, stamp: string, content: string) => {
+      textCopies.push({ path: p, content });
+      return `.context/trash/${stamp}/${p}`;
+    }) as never);
+    const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "n.md" }] }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const carry = () => {
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    };
+    carry();
+    const then = { notes: [], tombstones: ["d1"] };
+    const api = fakeApi(then);
+    const reg = new VaultRegistry(api);
+    const host = recordingHost();
+    (host.host as InboundHost).localStateVector = async () => localSv;
+    reg.setInboundHost(host.host);
+    (host.host as InboundHost).localText = async () => opts.crdtText ?? null;
+    if (acked) reg.recordAck("d1", acked);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    return { disk, reg, api, carry, then, textCopies };
+  }
+
+  it("closed-app offline edit, then a teammate's delete: recovery copy first", async () => {
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "synced text");
+    const acked = Y.encodeStateVector(doc);
+    doc.getText("content").insert(11, " + offline edit"); // made while the app was closed
+    const { disk } = await deleteWith(Y.encodeStateVector(doc), acked);
+    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["deletedByTeammate"]);
+  });
+
+  it("open-but-disconnected edit (never acknowledged at all): recovery copy first", async () => {
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "typed with no network");
+    const { disk } = await deleteWith(Y.encodeStateVector(doc), null);
+    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.notes.has("n.md")).toBe(false);
+  });
+
+  it("a stale device accepts the delete outright and does not resurrect it", async () => {
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "synced text");
+    const sv = Y.encodeStateVector(doc);
+    const { disk, carry, then } = await deleteWith(sv, sv);
+    expect(disk.copies).toEqual([]);
+    expect(disk.deleted).toEqual(["n.md"]);
+    expect(reconcileReport.items()).toEqual([]);
+    // A later pass neither re-creates the file nor re-registers the note.
+    carry();
+    const api = fakeApi(then);
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
+    expect(vi.mocked(ipc.writeNoteIfMissing)).not.toHaveBeenCalledWith("n.md", expect.anything(), expect.anything());
+  });
+
+  it("an empty file over unacked CRDT ops: the CRDT's text is what goes to the trash", async () => {
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "only in the CRDT");
+    const { textCopies, disk } = await deleteWith(Y.encodeStateVector(doc), null, {
+      body: "",
+      crdtText: "only in the CRDT",
+    });
+    expect(textCopies).toEqual([{ path: "n.md", content: "only in the CRDT" }]);
+    expect(disk.copies).toEqual([]);
+    expect(disk.notes.has("n.md")).toBe(false);
+  });
+
+  it("persists the acknowledgement across a relaunch", async () => {
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "x");
+    const { reg } = await deleteWith(Y.encodeStateVector(doc), Y.encodeStateVector(doc));
+    void reg;
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1]?.[0] as string);
+    // d1 left the vault (tombstoned + removed), so its ack was pruned with it.
+    expect(cfg.ackedSv?.d1).toBeUndefined();
+  });
+});
+
+describe("offline reconciliation — folder kept by this device's new notes (D8)", () => {
+  it("keeps a teammate-deleted folder holding a note created here, and says so", async () => {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    disk.notes.set("Team/old.md", "d1");
+    install(disk);
+    const reg1 = new VaultRegistry(
+      fakeApi({ notes: [{ id: "d1", rel_path: "Team/old.md" }], folders: [{ id: "f1", path: "Team" }] }),
+    );
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+
+    // Offline, this device made a new note inside the folder the teammate deletes.
+    disk.notes.set("Team/new.md", "local-new");
+    disk.bodies.set("Team/new.md", "written offline");
+    const reg = new VaultRegistry(
+      fakeApi({ notes: [], tombstones: ["d1"], folders: [], folderTombstones: ["f1"] }),
+    );
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(disk.folders.has("Team")).toBe(true);
+    expect(disk.notes.has("Team/new.md")).toBe(true);
+    expect(disk.notes.has("Team/old.md")).toBe(false);
+    expect(reconcileReport.items()).toEqual([
+      expect.objectContaining({ kind: "folderKept", path: "Team" }),
+    ]);
+  });
+});
+
+describe("offline reconciliation — same-path create (D4)", () => {
+  /** Pass 1 agrees on `a.md` (a baseline exists); then this device creates
+   *  `P.md` offline while a teammate's `P.md` lands on the server. */
+  async function sameCreate(opts: {
+    serverCreatedAt: string;
+    localCreated: number | null;
+    updateNote?: (id: string, input: { relPath?: string }) => Promise<unknown>;
+    baseline?: boolean;
+  }) {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    if (opts.baseline !== false) disk.notes.set("a.md", "d0");
+    install(disk);
+    vi.mocked(ipc.fileStat).mockImplementation((async () => ({
+      size: 10, modified: opts.localCreated, created: opts.localCreated,
+    })) as never);
+    if (opts.baseline !== false) {
+      const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d0", rel_path: "a.md" }] }));
+      reg1.setInboundHost(recordingHost().host);
+      await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    }
+    disk.notes.set("P.md", "local-b");
+    disk.bodies.set("P.md", "B's words");
+    const theirs = { id: "d9", rel_path: "P.md", createdAt: opts.serverCreatedAt };
+    const api = fakeApi({
+      notes: [...(opts.baseline !== false ? [{ id: "d0", rel_path: "a.md" }] : []), theirs],
+      tombstones: [],
+    });
+    const updateNote = vi.fn(opts.updateNote ?? (async (_id: string, input: { relPath?: string }) => ({
+      id: "d9", rel_path: input.relPath, title: null,
+    })));
+    (api as unknown as { updateNote: typeof updateNote }).updateNote = updateNote;
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    return { disk, reg, api, updateNote };
+  }
+
+  it("the local note is later: it is renamed and never bound to the teammate's id", async () => {
+    const { disk, reg, updateNote } = await sameCreate({
+      serverCreatedAt: "2020-01-01T00:00:00Z",
+      localCreated: Date.parse("2026-09-26T00:00:00Z"),
+    });
+    expect(updateNote).not.toHaveBeenCalled();
+    const moved = [...disk.notes].find(([p]) => p.startsWith("P (conflict "));
+    expect(moved?.[1]).toBe("local-b");
+    expect(disk.bodies.get(moved![0])).toBe("B's words");
+    expect(reg.getMapping(moved![0])?.docId ?? null).not.toBe("d9");
+    const item = reconcileReport.items().find((i) => i.kind === "renamedConflict");
+    expect(item).toMatchObject({ path: "P.md", newPath: moved![0] });
+  });
+
+  it("the server note is later: the teammate's note is renamed, ours keeps the path", async () => {
+    const { disk, reg, updateNote } = await sameCreate({
+      serverCreatedAt: "2026-09-26T12:00:00Z",
+      localCreated: Date.parse("2026-09-25T00:00:00Z"),
+    });
+    expect(updateNote).toHaveBeenCalledWith("d9", { relPath: expect.stringMatching(/^P \(conflict \d{4}-\d{2}-\d{2}\)\.md$/) });
+    expect(disk.notes.get("P.md")).toBe("local-b");
+    expect(disk.bodies.get("P.md")).toBe("B's words");
+    expect(reg.getMapping("P.md")?.docId ?? null).not.toBe("d9");
+    expect(reconcileReport.items().map((i) => i.kind)).toContain("renamedConflict");
+  });
+
+  it("a refused server rename falls back to moving the local file", async () => {
+    const { disk, reg } = await sameCreate({
+      serverCreatedAt: "2026-09-26T12:00:00Z",
+      localCreated: Date.parse("2026-09-25T00:00:00Z"),
+      updateNote: async () => { throw new Error("403 no_write_access"); },
+    });
+    expect(disk.notes.has("P.md")).toBe(false);
+    const moved = [...disk.notes].find(([p]) => p.startsWith("P (conflict "));
+    expect(moved?.[1]).toBe("local-b");
+    expect(reg.getMapping(moved![0])?.docId ?? null).not.toBe("d9");
+  });
+
+  it("a first sync with no baseline still adopts by path (no conflict)", async () => {
+    const { disk, updateNote } = await sameCreate({
+      serverCreatedAt: "2020-01-01T00:00:00Z",
+      localCreated: Date.parse("2026-09-26T00:00:00Z"),
+      baseline: false,
+    });
+    expect(updateNote).not.toHaveBeenCalled();
+    expect(disk.notes.has("P.md")).toBe(true);
+    expect(reconcileReport.items()).toEqual([]);
+  });
+});
+
+describe("offline reconciliation — closed-app rename and delete (row 4b, D5)", () => {
+  async function afterClosedApp(change: (disk: FakeDisk) => void, localText: string | null) {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.bodies.set("a.md", "hello there");
+    install(disk);
+    const listing = { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] as string[] };
+    const reg1 = new VaultRegistry(fakeApi(listing));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    change(disk);
+    vi.mocked(ipc.writeNoteIfMissing).mockClear();
+    vi.mocked(ipc.rebindNoteId).mockClear();
+    const api = fakeApi({ notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] });
+    const updateNote = vi.fn(async (_id: string, input: { relPath?: string }) => ({
+      id: "d1", rel_path: input.relPath, title: null,
+    }));
+    (api as unknown as { updateNote: typeof updateNote }).updateNote = updateNote;
+    const reg = new VaultRegistry(api);
+    const host = recordingHost();
+    (host.host as InboundHost).localText = async () => localText;
+    reg.setInboundHost(host.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    return { disk, reg, api, updateNote };
+  }
+
+  it("a rename made while the app was closed stays ONE note", async () => {
+    const { reg, api, updateNote } = await afterClosedApp((disk) => {
+      disk.notes.delete("a.md");
+      disk.bodies.delete("a.md");
+      disk.notes.set("b.md", "local-x");
+      disk.bodies.set("b.md", "hello there");
+    }, "hello there");
+    expect(updateNote).toHaveBeenCalledWith("d1", expect.objectContaining({ relPath: "b.md" }));
+    expect(vi.mocked(ipc.rebindNoteId)).toHaveBeenCalledWith("b.md", "d1", null);
+    expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
+    expect(vi.mocked(ipc.writeNoteIfMissing)).not.toHaveBeenCalledWith("a.md", expect.anything(), expect.anything());
+    expect(reg.getMapping("b.md")?.docId).toBe("d1");
+    expect(reconcileReport.items()).toEqual([]);
+  });
+
+  it("different text is not a rename: the old note is restored and the new file registers", async () => {
+    const { api } = await afterClosedApp((disk) => {
+      disk.notes.delete("a.md");
+      disk.bodies.delete("a.md");
+      disk.notes.set("b.md", "local-x");
+      disk.bodies.set("b.md", "something else entirely");
+    }, "hello there");
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("a.md", "", null);
+    expect(vi.mocked(api.createNote)).toHaveBeenCalledWith(expect.objectContaining({ relPath: "b.md" }));
+    expect(reconcileReport.items().map((i) => [i.kind, i.path])).toEqual([["restoredFromServer", "a.md"]]);
+  });
+
+  it("a delete made while the app was closed is undone, and reported (D5)", async () => {
+    await afterClosedApp((disk) => {
+      disk.notes.delete("a.md");
+      disk.bodies.delete("a.md");
+    }, "hello there");
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("a.md", "", null);
+    expect(reconcileReport.items()).toEqual([
+      expect.objectContaining({ kind: "restoredFromServer", path: "a.md", docId: "d1" }),
+    ]);
+  });
+});
+
+describe("offline reconciliation — ready.tombstones", () => {
+  async function pull(opts: { readyTombstones?: string[]; listingTombstones: string[] | null }) {
+    reconcileReport.clear();
+    const disk = new FakeDisk();
+    disk.notes.set("n.md", "d1");
+    disk.bodies.set("n.md", "edited offline");
+    disk.unseen.add("d1");
+    install(disk);
+    const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "n.md" }] }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+    const reg = new VaultRegistry(fakeApi({ notes: [], tombstones: opts.listingTombstones }));
+    reg.setInboundHost(recordingHost().host);
+    if (opts.readyTombstones) reg.noteServerTombstones(opts.readyTombstones);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    return { disk, reg };
+  }
+
+  it("a doc named only by ready.tombstones goes down the DELETION path (recovery copy, teammate delete)", async () => {
+    const { disk, reg } = await pull({ readyTombstones: ["d1"], listingTombstones: [] });
+    expect(reg.isServerTombstoned("d1")).toBe(true);
+    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(disk.notes.has("n.md")).toBe(false);
+    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["deletedByTeammate"]);
+  });
+
+  it("without the field the pass is unchanged: the same absence reads as a revocation", async () => {
+    // Today's behaviour for an older server: a small, answered absence is a
+    // revocation (kept locally), which is exactly what the field corrects.
+    const { disk } = await pull({ listingTombstones: [] });
+    expect(disk.copies.map((c) => c.from)).toEqual(["n.md"]);
+    expect(reconcileReport.items().map((i) => i.kind)).toEqual(["keptLocally"]);
+  });
+
+  it("a listing that cannot answer tombstones stays 'cannot answer'", async () => {
+    const { disk } = await pull({ readyTombstones: ["d1"], listingTombstones: null });
+    expect(disk.notes.has("n.md")).toBe(true);
   });
 });
