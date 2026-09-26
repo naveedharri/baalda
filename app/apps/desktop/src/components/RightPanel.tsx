@@ -1,6 +1,6 @@
 /* The right-side pop-out panel: Activity (one feed of reconnect results,
    server Trash and local recovery copies) and Versions (the open note's
-   history). One
+   history). Push-to-talk lives in the main toolbar, not here. One
    container, the old version panel's slide-in and close rules: Escape, the ✕,
    or a click outside it (the toolbar toggle and the editor-area virtual tabs
    excepted, so it coexists with "Review changes"). */
@@ -11,7 +11,6 @@ import { useStore } from "../store";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { VersionsTab } from "./VersionPanel";
 import { ActivityFeed } from "./ActivityFeed";
-import { TalkButton } from "./TalkButton";
 import { usePendingReviewCount } from "./ReviewTab";
 import { RIGHT_PANEL_TAB_LABEL, RIGHT_PANEL_TABS, type RightPanelTab } from "./rightPanelTab";
 
@@ -29,12 +28,15 @@ const ICON_PROPS = {
   "aria-hidden": true,
 };
 
-/** The panel's tab switchers: the icon buttons that used to sit in the header
- *  (Version history's clock) plus Activity's pulse line. */
+/** The panel's tab switchers: Version history's clock and Activity's
+ *  bulleted log (three bullets, three lines), distinct from the clock beside it. */
 const TAB_ICON: Record<RightPanelTab, React.ReactNode> = {
   activity: (
     <svg {...ICON_PROPS}>
-      <path d="M3 12h4l3-8 4 16 3-8h4" />
+      <circle cx="5" cy="6" r="1.4" />
+      <circle cx="5" cy="12" r="1.4" />
+      <circle cx="5" cy="18" r="1.4" />
+      <path d="M10 6h10M10 12h10M10 18h7" />
     </svg>
   ),
   versions: (
@@ -127,9 +129,6 @@ function PanelBody({ tab }: { tab: RightPanelTab }) {
               )}
             </button>
           ))}
-          {/* Push-to-talk, moved here from the toolbar: not a tab, the same
-              hold-to-talk button with all its states. */}
-          <TalkButton />
           <span className="right-panel-tab-name">{RIGHT_PANEL_TAB_LABEL[tab]}</span>
         </div>
         <button className="icon-btn" onClick={close} aria-label="Close panel" title="Close (Esc)">

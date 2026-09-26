@@ -1,3 +1,4 @@
+import { TalkButton } from "./components/TalkButton";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
@@ -1415,6 +1416,8 @@ export default function App() {
               noteOpen={openNote != null && !isPreview}
               attachmentLocalOnly={attachmentLocalOnly}
             />
+            {/* Vault-wide, so it sits in the header regardless of the open note. */}
+            <TalkButton />
             {/* Same gate as history: a link is a doc_id, so it only exists for a
                 note the server knows about. */}
             {versionDocId && !isPreview && <ShareNoteButton docId={versionDocId} />}
