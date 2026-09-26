@@ -179,10 +179,10 @@ export function ShareNoteButton({ docId }: { docId: string }) {
             strokeLinejoin="round"
             aria-hidden="true"
           >
-            <circle cx="18" cy="5" r="3" />
-            <circle cx="6" cy="12" r="3" />
-            <circle cx="18" cy="19" r="3" />
-            <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
+            {/* Curved forward arrow: the shaft rises from bottom-left, the
+                head points right. */}
+            <path d="M4 19v-2a7 7 0 0 1 7-7h9" />
+            <path d="M16 6l4 4-4 4" />
           </svg>
         )}
       </button>

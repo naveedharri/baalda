@@ -11,8 +11,13 @@ import { useStore } from "../store";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { VersionsTab } from "./VersionPanel";
 import { ActivityFeed } from "./ActivityFeed";
+import { TalkButton } from "./TalkButton";
 import { usePendingReviewCount } from "./ReviewTab";
 import { RIGHT_PANEL_TAB_LABEL, RIGHT_PANEL_TABS, type RightPanelTab } from "./rightPanelTab";
+
+/** Portaled UI the panel opens: ConfirmDialog (modal), RowActionsMenu
+ *  (`.menu-portal`), toasts. A click there must not close the panel under it. */
+const PANEL_SPAWNED = ".panel-btn, .modal-backdrop, .modal, .menu-portal, .toast, .toast-viewport";
 
 const ICON_PROPS = {
   viewBox: "0 0 24 24",
@@ -68,9 +73,10 @@ function PanelBody({ tab }: { tab: RightPanelTab }) {
       const target = e.target as Node;
       if (ref.current?.contains(target)) return;
       if (target instanceof Element) {
-        // The toggle itself; dialogs and menus the panel opened; the editor
-        // area's virtual tabs (Review changes / Compare stay usable beside it).
-        if (target.closest(".panel-btn, .modal-backdrop, .modal, .context-menu, .row-actions-menu, .editor-wrap, .tab-strip")) return;
+        // Only the toggle itself and the dialogs / menus / popovers the panel
+        // spawns (portaled outside it). Anything else, the editor, tab strip,
+        // sidebar or a Review changes tab included, closes the panel.
+        if (target.closest(PANEL_SPAWNED)) return;
       }
       useStore.getState().closeRightPanel();
     };
@@ -121,6 +127,9 @@ function PanelBody({ tab }: { tab: RightPanelTab }) {
               )}
             </button>
           ))}
+          {/* Push-to-talk, moved here from the toolbar: not a tab, the same
+              hold-to-talk button with all its states. */}
+          <TalkButton />
           <span className="right-panel-tab-name">{RIGHT_PANEL_TAB_LABEL[tab]}</span>
         </div>
         <button className="icon-btn" onClick={close} aria-label="Close panel" title="Close (Esc)">

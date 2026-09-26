@@ -13,7 +13,6 @@ import {
   SWITCH_VAULT,
   VaultFolderMissingBannerView,
 } from "./components/VaultFolderMissing";
-import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -1416,11 +1415,34 @@ export default function App() {
               noteOpen={openNote != null && !isPreview}
               attachmentLocalOnly={attachmentLocalOnly}
             />
-            {/* Vault-wide, so it sits in the header regardless of the open note. */}
-            <TalkButton />
             {/* Same gate as history: a link is a doc_id, so it only exists for a
                 note the server knows about. */}
             {versionDocId && !isPreview && <ShareNoteButton docId={versionDocId} />}
+            <button
+              className="icon-btn graph-btn"
+              title="Graph view (⌘G)"
+              aria-label="Open graph view"
+              onClick={() => setGraphOpen(true)}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="5.5" cy="6" r="2.5" />
+                <circle cx="18" cy="4.5" r="2" />
+                <circle cx="12.5" cy="13" r="2.5" />
+                <circle cx="6" cy="19" r="2" />
+                <circle cx="19.5" cy="18.5" r="2.5" />
+                <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
+              </svg>
+            </button>
+            {/* Far right: the Activity / Versions panel (push-to-talk lives in
+                its header now). */}
             <button
               className={`icon-btn panel-btn${rightPanelOpen ? " active" : ""}`}
               title={pendingReview > 0 ? `Panel (${pendingReview} to review)` : "Panel"}
@@ -1444,29 +1466,6 @@ export default function App() {
                 <path d="M15 4v16" />
               </svg>
               {pendingReview > 0 && <span className="panel-btn-badge" aria-hidden="true" />}
-            </button>
-            <button
-              className="icon-btn graph-btn"
-              title="Graph view (⌘G)"
-              aria-label="Open graph view"
-              onClick={() => setGraphOpen(true)}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="5.5" cy="6" r="2.5" />
-                <circle cx="18" cy="4.5" r="2" />
-                <circle cx="12.5" cy="13" r="2.5" />
-                <circle cx="6" cy="19" r="2" />
-                <circle cx="19.5" cy="18.5" r="2.5" />
-                <path d="M7.8 7.2 10.6 11M14.4 11.3 16.6 6M11 15 7.3 17.6M14.8 14.6l3 2.6" />
-              </svg>
             </button>
           </header>
           <VaultUnsyncedBanner />
