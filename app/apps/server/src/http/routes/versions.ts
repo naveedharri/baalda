@@ -3,7 +3,12 @@ import { pool } from "../../db/pool.js";
 import { canEditDoc } from "../../permissions/http-gates.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
-import { vaultAccess } from "../../permissions/vault-docs.js";
+import {
+  listDeletedReadableDocsInVault,
+  listReadableDocsInVault,
+  vaultAccess,
+} from "../../permissions/vault-docs.js";
+import { extractDocText } from "../../index/indexer.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited, type VersionCause } from "../../versions/capture.js";
 import {
@@ -101,6 +106,10 @@ function recoveryCsv(candidates: RecoveryCandidate[]): string {
   );
   return [head, ...rows].join("\n") + "\n";
 }
+
+/** Default look-back and page cap for `GET /vaults/:id/shrink-events`. */
+const SHRINK_EVENTS_DEFAULT_DAYS = 30;
+const SHRINK_EVENTS_MAX = 200;
 
 /** Live note → its collection id, or null when the note is gone. */
 async function noteVaultId(docId: string): Promise<string | null> {
@@ -293,6 +302,77 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     });
     if (results.some((r) => r.ok)) deps.onRegistryChanged(vaultId, null);
     return c.json({ results });
+  });
+
+  // ── shrink events (#200) ──────────────────────────────────────────────────
+  // GET /api/vaults/:vaultId/shrink-events?since=<ISO>&limit=<n≤200>
+  // Every `pre-shrink` version (an update that left ≤20% of a note; see
+  // `versions/shrink-guard.ts`) on a note the caller can read, deleted notes
+  // included, newest first. `beforeChars` is the captured text's length. The
+  // capture does not store the post-shrink text, so `afterChars` is the note's
+  // CURRENT length and the response says so with `afterIsCurrent: true`.
+  routes.get("/vaults/:vaultId/shrink-events", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const role = await vaultRole(vaultId, session.userId);
+    if (role === undefined) return c.json({ error: "Unknown vault" }, 404);
+    if (!role) return c.json({ error: "Not a member of this vault" }, 403);
+
+    const sinceRaw = c.req.query("since");
+    const since = sinceRaw ? new Date(sinceRaw) : new Date(Date.now() - SHRINK_EVENTS_DEFAULT_DAYS * 86_400_000);
+    if (Number.isNaN(since.getTime())) return c.json({ error: "since must be an ISO date", code: "invalid_since" }, 400);
+    const limitRaw = Number.parseInt(c.req.query("limit") ?? "", 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, SHRINK_EVENTS_MAX) : SHRINK_EVENTS_MAX;
+
+    const [live, deleted] = await Promise.all([
+      listReadableDocsInVault(session.userId, vaultId),
+      listDeletedReadableDocsInVault(session.userId, vaultId),
+    ]);
+    const readable = [...live, ...deleted];
+    if (readable.length === 0) return c.json({ items: [], truncated: false, afterIsCurrent: true });
+
+    const { rows } = await pool.query<{
+      id: string;
+      doc_id: string;
+      rel_path: string;
+      created_at: Date;
+      before_chars: number;
+      deleted: boolean;
+    }>(
+      `SELECT v.id, v.doc_id, n.rel_path, v.created_at,
+              char_length(v.content)::int AS before_chars,
+              n.deleted_at IS NOT NULL AS deleted
+         FROM note_versions v
+         JOIN notes n ON n.id = v.doc_id AND n.vault_id = $1
+        WHERE v.vault_id = $1 AND v.cause = 'pre-shrink' AND v.created_at >= $2
+          AND v.doc_id = ANY($3::text[])
+        ORDER BY v.created_at DESC, v.id DESC
+        LIMIT $4`,
+      [vaultId, since, readable, limit + 1],
+    );
+    const page = rows.slice(0, limit);
+    // Current length per distinct doc, derived the way the indexer derives text.
+    const docIds = [...new Set(page.map((r) => r.doc_id))];
+    const current = new Map<string, number>();
+    for (let i = 0; i < docIds.length; i += 8) {
+      await Promise.all(
+        docIds.slice(i, i + 8).map(async (d) => current.set(d, (await extractDocText(d)).length)),
+      );
+    }
+    return c.json({
+      items: page.map((r) => ({
+        versionId: Number(r.id),
+        docId: r.doc_id,
+        relPath: r.rel_path,
+        capturedAt: r.created_at.toISOString(),
+        beforeChars: r.before_chars,
+        afterChars: current.get(r.doc_id) ?? 0,
+        deleted: r.deleted,
+      })),
+      truncated: rows.length > limit,
+      afterIsCurrent: true,
+    });
   });
 
   routes.get("/vaults/:vaultId/checkpoints", async (c) => {
