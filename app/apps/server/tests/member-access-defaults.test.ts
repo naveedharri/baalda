@@ -3,6 +3,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { pool } from "../src/db/pool.js";
 import { applyBulkAccess, setJoinDefault } from "../src/permissions/access-management.js";
+import { canCreateIn, canEditFolder } from "../src/permissions/http-gates.js";
 import { effectivePermission } from "../src/permissions/resolver.js";
 import { listReadableDocsInVault } from "../src/permissions/vault-docs.js";
 import { resetDb } from "./helpers/db.js";
@@ -92,6 +93,42 @@ describe("future-member access snapshots", () => {
     });
     expect(await effectivePermission(admin, doc)).toBe("edit");
     expect(await effectivePermission(owner, doc)).toBe("edit");
+  });
+
+  it("refuses a Private-snapshot admin writes inside a pre-join folder until access is granted", async () => {
+    const { org, owner, vault, folder } = await fixture();
+    const admin = await seedUser(`private-admin-write-${randomUUID()}@test.dev`);
+    await seedMember(org, admin, "admin");
+
+    expect(await canEditFolder(admin, folder)).toBe(false);
+    expect(await canCreateIn(admin, vault, folder)).toBe(false);
+    // The owner has no snapshot and keeps the role shortcut.
+    expect(await canEditFolder(owner, folder)).toBe(true);
+    // Content created after the join follows the live posture.
+    const later = await seedFolder(vault, null, "Later", "Later", owner);
+    expect(await canCreateIn(admin, vault, later)).toBe(true);
+    // Root creation follows the live posture, never the join default.
+    expect(await canCreateIn(admin, vault, null)).toBe(true);
+
+    await applyBulkAccess({
+      organizationId: org,
+      actorUserId: owner,
+      resources: [{ resourceType: "folder", resourceId: folder }],
+      audience: { type: "org" },
+      mode: "open",
+    });
+    expect(await canCreateIn(admin, vault, folder)).toBe(true);
+  });
+
+  it("keeps the admin shortcut for a legacy membership with no snapshot", async () => {
+    const { org, vault, folder } = await fixture();
+    const admin = await seedUser(`legacy-admin-${randomUUID()}@test.dev`);
+    await seedMember(org, admin, "admin");
+    await pool.query(
+      "DELETE FROM member_access_snapshots WHERE organization_id = $1 AND user_id = $2",
+      [org, admin],
+    );
+    expect(await canCreateIn(admin, vault, folder)).toBe(true);
   });
 
   it("changes only future joins and keeps legacy memberships unchanged", async () => {

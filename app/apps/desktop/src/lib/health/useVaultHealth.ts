@@ -24,6 +24,7 @@ import { copyText } from "../clipboard";
 import { isNoteExt } from "../formats";
 import { toast } from "../toast";
 import { runCheckAction, type CheckActionDeps } from "./checkActions";
+import { withoutAutomaticChecks } from "./checks";
 import {
   buildHealthReport,
   composeInspectionVerdict,
@@ -234,7 +235,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         liveDocs[docId] = path;
       }
       void ipc.vaultChecks(liveDocs, vaultEpoch)
-        .then((c) => { if (live) setChecks(c); })
+        .then((c) => { if (live) setChecks(withoutAutomaticChecks(c)); })
         .catch(() => { if (live) setChecks(null); });
     }
     return () => {
@@ -314,10 +315,12 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       localNotePaths,
       failures,
       stats,
+      checks,
       members,
     };
     return buildHealthReport(input);
   }, [
+    checks,
     vaultReadySeen,
     syncEnabled,
     syncStatus,

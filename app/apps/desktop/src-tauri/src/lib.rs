@@ -4,6 +4,7 @@
 
 pub mod attachments;
 pub mod checks;
+mod clipboard;
 // `pub` so the integration tests can drive the batch appliers
 // (`apply_bootstrap_entries`, `materialize_notes`) directly: they are the whole
 // policy of the bulk sync path — the eligibility table, the path allowlist —
@@ -18,6 +19,7 @@ pub mod keychain;
 pub mod notefile;
 pub mod oauth;
 pub mod parse;
+mod relaunch;
 mod state;
 pub mod stats;
 pub mod tree;
@@ -133,10 +135,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
-        // Native clipboard: the webview's navigator.clipboard is tied to
-        // WebKit's transient user activation, which an await (e.g. minting a
-        // share link) outlives — a native call has no such rule.
-        .plugin(tauri_plugin_clipboard_manager::init())
         // `baalda://` links. A teammate pastes one into chat; clicking it hands
         // the URL to this app, which resolves it against the *recipient's* own
         // account and access — the link carries ids, never content or a grant.
@@ -162,6 +160,9 @@ pub fn run() {
             // managed to render, instead of the app running invisibly. Tauri v2
             // window methods are callable off the main thread and show() on a
             // visible window is a no-op, so this needs no coordination.
+            // A silent update restarted us while another app was in front:
+            // hand focus straight back (see `relaunch.rs`).
+            relaunch::apply_on_launch(app.handle());
             #[cfg(desktop)]
             if let Some(win) = app.get_webview_window("main") {
                 // While it is still hidden, so the first frame is already the
@@ -176,13 +177,25 @@ pub fn run() {
                         "[window] frontend never revealed the window in 1500ms; showing it anyway"
                     );
                     let _ = win.show();
-                    let _ = win.set_focus();
+                    let background =
+                        win.app_handle().state::<relaunch::BackgroundLaunch>().get();
+                    if !background {
+                        let _ = win.set_focus();
+                    }
                 });
             }
             Ok(())
         })
         .manage(AppState::default())
+        .manage(relaunch::BackgroundLaunch::default())
+        // Native clipboard (`clipboard_write`): the webview's navigator.clipboard
+        // is tied to WebKit's transient user activation, which an await (e.g.
+        // minting a share link) outlives — a native call has no such rule.
+        .manage(clipboard::ClipboardState::default())
         .invoke_handler(tauri::generate_handler![
+            clipboard::clipboard_write,
+            relaunch::set_background_relaunch,
+            relaunch::launched_in_background,
             commands::pick_vault,
             commands::open_vault,
             commands::get_last_vault,
@@ -190,12 +203,14 @@ pub fn run() {
             commands::get_recent_vaults,
             commands::remove_recent_vault,
             commands::delete_vault,
+            commands::reset_vault_local_copy,
             commands::create_vault,
             commands::is_vault,
             commands::list_tree,
             commands::list_children,
             commands::read_note,
             commands::note_exists,
+            commands::vault_root_state,
             commands::write_trash_copy,
             commands::copy_to_trash,
             commands::rebind_note_id,

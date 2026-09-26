@@ -409,7 +409,6 @@ const ROW_ACTIONS: ReadonlySet<HealthRemedy> = new Set<HealthRemedy>([
   "upgrade",
   "sign-in",
   "reset-history",
-  "reclaim",
   "contact-owner",
 ]);
 
@@ -526,7 +525,7 @@ function Remedy({
   /** The collapsed row's single button: a pill, not a text link. */
   emphasis?: boolean;
 }) {
-  const { actions, confirm, openNote, reclaim } = handlers;
+  const { actions, confirm, openNote } = handlers;
   const [copied, setCopied] = useState(false);
   const pill = emphasis ? "ghost-pill sm" : "link-btn";
 
@@ -579,12 +578,6 @@ function Remedy({
         >
           Reset history
         </button>
-      );
-    case "reclaim":
-      return (
-        <AsyncButton className={emphasis ? "ghost-pill sm" : "link-btn"} onClick={reclaim}>
-          Reclaim
-        </AsyncButton>
       );
     case "sign-in":
       return (

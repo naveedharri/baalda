@@ -53,6 +53,7 @@ import {
   withRetry,
 } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
+import { isSymlinkRefusal, SYMLINK_REFUSAL_REASON } from "./linkRefusals";
 import { toast } from "../toast";
 import { vaultScopes, type VaultScope, type VaultScopeSource } from "./vaultScope";
 
@@ -314,6 +315,26 @@ export interface InboundHost {
    */
   revocationRefused?(docIds: string[]): void;
   /**
+   * The vault root folder is gone (renamed, moved, unmounted) while the app is
+   * open (#221). Every structural step stops while this holds — materialize,
+   * register, move, delete — because each of them would act on a folder that no
+   * longer exists: re-creating the old root from the server, or reading the
+   * whole vault as deleted. Synchronous, so {@link VaultRegistry.stale} can ask.
+   */
+  structurePaused?(): boolean;
+  /**
+   * Ask the disk right now whether the vault root is still a folder, and
+   * resolve false (having paused structure) when it is not. Called at the top
+   * of every reconcile and pull, before anything reads the tree.
+   */
+  confirmVaultRoot?(): Promise<boolean>;
+  /**
+   * Docs removed from disk in a live bulk delete that the user has not decided
+   * about yet ("delete for everyone" or "restore", #221). Until they answer, a
+   * pull neither re-materializes these nor treats them as anything else.
+   */
+  heldDocIds?(): ReadonlySet<string>;
+  /**
    * The signed-in user's id, or null when there is no session.
    *
    * Used to keep legacy authorship metadata attributable to one account.
@@ -487,6 +508,16 @@ function reasonOf(err: unknown): string {
   return String(err);
 }
 
+/** A server note that could not be materialized. A symbolic link at the path is
+ *  not a disk-write failure but a deliberate refusal, so it is recorded as an
+ *  `inbound-blocked` safety issue (code `symlink`) rather than `materialize`. */
+function materializeFailure(path: string, docId: string | null, err: unknown): RegistryFailure {
+  if (isSymlinkRefusal(err)) {
+    return { kind: "inbound-blocked", path, docId, reason: SYMLINK_REFUSAL_REASON, code: "symlink" };
+  }
+  return { kind: "materialize", path, docId, reason: reasonOf(err), code: null };
+}
+
 /** The shapes `listFolderRegistry` / `listNoteRegistry` resolve to, named here so
  *  the optimistic prefetch can hold onto them. Inferred rather than re-declared,
  *  so they cannot drift from the api client. */
@@ -610,6 +641,8 @@ export class VaultRegistry {
   private unhydratedPlaceholders = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
+  /** See {@link lastPassDrift}. */
+  private passDrift: { missingMapped: number; unmappedLocal: number } | null = null;
   /** Set when the server refused on a plan limit: the rest of the run is
    *  pointless (every further create would 402 too), so it stops. */
   private limitReached: string | null = null;
@@ -843,6 +876,7 @@ export class VaultRegistry {
     this.primedConfig = null;
     this.serverVaultId = null;
     this.organizationId = null;
+    this.passDrift = null;
     this.byPath.clear();
     this.byDocId.clear();
     this.byPathCi = null;
@@ -883,7 +917,22 @@ export class VaultRegistry {
   /** True when this registry's contents belong to a vault that is no longer the
    *  open one. Bail silently — "the user moved on" is not an error. */
   private stale(): boolean {
-    return this.bound != null && !this.bound.isCurrent();
+    if (this.bound != null && !this.bound.isCurrent()) return true;
+    // A vanished vault root (#221) is the same answer for a different reason:
+    // whatever this pass meant to write belongs to a folder that is not there.
+    return this.host?.structurePaused?.() === true;
+  }
+
+  /**
+   * What the last structure pass saw that it could not explain (#221):
+   * `missingMapped` notes this device already knew by path whose files are no
+   * longer on disk (re-materialized from the server), and `unmappedLocal` files
+   * on disk the server has never seen (registered as new). Both at once, on the
+   * first pass after a vault opens, is what a rename, move or delete made while
+   * the app was closed looks like. Reported only; the pass acts as it always did.
+   */
+  lastPassDrift(): { missingMapped: number; unmappedLocal: number } | null {
+    return this.passDrift;
   }
 
   /**
@@ -2188,6 +2237,11 @@ export class VaultRegistry {
     // `primeLocal` may have claimed the same scope moments ago; keep that claim
     // while it is still current rather than re-reading it.
     if (!this.bound || !this.bound.isCurrent()) this.bound = this.scopes.current();
+    // See `pullOnce`: nothing below may run against a vault root that is gone.
+    if (this.host?.confirmVaultRoot && !(await this.host.confirmVaultRoot())) {
+      return { seeded: false };
+    }
+    if (this.stale()) return { seeded: false };
     this.organizationId = input.organizationId;
     this.failed = [];
     this.limitReached = null;
@@ -2439,6 +2493,10 @@ export class VaultRegistry {
     // created under A and A's doc map was written into B's config.json.
     if (this.stale()) return false;
     if (!this.serverVaultId) return false;
+    // The root is still a folder (#221). Asked of the disk, not of the last
+    // watcher batch: a renamed root may never have reported anything.
+    if (this.host?.confirmVaultRoot && !(await this.host.confirmVaultRoot())) return false;
+    if (this.stale()) return false;
     const vaultId = this.serverVaultId;
     const tree = await this.readFullTree();
     if (this.stale()) return false;
@@ -2477,6 +2535,8 @@ export class VaultRegistry {
     const serverFolders = folderRegistry.folders;
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
+    // The paths this device already knew BEFORE this pass (#221 drift report).
+    const priorMappedCi = new Set([...this.byPath.keys()].map((p) => p.toLowerCase()));
     const checkpoint = this.checkpoint ?? this.newCheckpointer();
     // A pull can be the first thing to touch a big vault's map (a reconnect
     // catch-up), so retune here too rather than trusting the construction-time
@@ -2954,9 +3014,21 @@ export class VaultRegistry {
     // disk would be "server-only" here and get an empty file written at the other
     // spelling — which on a case-insensitive filesystem is the SAME file.
     const localNotePaths = new Set(notes.map((n) => n.path.toLowerCase()));
-    const toMaterialize = [...resolvedNotePaths].filter(
-      (rp) => !localNotePaths.has(rp.toLowerCase()),
-    );
+    // Removed from disk in a live bulk delete the user has not answered yet
+    // (#221): neither restored nor deleted until they do.
+    const held = this.host?.heldDocIds?.() ?? null;
+    const toMaterialize = [...resolvedNotePaths].filter((rp) => {
+      if (localNotePaths.has(rp.toLowerCase())) return false;
+      if (held && held.size > 0) {
+        const docId = this.byPath.get(rp)?.docId;
+        if (docId && held.has(docId)) return false;
+      }
+      return true;
+    });
+    this.passDrift = {
+      missingMapped: toMaterialize.filter((rp) => priorMappedCi.has(rp.toLowerCase())).length,
+      unmappedLocal: missingNotes.length,
+    };
     this.sink.addTotal(toMaterialize.length);
     // Materializing is the other half a pull can be bulk for — a fresh device
     // writes the whole vault here without registering a single row above.
@@ -3045,13 +3117,9 @@ export class VaultRegistry {
           this.sink.item("ok");
         } catch (e) {
           if (ipc.isVaultMismatch(e)) return; // the vault moved on — not a failure
-          this.sink.item(this.recordFailure({
-            kind: "materialize",
-            path: rp,
-            docId: this.byPath.get(rp)?.docId ?? null,
-            reason: reasonOf(e),
-            code: null,
-          }));
+          this.sink.item(
+            this.recordFailure(materializeFailure(rp, this.byPath.get(rp)?.docId ?? null, e)),
+          );
         }
       },
       { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => this.stopRun() },
@@ -3344,6 +3412,15 @@ export class VaultRegistry {
       const created: string[] = [];
       for (const rp of group) {
         const out = byPath.get(rp);
+        // A link at the path is refused per item by Rust (#216) and must be
+        // said, not counted "ok". Other per-item write errors keep their
+        // existing quiet behaviour here.
+        if (out?.error && isSymlinkRefusal(out.error)) {
+          this.sink.item(
+            this.recordFailure(materializeFailure(rp, this.byPath.get(rp)?.docId ?? null, out.error)),
+          );
+          continue;
+        }
         if (out?.created) {
           mutated = true;
           // One owed watcher echo, so the sync layer does not treat our own
@@ -3477,10 +3554,10 @@ export class VaultRegistry {
    * whole subtree of paths) and a single note. doc_ids never change — only the
    * path columns move — so open docs and backlinks survive (spec invariant).
    */
-  async renamePath(oldPath: string, newPath: string): Promise<void> {
-    if (this.stale()) return;
+  async renamePath(oldPath: string, newPath: string): Promise<boolean> {
+    if (this.stale()) return false;
     const vaultId = this.serverVaultId;
-    if (!vaultId) return;
+    if (!vaultId) return false;
     const folderId = this.folderByPath.get(oldPath);
     if (folderId) {
       // Folder move: rewrite the server subtree, then the local prefix maps.
@@ -3502,17 +3579,20 @@ export class VaultRegistry {
           reason: reasonOf(e),
           code: errorCode(e),
         });
-        return;
+        return false;
       }
       // The maps may belong to a different vault by now — remapping them would
       // rewrite that vault's paths with this one's move.
-      if (this.stale() || this.serverVaultId !== vaultId) return;
+      if (this.stale() || this.serverVaultId !== vaultId) return false;
       this.folderByPath = remapPrefix(this.folderByPath, oldPath, newPath);
       this.byPath = remapPrefix(this.byPath, oldPath, newPath);
+      // The server moved the subtree's `files` rows too (`planFolderMove`), so
+      // the binaries under it keep their registrations at the new paths.
+      this.fileByPath = remapPrefix(this.fileByPath, oldPath, newPath);
       this.rebuildByDocId();
       this.persist();
       this.notifyMapChanged();
-      return;
+      return true;
     }
     const mapping = this.byPath.get(oldPath);
     if (mapping) {
@@ -3534,15 +3614,17 @@ export class VaultRegistry {
           reason: reasonOf(e),
           code: errorCode(e),
         });
-        return;
+        return false;
       }
-      if (this.stale() || this.serverVaultId !== vaultId) return;
+      if (this.stale() || this.serverVaultId !== vaultId) return false;
       this.byPath.delete(oldPath);
       this.byPath.set(newPath, mapping);
       this.byDocId.set(mapping.docId, newPath);
       this.persist();
       this.notifyMapChanged();
+      return true;
     }
+    return false;
   }
 
   /**

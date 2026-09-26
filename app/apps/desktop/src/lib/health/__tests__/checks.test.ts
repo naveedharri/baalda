@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUTOMATIC_CHECK_IDS,
   CHECK_ACTIONS,
   CHECK_BY_ID,
   CHECK_DEFINITIONS,
   WHOLE_VAULT_ACTIONS,
   checkRows,
   summarizeChecks,
+  withoutAutomaticChecks,
   type CheckAction,
 } from "../checks";
 import type { VaultCheckId, VaultChecks } from "../types";
@@ -129,10 +131,13 @@ describe("check definitions", () => {
   });
 });
 
+/** The definitions Health lists: everything the app does not resolve itself. */
+const LISTED = CHECK_DEFINITIONS.filter((d) => !AUTOMATIC_CHECK_IDS.has(d.id));
+
 describe("checkRows", () => {
-  it("returns every definition in order, passed when the count is 0", () => {
+  it("returns every listed definition in order, passed when the count is 0", () => {
     const rows = checkRows(null);
-    expect(rows.map((r) => r.def.id)).toEqual(CHECK_DEFINITIONS.map((d) => d.id));
+    expect(rows.map((r) => r.def.id)).toEqual(LISTED.map((d) => d.id));
     expect(rows.every((r) => r.passed && r.result.count === 0)).toBe(true);
   });
 
@@ -150,7 +155,17 @@ describe("checkRows", () => {
     expect(empty.result.items).toHaveLength(2);
     const stale = rows.find((r) => r.def.id === "stale-index")!;
     expect(stale.passed).toBe(true);
-    expect(rows).toHaveLength(CHECK_DEFINITIONS.length);
+    expect(rows).toHaveLength(LISTED.length);
+  });
+
+  it("never lists leftover edit history: the app reclaims it on its own", () => {
+    const checks: VaultChecks = {
+      computedAt: 1,
+      results: [{ id: "orphan-history", count: 18, bytes: 4_200_000, items: [] }],
+    };
+    expect(checkRows(checks).some((r) => r.def.id === "orphan-history")).toBe(false);
+    expect(summarizeChecks(checkRows(checks)).headline).toBe(`All ${LISTED.length} checks passed`);
+    expect(withoutAutomaticChecks(checks).results).toEqual([]);
   });
 });
 
@@ -162,7 +177,7 @@ describe("summarizeChecks", () => {
 
   it("says all passed when nothing fails", () => {
     const s = summarizeChecks(checkRows(null));
-    expect(s.headline).toBe(`All ${CHECK_DEFINITIONS.length} checks passed`);
+    expect(s.headline).toBe(`All ${LISTED.length} checks passed`);
     expect(s.errors + s.warnings + s.infos).toBe(0);
   });
 
@@ -180,7 +195,7 @@ describe("summarizeChecks", () => {
     const s = summarizeChecks(checkRows(failing(["trash"])));
     expect(s.errors + s.warnings).toBe(0);
     expect(s.headline).toBe(
-      `${CHECK_DEFINITIONS.length - 1} of ${CHECK_DEFINITIONS.length} checks passed · 1 housekeeping`,
+      `${LISTED.length - 1} of ${LISTED.length} checks passed · 1 housekeeping`,
     );
   });
 

@@ -639,6 +639,89 @@ pub async fn delete_vault(
     write_config(&app, &state, &cfg)
 }
 
+/// Reset local copy (#228): PERMANENTLY delete the open vault's folder on this
+/// device so the caller can recreate it and sync a fresh copy down from the
+/// server. Not the Trash, by product decision: the server copy is the backup,
+/// and the UI names every unsynced note before it lets this run.
+///
+/// Guarded by [`check_reset_target`]; the watcher and index are released
+/// before the delete so nothing re-creates files inside the folder mid-way.
+#[tauri::command]
+pub async fn reset_vault_local_copy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (open, _) = require_vault_at(&state, expected_epoch)?;
+    let vaults_root = read_config(&app, &state)
+        .vaults_root
+        .map(PathBuf::from)
+        .or_else(|| default_vaults_root(&app).ok());
+    let home = app.path().home_dir().ok();
+    let target = check_reset_target(Path::new(&path), &open, vaults_root.as_deref(), home.as_deref())?;
+    // Stop the watcher and let go of the index first. Taken out under the lock,
+    // dropped outside it: the watcher's drop joins its threads, which may need
+    // the index lock themselves.
+    let (watcher, index) = {
+        let mut inner = state.inner.lock().unwrap();
+        (inner.watcher.take(), inner.index.take())
+    };
+    drop(watcher);
+    drop(index);
+    std::fs::remove_dir_all(&target).map_err(io_ctx("delete the vault folder", &target))
+}
+
+/// The refusals of [`reset_vault_local_copy`], pure so each one is testable.
+/// Returns the canonical folder to delete.
+pub fn check_reset_target(
+    target: &Path,
+    open_vault: &Path,
+    vaults_root: Option<&Path>,
+    home: Option<&Path>,
+) -> AppResult<PathBuf> {
+    let refuse = |why: &str| -> AppResult<PathBuf> {
+        Err(AppError::new(format!("Refusing to reset {}: {why}", target.display())))
+    };
+    let meta = match std::fs::symlink_metadata(target) {
+        Ok(m) => m,
+        Err(_) => return refuse("the folder doesn't exist"),
+    };
+    if meta.file_type().is_symlink() {
+        return refuse("it is a link, not the vault folder itself");
+    }
+    if !meta.is_dir() {
+        return refuse("it isn't a folder");
+    }
+    let canon = match std::fs::canonicalize(target) {
+        Ok(p) => p,
+        Err(_) => return refuse("its location can't be resolved"),
+    };
+    let open_canon = std::fs::canonicalize(open_vault).unwrap_or_else(|_| open_vault.to_path_buf());
+    if canon != open_canon {
+        return refuse("it isn't the vault that is open");
+    }
+    if canon.parent().is_none() {
+        return refuse("it is a filesystem root");
+    }
+    if let Some(home) = home {
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        if home.starts_with(&canon) {
+            return refuse("it is your home folder or contains it");
+        }
+    }
+    if let Some(root) = vaults_root {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if root.starts_with(&canon) {
+            return refuse("it is the vaults folder or contains it");
+        }
+    }
+    if !canon.join(".context").is_dir() {
+        return refuse("it has no .context folder, so it doesn't look like a vault");
+    }
+    Ok(canon)
+}
+
 /// Create a brand-new empty vault folder `<parent>/<name>` and open it. A name
 /// whose folder is taken gets a numeric suffix (see `free_vault_dir`) rather
 /// than an error — duplicate vault names are allowed.
@@ -1262,8 +1345,38 @@ pub async fn note_exists(
     // one runs 2.5 s after the event that armed it, which is easily long enough
     // for a vault switch.
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    let abs = vault::resolve_in_vault(&vault, &path)?;
-    Ok(abs.is_file())
+    vault::resolve_in_vault(&vault, &path)?;
+    // Not `is_file()`, which follows links (#216): a link at a note path is
+    // invisible to the tree walk, so the delete drain must see it as gone too,
+    // or a moved note keeps its stale identity alive behind the link.
+    Ok(vault::vault_path_state(&vault, &path) == vault::PathState::Regular)
+}
+
+/// Is the open vault's root folder still a folder? `"dir"`, `"missing"`, or
+/// `"not-dir"` (a file now sits where the folder was).
+///
+/// The sync layer asks before every structural pass and on every watcher batch
+/// (#221): a vault root renamed, moved or unmounted while the app is open leaves
+/// the watcher on a dead path, and any pull or delete drain that ran against it
+/// would re-create the old folder from the server or read the whole vault as
+/// deleted. Follows links, like the watcher's own root check — a vault opened
+/// through a linked folder is still a vault while the link resolves.
+#[tauri::command]
+pub async fn vault_root_state(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<String> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    Ok(vault_root_state_of(&vault).to_string())
+}
+
+/// The pure half of [`vault_root_state`].
+pub fn vault_root_state_of(vault: &Path) -> &'static str {
+    match std::fs::metadata(vault) {
+        Ok(m) if m.is_dir() => "dir",
+        Ok(_) => "not-dir",
+        Err(_) => "missing",
+    }
 }
 
 /// Save a recovery copy of local text that could not be synced
@@ -1317,9 +1430,17 @@ pub async fn write_note(
     content: String,
     expected_epoch: Option<u64>,
     doc_id: Option<String>,
-) -> AppResult<()> {
+    expected_sha: Option<String>,
+) -> AppResult<&'static str> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
-    notefile::write_note(&vault, &path, &content)?;
+    // Compare-and-swap (#216): the bridge passes the hash of the file it last
+    // agreed with. A file that moved on since is NOT overwritten — the answer
+    // is "stale" (a value, not an error) and the bridge re-ingests instead.
+    if notefile::write_note_cas(&vault, &path, &content, expected_sha.as_deref())?
+        == notefile::WriteNoteOutcome::Stale
+    {
+        return Ok("stale");
+    }
     // Re-index immediately so search/backlinks are fresh without waiting for
     // the watcher echo.
     let abs = vault::resolve_in_vault(&vault, &path)?;
@@ -1331,7 +1452,7 @@ pub async fn write_note(
         guard.set_disk_base(doc_id, &notefile::sha256_hex(&content))?;
     }
     guard.index_note(&vault, &abs)?;
-    Ok(())
+    Ok("written")
 }
 
 /// The doc's recorded disk base (sha256 of the bytes last synced between its
@@ -2338,6 +2459,9 @@ pub struct MaterializeOutcome {
     pub created: bool,
     /// The index row at this path now carries the server's `doc_id`.
     pub rebound: bool,
+    /// Why the placeholder could not be written, when it could not — e.g. the
+    /// path is a symbolic link (#216), which the desktop surfaces in Health.
+    pub error: Option<String>,
 }
 
 /// Materialize N server-only notes as create-only placeholders, then index and
@@ -2372,6 +2496,7 @@ pub fn materialize_notes(
                 rel_path: item.rel_path.clone(),
                 created: false,
                 rebound: false,
+                error: None,
             });
             continue;
         }
@@ -2385,6 +2510,7 @@ pub fn materialize_notes(
                     rel_path: item.rel_path.clone(),
                     created: false,
                     rebound: false,
+                    error: Some(e.0),
                 });
                 continue;
             }
@@ -2394,6 +2520,7 @@ pub fn materialize_notes(
             rel_path: item.rel_path.clone(),
             created,
             rebound: false,
+            error: None,
         });
         rows.push((item.rel_path.clone(), item.doc_id.clone()));
     }
@@ -2723,6 +2850,84 @@ pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_target_deletes_only_the_open_vault_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let root = home.join("Documents").join("Baalda Vaults");
+        let vault = root.join("Team");
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+        std::fs::write(vault.join("a.md"), "x").unwrap();
+        let ok = check_reset_target(&vault, &vault, Some(&root), Some(&home)).unwrap();
+        std::fs::remove_dir_all(&ok).unwrap();
+        assert!(!vault.exists());
+        assert!(root.is_dir(), "the vaults root survives");
+    }
+
+    #[test]
+    fn reset_target_refusals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let root = home.join("Documents").join("Baalda Vaults");
+        let vault = root.join("Team");
+        let other = root.join("Other");
+        std::fs::create_dir_all(vault.join(".context")).unwrap();
+        std::fs::create_dir_all(other.join(".context")).unwrap();
+        let no_ctx = tmp.path().join("plain");
+        std::fs::create_dir_all(&no_ctx).unwrap();
+        let err = |t: &Path, open: &Path| {
+            check_reset_target(t, open, Some(&root), Some(&home)).unwrap_err().to_string()
+        };
+        // Missing.
+        assert!(err(&tmp.path().join("nope"), &vault).contains("doesn't exist"));
+        // Not the open vault.
+        assert!(err(&other, &vault).contains("isn't the vault that is open"));
+        // A symlink to the open vault.
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&vault, &link).unwrap();
+            assert!(err(&link, &vault).contains("link"));
+        }
+        // A file.
+        let file = tmp.path().join("f.txt");
+        std::fs::write(&file, "x").unwrap();
+        assert!(err(&file, &file).contains("isn't a folder"));
+        // Filesystem root.
+        assert!(err(Path::new("/"), Path::new("/")).contains("filesystem root"));
+        // Home.
+        std::fs::create_dir_all(home.join(".context")).unwrap();
+        assert!(err(&home, &home).contains("home folder"));
+        // The vaults root itself, and an ancestor of it.
+        std::fs::create_dir_all(root.join(".context")).unwrap();
+        assert!(err(&root, &root).contains("vaults folder"));
+        let docs = home.join("Documents");
+        std::fs::create_dir_all(docs.join(".context")).unwrap();
+        assert!(err(&docs, &docs).contains("vaults folder"));
+        // No `.context`.
+        assert!(err(&no_ctx, &no_ctx).contains(".context"));
+        // Nothing was deleted by any refusal.
+        assert!(vault.is_dir() && other.is_dir() && root.is_dir() && no_ctx.is_dir());
+    }
+
+    #[test]
+    fn vault_root_state_reports_a_vanished_or_replaced_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().join("vault");
+        std::fs::create_dir(&v).unwrap();
+        assert_eq!(vault_root_state_of(&v), "dir");
+        std::fs::rename(&v, tmp.path().join("moved")).unwrap();
+        assert_eq!(vault_root_state_of(&v), "missing");
+        std::fs::write(&v, "x").unwrap();
+        assert_eq!(vault_root_state_of(&v), "not-dir");
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(tmp.path().join("moved"), &link).unwrap();
+            assert_eq!(vault_root_state_of(&link), "dir", "a linked root is still a vault");
+        }
+    }
 
     #[test]
     fn inbound_batch_file_removal_preserves_directories_and_metadata() {

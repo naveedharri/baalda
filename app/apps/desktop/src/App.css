@@ -3161,7 +3161,37 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 }
 .banner-actions {
   display: flex;
+  align-items: center;
+  flex-shrink: 0;
   gap: var(--sp-2);
+}
+/* Banner buttons are compact pills of one height. The primary keeps its accent
+   fill; everything else (an unclassed button was the browser's grey box) is a
+   quiet outlined pill that picks up the strip's own tint. */
+.banner .banner-actions button:not(.link-btn) {
+  height: 30px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.banner .banner-actions button:not(.primary):not(.link-btn) {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.banner .banner-actions button:not(.primary):not(.link-btn):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  border-color: color-mix(in srgb, currentColor 36%, transparent);
+}
+.banner .banner-actions button:not(.primary):not(.link-btn):disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 /* Update banner: same shape as the removed-note banner, but an accent tint so
    it reads as informational rather than a warning. */
@@ -3196,6 +3226,17 @@ html[data-platform="macos"] .sidebar-hidden .main-header {
 }
 .not-syncing-banner strong {
   color: var(--warning);
+}
+.not-syncing-banner > span {
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+.not-syncing-banner .banner-actions button:not(.primary):not(.link-btn) {
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.not-syncing-banner .banner-actions button:not(.primary):not(.link-btn):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 55%, transparent);
 }
 
 .attachment-sync-notice {
@@ -6594,6 +6635,10 @@ button.secondary:disabled {
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--danger-soft) 48%, var(--bg-surface));
 }
+/* Stacked Danger zone cards (Reset local copy, then Make local only). */
+.vault-local-only-card + .vault-local-only-card {
+  margin-top: var(--sp-3);
+}
 .vault-local-only-icon {
   width: 30px;
   height: 30px;
@@ -7799,4 +7844,55 @@ button.secondary:active:not(:disabled),
 
 .settings-nav .settings-ai-item .menu-icon svg {
   fill: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* #228 — the open vault's folder is missing. */
+.member-role.folder-missing {
+  color: var(--danger);
+  background: var(--danger-soft);
+  text-transform: none;
+}
+.vault-line .vault-path.is-missing {
+  color: var(--danger);
+}
+.wf-switch {
+  display: block;
+  margin: var(--sp-3) auto 0;
+}
+.reset-unsynced-list {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-4);
+}
+
+/* ---- Row overflow menu (⋯): a row keeps one primary action visible and puts
+   the rest behind this trigger (Settings → Vaults). */
+.row-more {
+  display: inline-flex;
+}
+.row-more-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.row-more-btn:hover:not(:disabled),
+.row-more-btn.open {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.row-more-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.row-more-menu {
+  min-width: 200px;
 }

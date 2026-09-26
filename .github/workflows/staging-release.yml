@@ -497,6 +497,10 @@ jobs:
                 echo
                 echo "$section"
               } >> "$RUNNER_TEMP/staging-notes.md"
+            else
+              # No queued points is a silent release, exactly as in release.yml
+              # (silent is the default): testers get the update without What's New.
+              printf '\n<!-- baalda:silent -->\n' >> "$RUNNER_TEMP/staging-notes.md"
             fi
           fi
 

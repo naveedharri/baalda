@@ -270,4 +270,27 @@ describe("site 3 — materializing server-only notes", () => {
     expect(reg.consumeMaterialized("Remote3.md")).toBe(true);
     expect(reg.consumeMaterialized("Remote3.md")).toBe(false);
   });
+
+  it("a batch item Rust refused as a symbolic link is a Health row, not an ok (#216)", async () => {
+    vi.mocked(ipc.materializeNotesBatch).mockImplementation(async (items) =>
+      items.map((i) =>
+        i.relPath === "Remote7.md"
+          ? {
+              relPath: i.relPath,
+              created: false,
+              rebound: false,
+              error: "This path is a symbolic link. Baalda does not sync through links. (Remote7.md)",
+            }
+          : { relPath: i.relPath, created: true, rebound: true },
+      ),
+    );
+    const { api } = fakeApi({ serverNotes: serverOnly(25) });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(0));
+
+    expect(reg.consumeMaterialized("Remote7.md")).toBe(false);
+    expect(reg.failures()).toEqual([
+      expect.objectContaining({ kind: "inbound-blocked", path: "Remote7.md", docId: "srv-7", code: "symlink" }),
+    ]);
+  });
 });

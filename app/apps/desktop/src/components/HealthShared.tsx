@@ -39,8 +39,6 @@ export interface HealthHandlers {
   openNote: (path: string) => void;
   /** Raise one of the confirms above. */
   confirm: (c: ConfirmState) => void;
-  /** Reclaim orphan history and toast the result. */
-  reclaim: () => Promise<void>;
   /** Start a check's heal or bulk action, confirming first when its plan says
    *  to. The page owns the run so a collapsing row cannot abandon it. */
   runCheck: (plan: CheckActionPlan) => void;

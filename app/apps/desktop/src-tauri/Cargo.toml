@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.1.68"
+version = "0.1.69"
 description = "Baalda — local-first markdown app"
 authors = ["Baalda"]
 license = "Apache-2.0"
@@ -21,7 +21,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-process = "2"
-tauri-plugin-clipboard-manager = "2"
+# Native clipboard writes, dispatched to the main thread by `clipboard.rs`
+# (NSPasteboard is not thread-safe; the clipboard plugin wrote it off-main).
+arboard = { version = "3", features = ["wayland-data-control"] }
 # Frontend logging: `console.log` in a WKWebView never reaches the `tauri dev`
 # terminal, so the UI reports through this plugin's Stdout target instead.
 tauri-plugin-log = "2"
@@ -98,7 +100,7 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 # Async file I/O for the same streaming path. Both are already in the tree under
 # reqwest/hyper; naming them here only makes the dependency honest.
-tokio = { version = "1", default-features = false, features = ["fs", "io-util"] }
+tokio = { version = "1", default-features = false, features = ["fs", "io-util", "sync"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 
 # The updater is desktop-only — gate it so mobile targets don't try to build it.

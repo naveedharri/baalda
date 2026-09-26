@@ -263,15 +263,6 @@ export function HealthView({
       if (plan.confirm) setConfirming({ kind: "check-action", plan });
       else void startCheckAction(plan);
     },
-    async reclaim() {
-      const { docsRemoved, bytesReclaimed } = await actions.reclaimOrphans();
-      toast(
-        docsRemoved === 0
-          ? "Nothing to reclaim"
-          : `Reclaimed ${formatBytes(bytesReclaimed)} from ${docsRemoved.toLocaleString()} ` +
-              `orphan ${docsRemoved === 1 ? "doc" : "docs"}`,
-      );
-    },
   };
 
   if (mode === "finding" && findingId) {

@@ -131,8 +131,9 @@ are safe while the app is open on a synced vault, and each reaches the team live
 |---|---|
 | **Create** a `.md` file | Unmapped path ⇒ a debounced registry pull registers it as a new note and uploads its content. |
 | **Edit** a `.md` file | Diff-merged into the note's `Y.Text` as operations (never an overwrite) and pushed, so it merges with whatever a teammate is typing. |
-| **Delete** a `.md` file | Propagated as a real soft delete after a **2.5 s grace window**: the note leaves the server and every teammate's device trashes its copy. Your own copy of the text is kept in `.context/trash/<timestamp>/`. |
+| **Delete** a `.md` file | Propagated as a real soft delete after a **2.5 s grace window**: the note leaves the server and every teammate's device removes its copy. No local recovery copy is made (the file is already gone by your choice); Version History on the server still has the note. |
 | **Rename or move** a `.md` file | Recognised as a rename, so the note keeps its `doc_id` — its history, its backlinks, and its shares all survive. |
+| **Move or rename a folder** | Recognised as ONE folder move (`PATCH /folders/:id`, exactly like a sidebar drag), so every note and file under it keeps its id. See *External structure changes* below. |
 
 The grace window exists because a vanished file is not yet a delete: an editor that saves by
 unlinking and rewriting, a rename (which the OS reports as two unrelated events), and a
@@ -146,9 +147,10 @@ Three deliberate refusals, all of them protecting notes you did not mean to lose
   *partial* truncation is a normal edit and applies). Writing an empty placeholder is something
   the app itself does when it materializes a note it hasn't downloaded yet, and treating that as
   an edit would delete the note's content for everyone.
-- **A mass disappearance is never propagated.** More than a fifth of the vault vanishing in one
-  window (minimum five notes) abandons the whole batch and reports it, because an unmounted
-  volume, an evicted cloud folder or a branch switch looks exactly like a bulk delete.
+- **A mass disappearance is never propagated silently.** More than a fifth of the vault vanishing
+  in one window (minimum five notes) is held: with the vault root present in a live session the
+  app asks "Delete them for everyone, or restore them?" and does neither until answered; with the
+  vault root gone (an unmounted volume) the whole batch is refused without asking.
 - **A note this device never finished uploading is never deleted from the server.** The only copy
   of that work might be the one you just removed.
 
@@ -161,6 +163,31 @@ Two things stay off-limits to outside writers:
 - **Deletes at startup are not propagated.** Until the vault channel is connected *and* a structure
   pull has completed, a missing file is read as "the disk isn't ready yet" and the note is
   re-materialized (with its content, when this device has it) rather than deleted.
+
+### External structure changes (#221)
+
+The rule is simple: **content edits on disk are fine at any time; structure changes (rename,
+move, delete) need the app open** — or go through the sidebar, or MCP `move_note` /
+`move_folder` / `delete_note` / `delete_folder`. Symbolic links inside a vault are not supported.
+While the app is open:
+
+- **A folder moved outside the app** arrives from the OS as one event for the folder (old path
+  gone, new path present), never per note. The delete drain pairs the topmost vanished registered
+  folder with a new unregistered one by sub-path: when at least 80% of the old folder's notes
+  exist at the same sub-path under the new folder with byte-identical text (sha256, the same hash
+  the per-note rename pairing uses), it is one server folder move; every note under it keeps its
+  id, including notes edited in the same breath (their new bytes are pushed), and binaries follow
+  the folder row. Below 80% the notes go through the per-note pairing and then the delete drain.
+  The registry pull waits until this decision is made.
+- **The vault root vanishing** (renamed, moved, unmounted) pauses every structural step for that
+  vault — pull, materialize, register, delete, binary mirror — and every Rust write that would
+  re-create the old folder is refused. A banner asks to reopen the vault from its new location.
+- **A large live delete asks** instead of being undone (above).
+
+Changes made while the app was **closed** are not reconciled as structure (#215): edits are
+merged on reopen, but the old paths of renamed, moved or deleted notes come back and new paths
+register as new notes. The first pass after opening shows a one-time notice when it sees both
+known notes missing and unknown files present.
 
 For a *scripted* or agent-driven workflow that needs confirmation of each write rather than
 fire-and-forget filesystem semantics, use the MCP server instead ([[04-team-collaboration]]): its

@@ -39,6 +39,9 @@ import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { VaultFolderMissingRowActions } from "./VaultFolderMissing";
+import { useResetLocalCopy } from "./useResetLocalCopy";
+import { RowActionsMenu } from "./RowActionsMenu";
 import { AiSettingsTab } from "./AiSettingsTab";
 import { HealthTab } from "./HealthTab";
 import { useHealthAttentionCount } from "../lib/health/useHealthAttention";
@@ -564,6 +567,7 @@ function UnsyncDangerZone() {
   const serverUrl = useStore((s) => s.serverUrl);
   const [preview, setPreview] = useState<UnsyncPreview | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const reset = useResetLocalCopy();
 
   useEffect(() => {
     if (!orgId) return;
@@ -588,6 +592,26 @@ function UnsyncDangerZone() {
     <>
       <div className="menu-sep" />
       <div className="subhead">Danger zone</div>
+      {reset.available && (
+        <div className="vault-local-only-card">
+          <span className="vault-local-only-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 3-6.7" />
+              <path d="M3 4v5h5" />
+            </svg>
+          </span>
+          <div className="vault-local-only-copy">
+            <strong>Reset local copy</strong>
+            <span className="field-hint">
+              Delete {folder ? <>the <strong>{folder}</strong> folder</> : "this vault's folder"} on this
+              device and download a fresh copy from {serverHost(serverUrl)}. Nothing changes for your team.
+            </span>
+          </div>
+          <button className="vault-local-only-action" onClick={reset.start}>
+            Reset
+          </button>
+        </div>
+      )}
       <div className="vault-local-only-card">
         <span className="vault-local-only-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -623,6 +647,7 @@ function UnsyncDangerZone() {
           Make local only
         </button>
       </div>
+      {reset.dialog}
       {confirming && (
         <UnsyncConfirmDialog
           orgId={orgId}
@@ -902,10 +927,14 @@ function SyncGate({ label, onGoToSync }: { label: string; onGoToSync: () => void
  */
 function VaultsTab() {
   const session = useStore((s) => s.session);
+  const reset = useResetLocalCopy();
   const organizations = useStore((s) => s.organizations);
   const members = useStore((s) => s.members);
   const vault = useStore((s) => s.vault);
   const syncEnabled = useStore((s) => s.syncEnabled);
+  // The open vault's folder is gone (#228): its row says so instead of
+  // "Current" and offers the banner's recovery actions.
+  const rootMissing = useStore((s) => s.structureNotice.rootMissing);
   const billingEnabled = useStore((s) => s.billingConfig?.enabled === true);
   // Bumped after a local remove/delete so the recents list re-fetches.
   const [localsNonce, setLocalsNonce] = useState(0);
@@ -1195,6 +1224,23 @@ function VaultsTab() {
     }
   };
 
+  // Restore here / Locate folder… for the open vault whose folder is missing —
+  // the same store actions as the banner and the Set-up prompt.
+  const recover = (fn: () => Promise<void>) => async () => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await fn();
+      setBound(readOrgVaults());
+      setLocalsNonce((n) => n + 1);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const changeRoot = async () => {
     try {
       const picked = await ipc.pickVaultsRoot();
@@ -1264,7 +1310,14 @@ function VaultsTab() {
                 </span>
               ) : (
                 <span className="vault-row-actions">
-                  {isActive ? (
+                  {isActive && rootMissing ? (
+                    <VaultFolderMissingRowActions
+                      synced={syncEnabled}
+                      busy={busy}
+                      onRestore={recover(() => useStore.getState().restoreVaultFolder())}
+                      onLocate={recover(() => useStore.getState().locateVaultFolder())}
+                    />
+                  ) : isActive ? (
                     <span className="member-role">Current</span>
                   ) : (
                     <AsyncButton
@@ -1275,59 +1328,73 @@ function VaultsTab() {
                       Switch
                     </AsyncButton>
                   )}
-                  <AsyncButton
-                    className="link-btn"
+                  <RowActionsMenu
+                    ariaLabel={`More actions for ${o.name}`}
                     disabled={busy}
-                    title="Stop syncing this vault here; server data is kept"
-                    onClick={() => removeLocal(o.id)}
-                  >
-                    Remove from device
-                  </AsyncButton>
-                  {canLeave(o.id) && (
-                    <button
-                      className="link-btn danger"
-                      disabled={busy}
-                      title="Leave this vault — you lose access and it is removed from this device"
-                      onClick={() => {
-                        setActionError(null);
-                        setConfirmLeave({ orgId: o.id, name: o.name });
-                      }}
-                    >
-                      Leave
-                    </button>
-                  )}
-                  {/* Same owner heuristic as Delete: on the active row we know
-                      the caller's role, elsewhere we don't, so we offer it and
-                      let the server's 403 `owner_only` settle it. */}
-                  {canDelete(o.id) && (
-                    <button
-                      className="link-btn danger"
-                      disabled={busy}
-                      title="Delete this vault from the server and keep its files on this device"
-                      onClick={() => {
-                        setActionError(null);
-                        setConfirmUnsync({ orgId: o.id, name: o.name });
-                      }}
-                    >
-                      Make local only
-                    </button>
-                  )}
-                  {canDelete(o.id) && (
-                    <AsyncButton
-                      className="link-btn danger"
-                      disabled={busy}
-                      title="Permanently delete this vault and all its notes for everyone"
-                      onClick={() => askDelete(o.id, o.name)}
-                    >
-                      Delete
-                    </AsyncButton>
-                  )}
+                    actions={[
+                      {
+                        key: "remove",
+                        label: "Remove from device",
+                        title: "Stop syncing this vault here; server data is kept",
+                        onSelect: () => removeLocal(o.id),
+                      },
+                      // Only the open synced vault, and only while its folder is
+                      // there (a missing one has Restore here beside the menu).
+                      ...(isActive && reset.available
+                        ? [{
+                            key: "reset",
+                            label: "Reset local copy",
+                            title: "Delete this device's copy of the vault and download a fresh one",
+                            onSelect: reset.start,
+                          }]
+                        : []),
+                      ...(canLeave(o.id)
+                        ? [{
+                            key: "leave",
+                            label: "Leave vault",
+                            danger: true,
+                            separated: true,
+                            title: "Leave this vault — you lose access and it is removed from this device",
+                            onSelect: () => {
+                              setActionError(null);
+                              setConfirmLeave({ orgId: o.id, name: o.name });
+                            },
+                          }]
+                        : []),
+                      // Same owner heuristic as Delete: on the active row we know
+                      // the caller's role, elsewhere we don't, so we offer it and
+                      // let the server's 403 `owner_only` settle it.
+                      ...(canDelete(o.id)
+                        ? [
+                            {
+                              key: "unsync",
+                              label: "Make local only",
+                              danger: true,
+                              separated: !canLeave(o.id),
+                              title: "Delete this vault from the server and keep its files on this device",
+                              onSelect: () => {
+                                setActionError(null);
+                                setConfirmUnsync({ orgId: o.id, name: o.name });
+                              },
+                            },
+                            {
+                              key: "delete",
+                              label: "Delete vault",
+                              danger: true,
+                              title: "Permanently delete this vault and all its notes for everyone",
+                              onSelect: () => askDelete(o.id, o.name),
+                            },
+                          ]
+                        : []),
+                    ]}
+                  />
                 </span>
               )}
             </li>
           );
         })}
       </ul>
+      {reset.dialog}
 
       <div className="vault-tab-actions">
         {creating ? (
@@ -1492,7 +1559,14 @@ function VaultsTab() {
                     </span>
                   ) : (
                     <span className="vault-row-actions">
-                      {isCurrent ? (
+                      {isCurrent && rootMissing ? (
+                        <VaultFolderMissingRowActions
+                          synced={false}
+                          busy={busy}
+                          onRestore={() => undefined}
+                          onLocate={recover(() => useStore.getState().locateVaultFolder())}
+                        />
+                      ) : isCurrent ? (
                         <span className="member-role">Current</span>
                       ) : (
                         <AsyncButton
@@ -1503,25 +1577,29 @@ function VaultsTab() {
                           Switch
                         </AsyncButton>
                       )}
-                      <button
-                        className="link-btn"
+                      <RowActionsMenu
+                        ariaLabel={`More actions for ${r.name ?? r.path}`}
                         disabled={busy}
-                        title="Remove this folder from the list. Files stay on disk."
-                        onClick={() => void removeLocalVaultRow(r.path)}
-                      >
-                        Remove
-                      </button>
-                      <button
-                        className="link-btn danger"
-                        disabled={busy}
-                        title="Delete this vault — moves its folder and all its notes to the Trash"
-                        onClick={() => {
-                          setActionError(null);
-                          setConfirmDeleteLocal(r.path);
-                        }}
-                      >
-                        Delete
-                      </button>
+                        actions={[
+                          {
+                            key: "remove",
+                            label: "Remove from list",
+                            title: "Remove this folder from the list. Files stay on disk.",
+                            onSelect: () => removeLocalVaultRow(r.path),
+                          },
+                          {
+                            key: "delete",
+                            label: "Delete vault",
+                            danger: true,
+                            separated: true,
+                            title: "Delete this vault — moves its folder and all its notes to the Trash",
+                            onSelect: () => {
+                              setActionError(null);
+                              setConfirmDeleteLocal(r.path);
+                            },
+                          },
+                        ]}
+                      />
                     </span>
                   )}
                 </li>

@@ -1,4 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { launchedInBackground } from "./backgroundRelaunch";
 import * as perf from "./perf";
 
 /** The window starts hidden (`visible: false` in `tauri.conf.json`) so nobody
@@ -24,8 +25,11 @@ export function revealWindowOnce(): void {
     const win = getCurrentWindow();
     void win
       .show()
-      .then(() => {
+      .then(async () => {
         perf.mark("window-shown");
+        // After a background relaunch the app hid itself so the user's other
+        // app keeps focus; taking focus here would undo exactly that.
+        if (await launchedInBackground()) return;
         return win.setFocus();
       })
       .catch((e) => console.warn("[window] show from the frontend failed", e));

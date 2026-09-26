@@ -7,7 +7,79 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **A version before any large deletion (server).** When one edit removes most of a note, the
+  server first keeps the note as it was, shown in Version History as "Before large deletion".
+  Owners and admins can also list notes damaged by past sync bugs (emptied, or full of repeated
+  punctuation), review the proposed version for each and restore the ones they choose
+  (`GET/POST /api/vaults/:vaultId/recovery`, `pnpm run recover:notes`). Every restore can be
+  undone from Version History (#200).
+- **Reset local copy (desktop).** Settings → Vaults (on the open synced vault's row) and the Health
+  diagnostic tools offer "Reset local copy": after a confirm that names any notes whose changes
+  haven't reached the server, Baalda stops sync, permanently deletes this device's folder of the
+  vault and restores it from the Remote Vault. Nothing changes for the team. Rust refuses anything
+  but the open vault root itself (no link, home folder, vaults folder or folder without `.context`)
+  (#228).
+
+### Fixed
+- **A missing vault folder can be recovered in place (desktop).** When the open vault's folder is
+  moved, renamed or deleted, the banner now says "This vault's folder is missing. It was moved,
+  renamed or deleted." and offers **Restore here** (recreate it at the same path and sync
+  everything down) and **Locate folder…** (pick where it went), plus **Switch vault**. A local-only
+  vault gets Locate folder… only. While the folder is missing the open tabs close, the sidebar
+  shows "Folder missing" instead of the path, the sync pill reads "Paused" instead of "Synced",
+  and Settings → Vaults shows a "Folder missing" badge with the same two actions. Launching with a
+  synced vault's folder already gone shows the same wording and actions in the Set-up prompt; both
+  paths run the existing set-up logic. A local-only vault's vanished folder is now detected too (#228).
+- **The Access panel no longer says "Shared" for a person in a Private vault (desktop).** Viewing
+  one person's access now shows a level (Can edit / Can view / No access) instead of the vault-mode
+  words, so an owner who keeps full access in a Private vault reads "Can edit", not "Shared". The
+  Set-access tiles for Specific people use the same words, Everyone's Private tile says "Hidden
+  from the team. You and admins keep access.", and "No access" is disabled when the only person
+  chosen is you and you own or administer the vault.
+- **A note renamed outside the app in the same second as an edit kept its identity (desktop).** The
+  edit's push made the server announce `registry-changed`, and that frame ran a registry pull inside
+  the rename's 2.5 s grace window: the new name registered as a brand-new note and the old one was
+  re-materialized from the server. The frame's pull now waits for the delete drain whenever a note
+  delete is pending, exactly as it already did for a vanished folder (#221).
+- **Reorganising a vault with the app open (desktop).** A folder moved or renamed outside the app
+  (Finder, `mv`, a script) arrives as one watcher event for the folder, so it used to be missed:
+  every note under it got a second identity. The watcher now reports `gone` on `tree` changes, and
+  the delete drain pairs a vanished registered folder with a new one by sub-path and content hash
+  (at least 80% byte-identical) and applies ONE server folder move, keeping every id. A vault root
+  that is renamed, moved or unmounted now stops every structural step, refuses Rust writes that
+  would re-create it, and shows a banner to reopen it. A live delete above the blast-radius cap asks
+  "Delete for everyone" or "Restore" instead of being silently undone. The first pass after opening
+  shows a one-time notice when renames, moves or deletes were made while the app was closed (#221).
+- **Symbolic links no longer fork notes or overwrite newer text (desktop).** A link inside a vault
+  is treated as absent by every identity check (materialize, the delete drain, the watcher), and
+  note writes are refused at or through a link instead of landing on the real file; refusals show
+  in Health, which also warns about links in the vault and flags two notes that resolve to one
+  file. Egest is now a compare-and-swap: a file that changed since the doc last saw it is merged in
+  rather than overwritten. Vaults opened through a symlinked or non-canonical root (such as
+  `/var` on macOS) receive watcher events again (#216).
+- **MCP connectors now always ask which vault to use (server).** A client that was already signed
+  in in the browser skipped the vault picker, so its connection failed on every call for anyone
+  in more than one vault. Such a connection now also returns a clear "no vault selected" error (#211).
+- **Crash when copying from a note (macOS).** Rich copies wrote the system clipboard from a
+  background thread while the webview wrote it on the main thread; the race could crash the app.
+  The native write now runs on the main thread (the clipboard plugin is replaced by a write-only
+  `clipboard_write` command), and selections without attachments are copied synchronously with no
+  native write at all, which also removes the spurious "Could not copy attachments" toast.
+- **Selections inside code blocks are visible again (desktop).** CodeMirror sets the selection
+  layer's z-index inline, which overrode the theme and hid the highlight under the code-block well.
+
 ### Changed
+- **Leftover edit history is reclaimed automatically (desktop).** Local history for notes the vault
+  no longer has used to wait for a manual Reclaim in Health. The same sweep that runs at vault open
+  now also runs while a live session is idle: 5 s after a registry pull, and right after a delete
+  drain or a revocation removes a note (at most once per 5 s, pinning every doc still in flight).
+  Health no longer lists "Leftover edit history" or offers Reclaim; the Local history summary
+  still reports the amount.
+- Wiki-links to notes that do not exist are greyed out and no longer create a note when clicked (desktop).
+- **Cleaner banner buttons (desktop).** Banner actions are compact pills of one height; secondary
+  actions such as "Keep as local vault" and "Open Health" are outlined instead of a grey box, and
+  the banner text is softer so the heading stands out.
 - **AI (Beta) settings page hidden (desktop).** Removed from the Vault Settings menu behind a
   `SHOW_AI_TAB` flag; any request for it opens Health instead. The code is unchanged.
 - **Calmer sync status (desktop).** The "N notes didn't sync" banner is gone, and the top pill only

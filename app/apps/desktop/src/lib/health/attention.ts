@@ -122,6 +122,10 @@ export function issueGroupTitle(kind: HealthIssueKind, n: number): string {
       return `${plural(n, "local change", "local changes")} held for safety`;
     case "orphan-history":
       return "Leftover edit history";
+    case "linked-paths":
+      return "Linked paths ignored by sync";
+    case "shared-file":
+      return `${plural(n, "file", "files")} shared by more than one note`;
   }
 }
 

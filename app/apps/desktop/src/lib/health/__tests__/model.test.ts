@@ -388,6 +388,67 @@ describe("registry failures", () => {
     expect(issue.why).not.toContain("could not be written");
   });
 
+  // #216: symbolic links.
+  it("says a linked path was refused in plain words", () => {
+    const r = buildHealthReport(input({ failures: {
+      registry: [{ kind: "inbound-blocked", path: "Old/n.md", docId: "old-id",
+        reason: "This path is a symbolic link. Baalda does not sync through links.", code: "symlink" }],
+      content: [], limitCode: null,
+    } }));
+    const issue = r.issues.find((i) => i.path === "Old/n.md")!;
+    expect(issue.kind).toBe("inbound-blocked");
+    expect(issue.title).toBe("Linked path not synced");
+    expect(issue.why).toBe("This path is a symbolic link. Baalda does not sync through links.");
+    expect(issue.code).toBe("symlink");
+  });
+
+  // #221: a live bulk delete held for the user's answer.
+  it("lists a note held by an unanswered bulk delete as waiting, not failed", () => {
+    const r = buildHealthReport(input({ failures: {
+      registry: [{ kind: "inbound-blocked", path: "Team/x.md", docId: "x-id",
+        reason: "removed from this folder in a bulk delete", code: "delete_decision" }],
+      content: [], limitCode: null,
+    } }));
+    const issue = r.issues.find((i) => i.path === "Team/x.md")!;
+    expect(issue.kind).toBe("inbound-blocked");
+    expect(issue.severity).toBe("warn");
+    expect(issue.title).toBe("Removed on disk, waiting for your answer");
+    expect(issue.remedies).not.toContain("retry");
+    expect(issue.code).toBe("delete_decision");
+  });
+
+  it("warns about linked paths and flags two notes sharing one file as an error", () => {
+    const r = buildHealthReport(input({
+      checks: {
+        computedAt: NOW,
+        results: [],
+        linkedPaths: {
+          id: "linked-paths",
+          count: 2,
+          items: [
+            { path: "Alias.md", detail: "links to /v/Solo.md" },
+            { path: "Old", detail: "links to /v/Business/Old" },
+          ],
+        },
+        sharedFiles: [{ paths: ["Business/Old/n.md", "Old/n.md"], docIds: ["new-id", "old-id"] }],
+      },
+    }));
+    const linked = r.issues.find((i) => i.kind === "linked-paths")!;
+    expect(linked.severity).toBe("warn");
+    expect(linked.title).toBe("2 linked paths are ignored by sync");
+    expect(linked.facts.map((f) => f.value)).toContain("Old (links to /v/Business/Old)");
+    const shared = r.issues.find((i) => i.kind === "shared-file")!;
+    expect(shared.severity).toBe("error");
+    expect(shared.title).toBe("Two notes share one file on disk");
+    expect(shared.why).toContain("Business/Old/n.md, Old/n.md");
+    expect(r.verdict).toBe("attention");
+    // Nothing to say for a vault without links.
+    const clean = buildHealthReport(input({
+      checks: { computedAt: NOW, results: [], linkedPaths: { id: "linked-paths", count: 0, items: [] }, sharedFiles: [] },
+    }));
+    expect(clean.issues.filter((i) => i.kind === "linked-paths" || i.kind === "shared-file")).toEqual([]);
+  });
+
   it("maps note/folder failures to `register-failed` and materialize/inbound to `materialize-failed`", () => {
     const r = buildHealthReport(
       input({
@@ -550,7 +611,7 @@ describe("stats-derived issues and stages", () => {
     };
   }
 
-  it("raises one `orphan-history` warning with a reclaim remedy, and warns the history stage", () => {
+  it("never raises leftover history as an issue: the history stage mentions it, still ok", () => {
     const r = buildHealthReport(
       input({
         ...healthyVault(4),
@@ -565,12 +626,11 @@ describe("stats-derived issues and stages", () => {
         }),
       }),
     );
-    const i = r.issues.find((x) => x.kind === "orphan-history");
-    expect(i?.severity).toBe("warn");
-    expect(i?.remedies).toEqual(["reclaim"]);
-    expect(i?.facts).toContainEqual({ label: "Leftover notes", value: "953" });
-    expect(stage(r, "history").state).toBe("warn");
-    // A warning is not a reason to stop calling the vault healthy.
+    // The sync layer reclaims it on its own, so nothing offers a Reclaim.
+    expect(r.issues.filter((x) => x.kind === "orphan-history")).toHaveLength(0);
+    expect(r.issues.some((x) => x.remedies.some((m) => (m as string) === "reclaim"))).toBe(false);
+    expect(stage(r, "history").state).toBe("ok");
+    expect(stage(r, "history").detail).toContain("of which 953 belong to notes this vault no longer has");
     expect(r.verdict).toBe("healthy");
   });
 
@@ -682,7 +742,6 @@ describe("issue ordering", () => {
       ["error", "limit", null],
       ["error", "upload-failed", "a.md"],
       ["error", "upload-failed", "b.md"],
-      ["warn", "orphan-history", null],
       ["warn", "unregistered", "zzz.md"],
     ]);
   });
@@ -783,7 +842,6 @@ describe("explanations", () => {
       "left-behind",
       "limit",
       "no-access",
-      "orphan-history",
     ]) {
       expect(kinds).toContain(want);
     }
@@ -906,21 +964,6 @@ describe("explanations", () => {
     expect(i.facts.find((f) => f.label === "Doc id")?.copyable).toBe(true);
     expect(i.facts.find((f) => f.label === "Raw reason")?.copyable).toBe(true);
     expect(i.facts.find((f) => f.label === "Limit")?.value).toBe("10 MB per note");
-  });
-
-  it("orphan history is leftover storage, not a risk to anything", () => {
-    const i = issueOf(
-      {
-        stats: statsWith({
-          history: { docs: 5, updates: 20, bytes: 5_000, orphanDocs: 3, orphanBytes: 2_048 },
-        }),
-      },
-      "orphan-history",
-    );
-    expect(i.explanation.safety).toBe("both");
-    expect(i.explanation.meaning).toContain("Safe to reclaim or ignore");
-    expect(i.remedies).toEqual(["reclaim"]);
-    expect(i.facts.find((f) => f.label === "Space used")?.value).toBe("2 KB");
   });
 });
 

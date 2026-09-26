@@ -8,7 +8,7 @@
 // failures, so the page is exercised with exactly the wording users would see.
 // Every action is a console log: nothing here touches disk or a server.
 
-import { CHECK_DEFINITIONS } from "./checks";
+import { AUTOMATIC_CHECK_IDS, CHECK_DEFINITIONS } from "./checks";
 import { buildHealthReport, type HealthFailures, type HealthInput } from "./model";
 import type {
   HealthActions,
@@ -127,7 +127,7 @@ export function buildDemoReport(): VaultHealthSnapshot["report"] {
 function demoChecks(): VaultChecks {
   return {
     computedAt: Date.now(),
-    results: CHECK_DEFINITIONS.map((d) =>
+    results: CHECK_DEFINITIONS.filter((d) => !AUTOMATIC_CHECK_IDS.has(d.id)).map((d) =>
       d.id === "empty-notes"
         ? { id: d.id, count: 3, items: [{ path: "Inbox/Untitled.md" }, { path: "Daily/2026-09-20.md" }, { path: LONG }] }
         : { id: d.id, count: 0, items: [] },

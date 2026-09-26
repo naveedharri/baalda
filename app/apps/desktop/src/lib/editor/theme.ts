@@ -93,8 +93,11 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   // tint, and 28% accent over dark text still reads. (A `multiply` blend was
   // tried first: it kept text crisper but barely tinted grey chips, so a
   // selection across inline code looked incomplete.)
+  // `!important` because drawSelection writes the layer's z-index INLINE
+  // (`-1 - position`, i.e. -2), which silently beats a plain theme rule and
+  // left selections inside a code block invisible under the well.
   ".cm-selectionLayer": {
-    zIndex: "1",
+    zIndex: "1 !important",
     pointerEvents: "none",
   },
 
@@ -126,6 +129,18 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   },
   ".cm-wikilink:hover": {
     backgroundColor: "var(--accent-soft)",
+    textDecoration: "none",
+  },
+  // A link to a note that does not exist: greyed out, and inert to the mouse
+  // (a click places the caret; it never creates the note). `--text-tertiary`
+  // rather than `--text-faint`, because this is prose to read, not a marker —
+  // and it is the tier the dark palette pins above 4.5:1 (theme.test.ts).
+  ".cm-wikilink.cm-wikilink-unresolved": {
+    color: "var(--text-tertiary)",
+    cursor: "default",
+  },
+  ".cm-wikilink.cm-wikilink-unresolved:hover": {
+    backgroundColor: "transparent",
     textDecoration: "none",
   },
 

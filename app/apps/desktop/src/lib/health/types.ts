@@ -165,6 +165,20 @@ export interface VaultChecks {
   computedAt: number;
   /** One entry per `VaultCheckId`, always all of them, in the union's order. */
   results: VaultCheckResult[];
+  /** Symbolic links under the vault (#216). Sync never follows them, so each is
+   *  a path Baalda treats as absent. Items are link paths, `detail` the target.
+   *  Reported beside `results` because it feeds the issue list, not the checks
+   *  list. Optional so a fixture without it still types. */
+  linkedPaths?: { id: "linked-paths"; count: number; bytes?: number | null; items: VaultCheckItem[] };
+  /** Mapped notes whose paths resolve to ONE file on disk (same device + inode). */
+  sharedFiles?: SharedFileGroup[];
+}
+
+export interface SharedFileGroup {
+  /** Vault-relative paths, sorted. */
+  paths: string[];
+  /** The doc id mapped at each path, in `paths` order. */
+  docIds: string[];
 }
 
 // ── Sync health (TS model) ─────────────────────────────────────────────────────
@@ -226,7 +240,11 @@ export type HealthIssueKind =
   /** An inbound removal or move was withheld by a safety check. */
   | "inbound-blocked"
   /** Local CRDT history for a doc the vault no longer has. */
-  | "orphan-history";
+  | "orphan-history"
+  /** Symbolic links in the vault, which sync ignores (#216). */
+  | "linked-paths"
+  /** Two or more mapped notes resolve to one file on disk (#216). */
+  | "shared-file";
 
 export type HealthRemedy =
   | "retry"
@@ -235,7 +253,6 @@ export type HealthRemedy =
   | "delete"
   | "upgrade"
   | "reset-history"
-  | "reclaim"
   | "sign-in"
   /** Save a copy of the file outside the vault (native save dialog). */
   | "export-copy"

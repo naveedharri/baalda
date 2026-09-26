@@ -126,15 +126,21 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - Sync is always on in the background for the whole vault, not just the open note, so notes are
   already up to date before you click them.
 - What travels: binary change records, never whole files. Each device rebuilds its own `.md`.
-- Deleting a note's file on disk (in Finder, with `rm`, or by asking an AI to tidy the vault) does
-  remove it for the team, a couple of seconds later. Your own copy of the text is kept in the
-  vault's hidden trash folder first, so a mistake is recoverable by hand.
-  Two things are never propagated: a delete of a note this device had not finished uploading, and a
-  mass disappearance (more than a fifth of the vault at once), because an unmounted drive or a
-  cloud-storage hiccup looks exactly like a bulk delete. Deleting inside the app is unchanged and
-  is still the clearest way to remove a note everywhere.
+- Deleting a note's file on disk (in Finder, with `rm`, or by asking an AI to tidy the vault) while
+  Baalda is open does remove it for the team, a couple of seconds later. No extra local copy is
+  kept; the note's Version History on the server still has it.
+  A delete of a note this device had not finished uploading is never propagated. Removing a lot at
+  once (more than a fifth of the vault) makes Baalda ask first: "Delete them for everyone, or
+  restore them?" If the whole vault folder disappeared (an unmounted drive), nothing is deleted and
+  nothing is asked. Deleting inside the app is still the clearest way to remove a note everywhere.
 - Renames and moves are tracked by a stable note id, so nothing forks or loses its history — that
-  holds for a rename done outside the app too.
+  holds for a rename, or a whole folder moved in Finder or by a script, done outside the app
+  while Baalda is open.
+- If the vault folder itself is renamed or moved while Baalda is open, syncing that vault stops and
+  a banner asks you to reopen it from its new location.
+- Structure changes made while Baalda is closed (renames, moves, deletes) are not applied: edits
+  are merged, but old names come back and new names appear as new notes. Baalda shows a notice
+  when it sees this. Keep Baalda open when reorganising.
 - Multiple vaults per account. Switch between them from the account menu.
 
 ## Team collaboration
@@ -168,8 +174,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - **Locks**: lock a note or folder so it is read-only for everyone, admins included, until
   unlocked. Setting the whole vault to read-only shows that same lock on every folder and note,
   except the ones you were given edit access to.
-- **Losing access** removes the note from the ex-reader's other devices (moved to trash, never
-  destroyed); regaining access brings it back.
+- **Losing access** removes the note from the ex-reader's devices (the note itself stays on the
+  server for everyone who can still read it); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom
   roles, SSO/SAML, two-factor authentication, mandatory email verification.
 - **Public links**: turn a note into a read-only web page anyone with the link can read. Revoke

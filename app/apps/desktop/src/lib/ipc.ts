@@ -226,6 +226,14 @@ export interface FileChanged {
    * not do is re-index, re-render or re-upload anything.
    */
   unchanged?: boolean;
+  /**
+   * The path is no longer on disk (or is now a link, which sync treats as
+   * absent). Always true for `removed`; on `tree` it tells a folder that went
+   * away from one that appeared or changed — the two halves of a folder moved
+   * outside the app (#221). The vault ROOT vanishing is reported as
+   * `{ path: "", kind: "tree", gone: true }`. Optional for older Rust builds.
+   */
+  gone?: boolean;
 }
 
 /** One attachment file's metadata (mirrors the Rust `AttachmentMeta`). */
@@ -275,6 +283,12 @@ export interface ImportSummary {
   skipped: number;
 }
 
+// ---- Clipboard ------------------------------------------------------------
+
+/** Write-only native clipboard; Rust performs the write on the main thread. */
+export const clipboardWrite = (text: string, html?: string) =>
+  invoke<void>("clipboard_write", { text, html: html ?? null });
+
 // ---- Vault ----------------------------------------------------------------
 
 export const pickVault = () => invoke<VaultInfo | null>("pick_vault");
@@ -299,6 +313,15 @@ export const removeRecentVault = (path: string) =>
  *  it from recents. Destructive — the on-disk files are the only copy. */
 export const deleteVault = (path: string) =>
   invoke<void>("delete_vault", { path });
+/**
+ * Reset local copy (#228): PERMANENTLY delete the open vault's folder on this
+ * device (never the Trash) after stopping its watcher. Rust refuses anything
+ * but the open vault root itself — no symlink, no home, no vaults-root or its
+ * ancestor, and it must hold a `.context`. The caller then recreates the folder
+ * and syncs it down from the server.
+ */
+export const resetVaultLocalCopy = (path: string, expectedEpoch?: VaultEpoch) =>
+  invoke<void>("reset_vault_local_copy", { path, expectedEpoch: expectedEpoch ?? null });
 /** Create a new empty vault folder `<parent>/<name>` and open it. */
 export const createVault = (parent: string, name: string) =>
   invoke<VaultInfo>("create_vault", { parent, name });
@@ -377,6 +400,14 @@ export const readNote = (path: string, expectedEpoch?: VaultEpoch) =>
 export const noteExists = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("note_exists", { path, expectedEpoch: expectedEpoch ?? null });
 /**
+ * Is the open vault's root folder still a folder (#221)? A root renamed, moved
+ * or unmounted while the app is open leaves the watcher on a dead path; the sync
+ * layer asks this before every structural pass and on every watcher batch.
+ */
+export type VaultRootState = "dir" | "missing" | "not-dir";
+export const vaultRootState = (expectedEpoch?: VaultEpoch) =>
+  invoke<VaultRootState>("vault_root_state", { expectedEpoch: expectedEpoch ?? null });
+/**
  * Save local text that could not be synced into `.context/trash/<stamp>/<rel>`
  * and return the trash-relative destination.
  */
@@ -404,17 +435,26 @@ export const rebindNoteId = (path: string, docId: string, expectedEpoch?: VaultE
   invoke<boolean>("rebind_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
 /** Atomic write + re-index. `docId` (the bridge's egest) also records the
  *  written bytes as that doc's disk base in the same Rust call (#200). */
+/** What `write_note` did. `stale` = the compare-and-swap refused: the file no
+ *  longer hashes to `expectedSha`, so nothing was written (#216). */
+export type WriteNoteResult = "written" | "stale";
+/** Atomic note write. With `expectedSha` (sha256 hex of the file the caller
+ *  last observed; the empty-string hash for "no file") Rust refuses to replace a
+ *  file that moved on since and answers `"stale"` instead of writing. Refuses a
+ *  symbolic link at or above the path (error containing "symbolic link"). */
 export const writeNote = (
   path: string,
   content: string,
   expectedEpoch?: VaultEpoch,
   docId?: string,
+  expectedSha?: string | null,
 ) =>
-  invoke<void>("write_note", {
+  invoke<WriteNoteResult>("write_note", {
     path,
     content,
     expectedEpoch: expectedEpoch ?? null,
     docId: docId ?? null,
+    expectedSha: expectedSha ?? null,
   });
 /** The sha256 of the bytes this device last synced between a doc's file and
  *  its CRDT, or null when none was ever recorded (see `yjs_disk_base`). */
@@ -791,6 +831,8 @@ export interface MaterializeOutcome {
   created: boolean;
   /** The index row at this path now carries the server's `docId`. */
   rebound: boolean;
+  /** Why the placeholder could not be written (e.g. a symbolic link, #216). */
+  error?: string | null;
 }
 
 /**

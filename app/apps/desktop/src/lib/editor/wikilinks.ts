@@ -8,7 +8,10 @@
 //       [[Note#H|label]]   → label
 //     Put the caret on one and the raw brackets come back for editing, on the
 //     same TOKEN rule as the rest of live preview (see ./reveal.ts).
-//  3. Click / cmd-click on a link navigates to the target note.
+//  3. Click / cmd-click on a link navigates to the target note. A link whose
+//     target resolves to no note is greyed out (`cm-wikilink-unresolved`, same
+//     rule as Rust `resolve_wikilink`, see ./wikilinkResolve.ts) and a click
+//     on it does nothing.
 //
 // Kept dependency-light and origin-agnostic so Phase 1's Yjs binding can be
 // layered on without touching this file.
@@ -18,7 +21,7 @@ import {
   type CompletionContext,
   type CompletionResult,
 } from "@codemirror/autocomplete";
-import type { Range } from "@codemirror/state";
+import { type Range, StateEffect } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -29,6 +32,7 @@ import {
 } from "@codemirror/view";
 import type { NoteTitle } from "../ipc";
 import { focusMoved, selectionTouches } from "./reveal";
+import { isWikilinkResolved } from "./wikilinkResolve";
 
 /**
  * `[[target]]`, `[[target|alias]]`, `[[target#heading]]` — a FRESH regex per
@@ -42,7 +46,7 @@ export const wikilinkRe = (): RegExp => /\[\[([^\]\n]+)\]\]/g;
 export interface WikilinkOptions {
   /** Current note titles for autocomplete (read fresh on each request). */
   getTitles: () => NoteTitle[];
-  /** Navigate to a target name (resolve + open, create-on-click if dangling). */
+  /** Navigate to a target name (resolve + open; a dangling link does nothing). */
   onNavigate: (target: string) => void;
 }
 
@@ -87,6 +91,14 @@ export function wikilinkCompletions(opts: WikilinkOptions) {
 // ---- Decoration + click navigation ---------------------------------------
 
 const wikilinkMark = Decoration.mark({ class: "cm-wikilink" });
+const unresolvedMark = Decoration.mark({ class: "cm-wikilink cm-wikilink-unresolved" });
+
+/**
+ * The note-title list changed (a note was created, renamed or removed), so a
+ * link's resolved / unresolved styling may have too. Dispatched by the host
+ * (`Editor.tsx`) when `store.titles` changes reference.
+ */
+export const wikilinkTitlesChanged = StateEffect.define<null>();
 const hidden = Decoration.replace({});
 
 /** The `›` between a note and the heading inside it. Not document text — the
@@ -105,9 +117,10 @@ class HeadingSepWidget extends WidgetType {
 
 const headingSep = Decoration.replace({ widget: new HeadingSepWidget() });
 
-function buildDecorations(view: EditorView): DecorationSet {
+function buildDecorations(view: EditorView, getTitles: () => NoteTitle[]): DecorationSet {
   const decos: Range<Decoration>[] = [];
   const touches = selectionTouches(view.state);
+  const titles = getTitles();
   for (const { from, to } of view.visibleRanges) {
     const text = view.state.doc.sliceString(from, to);
     const re = wikilinkRe();
@@ -115,7 +128,9 @@ function buildDecorations(view: EditorView): DecorationSet {
     while ((m = re.exec(text)) !== null) {
       const start = from + m.index;
       const end = start + m[0].length;
-      decos.push(wikilinkMark.range(start, end));
+      decos.push(
+        (isWikilinkResolved(m[1], titles) ? wikilinkMark : unresolvedMark).range(start, end),
+      );
       if (touches(start, end)) continue;
 
       // Inner span, i.e. everything between the brackets.
@@ -165,13 +180,22 @@ export function wikilinks(opts: WikilinkOptions) {
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
-        this.decorations = buildDecorations(view);
+        this.decorations = buildDecorations(view, opts.getTitles);
       }
       update(u: ViewUpdate) {
         // Selection and focus matter now that the brackets fold away off the
         // caret (they did not when this only painted a colour).
-        if (u.docChanged || u.viewportChanged || u.selectionSet || focusMoved(u)) {
-          this.decorations = buildDecorations(u.view);
+        const titlesChanged = u.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(wikilinkTitlesChanged)),
+        );
+        if (
+          u.docChanged ||
+          u.viewportChanged ||
+          u.selectionSet ||
+          focusMoved(u) ||
+          titlesChanged
+        ) {
+          this.decorations = buildDecorations(u.view, opts.getTitles);
         }
       }
     },
@@ -187,6 +211,9 @@ export function wikilinks(opts: WikilinkOptions) {
             ".cm-wikilink"
           ) as HTMLElement | null;
           if (!target) return false;
+          // A link to nothing is plain text to the mouse: the click places the
+          // caret like anywhere else and never creates a note.
+          if (target.classList.contains("cm-wikilink-unresolved")) return false;
           const pos = view.posAtDOM(target);
           const name = targetAtPos(view, pos);
           if (name) {

@@ -158,7 +158,7 @@ export function HousekeeperView({ vaultId, notes, onUpgrade, diagnostics, onOpen
             <div className="assistant-finding-content">
             <div className="assistant-finding-heading"><strong>{f.title}</strong><span className="housekeeper-badge">{f.count}</span><span className={`housekeeper-priority housekeeper-priority-${f.priority}`}>{f.label}</span></div>
             {f.action && f.action !== "inspect" && <p className="housekeeper-detail">{f.actionReason}</p>}
-            {["illegal-names", "case-collisions", "long-paths", "oversized-notes", "unreadable-notes", "heavy-history", "orphan-history", "trash", "issue-no-access", "issue-no-write-access", "vault-no-access", "issue-left-behind", "remote-files"].includes(f.id) && onPrepareFix && <button className="primary" disabled={busy} onClick={() => {
+            {["illegal-names", "case-collisions", "long-paths", "oversized-notes", "unreadable-notes", "heavy-history", "trash", "issue-no-access", "issue-no-write-access", "vault-no-access", "issue-left-behind", "remote-files"].includes(f.id) && onPrepareFix && <button className="primary" disabled={busy} onClick={() => {
               setActiveFinding(f.id);
               void run(async () => { const access = await api.housekeeperStatus(vaultId); if (!access.available || !alive.current) return; await onPrepareFix(f.id); }, "Preparing action…");
             }}>{busy && activeFinding === f.id ? "Preparing…" : "Prepare fix"}</button>}

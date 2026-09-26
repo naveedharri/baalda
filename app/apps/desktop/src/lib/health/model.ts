@@ -32,6 +32,7 @@ import type {
   HealthStage,
   HealthStageState,
   HealthVerdict,
+  VaultChecks,
   VaultStats,
 } from "./types";
 
@@ -99,6 +100,9 @@ export interface HealthInput {
   failures: HealthFailures;
   /** The Rust census, when it has landed. */
   stats: VaultStats | null;
+  /** The Rust integrity checks (`ipc.vaultChecks`), when they have landed. Only
+   *  their link findings (#216) become issues; the rest render as checks. */
+  checks?: VaultChecks | null;
   /** `store.members` — the vault's roster, used ONLY to name the owner in an
    *  access explanation ("Ask <name> …"). Structural on purpose so the model
    *  needs no value import from `lib/api.ts`; absent ⇒ the explanations fall
@@ -596,6 +600,59 @@ function limitIssue(f: HealthRegistryFailure): HealthIssue {
 function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue {
   const key = f.docId ?? f.path;
   if (isLimitCode(f.code)) return limitIssue(f);
+  if (f.kind === "inbound-blocked" && f.code === "symlink") {
+    return {
+      key,
+      docId: f.docId,
+      path: f.path,
+      kind: "inbound-blocked",
+      severity: "error",
+      title: "Linked path not synced",
+      why: f.reason,
+      remedies: ["reveal", "copy-details"],
+      code: f.code,
+      explanation: {
+        meaning:
+          "The Remote Vault has a note at this path, but on this computer the path is a " +
+          "symbolic link. Baalda never writes through a link, so the file it points at was left untouched.",
+        next: "Baalda checks again on the next sync pass.",
+        fixes: [
+          "Remove the link if the real file is already in the vault.",
+          "Or move the real file to this path instead of linking to it.",
+        ],
+        safety: "on-server",
+      },
+      facts: [...pathFact(f.path), ...docIdFact(f.docId)],
+      autoRetries: true,
+    };
+  }
+  if (f.kind === "inbound-blocked" && f.code === "delete_decision") {
+    return {
+      key,
+      docId: f.docId,
+      path: f.path,
+      kind: "inbound-blocked",
+      severity: "warn",
+      title: "Removed on disk, waiting for your answer",
+      why: "This note was removed from the vault folder together with many others at once.",
+      remedies: ["copy-details"],
+      code: f.code,
+      explanation: {
+        meaning:
+          "Many notes disappeared from this folder in one go while Baalda was open. Baalda held " +
+          "the change instead of syncing it, so the note is still on the Remote Vault and nothing " +
+          "was deleted for your team.",
+        next: "Nothing happens to this note until you answer the banner at the top of the window.",
+        fixes: [
+          "Choose Delete for everyone if you meant to remove these notes.",
+          "Or choose Restore to bring them back from the Remote Vault.",
+        ],
+        safety: "on-server",
+      },
+      facts: [...pathFact(f.path), ...docIdFact(f.docId)],
+      autoRetries: false,
+    };
+  }
   if (f.kind === "inbound-blocked") {
     return {
       key,
@@ -1005,35 +1062,92 @@ function buildIssues(
     }
   }
 
-  const orphanDocs = input.stats?.history.orphanDocs ?? 0;
-  if (orphanDocs > 0) {
-    const orphanBytes = input.stats?.history.orphanBytes ?? 0;
-    push({
-      key: "history:orphans",
+  // Leftover edit history (CRDT rows for notes this vault no longer has) is no
+  // longer an issue: the sync layer reclaims it on its own once the session is
+  // idle (`SyncManager.requestCrdtSweep`). The history stage below still says
+  // how much there is.
+
+  for (const issue of linkIssues(input.checks)) push(issue);
+
+  issues.sort(compareIssues);
+  return { issues, unregisteredTotal };
+}
+
+/**
+ * The two link findings of the Rust checks (#216). Sync never follows a
+ * symbolic link, so a link is a path the user can see in Finder that Baalda
+ * treats as absent — a warning. Two mapped notes that resolve to ONE file are
+ * worse: each identity egests over the same bytes, so the stale one can
+ * overwrite the newer text — an error, one per file.
+ */
+export function linkIssues(checks: VaultChecks | null | undefined): HealthIssue[] {
+  if (!checks) return [];
+  const out: HealthIssue[] = [];
+  const linked = checks.linkedPaths;
+  if (linked && linked.count > 0) {
+    const shown = linked.items.map((i) => i.path);
+    out.push({
+      key: "links:ignored",
       docId: null,
       path: null,
-      kind: "orphan-history",
+      kind: "linked-paths",
       severity: "warn",
-      title: "Unused edit history",
-      why: `${formatBytes(orphanBytes)} can be freed. Your notes stay unchanged.`,
-      remedies: ["reclaim"],
-      code: null,
+      title: `${plural(linked.count, "linked path")} ${linked.count === 1 ? "is" : "are"} ignored by sync`,
+      why: "These paths are symbolic links. Baalda does not sync through links.",
+      remedies: ["copy-details"],
+      code: "symlink",
       explanation: {
-        meaning: "Old history from notes no longer in this vault. Safe to reclaim or ignore.",
-        next: "Kept until you reclaim it.",
-        fixes: ["Reclaim to free space."],
-        safety: "both",
+        meaning:
+          "A symbolic link points at another file or folder. Baalda syncs the real file " +
+          "or folder, never the link, so anything reached only through a link stays on this device.",
+        next: "Nothing — links are always skipped.",
+        fixes: [
+          "Move the real file or folder into the vault where you want it, instead of linking to it.",
+          "Or delete the link if the real one is already in the vault.",
+        ],
+        safety: "unknown",
       },
       facts: [
-        { label: "Leftover notes", value: num(orphanDocs) },
-        { label: "Space used", value: formatBytes(orphanBytes) },
+        { label: "Links", value: num(linked.count) },
+        ...shown.map((p, i) => ({
+          label: "Path",
+          value: linked.items[i]?.detail ? `${p} (${linked.items[i].detail})` : p,
+        })),
       ],
       autoRetries: false,
     });
   }
-
-  issues.sort(compareIssues);
-  return { issues, unregisteredTotal };
+  for (const group of checks.sharedFiles ?? []) {
+    if (group.paths.length < 2) continue;
+    out.push({
+      key: `shared:${group.paths.join("|")}`,
+      docId: group.docIds[0] ?? null,
+      path: group.paths[0],
+      kind: "shared-file",
+      severity: "error",
+      title: "Two notes share one file on disk",
+      why: `${group.paths.join(", ")} are the same file on disk, usually through a symbolic link.`,
+      remedies: ["reveal", "copy-details"],
+      code: "shared-file",
+      explanation: {
+        meaning:
+          "Each of these paths is its own note in Baalda, but they are one file on this computer. " +
+          "Edits made through one can overwrite the other.",
+        next: "Nothing — Baalda will not pick which note is the real one.",
+        fixes: [
+          "Remove the symbolic link, so only the real path is left.",
+          "If a copy of the note comes back at the linked path afterwards, delete that copy.",
+        ],
+        safety: "unknown",
+      },
+      facts: group.paths.flatMap((p, i) => [
+        { label: "Path", value: p },
+        ...docIdFact(group.docIds[i] ?? null),
+      ]),
+      autoRetries: false,
+    });
+  }
+  return out;
 }
 
 /** Errors before warnings; within a severity, by path (vault-level issues, which
@@ -1098,7 +1212,8 @@ function buildStages(
   const history: HealthStage = {
     id: "history",
     label: "Local history",
-    state: orphanDocs > 0 ? "warn" : "ok",
+    // Informational only: reclaimed automatically, never something to act on.
+    state: "ok",
     headline: stats ? num(stats.history.docs) : "—",
     detail: stats
       ? `${plural(stats.history.docs, "note")} have edit history stored on this device` +

@@ -11,6 +11,8 @@ import { foldEffectsFor, parseNoteUiState, persistFolds } from "../lib/editor/fo
 import { propertiesMode as propertiesModeFacet } from "../lib/editor/frontmatter";
 import { loadTypes } from "../lib/frontmatter/types";
 import { dispatchAfterCommit } from "../lib/editor/effectDispatch";
+import { wikilinkTitlesChanged } from "../lib/editor/wikilinks";
+import { wikilinkClickAction } from "../lib/editor/wikilinkResolve";
 import { setActiveNote } from "../lib/editor/activeView";
 import { bindActiveNote } from "../lib/editor/activeNoteBinding";
 import { saveAttachment } from "../lib/attachments";
@@ -469,6 +471,8 @@ export function Editor() {
     let awareness: Awareness | null = null;
     let onAwarenessChange: (() => void) | null = null;
     let onInitialContent: (() => void) | null = null;
+    let unsubscribeTitles: (() => void) | null = null;
+    let cancelTitlesDispatch: (() => void) | null = null;
     // The editor pane is empty until CodeMirror is constructed below, and
     // getting there means opening the bridge, hydrating the CRDT from SQLite
     // and — for a synced note — waiting out the provider's first sync. On a
@@ -478,17 +482,14 @@ export function Editor() {
 
     const navigate = async (target: string) => {
       try {
-        const resolved = await ipc.resolveWikilink(target);
-        if (resolved) {
-          await useStore.getState().openNoteByPath(resolved.path);
-          return;
+        // A link to a note that does not exist does nothing — it is greyed out
+        // in the editor, and a click never creates a note at the vault root.
+        const action = wikilinkClickAction(await ipc.resolveWikilink(target));
+        if (action.kind === "open") {
+          await useStore.getState().openNoteByPath(action.path);
+        } else {
+          console.debug("wiki-link has no target", target);
         }
-        const slash = target.lastIndexOf("/");
-        const dir = slash === -1 ? "" : target.slice(0, slash);
-        const name = slash === -1 ? target : target.slice(slash + 1);
-        // The name comes from the link, so this takes the explicit-name path —
-        // no rename box, unlike ⌘N / the sidebar's + (see `createNoteIn`).
-        await useStore.getState().createNoteAt(dir, name);
       } catch (err) {
         console.error("wiki-link navigation failed", err);
       }
@@ -638,6 +639,20 @@ export function Editor() {
       if (foldEffects.length) view.dispatch({ effects: foldEffects });
       viewRef.current = view;
       switchingNoteRef.current = false;
+      // A note created, renamed or removed can flip a `[[link]]` between
+      // resolved and greyed out, so repaint the links when the title list moves.
+      // Deferred like every other dispatch into this view: a store update can
+      // land in the middle of a CodeMirror update (see effectDispatch.ts).
+      const titlesView = view;
+      unsubscribeTitles = useStore.subscribe((s, prev) => {
+        if (s.titles === prev.titles) return;
+        cancelTitlesDispatch?.();
+        cancelTitlesDispatch = dispatchAfterCommit(
+          titlesView,
+          { effects: wikilinkTitlesChanged.of(null) },
+          { isLive: () => !cancelled && viewRef.current === titlesView },
+        );
+      });
       setMountedNotePath(notePath);
 
       const reveal = () => {
@@ -702,6 +717,8 @@ export function Editor() {
 
     return () => {
       cancelled = true;
+      unsubscribeTitles?.();
+      cancelTitlesDispatch?.();
       if (onInitialContent) bridgeRef.current?.text.unobserve(onInitialContent);
       if (onAwarenessChange && awareness) awareness.off("change", onAwarenessChange);
       setActiveNote(null);
