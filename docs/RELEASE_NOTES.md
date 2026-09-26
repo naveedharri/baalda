@@ -23,10 +23,6 @@
 
 ## 0.1.69
 
-- Improvements and bug fixes: syncing is more reliable when you reorganise or edit your vault from outside Baalda, and your notes stay exactly as you wrote them.
-- Baalda explains clearly when something can't sync.
-- Editing polish: copying from a note and selecting text in code blocks work smoothly again, and Version History keeps a copy before any large deletion.
-
 ## 0.1.68
 
 - Clearer sync status: the indicator at the top now simply tells you when your vault is synced or syncing, without false alarms.
