@@ -7,6 +7,7 @@ import {
   effectivePermission,
   isDenied,
   isLocked,
+  memberAccessSnapshot,
   resolveAccessForUser,
   vaultBaseline,
   type ResolverCache,
@@ -68,8 +69,9 @@ export async function canEditFolder(
   const { rows } = await db.query<{
     created_by: string | null;
     organization_id: string;
+    created_at: Date;
   }>(
-    `SELECT f.created_by, v.organization_id
+    `SELECT f.created_by, v.organization_id, f.created_at
        FROM folders f JOIN vaults v ON v.id = f.vault_id
       WHERE f.id = $1`,
     [folderId],
@@ -96,11 +98,18 @@ export async function canEditFolder(
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;
+  // A folder that already existed when this person joined is judged by their
+  // join snapshot, exactly as reading it is — an admin who joined under a
+  // Private default must not restructure a folder they cannot see.
+  const snapshot = cache
+    ? await cache.snapshot(db, row.organization_id, userId)
+    : await memberAccessSnapshot(db, row.organization_id, userId);
+  const existingAtJoin = !!snapshot && row.created_at <= snapshot.snapshotAt;
 
-  // An item set Private, a Read-only vault and a sealed vault all skip the
-  // shortcuts AND the creator rule, and let the share lookup decide — that is
-  // how a folder marked Shared still lifts someone out of any of the three.
-  if (itemPrivate || readOnlyVault || sealedVault) {
+  // An item set Private, a Read-only vault, a sealed vault and a pre-join
+  // folder all skip the shortcuts AND the creator rule, and let the share
+  // lookup decide — that is how a folder marked Shared still lifts someone out.
+  if (itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
     const ctx = await buildAccessContext("folder", folderId, db, cache);
     if (!ctx) return false;
     return (await resolveAccessForUser(ctx, userId, role, db, cache)).permission === "edit";
