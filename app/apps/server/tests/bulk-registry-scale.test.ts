@@ -61,14 +61,15 @@ describe("registration batch query count", () => {
   /**
    * 200 brand-new notes in ONE folder.
    *
-   * 10 statements, and every one of them is named:
+   * 11 statements, and every one of them is named:
    *   1 — the adopt probe, prefilled for all 200 paths with `lower(rel_path) = ANY`
    *   1 — the parent-folder map, ditto for the one directory they name
-   *   7 — `canCreateIn` on that folder (memoised per folder, as it always was)
+   *   8 — `canCreateIn` on that folder (memoised per folder, as it always was;
+   *       one of them is the member's join snapshot, memoised per vault)
    *   1 — the `INSERT … SELECT FROM unnest(…) ON CONFLICT (id) DO NOTHING`
    * The frozen-root latch adds none: nothing here resolves to the root.
    */
-  it("registers 200 new notes in one folder in a constant 10 statements", async () => {
+  it("registers 200 new notes in one folder in a constant 11 statements", async () => {
     await seedFolder(vault, null, "Docs", "Docs");
     const counter = countingDb();
     const ctx = registerCtx(vault, owner.userId, counter.db);
@@ -81,7 +82,7 @@ describe("registration batch query count", () => {
       })),
     );
     expect(out.every((r) => r.status === "created")).toBe(true);
-    expect(counter.count()).toBe(10);
+    expect(counter.count()).toBe(11);
 
     const { rows } = await pool.query<{ n: number }>(
       "SELECT count(*)::int AS n FROM notes WHERE vault_id = $1 AND deleted_at IS NULL",
@@ -129,12 +130,12 @@ describe("registration batch query count", () => {
       })),
     );
     expect(out.every((r) => r.status === "created")).toBe(true);
-    // 105 = 1 adopt probe + 1 folder map + 1 insert + 102 for the write gate
-    // (~5 per folder; the member role and the vault baseline are now memoised
-    // for the whole request, down from ~7). Before this change the same call was
+    // 106 = 1 adopt probe + 1 folder map + 1 insert + 103 for the write gate
+    // (~5 per folder; the member role, the vault baseline and the join snapshot
+    // are memoised for the whole request, down from ~7). Before this change the same call was
     // ~740 statements — 200 adopt probes + 200 parent lookups + 20×7 + 200
     // inserts — run serially on one connection. The number that matters is that
     // NOTHING here scales with the note count any more.
-    expect(counter.count()).toBe(105);
+    expect(counter.count()).toBe(106);
   });
 });
