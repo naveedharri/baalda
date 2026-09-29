@@ -318,3 +318,61 @@ describe("vault scoping", () => {
     expect(useStore.getState().noteLastEdited).toEqual({});
   });
 });
+
+describe("right panel", () => {
+  beforeEach(() => {
+    useStore.setState({ rightPanel: null });
+    try {
+      localStorage.removeItem("baalda.rightPanelTab");
+    } catch {
+      // node env without storage: the store falls back to "sync"
+    }
+  });
+
+  it("opens on the Activity tab by default and closes", () => {
+    useStore.getState().openRightPanel();
+    expect(useStore.getState().rightPanel).toEqual({ tab: "activity" });
+    useStore.getState().closeRightPanel();
+    expect(useStore.getState().rightPanel).toBeNull();
+  });
+
+  it("switching away from Versions, or closing, clears the version state", () => {
+    useStore.getState().openRightPanel("versions");
+    useStore.setState({ versionPanelDocId: "doc-a", noteVersions: [VERSION], versionPreview: { versionId: 7, content: "x" } });
+    useStore.getState().setRightPanelTab("versions");
+    // Staying on Versions keeps the note's history.
+    expect(useStore.getState().versionPanelDocId).toBe("doc-a");
+    useStore.getState().setRightPanelTab("activity");
+    expect(useStore.getState()).toMatchObject({
+      rightPanel: { tab: "activity" },
+      versionPanelDocId: null,
+      noteVersions: null,
+      versionPreview: null,
+    });
+    useStore.getState().setRightPanelTab("versions");
+    useStore.setState({ versionPanelDocId: "doc-a" });
+    useStore.getState().closeRightPanel();
+    expect(useStore.getState().versionPanelDocId).toBeNull();
+  });
+
+  it("remembers the last tab when storage is available", () => {
+    const store = new Map<string, string>();
+    const prev = (globalThis as { localStorage?: unknown }).localStorage;
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    try {
+      useStore.getState().openRightPanel("versions");
+      useStore.getState().closeRightPanel();
+      useStore.getState().openRightPanel();
+      expect(useStore.getState().rightPanel).toEqual({ tab: "versions" });
+      store.set("baalda.rightPanelTab", "bogus");
+      useStore.getState().openRightPanel();
+      expect(useStore.getState().rightPanel).toEqual({ tab: "activity" });
+    } finally {
+      (globalThis as { localStorage?: unknown }).localStorage = prev;
+    }
+  });
+});

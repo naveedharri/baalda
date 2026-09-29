@@ -8,6 +8,7 @@ import {
   withVaultCheckpointLock,
   type CheckpointStructure,
 } from "./checkpoints.js";
+import { softDeleteSet } from "../trash/retention.js";
 
 /**
  * Revert a whole vault to a checkpoint.
@@ -247,7 +248,7 @@ export async function revertVaultToCheckpoint(
             // Yjs history and every share row pointing at it.
             await db.query(
               `UPDATE notes
-                  SET deleted_at = NULL, rel_path = $2, title = $3, folder_id = $4,
+                  SET deleted_at = NULL, deleted_by = NULL, purge_after = NULL, rel_path = $2, title = $3, folder_id = $4,
                       updated_at = now()
                 WHERE id = $1`,
               [note.id, note.rel_path, note.title, folderId],
@@ -300,10 +301,10 @@ export async function revertVaultToCheckpoint(
         throw new RevertTooDestructiveError(doomed, cap);
       }
       const { rows: removed } = await db.query<{ id: string }>(
-        `UPDATE notes SET deleted_at = now()
+        `UPDATE notes SET ${softDeleteSet("$3")}
           WHERE vault_id = $1 AND deleted_at IS NULL AND NOT (id = ANY($2::text[]))
         RETURNING id`,
-        [vaultId, keepIds],
+        [vaultId, keepIds, userId],
       );
       if (removed.length > 0) {
         await purgeNoteIndex(

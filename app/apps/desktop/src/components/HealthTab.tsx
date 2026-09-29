@@ -329,6 +329,7 @@ export function HealthView({
         />
       </Section>
 
+
       </>}
       {mode !== "overview" && <details className="health-advanced" open={mode === "diagnostics" ? true : undefined}>
         <summary>

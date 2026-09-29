@@ -36,6 +36,8 @@ import type {
   NoteBatchResult,
   NoteDeleteResult,
 } from "./bulk-types.js";
+import { softDeleteSet } from "../../trash/retention.js";
+import { syncPermission } from "../../trash/access.js";
 
 /**
  * Bulk registration + content push.
@@ -538,7 +540,12 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       // doc name, which is how a live document ends up keyed to the wrong vault.
       const askedIds = [...new Set(pending.map((p) => p.item.docId))];
       const { rows: present } = await pool.query<{ id: string }>(
-        "SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL AND id = ANY($2::text[])",
+        // A note in Trash still takes pushes while inside its retention window
+        // (`trash/access.ts`): an offline teammate's edits land in its CRDT and
+        // the note stays deleted. Past `purge_after` it is not "in vault".
+        `SELECT id FROM notes
+          WHERE vault_id = $1 AND id = ANY($2::text[])
+            AND (deleted_at IS NULL OR (purge_after IS NOT NULL AND purge_after > now()))`,
         [auth.vaultId, askedIds],
       );
       const inVault = new Set(present.map((r) => r.id));
@@ -559,7 +566,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
         permission.set(
           docId,
           inVault.has(docId)
-            ? await effectivePermission(auth.userId, docId, pool, resolverCache)
+            ? await syncPermission(auth.userId, docId, pool, resolverCache)
             : "none",
         );
       });
@@ -707,8 +714,8 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
     const unique = [...new Set(deletable)];
     for (const slice of chunked(unique, DELETE_CHUNK)) {
       await pool.query(
-        "UPDATE notes SET deleted_at = now() WHERE id = ANY($1::text[]) AND deleted_at IS NULL",
-        [slice],
+        `UPDATE notes SET ${softDeleteSet("$2")} WHERE id = ANY($1::text[]) AND deleted_at IS NULL`,
+        [slice, auth.userId],
       );
       await purgeNoteIndex(slice);
     }

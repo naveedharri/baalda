@@ -274,6 +274,9 @@ interface DocLocation {
 async function locateDoc(
   db: Queryable,
   docId: string,
+  /** Also locate a soft-deleted note (Trash reads, restores, pushes into a
+   *  tombstoned doc). Everything else keeps treating a deleted doc as absent. */
+  includeDeleted = false,
 ): Promise<DocLocation | null> {
   const { rows } = await db.query<{
     vault_id: string;
@@ -284,13 +287,13 @@ async function locateDoc(
   }>(
     `SELECT loc.vault_id, loc.folder_id, loc.created_by, loc.created_at, v.organization_id
        FROM (
-         SELECT vault_id, folder_id, created_by, created_at FROM notes  WHERE id = $1 AND deleted_at IS NULL
+         SELECT vault_id, folder_id, created_by, created_at FROM notes  WHERE id = $1 AND (deleted_at IS NULL OR $2::boolean)
          UNION ALL
          SELECT vault_id, folder_id, NULL::text, created_at FROM files  WHERE id = $1
        ) loc
        JOIN vaults v ON v.id = loc.vault_id
       LIMIT 1`,
-    [docId],
+    [docId, includeDeleted],
   );
   const row = rows[0];
   if (!row) return null;
@@ -593,8 +596,10 @@ export async function effectivePermission(
   /** Optional request-scoped memo for the per-vault / per-folder inputs. Changes
    *  nothing about the answer — see {@link ResolverCache}. */
   cache?: ResolverCache,
+  /** Resolve a soft-deleted note as if it were live (see `trash/access.ts`). */
+  opts: { includeDeleted?: boolean } = {},
 ): Promise<Permission> {
-  const loc = await locateDoc(db, docId);
+  const loc = await locateDoc(db, docId, opts.includeDeleted === true);
   if (!loc) return "none";
 
   const folderIds = cache

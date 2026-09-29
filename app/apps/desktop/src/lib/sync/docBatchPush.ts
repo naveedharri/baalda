@@ -139,6 +139,12 @@ export interface DocBatchPusherOptions {
   deps: DocBatchPushDeps;
   /** Record a confirmed push (checkpointed by the registry). */
   markPushed: (docId: string) => void;
+  /**
+   * The server now holds every op in `sv` for `docId` (an `applied`/`skipped`
+   * push of an update with that state vector). Feeds the acknowledged state
+   * vector the inbound destruction gate reads (`VaultRegistry.recordAck`).
+   */
+  markAcked?: (docId: string, sv: Uint8Array) => void;
   /** Docs to leave alone — the open note, whose editor owns its provider. */
   skip?: (docId: string) => boolean;
   progress?: SyncProgressSink;
@@ -524,6 +530,11 @@ export class DocBatchPusher {
         // `skipped` = the merge captured no new update, i.e. the server already
         // held this state. Confirmed just as firmly as `applied`.
         this.opts.markPushed(p.docId);
+        try {
+          this.opts.markAcked?.(p.docId, Y.encodeStateVectorFromUpdate(p.update));
+        } catch {
+          /* an undecodable update only leaves the gate more conservative */
+        }
         this.progress.doc(p.docId, "synced");
         this.progress.item("ok");
         this.pushed++;

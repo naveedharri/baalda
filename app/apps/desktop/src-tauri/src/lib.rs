@@ -22,6 +22,7 @@ pub mod parse;
 mod relaunch;
 mod state;
 pub mod stats;
+pub mod trash;
 pub mod tree;
 pub mod vault;
 mod watcher;
@@ -257,6 +258,9 @@ pub fn run() {
             commands::vault_stats,
             commands::vault_checks,
             commands::empty_trash,
+            trash::list_trash_copies,
+            trash::read_trash_copy,
+            trash::delete_trash_copy,
             commands::rebuild_index,
             commands::read_external_file,
             commands::get_server_url,

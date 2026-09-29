@@ -2,7 +2,7 @@ import { Server } from "@hocuspocus/server";
 import * as Y from "yjs";
 import { config } from "../config.js";
 import { verifySyncToken } from "../tokens/sync-token.js";
-import { effectivePermission } from "../permissions/resolver.js";
+import { syncPermission } from "../trash/access.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
 import { scheduleIndex } from "../index/indexer.js";
 import { formatDocName, parseDocName } from "./doc-name.js";
@@ -69,7 +69,21 @@ export interface SyncContext {
    * `context`, so `onChange` can read one field regardless of who wrote.
    */
   userId: string | null;
+  /** Throttle for {@link RejectedHook}: last time this connection reported a
+   *  dropped read-only edit (ms epoch). */
+  lastRejectedAt?: number;
 }
+
+/** Minimum gap between two `rejected` reports for one connection. */
+export const REJECTED_THROTTLE_MS = 5000;
+
+/**
+ * Notified when a READ-ONLY connection sends an update carrying ops the server
+ * lacks, which Hocuspocus drops with only a bare `syncStatus: false`. The vault
+ * channel turns it into a `rejected` frame for that user, so the desktop can park
+ * the edit. Attributed connections only; throttled per connection.
+ */
+export type RejectedHook = (vaultId: string, docId: string, userId: string) => void;
 
 /**
  * Notified after each persisted doc change so the vault replication channel
@@ -136,6 +150,7 @@ export function createSyncServer(
   port: number = config.hocuspocusPort,
   onDocChanged?: DocChangedHook,
   onDocEdited?: DocEditedHook,
+  onRejected?: RejectedHook,
 ): Server<SyncContext> {
   return new Server<SyncContext>({
     name: "context-sync",
@@ -169,6 +184,34 @@ export function createSyncServer(
       if (refusal) {
         console.error(`${refusal} for ${data.documentName}`);
         throw new NoteTooLargeError();
+      }
+    },
+
+    /**
+     * Read-only drop detection. Runs before Hocuspocus' own readOnly branch
+     * (which answers step 2 / update with `syncStatus: false` and discards it).
+     * Only step 2 (1) and update (2) carry ops; an update the document already
+     * contains (a reconnecting viewer's step 2) is not a rejection.
+     */
+    async beforeSync(data) {
+      if (!onRejected) return;
+      const ctx = data.context as SyncContext | undefined;
+      if (!ctx?.readOnly || !ctx.userId) return;
+      if (data.type !== 1 && data.type !== 2) return;
+      const now = Date.now();
+      if (ctx.lastRejectedAt && now - ctx.lastRejectedAt < REJECTED_THROTTLE_MS) return;
+      let contained = true;
+      try {
+        contained = Y.snapshotContainsUpdate(Y.snapshot(data.document), data.payload);
+      } catch {
+        contained = true; // undecodable: Hocuspocus will reject it anyway
+      }
+      if (contained) return;
+      ctx.lastRejectedAt = now;
+      try {
+        onRejected(ctx.vaultId, ctx.docId, ctx.userId);
+      } catch (err) {
+        console.error("onRejected hook failed:", err);
       }
     },
 
@@ -221,7 +264,7 @@ export function createSyncServer(
       if (claims.userId) {
         let permission;
         try {
-          permission = await effectivePermission(claims.userId, parsed.docId);
+          permission = await syncPermission(claims.userId, parsed.docId);
         } catch (err) {
           // Fail CLOSED. A resolver that cannot answer must not be read as
           // "carry on with whatever the token claimed" — that is the hole this

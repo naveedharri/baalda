@@ -84,6 +84,12 @@ import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
 import type { AccountLinkKind } from "./lib/accountLink";
 import { normalizeServerUrl } from "./lib/auth/serverChoice";
+import { readLastTab, writeLastTab, type RightPanelTab } from "./components/rightPanelTab";
+import {
+  neighbourAfterClose,
+  upsertTab,
+  type VirtualTab,
+} from "./components/virtualTabs";
 import {
   acceptInviteFailureMessage,
   clearPendingInvite,
@@ -105,6 +111,12 @@ import {
 /** Notes already toasted about a failed sync registration — one sticky
  *  explanation per note is enough; the retry is automatic. */
 const registerFailureToasted = new Set<string>();
+
+/** One access change the Activity feed lists (session-only). */
+export type AccessEvent =
+  | { kind: "removed"; at: number; vaultId: string | null; docId: string; path: string }
+  | { kind: "granted"; at: number; vaultId: string | null; count: number; paths?: string[] };
+const ACCESS_EVENTS_MAX = 200;
 
 export interface OpenNote {
   path: string;
@@ -167,6 +179,15 @@ interface AppStore {
    *  `openNote.path`; this list is only which tabs exist, so the two never
    *  disagree about what's on screen. Session-only, vault-scoped. */
   openTabs: string[];
+  /** Non-note tabs (recovery copy, trash preview, compare, review). See
+   *  `components/virtualTabs.ts`. Session-only, vault-scoped. */
+  virtualTabs: VirtualTab[];
+  /** The virtual tab on screen, or null when the note editor is. Opening a note
+   *  clears it; `openNote` is never touched by a virtual tab. */
+  activeVirtualTab: string | null;
+  openVirtualTab: (tab: VirtualTab) => void;
+  activateVirtualTab: (id: string | null) => void;
+  closeVirtualTab: (id: string) => void;
   /** True when the open note's file was deleted out from under us. */
   noteRemoved: boolean;
   /**
@@ -188,6 +209,12 @@ interface AppStore {
    * (a Finder delete) and offers no recovery hint.
    */
   noteRemovedByTeammate: { reason: "deleted" | "revoked"; trashedTo: string | null } | null;
+  /**
+   * Access changes this session, newest last, for the Activity feed. Fed by the
+   * sync layer's `onNoteRemoved(reason: "revoked")`. Session-only, never persisted,
+   * tagged with the server vault id so the feed shows only the open vault's. Capped at ACCESS_EVENTS_MAX.
+   */
+  accessEvents: AccessEvent[];
   /**
    * What the sync layer says about the vault's STRUCTURE while it is open
    * (#221, `SyncManager.structureNotice`): the vault folder vanished, a live
@@ -554,6 +581,10 @@ interface AppStore {
    */
   settingsRequest: { tab: SettingsTab; token: number } | null;
   requestSettings: (tab: SettingsTab) => void;
+  /** Bumped to ask the open Settings dialog to close (an action in it opened
+   *  something in the editor area behind it). */
+  settingsDismissToken: number;
+  dismissSettings: () => void;
   /** Open Account Settings on a particular page (for links such as the
    * sidebar colour explanation). Owned and consumed by `AccountMenu`. */
   accountSettingsRequest: { tab: AccountSettingsTab; token: number } | null;
@@ -807,6 +838,14 @@ interface AppStore {
   /** Open the history panel for a note and load its versions. */
   openVersionPanel: (docId: string) => Promise<void>;
   closeVersionPanel: () => void;
+  /** The right-side panel (Sync / Versions / What's new), or null when closed.
+   *  The Versions tab drives `versionPanelDocId` (App.tsx keeps it on the open
+   *  note); every other tab, and closing, clears it and its preview. */
+  rightPanel: { tab: RightPanelTab } | null;
+  /** Open on `tab`, or the last tab used on this device. */
+  openRightPanel: (tab?: RightPanelTab) => void;
+  closeRightPanel: () => void;
+  setRightPanelTab: (tab: RightPanelTab) => void;
   /** Load one version's markdown for the read-only editor overlay. */
   previewVersion: (versionId: number) => Promise<void>;
   clearVersionPreview: () => void;
@@ -1607,6 +1646,8 @@ function vaultScopedSyncReset() {
     // Tabs are paths, and paths only mean something inside the vault that
     // minted them — every vault leave/switch spreads this reset.
     openTabs: [] as string[],
+    virtualTabs: [] as VirtualTab[],
+    activeVirtualTab: null as string | null,
     // A folder's own stamp says nothing about the next folder.
     openFolderIsSynced: null as boolean | null,
     // Same rule: the "this vault was made local only" verdict belongs to ONE
@@ -1696,9 +1737,22 @@ export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
   openNote: null,
+  openVirtualTab: (tab) =>
+    set((s) => ({ virtualTabs: upsertTab(s.virtualTabs, tab), activeVirtualTab: tab.id })),
+  activateVirtualTab: (id) => set({ activeVirtualTab: id }),
+  closeVirtualTab: (id) =>
+    set((s) => {
+      const next = s.virtualTabs.filter((t) => t.id !== id);
+      if (next.length === s.virtualTabs.length) return {};
+      // Closing the one on screen falls back to a neighbour, then the note.
+      const active =
+        s.activeVirtualTab === id ? neighbourAfterClose(s.virtualTabs, id) : s.activeVirtualTab;
+      return { virtualTabs: next, activeVirtualTab: active };
+    }),
   noteRemoved: false,
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
+  accessEvents: [],
   structureNotice: { rootMissing: false, pendingDelete: null, closedAppChanges: false },
   applyStructureNotice: (notice) => {
     const wasMissing = get().structureNotice.rootMissing;
@@ -1712,6 +1766,20 @@ export const useStore = create<AppStore>((set, get) => ({
   dismissClosedAppChanges: () => syncManager.dismissClosedChangesNotice(),
   revealRequest: null,
   settingsRequest: null,
+  rightPanel: null,
+  openRightPanel: (tab) => {
+    const t = tab ?? readLastTab();
+    writeLastTab(t);
+    set({
+      rightPanel: { tab: t },
+      ...(t === "versions" ? {} : { versionPanelDocId: null, noteVersions: null, versionPreview: null }),
+    });
+  },
+  closeRightPanel: () =>
+    set({ rightPanel: null, versionPanelDocId: null, noteVersions: null, versionPreview: null }),
+  setRightPanelTab: (tab) => get().openRightPanel(tab),
+  settingsDismissToken: 0,
+  dismissSettings: () => set((s) => ({ settingsDismissToken: s.settingsDismissToken + 1 })),
   accountSettingsRequest: null,
   revealedPath: null,
   backlinks: [],
@@ -2076,6 +2144,8 @@ export const useStore = create<AppStore>((set, get) => ({
 
   openNoteByPath: async (path) => {
     const epoch = get().vault?.epoch;
+    // A note opened from anywhere takes the editor area back from a virtual tab.
+    if (get().activeVirtualTab) set({ activeVirtualTab: null });
     // Name the note being opened before the first await. In a synced vault this
     // function makes a network call (`registerNote`) before `openNote` is set,
     // so the row stays unselected and the editor keeps showing the previous note
@@ -2578,7 +2648,28 @@ export const useStore = create<AppStore>((set, get) => ({
     // CodeMirror bound to a destroyed Y.Doc throws on the next keystroke.
     syncManager.setInboundListeners({
       onNotePathChanged: (_docId, from, to) => get().followNoteRename(from, to),
-      onNoteRemoved: (_docId, path, trashedTo, reason) => {
+      // Notes that became readable since the previous pull (a grant).
+      onAccessGranted: ({ count, paths }) => {
+        const ev: AccessEvent = {
+          kind: "granted",
+          at: Date.now(),
+          vaultId: syncManager.registry.vaultId ?? null,
+          count,
+          paths,
+        };
+        set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
+      },
+      onNoteRemoved: (docId, path, trashedTo, reason) => {
+        if (reason === "revoked") {
+          const ev: AccessEvent = {
+            kind: "removed",
+            at: Date.now(),
+            vaultId: syncManager.registry.vaultId ?? null,
+            docId,
+            path,
+          };
+          set({ accessEvents: [...get().accessEvents, ev].slice(-ACCESS_EVENTS_MAX) });
+        }
         get().pruneTabs([path]);
         const open = get().openNote;
         if (open && (open.path === path || open.path.startsWith(path + "/"))) {

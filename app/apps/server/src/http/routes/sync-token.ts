@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
-import { effectivePermission } from "../../permissions/resolver.js";
+import { syncPermission } from "../../trash/access.js";
 import { mintSyncToken } from "../../tokens/sync-token.js";
 import { getSession } from "../session.js";
 
@@ -15,7 +15,9 @@ export const syncTokenRoutes = new Hono();
 
 async function docVaultId(docId: string): Promise<string | null> {
   const { rows } = await pool.query<{ vault_id: string }>(
-    `SELECT vault_id FROM notes WHERE id = $1 AND deleted_at IS NULL
+    `SELECT vault_id FROM notes
+      WHERE id = $1
+        AND (deleted_at IS NULL OR (purge_after IS NOT NULL AND purge_after > now()))
      UNION ALL
      SELECT vault_id FROM files WHERE id = $1
      LIMIT 1`,
@@ -42,7 +44,9 @@ syncTokenRoutes.post("/sync-token", async (c) => {
   const vaultId = await docVaultId(docId);
   if (!vaultId) return c.json({ error: "Unknown document" }, 404);
 
-  const permission = await effectivePermission(session.userId, docId);
+  // A note in Trash (inside its retention window) still mints: pushes into it
+  // are accepted so offline edits reach the server; the note stays deleted.
+  const permission = await syncPermission(session.userId, docId);
   if (permission === "none") {
     return c.json({ error: "No access to this document" }, 403);
   }

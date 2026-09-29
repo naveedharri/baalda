@@ -6,6 +6,7 @@ import { type PubSub, vaultTopic } from "./pubsub.js";
 import { verifyVaultToken } from "../tokens/vault-token.js";
 import { listReadableDocsInVault } from "../permissions/vault-docs.js";
 import { listEmptyDocs, loadDocDiff } from "../yjs/persistence.js";
+import { deletedNotesAmong } from "../trash/access.js";
 import {
   parseHello,
   parsePresence,
@@ -14,6 +15,7 @@ import {
   encodePubsubAclChanged,
   encodePubsubRegistryChanged,
   encodePubsubMemberJoined,
+  encodePubsubRejected,
   encodePubsubPresence,
   encodePubsubPresenceQuery,
   encodePubsubVoice,
@@ -61,6 +63,8 @@ export interface VaultChannelDeps {
   loadDiff?: typeof loadDocDiff;
   /** Which readable docs hold no server content — reported on `ready`. */
   listEmpty?: typeof listEmptyDocs;
+  /** Which of the client's held ids are soft-deleted — `ready.tombstones`. */
+  listDeletedAmong?: typeof deletedNotesAmong;
   verifyToken?: typeof verifyVaultToken;
   backfillConcurrency?: number;
   /** Per-connection outbound cap in bytes (default `config.vaultSendCapBytes`). */
@@ -110,11 +114,18 @@ export const BEHIND_CAP = 2000;
  */
 export const REVOKED_CAP = 2000;
 
+/** Most ids one `ready.tombstones` names; `tombstonesTruncated` says more exist. */
+export const TOMBSTONES_CAP = 2000;
+
+/** Most ids one `ready.covered` names; `coveredTruncated` says more exist. */
+export const COVERED_CAP = 2000;
+
 export class VaultChannel {
   private readonly pubsub: PubSub;
   private readonly listReadableDocs: typeof listReadableDocsInVault;
   private readonly loadDiff: typeof loadDocDiff;
   private readonly listEmpty: typeof listEmptyDocs;
+  private readonly listDeletedAmong: typeof deletedNotesAmong;
   private readonly verifyToken: typeof verifyVaultToken;
   private readonly concurrency: number;
   private readonly sendCapBytes: number;
@@ -138,6 +149,7 @@ export class VaultChannel {
     this.listReadableDocs = deps.listReadableDocs ?? listReadableDocsInVault;
     this.loadDiff = deps.loadDiff ?? loadDocDiff;
     this.listEmpty = deps.listEmpty ?? listEmptyDocs;
+    this.listDeletedAmong = deps.listDeletedAmong ?? deletedNotesAmong;
     this.verifyToken = deps.verifyToken ?? verifyVaultToken;
     this.concurrency = deps.backfillConcurrency ?? config.backfillConcurrency;
     this.sendCapBytes = deps.sendCapBytes ?? config.vaultSendCapBytes;
@@ -226,6 +238,12 @@ export class VaultChannel {
     await this.pubsub.publish(vaultTopic(vaultId), encodePubsubMemberJoined(name));
   }
 
+  /** A read-only connection's edit was dropped (`ready`-independent; see the
+   *  `rejected` frame). Every instance forwards it to that user's sockets. */
+  async publishRejected(vaultId: string, userId: string, docId: string): Promise<void> {
+    await this.pubsub.publish(vaultTopic(vaultId), encodePubsubRejected(userId, docId, "read_only"));
+  }
+
   /** Wire the channel onto the HTTP server's upgrade at `config.vaultSyncPath`. */
   attachUpgrade(httpServer: HttpServer): WebSocketServer {
     const wss = new WebSocketServer({ noServer: true });
@@ -289,6 +307,7 @@ export class VaultChannel {
       listReadableDocs: this.listReadableDocs,
       loadDiff: this.loadDiff,
       listEmpty: this.listEmpty,
+      listDeletedAmong: this.listDeletedAmong,
       verifyToken: this.verifyToken,
       concurrency: this.concurrency,
       sendCapBytes: this.sendCapBytes,
@@ -304,6 +323,7 @@ interface ConnDeps {
   listReadableDocs: typeof listReadableDocsInVault;
   loadDiff: typeof loadDocDiff;
   listEmpty: typeof listEmptyDocs;
+  listDeletedAmong: typeof deletedNotesAmong;
   verifyToken: typeof verifyVaultToken;
   concurrency: number;
   sendCapBytes: number;
@@ -527,7 +547,31 @@ class VaultConnection {
     // longer read. Pure set arithmetic over two things already in hand (the
     // hello manifest and `this.readable`), so it costs no query.
     const batchedRevocations = this.caps.has("revocation-batches");
-    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest, [...(hello.files ?? []), ...(hello.held ?? [])]);
+    const heldIds = [...(hello.files ?? []), ...(hello.held ?? [])];
+    // Soft-deleted docs among what the client holds are TOMBSTONES, not
+    // revocations: named separately so the client resolves them as deletes (and
+    // can push unseen edits into Trash first), and never in both lists. One
+    // bounded query over the client's own non-readable ids; a failure degrades
+    // to the old frame (everything non-readable stays in `revoked`).
+    let deleted = new Set<string>();
+    try {
+      const candidates = [...new Set([...Object.keys(hello.manifest), ...heldIds])].filter(
+        (id) => !this.readable.has(id),
+      );
+      deleted = await this.deps.listDeletedAmong(this.vaultId!, candidates);
+    } catch (err) {
+      console.error("Vault channel tombstone probe failed:", err);
+    }
+    const tombstones = [...deleted].slice(0, TOMBSTONES_CAP);
+    const tombstonesTruncated = deleted.size > TOMBSTONES_CAP;
+    const { revoked, revokedTruncated } = this.revokedFromManifest(hello.manifest, heldIds, deleted);
+    // Backfill only walks readable docs, so `covered` cannot overlap `revoked`
+    // or `tombstones`; filtered anyway so the frame's contract never rests on
+    // that. Live-only mode skipped the backfill: the field is omitted.
+    const excluded = new Set([...revoked, ...deleted]);
+    const covered =
+      hello.mode === "live-only" ? [] : this.covered.filter((d) => !excluded.has(d));
+    const coveredTruncated = hello.mode !== "live-only" && this.coveredTruncated;
     if (batchedRevocations) {
       for (let i = 0; i < revoked.length; i += REVOKED_CAP) {
         this.send({ t: "revoked", docIds: revoked.slice(i, i + REVOKED_CAP) });
@@ -543,6 +587,10 @@ class VaultConnection {
       ...(behind.length > 0 && behindTruncated ? { behindTruncated: true as const } : {}),
       ...(!batchedRevocations && revoked.length > 0 ? { revoked } : {}),
       ...(revoked.length > 0 && revokedTruncated ? { revokedTruncated: true as const } : {}),
+      ...(tombstones.length > 0 ? { tombstones } : {}),
+      ...(tombstonesTruncated ? { tombstonesTruncated: true as const } : {}),
+      ...(covered.length > 0 ? { covered } : {}),
+      ...(coveredTruncated ? { coveredTruncated: true as const } : {}),
     });
   }
 
@@ -582,6 +630,8 @@ class VaultConnection {
   private revokedFromManifest(
     manifest: Record<string, string>,
     files?: string[],
+    /** Soft-deleted ids, reported as `ready.tombstones` instead. */
+    tombstoned: Set<string> = new Set(),
   ): {
     revoked: string[];
     revokedTruncated: boolean;
@@ -595,6 +645,7 @@ class VaultConnection {
     // this stays pure set arithmetic over two things already in hand.
     for (const docId of [...Object.keys(manifest), ...(files ?? [])]) {
       if (this.readable.has(docId)) continue;
+      if (tombstoned.has(docId)) continue;
       if (seen.has(docId)) continue;
       if (!this.caps.has("revocation-batches") && revoked.length >= REVOKED_CAP) {
         revokedTruncated = true;
@@ -722,11 +773,23 @@ class VaultConnection {
    */
   private behind: string[] = [];
   private behindTruncated = false;
+  /**
+   * Manifest docs whose hello state vector the server's stored state fully
+   * covers (equal, or server ahead: the backfill diff carries everything the
+   * client lacks and the client holds nothing the server lacks). A by-product
+   * of the same `loadDiff` the backfill already runs; named on `ready.covered`
+   * so the client can record a server-acknowledged base. Never collected in
+   * live-only mode, where the backfill is skipped.
+   */
+  private covered: string[] = [];
+  private coveredTruncated = false;
 
   /** Stream missing ops for every readable doc, priority docs first. */
   private async backfill(manifest: Record<string, string>, priority: string[]): Promise<void> {
     this.behind = [];
     this.behindTruncated = false;
+    this.covered = [];
+    this.coveredTruncated = false;
     const prioritized = priority.filter((d) => this.readable.has(d));
     const prioritySet = new Set(prioritized);
     const rest = [...this.readable].filter((d) => !prioritySet.has(d));
@@ -757,6 +820,9 @@ class VaultConnection {
     if (diff?.clientAhead) {
       if (this.behind.length < BEHIND_CAP) this.behind.push(docId);
       else this.behindTruncated = true;
+    } else if (diff && clientSv) {
+      if (this.covered.length < COVERED_CAP) this.covered.push(docId);
+      else this.coveredTruncated = true;
     }
     if (!diff || diff.upToDate) return; // nothing new for this client
     this.sendBinary(encodeWsUpdate(docId, diff.update));
@@ -809,6 +875,13 @@ class VaultConnection {
       // wasted round trip (listFolders + listNotes + a full client syncStructure).
       if (selfOnly) return;
       this.send({ t: "registry" });
+      return;
+    }
+    if (msg.type === "rejected") {
+      // Only the user whose edit was dropped; the doc id is one they sent.
+      if (msg.userId === this.userId) {
+        this.send({ t: "rejected", docId: msg.docId, reason: msg.reason });
+      }
       return;
     }
     if (msg.type === "member-joined") {
@@ -886,10 +959,28 @@ class VaultConnection {
     }
     const prev = this.readable;
     this.readable = next;
+    // A doc that fell out because it was DELETED is not a revocation: the
+    // `registry` broadcast that accompanies a delete makes the client re-pull,
+    // and the pull's tombstone list handles it as a delete (Trash-aware).
+    // Only genuinely revoked ids go out as `revoked` / `drop`. A probe failure
+    // keeps the old behaviour (everything that fell out is announced).
+    const fellOut = [...prev].filter((d) => !next.has(d));
+    let deletedNow = new Set<string>();
+    if (fellOut.length > 0) {
+      try {
+        deletedNow = await this.deps.listDeletedAmong(this.vaultId, fellOut);
+      } catch (err) {
+        console.error("Vault channel tombstone probe (live) failed:", err);
+      }
+    }
     let lost = 0;
     let revokedBatch: string[] = [];
     for (const docId of prev) {
       if (!next.has(docId)) {
+        if (deletedNow.has(docId)) {
+          lost++;
+          continue;
+        }
         if (this.caps.has("revocation-batches")) {
           revokedBatch.push(docId);
           if (revokedBatch.length === REVOKED_CAP) {

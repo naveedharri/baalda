@@ -35,6 +35,7 @@ import {
   tombstoneFile,
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
+import { softDeleteSet } from "../../trash/retention.js";
 
 /** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
  *  bound the vault channel's `ready.revoked` uses for the list it corroborates,
@@ -656,7 +657,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await canEditFolder(session.userId, id))) {
       return c.json({ error: "You cannot delete this folder" }, 403);
     }
-    const { deletedNoteIds } = await deleteFolderCascade(pool, id);
+    const { deletedNoteIds } = await deleteFolderCascade(pool, id, session.userId);
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
     changed(c, row.vault_id);
@@ -900,7 +901,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     if (!(await canEditDoc(session.userId, id))) {
       return c.json({ error: "You cannot delete this note" }, 403);
     }
-    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = $1", [id]);
+    await pool.query(`UPDATE notes SET ${softDeleteSet("$2")} WHERE id = $1`, [id, session.userId]);
     // Drop the DERIVED search/graph rows with the note. They are a rebuildable
     // cache of the canonical Yjs state (migration 005), and note_index keeps a
     // full plain-text copy of the body — leaving it behind grew those tables
@@ -909,6 +910,15 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // it on its next store (indexer.scheduleIndex / backfillIndex).
     await purgeNoteIndex([id]);
     changed(c, row.vault_id);
+    // Kick live editors so their provider re-authenticates and learns the doc
+    // is in Trash (pushes into it stay accepted until purge_after). Same as
+    // MCP's delete_note; `evictDoc` so the next connect reloads from Postgres.
+    try {
+      if (deps.evictDoc) await deps.evictDoc(row.vault_id, id);
+      else deps.disconnectDoc?.(row.vault_id, id);
+    } catch (err) {
+      console.warn(`[registry] evicting ${id} after a note delete failed:`, err);
+    }
     return c.json({ ok: true }, 200);
   });
 

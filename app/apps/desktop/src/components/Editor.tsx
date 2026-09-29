@@ -32,6 +32,7 @@ import { EditorEmpty, EditorSkeleton } from "./EditorPlaceholders";
 import { characterSvg } from "./Avatar";
 import { agoFromIso, lastEditedTooltip } from "./versionFormat";
 import { noteContentReady, shouldShowNoteSkeleton } from "../lib/editor/noteLoading";
+import { registerLiveView } from "./liveEditorViews";
 
 interface Peer {
   id: string;
@@ -472,6 +473,7 @@ export function Editor() {
     let onAwarenessChange: (() => void) | null = null;
     let onInitialContent: (() => void) | null = null;
     let unsubscribeTitles: (() => void) | null = null;
+    let unregisterLiveView: (() => void) | null = null;
     let cancelTitlesDispatch: (() => void) | null = null;
     // The editor pane is empty until CodeMirror is constructed below, and
     // getting there means opening the bridge, hydrating the CRDT from SQLite
@@ -638,6 +640,7 @@ export function Editor() {
       const foldEffects = foldEffectsFor(view.state, parseNoteUiState(storedUiState));
       if (foldEffects.length) view.dispatch({ effects: foldEffects });
       viewRef.current = view;
+      unregisterLiveView = registerLiveView(notePath, view);
       switchingNoteRef.current = false;
       // A note created, renamed or removed can flip a `[[link]]` between
       // resolved and greyed out, so repaint the links when the title list moves.
@@ -727,6 +730,7 @@ export function Editor() {
       if (view) switchingNoteRef.current = true;
       setMountedNotePath(null);
       setReadyNotePath(null);
+      unregisterLiveView?.();
       if (view) view.destroy();
       viewRef.current = null;
       editableRef.current = null;

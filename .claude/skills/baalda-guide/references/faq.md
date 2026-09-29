@@ -121,9 +121,21 @@ Yes, and it is a supported way to work. Create, edit, delete, rename and move `.
 tool — Finder, a script, an AI agent — and Baalda picks the change up and syncs it, merging an
 outside edit with whatever a teammate is typing rather than overwriting it. A delete on disk takes
 a couple of seconds to reach the team (long enough that an editor's save or a rename is not
-mistaken for one); no extra local copy is kept, but the note's Version History still has it. The
+mistaken for one); no extra local copy is kept, but the note goes to the vault's Trash for 30
+days and can be restored from there. The
 one folder to leave alone is the hidden `.context` folder inside the vault: that is Baalda's own
 index and sync state.
+
+## What happens when someone deletes a note I was editing offline?
+Your work is kept. Deleted notes go to the vault's **Trash** for 30 days, and edits you made while
+offline still reach that note when you reconnect, so a teammate who restores it gets your changes
+too. If your copy had changes the server never saw, Baalda also keeps a copy on your computer
+before removing the file, and tells you once in a summary. Anyone who can edit the note (or a vault
+owner or admin) can **Restore** it from Trash; if its name is taken by then, it comes back with
+"(restored <date>)" added. After 30 days the note is removed for good. The same protection applies
+when your access to a note is removed while you have unsent edits: they stay on your computer,
+marked as no longer shared. If two people create a note with the same name while offline, both
+are kept and the later one is renamed with "(conflict <date>)".
 
 ## Can I rename, move or delete files and folders outside Baalda?
 Editing the text of notes from any tool is fine at any time, even while Baalda is closed. For
@@ -134,8 +146,10 @@ renaming, moving and deleting, keep Baalda open (or use the sidebar, or the AI t
 - Removing a lot of notes at once makes Baalda ask: delete them for everyone, or restore them.
 - If you rename or move the vault folder itself, Baalda stops syncing it and asks you to reopen it
   from its new location.
-- Renames, moves and deletes made while Baalda is closed are not applied: the old names come back
-  and the new ones appear as new notes. Baalda shows a notice when this happens.
+- Renames made while Baalda is closed are recognised on the next launch when the note's text is
+  unchanged, so the note keeps its history. Deletes made while Baalda is closed are undone (the
+  note comes back from the server); delete it again from the app to delete it for everyone.
+  Baalda shows a short summary when it reconciles anything like this.
 - Symbolic links (aliases made with `ln -s`) inside a vault are not supported; Baalda ignores them.
 
 ## How does the AI part work?

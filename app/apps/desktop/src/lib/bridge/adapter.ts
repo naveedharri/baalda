@@ -7,6 +7,7 @@ import { currentVaultEpoch } from "../sync/vaultScope";
 import { clearLinkRefusal, isSymlinkRefusal, noteLinkRefusal } from "../sync/linkRefusals";
 import { dismissToast, toast } from "../toast";
 import { NoteBridge } from "./noteBridge";
+import { reconcileReport } from "../sync/reconcileReport";
 import type { BridgeIO } from "./types";
 
 /**
@@ -87,6 +88,15 @@ export function createTauriBridgeIO(epoch?: ipc.VaultEpoch): BridgeIO {
       }
     },
     sha256: sha256Hex,
+    // The server's text is about to win over bytes another app wrote: keep them,
+    // and say so in the reconnect summary (never a silent overwrite).
+    saveRecoveryCopy: async (path, content) => {
+      const dest = await ipc.writeTrashCopy(
+        path, new Date().toISOString().replace(/[:.]/g, "-"), content, epoch,
+      );
+      reconcileReport.record({ kind: "externalEditSaved", path, detail: dest });
+      return dest;
+    },
     // A failed write is the one bridge error a person must see (#81): the .md is
     // the durable copy, and "nothing happened" is how it would otherwise read.
     onWriteFailed: reportSaveFailure,

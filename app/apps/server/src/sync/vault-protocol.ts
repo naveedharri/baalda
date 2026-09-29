@@ -135,6 +135,21 @@ export type ServerControl =
    * default vault with thousands of docs the member never had names none of
    * them, because the client holds none of them.
    *
+   * `tombstones` names the docs this client holds (manifest ∪ held ∪ files)
+   * that are SOFT-DELETED in this vault — in Trash, or deleted and awaiting
+   * purge. A tombstoned doc is never also in `revoked`: a delete is not an
+   * access change, and the client handles it as a delete (its unseen edits can
+   * still be pushed into the Trash copy until `purge_after`). Capped at 2000;
+   * `tombstonesTruncated` means more exist and the registry pull's tombstones
+   * remain the complete answer.
+   *
+   * `covered` names the manifest docs whose hello state vector the server's
+   * stored state fully covers: equal, or the server ahead (the backfill that
+   * preceded this frame delivered the rest). The client holds no op the server
+   * lacks, so it may record the server-acknowledged base for them. Never a doc
+   * in `behind`, `revoked` or `tombstones`; omitted in live-only mode (no
+   * backfill ran). Capped at 2000; `coveredTruncated` means more qualified.
+   *
    * Every field is OMITTED when it has nothing to say, so the overwhelmingly
    * common frame stays byte-identical to `{"t":"ready"}`. Old clients ignore
    * unknown keys (`parseServerControl` switches on `t` and reads only what it
@@ -149,10 +164,25 @@ export type ServerControl =
       behindTruncated?: true;
       revoked?: string[];
       revokedTruncated?: true;
+      tombstones?: string[];
+      tombstonesTruncated?: true;
+      covered?: string[];
+      coveredTruncated?: true;
     }
   | { t: "revoked"; docIds: string[] }
   | { t: "bootstrap" }
   | { t: "drop"; docId: string } // access lost / doc removed -> client evicts
+  /**
+   * The server DROPPED an edit this user sent on the doc's own Hocuspocus
+   * socket, because that connection is read-only (a view grant, a lock, a
+   * Read-only vault). Hocuspocus only answers such a message with a bare
+   * `syncStatus: false`, which the provider does not surface; this frame is the
+   * explicit signal so the desktop can park the unsent edit (keep it locally,
+   * marked unsynced) instead of believing it landed. Addressed to the user who
+   * sent it only, throttled per connection, and sent only for updates that
+   * carry ops the server lacks. Old clients ignore an unknown `t`.
+   */
+  | { t: "rejected"; docId: string; reason: "read_only" }
   | { t: "reauth" } // ACL changed in this vault -> client re-mints its open doc's token
   | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry
   | { t: "member"; name: string } // a new teammate joined the vault -> refresh + celebrate
@@ -364,6 +394,7 @@ export const PS_MEMBER_JOINED = 0x04;
 export const PS_PRESENCE = 0x05;
 export const PS_PRESENCE_QUERY = 0x06;
 export const PS_VOICE = 0x07;
+export const PS_REJECTED = 0x08;
 
 export function encodePubsubUpdate(docId: string, update: Uint8Array): Uint8Array {
   const body = frameDocPayload(docId, update);
@@ -423,6 +454,15 @@ export function encodePubsubVoice(frame: Uint8Array): Uint8Array {
   return out;
 }
 
+/** A read-only connection's edit was dropped; addressed to `userId` only. */
+export function encodePubsubRejected(userId: string, docId: string, reason: "read_only"): Uint8Array {
+  const body = enc.encode(JSON.stringify({ userId, docId, reason }));
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_REJECTED;
+  out.set(body, 1);
+  return out;
+}
+
 /** Ask every connection in the vault to re-announce its presence — sent when a
  *  client joins so it learns who's already viewing what (stateless: no instance
  *  holds the whole roster, so newcomers pull it via a re-announce round). */
@@ -437,7 +477,8 @@ export type PubsubMessage =
   | { type: "member-joined"; name: string }
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
-  | { type: "voice"; frame: Uint8Array; speakerId: string };
+  | { type: "voice"; frame: Uint8Array; speakerId: string }
+  | { type: "rejected"; userId: string; docId: string; reason: "read_only" };
 
 export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
   if (bytes.length < 1) return null;
@@ -483,6 +524,21 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
       // person talking, so a frame without one is unusable, not merely odd.
       if (!parsed?.header.u) return null;
       return { type: "voice", frame, speakerId: parsed.header.u };
+    }
+    case PS_REJECTED: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as {
+          userId?: unknown;
+          docId?: unknown;
+          reason?: unknown;
+        };
+        if (typeof p.userId !== "string" || typeof p.docId !== "string" || p.reason !== "read_only") {
+          return null;
+        }
+        return { type: "rejected", userId: p.userId, docId: p.docId, reason: "read_only" };
+      } catch {
+        return null;
+      }
     }
     default:
       return null;

@@ -128,7 +128,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 - What travels: binary change records, never whole files. Each device rebuilds its own `.md`.
 - Deleting a note's file on disk (in Finder, with `rm`, or by asking an AI to tidy the vault) while
   Baalda is open does remove it for the team, a couple of seconds later. No extra local copy is
-  kept; the note's Version History on the server still has it.
+  kept; the note goes to the vault's Trash for 30 days, where anyone who can edit it can Restore it.
+- Deleted notes stay in the vault's Trash for 30 days. Edits a teammate made offline still reach a
+  deleted note when they reconnect, so nothing typed offline is lost, and a restored note carries
+  them. After 30 days the note is removed for good.
   A delete of a note this device had not finished uploading is never propagated. Removing a lot at
   once (more than a fifth of the vault) makes Baalda ask first: "Delete them for everyone, or
   restore them?" If the whole vault folder disappeared (an unmounted drive), nothing is deleted and
