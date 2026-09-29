@@ -2739,6 +2739,15 @@ export class ApiClient {
     return data.blobs ?? [];
   }
 
+  /** Ids of tree files this vault deleted (`file_tombstones`), newest first. */
+  async listFileTombstones(vaultId: string): Promise<string[]> {
+    const { data } = await this.request<{ ids: string[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/file-tombstones`,
+    );
+    return Array.isArray(data.ids) ? data.ids : [];
+  }
+
   /** How many attachment/file bytes this vault stores on the server. */
   async vaultStorage(vaultId: string): Promise<VaultStorageUsage> {
     const { data } = await this.request<VaultStorageUsage>(

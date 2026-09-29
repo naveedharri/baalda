@@ -61,6 +61,7 @@ import {
  *   POST /api/blobs/:id/parts                more presigned part URLs (multipart)
  *   POST /api/blobs/:id/complete             verify what landed and publish the blob
  *   GET  /api/vaults/:vaultId/blobs          list metadata
+ *   GET  /api/vaults/:vaultId/file-tombstones ids of deleted tree files
  *   GET  /api/blobs/:id                      download bytes with the stored mime
  *   GET  /api/blobs/:id/url                  a URL to fetch the bytes from
  *   HEAD /api/blobs/:id                      the same headers, no body
@@ -1476,6 +1477,33 @@ blobRoutes.put("/vaults/:vaultId/blobs/:blobId/text", async (c) => {
   );
 
   return c.body(null, 204);
+});
+
+// ── file tombstones ───────────────────────────────────────────────────────
+// The ids of registered tree files this vault deleted (`file_tombstones`,
+// migration 029). A device that still holds one of these files under the SAME
+// id is holding a stale copy: without this list its mirror sees bytes the
+// server lacks and uploads them again, undoing the delete for everyone (#215).
+// Ids only — a client can match an id it already persisted and learns nothing
+// else. Newest first, capped.
+export const FILE_TOMBSTONES_CAP = 5000;
+blobRoutes.get("/vaults/:vaultId/file-tombstones", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+  const vaultId = c.req.param("vaultId");
+  const org = await vaultOrg(vaultId);
+  if (!org) return c.json({ error: "Unknown vault" }, 404);
+  if (!(await orgRole(org, session.userId))) {
+    return c.json({ error: "Not a member of this vault" }, 403);
+  }
+  const { rows } = await pool.query<{ id: string }>(
+    `SELECT id FROM file_tombstones
+      WHERE vault_id = $1
+        AND NOT EXISTS (SELECT 1 FROM files f WHERE f.id = file_tombstones.id)
+      ORDER BY deleted_at DESC LIMIT $2`,
+    [vaultId, FILE_TOMBSTONES_CAP],
+  );
+  return c.json({ ids: rows.map((r) => r.id) });
 });
 
 // ── list ──────────────────────────────────────────────────────────────────

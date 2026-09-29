@@ -5705,6 +5705,10 @@ export class SyncManager implements InboundHost {
       // The recovery copy a server version replaces a divergent local one after.
       keepLocalCopy: (relPath) =>
         ipc.copyToTrash(relPath, trashStamp(), epoch),
+      // A teammate deleted the file: a stale local copy goes to the trash
+      // instead of being uploaded back (#215).
+      listFileTombstones: () => api.listFileTombstones(vaultId),
+      removeLocal: (relPath) => ipc.deleteFile(relPath, epoch).then(() => undefined),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => this.registry.forgetFileId(relPath),
