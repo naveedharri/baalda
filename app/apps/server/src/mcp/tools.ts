@@ -5,6 +5,8 @@ import {
   createNote,
   deleteFolder,
   deleteNote,
+  deleteFileTool,
+  moveFileTool,
   editNote,
   getAccessDefaultTool,
   listAttachments,
@@ -511,6 +513,35 @@ export const TOOLS: McpTool[] = [
     },
     annotations: { destructiveHint: true },
     handler: (ctx, a) => deleteNote(ctx, reqStr(a, "docId")),
+  },
+  {
+    name: "delete_file",
+    description:
+      "Delete a non-note file (pdf, image, office document, csv...) by its id from list_attachments. Removes it for everyone; teammates' stale copies are set aside rather than re-uploaded.",
+    inputSchema: {
+      type: "object",
+      properties: { fileId: S("File id (the docId list_attachments reports)") },
+      required: ["fileId"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: true },
+    handler: (ctx, a) => deleteFileTool(ctx, reqStr(a, "fileId")),
+  },
+  {
+    name: "move_file",
+    description:
+      "Rename or move a non-note file, keeping its id. path is the new vault-relative path; its directory must be an existing folder.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: S("File id (the docId list_attachments reports)"),
+        path: S("New vault-relative path, e.g. 'Archive/report.pdf'"),
+      },
+      required: ["fileId", "path"],
+      additionalProperties: false,
+    },
+    annotations: { idempotentHint: true },
+    handler: (ctx, a) => moveFileTool(ctx, reqStr(a, "fileId"), reqStr(a, "path")),
   },
   {
     name: "create_folder",
