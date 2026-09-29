@@ -44,7 +44,7 @@ client can read and write the vault the same way a person does — gated by the
 - **Tools:** `list_vaults`, `list_folders`, `create_folder`, `move_folder`,
   `delete_folder`, `list_notes`, `read_note`, `search_notes`, `create_note`,
   `update_note`, `append_note`, `edit_note`, `move_note`, `delete_note`,
-  `list_attachments`, `read_attachment_text`, plus the access tools
+  `list_attachments`, `read_attachment_text`, `move_file`, `delete_file`, plus the access tools
   `get_access_default`, `set_access_default`, `list_resource_access`,
   `manage_access`.
 - **Writes** go through the Hocuspocus sync server: if the note is open they

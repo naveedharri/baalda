@@ -143,7 +143,10 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   a banner asks you to reopen it from its new location.
 - Structure changes made while Baalda is closed (renames, moves, deletes) are not applied: edits
   are merged, but old names come back and new names appear as new notes. Baalda shows a notice
-  when it sees this. Keep Baalda open when reorganising.
+  when it sees this. Keep Baalda open when reorganising. The same applies to other files
+  (PDFs, images, office documents). When a teammate deletes a file, a stale copy on another
+  device is moved into that vault's local trash (`.context/trash`) instead of being uploaded
+  again.
 - Multiple vaults per account. Switch between them from the account menu.
 
 ## Team collaboration
@@ -205,7 +208,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   files; Baalda notices and syncs. A human typing and an AI rewriting the same note merge.
 - **Remote / cloud agents** use the built-in **MCP endpoint** (`<server>/api/mcp`). Create a
   token in Vault Settings → MCP. Tools: list vaults, list/create/move/delete folders,
-  list/read/search/create/update/append/move/delete notes. The AI is bound by the exact same
+  list/read/search/create/update/append/edit/move/delete notes, list files and read their
+  extracted text, and move/rename/delete files. The AI is bound by the exact same
   permissions as the person who created the token. If a note is open, you watch the AI type.
 - Bring your own model. Baalda ships no AI model, no API key requirement, and no chat panel.
 - **Planned**: in-app AI panel, AI as a live collaboration peer, richer vector search.

@@ -162,13 +162,21 @@ Two things stay off-limits to outside writers:
   restored file re-registers as a brand-new note.
 - **Deletes at startup are not propagated.** Until the vault channel is connected *and* a structure
   pull has completed, a missing file is read as "the disk isn't ready yet" and the note is
-  re-materialized (with its content, when this device has it) rather than deleted.
+  re-materialized (with its content, when this device has it) rather than deleted. The user is
+  told (`restoredFromServer` in the reconcile summary). Neither a note nor a binary delete makes a
+  `.context/trash` copy: the note's text survives in the CRDT and the server's trash, and a
+  binary's only other copy is the server's.
+- **A deleted non-note file stays deleted (#215).** `DELETE /api/files/:id` tombstones the id
+  (`file_tombstones`); `GET /api/vaults/:id/file-tombstones` lists those ids, and the attachment
+  mirror (`planBinarySync` `toTrash`) moves a local file this device knows by a tombstoned id into
+  `.context/trash` instead of uploading it back. Matching is by id only, so a new file saved at the
+  same path still uploads.
 
 ### External structure changes (#221)
 
 The rule is simple: **content edits on disk are fine at any time; structure changes (rename,
 move, delete) need the app open** — or go through the sidebar, or MCP `move_note` /
-`move_folder` / `delete_note` / `delete_folder`. Symbolic links inside a vault are not supported.
+`move_folder` / `delete_note` / `delete_folder` / `move_file` / `delete_file`. Symbolic links inside a vault are not supported.
 While the app is open:
 
 - **A folder moved outside the app** arrives from the OS as one event for the folder (old path
