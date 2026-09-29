@@ -309,6 +309,49 @@ export function writeEditorMeasure(measure: EditorMeasure): void {
   }
 }
 
+const EDITOR_FONT_SIZE_KEY = "context.editorFontSize";
+/** The note editor's text size in px. 16px is `--fs-lg`, the size the editor
+ *  always used, so a device that never chose sees no change. Only the editor
+ *  reads it (via `--editor-font-size`); the sidebar and chrome do not. */
+export const EDITOR_FONT_SIZE_DEFAULT = 16;
+export const EDITOR_FONT_SIZE_MIN = 12;
+export const EDITOR_FONT_SIZE_MAX = 24;
+export const EDITOR_FONT_SIZE_STEP = 1;
+
+/** Round to whole px and clamp; NaN (a corrupted write) falls back to the default. */
+export function clampEditorFontSize(px: number): number {
+  if (Number.isNaN(px)) return EDITOR_FONT_SIZE_DEFAULT;
+  const snapped = Math.round(px / EDITOR_FONT_SIZE_STEP) * EDITOR_FONT_SIZE_STEP;
+  return Math.min(EDITOR_FONT_SIZE_MAX, Math.max(EDITOR_FONT_SIZE_MIN, snapped));
+}
+
+export function readEditorFontSize(): number {
+  try {
+    const raw = localStorage.getItem(EDITOR_FONT_SIZE_KEY);
+    if (raw === null || raw.trim() === "") return EDITOR_FONT_SIZE_DEFAULT;
+    return clampEditorFontSize(Number(raw));
+  } catch {
+    return EDITOR_FONT_SIZE_DEFAULT;
+  }
+}
+
+export function writeEditorFontSize(px: number): void {
+  try {
+    localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(clampEditorFontSize(px)));
+  } catch {
+    /* localStorage unavailable — the choice stays in-memory only */
+  }
+}
+
+/** Publish the size as the token the editor theme and skeleton read. */
+export function applyEditorFontSize(px: number): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(
+    "--editor-font-size",
+    `${clampEditorFontSize(px)}px`,
+  );
+}
+
 /**
  * Show the line-number gutter. OFF by default, unlike everything else here: the
  * gutter takes real width from the prose column, and a second brain is a place

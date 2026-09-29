@@ -20,6 +20,9 @@
 // what nothing foresaw, including a lazy chunk that fails to load.
 
 import { lazy, Suspense, useState } from "react";
+import * as ipc from "../lib/ipc";
+import { openImageLightbox } from "../lib/imageLightbox";
+import { clampZoom, zoomIn, zoomKeyAction, zoomOut } from "../lib/imageZoom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useStore } from "../store";
 import { viewerFor, type ViewerKind } from "../lib/formats";
@@ -51,24 +54,71 @@ const LAZY_LEAVES: Partial<Record<ViewerKind, React.ComponentType<ViewerProps>>>
 /** Image and PDF: streamed straight off the asset protocol, no chunk. */
 function NativeView({ path, abs, src, kind }: ViewerProps & { kind: "image" | "pdf" }) {
   const [failed, setFailed] = useState(false);
+  // Image zoom for Cmd+= / Cmd+- / Cmd+0 while the preview is focused. 1 =
+  // fit to the pane (the CSS max-width/height), larger scrolls the body.
+  const [zoom, setZoom] = useState(1);
   const name = path.split("/").pop() ?? path;
 
   if (failed) {
     return <FileCard path={path} abs={abs} reason={`Couldn't load ${name}.`} />;
   }
-  return (
-    <div className={`file-preview file-preview-${kind}`} data-viewer={kind}>
-      <div className="file-preview-body">
-        {kind === "image" ? (
-          <img
-            className="file-preview-img"
-            src={src}
-            alt={name}
-            onError={() => setFailed(true)}
-          />
-        ) : (
+  if (kind === "pdf") {
+    return (
+      <div className="file-preview file-preview-pdf" data-viewer="pdf">
+        <div className="file-preview-body">
           <iframe className="file-preview-frame" src={src} title={name} />
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="file-preview file-preview-image"
+      data-viewer="image"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        const action = zoomKeyAction(e);
+        if (!action) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setZoom((z) => (action === "reset" ? 1 : action === "in" ? zoomIn(z) : zoomOut(z)));
+      }}
+    >
+      <div className="file-preview-toolbar">
+        {zoom !== 1 && (
+          <button type="button" className="ghost-pill sm" onClick={() => setZoom(1)}>
+            {Math.round(clampZoom(zoom) * 100)}%
+          </button>
         )}
+        <button
+          type="button"
+          className="ghost-pill sm"
+          onClick={() => void ipc.openInFileManager(abs)}
+        >
+          Open externally
+        </button>
+        <button
+          type="button"
+          className="ghost-pill sm"
+          onClick={() => void ipc.revealInFileManager(abs)}
+        >
+          {ipc.revealLabel()}
+        </button>
+      </div>
+      <div className="file-preview-body">
+        <img
+          className="file-preview-img"
+          src={src}
+          alt={name}
+          title="Click to view full screen"
+          style={
+            zoom === 1
+              ? undefined
+              : { maxWidth: "none", maxHeight: "none", width: `${zoom * 100}%` }
+          }
+          onClick={() => openImageLightbox(src, name)}
+          onError={() => setFailed(true)}
+        />
       </div>
     </div>
   );

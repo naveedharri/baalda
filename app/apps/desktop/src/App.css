@@ -8113,3 +8113,48 @@ button.secondary:active:not(:disabled),
   font-size: var(--fs-xs);
   line-height: var(--lh-body);
 }
+
+/* Image file preview: open/reveal actions above the image (#238). */
+.file-preview-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) 0;
+}
+.file-preview-image:focus {
+  outline: none;
+}
+.file-preview-image .file-preview-img {
+  cursor: zoom-in;
+}
+.cm-md-img {
+  cursor: zoom-in;
+}
+
+/* Image lightbox (lib/imageLightbox.ts): wheel/pinch zoom, drag pan, Esc or
+   backdrop click closes. Above modals (300). */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: grab;
+  touch-action: none;
+}
+.image-lightbox.dragging {
+  cursor: grabbing;
+}
+.image-lightbox:focus {
+  outline: none;
+}
+.image-lightbox-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  user-select: none;
+  transform-origin: center center;
+  will-change: transform;
+}
