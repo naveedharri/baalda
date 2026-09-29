@@ -43,6 +43,7 @@ const TABLES = [
   "session",
   "account",
   "verification",
+  "signin_throttle",
   '"user"',
 ];
 

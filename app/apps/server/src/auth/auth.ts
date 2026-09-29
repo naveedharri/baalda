@@ -9,6 +9,7 @@ import { canAddMember, canCreateOrganization } from "../billing/entitlements.js"
 import { announceMemberJoined } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
+import { clearThrottle } from "./signin-throttle.js";
 
 /**
  * Better Auth (spec 04 §1/§2).
@@ -136,6 +137,11 @@ export const auth = betterAuth({
     // A reset is what you do when you suspect someone else has the old
     // password; leaving their sessions alive would defeat it.
     revokeSessionsOnPasswordReset: true,
+    // A completed reset proves ownership of the address: lift any sign-in
+    // lockout on it (#237, auth/signin-throttle.ts).
+    onPasswordReset: async ({ user }: { user: { email: string } }) => {
+      await clearThrottle(user.email);
+    },
   },
   ...(mailerOn
     ? {

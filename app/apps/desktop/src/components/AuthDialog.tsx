@@ -19,6 +19,7 @@ import {
 import { readRememberPassword, saveRememberedPassword, writeRememberPassword } from "../lib/rememberedPassword";
 import { useRememberedPassword } from "../lib/useRememberedPassword";
 import { passwordResetFailureMessage } from "../lib/resetFlow";
+import { signInRetryAfter, throttleMessage } from "../lib/signinThrottle";
 import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { serverFailureMessage } from "./serverFailureMessage";
@@ -170,6 +171,21 @@ export function AuthDialog({
     }),
   );
   const [password, setPassword] = useRememberedPassword(serverUrl, email, mode, step, rememberPassword);
+  // Sign-in lockout (#237): when the server answers 429 we hold the button
+  // until Retry-After passes, with a live countdown under the password field.
+  const [lockedUntil, setLockedUntil] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (lockedUntil == null) return;
+    const id = window.setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (t >= lockedUntil) setLockedUntil(null);
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [lockedUntil]);
+  const lockSeconds = lockedUntil != null ? Math.max(0, Math.ceil((lockedUntil - now) / 1000)) : 0;
+  const signInLocked = mode === "sign-in" && lockSeconds > 0;
   // Revealed by the "Your own server" card rather than shown alongside it: an
   // input sitting under two options reads as belonging to both.
   const [ownOpen, setOwnOpen] = useState(false);
@@ -308,7 +324,14 @@ export function AuthDialog({
       if (mode === "sign-in") {
         try {
           await useStore.getState().signIn(email.trim(), password);
+          setLockedUntil(null);
         } catch (err) {
+          const wait = signInRetryAfter(err);
+          if (wait != null) {
+            setNow(Date.now());
+            setLockedUntil(Date.now() + wait * 1000);
+            throw err;
+          }
           // Dev convenience: the prefilled test account self-provisions on a
           // fresh database instead of dead-ending on "User not found".
           if (import.meta.env.DEV && email.trim() === "test@context.local") {
@@ -670,6 +693,11 @@ export function AuthDialog({
                     left, the way out on the right. "Forgot password?" kept its
                     right edge — it still reads as belonging to the field above
                     rather than as a second submit action. */}
+                {signInLocked && (
+                  <div className="auth-error" role="alert">
+                    {throttleMessage(lockSeconds)}
+                  </div>
+                )}
                 <div className="auth-form-options">
                   <label className="auth-remember">
                     <Switch
@@ -696,7 +724,7 @@ export function AuthDialog({
                 <button
                   className={`primary${busy ? " is-busy" : ""}`}
                   type="submit"
-                  disabled={busy || googleBusy}
+                  disabled={busy || googleBusy || signInLocked}
                   aria-busy={busy || undefined}
                 >
                   <span className="async-btn-label">
@@ -760,7 +788,7 @@ export function AuthDialog({
                 )}
               </div>
             )}
-            {mode !== "reset" && authError && <div className="auth-error">{authError}</div>}
+            {mode !== "reset" && authError && !signInLocked && <div className="auth-error">{authError}</div>}
             {/* The one trap this form can't detect: an account created THROUGH
                 Google has no password at all, so email sign-in answers "Invalid
                 email or password" and sign-up answers "already exists" — a dead end

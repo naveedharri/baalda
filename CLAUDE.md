@@ -369,6 +369,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   bound to server URL and email. Logout clears the session but retains this saved
   login; turning the switch off deletes it. The old email-only preference does
   not opt existing users into password storage. No password enters localStorage.
+  Failed email sign-ins are throttled per lowercased email string (`auth/signin-throttle.ts`,
+  Postgres `signin_throttle`, migration 036; wrapped around `POST /api/auth/sign-in/email` in
+  `http/app.ts`): 5 failures in 15 min lock the account from ANY IP with 429 + `Retry-After`,
+  1 → 5 → 15 min on repeat lockouts; success and `onPasswordReset` clear it. Unknown addresses
+  are counted identically, so the response never reveals whether an account exists (#237).
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
   `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
