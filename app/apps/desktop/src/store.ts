@@ -52,6 +52,9 @@ import {
   readAutomaticItemColors,
   readMentionSound,
   readEditorMeasure,
+  readEditorFontSize,
+  writeEditorFontSize,
+  applyEditorFontSize,
   readLineNumbers,
   readPropertiesMode,
   readTreeSort,
@@ -500,6 +503,8 @@ interface AppStore {
   /** How wide the editor's prose column runs: a measure in `ch`, or "full" for
    *  the whole pane. Device-local (Settings → Appearance). */
   editorMeasure: EditorMeasure;
+  /** Note editor text size in px (Settings → Appearance). Device-local. */
+  editorFontSize: number;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
@@ -667,6 +672,7 @@ interface AppStore {
   setMentionSound: (enabled: boolean) => void;
   setPropertiesMode: (mode: PropertiesMode) => void;
   setEditorMeasure: (measure: EditorMeasure) => void;
+  setEditorFontSize: (px: number) => void;
   setLineNumbers: (on: boolean) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
@@ -1826,6 +1832,7 @@ export const useStore = create<AppStore>((set, get) => ({
   automaticItemColors: readAutomaticItemColors(null),
   propertiesMode: readPropertiesMode(),
   editorMeasure: readEditorMeasure(),
+  editorFontSize: readEditorFontSize(),
   lineNumbers: readLineNumbers(),
   pendingTitleFocus: null,
   treeSort: readTreeSort(),
@@ -3040,6 +3047,11 @@ export const useStore = create<AppStore>((set, get) => ({
   setEditorMeasure: (measure) => {
     writeEditorMeasure(measure);
     set({ editorMeasure: measure });
+  },
+  setEditorFontSize: (px) => {
+    writeEditorFontSize(px);
+    applyEditorFontSize(px);
+    set({ editorFontSize: px });
   },
 
   setLineNumbers: (on) => {
@@ -4533,3 +4545,7 @@ if (import.meta.hot) {
     window.location.reload();
   });
 }
+
+// The editor text size is a CSS token on :root, so it must be published once at
+// startup (after restart) as well as on every change.
+applyEditorFontSize(useStore.getState().editorFontSize);

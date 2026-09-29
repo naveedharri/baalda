@@ -505,7 +505,7 @@
 .editor-skeleton {
   position: absolute;
   inset: 0;
-  font-size: var(--fs-lg);
+  font-size: var(--editor-font-size, var(--fs-lg));
   padding: var(--sp-8) var(--editor-pad-x);
   display: flex;
   flex-direction: column;
