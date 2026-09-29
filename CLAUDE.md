@@ -239,6 +239,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   base sha persisted as `config.json fileBases`: local==base ⇒ download the teammate's version,
   server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
   changed ⇒ server canonical, local copy to `.context/trash` (`copy_to_trash`) first — never a flip.
+  A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
+  ids from `file_tombstones` with no live row) is `toTrash`: copied to `.context/trash`, removed, its id
+  forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only; a
+  failed listing means no suppression that pass.
   Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
   notes, then pull the registry and use the HTTP bulk downloader. Bootstrap pages are
   gzip without `Content-Encoding`; the desktop explicitly inflates before decoding.
@@ -487,7 +491,9 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   (`beforeSync` hook, throttled).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text`.
+  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text/move_file/delete_file`.
+  `delete_file` shares `deleteRegisteredFile` (`http/routes/registry.ts`) with `DELETE /api/files/:id`;
+  `move_file` re-registers the id at a new path through `registerFile`, like `POST /api/files`.
   `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
   optional `expectedRevision` and refuse a stale write (the check runs under the doc writer's per-doc
   lock, so check + apply are atomic). `edit_note` applies exact-anchor replace/insert/delete ops (an

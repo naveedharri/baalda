@@ -994,21 +994,49 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const id = c.req.param("id");
+    const out = await deleteRegisteredFile(session.userId, id);
+    if (out.status === "gone") return c.body(null, 204);
+    if (out.status === "not_member") return c.json({ error: "Not a member of this vault" }, 403);
+    if (out.status === "forbidden") return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    changed(c, out.vaultId);
+    return c.body(null, 204);
+  });
+
+  return registryRoutes;
+}
+
+export type FileDeleteResult =
+  | { status: "gone" }
+  | { status: "not_member" }
+  | { status: "forbidden" }
+  | { status: "deleted"; vaultId: string; path: string };
+
+/**
+ * Delete a registered tree file — row, bytes, tombstone. Shared by
+ * `DELETE /api/files/:id` and MCP `delete_file`, so both use one gate.
+ * `allowedOrg`: an MCP token is scoped to one org; a row in another org
+ * answers `not_member`.
+ */
+export async function deleteRegisteredFile(
+  userId: string,
+  id: string,
+  allowedOrg?: string,
+): Promise<FileDeleteResult> {
     const { rows } = await pool.query<{ vault_id: string; path: string }>(
       "SELECT vault_id, path FROM files WHERE id = $1",
       [id],
     );
     const row = rows[0];
-    if (!row) return c.body(null, 204);
+    if (!row) return { status: "gone" };
     const org = await vaultOrg(row.vault_id);
-    if (!org || !(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this vault" }, 403);
+    if (!org || (allowedOrg && org !== allowedOrg) || !(await orgRole(org, userId))) {
+      return { status: "not_member" };
     }
     // The SAME gate that let these bytes be uploaded decides who may take them
     // away (`canWriteBlob` → `canCreateIn` on the file's folder): a Read-only
     // vault, a locked share or a sealed posture refuses both ends.
-    if (!(await canWriteBlob(session.userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
-      return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    if (!(await canWriteBlob(userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
+      return { status: "forbidden" };
     }
 
     // Bytes first, row second. The other order would leave blobs whose `doc_id`
@@ -1023,10 +1051,5 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     await tombstoneFile(pool, id);
     await pool.query("DELETE FROM files WHERE id = $1", [id]);
     console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
-    changed(c, row.vault_id);
-    return c.body(null, 204);
-  });
-
-  return registryRoutes;
+    return { status: "deleted", vaultId: row.vault_id, path: row.path };
 }
-

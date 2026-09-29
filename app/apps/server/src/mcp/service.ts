@@ -44,6 +44,8 @@ import {
 } from "../permissions/access-management.js";
 import { buildAccessContext, resolveAccessForUser } from "../permissions/resolver.js";
 import { softDeleteSet } from "../trash/retention.js";
+import { deleteRegisteredFile } from "../http/routes/registry.js";
+import { registerCtx, registerFile } from "../registry/batch-ops.js";
 
 /**
  * The CRUD operations the MCP exposes, each one gated by the SAME ACL the rest
@@ -949,6 +951,41 @@ export async function deleteNote(ctx: McpContext, docId: string) {
   // note stays listed in every open sidebar.
   ctx.onRegistryChanged?.(note.vault_id);
   return { deleted: docId };
+}
+
+// ── tree files (non-note binaries) ─────────────────────────────────────────
+
+/** Delete a tree file through the SAME gate as `DELETE /api/files/:id`. */
+export async function deleteFileTool(ctx: McpContext, fileId: string) {
+  const out = await deleteRegisteredFile(ctx.auth.userId, fileId, ctx.auth.organizationId);
+  if (out.status === "gone") throw new McpToolError(`Unknown file: ${fileId}`);
+  if (out.status === "not_member") throw new McpToolError("This file is outside the scope of this token");
+  if (out.status === "forbidden") throw new McpToolError("You do not have edit access to this file");
+  ctx.disconnectDoc(out.vaultId, fileId);
+  ctx.onRegistryChanged?.(out.vaultId);
+  return { deleted: fileId, path: out.path };
+}
+
+/**
+ * Rename or move a tree file, keeping its id: the same re-registration
+ * (`registerFile` with the file's id and a new path) `POST /api/files` does.
+ */
+export async function moveFileTool(ctx: McpContext, fileId: string, path: string) {
+  const { rows } = await pool.query<{ vault_id: string; path: string }>(
+    "SELECT vault_id, path FROM files WHERE id = $1",
+    [fileId],
+  );
+  const row = rows[0];
+  if (!row) throw new McpToolError(`Unknown file: ${fileId}`);
+  await requireVaultInScope(ctx.auth, row.vault_id);
+  const out = await registerFile(registerCtx(row.vault_id, ctx.auth.userId), {
+    path,
+    docId: fileId,
+    folderId: null,
+  });
+  if (out.status === "error") throw new McpToolError(out.message ?? "move refused");
+  if (out.wrote) ctx.onRegistryChanged?.(row.vault_id);
+  return { fileId: out.row.id, path: out.row.path, folderId: out.row.folderId };
 }
 
 // ── search ────────────────────────────────────────────────────────────────
