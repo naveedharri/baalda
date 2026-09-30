@@ -110,12 +110,16 @@ describe("a new vault's default access", () => {
   it("keeps a later member locked out of a vault the owner set to Private", async () => {
     const vault = await createVault(owner, org, "Notes");
     const note = await seedNote(vault.id, null, "secret.md", owner.userId);
-    // Access panel → Private revokes exactly this row.
+    // Access panel → Private revokes exactly this row…
     await pool.query(
       `DELETE FROM shares
         WHERE resource_type = 'vault' AND resource_id = $1 AND principal_type = 'org'`,
       [org],
     );
+    // …and New-member access is its own setting (it starts Open with the
+    // vault), so a fully locked vault sets that to Private too.
+    const res = await req(owner, "PUT", `/api/orgs/${org}/access-default`, { mode: "private" });
+    expect(res.status).toBe(200);
 
     const joiner = await signUp("late@default-access.test");
     await seedMember(org, joiner.userId, "member");
