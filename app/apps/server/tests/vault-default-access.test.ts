@@ -10,9 +10,10 @@ import { effectivePermission } from "../src/permissions/resolver.js";
 /**
  * The access a vault has the moment it is created.
  *
- * A vault is created SHARED for its creator and current team, while the
- * future-member default starts Private. Joining later therefore does not expose
- * content that predates the membership until an owner/admin shares it.
+ * A vault is created SHARED — for its creator, its current team AND anyone
+ * who joins later: the future-member default starts Open alongside the
+ * org-wide `edit` grant, so a teammate invited next week sees the notes that
+ * already exist (a Private join default used to hide them).
  *
  * The tests below pin both halves of that: the default is applied at creation,
  * and it is applied ONLY at creation, so an owner who later chooses Private
@@ -71,14 +72,23 @@ describe("a new vault's default access", () => {
     expect(rows[0].permission).toBe("edit");
   });
 
-  it("keeps the default-Private future member from an existing note", async () => {
+  it("opens the vault to people who join later", async () => {
+    await createVault(owner, org, "Notes");
+    const { rows } = await pool.query<{ join_default: string }>(
+      "SELECT join_default FROM organization_access_settings WHERE organization_id = $1",
+      [org],
+    );
+    expect(rows[0]?.join_default).toBe("open");
+  });
+
+  it("lets a later joiner read a note that existed before they joined", async () => {
     const vault = await createVault(owner, org, "Notes");
     const note = await seedNote(vault.id, null, "owners-note.md", owner.userId);
 
     const joiner = await signUp("joiner@default-access.test");
     await seedMember(org, joiner.userId, "member");
 
-    expect(await effectivePermission(joiner.userId, note)).toBe("none");
+    expect(await effectivePermission(joiner.userId, note)).toBe("edit");
   });
 
   it("does not re-grant when a second collection is added", async () => {
