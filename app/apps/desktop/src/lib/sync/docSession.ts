@@ -1809,7 +1809,10 @@ export class SyncManager implements InboundHost {
       if (!mapping) {
         // Possibly the arrival half of a rename whose departure half is pending.
         // Recorded either way; `drainDiskDeletes` decides by content hash.
-        if (this.pendingDiskDeletes.size > 0 || this.goneFolders.size > 0) {
+        if (
+          (this.pendingDiskDeletes.size > 0 || this.goneFolders.size > 0) &&
+          !this.registry.isOwnMove?.(relPath)
+        ) {
           this.renameCandidates.set(relPath, Date.now());
           queuedDelete = true; // hold the pull until the drain has decided
         }
@@ -1890,6 +1893,10 @@ export class SyncManager implements InboundHost {
    */
   private queueDiskDelete(scope: VaultScope, relPath: string): boolean {
     if (this.liveSince == null) return false;
+    // The registry moved this file itself (a same-path conflict copy): the path
+    // is still the teammate's note and is about to be materialized back. Neither
+    // a delete nor half of a rename — pairing it renamed their note on the server.
+    if (this.registry.isOwnMove?.(relPath)) return false;
     const mapping = this.registry.getMapping(relPath);
     if (!mapping) return false;
     if (!this.registry.isPushed(mapping.docId)) {
