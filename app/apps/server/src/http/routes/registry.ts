@@ -36,6 +36,7 @@ import {
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 import { softDeleteSet } from "../../trash/retention.js";
+import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
 
 /** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
  *  bound the vault channel's `ready.revoked` uses for the list it corroborates,
@@ -235,6 +236,19 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
          VALUES ($1, $2, 'vault', $2, 'org', $2, 'edit', $3)
          ON CONFLICT (resource_type, resource_id, principal_type, principal_id) DO NOTHING`,
         [randomUUID(), organizationId, session.userId],
+      );
+      // …and for the people invited LATER, too. The future-member default
+      // (migration 032) starts `private`, which hid every note that existed
+      // before someone joined: a vault that read as shared showed a new
+      // teammate an empty sidebar. `open` is what migration 033 maps an
+      // org-wide `edit` vault grant to, so the two halves now agree. Same
+      // first-collection rule as the grant: after creation the owner's
+      // choice (Access → Everyone) is the truth.
+      await pool.query(
+        `INSERT INTO organization_access_settings (organization_id, join_default)
+         VALUES ($1, 'open')
+         ON CONFLICT (organization_id) DO UPDATE SET join_default = 'open', updated_at = now()`,
+        [organizationId],
       );
     }
     return c.json({ id, organizationId, name, rootFrozen: false }, 201);
@@ -815,7 +829,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
     const { rows } = await pool.query(
-      "SELECT vault_id, rel_path, title, folder_id FROM notes WHERE id = $1 AND deleted_at IS NULL",
+      "SELECT vault_id, rel_path, title, folder_id, created_by FROM notes WHERE id = $1 AND deleted_at IS NULL",
       [id],
     );
     const row = rows[0];
@@ -832,6 +846,34 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       title: body.title,
       folderId,
     };
+    // Brakes on renaming someone else's note (see `registry/rename-guard.ts`):
+    // never to a conflict name, and never hundreds at a time.
+    if (
+      moveInput.relPath !== undefined &&
+      moveInput.relPath !== row.rel_path &&
+      row.created_by !== session.userId
+    ) {
+      if (gainsConflictSuffix(row.rel_path, moveInput.relPath)) {
+        return c.json(
+          {
+            error: "A teammate's note can't be renamed to a conflict name — keep yours as the copy",
+            code: "conflict_rename_refused",
+          },
+          409,
+        );
+      }
+      const budget = takeForeignRename(session.userId, row.vault_id);
+      if (!budget.ok) {
+        c.header("Retry-After", String(budget.retryAfter));
+        return c.json(
+          {
+            error: "Too many of your teammates' notes renamed at once — try again shortly",
+            code: "rename_rate_limited",
+          },
+          429,
+        );
+      }
+    }
     // Resolve the destination from the PATH first: a `relPath`-only move to
     // another folder (or out to the root) is a re-parent whether or not the
     // client also said `folderId`, and both gates below must judge the real one.

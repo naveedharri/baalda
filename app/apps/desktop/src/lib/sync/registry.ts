@@ -513,6 +513,22 @@ const INBOUND_REMOVE_CONCURRENCY = IPC_CONCURRENCY;
  */
 const PULL_PAGE_LIMIT = 5000;
 
+/** How long a registry-made move stays "ours" (see `RegistrySync.isOwnMove`):
+ *  comfortably past the watcher debounce and the 2.5 s disk-delete grace. */
+const OWN_MOVE_TTL_MS = 120_000;
+
+/**
+ * The most same-path conflicts one pass may resolve by renaming. A real one is
+ * two people creating the same note while apart — a handful at most. Hundreds
+ * in one pass means the premise is wrong (the files are the server's own notes,
+ * written here by this device), and renaming them all renamed a whole team's
+ * notes. Over the cap nothing is renamed; the paths are left exactly as they
+ * are and reported.
+ */
+function samePathConflictCap(listed: number): number {
+  return Math.max(10, Math.ceil(listed * 0.01));
+}
+
 /** Extensions treated as editable notes (reconciled to the server `notes` set).
  *  Images/PDFs surface in the tree but sync as embedded attachments, not notes.
  *
@@ -799,6 +815,19 @@ export class VaultRegistry {
    * first event that arrives for it.
    */
   private materialized = new Set<string>();
+  /**
+   * Paths the same-path conflict step ({@link resolveSamePathConflicts}) just
+   * moved a local file away from or onto, with the time it did so.
+   *
+   * That move is the registry's own, not the user's: the vacated path is still
+   * mapped to the teammate's note (and is about to be materialized back), and
+   * the conflict copy holds this device's bytes. Seen through the watcher it is
+   * indistinguishable from a rename made in Finder, so the disk-delete drain
+   * and {@link pairClosedAppRenames} paired the two halves and renamed the
+   * TEAMMATE'S note on the server to the conflict name — for everyone. See
+   * {@link isOwnMove}.
+   */
+  private ownMoves = new Map<string, number>();
   private unhydratedPlaceholders = new Set<string>();
   /** Everything that could not be registered in the last run. */
   private failed: RegistryFailure[] = [];
@@ -1066,6 +1095,7 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving — and a stale entry would
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
+    this.ownMoves.clear();
     this.unhydratedPlaceholders.clear();
     // The identical-config memo (see {@link writeConfig}) is only honest while
     // this registry is the last thing that wrote `.context/config.json`. A
@@ -1174,6 +1204,29 @@ export class VaultRegistry {
     // order of magnitude past that is stale by definition.
     if (this.materialized.size > 20_000) this.materialized.clear();
     this.materialized.add(relPath);
+  }
+
+  /**
+   * Did the registry itself move a file off or onto `relPath` moments ago (see
+   * {@link ownMoves})? Such a path is never a user delete and never one half of
+   * a user rename. Not consumed: the watcher may report the path more than once,
+   * so entries simply age out.
+   */
+  isOwnMove(relPath: string): boolean {
+    const at = this.ownMoves.get(relPath.toLowerCase());
+    if (at === undefined) return false;
+    if (Date.now() - at > OWN_MOVE_TTL_MS) {
+      this.ownMoves.delete(relPath.toLowerCase());
+      return false;
+    }
+    return true;
+  }
+
+  private noteOwnMove(from: string, to: string): void {
+    if (this.ownMoves.size > 20_000) this.ownMoves.clear();
+    const now = Date.now();
+    this.ownMoves.set(from.toLowerCase(), now);
+    this.ownMoves.set(to.toLowerCase(), now);
   }
 
   markUnhydratedPlaceholder(docId: string): void {
@@ -2354,6 +2407,11 @@ export class VaultRegistry {
     const out = new Map<string, string>();
     if (missingMapped.length === 0 || unmapped.length === 0 || !this.host?.localText) return out;
     const held = this.host.heldDocIds?.() ?? null;
+    // A conflict move the registry made itself is not a rename made while the
+    // app was closed; pairing it renamed the teammate's note (see `ownMoves`).
+    missingMapped = missingMapped.filter((p) => !this.isOwnMove(p));
+    unmapped = unmapped.filter((p) => !this.isOwnMove(p));
+    if (missingMapped.length === 0 || unmapped.length === 0) return out;
     const byHash = new Map<string, string | null>(); // null ⇒ ambiguous
     for (const p of unmapped) {
       let text: string;
@@ -2422,8 +2480,11 @@ export class VaultRegistry {
     serverNotes: RegisteredNote[],
     localNotePathCi: Map<string, string>,
     titles: () => Promise<ipc.NoteTitle[]>,
-  ): Promise<void> {
-    if (this.baselineDocs.size === 0) return;
+  ): Promise<Set<string>> {
+    /** Lower-cased paths held out of the pass: the teammate's note there must
+     *  NOT be bound to the local file, or the next egest writes over it. */
+    const held = new Set<string>();
+    if (this.baselineDocs.size === 0) return held;
     const candidates: Array<{ n: RegisteredNote; localPath: string; docId: string }> = [];
     for (const n of serverNotes) {
       const rp = noteRelPath(n);
@@ -2433,23 +2494,58 @@ export class VaultRegistry {
       if (localPath === undefined || this.byPath.has(localPath)) continue;
       candidates.push({ n, localPath, docId });
     }
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) return held;
     const localIds = new Map((await titles()).map((t) => [t.path.toLowerCase(), t.id] as const));
     const taken = new Set<string>([
       ...localNotePathCi.keys(),
       ...serverNotes.map((x) => (noteRelPath(x) ?? "").toLowerCase()),
     ]);
-    for (const { n, localPath, docId } of candidates) {
-      if (this.stopRun()) return;
-      if (localIds.get(localPath.toLowerCase()) === docId) continue; // the same note
-      if (await this.isEmptyOnDisk(localPath)) continue; // nothing of ours to lose
+    const conflicts: typeof candidates = [];
+    for (const c of candidates) {
+      if (this.stopRun()) return held;
+      if (localIds.get(c.localPath.toLowerCase()) === c.docId) continue; // the same note
+      // This device already holds the server note's own CRDT, so it has seen
+      // that note — the file at its path is that note, written here by the
+      // materialize step or the bulk download, not a create of ours made while
+      // apart. (A genuine same-path create is precisely a teammate's note this
+      // device has NEVER seen.) A reset re-downloads the whole vault, and every
+      // note whose index row had not been bound to its id yet used to land here.
+      try {
+        if ((await this.host?.localText?.(c.docId)) != null) continue;
+      } catch {
+        /* unreadable local store: fall through to the other checks */
+      }
+      if (await this.isEmptyOnDisk(c.localPath)) continue; // nothing of ours to lose
+      conflicts.push(c);
+    }
+    if (conflicts.length === 0) return held;
+    if (conflicts.length > samePathConflictCap(serverNotes.length)) {
+      // Refused wholesale, before anything moves. Held out of this pass exactly
+      // like a conflict whose rename failed: left on disk, never bound to the
+      // teammate's id, never renamed on either side.
+      console.warn(
+        `[registry] ${conflicts.length} same-path conflicts in one pass (cap ${samePathConflictCap(serverNotes.length)}) — renaming none`,
+      );
+      for (const { localPath } of conflicts) {
+        held.add(localPath.toLowerCase());
+        localNotePathCi.delete(localPath.toLowerCase());
+        this.aliasPaths.add(localPath);
+        this.recordFailure({
+          kind: "note", path: localPath, docId: null, code: null,
+          reason: "a teammate's note exists at the same path; too many such clashes at once to rename safely — left on disk, not synced",
+        });
+      }
+      return held;
+    }
+    for (const { n, localPath, docId } of conflicts) {
+      if (this.stopRun()) return held;
       const serverAt = Date.parse(noteCreatedAtOf(n) ?? "");
       let localAt = Number.POSITIVE_INFINITY; // unknown ⇒ local is the later one
       try {
         const st = await ipc.fileStat(localPath, this.epoch());
         localAt = st.created ?? st.modified ?? Number.POSITIVE_INFINITY;
       } catch (e) {
-        if (ipc.isVaultMismatch(e)) return;
+        if (ipc.isVaultMismatch(e)) return held;
       }
       const target = conflictPath(localPath, taken);
       taken.add(target.toLowerCase());
@@ -2473,6 +2569,7 @@ export class VaultRegistry {
         // Not `markMaterialized`: the watcher event for `target` is what gets
         // the renamed note registered as the NEW note it is, promptly.
         await ipc.renamePath(localPath, target, this.epoch());
+        this.noteOwnMove(localPath, target);
         localNotePathCi.delete(localPath.toLowerCase());
         reconcileReport.record({
           kind: "renamedConflict", path: localPath, newPath: target,
@@ -2481,9 +2578,10 @@ export class VaultRegistry {
             : "a teammate created a note at the same path first; this one was renamed",
         });
       } catch (e) {
-        if (ipc.isVaultMismatch(e)) return;
+        if (ipc.isVaultMismatch(e)) return held;
         // Could not move ours: never bind it to their id. Hold the path out of
         // this pass entirely, so the file is left exactly as it is.
+        held.add(localPath.toLowerCase());
         localNotePathCi.delete(localPath.toLowerCase());
         this.aliasPaths.add(localPath);
         this.recordFailure({
@@ -2492,6 +2590,7 @@ export class VaultRegistry {
         });
       }
     }
+    return held;
   }
 
   /**
@@ -3186,11 +3285,11 @@ export class VaultRegistry {
     // D4: two people created a note at the same path while apart. Resolve it
     // BEFORE anything binds the local file to the server's id, which would
     // otherwise egest the teammate's text over this device's bytes.
-    await this.resolveSamePathConflicts(serverNotes, localNotePathCi, titles);
+    const heldConflicts = await this.resolveSamePathConflicts(serverNotes, localNotePathCi, titles);
     if (this.stale()) return mutated;
     for (const n of serverNotes) {
       const rp = noteRelPath(n);
-      if (rp) resolveNote(rp, noteDocId(n));
+      if (rp && !heldConflicts.has(rp.toLowerCase())) resolveNote(rp, noteDocId(n));
     }
     // The note twin of the folder collapse above: a mapping under a spelling this
     // pass did not resolve, whose case-variant it DID, is the leftover of a

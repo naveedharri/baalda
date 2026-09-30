@@ -446,6 +446,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `GET /vaults/:id/locks` reports the Read-only posture as a synthetic `vault` lock row (id
   `vault:<orgId>`, `permission: 'locked'`) plus the **lifts** — the surviving org `edit` rows and the
   caller's own per-user `edit` rows — so the sidebar can padlock everything except what a grant frees.
+  Renaming a note someone ELSE created (`PATCH /api/notes/:id`, `registry/rename-guard.ts`) is
+  refused when it adds a `(conflict YYYY-MM-DD)` suffix (409 `conflict_rename_refused`) and
+  budgeted at 100 per (user, vault) per 5 min (429 `rename_rate_limited`) — a burst brake after one
+  client renamed 619 teammates' notes (2026-09-30). The desktop's same-path step also refuses to
+  treat a note it holds local CRDT for as a clash, renames none past `samePathConflictCap`, and marks
+  its own moves (`isOwnMove`) so the disk-delete drain and `pairClosedAppRenames` never pair them.
   Creates are gated by `permissions/http-gates.ts` `canCreateIn` (= `canEditFolder` in a folder;
   `vaultRootWritable` at the root, which a per-user vault-scoped `edit` lifts) and attachment uploads by
   `canWriteAttachment` (vault posture only — a blob has no folder to resolve a lock against); refusals
@@ -456,7 +462,8 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `join_default` (Private by default), per-membership snapshots and an ordered ACL revision, and
   migration 033 seeds that default ONCE from each existing vault's posture (org-wide vault grant
   `edit` → `open`, `view` → `readonly`, sealed or ungranted → `private`) so a Shared team sees no
-  change; vaults created later keep the Private default. Only
+  change. A vault created later gets `open` alongside its org-wide `edit` grant (`POST /api/vaults`,
+  first collection only), so people who join afterwards see the notes that already exist. Only
   content that already existed when someone joined uses that snapshot; a team grant written before
   a Private join stays hidden, while a later Everyone action has a newer revision and deliberately
   opens the selected subtree. Existing memberships have no snapshot and are unchanged. The default
