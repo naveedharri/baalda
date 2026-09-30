@@ -131,6 +131,8 @@ describe("MCP access-management HTTP surface", () => {
       "append_note",
       "edit_note",
       "delete_note",
+      "delete_file",
+      "move_file",
       "create_folder",
       "delete_folder",
       "move_note",

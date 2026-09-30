@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-auth/plugins";
 import { config } from "../config.js";
 import { auth } from "../auth/auth.js";
+import { throttledSignIn } from "../auth/signin-throttle.js";
 import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
@@ -211,6 +212,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/", createPublicPageRoutes({ docWriter: deps.docWriter }));
 
   // Better Auth owns everything under /api/auth (web-standard Request handler).
+  // Email sign-in passes the per-account failure throttle first (#237).
+  app.post("/api/auth/sign-in/email", (c) => throttledSignIn(c.req.raw, auth.handler));
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
   // Desktop Google sign-in handoff — deliberately NOT under /api/auth (the

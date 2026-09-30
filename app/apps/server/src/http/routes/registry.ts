@@ -36,6 +36,7 @@ import {
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 import { softDeleteSet } from "../../trash/retention.js";
+import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
 
 /** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
  *  bound the vault channel's `ready.revoked` uses for the list it corroborates,
@@ -235,6 +236,19 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
          VALUES ($1, $2, 'vault', $2, 'org', $2, 'edit', $3)
          ON CONFLICT (resource_type, resource_id, principal_type, principal_id) DO NOTHING`,
         [randomUUID(), organizationId, session.userId],
+      );
+      // …and for the people invited LATER, too. The future-member default
+      // (migration 032) starts `private`, which hid every note that existed
+      // before someone joined: a vault that read as shared showed a new
+      // teammate an empty sidebar. `open` is what migration 033 maps an
+      // org-wide `edit` vault grant to, so the two halves now agree. Same
+      // first-collection rule as the grant: after creation the owner's
+      // choice (Access → Everyone) is the truth.
+      await pool.query(
+        `INSERT INTO organization_access_settings (organization_id, join_default)
+         VALUES ($1, 'open')
+         ON CONFLICT (organization_id) DO UPDATE SET join_default = 'open', updated_at = now()`,
+        [organizationId],
       );
     }
     return c.json({ id, organizationId, name, rootFrozen: false }, 201);
@@ -815,7 +829,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
     const { rows } = await pool.query(
-      "SELECT vault_id, rel_path, title, folder_id FROM notes WHERE id = $1 AND deleted_at IS NULL",
+      "SELECT vault_id, rel_path, title, folder_id, created_by FROM notes WHERE id = $1 AND deleted_at IS NULL",
       [id],
     );
     const row = rows[0];
@@ -832,6 +846,34 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       title: body.title,
       folderId,
     };
+    // Brakes on renaming someone else's note (see `registry/rename-guard.ts`):
+    // never to a conflict name, and never hundreds at a time.
+    if (
+      moveInput.relPath !== undefined &&
+      moveInput.relPath !== row.rel_path &&
+      row.created_by !== session.userId
+    ) {
+      if (gainsConflictSuffix(row.rel_path, moveInput.relPath)) {
+        return c.json(
+          {
+            error: "A teammate's note can't be renamed to a conflict name — keep yours as the copy",
+            code: "conflict_rename_refused",
+          },
+          409,
+        );
+      }
+      const budget = takeForeignRename(session.userId, row.vault_id);
+      if (!budget.ok) {
+        c.header("Retry-After", String(budget.retryAfter));
+        return c.json(
+          {
+            error: "Too many of your teammates' notes renamed at once — try again shortly",
+            code: "rename_rate_limited",
+          },
+          429,
+        );
+      }
+    }
     // Resolve the destination from the PATH first: a `relPath`-only move to
     // another folder (or out to the root) is a re-parent whether or not the
     // client also said `folderId`, and both gates below must judge the real one.
@@ -994,21 +1036,49 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const id = c.req.param("id");
+    const out = await deleteRegisteredFile(session.userId, id);
+    if (out.status === "gone") return c.body(null, 204);
+    if (out.status === "not_member") return c.json({ error: "Not a member of this vault" }, 403);
+    if (out.status === "forbidden") return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    changed(c, out.vaultId);
+    return c.body(null, 204);
+  });
+
+  return registryRoutes;
+}
+
+export type FileDeleteResult =
+  | { status: "gone" }
+  | { status: "not_member" }
+  | { status: "forbidden" }
+  | { status: "deleted"; vaultId: string; path: string };
+
+/**
+ * Delete a registered tree file — row, bytes, tombstone. Shared by
+ * `DELETE /api/files/:id` and MCP `delete_file`, so both use one gate.
+ * `allowedOrg`: an MCP token is scoped to one org; a row in another org
+ * answers `not_member`.
+ */
+export async function deleteRegisteredFile(
+  userId: string,
+  id: string,
+  allowedOrg?: string,
+): Promise<FileDeleteResult> {
     const { rows } = await pool.query<{ vault_id: string; path: string }>(
       "SELECT vault_id, path FROM files WHERE id = $1",
       [id],
     );
     const row = rows[0];
-    if (!row) return c.body(null, 204);
+    if (!row) return { status: "gone" };
     const org = await vaultOrg(row.vault_id);
-    if (!org || !(await orgRole(org, session.userId))) {
-      return c.json({ error: "Not a member of this vault" }, 403);
+    if (!org || (allowedOrg && org !== allowedOrg) || !(await orgRole(org, userId))) {
+      return { status: "not_member" };
     }
     // The SAME gate that let these bytes be uploaded decides who may take them
     // away (`canWriteBlob` → `canCreateIn` on the file's folder): a Read-only
     // vault, a locked share or a sealed posture refuses both ends.
-    if (!(await canWriteBlob(session.userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
-      return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
+    if (!(await canWriteBlob(userId, { vault_id: row.vault_id, rel_path: row.path, doc_id: id }))) {
+      return { status: "forbidden" };
     }
 
     // Bytes first, row second. The other order would leave blobs whose `doc_id`
@@ -1023,10 +1093,5 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     await tombstoneFile(pool, id);
     await pool.query("DELETE FROM files WHERE id = $1", [id]);
     console.info(`[registry] deleted file ${row.path} (${id}) and ${blobs} blob(s)`);
-    changed(c, row.vault_id);
-    return c.body(null, 204);
-  });
-
-  return registryRoutes;
+    return { status: "deleted", vaultId: row.vault_id, path: row.path };
 }
-

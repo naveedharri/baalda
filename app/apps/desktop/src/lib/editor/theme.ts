@@ -21,7 +21,7 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     color: "var(--text-primary)",
     backgroundColor: "var(--bg-surface)",
     fontFamily: "var(--font-body)",
-    fontSize: "var(--fs-lg)",
+    fontSize: "var(--editor-font-size, var(--fs-lg))",
   },
   // The prose column: a calm sheet, generous padding, comfortable measure.
   ".cm-scroller": {

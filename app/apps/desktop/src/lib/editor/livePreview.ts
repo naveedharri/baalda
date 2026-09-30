@@ -32,6 +32,7 @@
 // table, because their widget is editable (./table/TableWidget). Clicking a
 // cell types into the cell, so there is no source to fall back to.
 
+import { openImageLightbox } from "../imageLightbox";
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { type EditorState, StateField } from "@codemirror/state";
 import {
@@ -112,6 +113,13 @@ class ImageWidget extends WidgetType {
     img.className = "cm-md-img";
     img.src = this.src;
     if (this.alt) img.alt = this.alt;
+    // A plain click on the rendered image opens the lightbox. CodeMirror still
+    // sees the event (ignoreEvent → false), so cursor placement is unchanged;
+    // a modified click or a double-click stays an editing gesture.
+    img.addEventListener("click", (e) => {
+      if (e.detail > 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      openImageLightbox(this.src, this.alt);
+    });
     return img;
   }
   ignoreEvent() {

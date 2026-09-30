@@ -66,8 +66,11 @@ attach the file to a note. Do not expect syntax highlighting of a standalone `.p
 
 Local-only vaults have no such limits; these apply when syncing.
 
-**Attachments are never AI-edited or searched.** The MCP tools and the search index only see
-note text. An AI connected over MCP cannot read a PDF or DOCX you attached.
+**Attachments are never AI-edited.** An AI connected over MCP can list files and read the
+text Baalda extracted from them (PDF, DOCX and similar) with `list_attachments` and
+`read_attachment_text`, and search ranks file text beside notes. It can rename, move or delete a
+file (`move_file`, `delete_file`) with the same permissions as the token's owner, but it never
+receives or writes a file's raw bytes.
 
 ## Ready answers
 

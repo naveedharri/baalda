@@ -217,4 +217,51 @@ describe("MCP file tools", () => {
     });
     expect(notesOnly.data.results).toEqual([]);
   });
+
+  describe("delete_file / move_file (#215)", () => {
+    it("owner deletes a file: row gone, tombstoned, registry-changed broadcast", async () => {
+      rec.registryBroadcasts.length = 0;
+      const r = await call(ownerToken, "delete_file", { fileId: fileDoc });
+      expect(r.isError).toBe(false);
+      expect(r.data).toMatchObject({ deleted: fileDoc, path: "Team/q3.xlsx" });
+      const { rows } = await pool.query("SELECT 1 FROM files WHERE id = $1", [fileDoc]);
+      expect(rows).toHaveLength(0);
+      const { rows: tomb } = await pool.query("SELECT 1 FROM file_tombstones WHERE id = $1", [fileDoc]);
+      expect(tomb).toHaveLength(1);
+      expect(rec.registryBroadcasts).toEqual([{ vaultId: vault, originId: null }]);
+    });
+
+    it("a member without edit access cannot delete (same gate as HTTP)", async () => {
+      await seedVaultGrant(org, "view");
+      const r = await call(memberToken, "delete_file", { fileId: fileDoc });
+      expect(r.isError).toBe(true);
+      const { rows } = await pool.query("SELECT 1 FROM files WHERE id = $1", [fileDoc]);
+      expect(rows).toHaveLength(1);
+    });
+
+    it("an unknown file id is an error", async () => {
+      const r = await call(ownerToken, "delete_file", { fileId: randomUUID() });
+      expect(r.isError).toBe(true);
+    });
+
+    it("move_file renames in place keeping the id, and broadcasts", async () => {
+      await seedVaultGrant(org, "edit");
+      rec.registryBroadcasts.length = 0;
+      const r = await call(ownerToken, "move_file", { fileId: fileDoc, path: "Team/q3-final.xlsx" });
+
+      expect(r.isError).toBe(false);
+      expect(r.data).toMatchObject({ fileId: fileDoc, path: "Team/q3-final.xlsx", folderId: teamFolder });
+      const { rows } = await pool.query<{ path: string }>("SELECT path FROM files WHERE id = $1", [fileDoc]);
+      expect(rows[0].path).toBe("Team/q3-final.xlsx");
+      expect(rec.registryBroadcasts).toEqual([{ vaultId: vault, originId: null }]);
+    });
+
+    it("move_file refuses a read-only member", async () => {
+      await seedVaultGrant(org, "view");
+      const r = await call(memberToken, "move_file", { fileId: fileDoc, path: "Team/x.xlsx" });
+      expect(r.isError).toBe(true);
+      const { rows } = await pool.query<{ path: string }>("SELECT path FROM files WHERE id = $1", [fileDoc]);
+      expect(rows[0].path).toBe("Team/q3.xlsx");
+    });
+  });
 });

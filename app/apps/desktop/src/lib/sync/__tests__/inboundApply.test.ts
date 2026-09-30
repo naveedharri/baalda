@@ -1939,6 +1939,10 @@ describe("offline reconciliation — same-path create (D4)", () => {
     localCreated: number | null;
     updateNote?: (id: string, input: { relPath?: string }) => Promise<unknown>;
     baseline?: boolean;
+    /** This device's local CRDT text per doc id (absent ⇒ never seen). */
+    localText?: Record<string, string>;
+    /** Extra same-path pairs: local file + a teammate's server note at it. */
+    extra?: number;
   }) {
     reconcileReport.clear();
     const disk = new FakeDisk();
@@ -1957,8 +1961,13 @@ describe("offline reconciliation — same-path create (D4)", () => {
     disk.notes.set("P.md", "local-b");
     disk.bodies.set("P.md", "B's words");
     const theirs = { id: "d9", rel_path: "P.md", createdAt: opts.serverCreatedAt };
+    const extra = Array.from({ length: opts.extra ?? 0 }, (_, i) => {
+      disk.notes.set(`E${i}.md`, `local-e${i}`);
+      disk.bodies.set(`E${i}.md`, `words ${i}`);
+      return { id: `de${i}`, rel_path: `E${i}.md`, createdAt: opts.serverCreatedAt };
+    });
     const api = fakeApi({
-      notes: [...(opts.baseline !== false ? [{ id: "d0", rel_path: "a.md" }] : []), theirs],
+      notes: [...(opts.baseline !== false ? [{ id: "d0", rel_path: "a.md" }] : []), theirs, ...extra],
       tombstones: [],
     });
     const updateNote = vi.fn(opts.updateNote ?? (async (_id: string, input: { relPath?: string }) => ({
@@ -1966,10 +1975,52 @@ describe("offline reconciliation — same-path create (D4)", () => {
     })));
     (api as unknown as { updateNote: typeof updateNote }).updateNote = updateNote;
     const reg = new VaultRegistry(api);
-    reg.setInboundHost(recordingHost().host);
+    const { host } = recordingHost();
+    const texts = opts.localText;
+    reg.setInboundHost(texts ? { ...host, localText: async (id) => texts[id] ?? null } : host);
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
     return { disk, reg, api, updateNote };
   }
+
+  it("never treats a note this device already holds as a same-path create", async () => {
+    // A reset re-downloads the vault: the file at P.md IS the teammate's note,
+    // written here from the server, and the local CRDT for d9 proves it.
+    const { disk, reg, updateNote } = await sameCreate({
+      serverCreatedAt: "2020-01-01T00:00:00Z",
+      localCreated: Date.parse("2026-09-26T00:00:00Z"),
+      localText: { d9: "B's words" },
+    });
+    expect(updateNote).not.toHaveBeenCalled();
+    expect([...disk.notes.keys()].some((p) => p.includes("(conflict "))).toBe(false);
+    expect(disk.notes.has("P.md")).toBe(true);
+    expect(reg.getMapping("P.md")?.docId).toBe("d9");
+    expect(reconcileReport.items()).toEqual([]);
+  });
+
+  it("renames nothing when one pass finds more clashes than the cap", async () => {
+    const { disk, reg, updateNote } = await sameCreate({
+      serverCreatedAt: "2026-09-26T12:00:00Z",
+      localCreated: Date.parse("2026-09-25T00:00:00Z"),
+      extra: 12,
+    });
+    expect(updateNote).not.toHaveBeenCalled();
+    expect([...disk.notes.keys()].some((p) => p.includes("(conflict "))).toBe(false);
+    expect(disk.notes.get("P.md")).toBe("local-b");
+    expect(reg.getMapping("P.md")?.docId ?? null).not.toBe("d9");
+    expect(reconcileReport.items()).toEqual([]);
+    expect(reg.failures().some((f) => f.path === "P.md")).toBe(true);
+  });
+
+  it("marks its own conflict move so the drain cannot pair it into a server rename", async () => {
+    const { disk, reg } = await sameCreate({
+      serverCreatedAt: "2020-01-01T00:00:00Z",
+      localCreated: Date.parse("2026-09-26T00:00:00Z"),
+    });
+    const moved = [...disk.notes.keys()].find((p) => p.startsWith("P (conflict "))!;
+    expect(reg.isOwnMove("P.md")).toBe(true);
+    expect(reg.isOwnMove(moved)).toBe(true);
+    expect(reg.isOwnMove("a.md")).toBe(false);
+  });
 
   it("the local note is later: it is renamed and never bound to the teammate's id", async () => {
     const { disk, reg, updateNote } = await sameCreate({

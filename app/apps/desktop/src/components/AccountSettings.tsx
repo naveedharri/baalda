@@ -6,6 +6,9 @@ import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
   type ActivityStatus,
+  EDITOR_FONT_SIZE_MAX,
+  EDITOR_FONT_SIZE_MIN,
+  EDITOR_FONT_SIZE_STEP,
   PROPERTIES_MODES,
   readAutomaticItemColors,
   writeServerChoice,
@@ -362,6 +365,7 @@ function AppearanceTab() {
   const automaticItemColors = useStore((s) => s.automaticItemColors);
   const propertiesMode = useStore((s) => s.propertiesMode);
   const editorMeasure = useStore((s) => s.editorMeasure);
+  const editorFontSize = useStore((s) => s.editorFontSize);
   const lineNumbers = useStore((s) => s.lineNumbers);
   useEffect(() => {
     useStore.setState({ automaticItemColors: readAutomaticItemColors(session?.user.id) });
@@ -417,6 +421,27 @@ function AppearanceTab() {
           <span className="range-value">{measureLabel(editorMeasure)}</span>
         </span>
         <ContentWidthPreview measure={editorMeasure} />
+      </div>
+      <div className="menu-row measure-row">
+        <label className="menu-row-label" htmlFor="editor-text-size">
+          Text size
+          <span className="field-hint">The size of note text in the editor.</span>
+        </label>
+        <span className="range-field">
+          <input
+            id="editor-text-size"
+            className="range-input"
+            type="range"
+            min={EDITOR_FONT_SIZE_MIN}
+            max={EDITOR_FONT_SIZE_MAX}
+            step={EDITOR_FONT_SIZE_STEP}
+            value={editorFontSize}
+            aria-label="Text size"
+            aria-valuetext={`${editorFontSize} pixels`}
+            onChange={(e) => useStore.getState().setEditorFontSize(Number(e.target.value))}
+          />
+          <span className="range-value">{editorFontSize}px</span>
+        </span>
       </div>
       <label className="menu-row toggle-row">
         <span className="menu-row-label">

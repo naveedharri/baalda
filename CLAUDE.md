@@ -239,6 +239,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   base sha persisted as `config.json fileBases`: local==base ⇒ download the teammate's version,
   server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
   changed ⇒ server canonical, local copy to `.context/trash` (`copy_to_trash`) first — never a flip.
+  A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
+  ids from `file_tombstones` with no live row) is `toTrash`: copied to `.context/trash`, removed, its id
+  forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only; a
+  failed listing means no suppression that pass.
   Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
   notes, then pull the registry and use the HTTP bulk downloader. Bootstrap pages are
   gzip without `Content-Encoding`; the desktop explicitly inflates before decoding.
@@ -369,6 +373,11 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   bound to server URL and email. Logout clears the session but retains this saved
   login; turning the switch off deletes it. The old email-only preference does
   not opt existing users into password storage. No password enters localStorage.
+  Failed email sign-ins are throttled per lowercased email string (`auth/signin-throttle.ts`,
+  Postgres `signin_throttle`, migration 036; wrapped around `POST /api/auth/sign-in/email` in
+  `http/app.ts`): 5 failures in 15 min lock the account from ANY IP with 429 + `Retry-After`,
+  1 → 5 → 15 min on repeat lockouts; success and `onPasswordReset` clear it. Unknown addresses
+  are counted identically, so the response never reveals whether an account exists (#237).
 - `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
   `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
@@ -437,6 +446,12 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `GET /vaults/:id/locks` reports the Read-only posture as a synthetic `vault` lock row (id
   `vault:<orgId>`, `permission: 'locked'`) plus the **lifts** — the surviving org `edit` rows and the
   caller's own per-user `edit` rows — so the sidebar can padlock everything except what a grant frees.
+  Renaming a note someone ELSE created (`PATCH /api/notes/:id`, `registry/rename-guard.ts`) is
+  refused when it adds a `(conflict YYYY-MM-DD)` suffix (409 `conflict_rename_refused`) and
+  budgeted at 100 per (user, vault) per 5 min (429 `rename_rate_limited`) — a burst brake after one
+  client renamed 619 teammates' notes (2026-09-30). The desktop's same-path step also refuses to
+  treat a note it holds local CRDT for as a clash, renames none past `samePathConflictCap`, and marks
+  its own moves (`isOwnMove`) so the disk-delete drain and `pairClosedAppRenames` never pair them.
   Creates are gated by `permissions/http-gates.ts` `canCreateIn` (= `canEditFolder` in a folder;
   `vaultRootWritable` at the root, which a per-user vault-scoped `edit` lifts) and attachment uploads by
   `canWriteAttachment` (vault posture only — a blob has no folder to resolve a lock against); refusals
@@ -447,7 +462,8 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `join_default` (Private by default), per-membership snapshots and an ordered ACL revision, and
   migration 033 seeds that default ONCE from each existing vault's posture (org-wide vault grant
   `edit` → `open`, `view` → `readonly`, sealed or ungranted → `private`) so a Shared team sees no
-  change; vaults created later keep the Private default. Only
+  change. A vault created later gets `open` alongside its org-wide `edit` grant (`POST /api/vaults`,
+  first collection only), so people who join afterwards see the notes that already exist. Only
   content that already existed when someone joined uses that snapshot; a team grant written before
   a Private join stays hidden, while a later Everyone action has a newer revision and deliberately
   opens the selected subtree. Existing memberships have no snapshot and are unchanged. The default
@@ -482,7 +498,9 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   (`beforeSync` hook, throttled).
 - `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
 - `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text`.
+  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text/move_file/delete_file`.
+  `delete_file` shares `deleteRegisteredFile` (`http/routes/registry.ts`) with `DELETE /api/files/:id`;
+  `move_file` re-registers the id at a new path through `registerFile`, like `POST /api/files`.
   `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
   optional `expectedRevision` and refuse a stale write (the check runs under the doc writer's per-doc
   lock, so check + apply are atomic). `edit_note` applies exact-anchor replace/insert/delete ops (an

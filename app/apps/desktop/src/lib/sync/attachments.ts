@@ -245,6 +245,12 @@ export interface BinaryPlan {
   toReplace: BinaryReplace[];
   /** Files whose local bytes equal the server's — the base to record. */
   agreed: Array<{ relPath: string; docId: string; sha256: string }>;
+  /**
+   * Local files this device knows by a `files` id the server has TOMBSTONED
+   * (a teammate deleted the file). Never uploaded — that would undo the delete
+   * for everyone (#215) — but moved to `.context/trash`.
+   */
+  toTrash: Array<{ local: LocalAttachment; docId: string }>;
 }
 
 /** What the three-way needs to know about this device's history. */
@@ -253,6 +259,8 @@ export interface BinaryPlanContext {
   docIdFor: (relPath: string) => string | null;
   /** The sha this device last agreed with the server on for a `files` id. */
   baseFor: (docId: string) => string | null;
+  /** Did the server delete the `files` row with this id (`file_tombstones`)? */
+  isTombstoned?: (docId: string) => boolean;
 }
 
 /**
@@ -288,6 +296,7 @@ export function planBinarySync(
   const toUpload: PlannedUpload[] = [];
   const toReplace: BinaryReplace[] = [];
   const agreed: BinaryPlan["agreed"] = [];
+  const toTrash: BinaryPlan["toTrash"] = [];
   /** Server rows the three-way consumed: never also a plain download. */
   const consumed = new Set<string>();
   /** Local paths the three-way decided: never also a plain upload. */
@@ -306,7 +315,16 @@ export function planBinarySync(
       if (isUnderAttachments(a.relPath)) continue;
       const knownId = ctx.docIdFor(a.relPath);
       const rows = knownId ? byDoc.get(knownId) : byPath.get(a.relPath.toLowerCase());
-      if (!rows || rows.length === 0) continue;
+      if (!rows || rows.length === 0) {
+        // The id this device knows the file by was deleted on the server: this
+        // is a stale copy of a deleted file, not a new one. An id match proves
+        // it IS that file (a same-named successor carries a different id).
+        if (knownId && ctx.isTombstoned?.(knownId)) {
+          decided.add(a.relPath);
+          toTrash.push({ local: a, docId: knownId });
+        }
+        continue;
+      }
       decided.add(a.relPath);
       for (const r of rows) consumed.add(r.id);
       const same = rows.find((r) => r.sha256 === a.sha256);
@@ -346,7 +364,7 @@ export function planBinarySync(
       (isUnderAttachments(b.relPath) || !localShas.has(b.sha256)) &&
       !localPaths.has(b.relPath.toLowerCase()),
   );
-  return { toUpload, toDownload, toReplace, agreed };
+  return { toUpload, toDownload, toReplace, agreed, toTrash };
 }
 
 /**
@@ -643,6 +661,12 @@ export interface AttachmentSyncDeps {
   isDeletePending?: (relPath: string) => boolean;
   /** List the server's blobs for this vault. */
   listServer: () => Promise<ServerBlob[]>;
+  /** Ids of tree files the server deleted (`GET /vaults/:id/file-tombstones`).
+   *  Absent or failing: no suppression this pass (the older behaviour). */
+  listFileTombstones?: () => Promise<string[]>;
+  /** Remove a local tree binary outright (`ipc.deleteFile`) — used only after
+   *  {@link keepLocalCopy} put its bytes in `.context/trash`. */
+  removeLocal?: (relPath: string) => Promise<void>;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
    *  with no intent route, and the reason that route stays forever. `docId` is
    *  the `files` row a tree binary belongs to — sent as `x-doc-id`. */
@@ -1184,10 +1208,20 @@ export class AttachmentSync {
         if (!this.localPathKeys.has(key) || listed.has(key)) this.unreadable.delete(key);
       }
     }
+    let tombstoned: Set<string> | null = null;
+    if (this.deps.listFileTombstones) {
+      try {
+        tombstoned = new Set(await this.deps.listFileTombstones());
+      } catch (e) {
+        console.warn("[attachments] file tombstones unavailable — no suppression this pass", e);
+      }
+    }
     const plan = planBinarySync(local, server, {
       docIdFor: (relPath) => this.docIdFor(relPath),
       baseFor: (docId) => this.baseFor(docId),
+      isTombstoned: tombstoned ? (docId) => tombstoned.has(docId) : undefined,
     });
+    await this.trashTombstoned(plan.toTrash);
     const { toDownload } = plan;
     // A 0-byte file has nothing to upload: the server refuses an empty blob
     // (`invalid_size`), and before this that refusal read as a transient error,
@@ -1461,6 +1495,28 @@ export class AttachmentSync {
    * {@link BinaryReplace}). The recovery copy comes FIRST, and a failed copy
    * stops the replacement: the local bytes are never overwritten without one.
    */
+  private async trashTombstoned(items: BinaryPlan["toTrash"]): Promise<void> {
+    const keep = this.deps.keepLocalCopy;
+    const remove = this.deps.removeLocal;
+    for (const { local, docId } of items) {
+      if (!keep || !remove || !this.current()) {
+        console.info(`[attachments] ${local.relPath} was deleted on the server — not uploading it back`);
+        continue;
+      }
+      try {
+        const dest = await keep(local.relPath);
+        await remove(local.relPath);
+        this.fileIds.delete(local.relPath);
+        this.deps.forgetFileId?.(local.relPath);
+        console.info(
+          `[attachments] ${local.relPath} (file ${docId}) was deleted by a teammate — local copy moved to ${dest}`,
+        );
+      } catch (e) {
+        console.warn(`[attachments] couldn't set aside deleted file ${local.relPath}; leaving it`, e);
+      }
+    }
+  }
+
   private async replaceOne(r: BinaryReplace, kept: string[]): Promise<void> {
     const relPath = r.local.relPath;
     if (r.keepCopy) {
