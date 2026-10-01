@@ -4,6 +4,8 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { sha256Hex } from "./capture.js";
+import { isSharpShrink } from "./shrink-guard.js";
+import { gcNoteTexts, storeNoteText, VERSION_CONTENT, VERSION_TEXT_JOIN } from "./texts.js";
 
 /**
  * Vault-wide checkpoints: a snapshot of the folder/note STRUCTURE (JSONB) plus
@@ -24,6 +26,14 @@ export const MAX_CHECKPOINTS = 5;
 export const MAX_CHECKPOINT_DOC_BYTES = 20 * 1024 * 1024;
 /** How stale the newest `auto` checkpoint must be before another is taken. */
 export const DAILY_CHECKPOINT_MS = 24 * 60 * 60 * 1000;
+/**
+ * A `pre-shrink` version this recent, on a note that is still shrunk, is what a
+ * checkpoint stores for that note instead of its current text (#254). One day,
+ * the daily cadence, so roughly the first checkpoint after a wipe carries the
+ * text from before it, and a note someone emptied on purpose is not resurrected
+ * by checkpoints for ever.
+ */
+export const CHECKPOINT_SHRINK_CARRY_MS = DAILY_CHECKPOINT_MS;
 
 export type CheckpointKind = "auto" | "manual";
 
@@ -45,6 +55,13 @@ export interface CheckpointFolder {
 export interface CheckpointStructure {
   notes: CheckpointNote[];
   folders: CheckpointFolder[];
+  /**
+   * Notes whose stored body is their recent `pre-shrink` text rather than the
+   * (emptied) text they held at capture time — see
+   * {@link CHECKPOINT_SHRINK_CARRY_MS}. Metadata only; a revert reads bodies
+   * from `vault_checkpoint_docs` either way. Absent on older checkpoints.
+   */
+  carriedPreShrink?: string[];
 }
 
 /** The list-shape a client sees. Never carries note content. */
@@ -121,6 +138,12 @@ export interface CaptureCheckpointOptions {
   createdBy?: string | null;
   /** Checkpoint ids the prune must not touch (a revert's target, e.g.). */
   excludeFromPrune?: string[];
+  /**
+   * Sweep the vault's unreferenced `note_texts` afterwards (default true). A
+   * revert's own undo snapshot passes false: it runs inside the revert's long
+   * transaction, where the sweep's row locks would be held until the end.
+   */
+  gcTexts?: boolean;
 }
 
 /**
@@ -130,10 +153,15 @@ export interface CaptureCheckpointOptions {
  */
 export async function captureCheckpoint(
   opts: CaptureCheckpointOptions,
-): Promise<{ id: string; noteCount: number }> {
+): Promise<{ id: string; noteCount: number; carriedPreShrink: number }> {
   const { db, vaultId } = opts;
   const structure = await readVaultStructure(db, vaultId);
   const id = randomUUID();
+  const preShrink = await recentPreShrinkTexts(
+    db,
+    structure.notes.map((n) => n.id),
+  );
+  const carried: string[] = [];
   await db.query(
     `INSERT INTO vault_checkpoints (id, vault_id, kind, label, created_by, structure)
      VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
@@ -167,18 +195,47 @@ export async function captureCheckpoint(
       emptyCount++;
       continue;
     }
-    if (Buffer.byteLength(content, "utf8") > MAX_CHECKPOINT_DOC_BYTES) {
+    // A note emptied by a recent sharp shrink is checkpointed as it stood
+    // BEFORE the shrink (#254): the overdue daily checkpoint is typically
+    // triggered by the very write that emptied it, and storing the wiped body
+    // made the newest checkpoint useless for undoing exactly that damage,
+    // while rotation aged out the older ones that still had the text.
+    let body = content;
+    const before = preShrink.get(note.id);
+    if (before != null && isSharpShrink(before, content)) {
+      body = before;
+      carried.push(note.id);
+    }
+    if (Buffer.byteLength(body, "utf8") > MAX_CHECKPOINT_DOC_BYTES) {
       if (skippedOversized.length < SAMPLE) skippedOversized.push(note.id);
       oversizedCount++;
       continue;
     }
+    // Content-addressed (#264): an unchanged note costs this checkpoint one
+    // narrow reference row, no text. Text first, reference second: the order
+    // the `note_texts` sweep's grace relies on.
+    const sha = sha256Hex(body);
+    await storeNoteText(db, { vaultId, docId: note.id, sha, content: body });
     await db.query(
       `INSERT INTO vault_checkpoint_docs (checkpoint_id, doc_id, sha256, content)
-       VALUES ($1, $2, $3, $4)
+       VALUES ($1, $2, $3, NULL)
        ON CONFLICT (checkpoint_id, doc_id) DO NOTHING`,
-      [id, note.id, sha256Hex(content), content],
+      [id, note.id, sha],
     );
     noteCount++;
+  }
+
+  if (carried.length > 0) {
+    await db.query(
+      `UPDATE vault_checkpoints
+          SET structure = jsonb_set(structure, '{carriedPreShrink}', $2::jsonb)
+        WHERE id = $1`,
+      [id, JSON.stringify(carried)],
+    );
+    console.warn(
+      `[checkpoints] vault ${vaultId}: ${carried.length} recently shrunk note(s) checkpointed ` +
+        `with their text from before the shrink (${sample(carried.slice(0, SAMPLE), carried.length)})`,
+    );
   }
 
   if (emptyCount > 0 || oversizedCount > 0) {
@@ -196,7 +253,33 @@ export async function captureCheckpoint(
   }
 
   await pruneCheckpoints(db, vaultId, [id, ...(opts.excludeFromPrune ?? [])]);
-  return { id, noteCount };
+  // Housekeeping: drop texts no version or checkpoint points at any more. It
+  // only ever touches `note_texts`, never an inline body of an older row.
+  if (opts.gcTexts !== false) await gcNoteTexts(db, vaultId);
+  return { id, noteCount, carriedPreShrink: carried.length };
+}
+
+/**
+ * Each doc's newest `pre-shrink` text from the last
+ * {@link CHECKPOINT_SHRINK_CARRY_MS}, for the docs that have one. One indexed
+ * query (`note_versions_doc_idx`) for the whole vault; the hits are rare.
+ */
+async function recentPreShrinkTexts(
+  db: Queryable,
+  docIds: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (docIds.length === 0) return out;
+  const { rows } = await db.query<{ doc_id: string; content: string | null }>(
+    `SELECT DISTINCT ON (v.doc_id) v.doc_id, ${VERSION_CONTENT} AS content
+       FROM note_versions v ${VERSION_TEXT_JOIN}
+      WHERE v.doc_id = ANY($1::text[]) AND v.cause = 'pre-shrink'
+        AND v.created_at > now() - ($2::bigint * interval '1 millisecond')
+      ORDER BY v.doc_id, v.id DESC`,
+    [docIds, CHECKPOINT_SHRINK_CARRY_MS],
+  );
+  for (const r of rows) if (r.content != null) out.set(r.doc_id, pgText(r.content));
+  return out;
 }
 
 /** `a, b, c …+97 more` — enough to chase one, never enough to flood. */

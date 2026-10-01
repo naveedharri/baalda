@@ -115,12 +115,19 @@ export async function revertVaultToCheckpoint(
         folders: cpRows[0].structure?.folders ?? [],
       };
 
+      // Bodies are inline on checkpoints taken before migration 038 and
+      // content-addressed in `note_texts` after it (#264). A row whose text
+      // cannot be resolved is left out, i.e. treated like a structure-only
+      // note: the revert leaves that note's current content alone.
       const { rows: docRows } = await db.query<{
         doc_id: string;
         sha256: string;
         content: string;
       }>(
-        "SELECT doc_id, sha256, content FROM vault_checkpoint_docs WHERE checkpoint_id = $1",
+        `SELECT d.doc_id, d.sha256, COALESCE(d.content, t.content) AS content
+           FROM vault_checkpoint_docs d
+           LEFT JOIN note_texts t ON t.doc_id = d.doc_id AND t.sha256 = d.sha256
+          WHERE d.checkpoint_id = $1 AND COALESCE(d.content, t.content) IS NOT NULL`,
         [checkpointId],
       );
       const contentByDoc = new Map(docRows.map((r) => [r.doc_id, r]));
@@ -135,6 +142,7 @@ export async function revertVaultToCheckpoint(
         label: "Before revert",
         createdBy: userId,
         excludeFromPrune: [checkpointId],
+        gcTexts: false,
       });
 
       // ── folders ────────────────────────────────────────────────────────────

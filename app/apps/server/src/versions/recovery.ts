@@ -2,6 +2,7 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited } from "./capture.js";
+import { VERSION_CONTENT, VERSION_TEXT_JOIN } from "./texts.js";
 
 /**
  * Reviewed recovery of notes damaged by past sync bugs (issue #200).
@@ -170,7 +171,9 @@ export async function listRecoveryCandidates(
     if (!(await deps.canEdit(note.id))) continue;
     const current = (await deps.docWriter.peekContent(vaultId, note.id)) ?? "";
     const { rows } = await db.query<{ id: string; created_at: Date; content: string }>(
-      "SELECT id, created_at, content FROM note_versions WHERE doc_id = $1",
+      `SELECT v.id, v.created_at, ${VERSION_CONTENT} AS content
+         FROM note_versions v ${VERSION_TEXT_JOIN}
+        WHERE v.doc_id = $1 AND ${VERSION_CONTENT} IS NOT NULL`,
       [note.id],
     );
     const verdict = assessNote(
@@ -223,7 +226,9 @@ export async function applyRecovery(
       continue;
     }
     const { rows } = await db.query<{ content: string }>(
-      "SELECT content FROM note_versions WHERE id = $1 AND doc_id = $2",
+      `SELECT ${VERSION_CONTENT} AS content
+         FROM note_versions v ${VERSION_TEXT_JOIN}
+        WHERE v.id = $1 AND v.doc_id = $2 AND ${VERSION_CONTENT} IS NOT NULL`,
       [versionId, docId],
     );
     if (!rows[0]) {
