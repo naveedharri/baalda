@@ -132,6 +132,42 @@ export function invitationEmail(input: {
 }
 
 /**
+ * The one reminder an invitee gets about a day before their invitation runs
+ * out (#268, `invitations/sweep.ts`). Same link as the original — the
+ * invitation itself is unchanged; this only says it is about to expire.
+ */
+export function invitationReminderEmail(input: {
+  to: string;
+  url: string;
+  organizationName: string;
+  inviterName: string | null;
+  expiresAt: Date;
+}): MailMessage {
+  const inviter = input.inviterName?.trim() || null;
+  const who = inviter ?? "A teammate";
+  const askWho = inviter ?? "the person who invited you";
+  const subject = `Reminder: your invitation to ${input.organizationName} expires soon`;
+  const expires = input.expiresAt.toUTCString();
+  const text = [
+    `${who} invited you to join the vault "${input.organizationName}" on ${BRAND_NAME}, and the invitation expires ${expires}.`,
+    ``,
+    `Accept it before then:`,
+    input.url,
+    ``,
+    `Sign in with ${input.to} — or create an account with that address — and you'll land in the vault.`,
+    `After it expires, ask ${askWho} to send a new one.`,
+  ].join("\n");
+  const html = layout({
+    title: `Your invitation to ${esc(input.organizationName)} expires soon`,
+    intro: `<b>${esc(who)}</b> invited you to join the vault <b>${esc(input.organizationName)}</b> on ${esc(BRAND_NAME)}. Sign in with <b>${esc(input.to)}</b> — or create an account with that address — and you'll land in the vault.`,
+    cta: "Accept invitation",
+    url: input.url,
+    outro: `This invitation expires ${esc(expires)}. After that, ask ${esc(askWho)} to send a new one.`,
+  });
+  return { to: input.to, subject, text, html };
+}
+
+/**
  * To a vault's owner when a member leaves on their own (#121). Purely
  * informational — there is nothing for the owner to do — so no button. Names
  * the shares that were dropped, because that is the one side effect the owner

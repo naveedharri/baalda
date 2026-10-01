@@ -16,6 +16,9 @@ import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
 import { setTrashActivityPublisher } from "./trash/activity.js";
+import { startInvitationSweep, stopInvitationSweep } from "./invitations/scheduler.js";
+import { setInvitationActivityPublisher } from "./invitations/sweep.js";
+import { pool } from "./db/pool.js";
 import { invalidateReadableCache } from "./permissions/readable-cache.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
@@ -85,6 +88,15 @@ async function main() {
   // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
   setTrashActivityPublisher((vaultId) => {
     void vaultChannel.publishActivityChanged(vaultId).catch(broadcastFailed("activity-changed"));
+  });
+
+  // An invitation expired unaccepted → the inviter's and the admins' Activity
+  // feeds refetch (#268). Notices are per org; the channel is per collection.
+  setInvitationActivityPublisher((organizationId) => {
+    void pool
+      .query<{ id: string }>("SELECT id FROM vaults WHERE organization_id = $1", [organizationId])
+      .then(({ rows }) => Promise.all(rows.map((r) => vaultChannel.publishActivityChanged(r.id))))
+      .catch(broadcastFailed("activity-changed"));
   });
 
   // Version capture is created below (it needs the doc writer, which needs the
@@ -226,12 +238,16 @@ async function main() {
   startBlobGc();
   // Trash retention: notes past `purge_after` lose their CRDT, versions and row.
   startTrashPurge();
+  // Invitation reminders (one email a day before expiry, only when email is
+  // configured) and one Activity notice per invitation that expired (#268).
+  startInvitationSweep();
 
   const shutdown = async () => {
     console.log("Shutting down…");
     versionCapture?.stop();
     stopBlobGc();
     stopTrashPurge();
+    stopInvitationSweep();
     syncWss.close();
     releaseWatch?.stop();
     vaultWss.close();

@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   api: {
     listTrash: vi.fn(),
     listShrinkEvents: vi.fn(),
+    listInvitationExpiries: vi.fn(),
   },
 }));
 
@@ -88,6 +89,7 @@ beforeEach(() => {
   h.vaultId = null;
   h.api.listTrash.mockResolvedValue({ items: [], truncated: false });
   h.api.listShrinkEvents.mockResolvedValue({ items: [], truncated: false, afterIsCurrent: true });
+  h.api.listInvitationExpiries.mockResolvedValue([]);
   try {
     localStorage.clear();
   } catch {

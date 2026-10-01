@@ -9,7 +9,8 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
-import type { ShrinkEvent, TrashItem } from "../lib/api";
+import type { InvitationExpiry, ShrinkEvent, TrashItem } from "../lib/api";
+import { buildInviteLink } from "../lib/inviteLink";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
 import type { ReconcileItem } from "../lib/sync/reconcileReport";
@@ -247,6 +248,63 @@ function FailedRowActions({ failure, onDone }: { failure: FailedEntry; onDone: (
   );
 }
 
+/**
+ * Resend an expired invitation: the Members tab's Resend (VaultSettingsDialog),
+ * aimed at the notice's own vault. Better Auth gives the address a fresh row
+ * (new link, new expiry), which is also what drops this notice server-side.
+ * Without email the new link goes to the clipboard instead.
+ */
+function InvitationRowActions({
+  invitation,
+  online,
+  onDone,
+}: {
+  invitation: InvitationExpiry;
+  online: boolean;
+  onDone: () => void;
+}) {
+  const resend = async () => {
+    try {
+      const role = invitation.role === "admin" ? "admin" : "member";
+      const r = await useStore.getState().inviteMember(invitation.email, role, invitation.organizationId);
+      if (r.emailed) {
+        toast(`Sent a new invitation to ${invitation.email}.`, "success");
+      } else {
+        const link = buildInviteLink(useStore.getState().serverUrl, r.invitation.id);
+        let copied = false;
+        if (link) {
+          try {
+            await navigator.clipboard.writeText(link);
+            copied = true;
+          } catch {
+            /* clipboard unavailable */
+          }
+        }
+        const how = copied ? "Its link is copied; share it with them." : "Share its link from Vault Settings → Members.";
+        toast(
+          r.emailError ? `New invitation created, but the email failed: ${r.emailError} ${how}` : `New invitation created. ${how}`,
+          r.emailError ? "error" : "success",
+        );
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+    onDone();
+  };
+  return (
+    <span className="health-missing-actions">
+      <AsyncButton
+        className="ghost-pill sm"
+        disabled={!online}
+        title={online ? "Send a new invitation with a fresh link." : "Reconnect to resend."}
+        onClick={resend}
+      >
+        Resend
+      </AsyncButton>
+    </span>
+  );
+}
+
 function rowMeta(row: ActivityRow, now: number): string {
   const when = relativeTime(row.at, now);
   if (row.type === "trash") {
@@ -255,6 +313,10 @@ function rowMeta(row: ActivityRow, now: number): string {
   }
   if (row.type === "copy") return `${when} · ${formatBytes(row.copy.bytes)}`;
   if (row.type === "held") return "Waiting for your answer";
+  if (row.type === "invitation") {
+    const by = row.invitation.inviterName ? `sent by ${row.invitation.inviterName} · ` : "";
+    return `${by}${when}`;
+  }
   if (row.type === "shrunk" || row.type === "access" || row.type === "failed") {
     return row.path ? `${row.text} · ${when}` : when;
   }
@@ -277,6 +339,7 @@ function rowTitle(row: ActivityRow): string {
     return `${ACTIVITY_HINT.access}\n${row.path}`;
   }
   if (row.type === "failed") return `${ACTIVITY_HINT.failed}\n${row.text}`;
+  if (row.type === "invitation") return `${ACTIVITY_HINT.invitation}\n${row.invitation.email}`;
   return `${ACTIVITY_HINT.copy}\n.context/trash/${row.copy.stamp}/${row.copy.relPath}`;
 }
 
@@ -387,7 +450,8 @@ export function ActivityFeed() {
                     (row.type === "trash" && row.item.hasUnsyncedContributions) ||
                     row.type === "held" ||
                     row.type === "shrunk" ||
-                    row.type === "failed"
+                    row.type === "failed" ||
+                    row.type === "invitation"
                       ? "warn"
                       : undefined
                   }
@@ -430,6 +494,8 @@ export function ActivityFeed() {
                     activeFailures.has(row.key) ? <FailedRowActions failure={row.failure} onDone={schedule} /> : null
                   ) : row.type === "access" ? (
                     row.event.kind === "granted" ? <GrantRowActions paths={row.event.paths ?? []} /> : null
+                  ) : row.type === "invitation" ? (
+                    <InvitationRowActions invitation={row.invitation} online={trash.online} onDone={schedule} />
                   ) : row.type === "trash" ? (
                     <TrashRowActions item={row.item} online={trash.online} onRestored={schedule} />
                   ) : (
