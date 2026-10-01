@@ -34,15 +34,24 @@ const pending = new Map<string, ReturnType<typeof setTimeout>>();
  * Parse `[[wikilink]]` targets out of note text. Captures the title portion
  * only — the part before any `|` alias or `#` heading anchor — and trims it.
  * Duplicates within one doc are collapsed.
+ *
+ * A link is one line and must be CLOSED (`]]`, or an alias `|` / anchor `#`).
+ * An unclosed `[[` — a JS array in a code block, a stray paste — used to
+ * capture everything up to the next `]` across lines: a 34 KB "title" that
+ * overflows the `note_links` primary key and failed the note's indexing on
+ * every edit. Titles past WIKILINK_TITLE_MAX can't be a real note name and are
+ * skipped for the same reason.
  */
+export const WIKILINK_TITLE_MAX = 255;
+
 export function parseWikilinks(text: string): string[] {
-  const re = /\[\[([^\]|#]+)/g;
+  const re = /\[\[([^\]|#\r\n]+)(?=\]\]|\||#)/g;
   const seen = new Set<string>();
   const out: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const title = m[1].trim();
-    if (title && !seen.has(title)) {
+    if (title && title.length <= WIKILINK_TITLE_MAX && !seen.has(title)) {
       seen.add(title);
       out.push(title);
     }
