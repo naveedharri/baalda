@@ -160,6 +160,18 @@ describe("verdict precedence", () => {
     expect(stage(r, "server").state).toBe("busy");
   });
 
+  it("names notes whose content never reached the server while an upload resumes (#258)", () => {
+    const r = buildHealthReport(
+      input({
+        syncStatus: "offline",
+        syncProgress: { phase: "uploading", done: 40, total: 100, failed: 0, notUploaded: 60 },
+        ...healthyVault(100),
+      }),
+    );
+    expect(r.verdict).toBe("syncing");
+    expect(r.headline).toBe("Uploading — 60 notes not uploaded yet");
+  });
+
   it("reports `attention` for any error-severity issue", () => {
     const r = buildHealthReport(
       input({

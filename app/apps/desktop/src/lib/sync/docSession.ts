@@ -46,6 +46,7 @@ import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry, type InboundHost, type RegistryFailure } from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
 import {
+  isBulkPhase,
   vaultScopes,
   type DocSyncState,
   type SyncProgress,
@@ -3820,7 +3821,7 @@ export class SyncManager implements InboundHost {
       onProgress: (p) => {
         if (cleanupActive) return;
         this.logRunPhase(p);
-        this.onSyncProgress?.(p);
+        this.onSyncProgress?.(this.withUploadBacklog(p));
       },
       onDocState: (patch) => this.onDocState?.(patch),
     });
@@ -4834,6 +4835,35 @@ export class SyncManager implements InboundHost {
       permanentFailure: this.permanentFailures.get(docId)?.reason ?? null,
       emptyEverywhere: this.emptyEverywhere.has(docId),
     };
+  }
+
+  /**
+   * How many notes this device holds whose content the server has never
+   * confirmed (#258): not checkpointed as pushed, or named on `ready.empty`,
+   * and not settled as empty everywhere.
+   *
+   * The checkpoint behind it (`registry.pushed`) is persisted in
+   * `config.json`, so this survives a quit or crash mid first-upload — which is
+   * what lets the next launch say "Finishing upload" instead of resuming in
+   * silence while teammates open empty notes. Purely a READ: the resume itself
+   * is the ordinary content run, which pulls the server's state before pushing
+   * anything (`decideSeed`), so nothing here can send stale local state over
+   * content the server already has.
+   */
+  notUploadedCount(): number {
+    let n = 0;
+    for (const docId of this.registry.allDocIds()) {
+      if (this.emptyEverywhere.has(docId)) continue;
+      if (!this.registry.isPushed(docId) || this.serverEmpty.has(docId)) n++;
+    }
+    return n;
+  }
+
+  /** Stamp {@link SyncProgress.notUploaded} on a running phase's emission. */
+  private withUploadBacklog(p: SyncProgress | null): SyncProgress | null {
+    if (!p || !isBulkPhase(p.phase)) return p;
+    const notUploaded = this.notUploadedCount();
+    return notUploaded > 0 ? { ...p, notUploaded } : p;
   }
 
   /** Everything the current run could not sync — registry rows and note content. */
