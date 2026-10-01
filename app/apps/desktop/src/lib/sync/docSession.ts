@@ -14,7 +14,12 @@ import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
-import { isServerTooOld, type NoteLastEdited, type SessionInfo } from "../api";
+import {
+  ACCESS_CHECK_MAX,
+  isServerTooOld,
+  type NoteLastEdited,
+  type SessionInfo,
+} from "../api";
 import * as ipc from "../ipc";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
@@ -3637,6 +3642,7 @@ export class SyncManager implements InboundHost {
       toProbe.push({ docId, relPath });
     }
     if (toProbe.length === 0) return keep;
+    const settledNow: string[] = [];
     return runPool(
       toProbe,
       async ({ docId, relPath }) => {
@@ -3666,13 +3672,43 @@ export class SyncManager implements InboundHost {
         this.emptyEverywhere.add(docId);
         this.registry.markPushed(docId);
         this.progress?.doc(docId, "synced");
+        settledNow.push(docId);
       },
       { concurrency: IPC_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
     ).then(() => {
       if (!scope.isCurrent()) return;
       this.serverEmpty = keep;
       this.progress?.flush();
+      this.reportConfirmedEmpty(settledNow, scope);
     });
+  }
+
+  /**
+   * Tell the server which notes were just settled as empty everywhere (#257),
+   * so it can tell a genuinely empty note from an upload that never arrived.
+   *
+   * Fire-and-forget and purely informational: the server only stamps a marker
+   * (`notes.confirmed_empty_at`, and only on notes it holds no content for) and
+   * changes no content; nothing on either side reads the marker to clear or
+   * skip a note, and `ready.empty` still names these docs. A failure (offline,
+   * an older server without the route) costs only the count, and the doc is
+   * reported again on a later connect because `ready.empty` names it again.
+   * Once per doc per session — `emptyEverywhere` already keeps a settled doc
+   * from being probed twice, so this cannot loop.
+   */
+  private reportConfirmedEmpty(docIds: string[], scope: VaultScope): void {
+    const vaultId = this.registry.vaultId;
+    if (!vaultId || docIds.length === 0) return;
+    void (async () => {
+      for (let i = 0; i < docIds.length; i += ACCESS_CHECK_MAX) {
+        if (!scope.isCurrent()) return;
+        try {
+          await api.confirmEmptyNotes(vaultId, docIds.slice(i, i + ACCESS_CHECK_MAX));
+        } catch {
+          return; // informational: never retried in a loop, never surfaced
+        }
+      }
+    })();
   }
 
   /**

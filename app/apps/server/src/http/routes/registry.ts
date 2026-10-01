@@ -37,6 +37,12 @@ import {
 import { getSession } from "../session.js";
 import { softDeleteSet } from "../../trash/retention.js";
 import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
+import {
+  CONFIRM_EMPTY_MAX,
+  STALLED_UPLOAD_MIN_AGE_MINUTES,
+  confirmEmptyNotes,
+  uploadHealth,
+} from "../../registry/upload-health.js";
 
 /** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
  *  bound the vault channel's `ready.revoked` uses for the list it corroborates,
@@ -435,6 +441,58 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if ((await effectivePermission(session.userId, id)) === "none") none.push(id);
     });
     return c.json({ none });
+  });
+
+  // ── confirmed-empty notes / stalled uploads (#257) ───────────────────────
+  // The desktop settles a `ready.empty` doc whose file AND local CRDT are
+  // empty as "nothing anywhere"; this records that answer so a contentless
+  // note without the marker can be counted as an upload that never arrived.
+  // Informational only — see `registry/upload-health.ts`: nothing here or
+  // downstream clears, skips or overwrites content because of the marker.
+  registryRoutes.post("/vaults/:vaultId/notes/confirm-empty", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    if (!(await orgRole(org, session.userId))) {
+      return c.json({ error: "Not a member of this vault" }, 403);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const docIds: unknown = (body as { docIds?: unknown }).docIds;
+    if (!Array.isArray(docIds)) return c.json({ error: "docIds array required" }, 400);
+    const ids = [...new Set(docIds.filter((d): d is string => typeof d === "string" && d !== ""))];
+    if (ids.length > CONFIRM_EMPTY_MAX) {
+      return c.json({ error: `at most ${CONFIRM_EMPTY_MAX} docIds per request` }, 400);
+    }
+    // Only someone who could have written the content may vouch that there is
+    // none: the same per-doc resolver every write path uses.
+    const editable: string[] = [];
+    await runPool(ids, config.backfillConcurrency, async (id) => {
+      if ((await effectivePermission(session.userId, id)) === "edit") editable.push(id);
+    });
+    const confirmed = await confirmEmptyNotes(vaultId, editable);
+    return c.json({ confirmed });
+  });
+
+  registryRoutes.get("/vaults/:vaultId/upload-health", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const vaultId = c.req.param("vaultId");
+    const org = await vaultOrg(vaultId);
+    if (!org) return c.json({ error: "Unknown vault" }, 404);
+    const role = await orgRole(org, session.userId);
+    if (!role) return c.json({ error: "Not a member of this vault" }, 403);
+    // A vault-wide census (it counts notes the caller may not read), so it is
+    // for the people who manage the vault, like the access tree.
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "Owner or admin only", code: "not_manager" }, 403);
+    }
+    const raw = Number(c.req.query("minAgeMinutes"));
+    const minAge = Number.isFinite(raw)
+      ? Math.min(60 * 24 * 30, Math.max(0, Math.floor(raw)))
+      : STALLED_UPLOAD_MIN_AGE_MINUTES;
+    return c.json(await uploadHealth(vaultId, minAge));
   });
 
   // ── folders ──────────────────────────────────────────────────────────────

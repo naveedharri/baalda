@@ -2007,6 +2007,38 @@ export class ApiClient {
     return data.none ?? [];
   }
 
+  /**
+   * Tell the server these notes are genuinely empty here — empty file AND empty
+   * local CRDT (#257) — so a contentless note WITHOUT that marker can be counted
+   * as an upload that never arrived. Informational only: the server stamps a
+   * marker and changes no content. At most {@link ACCESS_CHECK_MAX} ids (the
+   * server's `CONFIRM_EMPTY_MAX`, the same bound). Returns the ids it stamped.
+   */
+  async confirmEmptyNotes(vaultId: string, docIds: string[]): Promise<string[]> {
+    const { data } = await this.request<{ confirmed: string[] }>(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/notes/confirm-empty`,
+      { body: { docIds } },
+    );
+    return data.confirmed ?? [];
+  }
+
+  /** Owner/admin census of notes registered but never uploaded (#257). */
+  async uploadHealth(vaultId: string): Promise<{
+    stalled: number;
+    confirmedEmpty: number;
+    minAgeMinutes: number;
+    byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
+  }> {
+    const { data } = await this.request<{
+      stalled: number;
+      confirmedEmpty: number;
+      minAgeMinutes: number;
+      byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
+    }>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/upload-health`);
+    return data;
+  }
+
   async listNotes(vaultId: string): Promise<RegisteredNote[]> {
     const { data } = await this.request<{ notes: RegisteredNote[] }>("GET", "/api/notes", {
       query: { vaultId },
