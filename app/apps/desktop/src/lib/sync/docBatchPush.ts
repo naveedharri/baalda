@@ -199,6 +199,11 @@ interface Prepared {
   seeded: boolean;
 }
 
+/** The server's per-item code while the shrink burst brake holds us (#252). */
+export const SHRINK_HELD_CODE = "shrink_held";
+export const SHRINK_HELD_REASON =
+  "Sync paused: many notes were emptied at once. This edit is safe on this device and syncs when the pause ends.";
+
 export class DocBatchPusher {
   private readonly opts: DocBatchPusherOptions;
   private readonly deps: DocBatchPushDeps;
@@ -595,6 +600,14 @@ export class DocBatchPusher {
         });
         return;
       default:
+        // The shrink burst brake holds this account's writes in the vault
+        // (#252). Retryable, and the local copy is untouched: the ops simply
+        // wait here until the pause lifts. Its own kind, so the session can
+        // say "Sync paused" instead of listing a failure per note.
+        if (res.code === SHRINK_HELD_CODE) {
+          this.fail(p.docId, p.relPath, SHRINK_HELD_REASON, { kind: "shrink-held" });
+          return;
+        }
         this.fail(p.docId, p.relPath, res.error ?? res.code ?? "the server refused this note");
         return;
     }

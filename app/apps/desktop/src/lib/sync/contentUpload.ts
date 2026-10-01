@@ -158,7 +158,7 @@ export interface UploadFailure {
   reason: string;
   /** Machine-readable cause for a terminal refusal. `permanent` only controls
    * retry scheduling; it must never be used as the user-facing diagnosis. */
-  kind?: "too-large" | "no-write-access";
+  kind?: "too-large" | "no-write-access" | "shrink-held";
   /**
    * Retrying the same bytes under the same access cannot fix this. The session
    * remembers these so they are not re-queued every connect, and they never

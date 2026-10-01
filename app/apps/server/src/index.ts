@@ -22,7 +22,14 @@ import { pool } from "./db/pool.js";
 import { invalidateReadableCache } from "./permissions/readable-cache.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
-import { setShrinkBrakeHook, setShrinkHook } from "./versions/shrink-guard.js";
+import {
+  isShrinkHeld,
+  setShrinkBrakeHook,
+  setShrinkBrakeReleaseHook,
+  setShrinkHook,
+  shrinkBrake,
+} from "./versions/shrink-guard.js";
+import { recordBrakeEngaged } from "./versions/brake-events.js";
 import { createReleaseWatch, releaseWatchConfig } from "./sync/release-watch.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
 
@@ -65,7 +72,11 @@ async function main() {
   // Vault replication channel (spec 05): pub/sub is in-memory unless REDIS_URL
   // is set, in which case fanout spans instances (HA / rolling deploys).
   const pubsub = await createPubSub(config.redisUrl);
-  const vaultChannel = new VaultChannel({ pubsub });
+  const vaultChannel = new VaultChannel({
+    pubsub,
+    // A client (re)connecting during a shrink-brake hold is told why (#252).
+    brakeState: (userId, vaultId) => shrinkBrake.holdOf(userId, vaultId),
+  });
 
   // Every publish below is fire-and-forget, and every one of them can reject
   // (pub/sub is Redis when REDIS_URL is set). `void promise` does NOT handle a
@@ -151,10 +162,70 @@ async function main() {
       .catch(broadcastFailed("activity-changed"));
   });
   // A BURST of them from one user in one vault engages the brake (#252): kick
-  // that user's live sockets there so they reconnect read-only for the hold.
-  setShrinkBrakeHook((vaultId, userId) => {
+  // that user's live sockets there so they reconnect read-only for the hold,
+  // tell their app why (a `brake` frame, never `rejected`), and record it for
+  // the vault's owners/admins, whose Activity refetches.
+  //
+  // When the hold ends — it lapses, or an owner/admin releases it — the user's
+  // sockets are kicked again so they reconnect WRITABLE, and their app hears
+  // `brake { held: false }`. Without that the read-only re-admission outlived
+  // the hold until something else happened to reconnect them.
+  const lapseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const brakeKey = (vaultId: string, userId: string) => `${vaultId}\u0000${userId}`;
+  const brakeLifted = (vaultId: string, userId: string) => {
+    const closed = disconnectUserInVault(sync, vaultId, userId);
+    if (closed > 0) {
+      console.info(`[versions] shrink brake lifted: reconnecting ${closed} connection(s) in vault ${vaultId}`);
+    }
+  };
+  setShrinkBrakeHook((vaultId, userId, hold) => {
     const closed = disconnectUserInVault(sync, vaultId, userId);
     console.warn(`[versions] shrink brake: closed ${closed} live connection(s) in vault ${vaultId}`);
+    void vaultChannel
+      .publishBrake(vaultId, userId, { held: true, until: hold.until, count: hold.count })
+      .catch(broadcastFailed("brake"));
+    void recordBrakeEngaged(vaultId, userId, hold.count, new Date(hold.until))
+      .then(() => vaultChannel.publishActivityChanged(vaultId))
+      .catch((err) => console.error("[versions] shrink brake record failed:", err));
+    const key = brakeKey(vaultId, userId);
+    clearTimeout(lapseTimers.get(key));
+    const timer = setTimeout(() => {
+      lapseTimers.delete(key);
+      if (isShrinkHeld(userId, vaultId)) return; // re-engaged meanwhile: its own timer
+      brakeLifted(vaultId, userId);
+      void vaultChannel.publishBrake(vaultId, userId, { held: false }).catch(broadcastFailed("brake"));
+      void vaultChannel.publishActivityChanged(vaultId).catch(broadcastFailed("activity-changed"));
+    }, Math.max(0, hold.until - Date.now()) + 50);
+    timer.unref?.();
+    lapseTimers.set(key, timer);
+  });
+  // Release (owner/admin, `http/routes/shrink-brake.ts`): every instance drops
+  // its own hold and re-admits that user's sockets writable — the hold is
+  // in-memory per process, so the release travels over pub/sub (in-memory by
+  // default, Redis when REDIS_URL spans instances).
+  const BRAKE_RELEASE_TOPIC = "shrink-brake:release";
+  await pubsub.subscribe(BRAKE_RELEASE_TOPIC, (payload) => {
+    try {
+      const { vaultId, userId } = JSON.parse(new TextDecoder().decode(payload)) as {
+        vaultId?: unknown;
+        userId?: unknown;
+      };
+      if (typeof vaultId !== "string" || typeof userId !== "string") return;
+      shrinkBrake.release(userId, vaultId);
+      const key = brakeKey(vaultId, userId);
+      clearTimeout(lapseTimers.get(key));
+      lapseTimers.delete(key);
+      brakeLifted(vaultId, userId);
+    } catch (err) {
+      console.error("[versions] shrink brake release message failed:", err);
+    }
+  });
+  setShrinkBrakeReleaseHook((vaultId, userId) => {
+    void pubsub
+      .publish(BRAKE_RELEASE_TOPIC, new TextEncoder().encode(JSON.stringify({ vaultId, userId })))
+      .catch(broadcastFailed("brake-release"));
+    void vaultChannel.publishBrake(vaultId, userId, { held: false }).catch(broadcastFailed("brake"));
+    void vaultChannel.publishActivityChanged(vaultId).catch(broadcastFailed("activity-changed"));
   });
 
   versionCapture = createVersionCapture({

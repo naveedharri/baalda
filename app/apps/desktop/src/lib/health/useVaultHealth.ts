@@ -80,6 +80,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const docSyncState = useStore((s) => s.docSyncState);
   const titles = useStore((s) => s.titles);
   const members = useStore((s) => s.members);
+  const syncPause = useStore((s) => s.syncPause);
   const userId = useStore((s) => s.session?.user.id);
   const myRole = members.find((m) => m.userId === userId)?.role;
   const canManage = myRole === "owner" || myRole === "admin";
@@ -317,6 +318,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       stats,
       checks,
       members,
+      syncPause,
     };
     return buildHealthReport(input);
   }, [
@@ -336,6 +338,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     failures,
     stats,
     members,
+    syncPause,
   ]);
 
   const inventory = useMemo<HealthInventory>(() => {

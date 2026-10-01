@@ -48,7 +48,7 @@ export interface HealthContentFailure {
   /** Retrying cannot help without changing the note or its access. */
   permanent?: boolean;
   /** User-facing diagnosis. `permanent` is scheduling metadata, not a cause. */
-  kind?: "too-large" | "no-write-access";
+  kind?: "too-large" | "no-write-access" | "shrink-held";
 }
 
 /** One row the registry could not create/move. Mirrors `registry.ts`
@@ -109,6 +109,9 @@ export interface HealthInput {
    *  needs no value import from `lib/api.ts`; absent ⇒ the explanations fall
    *  back to "the vault's owner". */
   members?: HealthMember[];
+  /** `store.syncPause` — the server's shrink burst brake holding this
+   *  account's writes in the vault (#252). Absent ⇒ none. */
+  syncPause?: { until: number | null; count: number | null } | null;
 }
 
 /** The one shape the model needs out of `api.Member`. */
@@ -898,6 +901,56 @@ export function buildHealthReport(input: HealthInput): HealthReport {
   };
 }
 
+/** The vault-level "Sync paused" issue (#252). Exported for tests. */
+export function syncPausedIssue(
+  pause: { until: number | null; count: number | null } | null,
+  heldNotes: number,
+  now: number,
+): HealthIssue {
+  const minutes =
+    pause?.until != null && pause.until > now ? Math.max(1, Math.round((pause.until - now) / 60_000)) : null;
+  const count = pause?.count ?? null;
+  return {
+    key: "vault:sync-paused",
+    docId: null,
+    path: null,
+    kind: "sync-paused",
+    severity: "warn",
+    title: "Sync paused",
+    why:
+      (count != null && count > 0
+        ? `${num(count)} notes were emptied at once from this account, so the Remote Vault paused your sync. `
+        : "Many notes were emptied at once from this account, so the Remote Vault paused your sync. ") +
+      "Your edits are safe on this device.",
+    remedies: ["copy-details"],
+    code: "shrink_held",
+    explanation: {
+      meaning:
+        "When one person's notes lose most of their text all at once, the Remote Vault stops " +
+        "accepting their edits for a while, in case something went wrong (a script, a bad " +
+        "sync, a folder emptied by mistake). Every note that lost its text was saved as a " +
+        "version first, so nothing on the server is lost.",
+      next:
+        (minutes != null
+          ? `The pause ends on its own in about ${minutes} min`
+          : "The pause ends on its own shortly") +
+        ", or sooner if a vault owner or admin releases it from Activity. Then your edits sync like any other edit.",
+      fixes: [
+        "Keep working. Everything you change stays on this device until the pause ends.",
+        "If the emptied notes were a mistake, restore them from version history before the pause ends.",
+        "Ask a vault owner or admin to release the pause if the change was intended.",
+      ],
+      safety: "only-here",
+    },
+    facts: [
+      ...(count != null ? [{ label: "Notes emptied", value: num(count) }] : []),
+      ...(heldNotes > 0 ? [{ label: "Notes waiting to sync", value: num(heldNotes) }] : []),
+      ...(minutes != null ? [{ label: "Ends in", value: `about ${minutes} min` }] : []),
+    ],
+    autoRetries: true,
+  };
+}
+
 // ── Verdict ───────────────────────────────────────────────────────────────────
 
 function decideVerdict(
@@ -946,9 +999,18 @@ function buildIssues(
   const owner = ownerOf(input.members);
   const issueCtx: IssueContext = { stats: input.stats, owner };
 
+  // A shrink-brake pause first, as ONE issue: the notes it held are not each
+  // broken, they are waiting for the same thing (#252).
+  const held = input.failures.content.filter((f) => f.kind === "shrink-held");
+  if (input.syncEnabled && (input.syncPause || held.length > 0)) {
+    push(syncPausedIssue(input.syncPause ?? null, held.length, input.now));
+  }
+
   // Content first: these are the failures that name a specific note whose only
   // copy is here.
-  for (const f of input.failures.content) push(contentIssue(f, issueCtx));
+  for (const f of input.failures.content) {
+    if (f.kind !== "shrink-held") push(contentIssue(f, issueCtx));
+  }
   for (const f of input.failures.registry) push(registryIssue(f, issueCtx));
 
   // A limit that stopped the run but was recorded against nothing the user can

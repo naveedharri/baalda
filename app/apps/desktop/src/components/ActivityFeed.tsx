@@ -9,7 +9,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
-import type { InvitationExpiry, ShrinkEvent, TrashItem } from "../lib/api";
+import type { InvitationExpiry, ShrinkBrakeEvent, ShrinkEvent, TrashItem } from "../lib/api";
 import { buildInviteLink } from "../lib/inviteLink";
 import { toast } from "../lib/toast";
 import { syncManager } from "../lib/sync/docSession";
@@ -203,6 +203,63 @@ function ShrunkRowActions({
   );
 }
 
+/**
+ * Release a member's sync pause early (owner/admin, #252). Their held edits
+ * then arrive like any edit — each sharp shrink is still saved as a version
+ * first, and a renewed burst pauses them again.
+ */
+function PausedRowActions({
+  event,
+  online,
+  onDone,
+}: {
+  event: ShrinkBrakeEvent;
+  online: boolean;
+  onDone: () => void;
+}) {
+  const [confirm, setConfirm] = useState(false);
+  const who = event.userName?.trim() || "this member";
+  const release = async () => {
+    setConfirm(false);
+    const vaultId = syncManager.registry.vaultId;
+    if (!vaultId) return;
+    try {
+      await authManager.api.releaseShrinkBrake(vaultId, event.userId);
+      toast(`Sync resumed for ${who}.`, "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+    onDone();
+  };
+  return (
+    <>
+      <span className="health-missing-actions">
+        <button
+          type="button"
+          className="ghost-pill sm"
+          disabled={!online}
+          title={online ? "Let their held edits sync now." : "Reconnect to release."}
+          onClick={() => setConfirm(true)}
+        >
+          Release
+        </button>
+      </span>
+      {confirm && (
+        <ConfirmDialog
+          title={`Resume sync for ${who}?`}
+          confirmLabel="Release"
+          onConfirm={release}
+          onCancel={() => setConfirm(false)}
+        >
+          Their edits that were waiting on their device sync now, including any notes they emptied.
+          Every emptied note was saved as a version first, so it can still be restored from Version
+          history. Check the Shrunk rows here first if the change might have been a mistake.
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
 function OpenNoteButton({ path }: { path: string }) {
   return (
     <button
@@ -317,6 +374,11 @@ function rowMeta(row: ActivityRow, now: number): string {
     const by = row.invitation.inviterName ? `sent by ${row.invitation.inviterName} · ` : "";
     return `${by}${when}`;
   }
+
+  if (row.type === "paused") {
+    if (row.event.held) return `${when} · until ${clockTime(Date.parse(row.event.heldUntil))}`;
+    return row.event.releasedAt ? `${when} · released early` : `${when} · ended`;
+  }
   if (row.type === "shrunk" || row.type === "access" || row.type === "failed") {
     return row.path ? `${row.text} · ${when}` : when;
   }
@@ -327,6 +389,7 @@ function rowTitle(row: ActivityRow): string {
   if (row.type === "reconcile") return `${ACTIVITY_HINT.reconcile}\n${row.item.detail ?? row.path}`;
   if (row.type === "trash") return `${ACTIVITY_HINT.trash}\n${row.path}`;
   if (row.type === "held") return ACTIVITY_HINT.held;
+  if (row.type === "paused") return `${ACTIVITY_HINT.paused}\n${row.text}`;
   if (row.type === "shrunk") {
     return `${ACTIVITY_HINT.shrunk}${row.event.deleted ? "\nThe note is deleted now." : ""}\n${row.path}`;
   }
@@ -449,6 +512,7 @@ export function ActivityFeed() {
                   data-tone={
                     (row.type === "trash" && row.item.hasUnsyncedContributions) ||
                     row.type === "held" ||
+                    (row.type === "paused" && row.event.held) ||
                     row.type === "shrunk" ||
                     row.type === "failed" ||
                     row.type === "invitation"
@@ -488,6 +552,10 @@ export function ActivityFeed() {
                     <ReconcileRowActions item={row.item} onChanged={schedule} />
                   ) : row.type === "held" ? (
                     <HeldRowActions onDone={schedule} />
+                  ) : row.type === "paused" ? (
+                    row.canRelease ? (
+                      <PausedRowActions event={row.event} online={trash.online} onDone={schedule} />
+                    ) : null
                   ) : row.type === "shrunk" ? (
                     <ShrunkRowActions event={row.event} online={trash.online} onDone={schedule} />
                   ) : row.type === "failed" ? (

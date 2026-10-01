@@ -5,6 +5,8 @@ import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { ReconcileBanner } from "./components/ReconcileBanner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
+import { SyncPausedBannerView } from "./components/SyncPausedBanner";
+import { syncPauseRemaining } from "./lib/sync/syncPause";
 import { VaultUnsyncedBannerView } from "./components/VaultUnsyncedBanner";
 import { NoteLimitBannerView, noteLimitBanner } from "./components/NoteLimitBanner";
 import {
@@ -197,6 +199,31 @@ function NotSyncingBanner() {
     <NotSyncingBannerView
       reason={reason}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
+      onOpenHealth={() => useStore.getState().requestSettings("health")}
+    />
+  );
+}
+
+/**
+ * "Sync paused" while the server's shrink burst brake holds our writes (#252).
+ * The minute tick only refreshes the "in about N min" countdown.
+ */
+function SyncPausedBanner() {
+  const pause = useStore((s) => s.syncPause);
+  const dismissed = useStore((s) => s.syncPauseDismissed);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!pause) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, [pause]);
+  return (
+    <SyncPausedBannerView
+      pause={pause}
+      dismissed={dismissed}
+      now={now}
+      onDismiss={() => useStore.getState().dismissSyncPause()}
       onOpenHealth={() => useStore.getState().requestSettings("health")}
     />
   );
@@ -858,6 +885,7 @@ function SyncIndicator({
   const pending = useStore((s) => s.syncPending);
   const progress = useStore((s) => s.syncProgress);
   const rootMissing = useStore((s) => s.structureNotice.rootMissing);
+  const syncPause = useStore((s) => s.syncPause);
   // The folder is gone (#228): nothing syncs until it is back, so the pill
   // must not claim "Synced". Neutral, not an error — the banner has the fix.
   if (rootMissing) {
@@ -865,6 +893,24 @@ function SyncIndicator({
       <span className="sync-badge offline" title="Sync is paused until the vault folder is back">
         <span className="sync-dot" aria-hidden="true" />
         Paused
+      </span>
+    );
+  }
+  // The server's shrink burst brake holds our writes (#252). Amber, not red:
+  // nothing is lost, and it ends on its own or when an owner releases it.
+  if (syncEnabled && syncPause) {
+    const remaining = syncPauseRemaining(syncPause, Date.now());
+    return (
+      <span
+        className="sync-badge connecting"
+        title={
+          "Many notes were emptied at once, so the server paused your sync. Your edits are safe " +
+          `on this device and sync when the pause ends${remaining ? ` (in ${remaining})` : ""} ` +
+          "or a vault owner or admin releases it."
+        }
+      >
+        <span className="sync-dot" aria-hidden="true" />
+        Sync paused
       </span>
     );
   }
@@ -1542,6 +1588,7 @@ export default function App() {
             <ReconcileBanner />
           </SilentBoundary>
           <NotSyncingBanner />
+          <SyncPausedBanner />
           <NoteLimitBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
