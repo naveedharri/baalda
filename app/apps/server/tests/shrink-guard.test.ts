@@ -131,15 +131,18 @@ describe("sharp-shrink reporting", () => {
       await Promise.all(pending);
 
       const { rows } = await pool.query<{ content: string; cause: string; author_id: string | null }>(
-        "SELECT content, cause, author_id FROM note_versions WHERE doc_id = $1 ORDER BY id",
+        `SELECT COALESCE(v.content, t.content) AS content, v.cause, v.author_id FROM note_versions v LEFT JOIN note_texts t ON t.doc_id = v.doc_id AND t.sha256 = v.sha256 WHERE v.doc_id = $1 ORDER BY v.id`,
         [docId],
       );
       expect(rows).toEqual([{ content: BODY, cause: "pre-shrink", author_id: user.userId }]);
 
-      // Idempotent: the same prior text is not stored twice.
+      // Every sharp shrink is its own event (#253) — a second report records a
+      // second `pre-shrink` row — but the text itself is stored once.
       await capture.preShrink(vaultId, docId, BODY);
       const { rows: again } = await pool.query("SELECT 1 FROM note_versions WHERE doc_id = $1", [docId]);
-      expect(again).toHaveLength(1);
+      expect(again).toHaveLength(2);
+      const { rows: texts } = await pool.query("SELECT 1 FROM note_texts WHERE doc_id = $1", [docId]);
+      expect(texts).toHaveLength(1);
     } finally {
       capture.stop();
     }

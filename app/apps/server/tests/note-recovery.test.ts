@@ -134,7 +134,7 @@ describe("recovery routes", () => {
     expect(rec.docWriter.store.get(wiped)).toBe(GOOD);
 
     const { rows } = await pool.query<{ cause: string; content: string }>(
-      "SELECT cause, content FROM note_versions WHERE doc_id = $1 ORDER BY id",
+      `SELECT v.cause, COALESCE(v.content, t.content) AS content FROM note_versions v LEFT JOIN note_texts t ON t.doc_id = v.doc_id AND t.sha256 = v.sha256 WHERE v.doc_id = $1 ORDER BY v.id`,
       [wiped],
     );
     expect(rows.map((r) => r.cause)).toEqual(["idle", "pre-revert"]);

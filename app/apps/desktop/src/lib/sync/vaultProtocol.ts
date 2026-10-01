@@ -145,9 +145,15 @@ export type ServerControl =
    *  dropped them (throttled server-side, ~5 s per connection). */
   | { t: "rejected"; docId: string; reason: "read_only" }
   | { t: "reauth" }
-  | { t: "registry" }
+  /** `meta`: the window carried only "last edited by" stamps, nothing
+   *  structural (#262) — the session folds it into a throttled pull. */
+  | { t: "registry"; meta?: true }
+  /** The vault's Trash or shrink-event listings changed (#260). */
+  | { t: "activity" }
   | { t: "member"; name: string }
   | ({ t: "presence" } & PresenceState)
+  /** A new release exists (#269): a hint to run the normal update check now. */
+  | { t: "version-available"; version: string }
   | { t: "err"; message: string };
 
 export function encodeHello(frame: Omit<HelloFrame, "t">): string {
@@ -210,7 +216,10 @@ export function parseServerControl(text: string): ServerControl | null {
     return { t: "revoked", docIds };
   }
   if (t === "reauth") return { t: "reauth" };
-  if (t === "registry") return { t: "registry" };
+  if (t === "registry") {
+    return (v as { meta?: unknown }).meta === true ? { t: "registry", meta: true } : { t: "registry" };
+  }
+  if (t === "activity") return { t: "activity" };
   if (t === "member" && typeof (v as { name?: unknown }).name === "string") {
     return { t: "member", name: (v as { name: string }).name };
   }
@@ -242,6 +251,12 @@ export function parseServerControl(text: string): ServerControl | null {
       return { t: "rejected", docId: r.docId, reason: "read_only" };
     }
     return null;
+  }
+  if (t === "version-available") {
+    const ver = (v as { version?: unknown }).version;
+    return typeof ver === "string" && ver.length > 0 && ver.length <= 64
+      ? { t: "version-available", version: ver }
+      : null;
   }
   if (t === "drop" && typeof (v as { docId?: unknown }).docId === "string") {
     return { t: "drop", docId: (v as { docId: string }).docId };

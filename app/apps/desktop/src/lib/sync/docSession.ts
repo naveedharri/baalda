@@ -14,8 +14,14 @@ import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
 import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter";
-import { isServerTooOld, type NoteLastEdited, type SessionInfo } from "../api";
+import {
+  ACCESS_CHECK_MAX,
+  isServerTooOld,
+  type NoteLastEdited,
+  type SessionInfo,
+} from "../api";
 import * as ipc from "../ipc";
+import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
@@ -46,6 +52,7 @@ import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry, type InboundHost, type RegistryFailure } from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
 import {
+  isBulkPhase,
   vaultScopes,
   type DocSyncState,
   type SyncProgress,
@@ -204,6 +211,18 @@ const EMPTY_PROBE_MAX_BYTES = 1024;
 const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
 
 /**
+ * Minimum gap between the last registry pull and one asked for by a META-only
+ * frame (#262) — the server's "last edited by" stamp, which moves no row and
+ * grants nothing. Each note connection that pushes ops stamps its note, so a
+ * returning device catching up, or a user opening notes in a row, used to make
+ * every app in the vault re-pull the whole tree once per note. The stamp is
+ * already up to 60 s behind server-side, so 30 s here costs nothing a person
+ * can see. Structural frames (create/rename/move/delete) never wait on this:
+ * they keep the immediate, debounced path.
+ */
+export const REGISTRY_META_PULL_MIN_MS = 30_000;
+
+/**
  * How long the server's `acl-changed` frame keeps a pull authorised to remove
  * files wholesale (see {@link SyncManager.revocationAuthority}).
  *
@@ -258,7 +277,9 @@ export type RegistryPullReason =
   | "revert"
   // #221: the user answered a held bulk delete.
   | "delete-restore"
-  | "delete-confirmed";
+  | "delete-confirmed"
+  // #262: a `meta` frame (last-edited stamps only), after its throttle.
+  | "meta-frame";
 
 export interface OpenedDoc {
   awareness: Awareness;
@@ -417,6 +438,14 @@ export class SyncManager implements InboundHost {
   /** When the currently-armed pull's burst started (see
    *  {@link REGISTRY_PULL_MAX_WAIT_MS}); 0 when no pull is armed. */
   private registryPullBurstAt = 0;
+  /** When the last registry pull was started (any reason). A meta-only frame
+   *  inside {@link REGISTRY_META_PULL_MIN_MS} of it is deferred, not dropped. */
+  private lastRegistryPullAt = 0;
+  /** The deferred meta-only pull, if one is waiting. At most one. */
+  private metaPullTimer: ReturnType<typeof setTimeout> | null = null;
+  /** UI subscribes here to refetch the Activity feed when the server says the
+   *  vault's Trash / shrink listings may have moved (#260). */
+  private onActivityChanged?: () => void;
   private attachments: AttachmentSync | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
@@ -1366,6 +1395,12 @@ export class SyncManager implements InboundHost {
         this.pullAfterDiskDeletes = true;
         return;
       }
+      this.lastRegistryPullAt = Date.now();
+      // This pull carries whatever a deferred meta-only one was waiting for.
+      if (this.metaPullTimer) {
+        clearTimeout(this.metaPullTimer);
+        this.metaPullTimer = null;
+      }
       void this.registry
         .pull()
         .then((changed) => {
@@ -1397,9 +1432,56 @@ export class SyncManager implements InboundHost {
     }, 250);
   }
 
+  /**
+   * A `registry` frame flagged `meta`: only "last edited by" stamps moved
+   * (#262). Nothing structural changed and nothing was granted or revoked, so
+   * there is no delete or rename this pull could be the first to hear about —
+   * those always arrive as ordinary frames and take {@link handleRegistryChanged}
+   * at once. All this pull refreshes is the sidebar's "edited by" line, so it
+   * rides an armed pull when there is one, and otherwise waits until
+   * {@link REGISTRY_META_PULL_MIN_MS} has passed since the last pull started.
+   * Deferred, never dropped: one timer, shared by every frame that lands while
+   * it waits.
+   */
+  handleRegistryMetaChanged(): void {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    if (this.registryPullTimer || this.metaPullTimer) return;
+    const wait = this.lastRegistryPullAt + REGISTRY_META_PULL_MIN_MS - Date.now();
+    if (wait <= 0) {
+      this.handleRegistryChanged("meta-frame");
+      return;
+    }
+    this.metaPullTimer = setTimeout(() => {
+      this.metaPullTimer = null;
+      if (scope.isCurrent()) this.handleRegistryChanged("meta-frame");
+    }, wait);
+  }
+
+  /** UI hook for the Activity feed's push refetch (#260). */
+  setActivityChangedListener(cb: (() => void) | undefined): void {
+    this.onActivityChanged = cb;
+  }
+
+  /** The server said Trash / shrink listings may have moved: an `activity`
+   *  frame, or a structural `registry` frame (every soft delete is one). */
+  private notifyActivityChanged(scope: VaultScope): void {
+    if (!scope.isCurrent()) return;
+    try {
+      this.onActivityChanged?.();
+    } catch (e) {
+      console.warn("[sync] activity listener threw", e);
+    }
+  }
+
   /** True while a debounced registry pull is still armed (teardown assertions). */
   hasPendingRegistryPull(): boolean {
     return this.registryPullTimer != null;
+  }
+
+  /** True while a meta-only pull is deferred (tests / teardown assertions). */
+  hasPendingMetaPull(): boolean {
+    return this.metaPullTimer != null;
   }
 
   /** True while the blob mirror has a debounced pass armed — the binary half of
@@ -2666,6 +2748,10 @@ export class SyncManager implements InboundHost {
       clearTimeout(this.registryPullTimer);
       this.registryPullTimer = null;
     }
+    if (this.metaPullTimer) {
+      clearTimeout(this.metaPullTimer);
+      this.metaPullTimer = null;
+    }
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
     this.renameCandidates.clear();
@@ -3636,6 +3722,7 @@ export class SyncManager implements InboundHost {
       toProbe.push({ docId, relPath });
     }
     if (toProbe.length === 0) return keep;
+    const settledNow: string[] = [];
     return runPool(
       toProbe,
       async ({ docId, relPath }) => {
@@ -3665,13 +3752,43 @@ export class SyncManager implements InboundHost {
         this.emptyEverywhere.add(docId);
         this.registry.markPushed(docId);
         this.progress?.doc(docId, "synced");
+        settledNow.push(docId);
       },
       { concurrency: IPC_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
     ).then(() => {
       if (!scope.isCurrent()) return;
       this.serverEmpty = keep;
       this.progress?.flush();
+      this.reportConfirmedEmpty(settledNow, scope);
     });
+  }
+
+  /**
+   * Tell the server which notes were just settled as empty everywhere (#257),
+   * so it can tell a genuinely empty note from an upload that never arrived.
+   *
+   * Fire-and-forget and purely informational: the server only stamps a marker
+   * (`notes.confirmed_empty_at`, and only on notes it holds no content for) and
+   * changes no content; nothing on either side reads the marker to clear or
+   * skip a note, and `ready.empty` still names these docs. A failure (offline,
+   * an older server without the route) costs only the count, and the doc is
+   * reported again on a later connect because `ready.empty` names it again.
+   * Once per doc per session — `emptyEverywhere` already keeps a settled doc
+   * from being probed twice, so this cannot loop.
+   */
+  private reportConfirmedEmpty(docIds: string[], scope: VaultScope): void {
+    const vaultId = this.registry.vaultId;
+    if (!vaultId || docIds.length === 0) return;
+    void (async () => {
+      for (let i = 0; i < docIds.length; i += ACCESS_CHECK_MAX) {
+        if (!scope.isCurrent()) return;
+        try {
+          await api.confirmEmptyNotes(vaultId, docIds.slice(i, i + ACCESS_CHECK_MAX));
+        } catch {
+          return; // informational: never retried in a loop, never surfaced
+        }
+      }
+    })();
   }
 
   /**
@@ -3820,7 +3937,7 @@ export class SyncManager implements InboundHost {
       onProgress: (p) => {
         if (cleanupActive) return;
         this.logRunPhase(p);
-        this.onSyncProgress?.(p);
+        this.onSyncProgress?.(this.withUploadBacklog(p));
       },
       onDocState: (patch) => this.onDocState?.(patch),
     });
@@ -4836,6 +4953,35 @@ export class SyncManager implements InboundHost {
     };
   }
 
+  /**
+   * How many notes this device holds whose content the server has never
+   * confirmed (#258): not checkpointed as pushed, or named on `ready.empty`,
+   * and not settled as empty everywhere.
+   *
+   * The checkpoint behind it (`registry.pushed`) is persisted in
+   * `config.json`, so this survives a quit or crash mid first-upload — which is
+   * what lets the next launch say "Finishing upload" instead of resuming in
+   * silence while teammates open empty notes. Purely a READ: the resume itself
+   * is the ordinary content run, which pulls the server's state before pushing
+   * anything (`decideSeed`), so nothing here can send stale local state over
+   * content the server already has.
+   */
+  notUploadedCount(): number {
+    let n = 0;
+    for (const docId of this.registry.allDocIds()) {
+      if (this.emptyEverywhere.has(docId)) continue;
+      if (!this.registry.isPushed(docId) || this.serverEmpty.has(docId)) n++;
+    }
+    return n;
+  }
+
+  /** Stamp {@link SyncProgress.notUploaded} on a running phase's emission. */
+  private withUploadBacklog(p: SyncProgress | null): SyncProgress | null {
+    if (!p || !isBulkPhase(p.phase)) return p;
+    const notUploaded = this.notUploadedCount();
+    return notUploaded > 0 ? { ...p, notUploaded } : p;
+  }
+
   /** Everything the current run could not sync — registry rows and note content. */
   syncFailures(): {
     registry: ReturnType<VaultRegistry["failures"]>;
@@ -4958,6 +5104,11 @@ export class SyncManager implements InboundHost {
       this.registryPullTimer = null;
     }
     this.registryPullBurstAt = 0;
+    if (this.metaPullTimer) {
+      clearTimeout(this.metaPullTimer);
+      this.metaPullTimer = null;
+    }
+    this.lastRegistryPullAt = 0;
     if (this.localChangeTimer) {
       clearTimeout(this.localChangeTimer);
       this.localChangeTimer = null;
@@ -5388,7 +5539,19 @@ export class SyncManager implements InboundHost {
       // read-only/editable live — no reopen (spec 04 §4).
       onAclChanged: () => this.handleServerReauth(scope),
       // A teammate changed the folder/note structure — re-pull + refresh tree.
-      onRegistryChanged: () => this.handleRegistryChanged("registry-frame"),
+      // A `meta` frame is only "last edited by" stamps (#262) and takes the
+      // throttled path; anything structural pulls now, and may have moved the
+      // Trash too (every soft delete is a structural change).
+      onRegistryChanged: (meta) => {
+        if (meta) {
+          this.handleRegistryMetaChanged();
+          return;
+        }
+        this.handleRegistryChanged("registry-frame");
+        this.notifyActivityChanged(scope);
+      },
+      // Trash / shrink listings moved (#260): refetch instead of polling.
+      onActivityChanged: () => this.notifyActivityChanged(scope),
       // A new teammate joined the vault — refresh roster + celebrate.
       onMemberJoined: (name) => this.onMemberJoined?.(name),
       // A teammate's viewing state changed — update the sidebar presence roster.
@@ -5418,6 +5581,8 @@ export class SyncManager implements InboundHost {
       onServerRejected: (docId) => {
         if (scope.isCurrent()) void readOnlyRejections.handle(docId);
       },
+      // A new release exists (#269): run the normal update check soon.
+      onVersionAvailable: (version) => hintUpdateAvailable(version),
       // The server fully covers these hello vectors: record them as acks.
       onServerCovered: (acks) => {
         if (!scope.isCurrent()) return;

@@ -38,6 +38,7 @@
 // asked to make. So there is none, and the refusals above are what stand in for
 // it.
 
+import { pathKey } from "../pathIdentity";
 import { IPC_CONCURRENCY, REGISTRY_CONCURRENCY, runPool } from "./pool";
 
 /** How long a vanished binary waits before it is believed. Same window the
@@ -155,9 +156,10 @@ function errStatus(e: unknown): number | null {
 
 /** Paths compare case-insensitively everywhere here, exactly as they do in the
  *  registry and on the server (`lower(path)` unique indexes): a disk that says
- *  `Team/Report.pdf` and a blob that says `team/report.pdf` are one file. */
+ *  `Team/Report.pdf` and a blob that says `team/report.pdf` are one file. And
+ *  NFC-normalized (#259), so a Mac's decomposed name is the same file too. */
 function key(relPath: string): string {
-  return relPath.toLowerCase();
+  return pathKey(relPath);
 }
 
 export class BinaryDeleteQueue {

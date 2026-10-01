@@ -12,6 +12,7 @@ import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
 import { listReadableDocsInVault } from "../../permissions/vault-docs.js";
 import { revisionOf, type DocWriter } from "../../mcp/doc-writer.js";
+import { VERSION_CONTENT, VERSION_TEXT_JOIN } from "../../versions/texts.js";
 
 export interface HousekeeperNote { id: string; path: string; title: string }
 export interface HousekeeperHost {
@@ -123,8 +124,10 @@ export function createHousekeeperRoutes(docWriter: DocWriter): Hono {
         async recoveryVersion(id) {
           await note(id, true);
           const { rows } = await pool.query<{ content: string; created_at: string }>(
-            `SELECT content, created_at FROM note_versions WHERE doc_id = $1 AND vault_id = $2
-             AND octet_length(content) > 0 AND octet_length(content) <= 100000 ORDER BY id DESC LIMIT 1`, [id, vaultId]);
+            `SELECT ${VERSION_CONTENT} AS content, v.created_at FROM note_versions v ${VERSION_TEXT_JOIN}
+             WHERE v.doc_id = $1 AND v.vault_id = $2
+             AND octet_length(${VERSION_CONTENT}) > 0 AND octet_length(${VERSION_CONTENT}) <= 100000
+             ORDER BY v.id DESC LIMIT 1`, [id, vaultId]);
           return rows[0] ? { content: rows[0].content, createdAt: String(rows[0].created_at) } : null;
         },
         async edit(id, revision, index, before, after) {

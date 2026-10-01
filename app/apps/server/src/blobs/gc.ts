@@ -451,7 +451,7 @@ export async function sweepOrphansOnce(
         await client.query("DELETE FROM blobs WHERE id = $1", [orphan.id]);
         deleted++;
         console.log(
-          `[blob-gc] orphan removed: blob=${orphan.id} vault=${orphan.vault_id} path=${orphan.rel_path} size=${Number(orphan.size ?? 0)}`,
+          `[blob-gc] orphan removed: blob=${orphan.id} vault=${orphan.vault_id} size=${Number(orphan.size ?? 0)}`,
         );
       }
     }

@@ -167,6 +167,7 @@ export type BulkErrorCode =
   | "doc_id_conflict"
   | "note_deleted"
   | "path_folder_mismatch"
+  | "transient_file"
   | "root_frozen"
   | "no_write_access"
   | "no_edit_permission"
@@ -186,6 +187,7 @@ export const BULK_ERROR_CODES: readonly BulkErrorCode[] = [
   "doc_id_conflict",
   "note_deleted",
   "path_folder_mismatch",
+  "transient_file",
   "root_frozen",
   "no_write_access",
   "no_edit_permission",

@@ -28,6 +28,7 @@ vi.mock("../../lib/sync/docSession", () => ({
       content: [{ docId: "d1", relPath: "x.md", reason: "network" }],
       limitCode: null,
     }),
+    setActivityChangedListener: () => {},
   },
 }));
 vi.mock("../../lib/ipc", () => ({ listTrashCopies: vi.fn(async () => []) }));

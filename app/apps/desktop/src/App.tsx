@@ -46,8 +46,14 @@ import {
   installUpdate,
   isUpdateBlocking,
   justUpdatedTo,
+  launchUpdateGate,
+  RELEASES_PAGE_URL,
+  scheduleHintedUpdateCheck,
+  serverRequiresUpdate,
   useUpdateState,
 } from "./lib/updater";
+import { onClientOutdated } from "./lib/api";
+import { setUpdateHintHandler } from "./lib/updateHint";
 import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
@@ -564,22 +570,35 @@ function VaultFolderPrompt() {
  * build without the updater) never reaches `failed`, so it still walls nothing
  * off. Local edits stay safe throughout — notes are on disk, and
  * `installUpdate` flushes the open note before it touches anything.
+ *
+ * `launchVersion` is the other way in: the launch gate found an update before
+ * sync started (`launchUpdateGate`, #255) and is installing it now, with sync
+ * held until the restart. The same card shows the download as "Updating
+ * Baalda" — it is not a failure, so there are no retry actions — and goes away
+ * if the gate gives up and lets this build open.
  */
-function UpdateGate() {
+function UpdateGate({ launchVersion = null }: { launchVersion?: string | null }) {
   const update = useUpdateState();
+  // The version the wall is for. `""` is a wall too: the server refused this
+  // build (#251) and no newer release could be found to name.
   const [required, setRequired] = useState<string | null>(null);
   useEffect(() => {
     if (isUpdateBlocking(update) && "version" in update) setRequired(update.version);
   }, [update]);
+  // A server `426 client_outdated` refusal: try to update now, wall if not.
+  useEffect(() => onClientOutdated(() => void serverRequiresUpdate()), []);
 
-  if (!required) return null;
+  // `required === ""` is still a wall (server refusal, version unknown).
+  if (required === null && launchVersion == null) return null;
+  const launching = required === null;
 
   const pct =
     update.phase === "downloading" && update.total > 0
       ? Math.round((update.downloaded / update.total) * 100)
       : null;
 
-  const version = ("version" in update ? update.version : null) ?? required;
+  const version =
+    ("version" in update ? update.version : null) ?? required ?? (launchVersion || null);
 
   // Once the wall is up the only thing left in the window is this card, so a
   // manual retry restarts the moment it can — the quiet-moment wait exists to
@@ -591,6 +610,7 @@ function UpdateGate() {
   };
 
   const working =
+    launching ||
     update.phase === "checking" ||
     update.phase === "downloading" ||
     update.phase === "installing" ||
@@ -609,7 +629,12 @@ function UpdateGate() {
   };
 
   return (
-    <div className="update-gate" role="alertdialog" aria-modal="true" aria-label="Update required">
+    <div
+      className="update-gate"
+      role="alertdialog"
+      aria-modal="true"
+      aria-label={launching ? `Updating ${BRAND_NAME}` : "Update required"}
+    >
       <div className="update-gate-card">
         <div className="update-gate-badge" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -619,7 +644,7 @@ function UpdateGate() {
           </svg>
         </div>
         <div className="update-gate-heading">
-          <h1>Update required</h1>
+          <h1>{launching ? `Updating ${BRAND_NAME}` : "Update required"}</h1>
           {version && <span className="update-gate-version">v{version}</span>}
         </div>
         {working && (
@@ -627,7 +652,9 @@ function UpdateGate() {
             <p role="status">
               {update.phase === "checking"
                 ? "Checking for the update…"
-                : update.phase === "downloading"
+                : update.phase === "available"
+                  ? "Starting the download…"
+                  : update.phase === "downloading"
                   ? `Downloading v${update.version}${pct != null ? ` — ${pct}%` : "…"}`
                   : "Installing — the app will restart itself…"}
             </p>
@@ -651,16 +678,32 @@ function UpdateGate() {
         )}
         {!working && (
           <>
-            <p>
-              {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
-              {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
-              twice on its own. Check your connection and try again — your notes stay right
-              where they are, on your disk.
-            </p>
+            {required ? (
+              <p>
+                {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
+                {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
+                twice on its own. Check your connection and try again — your notes stay right
+                where they are, on your disk.
+              </p>
+            ) : (
+              <p>
+                Your server needs a newer version of {BRAND_NAME} before this one can sync.
+                Your notes and edits stay right where they are, on your disk, and sync as
+                soon as the update is in.
+              </p>
+            )}
             <div className="update-gate-actions">
               <AsyncButton className="primary update-gate-cta" onClick={retry}>
                 Try again
               </AsyncButton>
+              {/* For when the updater itself cannot install (#251): the same
+                  release, fetched by hand. */}
+              <button
+                className="ghost-pill lg"
+                onClick={() => void ipc.openExternal(RELEASES_PAGE_URL).catch(() => {})}
+              >
+                Download manually
+              </button>
               <button className="ghost-pill lg" onClick={() => void reload()}>
                 Reload
               </button>
@@ -932,6 +975,8 @@ export default function App() {
   // session restore + sync reconcile too, which is why launch showed "Loading…"
   // for seconds on a big vault: the sidebar was ready long before auth was.
   const [openingLastVault, setOpeningLastVault] = useState(true);
+  /** Version the launch gate is installing before sync starts, else null. */
+  const [launchUpdating, setLaunchUpdating] = useState<string | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
@@ -1023,6 +1068,18 @@ export default function App() {
         // The frame AFTER the state flush is the one the user sees.
         requestAnimationFrame(() => perf.mark("tree-painted"));
       }
+      // The update decision comes BEFORE the session restore (#255): with an
+      // update pending, the old build must not start the sync reconcile at
+      // all — that is where the bugs the new build fixed still live. The tree
+      // is already painted above; this only holds the network side. A found
+      // update installs and restarts right here (the card says "Updating
+      // Baalda"); no update, an offline launch or a check slower than
+      // LAUNCH_CHECK_TIMEOUT_MS falls straight through. Not in a dev build —
+      // see the note on the poll below.
+      if (!import.meta.env.DEV) {
+        await launchUpdateGate({ onUpdating: (v) => setLaunchUpdating(v) });
+        setLaunchUpdating(null);
+      }
       // Detached, deliberately: the session restore is 3+ HTTP round trips and
       // it ends in the sync reconcile, which on a large vault is minutes of
       // work. Every `set()` inside it is generation-guarded (`authInitGen`), so
@@ -1031,13 +1088,13 @@ export default function App() {
         .getState()
         .initAuth()
         .catch((e) => console.error("auth init failed", e));
-      // Check for updates at launch AND on a background poll, and install what
-      // we find WITHOUT asking: a found release is downloaded and installed
-      // silently, then the app restarts itself at the next pause in typing (see
-      // lib/quietMoment.ts). Nothing is shown on the way through — the user
-      // meets the new version in the What's New modal after the restart. The
-      // required-update wall (UpdateGate) is the fallback for when that silent
-      // path has failed twice.
+      // Check for updates on a background poll too (the launch check ran
+      // above), and install what we find WITHOUT asking: a found release is
+      // downloaded and installed silently, then the app restarts itself at the
+      // next pause in typing (see lib/quietMoment.ts). Nothing is shown on the
+      // way through — the user meets the new version in the What's New modal
+      // after the restart. The required-update wall (UpdateGate) is the
+      // fallback for when that silent path has failed twice.
       //
       // Failures (offline, non-bundled dev build) are swallowed by the updater
       // store — surfaced only in Settings → Updates. App-lifetime interval —
@@ -1049,8 +1106,10 @@ export default function App() {
       // dev session would silently download a release bundle and then ask Tauri
       // to relaunch a `cargo run` binary, which quits the app outright.
       if (!import.meta.env.DEV) {
-        void backgroundUpdateCheck();
         setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
+        // The server's release hint (#269) runs the same check early; the
+        // poll above stays as the fallback for servers that never send it.
+        setUpdateHintHandler(() => scheduleHintedUpdateCheck());
       }
     })();
   }, []);
@@ -1339,7 +1398,7 @@ export default function App() {
     // the user to choose/create one before its folder opens.
     return (
       <div className="app-shell">
-        <UpdateGate />
+        <UpdateGate launchVersion={launchUpdating} />
         {/* Reusing `.booting` means the loading→welcome hand-off reads as one
             continuous boot rather than a flash of a second loader. */}
         <Suspense fallback={<div className="booting">Loading…</div>}>
@@ -1355,7 +1414,7 @@ export default function App() {
     <div className="app-shell">
       {/* Window-global, above the sidebar+main split: a new release must be
           visible the moment the poll finds it, whatever is on screen. */}
-      <UpdateGate />
+      <UpdateGate launchVersion={launchUpdating} />
       <VaultSwitchOverlay />
       <PromptedAuthDialog />
       <div

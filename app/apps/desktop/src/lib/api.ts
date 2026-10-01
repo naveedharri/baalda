@@ -1,3 +1,4 @@
+import { CLIENT_OUTDATED_CODE, CLIENT_VERSION, CLIENT_VERSION_PARAM } from "./clientVersion";
 import type { AssistantProvider, HousekeeperStatus, HousekeeperScan, HousekeeperEdit, DiagnosticInput, DiagnosticReview } from "./housekeeper";
 // Type-only import: `bulkTypes.ts` is the hand-mirrored copy of the server's
 // wire contract, and importing the TYPES keeps this module a runtime leaf.
@@ -785,6 +786,45 @@ export class ApiError extends Error {
 }
 
 /**
+ * Did the server refuse this call because THIS build is below its minimum
+ * supported version (`426 client_outdated`, issue #251)? The server answers it
+ * only on the routes that hand out the ability to push note content, so a
+ * caller seeing it should stop syncing and ask for an update — retrying the
+ * same build can never succeed. Nothing is lost by stopping: local edits stay
+ * on disk and in the local CRDT, and the updated build pushes them.
+ */
+export function isClientOutdated(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 426 && errorCodeOf(e.body) === CLIENT_OUTDATED_CODE;
+}
+
+type ClientOutdatedListener = (info: { minVersion: string | null }) => void;
+const clientOutdatedListeners = new Set<ClientOutdatedListener>();
+
+/**
+ * Subscribe to "the server says this build is too old to sync". Fired once per
+ * refused request, from whichever call met the refusal first, so the UI can
+ * show "Update required" without every sync path having to route it there.
+ * Returns the unsubscribe.
+ */
+export function onClientOutdated(listener: ClientOutdatedListener): () => void {
+  clientOutdatedListeners.add(listener);
+  return () => clientOutdatedListeners.delete(listener);
+}
+
+function notifyClientOutdated(body: unknown): void {
+  if (errorCodeOf(body) !== CLIENT_OUTDATED_CODE) return;
+  const raw = (body as { minVersion?: unknown } | null)?.minVersion;
+  const minVersion = typeof raw === "string" ? raw : null;
+  for (const l of clientOutdatedListeners) {
+    try {
+      l({ minVersion });
+    } catch {
+      /* a listener's failure must not turn into the request's */
+    }
+  }
+}
+
+/**
  * A blob-transport call the server refused, carrying the machine-readable
  * `code` the flow branches on (`storage_limit_reached`, `attachment_too_large`,
  * `upload_incomplete`, …) next to the status.
@@ -1193,6 +1233,7 @@ export class ApiClient {
           ? String((parsed as { error?: unknown }).error)
           : undefined) ??
         `HTTP ${res.status}`;
+      if (res.status === 426) notifyClientOutdated(parsed);
       throw new ApiError(res.status, msg, parsed);
     }
 
@@ -2007,6 +2048,38 @@ export class ApiClient {
     return data.none ?? [];
   }
 
+  /**
+   * Tell the server these notes are genuinely empty here — empty file AND empty
+   * local CRDT (#257) — so a contentless note WITHOUT that marker can be counted
+   * as an upload that never arrived. Informational only: the server stamps a
+   * marker and changes no content. At most {@link ACCESS_CHECK_MAX} ids (the
+   * server's `CONFIRM_EMPTY_MAX`, the same bound). Returns the ids it stamped.
+   */
+  async confirmEmptyNotes(vaultId: string, docIds: string[]): Promise<string[]> {
+    const { data } = await this.request<{ confirmed: string[] }>(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/notes/confirm-empty`,
+      { body: { docIds } },
+    );
+    return data.confirmed ?? [];
+  }
+
+  /** Owner/admin census of notes registered but never uploaded (#257). */
+  async uploadHealth(vaultId: string): Promise<{
+    stalled: number;
+    confirmedEmpty: number;
+    minAgeMinutes: number;
+    byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
+  }> {
+    const { data } = await this.request<{
+      stalled: number;
+      confirmedEmpty: number;
+      minAgeMinutes: number;
+      byCreator: Array<{ userId: string | null; name: string | null; count: number }>;
+    }>("GET", `/api/vaults/${encodeURIComponent(vaultId)}/upload-health`);
+    return data;
+  }
+
   async listNotes(vaultId: string): Promise<RegisteredNote[]> {
     const { data } = await this.request<{ notes: RegisteredNote[] }>("GET", "/api/notes", {
       query: { vaultId },
@@ -2234,7 +2307,7 @@ export class ApiClient {
    */
   async batchPushDocs(vaultId: string, items: DocPushItem[]): Promise<DocPushResult[]> {
     return this.bulk<{ results: DocPushResult[] }>(
-      `/api/vaults/${encodeURIComponent(vaultId)}/docs/batch`,
+      `/api/vaults/${encodeURIComponent(vaultId)}/docs/batch?${CLIENT_VERSION_PARAM}=${encodeURIComponent(CLIENT_VERSION)}`,
       { items },
     ).then((d) => d.results ?? []);
   }
@@ -2701,6 +2774,7 @@ export class ApiClient {
   async syncToken(docId: string): Promise<SyncTokenResponse> {
     const { data } = await this.request<SyncTokenResponse>("POST", "/api/sync-token", {
       body: { docId },
+      query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION },
     });
     return data;
   }
@@ -2711,7 +2785,7 @@ export class ApiClient {
     const { data } = await this.request<VaultSyncTokenResponse>(
       "POST",
       "/api/vault-sync-token",
-      { body: { vaultId } },
+      { body: { vaultId }, query: { [CLIENT_VERSION_PARAM]: CLIENT_VERSION } },
     );
     return data;
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInviteLink, parseInviteDeepLink } from "../inviteLink";
+import { buildInviteLink, isInvitationExpired, parseInviteDeepLink } from "../inviteLink";
 import { parseConnectLink } from "../connectLink";
 import { parseNoteLink } from "../shareLink";
 
@@ -114,5 +114,19 @@ describe("buildInviteLink", () => {
     expect(buildInviteLink("javascript:alert(1)", "inv_1")).toBeNull();
     expect(buildInviteLink("https://notes.example.com", "../../etc/passwd")).toBeNull();
     expect(buildInviteLink("https://notes.example.com", "")).toBeNull();
+  });
+});
+
+describe("isInvitationExpired (#268)", () => {
+  const now = Date.parse("2026-10-01T12:00:00Z");
+  it("is expired at or after its date", () => {
+    expect(isInvitationExpired("2026-10-01T11:59:59Z", now)).toBe(true);
+    expect(isInvitationExpired("2026-10-01T12:00:00Z", now)).toBe(true);
+  });
+  it("is live before its date, and when the date is absent or unreadable", () => {
+    expect(isInvitationExpired("2026-10-08T12:00:00Z", now)).toBe(false);
+    expect(isInvitationExpired(undefined, now)).toBe(false);
+    expect(isInvitationExpired(null, now)).toBe(false);
+    expect(isInvitationExpired("not a date", now)).toBe(false);
   });
 });

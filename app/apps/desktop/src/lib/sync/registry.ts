@@ -38,6 +38,10 @@ import {
 import * as ipc from "../ipc";
 import type { TreeNode } from "../ipc";
 import * as perf from "../perf";
+// Every case-insensitive path key below goes through `pathKey` (NFC, then
+// lowercase, #259): a Mac's decomposed `Café.md` and a Windows box's composed
+// one are the same note. Compare-time only — paths are never rewritten.
+import { pathKey } from "../pathIdentity";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
 import { sha256Hex } from "../bridge/adapter";
@@ -65,7 +69,7 @@ export function conflictPath(relPath: string, taken: ReadonlySet<string>, now = 
   const day = now.toISOString().slice(0, 10);
   for (let i = 1; ; i++) {
     const candidate = `${dir}${stem} (conflict ${day}${i > 1 ? ` ${i}` : ""})${ext}`;
-    if (!taken.has(candidate.toLowerCase())) return candidate;
+    if (!taken.has(pathKey(candidate))) return candidate;
   }
 }
 import { planInbound, samePath, type InboundPlan, type InboundTrash } from "./inbound";
@@ -727,7 +731,7 @@ export class VaultRegistry {
 
   /** A materialize just re-created `rp`: report it if it was a mapped note (D5). */
   private noteRestored(rp: string): void {
-    if (!this.restoreCandidatesCi.delete(rp.toLowerCase())) return;
+    if (!this.restoreCandidatesCi.delete(pathKey(rp))) return;
     reconcileReport.record({
       kind: "restoredFromServer",
       docId: this.byPath.get(rp)?.docId,
@@ -995,11 +999,11 @@ export class VaultRegistry {
       // pre-migration-023 twins resolves to one of them consistently rather
       // than alternating between passes.
       for (const rp of this.byPath.keys()) {
-        const k = rp.toLowerCase();
+        const k = pathKey(rp);
         if (!this.byPathCi.has(k)) this.byPathCi.set(k, rp);
       }
     }
-    return this.byPathCi.get(relPath.toLowerCase()) ?? null;
+    return this.byPathCi.get(pathKey(relPath)) ?? null;
   }
 
   /** Folder twin of {@link canonicalNotePath}. Scanned rather than indexed:
@@ -1007,9 +1011,9 @@ export class VaultRegistry {
    *  is genuinely missing from the map. */
   private canonicalFolderPath(relPath: string): string | null {
     if (this.folderByPath.has(relPath)) return relPath;
-    const want = relPath.toLowerCase();
+    const want = pathKey(relPath);
     for (const rp of this.folderByPath.keys()) {
-      if (rp.toLowerCase() === want) return rp;
+      if (pathKey(rp) === want) return rp;
     }
     return null;
   }
@@ -1213,10 +1217,10 @@ export class VaultRegistry {
    * so entries simply age out.
    */
   isOwnMove(relPath: string): boolean {
-    const at = this.ownMoves.get(relPath.toLowerCase());
+    const at = this.ownMoves.get(pathKey(relPath));
     if (at === undefined) return false;
     if (Date.now() - at > OWN_MOVE_TTL_MS) {
-      this.ownMoves.delete(relPath.toLowerCase());
+      this.ownMoves.delete(pathKey(relPath));
       return false;
     }
     return true;
@@ -1225,8 +1229,8 @@ export class VaultRegistry {
   private noteOwnMove(from: string, to: string): void {
     if (this.ownMoves.size > 20_000) this.ownMoves.clear();
     const now = Date.now();
-    this.ownMoves.set(from.toLowerCase(), now);
-    this.ownMoves.set(to.toLowerCase(), now);
+    this.ownMoves.set(pathKey(from), now);
+    this.ownMoves.set(pathKey(to), now);
   }
 
   markUnhydratedPlaceholder(docId: string): void {
@@ -1637,15 +1641,15 @@ export class VaultRegistry {
     // fix: the file stays exactly where it is, local-only, and the path is left
     // out of every later pass until the server lists it again — see `hiddenPaths`.
     if (f.code === "not_readable" && (f.kind === "folder" || f.kind === "note")) {
-      this.hiddenPaths.add(f.path.toLowerCase());
+      this.hiddenPaths.add(pathKey(f.path));
       return "ok";
     }
     // The id names a note deleted on the server. Reported ONCE (the path is
     // skipped from now on — see `deletedPaths`), with a reason that says the
     // file is safe and why it no longer syncs.
     if (f.code === "note_deleted" && f.kind === "note") {
-      const firstTime = !this.deletedPaths.has(f.path.toLowerCase());
-      this.deletedPaths.add(f.path.toLowerCase());
+      const firstTime = !this.deletedPaths.has(pathKey(f.path));
+      this.deletedPaths.add(pathKey(f.path));
       if (f.docId) this.deletedDocIds.add(f.docId);
       if (!firstTime) return "failed";
       f = {
@@ -2490,20 +2494,20 @@ export class VaultRegistry {
       const rp = noteRelPath(n);
       const docId = noteDocId(n);
       if (!rp || this.baselineDocs.has(docId) || this.byDocId.has(docId)) continue;
-      const localPath = localNotePathCi.get(rp.toLowerCase());
+      const localPath = localNotePathCi.get(pathKey(rp));
       if (localPath === undefined || this.byPath.has(localPath)) continue;
       candidates.push({ n, localPath, docId });
     }
     if (candidates.length === 0) return held;
-    const localIds = new Map((await titles()).map((t) => [t.path.toLowerCase(), t.id] as const));
+    const localIds = new Map((await titles()).map((t) => [pathKey(t.path), t.id] as const));
     const taken = new Set<string>([
       ...localNotePathCi.keys(),
-      ...serverNotes.map((x) => (noteRelPath(x) ?? "").toLowerCase()),
+      ...serverNotes.map((x) => pathKey(noteRelPath(x) ?? "")),
     ]);
     const conflicts: typeof candidates = [];
     for (const c of candidates) {
       if (this.stopRun()) return held;
-      if (localIds.get(c.localPath.toLowerCase()) === c.docId) continue; // the same note
+      if (localIds.get(pathKey(c.localPath)) === c.docId) continue; // the same note
       // This device already holds the server note's own CRDT, so it has seen
       // that note — the file at its path is that note, written here by the
       // materialize step or the bulk download, not a create of ours made while
@@ -2527,8 +2531,8 @@ export class VaultRegistry {
         `[registry] ${conflicts.length} same-path conflicts in one pass (cap ${samePathConflictCap(serverNotes.length)}) — renaming none`,
       );
       for (const { localPath } of conflicts) {
-        held.add(localPath.toLowerCase());
-        localNotePathCi.delete(localPath.toLowerCase());
+        held.add(pathKey(localPath));
+        localNotePathCi.delete(pathKey(localPath));
         this.aliasPaths.add(localPath);
         this.recordFailure({
           kind: "note", path: localPath, docId: null, code: null,
@@ -2548,7 +2552,7 @@ export class VaultRegistry {
         if (ipc.isVaultMismatch(e)) return held;
       }
       const target = conflictPath(localPath, taken);
-      taken.add(target.toLowerCase());
+      taken.add(pathKey(target));
       const serverIsLater = Number.isFinite(serverAt) && serverAt > localAt;
       if (serverIsLater) {
         try {
@@ -2570,7 +2574,7 @@ export class VaultRegistry {
         // the renamed note registered as the NEW note it is, promptly.
         await ipc.renamePath(localPath, target, this.epoch());
         this.noteOwnMove(localPath, target);
-        localNotePathCi.delete(localPath.toLowerCase());
+        localNotePathCi.delete(pathKey(localPath));
         reconcileReport.record({
           kind: "renamedConflict", path: localPath, newPath: target,
           detail: serverIsLater
@@ -2581,8 +2585,8 @@ export class VaultRegistry {
         if (ipc.isVaultMismatch(e)) return held;
         // Could not move ours: never bind it to their id. Hold the path out of
         // this pass entirely, so the file is left exactly as it is.
-        held.add(localPath.toLowerCase());
-        localNotePathCi.delete(localPath.toLowerCase());
+        held.add(pathKey(localPath));
+        localNotePathCi.delete(pathKey(localPath));
         this.aliasPaths.add(localPath);
         this.recordFailure({
           kind: "note", path: localPath, docId: null, code: null,
@@ -3103,7 +3107,7 @@ export class VaultRegistry {
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
     // The paths this device already knew BEFORE this pass (#221 drift report).
-    const priorMappedCi = new Set([...this.byPath.keys()].map((p) => p.toLowerCase()));
+    const priorMappedCi = new Set([...this.byPath.keys()].map((p) => pathKey(p)));
     const checkpoint = this.checkpoint ?? this.newCheckpointer();
     // A pull can be the first thing to touch a big vault's map (a reconnect
     // catch-up), so retune here too rather than trusting the construction-time
@@ -3232,24 +3236,24 @@ export class VaultRegistry {
     // mapping under that, and the local paths were still unmatched next pass.
     // A 235-item wave that could never empty — "Syncing 225/235", restart, loop.
     const serverFolderByPathCi = new Map(
-      serverFolders.map((f) => [f.path.toLowerCase(), f.id] as const),
+      serverFolders.map((f) => [pathKey(f.path), f.id] as const),
     );
     for (const [rp, id] of [...this.folderByPath]) {
-      if (serverFolderByPathCi.get(rp.toLowerCase()) !== id) this.folderByPath.delete(rp);
+      if (serverFolderByPathCi.get(pathKey(rp)) !== id) this.folderByPath.delete(rp);
     }
     // The path we keep is the one on DISK: every other lookup in this class is
     // made with a local path, so mapping the server's spelling instead would
     // leave those lookups missing. The id is the identity; the spelling is ours.
-    const localFolderPathCi = new Map(folders.map((f) => [f.path.toLowerCase(), f.path] as const));
+    const localFolderPathCi = new Map(folders.map((f) => [pathKey(f.path), f.path] as const));
     for (const f of serverFolders) {
-      this.folderByPath.set(localFolderPathCi.get(f.path.toLowerCase()) ?? f.path, f.id);
+      this.folderByPath.set(localFolderPathCi.get(pathKey(f.path)) ?? f.path, f.id);
     }
     // …and drop the twin the merge left behind. Both spellings are in the
     // persisted map for a vault that had case-duplicated rows, and neither is
     // wrong enough for the prune above to remove (they carry the same id), so
     // without this they stay in `config.json` for good.
     for (const rp of [...this.folderByPath.keys()]) {
-      const onDisk = localFolderPathCi.get(rp.toLowerCase());
+      const onDisk = localFolderPathCi.get(pathKey(rp));
       if (onDisk !== undefined && onDisk !== rp) {
         this.folderByPath.delete(rp);
         mutated = true;
@@ -3258,29 +3262,29 @@ export class VaultRegistry {
     // A hidden path the server now lists (access came back), or that left the
     // disk, is an ordinary path again.
     if (this.hiddenPaths.size > 0) {
-      const onDiskCi = new Set([...folders, ...notes].map((x) => x.path.toLowerCase()));
+      const onDiskCi = new Set([...folders, ...notes].map((x) => pathKey(x.path)));
       for (const key of [...this.hiddenPaths]) {
         if (serverFolderByPathCi.has(key) || !onDiskCi.has(key)) this.hiddenPaths.delete(key);
       }
     }
     const missingFolders = folders.filter(
-      (f) => !this.folderByPath.has(f.path) && !this.hiddenPaths.has(f.path.toLowerCase()),
+      (f) => !this.folderByPath.has(f.path) && !this.hiddenPaths.has(pathKey(f.path)),
     );
 
     // 3. Notes: adopt by relPath, create missing. Any first-run seeding happened
     //    in reconcile before this runs; the seeded files register here as docs.
     // Case-insensitive for the same reason as the folders above, and again the
     // local spelling is the one mapped.
-    const localNotePathCi = new Map(notes.map((n) => [n.path.toLowerCase(), n.path] as const));
+    const localNotePathCi = new Map(notes.map((n) => [pathKey(n.path), n.path] as const));
     /** Every path the server accounted for, in the spelling we MAPPED it under. */
     const resolvedNotePaths = new Set<string>();
     /** The same set, lower-cased — what every membership test below compares on. */
     const resolvedNotePathsCi = new Set<string>();
     const resolveNote = (serverPath: string, docId: string) => {
-      const mapped = localNotePathCi.get(serverPath.toLowerCase()) ?? serverPath;
+      const mapped = localNotePathCi.get(pathKey(serverPath)) ?? serverPath;
       this.setMapping(mapped, docId, vaultId);
       resolvedNotePaths.add(mapped);
-      resolvedNotePathsCi.add(mapped.toLowerCase());
+      resolvedNotePathsCi.add(pathKey(mapped));
     };
     // D4: two people created a note at the same path while apart. Resolve it
     // BEFORE anything binds the local file to the server's id, which would
@@ -3289,7 +3293,7 @@ export class VaultRegistry {
     if (this.stale()) return mutated;
     for (const n of serverNotes) {
       const rp = noteRelPath(n);
-      if (rp && !heldConflicts.has(rp.toLowerCase())) resolveNote(rp, noteDocId(n));
+      if (rp && !heldConflicts.has(pathKey(rp))) resolveNote(rp, noteDocId(n));
     }
     // The note twin of the folder collapse above: a mapping under a spelling this
     // pass did not resolve, whose case-variant it DID, is the leftover of a
@@ -3297,7 +3301,7 @@ export class VaultRegistry {
     // path index needs the removal.
     for (const [rp, m] of [...this.byPath]) {
       if (resolvedNotePaths.has(rp)) continue;
-      if (!resolvedNotePathsCi.has(rp.toLowerCase())) continue;
+      if (!resolvedNotePathsCi.has(pathKey(rp))) continue;
       if (m.vaultId !== vaultId) continue;
       this.byPath.delete(rp);
       this.notifyMapChanged();
@@ -3318,8 +3322,8 @@ export class VaultRegistry {
     // vault re-registers normally.
     for (const rp of [...this.aliasPaths]) {
       if (
-        resolvedNotePathsCi.has(rp.toLowerCase()) ||
-        !localNotePathCi.has(rp.toLowerCase())
+        resolvedNotePathsCi.has(pathKey(rp)) ||
+        !localNotePathCi.has(pathKey(rp))
       ) {
         this.aliasPaths.delete(rp);
       }
@@ -3338,11 +3342,11 @@ export class VaultRegistry {
     }
     let missingNotes = notes.filter(
       (n) =>
-        !resolvedNotePathsCi.has(n.path.toLowerCase()) &&
+        !resolvedNotePathsCi.has(pathKey(n.path)) &&
         !this.inboundSuppressed.has(n.path) &&
         !this.aliasPaths.has(n.path) &&
-        !this.hiddenPaths.has(n.path.toLowerCase()) &&
-        !this.deletedPaths.has(n.path.toLowerCase()),
+        !this.hiddenPaths.has(pathKey(n.path)) &&
+        !this.deletedPaths.has(pathKey(n.path)),
     );
 
     // 3b. A rename made while the app was closed (offline reconciliation, row
@@ -3353,7 +3357,7 @@ export class VaultRegistry {
     if (missingNotes.length > 0) {
       const paired = await this.pairClosedAppRenames(
         [...resolvedNotePaths].filter(
-          (rp) => !localNotePathCi.has(rp.toLowerCase()) && priorMappedCi.has(rp.toLowerCase()),
+          (rp) => !localNotePathCi.has(pathKey(rp)) && priorMappedCi.has(pathKey(rp)),
         ),
         missingNotes.map((n) => n.path),
         serverNotes,
@@ -3363,12 +3367,12 @@ export class VaultRegistry {
         mutated = true;
         for (const [from, to] of paired) {
           resolvedNotePaths.delete(from);
-          resolvedNotePathsCi.delete(from.toLowerCase());
+          resolvedNotePathsCi.delete(pathKey(from));
           resolvedNotePaths.add(to);
-          resolvedNotePathsCi.add(to.toLowerCase());
+          resolvedNotePathsCi.add(pathKey(to));
         }
-        const taken = new Set([...paired.values()].map((p) => p.toLowerCase()));
-        missingNotes = missingNotes.filter((n) => !taken.has(n.path.toLowerCase()));
+        const taken = new Set([...paired.values()].map((p) => pathKey(p)));
+        missingNotes = missingNotes.filter((n) => !taken.has(pathKey(n.path)));
       }
     }
 
@@ -3529,7 +3533,7 @@ export class VaultRegistry {
           const noteId = noteDocId(out.value);
           this.setMapping(rp, noteId, vaultId);
           resolvedNotePaths.add(rp);
-          resolvedNotePathsCi.add(rp.toLowerCase());
+          resolvedNotePathsCi.add(pathKey(rp));
           // 201, not 200: a row the server MADE (see `api.createNote`). An
           // adopted one may already hold content and must never be announced.
           if (out.value.created && noteId) createdNow.push(noteId);
@@ -3567,7 +3571,7 @@ export class VaultRegistry {
     // 4. Prune mappings for notes that no longer exist anywhere (deleted on the
     //    server AND absent locally), then checkpoint the map.
     for (const [rp, m] of [...this.byPath]) {
-      if (!resolvedNotePathsCi.has(rp.toLowerCase())) {
+      if (!resolvedNotePathsCi.has(pathKey(rp))) {
         this.byPath.delete(rp);
         // Reverse entry only if it still names this path — see the same guard in
         // the cross-collection prune above (#129).
@@ -3623,12 +3627,12 @@ export class VaultRegistry {
     // Case-insensitive, or a note whose server spelling differs from the one on
     // disk would be "server-only" here and get an empty file written at the other
     // spelling — which on a case-insensitive filesystem is the SAME file.
-    const localNotePaths = new Set(notes.map((n) => n.path.toLowerCase()));
+    const localNotePaths = new Set(notes.map((n) => pathKey(n.path)));
     // Removed from disk in a live bulk delete the user has not answered yet
     // (#221): neither restored nor deleted until they do.
     const held = this.host?.heldDocIds?.() ?? null;
     const toMaterialize = [...resolvedNotePaths].filter((rp) => {
-      if (localNotePaths.has(rp.toLowerCase())) return false;
+      if (localNotePaths.has(pathKey(rp))) return false;
       if (held && held.size > 0) {
         const docId = this.byPath.get(rp)?.docId;
         if (docId && held.has(docId)) return false;
@@ -3636,14 +3640,14 @@ export class VaultRegistry {
       return true;
     });
     this.passDrift = {
-      missingMapped: toMaterialize.filter((rp) => priorMappedCi.has(rp.toLowerCase())).length,
+      missingMapped: toMaterialize.filter((rp) => priorMappedCi.has(pathKey(rp))).length,
       unmappedLocal: missingNotes.length,
     };
     // D5: a path this device had MAPPED before the pass and no longer has on
     // disk was removed here without the delete reaching the team (app closed,
     // or a refused propagation). Re-creating it undoes that; say so.
     this.restoreCandidatesCi = new Set(
-      toMaterialize.filter((rp) => priorMappedCi.has(rp.toLowerCase())).map((rp) => rp.toLowerCase()),
+      toMaterialize.filter((rp) => priorMappedCi.has(pathKey(rp))).map((rp) => pathKey(rp)),
     );
     this.sink.addTotal(toMaterialize.length);
     // Materializing is the other half a pull can be bulk for — a fresh device
@@ -3964,7 +3968,7 @@ export class VaultRegistry {
             // case-variant and answered with its own — see `resolveNote`.
             this.setMapping(rp, res.docId, vaultId);
             ctx.resolvedNotePaths.add(rp);
-            ctx.resolvedNotePathsCi.add(rp.toLowerCase());
+            ctx.resolvedNotePathsCi.add(pathKey(rp));
             // `created` only — an ADOPTED row may already hold content, and
             // seeding one is the split-brain pull-before-seed exists to prevent.
             if (res.status === "created") createdInChunk.push(res.docId);
@@ -4094,7 +4098,7 @@ export class VaultRegistry {
     if (mappedAs) return this.byPath.get(mappedAs) ?? null;
     // Deleted on the server (see `deletedPaths`): opening the local copy must
     // not ask again — the answer is known, and it stays a local-only note.
-    if ((docId && this.deletedDocIds.has(docId)) || this.deletedPaths.has(relPath.toLowerCase())) {
+    if ((docId && this.deletedDocIds.has(docId)) || this.deletedPaths.has(pathKey(relPath))) {
       return null;
     }
     try {
@@ -4274,8 +4278,8 @@ export class VaultRegistry {
           // stale/adopted server identity must not prevent deleting that local
           // remainder, but a readable, read-only folder still stays protected.
           const beneath = (candidate: string) => {
-            const root = path.toLowerCase();
-            const value = candidate.toLowerCase();
+            const root = pathKey(path);
+            const value = pathKey(candidate);
             return value === root || value.startsWith(root + "/");
           };
           const hasMappedContent = () =>

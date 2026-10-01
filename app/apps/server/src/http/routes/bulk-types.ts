@@ -174,6 +174,7 @@ export type BulkErrorCode =
   | "doc_id_conflict"
   | "note_deleted"
   | "path_folder_mismatch"
+  | "transient_file"
   | "note_limit_reached"
   | "root_frozen"
   | "no_write_access"

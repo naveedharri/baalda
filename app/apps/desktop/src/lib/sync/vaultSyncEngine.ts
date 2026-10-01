@@ -113,8 +113,13 @@ export interface VaultSyncEngineOptions {
   onAclChanged?: () => void;
   /** Fired when the folder/note structure changed in this vault (`registry`):
    *  a teammate created/renamed/moved/deleted a folder or note. The client
-   *  re-pulls the registry so its local tree reflects the change live. */
-  onRegistryChanged?: () => void;
+   *  re-pulls the registry so its local tree reflects the change live.
+   *  `meta` is true when the server says only "last edited by" stamps moved
+   *  (#262): nothing structural, so the pull may be throttled. */
+  onRegistryChanged?: (meta?: boolean) => void;
+  /** Fired when the vault's Trash or shrink-event listings changed
+   *  (`activity`, #260) — the Activity feed refetches on this, not a poll. */
+  onActivityChanged?: () => void;
   /** Fired when a new teammate joined the vault (`member`): the client
    *  refreshes its roster and shows a join celebration. */
   onMemberJoined?: (name: string) => void;
@@ -193,6 +198,12 @@ export interface VaultSyncEngineOptions {
    * connection (`{ t: "rejected", reason: "read_only" }`).
    */
   onServerRejected?: (docId: string, reason: "read_only") => void;
+  /**
+   * The server saw a new desktop release (`version-available`, #269). Only a
+   * hint: the receiver runs its ordinary update check, which verifies the
+   * release itself.
+   */
+  onVersionAvailable?: (version: string) => void;
   /**
    * The server fully covers these docs' hello state vectors (`ready.covered`):
    * each entry pairs the doc with the EXACT vector this connection's hello
@@ -316,7 +327,8 @@ export class VaultSyncEngine {
   private readonly onStatus?: (s: VaultSyncStatus) => void;
   private readonly onSessionRejected?: () => void;
   private readonly onAclChanged?: () => void;
-  private readonly onRegistryChanged?: () => void;
+  private readonly onRegistryChanged?: (meta?: boolean) => void;
+  private readonly onActivityChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onVoice?: (frame: VoiceFrame) => void;
@@ -328,6 +340,7 @@ export class VaultSyncEngine {
   private readonly onServerRevoked?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerTombstones?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerRejected?: (docId: string, reason: "read_only") => void;
+  private readonly onVersionAvailable?: (version: string) => void;
   private readonly onServerCovered?: (acks: Array<[docId: string, stateVector: string]>) => void;
   /** The manifest this connection's hello sent (docId → base64 state vector). */
   private sentManifest: Record<string, string> = {};
@@ -419,6 +432,7 @@ export class VaultSyncEngine {
     this.onSessionRejected = opts.onSessionRejected;
     this.onAclChanged = opts.onAclChanged;
     this.onRegistryChanged = opts.onRegistryChanged;
+    this.onActivityChanged = opts.onActivityChanged;
     this.onMemberJoined = opts.onMemberJoined;
     this.onPresence = opts.onPresence;
     this.onVoice = opts.onVoice;
@@ -432,6 +446,7 @@ export class VaultSyncEngine {
     this.onServerRevoked = opts.onServerRevoked;
     this.onServerTombstones = opts.onServerTombstones;
     this.onServerRejected = opts.onServerRejected;
+    this.onVersionAvailable = opts.onVersionAvailable;
     this.onServerCovered = opts.onServerCovered;
     this.onServerDrop = opts.onServerDrop;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
@@ -840,6 +855,8 @@ export class VaultSyncEngine {
         this.onServerRevoked?.(control.docIds, false);
       } else if (control.t === "rejected") {
         this.onServerRejected?.(control.docId, control.reason);
+      } else if (control.t === "version-available") {
+        this.onVersionAvailable?.(control.version);
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
         // …and tell the session WHICH doc left, so the live revocation path
@@ -851,7 +868,9 @@ export class VaultSyncEngine {
         this.onAclChanged?.();
       } else if (control.t === "registry") {
         // Folder/note structure changed — re-pull the registry + refresh tree.
-        this.onRegistryChanged?.();
+        this.onRegistryChanged?.(control.meta === true);
+      } else if (control.t === "activity") {
+        this.onActivityChanged?.();
       } else if (control.t === "member") {
         // A new teammate joined — refresh the roster + celebrate.
         this.onMemberJoined?.(control.name);

@@ -81,7 +81,7 @@ invitationRoutes.post("/invitations/:id/send", async (c) => {
       }),
     );
   } catch (err) {
-    console.error(`[email] invitation to ${inv.email} failed:`, err);
+    console.error(`[email] invitation ${inv.id} failed:`, err);
     return c.json(
       { error: "send_failed", message: `The mail provider refused the message: ${(err as Error).message}` },
       502,

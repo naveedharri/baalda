@@ -66,7 +66,9 @@
 // upload pays for the probe.
 
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
+import { isTransientPath, pathKey } from "../pathIdentity";
 import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
+import { reconcileReport } from "./reconcileReport";
 import type { DocSyncState } from "./vaultScope";
 import type {
   BlobCompleteBody,
@@ -152,6 +154,10 @@ export function isSafeTreeBinaryRelPath(relPath: string): boolean {
   if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith(".")))
     return false;
   if (isNoteExt(relPath)) return false;
+  // Another device's Office lock file (`~$Report.docx`, #265), registered by a
+  // client that predates the ignore rule: never pulled onto this disk. Its row
+  // is left alone — this only declines the download.
+  if (isTransientPath(relPath)) return false;
   const format = formatFor(relPath);
   return !!format && format.surface && format.syncAs === "attachment";
 }
@@ -251,6 +257,13 @@ export interface BinaryPlan {
    * for everyone (#215) — but moved to `.context/trash`.
    */
   toTrash: Array<{ local: LocalAttachment; docId: string }>;
+  /**
+   * A tree binary renamed or moved while no window could see it (the app was
+   * closed, or only its folder's event arrived): the server row at `from` moves
+   * to `to`, keeping its id (#215). Planned only when it is CERTAIN — see
+   * {@link planBinarySync}; anything less keeps today's behaviour.
+   */
+  toMove: Array<{ docId: string; from: string; to: string; sha256: string }>;
 }
 
 /** What the three-way needs to know about this device's history. */
@@ -283,6 +296,20 @@ export interface BinaryPlanContext {
  * has no id for — by path. Everything else (the `attachments/` store, rows with
  * no doc, paths the server holds nothing for) keeps the content-hash diff
  * described on {@link diffAttachments}. Without `ctx` there is no three-way.
+ *
+ * **Offline renames (`toMove`, #215).** A file renamed while the app was closed
+ * is, to the diff above, a local file the server has no row for (its bytes are
+ * known, so it never uploads) beside a server row whose path is gone (its sha
+ * is local, so it never downloads) — the row just stayed at the old name. It is
+ * paired back only when every one of these holds, and otherwise left exactly as
+ * before:
+ *   · the server row is doc-bound, NOT tombstoned, and its path is absent here;
+ *   · this device last AGREED with the server on exactly those bytes for that
+ *     id (`baseFor(docId) === sha`) — proof it had this very file, so a
+ *     teammate's new upload that happens to match a local copy is never moved;
+ *   · the local file has no row of its own (by id or by path);
+ *   · the pairing is unique: exactly one such row and one such file per sha.
+ * A move only re-points the row; no bytes are written, deleted or replaced.
  */
 export function planBinarySync(
   local: LocalAttachment[],
@@ -290,13 +317,14 @@ export function planBinarySync(
   ctx?: BinaryPlanContext,
 ): BinaryPlan {
   const localShas = new Set(local.map((a) => a.sha256));
-  const localPaths = new Set(local.map((a) => a.relPath.toLowerCase()));
+  const localPaths = new Set(local.map((a) => pathKey(a.relPath)));
   const serverShas = new Set(server.map((b) => b.sha256));
 
   const toUpload: PlannedUpload[] = [];
   const toReplace: BinaryReplace[] = [];
   const agreed: BinaryPlan["agreed"] = [];
   const toTrash: BinaryPlan["toTrash"] = [];
+  const toMove: BinaryPlan["toMove"] = [];
   /** Server rows the three-way consumed: never also a plain download. */
   const consumed = new Set<string>();
   /** Local paths the three-way decided: never also a plain upload. */
@@ -308,13 +336,18 @@ export function planBinarySync(
     for (const b of server) {
       if (!b.docId || !b.sha256 || !b.relPath || isUnderAttachments(b.relPath)) continue;
       byDoc.set(b.docId, [...(byDoc.get(b.docId) ?? []), b]);
-      const key = b.relPath.toLowerCase();
+      const key = pathKey(b.relPath);
       byPath.set(key, [...(byPath.get(key) ?? []), b]);
     }
+    /** Local files with no server row at all — the arrival half of an offline rename. */
+    const orphans: LocalAttachment[] = [];
+    /** Every `files` id some local path is already known by. */
+    const claimedIds = new Set<string>();
     for (const a of local) {
       if (isUnderAttachments(a.relPath)) continue;
       const knownId = ctx.docIdFor(a.relPath);
-      const rows = knownId ? byDoc.get(knownId) : byPath.get(a.relPath.toLowerCase());
+      if (knownId) claimedIds.add(knownId);
+      const rows = knownId ? byDoc.get(knownId) : byPath.get(pathKey(a.relPath));
       if (!rows || rows.length === 0) {
         // The id this device knows the file by was deleted on the server: this
         // is a stale copy of a deleted file, not a new one. An id match proves
@@ -322,7 +355,11 @@ export function planBinarySync(
         if (knownId && ctx.isTombstoned?.(knownId)) {
           decided.add(a.relPath);
           toTrash.push({ local: a, docId: knownId });
+          continue;
         }
+        // Nothing on the server at this path either (a known id whose row is
+        // simply elsewhere would have matched `byDoc`).
+        if (!byPath.has(pathKey(a.relPath))) orphans.push(a);
         continue;
       }
       decided.add(a.relPath);
@@ -347,6 +384,37 @@ export function planBinarySync(
         toReplace.push({ local: a, blob, keepCopy: true, reason: base ? "conflict" : "no-base" });
       }
     }
+
+    // Offline renames — see the doc comment. Any doubt ⇒ no move.
+    if (orphans.length > 0) {
+      const orphansBySha = new Map<string, LocalAttachment[]>();
+      for (const a of orphans) {
+        if (isTransientPath(a.relPath)) continue;
+        orphansBySha.set(a.sha256, [...(orphansBySha.get(a.sha256) ?? []), a]);
+      }
+      const vacatedBySha = new Map<string, Array<{ docId: string; from: string }>>();
+      for (const [docId, rows] of byDoc) {
+        if (claimedIds.has(docId) || ctx.isTombstoned?.(docId)) continue;
+        if (rows.some((r) => consumed.has(r.id) || localPaths.has(pathKey(r.relPath as string)))) {
+          continue;
+        }
+        const base = ctx.baseFor(docId);
+        const row = base ? rows.find((r) => r.sha256 === base) : undefined;
+        if (!row) continue;
+        const list = vacatedBySha.get(row.sha256) ?? [];
+        list.push({ docId, from: row.relPath as string });
+        vacatedBySha.set(row.sha256, list);
+      }
+      for (const [sha, vacated] of vacatedBySha) {
+        const arrived = orphansBySha.get(sha);
+        if (vacated.length !== 1 || !arrived || arrived.length !== 1) continue;
+        const [{ docId, from }] = vacated;
+        const to = arrived[0].relPath;
+        toMove.push({ docId, from, to, sha256: sha });
+        decided.add(to);
+        for (const r of byDoc.get(docId) ?? []) consumed.add(r.id);
+      }
+    }
   }
 
   for (const a of local) {
@@ -362,9 +430,9 @@ export function planBinarySync(
       // An embedded image must exist at the path the note references, even
       // when another local file happens to contain identical bytes.
       (isUnderAttachments(b.relPath) || !localShas.has(b.sha256)) &&
-      !localPaths.has(b.relPath.toLowerCase()),
+      !localPaths.has(pathKey(b.relPath)),
   );
-  return { toUpload, toDownload, toReplace, agreed, toTrash };
+  return { toUpload, toDownload, toReplace, agreed, toTrash, toMove };
 }
 
 /**
@@ -967,6 +1035,8 @@ export class AttachmentSync {
   /** `files` id → last agreed sha, for the session (write-through to
    *  `deps.setFileBase`, which persists it). */
   private readonly bases = new Map<string, string>();
+  /** `files` ids already reported as restored this session (one notice each). */
+  private readonly restoreNoticed = new Set<string>();
 
   constructor(
     private readonly deps: AttachmentSyncDeps,
@@ -1046,14 +1116,14 @@ export class AttachmentSync {
    * (the plan gate, the quota, the delete windows) still applies.
    */
   async retryFiles(paths: readonly string[]): Promise<ReconcileResult> {
-    const wanted = new Set(paths.map((p) => p.toLowerCase()));
+    const wanted = new Set(paths.map((p) => pathKey(p)));
     for (const p of paths) {
       this.registerRefused.delete(p);
-      this.unreadable.delete(p.toLowerCase());
+      this.unreadable.delete(pathKey(p));
     }
     try {
       for (const a of await this.deps.listLocal()) {
-        if (wanted.has(a.relPath.toLowerCase())) this.permanentSkips.delete(a.sha256);
+        if (wanted.has(pathKey(a.relPath))) this.permanentSkips.delete(a.sha256);
       }
     } catch {
       // No listing, no shas to forgive; the pass below reports the same failure.
@@ -1094,7 +1164,7 @@ export class AttachmentSync {
     try {
       const local = await this.deps.listLocal();
       if (!this.current()) throw new Error("The open vault changed.");
-      if (local.some((file) => file.relPath.toLowerCase() === path.toLowerCase())) {
+      if (local.some((file) => pathKey(file.relPath) === pathKey(path))) {
         throw new Error("This file is now on this computer. Use its normal Delete action instead.");
       }
       await this.deps.deleteFile(id);
@@ -1113,7 +1183,7 @@ export class AttachmentSync {
     try {
       const [local, server] = await Promise.all([this.deps.listLocal(), this.deps.listServer()]);
       if (!this.current()) throw new Error("The open vault changed.");
-      this.localPathKeys = new Set(local.map((a) => a.relPath.toLowerCase()));
+      this.localPathKeys = new Set(local.map((a) => pathKey(a.relPath)));
       // Explicit recovery is path-based: identical bytes at another local
       // path must not suppress a requested missing file. Keep the same server
       // path validation; the occupied-path check below still prevents overwrite.
@@ -1121,7 +1191,7 @@ export class AttachmentSync {
       const failures: string[] = [];
       for (const path of new Set(paths)) {
         if (!this.current()) throw new Error("The open vault changed.");
-        if (this.localPathKeys.has(path.toLowerCase())) continue;
+        if (this.localPathKeys.has(pathKey(path))) continue;
         const blob = candidates.find((b) => b.relPath === path);
         if (!blob || this.deps.isDeletePending?.(path)) {
           failures.push(`${path}: no downloadable copy is available. Check access or ask the owner to upload it again.`);
@@ -1201,9 +1271,9 @@ export class AttachmentSync {
     for (const b of server) if (b.sha256) this.blobIdBySha.set(b.sha256, b.id);
     // Rebuilt per pass, never accumulated: an adoption decided against a disk
     // two passes old would move a row onto a path that has since changed again.
-    this.localPathKeys = new Set(local.map((a) => a.relPath.toLowerCase()));
+    this.localPathKeys = new Set(local.map((a) => pathKey(a.relPath)));
     if (this.unreadable.size > 0) {
-      const listed = new Set(server.flatMap((b) => (b.relPath ? [b.relPath.toLowerCase()] : [])));
+      const listed = new Set(server.flatMap((b) => (b.relPath ? [pathKey(b.relPath)] : [])));
       for (const key of [...this.unreadable]) {
         if (!this.localPathKeys.has(key) || listed.has(key)) this.unreadable.delete(key);
       }
@@ -1222,6 +1292,8 @@ export class AttachmentSync {
       isTombstoned: tombstoned ? (docId) => tombstoned.has(docId) : undefined,
     });
     await this.trashTombstoned(plan.toTrash);
+    if (!this.attachmentSyncBlocked) await this.moveRenamedOffline(plan.toMove);
+    if (!this.current()) return { uploaded: 0, downloaded: 0 };
     const { toDownload } = plan;
     // A 0-byte file has nothing to upload: the server refuses an empty blob
     // (`invalid_size`), and before this that refusal read as a transient error,
@@ -1229,7 +1301,9 @@ export class AttachmentSync {
     // forever — an empty `__init__.py` held a `files` row with no bytes behind
     // it. The same reading `settleServerEmpty` gives an empty note: nothing to
     // push, so it is settled, never registered and never queued.
-    const toUpload = plan.toUpload.filter((a) => a.size !== 0);
+    // An Office lock file never uploads (#265). Rust's listing already leaves
+    // them out; this is the same rule held on the side that talks to the server.
+    const toUpload = plan.toUpload.filter((a) => a.size !== 0 && !isTransientPath(a.relPath));
     // Replacements grow during the upload phase: a 409 `stale_base` is one more.
     const replacements: BinaryReplace[] = [...plan.toReplace];
     for (const g of plan.agreed) {
@@ -1285,7 +1359,7 @@ export class AttachmentSync {
       this.fileStates = new Map<string, DocSyncState>();
       for (const a of local) {
         if (isUnderAttachments(a.relPath)) continue;
-        if (this.unreadable.has(a.relPath.toLowerCase())) continue;
+        if (this.unreadable.has(pathKey(a.relPath))) continue;
         this.fileStates.set(
           a.relPath,
           this.permanentSkips.has(a.sha256)
@@ -1329,7 +1403,7 @@ export class AttachmentSync {
         // is skipped without a round trip — see `permanentSkips`.
         if (this.attachmentSyncBlocked && !isUnderAttachments(a.relPath)) return;
         if (this.permanentSkips.has(a.sha256)) return;
-        if (this.unreadable.has(a.relPath.toLowerCase())) return;
+        if (this.unreadable.has(pathKey(a.relPath))) return;
         // An unregistered path while the delete queue is still trying to settle a
         // window is very likely the arrival half of a rename it is about to pair.
         // The WHOLE file waits, not just its registration: uploading it now would
@@ -1426,6 +1500,19 @@ export class AttachmentSync {
           // what puts a teammate's binary into the map the `hello` announces, and
           // so what lets a later revocation of it be named and removed.
           if (b.relPath && b.docId && !isUnderAttachments(b.relPath)) {
+            // This device had agreed with the server on this file before, so the
+            // bytes were here and are back now: a delete made while the app was
+            // closed (or one the live queue refused) was undone. Say so once
+            // (#215) — deleting it again with the app open makes it stick.
+            if (this.baseFor(b.docId) && !this.restoreNoticed.has(b.docId)) {
+              this.restoreNoticed.add(b.docId);
+              reconcileReport.record({
+                kind: "restoredFromServer",
+                docId: b.docId,
+                path: b.relPath,
+                detail: "removed on this device without reaching the team; restored from the server",
+              });
+            }
             this.fileIds.set(b.relPath, b.docId);
             this.deps.rememberFileId?.(b.relPath, b.docId);
             // These bytes came FROM the server, so it has them.
@@ -1517,6 +1604,43 @@ export class AttachmentSync {
     }
   }
 
+  /**
+   * Re-point the server row of each file renamed while nobody was watching
+   * (`BinaryPlan.toMove`, #215) — the same by-id re-registration a live rename
+   * makes (`binaryDeletes.applyRename`). Fail-safe at every step: a refusal, a
+   * throw or an answer naming a DIFFERENT row leaves everything as it was (the
+   * old row stays, the new path stays unregistered — today's outcome), and no
+   * byte on any disk is touched.
+   */
+  private async moveRenamedOffline(items: BinaryPlan["toMove"]): Promise<void> {
+    const register = this.deps.registerFile;
+    if (!register || items.length === 0) return;
+    for (const m of items) {
+      if (!this.current()) return;
+      // A live window owns these paths; the delete queue pairs them itself.
+      if (this.deps.isDeletePending?.(m.from) || this.deps.isDeletePending?.(m.to)) continue;
+      if (this.deps.isRenamePending?.()) return;
+      let id: string | null = null;
+      try {
+        id = await register({ relPath: m.to, id: m.docId });
+      } catch (e) {
+        console.warn(`[attachments] couldn't move the files row ${m.from} → ${m.to}; leaving it`, e);
+        continue;
+      }
+      if (!this.current()) return;
+      if (id !== m.docId) {
+        console.info(`[attachments] ${m.from} → ${m.to}: server answered another row — left as it was`);
+        continue;
+      }
+      this.fileIds.delete(m.from);
+      this.deps.forgetFileId?.(m.from);
+      this.fileIds.set(m.to, m.docId);
+      this.deps.rememberFileId?.(m.to, m.docId);
+      this.setBase(m.docId, m.sha256);
+      console.info(`[attachments] ${m.from} → ${m.to} (renamed while closed; keeping file ${m.docId})`);
+    }
+  }
+
   private async replaceOne(r: BinaryReplace, kept: string[]): Promise<void> {
     const relPath = r.local.relPath;
     if (r.keepCopy) {
@@ -1582,7 +1706,7 @@ export class AttachmentSync {
     // permission resolver answers for. A failure here is not fatal — the bytes
     // still go, with the pre-Stage-A path heuristic deciding who may read them.
     const docId = await this.ensureFileRow(a);
-    if (this.unreadable.has(a.relPath.toLowerCase())) throw new HiddenFile();
+    if (this.unreadable.has(pathKey(a.relPath))) throw new HiddenFile();
     // The version this edit started from. The server refuses (409 `stale_base`)
     // when the file has moved on since, instead of retiring a teammate's edit.
     const baseSha = docId ? (a.baseSha ?? this.baseFor(docId)) : null;
@@ -1929,7 +2053,7 @@ export class AttachmentSync {
     // pass uploads the local file instead (uploads run first).
     // `overwrite` is the three-way's replacement (`replaceOne`), which decided
     // the server's version wins and kept any copy it needed first.
-    if (!opts.overwrite && this.localPathKeys.has(relPath.toLowerCase())) {
+    if (!opts.overwrite && this.localPathKeys.has(pathKey(relPath))) {
       throw new Error(`${relPath} is occupied on disk — refusing to overwrite it with a download`);
     }
     const tree = !isUnderAttachments(relPath);
@@ -2122,7 +2246,7 @@ export class AttachmentSync {
         }
         if (res.code === "path_folder_mismatch") continue; // retried next pass
         if (res.code === "not_readable") {
-          this.unreadable.add(c.relPath.toLowerCase());
+          this.unreadable.add(pathKey(c.relPath));
           continue;
         }
         this.registerRefused.add(c.relPath);
@@ -2207,7 +2331,7 @@ export class AttachmentSync {
       //  • no status, or a 5xx — we never reached a decision. Offline, a
       //    restarting server. Those must not cost the file its doc_id forever.
       if (code === "not_readable") {
-        this.unreadable.add(relPath.toLowerCase());
+        this.unreadable.add(pathKey(relPath));
         return undefined;
       }
       const permanent = status != null && status >= 400 && status < 500 && status !== 400;
@@ -2280,8 +2404,8 @@ export class AttachmentSync {
     if (!rowPath || isUnderAttachments(rowPath)) return false;
     // No pass, no disk: never decide a rename against a listing we never made.
     if (this.localPathKeys.size === 0) return false;
-    const rowKey = rowPath.toLowerCase();
-    if (rowKey === relPath.toLowerCase()) return false;
+    const rowKey = pathKey(rowPath);
+    if (rowKey === pathKey(relPath)) return false;
     return !this.localPathKeys.has(rowKey);
   }
 

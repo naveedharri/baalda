@@ -22,6 +22,29 @@ describe("syncBadgeLabel", () => {
     expect(isSyncRunActive(progress)).toBe(true);
   });
 
+  // #258: an interrupted first upload resumes visibly, counting what is left.
+  it("names the notes still to upload while their content is missing on the server", () => {
+    const progress: SyncProgress = {
+      phase: "uploading",
+      done: 10,
+      total: 500,
+      failed: 0,
+      notUploaded: 412,
+    };
+    expect(syncBadgeLabel({ status: "synced", now, progress })).toBe("Uploading · 412 notes left");
+    expect(syncBadgeLabel({ status: "synced", now, progress: { ...progress, notUploaded: 1 } })).toBe(
+      "Uploading · 1 note left",
+    );
+    // Nothing missing: the ordinary counter, so a synced vault never reads "Uploading".
+    expect(syncBadgeLabel({ status: "synced", now, progress: { ...progress, notUploaded: undefined } })).toBe(
+      "Syncing 10/500 updates",
+    );
+    // Only while uploading: the download half of the run keeps its own counter.
+    expect(syncBadgeLabel({ status: "synced", now, progress: { ...progress, phase: "downloading" } })).toBe(
+      "Syncing 10/500 updates",
+    );
+  });
+
   it("reads 'Retrying…' when the run errored only because the channel never connected", () => {
     const stalled: SyncProgress = { phase: "error", done: 0, total: 0, failed: 0 };
     expect(syncBadgeLabel({ status: "connecting", now, progress: stalled })).toBe("Retrying…");

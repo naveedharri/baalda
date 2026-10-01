@@ -48,6 +48,12 @@ import { formatFor } from "../formats";
 import * as ipc from "../ipc";
 import { requestOpenFile } from "../openFileRequest";
 import { fenceRenderKind } from "./fenceKind";
+import {
+  MIN_IMAGE_WIDTH,
+  imageAltRange,
+  parseImageAlt,
+  planImageWidthChange,
+} from "./imageSize";
 import { frontmatterField } from "./frontmatter";
 import { MermaidWidget } from "./mermaid/MermaidWidget";
 import { CALLOUT_RE } from "./ofm/callout";
@@ -100,19 +106,40 @@ class HtmlEmbedWidget extends WidgetType {
   }
 }
 
-/** A Markdown `![alt](src)` image rendered inline. */
+/**
+ * A Markdown `![alt](src)` image rendered inline, at the width its alt names
+ * (`![alt|400](src)`, the Obsidian form — see ./imageSize.ts) or fitted to the
+ * column when it names none.
+ *
+ * In an editable note a corner handle resizes it (#244). The drag only styles
+ * the element; the document changes once, on release, as ONE minimal span
+ * replacement on this image's alt text — the same kind of transaction typing
+ * makes, so it reaches the `.md`, Yjs and undo like any edit. While the caret
+ * has unfolded the image to source there is no widget, and so no handle.
+ */
 class ImageWidget extends WidgetType {
-  constructor(readonly src: string, readonly alt: string) {
+  constructor(
+    readonly src: string,
+    readonly alt: string,
+    readonly width: number | null,
+    readonly editable: boolean,
+  ) {
     super();
   }
   eq(other: ImageWidget) {
-    return other.src === this.src && other.alt === this.alt;
+    return (
+      other.src === this.src &&
+      other.alt === this.alt &&
+      other.width === this.width &&
+      other.editable === this.editable
+    );
   }
-  toDOM() {
+  toDOM(view: EditorView) {
     const img = document.createElement("img");
     img.className = "cm-md-img";
     img.src = this.src;
     if (this.alt) img.alt = this.alt;
+    if (this.width != null) img.style.width = `${this.width}px`;
     // A plain click on the rendered image opens the lightbox. CodeMirror still
     // sees the event (ignoreEvent → false), so cursor placement is unchanged;
     // a modified click or a double-click stays an editing gesture.
@@ -120,11 +147,95 @@ class ImageWidget extends WidgetType {
       if (e.detail > 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       openImageLightbox(this.src, this.alt);
     });
-    return img;
+    if (!this.editable) return img;
+
+    const wrap = document.createElement("span");
+    wrap.className = "cm-md-img-wrap";
+    wrap.appendChild(img);
+    const handle = document.createElement("span");
+    handle.className = "cm-md-img-handle";
+    handle.setAttribute("aria-hidden", "true");
+    handle.title = "Drag to resize";
+    wrap.appendChild(handle);
+
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      // Never the click that opens the lightbox, never a caret placement.
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startW = img.getBoundingClientRect().width;
+      // The column bounds the drag, like the `max-width: 100%` it replaces.
+      const maxW = Math.max(MIN_IMAGE_WIDTH, view.contentDOM.clientWidth);
+      let current = startW;
+      wrap.classList.add("cm-md-img-resizing");
+      try {
+        handle.setPointerCapture(e.pointerId);
+      } catch {
+        // Synthetic events in tests have no capturable pointer.
+      }
+      const move = (ev: PointerEvent) => {
+        current = Math.min(maxW, Math.max(MIN_IMAGE_WIDTH, startW + (ev.clientX - startX)));
+        img.style.width = `${Math.round(current)}px`;
+      };
+      const done = (ev: PointerEvent, commit: boolean) => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", up);
+        handle.removeEventListener("pointercancel", cancel);
+        wrap.classList.remove("cm-md-img-resizing");
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (!commit || Math.round(current) === Math.round(startW)) {
+          img.style.width = this.width != null ? `${this.width}px` : "";
+          return;
+        }
+        if (!commitImageWidth(view, wrap, current)) {
+          img.style.width = this.width != null ? `${this.width}px` : "";
+        }
+      };
+      const up = (ev: PointerEvent) => done(ev, true);
+      const cancel = (ev: PointerEvent) => done(ev, false);
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", up);
+      handle.addEventListener("pointercancel", cancel);
+    });
+    // Swallow the click that ends a drag so it cannot reach anything else.
+    handle.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    return wrap;
   }
-  ignoreEvent() {
+  ignoreEvent(event: Event) {
+    // The handle's gesture is the widget's own: CodeMirror must not move the
+    // caret onto the image (which would unfold it to source mid-drag).
+    const t = event.target as HTMLElement | null;
+    return !!t?.closest?.(".cm-md-img-handle");
+  }
+}
+
+/**
+ * Write a dragged width back into the alt text of the image whose widget is
+ * `dom`. Re-reads the document at the widget's CURRENT position rather than
+ * trusting offsets captured at render time, and writes nothing unless that
+ * position still starts an `![…](` image and the note is editable.
+ */
+function commitImageWidth(view: EditorView, dom: HTMLElement, width: number): boolean {
+  if (view.state.readOnly) return false;
+  let pos: number;
+  try {
+    pos = view.posAtDOM(dom);
+  } catch {
     return false;
   }
+  const doc = view.state.doc;
+  const line = doc.lineAt(pos);
+  const alt = imageAltRange(doc.sliceString(pos, line.to), pos);
+  if (!alt) return false;
+  const change = planImageWidthChange(alt, width);
+  if (!change) return false;
+  view.dispatch({ changes: change, userEvent: "input.resize" });
+  return true;
 }
 
 /**
@@ -396,13 +507,20 @@ class FileChipWidget extends WidgetType {
  * One switch, so the answer cannot drift from the pane viewer's
  * (`viewerFor` drives both). `![[…]]` embeds stay unhandled — out of scope.
  */
-function embedWidget(src: string, resolved: string, alt: string): WidgetType {
+function embedWidget(
+  src: string,
+  resolved: string,
+  rawAlt: string,
+  editable = false,
+): WidgetType {
+  // `alt|400` → alt "alt", width 400 (#244). The size segment is never shown.
+  const { alt, width } = parseImageAlt(rawAlt);
   const format = formatFor(src);
   const rel = vaultRelFromSrc(src);
   const name = (src.split(/[\\/]/).pop() || alt || "file").split("?")[0];
   switch (format?.viewer) {
     case "image":
-      return new ImageWidget(resolved, alt);
+      return new ImageWidget(resolved, alt, width, editable);
     case "pdf":
       return new PdfEmbedWidget(resolved, alt);
     case "video":
@@ -787,7 +905,7 @@ function buildDecorations(
               const alt = /^!\[([^\]]*)\]/.exec(raw)?.[1] ?? "";
               decos.push(
                 Decoration.replace({
-                  widget: embedWidget(src, resolveAsset(src), alt),
+                  widget: embedWidget(src, resolveAsset(src), alt, !state.readOnly),
                 }).range(node.from, node.to)
               );
               return false;
@@ -872,7 +990,14 @@ export function livePreview(
       update(u: ViewUpdate) {
         // `focusMoved`: blurring hides every marker, so the set goes stale the
         // moment focus moves even though neither doc nor selection did.
-        if (u.docChanged || u.viewportChanged || u.selectionSet || focusMoved(u)) {
+        // A read-only flip adds or removes the image resize handles (#244).
+        if (
+          u.docChanged ||
+          u.viewportChanged ||
+          u.selectionSet ||
+          focusMoved(u) ||
+          u.startState.readOnly !== u.state.readOnly
+        ) {
           this.decorations = buildDecorations(u.view, resolveAsset, inlineTitle);
         }
       }

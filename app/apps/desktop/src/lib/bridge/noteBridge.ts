@@ -7,6 +7,7 @@
 // vitest in Node with an in-memory fake and no Tauri/DOM.
 
 import * as Y from "yjs";
+import { isBlankTruncation } from "./blankFile";
 import { applyDiff, changeRatio, computeDiff } from "./diff";
 import {
   DEFAULT_CONFIG,
@@ -804,12 +805,25 @@ export class NoteBridge {
     // server's copy of the note destroyed by a file the app itself had just
     // created (#93). A genuine partial truncation still applies below; only
     // all-or-nothing is refused. See `allowTruncateFromDisk`.
-    if (fileText.length === 0 && current.length > 0 && !this.cfg.allowTruncateFromDisk) {
+    //
+    // Widened past 0 bytes (#256): a file whose body is blank — whitespace, a
+    // lone newline, or bare frontmatter — over a doc with real content is the
+    // same all-or-nothing case in the shapes agents and scripts actually leave
+    // behind. That half only bites past `BLANK_INGEST_MIN_CHARS` of body (the
+    // server's shrink floor), so clearing a short note elsewhere still works;
+    // an edit typed in Baalda's own editor never comes through here at all.
+    // Both halves only REFUSE: the doc keeps its text and the file is left as
+    // it is, never rewritten by this branch.
+    const blankFile =
+      fileText.length === 0 ? current.length > 0 : isBlankTruncation(current, fileText);
+    if (blankFile && !this.cfg.allowTruncateFromDisk) {
       if (!this.truncateReported) {
         this.truncateReported = true;
         this.reportError(
           new Error(
-            `${this._path} is 0 bytes: refusing to clear a doc holding ${current.length} chars`,
+            fileText.length === 0
+              ? `${this._path} is 0 bytes: refusing to clear a doc holding ${current.length} chars`
+              : `${this._path} has no body: refusing to clear a doc holding ${current.length} chars`,
           ),
           "ingest:truncate",
         );

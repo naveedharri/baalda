@@ -19,6 +19,7 @@ import { buildTreeSyncIndex } from "../syncRollup";
 // under it. That module imports a type and nothing else, so this keeps the model
 // dependency-free.
 import { formatBytes, relativeTime } from "./format";
+import { BRAND_NAME } from "../brand";
 import { isBulkPhase, type DocSyncState, type SyncProgress } from "../sync/vaultScope";
 import type { SyncStatus } from "../sync/syncManager";
 import type { AuthStatus } from "../../store";
@@ -1351,6 +1352,16 @@ function describe(
       if (p?.phase === "removing") return {
         headline: `Updating access — ${num(Math.max(0, p.total - p.done))} remaining`,
         detail: "Removing local copies you can no longer access.",
+      };
+      // #258: content the server has never had (an interrupted first upload
+      // resuming, or a fresh one) is named as such, because "keep the app open
+      // until this reaches zero" is the one thing the reader needs to know.
+      const notUploaded = p?.notUploaded ?? 0;
+      if (notUploaded > 0) return {
+        headline: `Uploading — ${plural(notUploaded, "note")} not uploaded yet`,
+        detail:
+          `Teammates see these notes as empty until their content arrives. Keep ` +
+          `${BRAND_NAME} open until this reaches zero${where}.${overflow}`,
       };
       const of = p && p.total > 0 ? `${num(p.done)} of ${num(p.total)}` : num(behind);
       return {

@@ -2,6 +2,7 @@
 import { Hono } from "hono";
 import { scheduleIndex } from "../../index/indexer.js";
 import { listTrash, restoreNote, trashContent, TrashError } from "../../trash/service.js";
+import { trashChanged } from "../../trash/activity.js";
 import { getSession } from "../session.js";
 
 import { ORIGIN_HEADER } from "./registry.js";
@@ -47,6 +48,7 @@ export function createTrashRoutes(deps: TrashRouteDeps): Hono {
       const out = await restoreNote(session.userId, c.req.param("docId"));
       scheduleIndex(out.docId, 0);
       deps.onRegistryChanged?.(out.vaultId, c.req.header(ORIGIN_HEADER) ?? null);
+      trashChanged(out.vaultId);
       return c.json({ docId: out.docId, relPath: out.relPath, renamed: out.renamed }, 200);
     } catch (err) {
       if (err instanceof TrashError) return c.json({ error: err.message, code: err.code }, err.status);
