@@ -306,7 +306,7 @@ export async function createFolder(
   // the right shape for a tool an LLM retries.
   const existing = await pool.query<{ id: string; name: string; path: string }>(
     `SELECT id, name, path FROM folders
-      WHERE vault_id = $1 AND lower(path) = lower($2)
+      WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2)
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [input.vaultId, storedPath],
   );
@@ -336,7 +336,7 @@ export async function createFolder(
     if ((err as { code?: string }).code === "23505") {
       const winner = await pool.query<{ id: string; name: string; path: string }>(
         `SELECT id, name, path FROM folders
-          WHERE vault_id = $1 AND lower(path) = lower($2)
+          WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2)
           ORDER BY created_at ASC, id ASC LIMIT 1`,
         [input.vaultId, storedPath],
       );
@@ -630,7 +630,7 @@ export async function createNote(
     rel_path: string;
   }>(
     `SELECT id, title, folder_id, rel_path FROM notes
-      WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
+      WHERE vault_id = $1 AND vault_path_key(rel_path) = vault_path_key($2) AND deleted_at IS NULL
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [input.vaultId, storedRelPath],
   );

@@ -162,9 +162,9 @@ export function restoredPath(relPath: string, date: Date, counter: number): stri
 
 async function pathTaken(db: Queryable, vaultId: string, relPath: string): Promise<boolean> {
   const { rows } = await db.query(
-    `SELECT 1 FROM notes WHERE vault_id = $1 AND deleted_at IS NULL AND lower(rel_path) = lower($2)
+    `SELECT 1 FROM notes WHERE vault_id = $1 AND deleted_at IS NULL AND vault_path_key(rel_path) = vault_path_key($2)
      UNION ALL
-     SELECT 1 FROM files WHERE vault_id = $1 AND lower(path) = lower($2)
+     SELECT 1 FROM files WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2)
      LIMIT 1`,
     [vaultId, relPath],
   );
@@ -196,7 +196,7 @@ async function ensureFolderChain(
     }
     const { rows: tomb } = await db.query<{ id: string }>(
       `SELECT ft.id FROM folder_tombstones ft
-        WHERE ft.vault_id = $1 AND lower(ft.path) = lower($2)
+        WHERE ft.vault_id = $1 AND vault_path_key(ft.path) = vault_path_key($2)
           AND NOT EXISTS (SELECT 1 FROM folders f WHERE f.id = ft.id)
         ORDER BY ft.deleted_at DESC LIMIT 1`,
       [vaultId, path],

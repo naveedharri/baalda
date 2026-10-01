@@ -88,6 +88,13 @@ const fakeRegistry = vi.hoisted(() => {
     /** Registered folder ids by path. */
     folders: new Map<string, string>(),
     getFolderId: vi.fn((path: string): string | null => reg.folders.get(path) ?? null),
+    // ---- #266: tree binaries as folder-move evidence ----
+    /** Registered tree binaries: path → `files` id. */
+    files: new Map<string, string>(),
+    /** `config.json fileBases`: `files` id → agreed sha256. */
+    fileBases: new Map<string, string>(),
+    mappedFiles: vi.fn(() => [...reg.files].map(([relPath, fileId]) => ({ fileId, relPath }))),
+    getFileBase: vi.fn((fileId: string): string | null => reg.fileBases.get(fileId) ?? null),
     lastPassDrift: vi.fn((): { missingMapped: number; unmappedLocal: number } | null => null),
   };
   return reg;
@@ -123,6 +130,8 @@ const fakeDisk = vi.hoisted(() => {
     root: "dir" as "dir" | "missing" | "not-dir",
     /** Every `materialize_notes_batch` call (index + rebind of moved files). */
     materialized: [] as Array<Array<{ relPath: string; docId: string | null }>>,
+    /** Tree binaries on disk: path → sha256 (what `list_binaries` reports). */
+    binaries: new Map<string, string>(),
   };
   return state;
 });
@@ -182,6 +191,9 @@ vi.mock("../../ipc", () => ({
   listNoteTitles: vi.fn(async () => []),
   pruneYjsDocs: vi.fn(async () => ({ docsRemoved: 0, updatesRemoved: 0, bytesReclaimed: 0 })),
   listAttachments: vi.fn(async () => []),
+  listBinaries: vi.fn(async () =>
+    [...fakeDisk.binaries].map(([relPath, sha256]) => ({ relPath, sha256, size: 1 })),
+  ),
   readBinaryFile: vi.fn(async () => new Uint8Array()),
   writeBinaryFile: vi.fn(async () => {}),
 }));
@@ -361,6 +373,9 @@ beforeEach(() => {
   fakeDisk.root = "dir";
   fakeDisk.materialized = [];
   fakeRegistry.folders = new Map();
+  fakeRegistry.files = new Map();
+  fakeRegistry.fileBases = new Map();
+  fakeDisk.binaries = new Map();
   fakeRegistry.lastPassDrift.mockReset().mockReturnValue(null);
   fakeRegistry.renamePath.mockReset().mockResolvedValue(true);
   // A test may swap the recovery-copy writer for a failing one; put the real
@@ -1802,6 +1817,127 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     expect(fakeRegistry.pull).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  // #266: a folder that holds only binaries (or binaries beside notes) used to
+  // carry no evidence at all, so its files fell to the per-file paths — the
+  // server folder stayed behind and the files at the new path were minted new
+  // `files` ids. Paired by their agreed bytes (`fileBases`), it is ONE move.
+  const pdfs = ["Old/a.pdf", "Old/b.pdf", "Old/sub/c.pdf", "Old/d.pdf", "Old/e.pdf"];
+  const shaOf = (path: string) => `sha-${path.replace(/^Old\//, "")}`;
+  function mapBinaries(paths: readonly string[], withBase = true) {
+    for (const p of paths) {
+      fakeRegistry.files.set(p, `file-${p}`);
+      if (withBase) fakeRegistry.fileBases.set(`file-${p}`, shaOf(p));
+    }
+  }
+  const moveBinaries = (paths: readonly string[]) => {
+    for (const p of paths) fakeDisk.binaries.set(p.replace(/^Old/, "Archive"), shaOf(p));
+  };
+  const folderMoved = (sm: SyncManager) =>
+    sm.handleLocalFilesChanged([
+      { path: "Archive", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+
+  it("pairs a folder holding only binaries as ONE folder move, keeping every file id (#266)", async () => {
+    const sm = new SyncManager();
+    mapNotes(others, ["Old", "Old/sub", "Keep"]);
+    mapBinaries(pdfs);
+    await live(sm);
+    fakeRegistry.pull.mockClear();
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub", "Keep"]);
+    moveBinaries(pdfs);
+    // One replaced in the same breath: 4 of 5 is still the 80% rule.
+    fakeDisk.binaries.set("Archive/d.pdf", "sha-rewritten");
+
+    folderMoved(sm);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    // No notes to re-index under the new folder.
+    expect(fakeDisk.materialized).toEqual([]);
+    expect(fakeRegistry.pull).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("counts binaries beside notes: a mixed folder pairs on their combined evidence (#266)", async () => {
+    const sm = new SyncManager();
+    const two = oldNotes.slice(0, 2);
+    mapNotes([...two, ...others], ["Old", "Old/sub", "Keep"]);
+    mapBinaries(pdfs);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub", "Keep"]);
+    // One note rewritten (1/2 notes — below the notes-only ratio) but all five
+    // binaries intact: 6 of 7 items match.
+    fakeDisk.files.set("Archive/a.md", textOf("fa"));
+    fakeDisk.files.set("Archive/sub/b.md", "rewritten");
+    moveBinaries(pdfs);
+
+    folderMoved(sm);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("binaries below the ratio are not a folder move — left to today's per-file handling", async () => {
+    const sm = new SyncManager();
+    mapNotes(others, ["Old", "Keep"]);
+    mapBinaries(pdfs);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub"]);
+    moveBinaries(pdfs.slice(0, 2));
+    for (const p of pdfs.slice(2)) fakeDisk.binaries.set(p.replace(/^Old/, "Archive"), "sha-other");
+
+    folderMoved(sm);
+    await drain();
+
+    expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("a binary with no agreed base is no evidence: the folder is left to the pull, as before", async () => {
+    const sm = new SyncManager();
+    mapNotes(others, ["Old", "Keep"]);
+    mapBinaries(pdfs, false);
+    await live(sm);
+    fakeRegistry.pull.mockClear();
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub"]);
+    moveBinaries(pdfs);
+
+    folderMoved(sm);
+    await drain();
+
+    expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.pull).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("an unlistable disk gives the binaries no evidence and changes nothing", async () => {
+    const sm = new SyncManager();
+    mapNotes(others, ["Old", "Keep"]);
+    mapBinaries(pdfs);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub"]);
+    moveBinaries(pdfs);
+    // Every listing in the window fails (the blob mirror lists too).
+    const listing = vi.mocked(ipc.listBinaries);
+    const real = listing.getMockImplementation();
+    listing.mockRejectedValue(new Error("disk busy"));
+
+    folderMoved(sm);
+    await drain();
+    if (real) listing.mockImplementation(real);
+
+    expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     vi.useRealTimers();
   });
 

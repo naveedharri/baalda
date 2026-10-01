@@ -211,7 +211,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
 
     let wrote = false;
     await withRegisterCtx(auth.vaultId, auth.userId, async (ctx) => {
-      // One `lower(path) = ANY($1)` read answers every adopt probe AND every
+      // One `vault_path_key(path) = ANY($1)` read answers every adopt probe AND every
       // parent lookup this batch is about to make. Misses are cached too — "no
       // folder here yet" is the answer for most of a fresh tree — and each
       // create writes through, so `a/b/c` still finds the `a/b` two items back.
