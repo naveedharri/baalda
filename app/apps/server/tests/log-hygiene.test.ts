@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -15,7 +16,7 @@ import { describe, expect, it } from "vitest";
  * the dev-only `log` email transport, whose whole job is to print the message.
  */
 
-const SRC = join(__dirname, "..", "src");
+const SRC = fileURLToPath(new URL("../src", import.meta.url));
 const EXEMPT = [/^scripts\//, /\.test\.ts$/];
 /** The mailer's `log` transport prints the message by design (dev only). */
 const EXEMPT_SNIPPETS = ["(log transport — not delivered)"];
