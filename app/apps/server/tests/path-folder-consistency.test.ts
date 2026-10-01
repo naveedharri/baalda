@@ -247,9 +247,11 @@ describe("rel_path ↔ folder_id consistency", () => {
       // `folders_vault_path_ci_uq` (migration 023, case-insensitive) also refuses
       // these twins and is NOT restored by 022's SQL, so it is re-created at the
       // end of this test — dropping it for the whole run would silently disarm
-      // the case-collision backstop for every test after this one.
+      // the case-collision backstop for every test after this one. The same
+      // goes for `folders_vault_path_key_uq` (migration 043, NFC + lowercase).
       await pool.query("DROP INDEX IF EXISTS folders_vault_path_uq");
       await pool.query("DROP INDEX IF EXISTS folders_vault_path_ci_uq");
+      await pool.query("DROP INDEX IF EXISTS folders_vault_path_key_uq");
       const twin = await seedFolder(vault, team, "Daily", "Team/Daily"); // newer twin of `daily`
       const inTwin = await seedNote(vault, twin, "Team/Daily/twin.md", owner.userId);
       const child = await seedFolder(vault, twin, "Sub", "Team/Daily/Sub");
@@ -258,6 +260,9 @@ describe("rel_path ↔ folder_id consistency", () => {
       // 022 has collapsed the twins, so the case-insensitive backstop can go back.
       await pool.query(
         "CREATE UNIQUE INDEX IF NOT EXISTS folders_vault_path_ci_uq ON folders (vault_id, lower(path))",
+      );
+      await pool.query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS folders_vault_path_key_uq ON folders (vault_id, vault_path_key(path))",
       );
 
       const { rows } = await pool.query<{ id: string }>(
