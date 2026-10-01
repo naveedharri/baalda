@@ -199,12 +199,12 @@ function envInt(name: string, fallback: number): number {
 }
 
 /**
- * The process-wide brake. `SHRINK_BRAKE_COUNT` (default 3; 0 disables) distinct
+ * The process-wide brake. `SHRINK_BRAKE_COUNT` (default 10; 0 disables) distinct
  * populated notes within `SHRINK_BRAKE_WINDOW_SECONDS` (default 60) engage it
  * for `SHRINK_BRAKE_HOLD_MINUTES` (default 30).
  */
 export const shrinkBrake = new ShrinkBrake(
-  envInt("SHRINK_BRAKE_COUNT", 3),
+  envInt("SHRINK_BRAKE_COUNT", 10),
   envInt("SHRINK_BRAKE_WINDOW_SECONDS", 60) * 1000,
   envInt("SHRINK_BRAKE_HOLD_MINUTES", 30) * 60_000,
 );
