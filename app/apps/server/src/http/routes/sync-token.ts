@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
+import { createResolverCache } from "../../permissions/resolver.js";
 import { syncPermission } from "../../trash/access.js";
 import { mintSyncToken } from "../../tokens/sync-token.js";
 import { getSession } from "../session.js";
@@ -46,7 +47,11 @@ syncTokenRoutes.post("/sync-token", async (c) => {
 
   // A note in Trash (inside its retention window) still mints: pushes into it
   // are accepted so offline edits reach the server; the note stays deleted.
-  const permission = await syncPermission(session.userId, docId);
+  //
+  // A fresh, request-scoped `ResolverCache` (#263): the same answer, in about
+  // half the round trips — one share read for the four share questions and one
+  // read for role, join snapshot and posture. It dies with this request.
+  const permission = await syncPermission(session.userId, docId, pool, createResolverCache());
   if (permission === "none") {
     return c.json({ error: "No access to this document" }, 403);
   }

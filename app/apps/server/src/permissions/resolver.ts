@@ -54,14 +54,20 @@ type Queryable = Pick<pg.Pool, "query">;
  * is refused, and `ready.empty` names it again on the next connect, forever. So
  * this memoises the resolver's INPUTS and never its verdict:
  *
- *   · `role` and `baseline` are facts about the VAULT, identical for every item
- *     in a batch — 2 of the 7–8 queries per doc, ×5,000 docs;
- *   · `ancestors` is a fact about a FOLDER, shared by every doc in it.
+ *   · `role`, `snapshot` and `baseline` are facts about the (VAULT, user),
+ *     identical for every item in a batch — read together by `membership`;
+ *   · `ancestors` is a fact about a FOLDER, shared by every doc in it;
+ *   · a doc's share ROWS (on it, its chain and its vault) are read once and the
+ *     two denies, the grant and the lock are answered from them in memory, by
+ *     predicates that mirror each SELECT clause for clause (`rowsDenied`,
+ *     `rowsLocked`, `rowsGrants`);
+ *   · `prefetch` loads location, chain and rows for a whole batch in three
+ *     queries, for the routes that are about to resolve every one of them.
  *
- * Everything per-doc (`locateDoc`, both denies, the share lookup, the lock) is
- * still asked per doc, in the same order, by the same code. The answer for any
- * one doc is bit-for-bit what an uncached call returns — `resolveManyEqualsPerDoc`
- * in `tests/permissions.test.ts` is the drift test that says so.
+ * The branch logic of {@link effectivePermission} runs unchanged on top, in the
+ * same order. The answer for any one doc is bit-for-bit what an uncached call
+ * returns — `tests/resolver-cache-drift.test.ts` and
+ * `tests/resolver-prefetch-drift.test.ts` are the drift tests that say so.
  *
  * Scoped to one request deliberately: a longer-lived cache would keep serving a
  * role that was revoked or a posture that was just changed. Create one per
@@ -72,13 +78,51 @@ export interface ResolverCache {
   baseline(db: Queryable, organizationId: string): Promise<VaultPosture>;
   snapshot(db: Queryable, organizationId: string, userId: string): Promise<MemberAccessSnapshot | null>;
   ancestors(db: Queryable, folderId: string | null): Promise<string[]>;
+  /**
+   * Role, join snapshot and vault posture for one (vault, user) in ONE query,
+   * seeding the three memos above. The values are exactly what the separate
+   * queries return; only the round trips change.
+   */
+  membership(db: Queryable, organizationId: string, userId: string): Promise<MembershipFacts>;
+  /**
+   * Load the location, ancestor chain and every share row for many docs in a
+   * constant number of queries (three), for a batch route that is about to
+   * resolve all of them. Optional: a doc that was not prefetched (or was not
+   * found by the prefetch) is resolved exactly as before, from the database.
+   */
+  prefetch(db: Queryable, docIds: readonly string[]): Promise<void>;
+  /** A doc loaded by {@link prefetch}, or undefined (resolve it live). */
+  preloaded(docId: string): PreloadedDoc | undefined;
 }
+
+/** The per-(vault, user) facts {@link ResolverCache.membership} returns. */
+export interface MembershipFacts {
+  role: string | null;
+  snapshot: MemberAccessSnapshot | null;
+  baseline: VaultPosture;
+}
+
+/** A doc's location and its full share-row set, as {@link ResolverCache.prefetch}
+ *  loaded them — everything `effectivePermission` would otherwise SELECT. */
+export interface PreloadedDoc {
+  loc: DocLocation;
+  folderIds: string[];
+  /** Every share row on the doc (as a file), on each folder in `folderIds`, and
+   *  on its vault resource. The predicates below filter them exactly as the
+   *  per-query SQL does. */
+  rows: ShareRow[];
+}
+
+/** Ids per {@link ResolverCache.prefetch} round (three queries each). */
+const PREFETCH_CHUNK = 2000;
 
 export function createResolverCache(): ResolverCache {
   const roles = new Map<string, Promise<string | null>>();
   const baselines = new Map<string, Promise<VaultPosture>>();
   const snapshots = new Map<string, Promise<MemberAccessSnapshot | null>>();
   const chains = new Map<string, Promise<string[]>>();
+  const memberships = new Map<string, Promise<MembershipFacts>>();
+  const preloadedDocs = new Map<string, PreloadedDoc>();
   // The promise is cached, not the value, so N concurrent resolves of the same
   // key share ONE in-flight query instead of racing to fill the entry.
   const memo = <T>(m: Map<string, Promise<T>>, key: string, run: () => Promise<T>): Promise<T> => {
@@ -102,6 +146,34 @@ export function createResolverCache(): ResolverCache {
       folderId === null
         ? Promise.resolve([])
         : memo(chains, folderId, () => ancestorFolderIds(db, folderId)),
+    membership: (db, organizationId, userId) => {
+      const key = `${organizationId}\u0000${userId}`;
+      return memo(memberships, key, async () => {
+        const facts = await membershipFacts(db, organizationId, userId);
+        // Seed the single-fact memos so a later `role()` / `snapshot()` /
+        // `baseline()` in the same request reads the SAME answer rather than a
+        // second, possibly newer, one. An entry already there wins: whatever
+        // this request saw first is what it keeps seeing.
+        if (!roles.has(key)) roles.set(key, Promise.resolve(facts.role));
+        if (!snapshots.has(key)) snapshots.set(key, Promise.resolve(facts.snapshot));
+        if (!baselines.has(organizationId)) baselines.set(organizationId, Promise.resolve(facts.baseline));
+        return {
+          role: await roles.get(key)!,
+          snapshot: await snapshots.get(key)!,
+          baseline: await baselines.get(organizationId)!,
+        };
+      });
+    },
+    prefetch: async (db, docIds) => {
+      const wanted = [...new Set(docIds)].filter((id) => !preloadedDocs.has(id));
+      // Sliced so one listing of a whole vault is several bounded statements,
+      // never one array the size of the vault.
+      for (let i = 0; i < wanted.length; i += PREFETCH_CHUNK) {
+        const slice = wanted.slice(i, i + PREFETCH_CHUNK);
+        for (const [id, doc] of await prefetchDocs(db, slice)) preloadedDocs.set(id, doc);
+      }
+    },
+    preloaded: (docId) => preloadedDocs.get(docId),
   };
 }
 
@@ -220,6 +292,47 @@ function indexedRows(index: AccessIndex, docId: string | null, folderIds: string
   return rows;
 }
 
+/**
+ * The per-query predicates, over an already-loaded row list. Each mirrors one
+ * SELECT below clause for clause — {@link isDenied}, {@link isLocked} and the
+ * grant read in {@link sharePermission} — and both the {@link AccessIndex} and
+ * the {@link ResolverCache} paths answer through these, so there is exactly one
+ * in-memory copy of each rule to keep in step with its SQL.
+ *
+ * `rows` may hold rows on resources the SQL would not consider (a vault row for
+ * the deny/lock checks); the resource filter here drops them, so a caller can
+ * pass one superset to all three.
+ */
+function rowsDenied(rows: readonly ShareRow[], principalType: "user" | "org", principalId: string): boolean {
+  return rows.some((r) =>
+    (r.resource_type === "file" || r.resource_type === "folder") &&
+    r.permission === "denied" && r.principal_type === principalType && r.principal_id === principalId,
+  );
+}
+
+function rowsLocked(rows: readonly ShareRow[], userId: string): boolean {
+  return rows.some((r) =>
+    (r.resource_type === "file" || r.resource_type === "folder") &&
+    (r.permission === "locked" || r.permission === "readonly") &&
+    (r.principal_type === "org" || (r.principal_type === "user" && r.principal_id === userId)),
+  );
+}
+
+function rowsGrants(
+  rows: readonly ShareRow[],
+  userId: string,
+  organizationId: string,
+  orgClause: boolean,
+): ShareRow[] {
+  return rows.filter((r) =>
+    (r.resource_type === "file" || r.resource_type === "folder" ||
+      (r.resource_type === "vault" && r.resource_id === organizationId)) &&
+    (r.permission === "view" || r.permission === "edit" || r.permission === "readonly") &&
+    ((r.principal_type === "user" && r.principal_id === userId) ||
+      (orgClause && r.principal_type === "org" && r.principal_id === organizationId)),
+  );
+}
+
 /** In-memory {@link isDenied}. The file branch matches `resource_type = 'file'`. */
 function indexedIsDenied(
   index: AccessIndex,
@@ -228,17 +341,12 @@ function indexedIsDenied(
   docId: string | null,
   folderIds: string[],
 ): boolean {
-  return indexedRows(index, docId, folderIds).some((r) =>
-    r.permission === "denied" && r.principal_type === principalType && r.principal_id === principalId,
-  );
+  return rowsDenied(indexedRows(index, docId, folderIds), principalType, principalId);
 }
 
 /** In-memory {@link isLocked}: an org row matches whatever its principal id. */
 function indexedIsLocked(index: AccessIndex, userId: string, docId: string | null, folderIds: string[]): boolean {
-  return indexedRows(index, docId, folderIds).some((r) =>
-    (r.permission === "locked" || r.permission === "readonly") &&
-    (r.principal_type === "org" || (r.principal_type === "user" && r.principal_id === userId)),
-  );
+  return rowsLocked(indexedRows(index, docId, folderIds), userId);
 }
 
 /** In-memory row set of {@link sharePermission}'s SELECT. */
@@ -250,14 +358,152 @@ function indexedGrantRows(
   organizationId: string,
   orgClause: boolean,
 ): ShareRow[] {
-  return indexedRows(index, docId, folderIds, organizationId).filter((r) =>
-    (r.permission === "view" || r.permission === "edit" || r.permission === "readonly") &&
-    ((r.principal_type === "user" && r.principal_id === userId) ||
-      (orgClause && r.principal_type === "org" && r.principal_id === organizationId)),
-  );
+  return rowsGrants(indexedRows(index, docId, folderIds, organizationId), userId, organizationId, orgClause);
 }
 
-interface DocLocation {
+/**
+ * Every share row {@link isDenied}, {@link isLocked} and {@link sharePermission}
+ * could match for one doc — on the doc as a file, on each folder in its chain,
+ * and on its vault resource — in ONE read, for the cached path to filter in
+ * memory instead of asking four times.
+ *
+ * Narrowed to org rows and THIS user's rows: every one of the four predicates
+ * names either an org principal or `principal_id = userId`, so another
+ * member's per-user rows can never match and need not cross the wire.
+ */
+async function docShareRows(
+  db: Queryable,
+  userId: string,
+  docId: string,
+  folderIds: string[],
+  organizationId: string,
+): Promise<ShareRow[]> {
+  const { rows } = await db.query<ShareRow>(
+    `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
+       FROM shares
+      WHERE ((resource_type = 'file' AND resource_id = $1)
+          OR (resource_type = 'folder' AND resource_id = ANY($2::text[]))
+          OR (resource_type = 'vault' AND resource_id = $3))
+        AND (principal_type = 'org' OR (principal_type = 'user' AND principal_id = $4))`,
+    [docId, folderIds, organizationId, userId],
+  );
+  return rows;
+}
+
+/**
+ * {@link ResolverCache.prefetch}: locations, ancestor chains and share rows for
+ * many docs in three queries, whatever the count or the depth.
+ *
+ * Conservative by construction — a doc is preloaded only when the batch read
+ * provably saw what the per-doc reads would have:
+ *   · a live note or a files row (never a soft-deleted note: those resolve live,
+ *     through `includeDeleted`), joined to its vault exactly like `locateDoc`;
+ *   · NOT when the id has both a note and a files row, where `locateDoc`'s
+ *     `UNION ALL … LIMIT 1` is the authority on which one wins;
+ *   · NOT when its folder chain loops (the per-doc walk would never finish, and
+ *     a guess here would be a verdict nobody else reaches).
+ * Anything left out is simply resolved the old way.
+ */
+async function prefetchDocs(db: Queryable, docIds: string[]): Promise<Map<string, PreloadedDoc>> {
+  const out = new Map<string, PreloadedDoc>();
+  const { rows: located } = await db.query<{
+    id: string;
+    vault_id: string;
+    folder_id: string | null;
+    created_by: string | null;
+    created_at: Date;
+    organization_id: string;
+  }>(
+    `SELECT n.id, n.vault_id, n.folder_id, n.created_by, n.created_at, v.organization_id
+       FROM notes n JOIN vaults v ON v.id = n.vault_id
+      WHERE n.id = ANY($1::text[]) AND n.deleted_at IS NULL
+     UNION ALL
+     SELECT fi.id, fi.vault_id, fi.folder_id, NULL::text, fi.created_at, v.organization_id
+       FROM files fi JOIN vaults v ON v.id = fi.vault_id
+      WHERE fi.id = ANY($1::text[])`,
+    [docIds],
+  );
+  const seen = new Map<string, number>();
+  for (const r of located) seen.set(r.id, (seen.get(r.id) ?? 0) + 1);
+  const unique = located.filter((r) => seen.get(r.id) === 1);
+  if (unique.length === 0) return out;
+
+  const startFolders = [...new Set(unique.map((r) => r.folder_id).filter((f): f is string => f !== null))];
+  const parents = new Map<string, string | null>();
+  if (startFolders.length > 0) {
+    // UNION, not UNION ALL: shared ancestors are read once, and a cycle ends.
+    const { rows } = await db.query<{ id: string; parent_id: string | null }>(
+      `WITH RECURSIVE chain AS (
+          SELECT id, parent_id FROM folders WHERE id = ANY($1::text[])
+          UNION
+          SELECT f.id, f.parent_id
+            FROM folders f
+            JOIN chain c ON f.id = c.parent_id
+       )
+       SELECT id, parent_id FROM chain`,
+      [startFolders],
+    );
+    for (const r of rows) parents.set(r.id, r.parent_id);
+  }
+  // The same walk as `ancestorFolderIds`: the folder itself, then each parent
+  // that still exists, stopping at the root or at a parent with no row.
+  const chainOf = (folderId: string | null): string[] | null => {
+    const chain: string[] = [];
+    const visited = new Set<string>();
+    let id = folderId;
+    while (id !== null && parents.has(id)) {
+      if (visited.has(id)) return null;
+      visited.add(id);
+      chain.push(id);
+      id = parents.get(id) ?? null;
+    }
+    return chain;
+  };
+
+  const docs: Array<{ row: (typeof unique)[number]; folderIds: string[] }> = [];
+  for (const row of unique) {
+    const folderIds = chainOf(row.folder_id);
+    if (folderIds) docs.push({ row, folderIds });
+  }
+  if (docs.length === 0) return out;
+
+  const folderIds = [...new Set(docs.flatMap((d) => d.folderIds))];
+  const orgIds = [...new Set(docs.map((d) => d.row.organization_id))];
+  const { rows: shareRows } = await db.query<ShareRow>(
+    `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
+       FROM shares
+      WHERE (resource_type = 'file' AND resource_id = ANY($1::text[]))
+         OR (resource_type = 'folder' AND resource_id = ANY($2::text[]))
+         OR (resource_type = 'vault' AND resource_id = ANY($3::text[]))`,
+    [docs.map((d) => d.row.id), folderIds, orgIds],
+  );
+  const byResource = new Map<string, ShareRow[]>();
+  for (const r of shareRows) {
+    const key = shareKey(r.resource_type, r.resource_id);
+    const list = byResource.get(key);
+    if (list) list.push(r);
+    else byResource.set(key, [r]);
+  }
+  for (const { row, folderIds: chain } of docs) {
+    const rows: ShareRow[] = [...(byResource.get(shareKey("file", row.id)) ?? [])];
+    for (const f of chain) rows.push(...(byResource.get(shareKey("folder", f)) ?? []));
+    rows.push(...(byResource.get(shareKey("vault", row.organization_id)) ?? []));
+    out.set(row.id, {
+      loc: {
+        vaultId: row.vault_id,
+        folderId: row.folder_id,
+        organizationId: row.organization_id,
+        createdBy: row.created_by,
+        createdAt: row.created_at,
+      },
+      folderIds: chain,
+      rows,
+    });
+  }
+  return out;
+}
+
+export interface DocLocation {
   vaultId: string;
   folderId: string | null;
   organizationId: string;
@@ -435,6 +681,16 @@ async function sharePermission(
         )`,
     [userId, docId, folderIds, organizationId],
   );
+  return grantFromRows(rows, snapshot, resourceCreatedAt);
+}
+
+/** Highest-wins over {@link sharePermission}'s matching rows, skipping the org
+ *  grants a join snapshot already accounts for. */
+function grantFromRows(
+  rows: ReadonlyArray<Pick<ShareRow, "permission" | "principal_type" | "access_revision">>,
+  snapshot?: MemberAccessSnapshot | null,
+  resourceCreatedAt?: Date,
+): Permission {
   let best: Permission = "none";
   for (const r of rows) {
     const existingAtJoin = !!snapshot && !!resourceCreatedAt && resourceCreatedAt <= snapshot.snapshotAt;
@@ -535,9 +791,54 @@ export async function vaultBaseline(
       LIMIT 1`,
     [organizationId],
   );
-  const p = rows[0]?.permission;
+  return postureOf(rows[0]?.permission);
+}
+
+function postureOf(p: string | null | undefined): VaultPosture {
   if (p === "edit" || p === "view") return p;
   return p === "denied" ? "sealed" : null;
+}
+
+/**
+ * {@link memberRole}, {@link memberAccessSnapshot} and {@link vaultBaseline} as
+ * ONE round trip. Each column is that function's own SELECT, verbatim, as a
+ * scalar subquery (the snapshot is keyed by its primary key, so the LEFT JOIN
+ * yields at most one row) — the values cannot differ, only the latency.
+ */
+async function membershipFacts(
+  db: Queryable,
+  organizationId: string,
+  userId: string,
+): Promise<MembershipFacts> {
+  const { rows } = await db.query<{
+    role: string | null;
+    baseline: string | null;
+    mode: MemberAccessSnapshot["mode"] | null;
+    access_revision: string | number | null;
+    snapshot_at: Date | null;
+  }>(
+    `SELECT
+        (SELECT role FROM member
+          WHERE "organizationId" = $1 AND "userId" = $2 LIMIT 1) AS role,
+        (SELECT permission FROM shares
+          WHERE resource_type = 'vault' AND resource_id = $1
+            AND principal_type = 'org' AND permission IN ('view', 'edit', 'denied')
+          LIMIT 1) AS baseline,
+        s.mode, s.access_revision, s.snapshot_at
+       FROM (SELECT 1) AS one
+       LEFT JOIN member_access_snapshots s
+         ON s.organization_id = $1 AND s.user_id = $2`,
+    [organizationId, userId],
+  );
+  const row = rows[0];
+  return {
+    role: row?.role ?? null,
+    baseline: postureOf(row?.baseline),
+    snapshot:
+      row && row.mode !== null && row.snapshot_at !== null
+        ? { mode: row.mode, accessRevision: Number(row.access_revision), snapshotAt: row.snapshot_at }
+        : null,
+  };
 }
 
 /**
@@ -599,12 +900,40 @@ export async function effectivePermission(
   /** Resolve a soft-deleted note as if it were live (see `trash/access.ts`). */
   opts: { includeDeleted?: boolean } = {},
 ): Promise<Permission> {
-  const loc = await locateDoc(db, docId, opts.includeDeleted === true);
+  // A doc the batch prefetched answers from what that read loaded; anything
+  // else — no cache, not prefetched, or a soft-deleted lookup — reads live.
+  const pre = cache && opts.includeDeleted !== true ? cache.preloaded(docId) : undefined;
+  const loc = pre ? pre.loc : await locateDoc(db, docId, opts.includeDeleted === true);
   if (!loc) return "none";
 
-  const folderIds = cache
-    ? await cache.ancestors(db, loc.folderId)
-    : await ancestorFolderIds(db, loc.folderId);
+  const folderIds = pre
+    ? pre.folderIds
+    : cache
+      ? await cache.ancestors(db, loc.folderId)
+      : await ancestorFolderIds(db, loc.folderId);
+
+  // With a cache, the four share questions below (two denies, the grant, the
+  // lock) are answered from ONE read of every row on this doc, its chain and
+  // its vault, filtered by the same predicates the SQL spells out. Without one,
+  // each asks the database itself — the reference path the drift tests compare
+  // against.
+  const rows = pre ? pre.rows : cache ? await docShareRows(db, userId, docId, folderIds, loc.organizationId) : null;
+  const denied = async (principalType: "user" | "org", principalId: string) =>
+    rows ? rowsDenied(rows, principalType, principalId) : isDenied(db, principalType, principalId, docId, folderIds);
+  const locked = async () => (rows ? rowsLocked(rows, userId) : isLocked(db, userId, docId, folderIds));
+  const grant = async (
+    isMember: boolean,
+    orgGrantsApply: boolean,
+    snapshot?: MemberAccessSnapshot | null,
+    resourceCreatedAt?: Date,
+  ) =>
+    rows
+      ? grantFromRows(
+          rowsGrants(rows, userId, loc.organizationId, isMember && orgGrantsApply),
+          snapshot,
+          resourceCreatedAt,
+        )
+      : sharePermission(db, userId, docId, folderIds, loc.organizationId, isMember, orgGrantsApply, snapshot, resourceCreatedAt);
 
   // Denies are first and unconditional. Both kinds outrank the role branch
   // below: what you set in the Access panel applies to you too, or a vault
@@ -612,32 +941,19 @@ export async function effectivePermission(
   // on trust. The escape hatch is elsewhere and role-based — managing shares
   // (`canManage` in http/routes/shares.ts) is gated on owner/admin, never on
   // effective permission, so an owner can always lift what they set.
-  if (await isDenied(db, "user", userId, docId, folderIds)) return "none";
-  const itemPrivate = await isDenied(db, "org", loc.organizationId, docId, folderIds);
+  if (await denied("user", userId)) return "none";
+  const itemPrivate = await denied("org", loc.organizationId);
 
-  const role = cache
-    ? await cache.role(db, loc.organizationId, userId)
-    : await memberRole(db, loc.organizationId, userId);
-  const snapshot = cache
-    ? await cache.snapshot(db, loc.organizationId, userId)
-    : await memberAccessSnapshot(db, loc.organizationId, userId);
+  const facts = cache ? await cache.membership(db, loc.organizationId, userId) : null;
+  const role = facts ? facts.role : await memberRole(db, loc.organizationId, userId);
+  const snapshot = facts ? facts.snapshot : await memberAccessSnapshot(db, loc.organizationId, userId);
   const existingAtJoin = !!snapshot && loc.createdAt <= snapshot.snapshotAt;
 
   // A join default is a one-time view of content that already existed. It does
   // not rewrite the organization's live posture, and it is not an immutable
   // deny: an org grant written at a later ACL revision can raise it.
   if (existingAtJoin) {
-    const direct = await sharePermission(
-      db,
-      userId,
-      docId,
-      folderIds,
-      loc.organizationId,
-      role !== null,
-      !itemPrivate,
-      snapshot,
-      loc.createdAt,
-    );
+    const direct = await grant(role !== null, !itemPrivate, snapshot, loc.createdAt);
     let snapped: Permission = itemPrivate
       ? "none"
       : snapshot.mode === "open"
@@ -646,16 +962,14 @@ export async function effectivePermission(
           ? "view"
           : "none";
     snapped = maxPermission(snapped, direct);
-    if (snapped !== "none" && (await isLocked(db, userId, docId, folderIds))) return "view";
+    if (snapped !== "none" && (await locked())) return "view";
     return snapped;
   }
   // The vault's posture caps EVERY shortcut below it (see `vaultBaseline`).
   // Read-only and Private both skip the role AND the creator rule; they differ
   // only in what the vault itself then confers — `view` for one, nothing at all
   // for the other.
-  const baseline = cache
-    ? await cache.baseline(db, loc.organizationId)
-    : await vaultBaseline(db, loc.organizationId);
+  const baseline = facts ? facts.baseline : await vaultBaseline(db, loc.organizationId);
   const readOnlyVault = baseline === "view";
   const sealedVault = baseline === "sealed";
   const ungrantedVault = baseline === null;
@@ -669,15 +983,7 @@ export async function effectivePermission(
     // that spares the author is a Private you can never observe, and "it works,
     // trust me" is not a thing to ship in an access panel. Naming yourself in
     // the list below is how you get back in.
-    granted = await sharePermission(
-      db,
-      userId,
-      docId,
-      folderIds,
-      loc.organizationId,
-      false,
-      false,
-    );
+    granted = await grant(false, false);
   } else if (readOnlyVault || sealedVault) {
     // The two postures that take BOTH shortcuts away from everyone: the
     // owner/admin blanket edit, and authorship.
@@ -694,14 +1000,7 @@ export async function effectivePermission(
     // naming them. It is also the one difference from an item set Private,
     // which drops org grants on that item too, because there the point is the
     // opposite: withdrawing one thing from a team that can otherwise reach it.
-    granted = await sharePermission(
-      db,
-      userId,
-      docId,
-      folderIds,
-      loc.organizationId,
-      role !== null,
-    );
+    granted = await grant(role !== null, true);
   } else if (!ungrantedVault && (role === "owner" || role === "admin")) {
     // The blanket role shortcut. A vault that was never shared withdraws it —
     // an owner is not exempt from a vault nobody has been given — but leaves
@@ -716,18 +1015,11 @@ export async function effectivePermission(
     // notes they authored and can re-mint sync tokens indefinitely.
     granted = "edit";
   } else {
-    granted = await sharePermission(
-      db,
-      userId,
-      docId,
-      folderIds,
-      loc.organizationId,
-      role !== null, // isMember — gates the org-wide grant
-    );
+    granted = await grant(role !== null, true); // isMember — gates the org-wide grant
   }
 
   // Cap overlay: a matching lock caps at view; it never grants.
-  if (granted !== "none" && (await isLocked(db, userId, docId, folderIds))) {
+  if (granted !== "none" && (await locked())) {
     return "view";
   }
   return granted;

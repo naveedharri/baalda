@@ -445,8 +445,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // verdict, and dies with this request — every answer is bit-for-bit the
     // uncached one (`resolveManyEqualsPerDoc`), which is what this route's
     // "do not remove on doubt" contract needs.
+    //
+    // `prefetch` then loads every id's location, folder chain and share rows in
+    // three reads, so the pool below runs almost entirely in memory. An id it
+    // cannot vouch for is resolved live, exactly as before.
     const none: string[] = [];
     const resolverCache = createResolverCache();
+    await resolverCache.prefetch(pool, inVault);
     await runPool(inVault, config.backfillConcurrency, async (id) => {
       if ((await effectivePermission(session.userId, id, pool, resolverCache)) === "none") none.push(id);
     });
@@ -476,10 +481,13 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: `at most ${CONFIRM_EMPTY_MAX} docIds per request` }, 400);
     }
     // Only someone who could have written the content may vouch that there is
-    // none: the same per-doc resolver every write path uses.
+    // none: the same per-doc resolver every write path uses, with its inputs
+    // memoised and prefetched for this request only (#263).
     const editable: string[] = [];
+    const resolverCache = createResolverCache();
+    await resolverCache.prefetch(pool, ids);
     await runPool(ids, config.backfillConcurrency, async (id) => {
-      if ((await effectivePermission(session.userId, id)) === "edit") editable.push(id);
+      if ((await effectivePermission(session.userId, id, pool, resolverCache)) === "edit") editable.push(id);
     });
     const confirmed = await confirmEmptyNotes(vaultId, editable);
     return c.json({ confirmed });

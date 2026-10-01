@@ -2,7 +2,7 @@ import { withNoteQuota, NoteQuotaError } from "../billing/note-quota.js";
 import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole, resolveResource } from "../permissions/lookup.js";
-import { effectivePermission, type Permission } from "../permissions/resolver.js";
+import { createResolverCache, effectivePermission, type Permission } from "../permissions/resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "../permissions/vault-docs.js";
 import {
   canEditFolder,
@@ -528,8 +528,13 @@ export async function listNotes(
     permission: Permission;
     updatedAt: string;
   }> = [];
+  // One request-scoped cache, prefetched for the whole listing: the same
+  // per-doc resolver, answered from three batch reads instead of ~8 queries
+  // per note (#263). See `permissions/resolver.ts ResolverCache`.
+  const resolverCache = createResolverCache();
+  await resolverCache.prefetch(pool, rows.map((r) => r.id));
   for (const r of rows) {
-    const permission = await effectivePermission(ctx.auth.userId, r.id);
+    const permission = await effectivePermission(ctx.auth.userId, r.id, pool, resolverCache);
     if (permission === "none") continue; // members only see what's shared with them
     out.push({
       docId: r.id,
