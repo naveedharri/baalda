@@ -220,6 +220,35 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     borderRadius: "var(--radius-sm)",
     verticalAlign: "bottom",
   },
+  // Editable notes wrap the image so a corner handle can resize it (#244). An
+  // explicit `|width` sets the img's own width; `max-width: 100%` still caps it.
+  ".cm-md-img-wrap": {
+    position: "relative",
+    display: "inline-block",
+    maxWidth: "100%",
+    verticalAlign: "bottom",
+    lineHeight: "0",
+  },
+  ".cm-md-img-handle": {
+    position: "absolute",
+    right: "2px",
+    bottom: "2px",
+    width: "12px",
+    height: "12px",
+    borderRight: "2px solid var(--accent)",
+    borderBottom: "2px solid var(--accent)",
+    borderBottomRightRadius: "var(--radius-sm)",
+    cursor: "nwse-resize",
+    opacity: "0",
+    transition: "opacity 120ms ease",
+    touchAction: "none",
+  },
+  ".cm-md-img-wrap:hover .cm-md-img-handle, .cm-md-img-resizing .cm-md-img-handle": {
+    opacity: "1",
+  },
+  ".cm-md-img-resizing .cm-md-img": {
+    outline: "1px solid var(--accent)",
+  },
   // Markdown `![alt](src.pdf)` embeds rendered as an inline preview block.
   ".cm-md-pdf": {
     display: "block",
