@@ -117,6 +117,22 @@ const SERVER_ENV = [
   // Desktop URL scheme the server's pages bounce into; `baalda-staging` on the
   // staging project so its links open the Staging app, not the released one.
   "DEEP_LINK_SCHEME",
+  // Note Trash retention and the optional Baalda Assistant module override.
+  "TRASH_RETENTION_DAYS",
+  "HOUSEKEEPER_MODULE",
+  // Content-write safety (#251, #252): the oldest desktop build allowed to push
+  // note content, what a build that reports no version gets, and the burst
+  // brake on emptied notes.
+  "MIN_CLIENT_VERSION",
+  "UNVERSIONED_CLIENTS",
+  "SHRINK_BRAKE_COUNT",
+  "SHRINK_BRAKE_WINDOW_SECONDS",
+  "SHRINK_BRAKE_HOLD_MINUTES",
+  // Invitation lifetime (#268) and the release hint (#269); a staging project
+  // points RELEASE_MANIFEST_URL at the staging prerelease manifest.
+  "INVITATION_EXPIRES_HOURS",
+  "RELEASE_MANIFEST_URL",
+  "RELEASE_POLL_MINUTES",
 ] as const;
 
 export default defineRailway((ctx) => {
