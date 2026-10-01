@@ -2,7 +2,12 @@ import { serve } from "@hono/node-server";
 import type { Server as HttpServer } from "node:http";
 import { config } from "./config.js";
 import { createApp } from "./http/app.js";
-import { createSyncServer, disconnectDoc, evictDoc } from "./sync/hocuspocus.js";
+import {
+  createSyncServer,
+  disconnectDoc,
+  disconnectUserInVault,
+  evictDoc,
+} from "./sync/hocuspocus.js";
 import { attachSyncUpgrade } from "./sync/http-upgrade.js";
 import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
@@ -12,7 +17,7 @@ import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
-import { setShrinkHook } from "./versions/shrink-guard.js";
+import { setShrinkBrakeHook, setShrinkHook } from "./versions/shrink-guard.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
 
 /**
@@ -117,6 +122,12 @@ async function main() {
   // A single update that wipes most of a note keeps the text it replaced (#200).
   setShrinkHook((vaultId, docId, previousText) => {
     void versionCapture?.preShrink(vaultId, docId, previousText);
+  });
+  // A BURST of them from one user in one vault engages the brake (#252): kick
+  // that user's live sockets there so they reconnect read-only for the hold.
+  setShrinkBrakeHook((vaultId, userId) => {
+    const closed = disconnectUserInVault(sync, vaultId, userId);
+    console.warn(`[versions] shrink brake: closed ${closed} live connection(s) in vault ${vaultId}`);
   });
 
   versionCapture = createVersionCapture({

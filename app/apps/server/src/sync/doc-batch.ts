@@ -4,7 +4,7 @@ import { formatDocName } from "./doc-name.js";
 import type { SyncContext } from "./hocuspocus.js";
 import { appendUpdate, compareStateVectors, loadDocState } from "../yjs/persistence.js";
 import { indexDoc, scheduleIndex } from "../index/indexer.js";
-import { reportShrink } from "../versions/shrink-guard.js";
+import { isShrinkHeld, reportShrink } from "../versions/shrink-guard.js";
 
 /**
  * The server-side CRDT write path, shared by the MCP tools (`mcp/doc-writer.ts`)
@@ -205,7 +205,14 @@ export async function applyDetached(
     if (updates.length === 0) return "skipped";
     const merged = updates.length === 1 ? updates[0] : Y.mergeUpdates(updates);
     await appendUpdate(docId, merged);
-    reportShrink(vaultId, docId, before, doc.getText(CONTENT_FIELD).toString(), userId);
+    reportShrink(
+      vaultId,
+      docId,
+      before,
+      doc.getText(CONTENT_FIELD).toString(),
+      userId,
+      actor?.source ?? null,
+    );
     // Fan out to background subscribers, which the live path gets free from
     // Hocuspocus's onChange. Best-effort like the re-index: the write is already
     // durable, and failing it here would turn a delivery problem into a lost
@@ -323,7 +330,17 @@ export interface DocApplyResult {
   docId: string;
   outcome: ApplyOutcome | "error";
   error?: string;
+  /** Machine-readable reason for an `error` outcome, e.g. {@link SHRINK_HELD_CODE}. */
+  code?: string;
 }
+
+/**
+ * Per-item refusal while the shrink burst brake holds this user's writes in
+ * this vault (#252). Reported as an `error` outcome on purpose: every desktop
+ * build treats that as retryable and keeps its local CRDT, where `denied` would
+ * send it down the view-grant rebase that replaces the local copy.
+ */
+export const SHRINK_HELD_CODE = "shrink_held";
 
 /** Is a doc's shared text empty? The one question `expectEmpty` asks, asked the
  *  same way on both paths so they cannot disagree. */
@@ -352,6 +369,16 @@ export async function applyDocPush(
   // text before it. Everything else through this route is a merge into prior
   // state and must version like a single live write. See {@link BULK_SEED_ORIGIN}.
   const source = expectEmpty ? BULK_SEED_ORIGIN : BULK_ORIGIN;
+  // Held by the burst brake: apply nothing, and say so in a way the client
+  // retries later rather than resolves by discarding its copy.
+  if (isShrinkHeld(actor?.userId, vaultId)) {
+    return {
+      docId,
+      outcome: "error",
+      code: SHRINK_HELD_CODE,
+      error: "content writes are paused after several notes were emptied at once",
+    };
+  }
   try {
     const outcome = await withDocLock(docId, async () => {
       const live = runtime?.server.hocuspocus.documents.get(formatDocName(vaultId, docId));

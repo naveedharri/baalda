@@ -620,7 +620,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
         const index = permitted[i].index;
         results[index] =
           out.outcome === "error"
-            ? { docId: out.docId, status: "error", code: null, error: out.error ?? null }
+            ? { docId: out.docId, status: "error", code: out.code ?? null, error: out.error ?? null }
             : { docId: out.docId, status: out.outcome, code: null, error: null };
       });
 
