@@ -11,6 +11,11 @@
 --    not fail).
 --  * folder_tombstones holds a few rows per deleted folder.
 
+-- Bounds only the wait to ACQUIRE each lock, not the build: a long-running
+-- transaction on note_versions fails the deploy (which retries) instead of
+-- queueing every version insert behind this statement while it waits.
+SET LOCAL lock_timeout = '10s';
+
 -- `GET /vaults/:id/shrink-events` now selects candidate docs first:
 -- WHERE vault_id = $1 AND cause = 'pre-shrink' AND created_at >= $2.
 CREATE INDEX IF NOT EXISTS note_versions_pre_shrink_idx
