@@ -85,10 +85,14 @@ export function updateState(): UpdateState {
  * non-bundled dev build the updater is unavailable and this resolves to an
  * `error` state rather than throwing.
  */
-export async function checkForUpdate(): Promise<boolean> {
+export async function checkForUpdate(
+  options: { timeoutMs?: number } = {},
+): Promise<boolean> {
   try {
     setState({ phase: "checking" });
-    const update = await check();
+    const update = await check(
+      options.timeoutMs ? { timeout: options.timeoutMs } : undefined,
+    );
     if (update) {
       pending = update;
       setState({
@@ -179,7 +183,9 @@ export async function installUpdate(
     // this process keeps running from the old one, so the only disruptive act
     // left is the restart — hold it until the user pauses.
     setState({ phase: "ready", version: update.version });
-    if (options.waitForQuiet !== false) await waitForQuietMoment();
+    // The launch gate skips the wait (nobody is typing behind it) — unless it
+    // gave up holding sync for this download, in which case someone may be.
+    if (options.waitForQuiet !== false || launchHoldExpired) await waitForQuietMoment();
     // Catch anything typed during the download and the wait.
     await flushOpenNote();
     await recordRelaunchFocus();
@@ -199,10 +205,10 @@ export async function installUpdate(
  * a flaky download or a network blip should cost the user nothing, not a
  * full-screen interruption.
  */
-async function autoInstall(): Promise<void> {
+async function autoInstall(options: { waitForQuiet?: boolean } = {}): Promise<void> {
   autoAttempts += 1;
   const version = "version" in state ? state.version : "";
-  if (await installUpdate()) return;
+  if (await installUpdate(options)) return;
   if (autoAttempts >= 2) {
     autoInstalling = false;
     setState({
@@ -256,6 +262,93 @@ export async function checkAndAutoInstall(): Promise<void> {
   } else {
     autoInstalling = false;
   }
+}
+
+/**
+ * How long the launch check may hold sync back before giving up on it. The
+ * endpoint answers in well under a second when it is reachable; this bound is
+ * for the network that hangs instead of failing (captive portal, dead proxy),
+ * so an offline launch is delayed by at most this much.
+ */
+export const LAUNCH_CHECK_TIMEOUT_MS = 4_000;
+
+/**
+ * How long a found update may keep sync waiting while it downloads. Generous —
+ * a normal bundle lands in seconds — but finite, so a crawling connection opens
+ * the app on the old build rather than never.
+ */
+export const LAUNCH_INSTALL_HOLD_MS = 120_000;
+
+/** Set once the launch gate stopped waiting for its install (see above). */
+let launchHoldExpired = false;
+
+/**
+ * The launch gate: decide about an update BEFORE anything talks to the sync
+ * server (#255). Await it ahead of the session restore — a pending update used
+ * to run the whole startup reconcile (registry writes, sync tokens, batch
+ * pushes) on the old build first, and the old build is exactly where the sync
+ * bugs the new one fixed still live.
+ *
+ * - No update, an unreachable endpoint, or a check slower than
+ *   {@link LAUNCH_CHECK_TIMEOUT_MS}: resolves at once and sync starts as
+ *   before. A check that answers after the bound is not wasted — it carries on
+ *   in the background exactly like the poll (quiet-moment restart and all).
+ * - An update found inside the bound: `onUpdating` fires (the caller shows
+ *   "Updating Baalda…") and the install runs WITHOUT the quiet-moment wait —
+ *   nobody is typing yet and nothing has synced — then the app restarts into
+ *   the new build, so on success this promise never resolves. A failed install
+ *   resolves it (the one silent retry is already scheduled, and an app that
+ *   cannot update itself must still open), and so does a download still running
+ *   after {@link LAUNCH_INSTALL_HOLD_MS}.
+ */
+export async function launchUpdateGate(
+  options: {
+    timeoutMs?: number;
+    holdMs?: number;
+    onUpdating?: (version: string) => void;
+  } = {},
+): Promise<void> {
+  if (autoInstalling) return;
+  const timeoutMs = options.timeoutMs ?? LAUNCH_CHECK_TIMEOUT_MS;
+  autoInstalling = true;
+  autoAttempts = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const found = checkForUpdate({ timeoutMs });
+  const raced = await Promise.race([
+    found,
+    new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (raced === "timeout") {
+    void found.then((late) => {
+      if (late) void autoInstall();
+      else autoInstalling = false;
+    });
+    return;
+  }
+  if (!raced) {
+    autoInstalling = false;
+    return;
+  }
+  options.onUpdating?.("version" in state ? state.version : "");
+  // A download that crawls must not keep the app closed for good: past the
+  // hold the gate opens and sync starts on this build after all, and the
+  // install still in flight falls back to the quiet-moment restart (it reads
+  // `launchHoldExpired` once the bytes are in) instead of yanking the window
+  // out from under someone who has started typing meanwhile.
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  await Promise.race([
+    autoInstall({ waitForQuiet: false }),
+    new Promise<void>((resolve) => {
+      holdTimer = setTimeout(() => {
+        launchHoldExpired = true;
+        resolve();
+      }, options.holdMs ?? LAUNCH_INSTALL_HOLD_MS);
+    }),
+  ]);
+  if (holdTimer) clearTimeout(holdTimer);
 }
 
 /** The running app's version (from tauri.conf.json), for display. */

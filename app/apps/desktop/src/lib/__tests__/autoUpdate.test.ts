@@ -263,3 +263,116 @@ describe("the poll", () => {
     expect(check).toHaveBeenCalledTimes(2);
   });
 });
+
+// #255: the launch path decides about an update BEFORE sync starts. The gate's
+// promise is what the session restore awaits, so "resolved" here means "sync
+// may start now" and "pending" means the old build is still being held back.
+describe("the launch gate", () => {
+  it("installs a found update and restarts without the quiet wait", async () => {
+    const update = fakeUpdate("0.2.0");
+    check.mockResolvedValue(update);
+    const updater = await loadUpdater();
+    const onUpdating = vi.fn();
+
+    await updater.launchUpdateGate({ onUpdating });
+
+    expect(onUpdating).toHaveBeenCalledWith("0.2.0");
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
+    // Nobody is typing behind the gate: no quiet-moment wait, and the restart
+    // is asked for before the gate lets sync go (in the real app the process
+    // is gone by then and the promise never resolves).
+    expect(waitForQuietMoment).not.toHaveBeenCalled();
+    expect(trace).toEqual(["stash", "flush", "download", "flush", "relaunch"]);
+  });
+
+  it("resolves at once when there is no update", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+    const onUpdating = vi.fn();
+
+    await updater.launchUpdateGate({ onUpdating });
+
+    expect(onUpdating).not.toHaveBeenCalled();
+    expect(updater.updateState().phase).toBe("uptodate");
+  });
+
+  it("resolves at once when the check fails (offline launch)", async () => {
+    check.mockRejectedValue(new Error("error sending request"));
+    const updater = await loadUpdater();
+
+    await updater.launchUpdateGate();
+
+    expect(updater.updateState().phase).toBe("error");
+    expect(updater.isUpdateBlocking(updater.updateState())).toBe(false);
+  });
+
+  it("stops holding sync after the time box, and installs a late answer quietly", async () => {
+    const update = fakeUpdate("0.2.0");
+    let answer: (u: unknown) => void = () => {};
+    check.mockImplementation(() => new Promise((r) => (answer = r)));
+    const updater = await loadUpdater();
+
+    let resolved = false;
+    void updater.launchUpdateGate({ timeoutMs: 1_000 }).then(() => {
+      resolved = true;
+    });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(resolved).toBe(true);
+
+    // The late answer goes down the ordinary background path: sync is running
+    // by now, so the restart waits for a quiet moment.
+    answer(update);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(waitForQuietMoment).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets sync start when the install fails, keeping the one silent retry", async () => {
+    const update = fakeUpdate("0.2.0", { fail: true });
+    check.mockResolvedValue(update);
+    const updater = await loadUpdater();
+
+    await updater.launchUpdateGate();
+
+    expect(updater.updateState().phase).toBe("error");
+    expect(updater.isUpdateBlocking(updater.updateState())).toBe(false);
+    await vi.advanceTimersByTimeAsync(updater.AUTO_RETRY_DELAY_MS);
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up holding a crawling download, which then restarts at a quiet moment", async () => {
+    let finish = () => {};
+    const update = {
+      ...fakeUpdate("0.2.0"),
+      downloadAndInstall: vi.fn(
+        (onEvent: (e: Record<string, unknown>) => void) =>
+          new Promise<void>((r) => {
+            onEvent({ event: "Started", data: { contentLength: 200 } });
+            finish = () => {
+              onEvent({ event: "Finished" });
+              r();
+            };
+          }),
+      ),
+    };
+    check.mockResolvedValue(update);
+    const updater = await loadUpdater();
+
+    let resolved = false;
+    void updater.launchUpdateGate({ holdMs: 5_000 }).then(() => {
+      resolved = true;
+    });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(resolved).toBe(true);
+
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(waitForQuietMoment).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+  });
+});
