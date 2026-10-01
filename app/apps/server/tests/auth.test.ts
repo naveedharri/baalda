@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { auth } from "../src/auth/auth.js";
 import { pool } from "../src/db/pool.js";
+import { config } from "../src/config.js";
 import { resetDb } from "./helpers/db.js";
 import { bearerHeaders, createOrg, signIn, signUp } from "./helpers/auth.js";
 
@@ -34,7 +35,7 @@ describe("auth + organizations", () => {
     await expect(signIn("bob@example.com", "wrong-password")).rejects.toBeDefined();
   });
 
-  it("creates an org, invites a teammate (48h), and accepts", async () => {
+  it("creates an org, invites a teammate (7 days by default, #268), and accepts", async () => {
     const owner = await signUp("owner@acme.com");
     const org = await createOrg(owner, "Acme", "acme");
     expect(org.id).toBeTruthy();
@@ -53,11 +54,12 @@ describe("auth + organizations", () => {
     })) as { id: string; expiresAt: string | Date };
     expect(invite.id).toBeTruthy();
 
-    // expiry ~48h out
+    // expiry = INVITATION_EXPIRES_HOURS (default 7 days)
     const expires = new Date(invite.expiresAt).getTime();
     const hoursOut = (expires - Date.now()) / 3_600_000;
-    expect(hoursOut).toBeGreaterThan(47);
-    expect(hoursOut).toBeLessThan(49);
+    const configured = config.invitationExpiresInSeconds / 3600;
+    expect(hoursOut).toBeGreaterThan(configured - 1);
+    expect(hoursOut).toBeLessThan(configured + 1);
 
     // invitee signs up (email must match) and accepts
     const teammate = await signUp("teammate@acme.com");

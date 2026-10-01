@@ -80,3 +80,15 @@ export function parseInviteDeepLink(url: string): InviteDeepLink | null {
     server: rawServer ? normalizeServerUrl(rawServer) : null,
   };
 }
+
+/**
+ * Has this invitation's link stopped working? Better Auth leaves an expired row
+ * at status "pending", so the members list has to read the date to label it and
+ * offer Resend (#268). An absent or unparsable date is NOT expired: showing a
+ * live invitation as dead would be the worse mistake.
+ */
+export function isInvitationExpired(expiresAt: string | null | undefined, now: number = Date.now()): boolean {
+  if (!expiresAt) return false;
+  const t = Date.parse(expiresAt);
+  return Number.isFinite(t) && t <= now;
+}

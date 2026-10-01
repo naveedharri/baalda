@@ -361,6 +361,18 @@ export class VaultChannel {
     this.heartbeat = null;
   }
 
+  /**
+   * Tell every authenticated connection on THIS instance that a new desktop
+   * release exists (#269). Per instance on purpose: each instance runs its own
+   * release watcher, so no pub/sub fan-out is needed. Returns how many
+   * connections were told.
+   */
+  broadcastVersionAvailable(version: string): number {
+    let told = 0;
+    for (const conn of [...this.connections]) if (conn.hintVersionAvailable(version)) told++;
+    return told;
+  }
+
   /** Live connection count — the number that grew without bound while ghosts
    *  accumulated (one `VaultConnection` + subscription each). */
   connectionCount(): number {
@@ -1275,6 +1287,13 @@ class VaultConnection {
       /* already gone */
     }
     this.cleanup();
+  }
+
+  /** Forward a release hint once this connection has authenticated. */
+  hintVersionAvailable(version: string): boolean {
+    if (!this.helloSeen || !this.userId) return false;
+    this.send({ t: "version-available", version });
+    return true;
   }
 
   private send(control: ServerControl): void {

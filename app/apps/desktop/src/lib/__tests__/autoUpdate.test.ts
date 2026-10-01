@@ -376,3 +376,62 @@ describe("the launch gate", () => {
     expect(relaunch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("a server refusing this build (client_outdated, #251)", () => {
+  it("installs a found update straight away, with no wall", async () => {
+    const update = fakeUpdate("0.2.0");
+    check.mockResolvedValue(update);
+    const updater = await loadUpdater();
+
+    await updater.serverRequiresUpdate();
+
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+    expect(updater.isUpdateBlocking(updater.updateState())).toBe(false);
+  });
+
+  it("raises the wall at once when no newer build can be found", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+
+    await updater.serverRequiresUpdate();
+
+    expect(updater.isUpdateBlocking(updater.updateState())).toBe(true);
+    // Edits are never touched on this path: nothing is flushed or relaunched.
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("acts once per session however many calls are refused", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+
+    await updater.serverRequiresUpdate();
+    await updater.serverRequiresUpdate();
+
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it("links the manual download to the releases page", async () => {
+    const updater = await loadUpdater();
+    expect(updater.RELEASES_PAGE_URL).toMatch(/^https:\/\/github\.com\/naveedharri\/baalda\/releases\//);
+  });
+});
+
+describe("the server's release hint (#269)", () => {
+  it("runs one jittered background check, however many hints arrive", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+
+    updater.scheduleHintedUpdateCheck(() => 0.5);
+    updater.scheduleHintedUpdateCheck(() => 0.1);
+    expect(check).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(updater.UPDATE_HINT_JITTER_MS * 0.5);
+    expect(check).toHaveBeenCalledTimes(1);
+
+    // A later hint schedules a fresh one.
+    updater.scheduleHintedUpdateCheck(() => 0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(check).toHaveBeenCalledTimes(2);
+  });
+});

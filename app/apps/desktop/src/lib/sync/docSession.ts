@@ -21,6 +21,7 @@ import {
   type SessionInfo,
 } from "../api";
 import * as ipc from "../ipc";
+import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
@@ -5580,6 +5581,8 @@ export class SyncManager implements InboundHost {
       onServerRejected: (docId) => {
         if (scope.isCurrent()) void readOnlyRejections.handle(docId);
       },
+      // A new release exists (#269): run the normal update check soon.
+      onVersionAvailable: (version) => hintUpdateAvailable(version),
       // The server fully covers these hello vectors: record them as acks.
       onServerCovered: (acks) => {
         if (!scope.isCurrent()) return;

@@ -27,6 +27,7 @@ import { useSyncExternalStore } from "react";
 
 import { clearRelaunchFocus, recordRelaunchFocus } from "./backgroundRelaunch";
 import { bridgeManager } from "./bridge";
+import { APP_SCHEME } from "./deepLinkScheme";
 import { waitForQuietMoment } from "./quietMoment";
 
 export type UpdateState =
@@ -349,6 +350,71 @@ export async function launchUpdateGate(
     }),
   ]);
   if (holdTimer) clearTimeout(holdTimer);
+}
+
+/**
+ * Where a person downloads the current build by hand, for when the updater
+ * cannot install it (the wall's "Download manually"). The Staging app lives in
+ * its own rolling prerelease, which `releases/latest` never points at.
+ */
+export const RELEASES_PAGE_URL =
+  APP_SCHEME === "baalda-staging"
+    ? "https://github.com/naveedharri/baalda/releases/tag/staging"
+    : "https://github.com/naveedharri/baalda/releases/latest";
+
+let serverRequired = false;
+
+/**
+ * The server refused this build as too old to push note content
+ * (`426 client_outdated`, issue #251). Updating is then the only way back to
+ * syncing, so: check and install right away, exactly like the launch check;
+ * if that cannot produce a newer build (offline, the check failed, nothing
+ * newer published), raise the wall directly instead of waiting for two failed
+ * installs. Latched per session — every refused call reports it, and one
+ * attempt is enough.
+ *
+ * Nothing local is touched on the way: the refusal happened before any push,
+ * so edits stay in the local CRDT and on disk, and the updated build pushes
+ * them on its first sync.
+ */
+export async function serverRequiresUpdate(): Promise<void> {
+  if (serverRequired) return;
+  serverRequired = true;
+  // An install already in flight ends in a restart or in `failed` (the wall)
+  // on its own.
+  if (autoInstalling) return;
+  autoInstalling = true;
+  autoAttempts = 0;
+  if (await checkForUpdate()) {
+    await autoInstall();
+    return;
+  }
+  autoInstalling = false;
+  setState({
+    phase: "failed",
+    version: "",
+    message: "this server needs a newer version of the app to sync",
+  });
+}
+
+/** Upper bound of the random delay before a hinted check (#269). */
+export const UPDATE_HINT_JITTER_MS = 60_000;
+
+let hintTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * The server says a new release exists (#269): run the ordinary background
+ * check soon. Jittered over {@link UPDATE_HINT_JITTER_MS} so every connected
+ * app does not hit the release endpoint in the same second, and coalesced so a
+ * burst of hints (several vault channels, a reconnect) costs one check. The
+ * check verifies the release itself; this only moves it earlier than the poll.
+ */
+export function scheduleHintedUpdateCheck(random: () => number = Math.random): void {
+  if (hintTimer) return;
+  hintTimer = setTimeout(() => {
+    hintTimer = null;
+    void backgroundUpdateCheck();
+  }, Math.floor(random() * UPDATE_HINT_JITTER_MS));
 }
 
 /** The running app's version (from tauri.conf.json), for display. */

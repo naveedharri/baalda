@@ -199,6 +199,12 @@ export interface VaultSyncEngineOptions {
    */
   onServerRejected?: (docId: string, reason: "read_only") => void;
   /**
+   * The server saw a new desktop release (`version-available`, #269). Only a
+   * hint: the receiver runs its ordinary update check, which verifies the
+   * release itself.
+   */
+  onVersionAvailable?: (version: string) => void;
+  /**
    * The server fully covers these docs' hello state vectors (`ready.covered`):
    * each entry pairs the doc with the EXACT vector this connection's hello
    * sent for it. Never fired with an empty list.
@@ -334,6 +340,7 @@ export class VaultSyncEngine {
   private readonly onServerRevoked?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerTombstones?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerRejected?: (docId: string, reason: "read_only") => void;
+  private readonly onVersionAvailable?: (version: string) => void;
   private readonly onServerCovered?: (acks: Array<[docId: string, stateVector: string]>) => void;
   /** The manifest this connection's hello sent (docId → base64 state vector). */
   private sentManifest: Record<string, string> = {};
@@ -439,6 +446,7 @@ export class VaultSyncEngine {
     this.onServerRevoked = opts.onServerRevoked;
     this.onServerTombstones = opts.onServerTombstones;
     this.onServerRejected = opts.onServerRejected;
+    this.onVersionAvailable = opts.onVersionAvailable;
     this.onServerCovered = opts.onServerCovered;
     this.onServerDrop = opts.onServerDrop;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
@@ -847,6 +855,8 @@ export class VaultSyncEngine {
         this.onServerRevoked?.(control.docIds, false);
       } else if (control.t === "rejected") {
         this.onServerRejected?.(control.docId, control.reason);
+      } else if (control.t === "version-available") {
+        this.onVersionAvailable?.(control.version);
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
         // …and tell the session WHICH doc left, so the live revocation path

@@ -34,7 +34,7 @@ import {
   useUpdateState,
 } from "../lib/updater";
 import { readOrgVaults, useStore, type InviteResult } from "../store";
-import { buildInviteLink } from "../lib/inviteLink";
+import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
@@ -1833,6 +1833,28 @@ function MembersTab({ canManage }: { canManage: boolean }) {
     }
   };
 
+  /**
+   * Re-send an invitation: invite the same address with the same role again.
+   * The server replaces the pending row with a fresh one (new link, new expiry)
+   * and emails it — which is what an expired invitation needs (#268).
+   */
+  const [resendBusyId, setResendBusyId] = useState<string | null>(null);
+  const resend = async (inv: { id: string; email: string; role: string }) => {
+    setResendBusyId(inv.id);
+    setInviteError(null);
+    setLimitNudge(null);
+    try {
+      const role = inv.role === "admin" ? "admin" : "member";
+      setCreated(await useStore.getState().inviteMember(inv.email, role));
+    } catch (e) {
+      const kind = classifyLimitError(e);
+      if (kind) setLimitNudge({ kind, limit: limitFromError(e) });
+      else setInviteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResendBusyId(null);
+    }
+  };
+
   const invite = async () => {
     if (!inviteEmail.trim()) return;
     setBusy(true);
@@ -1993,13 +2015,33 @@ function MembersTab({ canManage }: { canManage: boolean }) {
         <>
           <div className="subhead">Invited — awaiting response</div>
           <ul className="member-list">
-            {pendingInvitations.map((inv) => (
+            {pendingInvitations.map((inv) => {
+              // Better Auth keeps an expired row at status "pending"; only the
+              // date says its link is dead.
+              const expired = isInvitationExpired(inv.expiresAt);
+              return (
               <li key={inv.id}>
                 <Avatar label={inv.email} />
                 <span className="member-name">{inv.email}</span>
-                <span className="member-role pending">{inv.role} · pending</span>
+                <span
+                  className="member-role pending"
+                  title={
+                    inv.expiresAt
+                      ? `${expired ? "Expired" : "Expires"} ${new Date(inv.expiresAt).toLocaleString()}`
+                      : undefined
+                  }
+                >
+                  {inv.role} · {expired ? "expired" : "pending"}
+                </span>
                 {canManage && (
                   <>
+                    <button
+                      className="link-btn"
+                      disabled={resendBusyId !== null}
+                      onClick={() => void resend(inv)}
+                    >
+                      {resendBusyId === inv.id ? "Sending…" : "Resend"}
+                    </button>
                     {/* The link is useful long after the invite was sent: the
                         email may have bounced, or this server may not send any. */}
                     <button
@@ -2037,7 +2079,8 @@ function MembersTab({ canManage }: { canManage: boolean }) {
                   </>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         </>
       )}

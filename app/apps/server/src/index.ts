@@ -2,7 +2,12 @@ import { serve } from "@hono/node-server";
 import type { Server as HttpServer } from "node:http";
 import { config } from "./config.js";
 import { createApp } from "./http/app.js";
-import { createSyncServer, disconnectDoc, evictDoc } from "./sync/hocuspocus.js";
+import {
+  createSyncServer,
+  disconnectDoc,
+  disconnectUserInVault,
+  evictDoc,
+} from "./sync/hocuspocus.js";
 import { attachSyncUpgrade } from "./sync/http-upgrade.js";
 import { createPubSub } from "./sync/pubsub.js";
 import { VaultChannel } from "./sync/vault-channel.js";
@@ -14,7 +19,8 @@ import { setTrashActivityPublisher } from "./trash/activity.js";
 import { invalidateReadableCache } from "./permissions/readable-cache.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
-import { setShrinkHook } from "./versions/shrink-guard.js";
+import { setShrinkBrakeHook, setShrinkHook } from "./versions/shrink-guard.js";
+import { createReleaseWatch, releaseWatchConfig } from "./sync/release-watch.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
 
 /**
@@ -132,6 +138,12 @@ async function main() {
       .then(() => vaultChannel.publishActivityChanged(vaultId))
       .catch(broadcastFailed("activity-changed"));
   });
+  // A BURST of them from one user in one vault engages the brake (#252): kick
+  // that user's live sockets there so they reconnect read-only for the hold.
+  setShrinkBrakeHook((vaultId, userId) => {
+    const closed = disconnectUserInVault(sync, vaultId, userId);
+    console.warn(`[versions] shrink brake: closed ${closed} live connection(s) in vault ${vaultId}`);
+  });
 
   versionCapture = createVersionCapture({
     docWriter,
@@ -184,6 +196,20 @@ async function main() {
   // upgrade handler ignores non-matching paths, so it coexists with /sync.
   const vaultWss = vaultChannel.attachUpgrade(httpServer);
 
+  // New desktop release → hint connected apps to check now (#269). Off with
+  // RELEASE_MANIFEST_URL=off or RELEASE_POLL_MINUTES=0; an offline host just
+  // never sends the hint.
+  const releaseCfg = releaseWatchConfig();
+  const releaseWatch = releaseCfg
+    ? createReleaseWatch({
+        ...releaseCfg,
+        onNewVersion: (version) => {
+          const told = vaultChannel.broadcastVersionAvailable(version);
+          console.info(`[release-watch] hinted ${told} connection(s)`);
+        },
+      })
+    : null;
+
   // Index any pre-existing notes missing from note_index (best-effort, async).
   backfillIndex()
     .then((n) => n > 0 && console.log(`Indexer: backfilled ${n} note(s).`))
@@ -207,6 +233,7 @@ async function main() {
     stopBlobGc();
     stopTrashPurge();
     syncWss.close();
+    releaseWatch?.stop();
     vaultWss.close();
     await pubsub.close();
     await sync.destroy();
