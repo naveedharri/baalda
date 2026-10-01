@@ -42,6 +42,7 @@ import type { SyncStatus } from "./lib/sync/syncManager";
 import type { DocSyncState, SyncProgress } from "./lib/sync/vaultScope";
 import type { VaultPeer } from "./lib/sync/vaultSyncEngine";
 import type { StructureNotice, VoiceSpeaker } from "./lib/sync/docSession";
+import type { SyncPause } from "./lib/sync/syncPause";
 import { MicPermissionError } from "./lib/voice/capture";
 import * as perf from "./lib/perf";
 import { createWithUniqueSlug, slugifyName } from "./lib/orgSlug";
@@ -357,6 +358,13 @@ interface AppStore {
   /** True while the open note has local edits not yet acked by the server
    *  (drives the "Saving…" badge state). */
   syncPending: boolean;
+  /** The server's shrink burst brake is pausing OUR writes in this vault
+   *  (#252): "Sync paused" on the pill, Health and a banner. Null otherwise. */
+  syncPause: SyncPause | null;
+  /** The `since` of the pause whose banner was dismissed (the pill and Health
+   *  keep saying it until it lifts). */
+  syncPauseDismissed: number | null;
+  dismissSyncPause: () => void;
   /**
    * Counted progress of the current vault's sync run; null when none is running.
    * Belongs to ONE vault — dropped on every vault switch (see
@@ -1632,6 +1640,7 @@ function vaultScopedSyncReset() {
     syncStatus: "offline" as SyncStatus,
     vaultSyncStatus: "offline" as SyncStatus,
     syncPending: false,
+    syncPause: null,
     syncProgress: null,
     failedRunToken: 0,
     vaultReadySeen: false,
@@ -1816,6 +1825,7 @@ export const useStore = create<AppStore>((set, get) => ({
   userInvitations: [],
   ...vaultScopedSyncReset(),
   lastSyncedAt: null,
+  syncPauseDismissed: null,
   vaultPresence: [],
   voiceSpeakers: [],
   broadcasting: false,
@@ -2618,6 +2628,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
+    syncManager.setSyncPauseListener((pause) => set({ syncPause: pause }));
     syncManager.setVaultStatusListener((status) =>
       set(
         status === "synced"
@@ -4346,6 +4357,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // A server ack of all pending changes: this is the real "synced just now".
   markSynced: () => set({ lastSyncedAt: Date.now(), syncPending: false }),
+  dismissSyncPause: () => set((s) => ({ syncPauseDismissed: s.syncPause?.since ?? null })),
 
   setSyncProgress: (progress) => {
     const prev = get().syncProgress;

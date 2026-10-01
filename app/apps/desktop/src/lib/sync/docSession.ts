@@ -70,6 +70,7 @@ import {
 import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
 import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
+import { SyncPauseTracker, type SyncPause } from "./syncPause";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
@@ -446,6 +447,30 @@ export class SyncManager implements InboundHost {
   /** UI subscribes here to refetch the Activity feed when the server says the
    *  vault's Trash / shrink listings may have moved (#260). */
   private onActivityChanged?: () => void;
+  /** UI subscribes here for "Sync paused" (the server's shrink burst brake,
+   *  #252). */
+  private onSyncPause?: (pause: SyncPause | null) => void;
+  /**
+   * This device's view of a shrink-brake hold on our own writes in this vault.
+   * A notice only: while it lasts, local edits stay exactly where they are, and
+   * when it lifts the notes it held are queued again like any other edit.
+   */
+  private readonly syncPause = new SyncPauseTracker({
+    onChange: (next, prev, reason) => {
+      try {
+        this.onSyncPause?.(next);
+      } catch (e) {
+        console.warn("[sync] pause listener threw", e);
+      }
+      if (next) {
+        if (!prev) this.note("warn", "sync-paused", "Sync paused: many notes were emptied at once");
+      } else if (prev && reason === "lifted") {
+        this.note("info", "sync-resumed", "Sync resumed");
+        const scope = this.scope;
+        if (scope?.isCurrent()) this.requeueShrinkHeld(scope);
+      }
+    },
+  });
   private attachments: AttachmentSync | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
@@ -1461,6 +1486,38 @@ export class SyncManager implements InboundHost {
   /** UI hook for the Activity feed's push refetch (#260). */
   setActivityChangedListener(cb: (() => void) | undefined): void {
     this.onActivityChanged = cb;
+  }
+
+  /** UI hook for the "Sync paused" notice (#252). Fires with the current
+   *  state at once, so a late subscriber is never stale. */
+  setSyncPauseListener(cb: ((pause: SyncPause | null) => void) | undefined): void {
+    this.onSyncPause = cb;
+    cb?.(this.syncPause.current());
+  }
+
+  /** The current shrink-brake pause on our writes in this vault, if any. */
+  syncPauseState(): SyncPause | null {
+    return this.syncPause.current();
+  }
+
+  /**
+   * The pause lifted: queue every note a batch push left `shrink-held` so its
+   * ops go up now, through the ordinary per-note drain — like {@link retryDoc}
+   * without the "user asked" note. Nothing local is touched: these docs were
+   * never pushed, so the drain pulls the server state first and merges.
+   */
+  private requeueShrinkHeld(scope: VaultScope): void {
+    let queued = 0;
+    for (const [docId, failure] of [...this.bulkFailures]) {
+      if (failure.kind !== "shrink-held") continue;
+      const relPath = this.registry.pathForDocId(docId) ?? failure.relPath;
+      this.bulkFailures.delete(docId);
+      this.invalidatedFailures.add(docId);
+      this.divergedDocs.add(docId);
+      this.localChanges.set(docId, relPath);
+      queued++;
+    }
+    if (queued > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
   }
 
   /** The server said Trash / shrink listings may have moved: an `activity`
@@ -4453,6 +4510,9 @@ export class SyncManager implements InboundHost {
         this.divergedDocs.delete(docId); // a confirmed push carries any merged ops
         this.serverEmpty.delete(docId);
         this.serverBehind.delete(docId);
+        // The server took a content write from us: a pause only a batch
+        // refusal announced is over.
+        this.syncPause.writeAccepted();
       },
       markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
       // Never touch the open note: its editor session owns that doc's provider.
@@ -4596,6 +4656,9 @@ export class SyncManager implements InboundHost {
 
   /** One note the bulk engine could not get through. */
   private recordBulkFailure(f: UploadFailure): void {
+    // Held by the shrink burst brake (#252): say "Sync paused" once rather
+    // than letting the note read as a mystery failure.
+    if (f.kind === "shrink-held") this.syncPause.batchHeld();
     this.invalidatedFailures.delete(f.docId);
     this.bulkFailures.set(f.docId, f);
     if (f.permanent) this.permanentFailures.set(f.docId, f);
@@ -5092,6 +5155,8 @@ export class SyncManager implements InboundHost {
     }
     this.vaultStatus = "idle";
     this.onVaultStatus?.("idle");
+    // A pause is about our writes in the vault we are leaving.
+    this.syncPause.reset();
     // The timeline describes the vault we are leaving; keeping it would explain
     // the next vault's state with the previous one's history. The SyncLog object
     // itself survives, so a subscriber's unsubscribe stays valid (see the field).
@@ -5583,6 +5648,10 @@ export class SyncManager implements InboundHost {
       },
       // A new release exists (#269): run the normal update check soon.
       onVersionAvailable: (version) => hintUpdateAvailable(version),
+      // The shrink burst brake paused or resumed OUR writes here (#252).
+      onBrake: (state) => {
+        if (scope.isCurrent()) this.syncPause.channel(state);
+      },
       // The server fully covers these hello vectors: record them as acks.
       onServerCovered: (acks) => {
         if (!scope.isCurrent()) return;

@@ -72,8 +72,9 @@ export function reportShrink(
         `content writes held for ${Math.round(shrinkBrake.holdMs / 60_000)} min`,
     );
     if (brakeHook) {
+      const hold = shrinkBrake.holdOf(userId, vaultId);
       try {
-        brakeHook(vaultId, userId);
+        brakeHook(vaultId, userId, hold ?? { until: Date.now(), count: shrinkBrake.threshold });
       } catch (err) {
         console.error(`[versions] shrink brake hook failed for vault ${vaultId}:`, err);
       }
@@ -82,6 +83,12 @@ export function reportShrink(
 }
 
 // ── the burst brake (issue #252) ───────────────────────────────────────────
+
+/** One live hold: when it lapses (ms epoch) and how many notes engaged it. */
+export interface BrakeHold {
+  until: number;
+  count: number;
+}
 
 /**
  * A per-(user, vault) brake on a BURST of sharp shrinks.
@@ -121,7 +128,7 @@ export function reportShrink(
  */
 export class ShrinkBrake {
   private readonly hits = new Map<string, Array<{ docId: string; at: number }>>();
-  private readonly held = new Map<string, number>();
+  private readonly held = new Map<string, BrakeHold>();
 
   constructor(
     public threshold: number,
@@ -158,28 +165,41 @@ export class ShrinkBrake {
     this.hits.set(key, recent);
     this.prune(t);
     if (recent.length < this.threshold || this.isHeld(userId, vaultId)) return false;
-    this.held.set(key, t + this.holdMs);
+    this.held.set(key, { until: t + this.holdMs, count: recent.length });
     this.hits.delete(key);
     return true;
   }
 
   /** Are this user's content writes in this vault being held right now? */
   isHeld(userId: string | null | undefined, vaultId: string): boolean {
-    if (!userId) return false;
-    const key = this.key(userId, vaultId);
-    const until = this.held.get(key);
-    if (until === undefined) return false;
-    if (this.now() >= until) {
-      this.held.delete(key);
-      return false;
-    }
-    return true;
+    return this.holdOf(userId, vaultId) !== null;
   }
 
-  /** Lift a hold early (an owner reviewed it, or a test). */
-  release(userId: string, vaultId: string): void {
+  /** The live hold on this user in this vault — when it lapses and how many
+   *  notes engaged it — or null. Expired holds are forgotten on read. */
+  holdOf(userId: string | null | undefined, vaultId: string): BrakeHold | null {
+    if (!userId) return null;
+    const key = this.key(userId, vaultId);
+    const hold = this.held.get(key);
+    if (hold === undefined) return null;
+    if (this.now() >= hold.until) {
+      this.held.delete(key);
+      return null;
+    }
+    return hold;
+  }
+
+  /**
+   * Lift a hold early (an owner/admin released it, or a test). Returns whether
+   * a hold was live. The burst count restarts from zero as well, so a client
+   * still replaying the same burst is braked again after another
+   * {@link threshold} notes — each one still versioned `pre-shrink` first.
+   */
+  release(userId: string, vaultId: string): boolean {
+    const was = this.isHeld(userId, vaultId);
     this.held.delete(this.key(userId, vaultId));
     this.hits.delete(this.key(userId, vaultId));
+    return was;
   }
 
   /** Bound memory: drop windows that have aged out entirely. */
@@ -215,11 +235,45 @@ export function isShrinkHeld(userId: string | null | undefined, vaultId: string)
 }
 
 /** Notified once when the brake engages, so the process can kick that user's
- *  live sockets for the vault (they reconnect read-only). */
-export type ShrinkBrakeHook = (vaultId: string, userId: string) => void;
+ *  live sockets for the vault (they reconnect read-only), tell that user's app
+ *  why, and record the hold for the vault's owners/admins (Activity). */
+export type ShrinkBrakeHook = (vaultId: string, userId: string, hold: BrakeHold) => void;
 
 let brakeHook: ShrinkBrakeHook | null = null;
 
 export function setShrinkBrakeHook(next: ShrinkBrakeHook | null): void {
   brakeHook = next;
+}
+
+/** Notified when a hold is lifted early on this process, so it can tell every
+ *  other instance (pub/sub), re-admit the user's sockets writable and clear the
+ *  notice on their app. Wired by `src/index.ts`; unbound it is a no-op. */
+export type ShrinkBrakeReleaseHook = (vaultId: string, userId: string) => void;
+
+let releaseHook: ShrinkBrakeReleaseHook | null = null;
+
+export function setShrinkBrakeReleaseHook(next: ShrinkBrakeReleaseHook | null): void {
+  releaseHook = next;
+}
+
+/**
+ * Lift a user's hold in a vault early (the owner/admin Release action).
+ *
+ * Safe by construction: nothing held was ever discarded — the client kept its
+ * ops — so releasing only lets them arrive, through the same write paths as any
+ * edit. Every sharp shrink among them is still versioned `pre-shrink` first,
+ * and the burst count restarts, so the same burst is braked again after
+ * another {@link ShrinkBrake.threshold} notes. Returns whether THIS process
+ * held one (another instance may; the hook reaches it). Never throws.
+ */
+export function releaseShrinkBrake(vaultId: string, userId: string): boolean {
+  const was = shrinkBrake.release(userId, vaultId);
+  if (releaseHook) {
+    try {
+      releaseHook(vaultId, userId);
+    } catch (err) {
+      console.error(`[versions] shrink brake release hook failed for vault ${vaultId}:`, err);
+    }
+  }
+  return was;
 }

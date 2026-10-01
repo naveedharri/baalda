@@ -576,6 +576,29 @@ export interface ShrinkEventListing {
   afterIsCurrent: boolean;
 }
 
+/** One time the shrink burst brake paused someone's sync in a vault (#252):
+ *  `GET /api/vaults/:id/shrink-brakes`. Owners/admins get every member's;
+ *  anyone else only their own. */
+export interface ShrinkBrakeEvent {
+  id: string;
+  userId: string;
+  userName: string | null;
+  noteCount: number;
+  engagedAt: string;
+  heldUntil: string;
+  releasedAt: string | null;
+  releasedBy: string | null;
+  /** Not released and not yet lapsed, as far as the server's record knows. */
+  held: boolean;
+}
+
+export interface ShrinkBrakeListing {
+  items: ShrinkBrakeEvent[];
+  /** True for owners/admins: the listing is the whole vault's and each held
+   *  row may be released. */
+  canRelease: boolean;
+}
+
 export interface NoteVersionDetail extends NoteVersion {
   content: string;
 }
@@ -2493,6 +2516,26 @@ export class ApiClient {
       `/api/vaults/${encodeURIComponent(vaultId)}/shrink-events${qs ? `?${qs}` : ""}`,
     );
     return { items: data.items ?? [], truncated: !!data.truncated, afterIsCurrent: data.afterIsCurrent ?? true };
+  }
+
+  /** Sync pauses (shrink brake holds) in this vault since `since`. An older
+   *  server without the route answers 404; callers treat that as none. */
+  async listShrinkBrakes(vaultId: string, since?: string): Promise<ShrinkBrakeListing> {
+    const qs = since ? `?${new URLSearchParams({ since }).toString()}` : "";
+    const { data } = await this.request<ShrinkBrakeListing>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/shrink-brakes${qs}`,
+    );
+    return { items: data.items ?? [], canRelease: data.canRelease === true };
+  }
+
+  /** Owner/admin: lift a member's sync pause early. Their held edits then
+   *  arrive like any edit (each sharp shrink still versioned first). */
+  async releaseShrinkBrake(vaultId: string, userId: string): Promise<void> {
+    await this.request(
+      "POST",
+      `/api/vaults/${encodeURIComponent(vaultId)}/shrink-brake/${encodeURIComponent(userId)}/release`,
+    );
   }
 
   /** One version *with* its markdown — the preview/revert payload. */

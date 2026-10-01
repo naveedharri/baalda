@@ -205,6 +205,12 @@ export interface VaultSyncEngineOptions {
    */
   onVersionAvailable?: (version: string) => void;
   /**
+   * The shrink burst brake paused (`held`) or resumed this user's content
+   * writes in this vault (`brake`, #252). Only a notice: nothing local is
+   * discarded either way.
+   */
+  onBrake?: (state: { held: boolean; until?: number; count?: number }) => void;
+  /**
    * The server fully covers these docs' hello state vectors (`ready.covered`):
    * each entry pairs the doc with the EXACT vector this connection's hello
    * sent for it. Never fired with an empty list.
@@ -341,6 +347,7 @@ export class VaultSyncEngine {
   private readonly onServerTombstones?: (docIds: string[], truncated: boolean) => void;
   private readonly onServerRejected?: (docId: string, reason: "read_only") => void;
   private readonly onVersionAvailable?: (version: string) => void;
+  private readonly onBrake?: (state: { held: boolean; until?: number; count?: number }) => void;
   private readonly onServerCovered?: (acks: Array<[docId: string, stateVector: string]>) => void;
   /** The manifest this connection's hello sent (docId → base64 state vector). */
   private sentManifest: Record<string, string> = {};
@@ -447,6 +454,7 @@ export class VaultSyncEngine {
     this.onServerTombstones = opts.onServerTombstones;
     this.onServerRejected = opts.onServerRejected;
     this.onVersionAvailable = opts.onVersionAvailable;
+    this.onBrake = opts.onBrake;
     this.onServerCovered = opts.onServerCovered;
     this.onServerDrop = opts.onServerDrop;
     this.inboundMaxBytes = opts.inboundQueueMaxBytes ?? INBOUND_QUEUE_MAX_BYTES;
@@ -857,6 +865,12 @@ export class VaultSyncEngine {
         this.onServerRejected?.(control.docId, control.reason);
       } else if (control.t === "version-available") {
         this.onVersionAvailable?.(control.version);
+      } else if (control.t === "brake") {
+        this.onBrake?.({
+          held: control.held,
+          ...(control.until !== undefined ? { until: control.until } : {}),
+          ...(control.count !== undefined ? { count: control.count } : {}),
+        });
       } else if (control.t === "drop") {
         this.sink.drop(control.docId);
         // …and tell the session WHICH doc left, so the live revocation path

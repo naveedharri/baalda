@@ -154,6 +154,10 @@ export type ServerControl =
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
+  /** The shrink burst brake (#252) paused — or stopped pausing — THIS user's
+   *  content writes in this vault. `until` (ms epoch) and `count` come with a
+   *  pause. Never a refusal: local edits stay and sync once it lifts. */
+  | { t: "brake"; held: boolean; until?: number; count?: number }
   | { t: "err"; message: string };
 
 export function encodeHello(frame: Omit<HelloFrame, "t">): string {
@@ -257,6 +261,21 @@ export function parseServerControl(text: string): ServerControl | null {
     return typeof ver === "string" && ver.length > 0 && ver.length <= 64
       ? { t: "version-available", version: ver }
       : null;
+  }
+  if (t === "brake") {
+    const o = v as { held?: unknown; until?: unknown; count?: unknown };
+    if (typeof o.held !== "boolean") return null;
+    if (!o.held) return { t: "brake", held: false };
+    const num = (x: unknown): number | undefined =>
+      typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined;
+    const until = num(o.until);
+    const count = num(o.count);
+    return {
+      t: "brake",
+      held: true,
+      ...(until !== undefined ? { until } : {}),
+      ...(count !== undefined ? { count: Math.floor(count) } : {}),
+    };
   }
   if (t === "drop" && typeof (v as { docId?: unknown }).docId === "string") {
     return { t: "drop", docId: (v as { docId: string }).docId };
