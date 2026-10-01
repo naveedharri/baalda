@@ -1,7 +1,8 @@
 /* The Activity feed's DATA half, mounted once for the whole app
    (`<ActivityHost />` in App.tsx) so the toolbar badge can count unread rows
    while the panel is closed. It owns the fetch schedule (debounced triggers,
-   the vault reaching "synced", a 60 s interval while the window is visible),
+   the vault reaching "synced", the server's push that Trash / shrink listings
+   moved, window focus, and a long safety interval while the window is visible),
    the per-vault notice log (`activityLog.ts`) and the read state
    (`activityUnread.ts`). `ActivityFeed.tsx` only renders the snapshot. */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -42,8 +43,21 @@ export function trashErrorMessage(e: unknown): string {
 
 /** Quiet-period before a refresh runs, so a burst of triggers is one fetch. */
 const REFRESH_DEBOUNCE_MS = 250;
-/** Background refresh while the tab is visible. */
-const REFRESH_INTERVAL_MS = 60_000;
+/**
+ * Safety-net refresh while the window is visible. This used to be the ONLY
+ * schedule (60 s), which made Trash + shrink-events about 70% of every request
+ * the server saw (#260). The feed now refetches when the vault channel says the
+ * listings moved (`activity` frames, and structural `registry` frames — every
+ * soft delete is one), when the window regains focus, and when the panel opens;
+ * this interval only covers a push lost to a reconnect.
+ */
+export const REFRESH_INTERVAL_MS = 10 * 60_000;
+/**
+ * Minimum gap between two PUSH-driven refetches. A busy team's structural churn
+ * arrives as several `registry` frames a second; the feed needs to be seconds
+ * fresh, not frame-fresh. Trailing: the last push in a burst is always honoured.
+ */
+export const PUSH_REFRESH_MIN_GAP_MS = 5_000;
 /** "Updating…" appears only for a fetch slower than this. */
 const SLOW_FETCH_MS = 400;
 
@@ -440,14 +454,36 @@ export function ActivityHost(): null {
     if (onActivity) schedule();
   }, [onActivity, schedule]);
   useEffect(() => {
+    // The server's push (#260). A hidden window skips it: becoming visible
+    // refetches anyway (below), so nothing pushed meanwhile is missed.
+    // Window focus rides the same throttle: alt-tabbing back and forth must not
+    // cost a Trash + shrink-events pair each time.
+    let lastPush = 0;
+    let trailing: number | null = null;
+    const throttled = () => {
+      if (document.visibilityState !== "visible" || trailing != null) return;
+      const wait = lastPush + PUSH_REFRESH_MIN_GAP_MS - Date.now();
+      const run = () => {
+        trailing = null;
+        lastPush = Date.now();
+        schedule();
+      };
+      if (wait <= 0) run();
+      else trailing = window.setTimeout(run, wait);
+    };
+    syncManager.setActivityChangedListener(throttled);
     const id = window.setInterval(() => {
       if (document.visibilityState === "visible") schedule();
     }, REFRESH_INTERVAL_MS);
     const onVisible = () => document.visibilityState === "visible" && schedule();
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", throttled);
     return () => {
+      syncManager.setActivityChangedListener(undefined);
+      if (trailing != null) window.clearTimeout(trailing);
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", throttled);
     };
   }, [schedule]);
 

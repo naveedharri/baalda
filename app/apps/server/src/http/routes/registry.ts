@@ -5,7 +5,7 @@ import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { canCreateIn, canEditDoc, canEditFolder, canWriteBlob } from "../../permissions/http-gates.js";
 import { deleteDocBlobs } from "./blobs.js";
-import { effectivePermission } from "../../permissions/resolver.js";
+import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
 import {
   listDeletedReadableDocsInVault,
   listReadableDocsInVault,
@@ -36,6 +36,7 @@ import {
 } from "../../registry/tree-ops.js";
 import { getSession } from "../session.js";
 import { softDeleteSet } from "../../trash/retention.js";
+import { trashChanged } from "../../trash/activity.js";
 import { gainsConflictSuffix, takeForeignRename } from "../../registry/rename-guard.js";
 
 /** Most doc ids one `POST /vaults/:id/access-check` may ask about — the same
@@ -430,9 +431,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // seconds on a managed database, and any proxy timeout in front of it turns
     // this into the client's "no answer, remove nothing" branch on every pass.
     // The same width the vault channel backfills at.
+    //
+    // One request-scoped `ResolverCache` for the whole batch (#263): the role,
+    // vault posture, join snapshot and each folder's ancestry are the same for
+    // every id, so 2,000 ids used to re-walk the same folders and re-read the
+    // same vault rows 2,000 times. The cache memoises those INPUTS only, never a
+    // verdict, and dies with this request — every answer is bit-for-bit the
+    // uncached one (`resolveManyEqualsPerDoc`), which is what this route's
+    // "do not remove on doubt" contract needs.
     const none: string[] = [];
+    const resolverCache = createResolverCache();
     await runPool(inVault, config.backfillConcurrency, async (id) => {
-      if ((await effectivePermission(session.userId, id)) === "none") none.push(id);
+      if ((await effectivePermission(session.userId, id, pool, resolverCache)) === "none") none.push(id);
     });
     return c.json({ none });
   });
@@ -675,6 +685,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Their derived index rows go with them (see the single-note delete below)…
     await purgeNoteIndex(deletedNoteIds);
     changed(c, row.vault_id);
+    if (deletedNoteIds.length > 0) trashChanged(row.vault_id);
     // …and anyone with one of them open is kicked off the now-gone doc. Without
     // this a folder delete left live editors happily typing into notes that no
     // longer exist anywhere in the tree — the single-note delete has always done
@@ -952,6 +963,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // it on its next store (indexer.scheduleIndex / backfillIndex).
     await purgeNoteIndex([id]);
     changed(c, row.vault_id);
+    trashChanged(row.vault_id);
     // Kick live editors so their provider re-authenticates and learns the doc
     // is in Trash (pushes into it stay accepted until purge_after). Same as
     // MCP's delete_note; `evictDoc` so the next connect reloads from Postgres.

@@ -10,6 +10,8 @@ import { setMemberJoinedPublisher } from "./sync/member-events.js";
 import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
+import { setTrashActivityPublisher } from "./trash/activity.js";
+import { invalidateReadableCache } from "./permissions/readable-cache.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
 import { setShrinkHook } from "./versions/shrink-guard.js";
@@ -74,6 +76,10 @@ async function main() {
   setMemberJoinedPublisher((vaultId, name) => {
     void vaultChannel.publishMemberJoined(vaultId, name).catch(broadcastFailed("member-joined"));
   });
+  // Soft delete / restore / purge → open Activity feeds refetch Trash (#260).
+  setTrashActivityPublisher((vaultId) => {
+    void vaultChannel.publishActivityChanged(vaultId).catch(broadcastFailed("activity-changed"));
+  });
 
   // Version capture is created below (it needs the doc writer, which needs the
   // sync server, which needs this hook) — hence the late binding. Every edit,
@@ -102,10 +108,14 @@ async function main() {
   );
   await sync.listen();
 
-  const onRegistryChanged = (vaultId: string, originId: string | null) =>
+  // Both structural and ACL changes drop this instance's display-only readable
+  // sets for the vault first (#261, `permissions/readable-cache.ts`).
+  const onRegistryChanged = (vaultId: string, originId: string | null) => {
+    invalidateReadableCache(vaultId);
     void vaultChannel
       .publishRegistryChanged(vaultId, originId)
       .catch(broadcastFailed("registry-changed"));
+  };
 
   // The detached write path never reaches Hocuspocus, so it reports edits here.
   const docWriter = createDocWriter(
@@ -115,13 +125,22 @@ async function main() {
   );
 
   // A single update that wipes most of a note keeps the text it replaced (#200).
+  // …and every open Activity feed in the vault refetches once it is stored
+  // (#260), instead of polling for it.
   setShrinkHook((vaultId, docId, previousText) => {
-    void versionCapture?.preShrink(vaultId, docId, previousText);
+    void (versionCapture?.preShrink(vaultId, docId, previousText) ?? Promise.resolve())
+      .then(() => vaultChannel.publishActivityChanged(vaultId))
+      .catch(broadcastFailed("activity-changed"));
   });
 
   versionCapture = createVersionCapture({
     docWriter,
-    onRegistryChanged,
+    // Version capture's only broadcast is the "last edited by" stamp, which
+    // moves no row and grants nothing — so it goes out as a meta-only frame,
+    // not a structural `registry-changed` that made every subscriber recompute
+    // its readable set and re-pull the whole registry per stamped doc (#262).
+    onRegistryChanged: (vaultId) =>
+      void vaultChannel.publishMetaChanged(vaultId).catch(broadcastFailed("meta-changed")),
     idleMs: config.versionIdleMs,
     // Activity-triggered daily checkpoint — no scheduler, and the freshness
     // test runs under a per-vault advisory lock so instances don't stampede.
@@ -132,8 +151,10 @@ async function main() {
     disconnectDoc: (vaultId, docId) => disconnectDoc(sync, vaultId, docId),
     evictDoc: (vaultId, docId) => evictDoc(sync, vaultId, docId),
     // Share create/revoke → subscribers re-evaluate their readable-doc set.
-    onAclChanged: (vaultId) =>
-      void vaultChannel.publishAclChanged(vaultId).catch(broadcastFailed("acl-changed")),
+    onAclChanged: (vaultId) => {
+      invalidateReadableCache(vaultId);
+      void vaultChannel.publishAclChanged(vaultId).catch(broadcastFailed("acl-changed"));
+    },
     // Folder/note create/rename/move/delete → subscribers re-pull the registry.
     // Coalesced per vault inside the channel, and skipped for the client whose
     // own write caused it (`originId`).

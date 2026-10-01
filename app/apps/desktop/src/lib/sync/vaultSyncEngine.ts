@@ -113,8 +113,13 @@ export interface VaultSyncEngineOptions {
   onAclChanged?: () => void;
   /** Fired when the folder/note structure changed in this vault (`registry`):
    *  a teammate created/renamed/moved/deleted a folder or note. The client
-   *  re-pulls the registry so its local tree reflects the change live. */
-  onRegistryChanged?: () => void;
+   *  re-pulls the registry so its local tree reflects the change live.
+   *  `meta` is true when the server says only "last edited by" stamps moved
+   *  (#262): nothing structural, so the pull may be throttled. */
+  onRegistryChanged?: (meta?: boolean) => void;
+  /** Fired when the vault's Trash or shrink-event listings changed
+   *  (`activity`, #260) — the Activity feed refetches on this, not a poll. */
+  onActivityChanged?: () => void;
   /** Fired when a new teammate joined the vault (`member`): the client
    *  refreshes its roster and shows a join celebration. */
   onMemberJoined?: (name: string) => void;
@@ -316,7 +321,8 @@ export class VaultSyncEngine {
   private readonly onStatus?: (s: VaultSyncStatus) => void;
   private readonly onSessionRejected?: () => void;
   private readonly onAclChanged?: () => void;
-  private readonly onRegistryChanged?: () => void;
+  private readonly onRegistryChanged?: (meta?: boolean) => void;
+  private readonly onActivityChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onVoice?: (frame: VoiceFrame) => void;
@@ -419,6 +425,7 @@ export class VaultSyncEngine {
     this.onSessionRejected = opts.onSessionRejected;
     this.onAclChanged = opts.onAclChanged;
     this.onRegistryChanged = opts.onRegistryChanged;
+    this.onActivityChanged = opts.onActivityChanged;
     this.onMemberJoined = opts.onMemberJoined;
     this.onPresence = opts.onPresence;
     this.onVoice = opts.onVoice;
@@ -851,7 +858,9 @@ export class VaultSyncEngine {
         this.onAclChanged?.();
       } else if (control.t === "registry") {
         // Folder/note structure changed — re-pull the registry + refresh tree.
-        this.onRegistryChanged?.();
+        this.onRegistryChanged?.(control.meta === true);
+      } else if (control.t === "activity") {
+        this.onActivityChanged?.();
       } else if (control.t === "member") {
         // A new teammate joined — refresh the roster + celebrate.
         this.onMemberJoined?.(control.name);
