@@ -11,6 +11,7 @@ import { backfillIndex } from "./index/indexer.js";
 import { startBlobGc, stopBlobGc } from "./blobs/gc.js";
 import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
 import { setTrashActivityPublisher } from "./trash/activity.js";
+import { invalidateReadableCache } from "./permissions/readable-cache.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
 import { setShrinkHook } from "./versions/shrink-guard.js";
@@ -107,10 +108,14 @@ async function main() {
   );
   await sync.listen();
 
-  const onRegistryChanged = (vaultId: string, originId: string | null) =>
+  // Both structural and ACL changes drop this instance's display-only readable
+  // sets for the vault first (#261, `permissions/readable-cache.ts`).
+  const onRegistryChanged = (vaultId: string, originId: string | null) => {
+    invalidateReadableCache(vaultId);
     void vaultChannel
       .publishRegistryChanged(vaultId, originId)
       .catch(broadcastFailed("registry-changed"));
+  };
 
   // The detached write path never reaches Hocuspocus, so it reports edits here.
   const docWriter = createDocWriter(
@@ -146,8 +151,10 @@ async function main() {
     disconnectDoc: (vaultId, docId) => disconnectDoc(sync, vaultId, docId),
     evictDoc: (vaultId, docId) => evictDoc(sync, vaultId, docId),
     // Share create/revoke → subscribers re-evaluate their readable-doc set.
-    onAclChanged: (vaultId) =>
-      void vaultChannel.publishAclChanged(vaultId).catch(broadcastFailed("acl-changed")),
+    onAclChanged: (vaultId) => {
+      invalidateReadableCache(vaultId);
+      void vaultChannel.publishAclChanged(vaultId).catch(broadcastFailed("acl-changed"));
+    },
     // Folder/note create/rename/move/delete → subscribers re-pull the registry.
     // Coalesced per vault inside the channel, and skipped for the client whose
     // own write caused it (`originId`).

@@ -3,11 +3,8 @@ import { pool } from "../../db/pool.js";
 import { canEditDoc } from "../../permissions/http-gates.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { effectivePermission } from "../../permissions/resolver.js";
-import {
-  listDeletedReadableDocsInVault,
-  listReadableDocsInVault,
-  vaultAccess,
-} from "../../permissions/vault-docs.js";
+import { vaultAccess } from "../../permissions/vault-docs.js";
+import { deletedReadableDocsForActivity, readableDocsForActivity } from "../../permissions/readable-cache.js";
 import { extractDocText } from "../../index/indexer.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited, type VersionCause } from "../../versions/capture.js";
@@ -325,11 +322,24 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const limitRaw = Number.parseInt(c.req.query("limit") ?? "", 10);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, SHRINK_EVENTS_MAX) : SHRINK_EVENTS_MAX;
 
+    // Candidates FIRST (#261): the docs with any `pre-shrink` version in the
+    // window, through `note_versions_pre_shrink_idx` (migration 041). Shrinks
+    // are rare, so this is usually empty and no readable set is built at all;
+    // otherwise readability is checked for these few ids only, against the
+    // display-only cached sets (`permissions/readable-cache.ts` — this listing
+    // drives nothing on a client's disk). It used to build both full sets on
+    // every call and send every readable id back as `= ANY($3)`.
+    const { rows: candidateRows } = await pool.query<{ doc_id: string }>(
+      `SELECT DISTINCT doc_id FROM note_versions
+        WHERE vault_id = $1 AND cause = 'pre-shrink' AND created_at >= $2`,
+      [vaultId, since],
+    );
+    if (candidateRows.length === 0) return c.json({ items: [], truncated: false, afterIsCurrent: true });
     const [live, deleted] = await Promise.all([
-      listReadableDocsInVault(session.userId, vaultId),
-      listDeletedReadableDocsInVault(session.userId, vaultId),
+      readableDocsForActivity(session.userId, vaultId),
+      deletedReadableDocsForActivity(session.userId, vaultId),
     ]);
-    const readable = [...live, ...deleted];
+    const readable = candidateRows.map((r) => r.doc_id).filter((d) => live.has(d) || deleted.has(d));
     if (readable.length === 0) return c.json({ items: [], truncated: false, afterIsCurrent: true });
 
     const { rows } = await pool.query<{

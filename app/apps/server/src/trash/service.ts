@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { pool as defaultPool } from "../db/pool.js";
 import { orgRole, vaultOrg } from "../permissions/lookup.js";
-import { listDeletedReadableDocsInVault } from "../permissions/vault-docs.js";
+import { deletedReadableDocsForActivity } from "../permissions/readable-cache.js";
 import { basename, dirname, findFolderByPath, joinPath } from "../registry/tree-ops.js";
 import { extractDocText, purgeNoteIndex } from "../index/indexer.js";
 import { trashedNotePermission } from "./access.js";
@@ -56,7 +56,20 @@ export async function listTrash(
   if (!(await orgRole(org, userId))) {
     throw new TrashError(403, "not_member", "Not a member of this vault");
   }
-  const readable = [...(await listDeletedReadableDocsInVault(userId, vaultId, db))];
+  // What is in this vault's Trash at all, through the partial tombstone index —
+  // cheap, and on most vaults most of the time the answer is "nothing", which
+  // needs no readable set (#261). Same window as the listing below.
+  const { rows: candidates } = await db.query<{ id: string }>(
+    `SELECT id FROM notes
+      WHERE vault_id = $1 AND deleted_at IS NOT NULL AND purged_at IS NULL
+        AND (purge_after IS NULL OR purge_after > now())`,
+    [vaultId],
+  );
+  if (candidates.length === 0) return { items: [], truncated: false };
+  // The deleted-readable set is the display-only cached one: this listing
+  // drives nothing on a client's disk (see `permissions/readable-cache.ts`).
+  const deletedReadable = await deletedReadableDocsForActivity(userId, vaultId, db);
+  const readable = candidates.map((r) => r.id).filter((id) => deletedReadable.has(id));
   if (readable.length === 0) return { items: [], truncated: false };
 
   const { rows } = await db.query<{
