@@ -4,6 +4,7 @@ import {
   CLIENT_VERSION_HEADER,
   CLIENT_VERSION_PARAM,
   clientVersionPolicy,
+  clientVersionStats,
   judgeClientVersion,
   parseClientVersion,
 } from "../src/http/client-version.js";
@@ -161,5 +162,20 @@ describe("content-write routes refuse outdated clients (426 client_outdated)", (
     expect((await post("/api/sync-token", owner.token, { docId: doc })).status).toBe(200);
     // A reporting build below the floor is still refused under the default.
     expect((await post("/api/sync-token", owner.token, { docId: doc }, "0.1.40")).status).toBe(426);
+  });
+
+  it("counts unversioned vs versioned requests for the rollout log line", async () => {
+    const { owner, doc } = await seed();
+    delete process.env.UNVERSIONED_CLIENTS;
+    clientVersionStats(true);
+    await post("/api/sync-token", owner.token, { docId: doc });
+    await post("/api/sync-token", owner.token, { docId: doc }, "0.1.74");
+    await post("/api/sync-token", owner.token, { docId: doc }, "0.1.10");
+    expect(clientVersionStats(true)).toEqual({
+      unversioned: 1,
+      versioned: 2,
+      belowMinimum: 1,
+      refused: 1,
+    });
   });
 });

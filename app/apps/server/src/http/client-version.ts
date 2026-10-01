@@ -143,13 +143,58 @@ export function judgeClientVersion(
  * (reads and CORS preflights are never gated) and answers anything else from
  * an outdated client with `426 client_outdated`.
  */
+/**
+ * Rollout counters: how many gated requests arrived WITHOUT a version, with
+ * one, and below the floor, since the last report. Logged as one line at most
+ * every {@link STATS_INTERVAL_MS}, so an operator can watch `unversioned` fall
+ * towards zero before setting `UNVERSIONED_CLIENTS=refuse`. Per process; no
+ * ids, no paths.
+ */
+export interface ClientVersionStats {
+  unversioned: number;
+  versioned: number;
+  belowMinimum: number;
+  refused: number;
+}
+
+const STATS_INTERVAL_MS = 60 * 60_000;
+let stats: ClientVersionStats = { unversioned: 0, versioned: 0, belowMinimum: 0, refused: 0 };
+let statsSince = Date.now();
+
+/** Read (and optionally reset) the counters. Exposed for tests. */
+export function clientVersionStats(reset = false): ClientVersionStats {
+  const out = { ...stats };
+  if (reset) {
+    stats = { unversioned: 0, versioned: 0, belowMinimum: 0, refused: 0 };
+    statsSince = Date.now();
+  }
+  return out;
+}
+
+function count(raw: string | undefined, verdict: ClientVersionVerdict): void {
+  if (parseClientVersion(raw)) stats.versioned++;
+  else stats.unversioned++;
+  if (!verdict.ok) {
+    stats.refused++;
+    if (verdict.reason === "below_minimum") stats.belowMinimum++;
+  }
+  const now = Date.now();
+  if (now - statsSince < STATS_INTERVAL_MS) return;
+  const minutes = Math.round((now - statsSince) / 60_000);
+  const s = clientVersionStats(true);
+  console.info(
+    `[client-version] last ${minutes} min of content-write requests: ` +
+      `unversioned=${s.unversioned} versioned=${s.versioned} below_minimum=${s.belowMinimum} refused=${s.refused}`,
+  );
+}
+
 export function requireSupportedClient(): MiddlewareHandler {
   return async (c, next) => {
     const method = c.req.method;
     if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
-    const verdict = judgeClientVersion(
-      c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM),
-    );
+    const raw = c.req.header(CLIENT_VERSION_HEADER) ?? c.req.query(CLIENT_VERSION_PARAM);
+    const verdict = judgeClientVersion(raw);
+    count(raw, verdict);
     if (verdict.ok) return next();
     return c.json(
       {
