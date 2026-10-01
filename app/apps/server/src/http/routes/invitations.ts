@@ -12,6 +12,7 @@ import {
   loadInvitation,
 } from "../../registry/invitations.js";
 import { InvitationListingError, listInvitationExpiries } from "../../invitations/expiries.js";
+import { redactAddresses } from "../../invitations/sweep.js";
 
 /**
  * Invitation read endpoints the desktop uses around Better Auth's own
@@ -88,7 +89,7 @@ invitationRoutes.post("/invitations/:id/send", async (c) => {
       }),
     );
   } catch (err) {
-    console.error(`[email] invitation ${inv.id} failed:`, err);
+    console.error(`[email] invitation ${inv.id} failed: ${redactAddresses(err)}`);
     return c.json(
       { error: "send_failed", message: `The mail provider refused the message: ${(err as Error).message}` },
       502,
