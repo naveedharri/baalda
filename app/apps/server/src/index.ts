@@ -18,6 +18,7 @@ import { startTrashPurge, stopTrashPurge } from "./trash/scheduler.js";
 import { createDocWriter } from "./mcp/doc-writer.js";
 import { createVersionCapture, type VersionCapture } from "./versions/capture.js";
 import { setShrinkBrakeHook, setShrinkHook } from "./versions/shrink-guard.js";
+import { createReleaseWatch, releaseWatchConfig } from "./sync/release-watch.js";
 import { maybeDailyCheckpoint } from "./versions/checkpoints.js";
 
 /**
@@ -174,6 +175,20 @@ async function main() {
   // upgrade handler ignores non-matching paths, so it coexists with /sync.
   const vaultWss = vaultChannel.attachUpgrade(httpServer);
 
+  // New desktop release → hint connected apps to check now (#269). Off with
+  // RELEASE_MANIFEST_URL=off or RELEASE_POLL_MINUTES=0; an offline host just
+  // never sends the hint.
+  const releaseCfg = releaseWatchConfig();
+  const releaseWatch = releaseCfg
+    ? createReleaseWatch({
+        ...releaseCfg,
+        onNewVersion: (version) => {
+          const told = vaultChannel.broadcastVersionAvailable(version);
+          console.info(`[release-watch] hinted ${told} connection(s)`);
+        },
+      })
+    : null;
+
   // Index any pre-existing notes missing from note_index (best-effort, async).
   backfillIndex()
     .then((n) => n > 0 && console.log(`Indexer: backfilled ${n} note(s).`))
@@ -197,6 +212,7 @@ async function main() {
     stopBlobGc();
     stopTrashPurge();
     syncWss.close();
+    releaseWatch?.stop();
     vaultWss.close();
     await pubsub.close();
     await sync.destroy();

@@ -148,6 +148,8 @@ export type ServerControl =
   | { t: "registry" }
   | { t: "member"; name: string }
   | ({ t: "presence" } & PresenceState)
+  /** A new release exists (#269): a hint to run the normal update check now. */
+  | { t: "version-available"; version: string }
   | { t: "err"; message: string };
 
 export function encodeHello(frame: Omit<HelloFrame, "t">): string {
@@ -242,6 +244,12 @@ export function parseServerControl(text: string): ServerControl | null {
       return { t: "rejected", docId: r.docId, reason: "read_only" };
     }
     return null;
+  }
+  if (t === "version-available") {
+    const ver = (v as { version?: unknown }).version;
+    return typeof ver === "string" && ver.length > 0 && ver.length <= 64
+      ? { t: "version-available", version: ver }
+      : null;
   }
   if (t === "drop" && typeof (v as { docId?: unknown }).docId === "string") {
     return { t: "drop", docId: (v as { docId: string }).docId };

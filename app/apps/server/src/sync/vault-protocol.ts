@@ -187,6 +187,13 @@ export type ServerControl =
   | { t: "registry" } // folders/notes structure changed -> client re-pulls the registry
   | { t: "member"; name: string } // a new teammate joined the vault -> refresh + celebrate
   | ({ t: "presence" } & PresenceState) // a teammate's live viewing state changed
+  /**
+   * A new desktop release exists (`sync/release-watch.ts`, #269). A HINT to run
+   * the client's own update check now — the updater still fetches and verifies
+   * the release itself, so this can never deliver or force anything. Sent to
+   * every authenticated connection; older clients ignore an unknown `t`.
+   */
+  | { t: "version-available"; version: string }
   | { t: "err"; message: string };
 
 /** Client's post-hello presence frame: declares what note it's currently on.

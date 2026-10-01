@@ -47,10 +47,12 @@ import {
   isUpdateBlocking,
   justUpdatedTo,
   RELEASES_PAGE_URL,
+  scheduleHintedUpdateCheck,
   serverRequiresUpdate,
   useUpdateState,
 } from "./lib/updater";
 import { onClientOutdated } from "./lib/api";
+import { setUpdateHintHandler } from "./lib/updateHint";
 import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
@@ -1074,6 +1076,9 @@ export default function App() {
       if (!import.meta.env.DEV) {
         void backgroundUpdateCheck();
         setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
+        // The server's release hint (#269) runs the same check early; the
+        // poll above stays as the fallback for servers that never send it.
+        setUpdateHintHandler(() => scheduleHintedUpdateCheck());
       }
     })();
   }, []);

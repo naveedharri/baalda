@@ -303,3 +303,22 @@ describe("a server refusing this build (client_outdated, #251)", () => {
     expect(updater.RELEASES_PAGE_URL).toMatch(/^https:\/\/github\.com\/naveedharri\/baalda\/releases\//);
   });
 });
+
+describe("the server's release hint (#269)", () => {
+  it("runs one jittered background check, however many hints arrive", async () => {
+    check.mockResolvedValue(null);
+    const updater = await loadUpdater();
+
+    updater.scheduleHintedUpdateCheck(() => 0.5);
+    updater.scheduleHintedUpdateCheck(() => 0.1);
+    expect(check).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(updater.UPDATE_HINT_JITTER_MS * 0.5);
+    expect(check).toHaveBeenCalledTimes(1);
+
+    // A later hint schedules a fresh one.
+    updater.scheduleHintedUpdateCheck(() => 0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(check).toHaveBeenCalledTimes(2);
+  });
+});

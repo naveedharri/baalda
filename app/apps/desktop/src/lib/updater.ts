@@ -304,6 +304,26 @@ export async function serverRequiresUpdate(): Promise<void> {
   });
 }
 
+/** Upper bound of the random delay before a hinted check (#269). */
+export const UPDATE_HINT_JITTER_MS = 60_000;
+
+let hintTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * The server says a new release exists (#269): run the ordinary background
+ * check soon. Jittered over {@link UPDATE_HINT_JITTER_MS} so every connected
+ * app does not hit the release endpoint in the same second, and coalesced so a
+ * burst of hints (several vault channels, a reconnect) costs one check. The
+ * check verifies the release itself; this only moves it earlier than the poll.
+ */
+export function scheduleHintedUpdateCheck(random: () => number = Math.random): void {
+  if (hintTimer) return;
+  hintTimer = setTimeout(() => {
+    hintTimer = null;
+    void backgroundUpdateCheck();
+  }, Math.floor(random() * UPDATE_HINT_JITTER_MS));
+}
+
 /** The running app's version (from tauri.conf.json), for display. */
 export function currentVersion(): Promise<string> {
   return getVersion();
