@@ -252,9 +252,14 @@ async function listDocsInVault(
   // ancestry is recoverable from the path even though the rows are gone. Only
   // the tombstone question asks for this: a LIVE note's `folder_id` is
   // authoritative and must stay the only thing that decides it.
+  //
+  // MATERIALIZED (#263): referenced once, Postgres inlines the CTE, and the
+  // planner then re-ran the whole tombstone scan inside the per-note EXISTS —
+  // once per deleted note per call. Same rows, same answer; it is now computed
+  // once per statement.
   const deadFolderCte = opts.deleted
     ? `,
-       dead_folder_paths AS (
+       dead_folder_paths AS MATERIALIZED (
           SELECT ft.path, ft.deleted_at FROM folder_tombstones ft
            WHERE ft.vault_id = $2
              AND (

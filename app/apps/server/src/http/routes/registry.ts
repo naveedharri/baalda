@@ -5,7 +5,7 @@ import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import { canCreateIn, canEditDoc, canEditFolder, canWriteBlob } from "../../permissions/http-gates.js";
 import { deleteDocBlobs } from "./blobs.js";
-import { effectivePermission } from "../../permissions/resolver.js";
+import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
 import {
   listDeletedReadableDocsInVault,
   listReadableDocsInVault,
@@ -431,9 +431,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // seconds on a managed database, and any proxy timeout in front of it turns
     // this into the client's "no answer, remove nothing" branch on every pass.
     // The same width the vault channel backfills at.
+    //
+    // One request-scoped `ResolverCache` for the whole batch (#263): the role,
+    // vault posture, join snapshot and each folder's ancestry are the same for
+    // every id, so 2,000 ids used to re-walk the same folders and re-read the
+    // same vault rows 2,000 times. The cache memoises those INPUTS only, never a
+    // verdict, and dies with this request — every answer is bit-for-bit the
+    // uncached one (`resolveManyEqualsPerDoc`), which is what this route's
+    // "do not remove on doubt" contract needs.
     const none: string[] = [];
+    const resolverCache = createResolverCache();
     await runPool(inVault, config.backfillConcurrency, async (id) => {
-      if ((await effectivePermission(session.userId, id)) === "none") none.push(id);
+      if ((await effectivePermission(session.userId, id, pool, resolverCache)) === "none") none.push(id);
     });
     return c.json({ none });
   });
