@@ -27,6 +27,16 @@ describe("wikilink parsing", () => {
   it("returns nothing when there are no links", () => {
     expect(parseWikilinks("plain text, no links")).toEqual([]);
   });
+
+  it("ignores an unclosed [[ instead of swallowing the rest of the note", () => {
+    const code = "const grid = [[1, 2],\n  [3, 4]];\nthen [[Real]]";
+    expect(parseWikilinks(code)).toEqual(["Real"]);
+    expect(parseWikilinks("[[never closed\nmore text")).toEqual([]);
+  });
+
+  it("skips titles too long to be a note name", () => {
+    expect(parseWikilinks(`[[${"x".repeat(300)}]] and [[Ok]]`)).toEqual(["Ok"]);
+  });
 });
 
 describe("local embedder (default, offline)", () => {

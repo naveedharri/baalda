@@ -111,6 +111,9 @@ async function bestEffort(
   } catch (err) {
     await q.query(`ROLLBACK TO SAVEPOINT ${name}`).catch(() => {});
     await q.query(`RELEASE SAVEPOINT ${name}`).catch(() => {});
+    // 40001 is the expected outcome of two readers refreshing one doc's cache
+    // under REPEATABLE READ (see above): the other reader wrote it. Not news.
+    if ((err as { code?: string } | null)?.code === "40001") return;
     console.warn(`[yjs] ${name} failed (ignored):`, err);
   }
 }
@@ -290,6 +293,24 @@ async function currentStateVector(
  * for. Safe to call from a read path: the pair is written together, so a stale
  * write is detected by the freshness check rather than trusted.
  */
+async function writeStateVector(
+  docId: string,
+  stateVector: Uint8Array,
+  uptoUpdateId: string | null,
+  db: Queryable,
+): Promise<void> {
+  await db.query(
+    `INSERT INTO doc_state_vectors (doc_id, state_vector, upto_update_id, updated_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (doc_id) DO UPDATE
+       SET state_vector = EXCLUDED.state_vector,
+           upto_update_id = EXCLUDED.upto_update_id,
+           updated_at = now()`,
+    [docId, Buffer.from(stateVector), uptoUpdateId],
+  );
+}
+
+/** {@link writeStateVector} outside a transaction: a failure is logged, never thrown. */
 async function rememberStateVector(
   docId: string,
   stateVector: Uint8Array,
@@ -297,15 +318,7 @@ async function rememberStateVector(
   db: Queryable,
 ): Promise<void> {
   try {
-    await db.query(
-      `INSERT INTO doc_state_vectors (doc_id, state_vector, upto_update_id, updated_at)
-       VALUES ($1, $2, $3, now())
-       ON CONFLICT (doc_id) DO UPDATE
-         SET state_vector = EXCLUDED.state_vector,
-             upto_update_id = EXCLUDED.upto_update_id,
-             updated_at = now()`,
-      [docId, Buffer.from(stateVector), uptoUpdateId],
-    );
+    await writeStateVector(docId, stateVector, uptoUpdateId, db);
   } catch (err) {
     // A cache miss is a slow read, never a failed one — this must not be able to
     // fail a sync.
@@ -402,8 +415,12 @@ export async function loadDocDiff(
 
     const merged = mergeParts(snapshotBuf, updates.rows);
     const serverStateVector = Y.encodeStateVectorFromUpdate(merged);
+    // The THROWING write: `bestEffort` is what absorbs a failure, by rolling its
+    // savepoint back. A write that swallowed its own error left the transaction
+    // aborted under a "successful" call, so the RELEASE that followed failed too
+    // — two error lines per read, and the cache never written for a busy doc.
     await bestEffort(q, inTx, "sv_cache", (qq) =>
-      rememberStateVector(
+      writeStateVector(
         docId,
         serverStateVector,
         updates.rows.length > 0 ? (updates.rows[updates.rows.length - 1]?.id ?? null) : null,
