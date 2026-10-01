@@ -1,6 +1,8 @@
 import { Server } from "@hocuspocus/server";
 import * as Y from "yjs";
 import { config } from "../config.js";
+import { pool } from "../db/pool.js";
+import { createResolverCache } from "../permissions/resolver.js";
 import { verifySyncToken } from "../tokens/sync-token.js";
 import { syncPermission } from "../trash/access.js";
 import { appendUpdate, loadDocState } from "../yjs/persistence.js";
@@ -272,7 +274,9 @@ export function createSyncServer(
       if (claims.userId) {
         let permission;
         try {
-          permission = await syncPermission(claims.userId, parsed.docId);
+          // Per-connect cache: fewer round trips, never a reused answer — it
+          // is created here and dropped with this call (#263).
+          permission = await syncPermission(claims.userId, parsed.docId, pool, createResolverCache());
         } catch (err) {
           // Fail CLOSED. A resolver that cannot answer must not be read as
           // "carry on with whatever the token claimed" — that is the hole this
