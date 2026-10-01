@@ -11,6 +11,7 @@ import {
 import { extractDocText } from "../../index/indexer.js";
 import type { DocWriter } from "../../mcp/doc-writer.js";
 import { recordVersion, sha256Hex, stampLastEdited, type VersionCause } from "../../versions/capture.js";
+import { VERSION_CONTENT, VERSION_TEXT_JOIN } from "../../versions/texts.js";
 import {
   captureCheckpoint,
   getCheckpointSummary,
@@ -151,8 +152,9 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
 
     const { rows } = await pool.query<VersionRow>(
       `SELECT v.id, v.doc_id, v.created_at, v.cause, v.author_id,
-              u.name AS author_name, v.sha256, octet_length(v.content) AS size
+              u.name AS author_name, v.sha256, octet_length(${VERSION_CONTENT}) AS size
          FROM note_versions v
+         ${VERSION_TEXT_JOIN}
          LEFT JOIN "user" u ON u.id = v.author_id
         WHERE v.doc_id = $1
         ORDER BY v.id DESC`,
@@ -175,8 +177,10 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     if (!Number.isFinite(versionId)) return c.json({ error: "Unknown version" }, 404);
     const { rows } = await pool.query<VersionRow & { content: string }>(
       `SELECT v.id, v.doc_id, v.created_at, v.cause, v.author_id,
-              u.name AS author_name, v.sha256, octet_length(v.content) AS size, v.content
+              u.name AS author_name, v.sha256, octet_length(${VERSION_CONTENT}) AS size,
+              ${VERSION_CONTENT} AS content
          FROM note_versions v
+         ${VERSION_TEXT_JOIN}
          LEFT JOIN "user" u ON u.id = v.author_id
         WHERE v.id = $1`,
       [versionId],
@@ -207,11 +211,15 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
     const versionId = Number.parseInt(c.req.param("versionId"), 10);
     if (!Number.isFinite(versionId)) return c.json({ error: "Unknown version" }, 404);
     const { rows } = await pool.query<{ doc_id: string; content: string }>(
-      "SELECT doc_id, content FROM note_versions WHERE id = $1",
+      `SELECT v.doc_id, ${VERSION_CONTENT} AS content
+         FROM note_versions v ${VERSION_TEXT_JOIN} WHERE v.id = $1`,
       [versionId],
     );
     const version = rows[0];
     if (!version || version.doc_id !== docId) return c.json({ error: "Unknown version" }, 404);
+    // Fail safe: a version whose text cannot be resolved is never "restored"
+    // as an empty note.
+    if (version.content == null) return c.json({ error: "Version content unavailable" }, 409);
 
     // Capture where we are BEFORE overwriting it, so a revert is itself
     // undoable. `recordVersion` dedupes against the newest stored version, so
@@ -341,9 +349,10 @@ export function createVersionRoutes(deps: VersionRouteDeps): Hono {
       deleted: boolean;
     }>(
       `SELECT v.id, v.doc_id, n.rel_path, v.created_at,
-              char_length(v.content)::int AS before_chars,
+              char_length(${VERSION_CONTENT})::int AS before_chars,
               n.deleted_at IS NOT NULL AS deleted
          FROM note_versions v
+         ${VERSION_TEXT_JOIN}
          JOIN notes n ON n.id = v.doc_id AND n.vault_id = $1
         WHERE v.vault_id = $1 AND v.cause = 'pre-shrink' AND v.created_at >= $2
           AND v.doc_id = ANY($3::text[])

@@ -4,6 +4,7 @@ import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import type { DocWriter } from "../mcp/doc-writer.js";
 import { BULK_ORIGIN, BULK_SEED_ORIGIN } from "../sync/doc-batch.js";
+import { storeNoteText } from "./texts.js";
 
 /**
  * Automatic version capture + "last edited by" stamping.
@@ -37,6 +38,10 @@ type Queryable = Pick<pg.Pool, "query">;
 export const IDLE_CAPTURE_MS = 10 * 60_000;
 /** Versions kept per note; the oldest beyond this are pruned on each capture. */
 export const MAX_VERSIONS_PER_NOTE = 50;
+/** Recent `pre-shrink` versions kept past {@link MAX_VERSIONS_PER_NOTE}. */
+export const PINNED_PRE_SHRINK = 10;
+/** How long a `pre-shrink` version stays pinned (matches the shrink feed's window). */
+export const PRE_SHRINK_PIN_DAYS = 30;
 /** Re-broadcast a stamp to the vault at most this often for the same editor.
  *  (The row itself is written every time — see the module comment.) */
 const STAMP_THROTTLE_MS = 60_000;
@@ -66,6 +71,15 @@ const NO_VERSION_SOURCES = new Set<string>([BULK_SEED_ORIGIN]);
 const VAULT_STAMP_SOURCES = new Set<string>([BULK_ORIGIN, BULK_SEED_ORIGIN]);
 /** Per-vault ceiling on how often the lazy daily-checkpoint check runs. */
 const CHECKPOINT_CHECK_INTERVAL_MS = 5 * 60_000;
+/**
+ * After a sharp shrink in a vault, hold its activity-triggered checkpoint for
+ * this long (#254). A device back from a long absence often makes the damaging
+ * write FIRST, and that same write used to trigger the overdue daily checkpoint
+ * a moment later — racing the `pre-shrink` capture and snapshotting the notes
+ * already emptied. Waiting out the burst lets every `pre-shrink` row land, so
+ * `captureCheckpoint` can keep the text from before the wipe instead.
+ */
+export const SHRINK_CHECKPOINT_HOLD_MS = 2 * 60_000;
 
 export type VersionCause = "idle" | "pre-revert" | "pre-shrink";
 
@@ -78,6 +92,15 @@ export function sha256Hex(text: string): string {
  * same sha256 (nothing changed since — this is the dedupe the whole capture
  * strategy relies on). Returns the new version id, or null when deduped or when
  * the doc has no live note row.
+ *
+ * A `pre-shrink` version is the one exception to the dedupe (#253). It is not a
+ * snapshot of "what changed", it is the RECORD that one update just removed
+ * most of the note — Activity's shrink feed and recovery list exactly these
+ * rows. The note a stale device empties is usually one nobody touched since its
+ * last idle version, so its pre-shrink text is that version's text, and the
+ * dedupe used to swallow every such wipe without a trace. The row is still
+ * cheap: text is content-addressed (`versions/texts.ts`), so it adds a
+ * reference, not a second copy.
  */
 export async function recordVersion(
   input: {
@@ -92,24 +115,40 @@ export async function recordVersion(
   // NUL cannot be stored in Postgres text (see `pgText`); hash what is stored.
   const content = pgText(input.content);
   const sha = sha256Hex(content);
-  const { rows: latest } = await db.query<{ sha256: string }>(
-    "SELECT sha256 FROM note_versions WHERE doc_id = $1 ORDER BY id DESC LIMIT 1",
-    [input.docId],
-  );
-  if (latest[0]?.sha256 === sha) return null;
+  if (input.cause !== "pre-shrink") {
+    const { rows: latest } = await db.query<{ sha256: string }>(
+      "SELECT sha256 FROM note_versions WHERE doc_id = $1 ORDER BY id DESC LIMIT 1",
+      [input.docId],
+    );
+    if (latest[0]?.sha256 === sha) return null;
+  }
 
+  // Text first, reference second: the order the text sweep's grace relies on.
+  await storeNoteText(db, { vaultId: input.vaultId, docId: input.docId, sha, content });
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO note_versions (doc_id, vault_id, content, sha256, cause, author_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
+     VALUES ($1, $2, NULL, $3, $4, $5)
      RETURNING id`,
-    [input.docId, input.vaultId, content, sha, input.cause, input.authorId],
+    [input.docId, input.vaultId, sha, input.cause, input.authorId],
   );
   await pruneVersions(input.docId, db);
   // BIGSERIAL arrives as a string from node-postgres; the API hands out numbers.
   return Number(rows[0].id);
 }
 
-/** Drop everything older than the newest {@link MAX_VERSIONS_PER_NOTE} versions. */
+/**
+ * Drop everything older than the newest {@link MAX_VERSIONS_PER_NOTE} versions,
+ * except the recent `pre-shrink` ones (#253): a wiped note keeps being edited
+ * (or keeps receiving idle captures of its empty state), and fifty of those
+ * used to push the only copy of the text from before the wipe out of history
+ * while the note was still empty. Up to {@link PINNED_PRE_SHRINK} of them, from
+ * the last {@link PRE_SHRINK_PIN_DAYS} days, are kept regardless.
+ *
+ * Every clause only ever KEEPS more than the plain "newest fifty" rule did: a
+ * row goes only when it is outside the newest fifty overall, outside the newest
+ * fifty that are not `pre-shrink` (so the shrink rows #253 now records never
+ * push an older ordinary version out sooner than before), and not pinned.
+ */
 export async function pruneVersions(
   docId: string,
   db: Queryable = defaultPool,
@@ -119,8 +158,18 @@ export async function pruneVersions(
       WHERE doc_id = $1
         AND id NOT IN (
           SELECT id FROM note_versions WHERE doc_id = $1 ORDER BY id DESC LIMIT $2
+        )
+        AND id NOT IN (
+          SELECT id FROM note_versions
+           WHERE doc_id = $1 AND cause <> 'pre-shrink' ORDER BY id DESC LIMIT $2
+        )
+        AND id NOT IN (
+          SELECT id FROM note_versions
+           WHERE doc_id = $1 AND cause = 'pre-shrink'
+             AND created_at > now() - ($4::int * interval '1 day')
+           ORDER BY id DESC LIMIT $3
         )`,
-    [docId, MAX_VERSIONS_PER_NOTE],
+    [docId, MAX_VERSIONS_PER_NOTE, PINNED_PRE_SHRINK, PRE_SHRINK_PIN_DAYS],
   );
   return rowCount ?? 0;
 }
@@ -202,6 +251,8 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
   const idleMs = deps.idleMs ?? IDLE_CAPTURE_MS;
   const sessions = new Map<string, Session>();
   const vaultChecked = new Map<string, number>();
+  /** Last sharp shrink reported per vault — holds its daily checkpoint. */
+  const vaultShrunkAt = new Map<string, number>();
   /** Bulk sources, keyed by vaultId. */
   const vaultNotices = new Map<string, Notice>();
   /** Live sources, keyed by docId. Cleared with the doc's session, exactly as
@@ -313,7 +364,17 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       // Lazy daily checkpoint: activity-triggered, no scheduler. The real
       // freshness test (and the cross-instance advisory lock) lives in
       // `maybeDailyCheckpoint`; this only keeps us from asking every keystroke.
-      if (deps.dailyCheckpoint) {
+      //
+      // Two kinds of activity never trigger it (#254). A bulk SEED is a client
+      // uploading what it already has — a brand-new vault's first upload used to
+      // take its first checkpoint mid-flight, "structure-only" for every note
+      // whose content had not arrived yet. And a vault that just had a sharp
+      // shrink waits out {@link SHRINK_CHECKPOINT_HOLD_MS}: the throttle stamp is
+      // left alone, so the first edit after the hold asks again.
+      const shrunkAt = vaultShrunkAt.get(vaultId);
+      const holding = shrunkAt !== undefined && now - shrunkAt < SHRINK_CHECKPOINT_HOLD_MS;
+      if (shrunkAt !== undefined && !holding) vaultShrunkAt.delete(vaultId);
+      if (deps.dailyCheckpoint && !holding && !NO_VERSION_SOURCES.has(source ?? "")) {
         const lastCheck = vaultChecked.get(vaultId) ?? 0;
         if (now - lastCheck > CHECKPOINT_CHECK_INTERVAL_MS) {
           vaultChecked.set(vaultId, now);
@@ -326,8 +387,11 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
 
     async preShrink(vaultId, docId, previousText) {
       // Read the author synchronously: the shrinking edit's own `touch` follows
-      // this call and would overwrite it.
+      // this call and would overwrite it. The checkpoint hold is set
+      // synchronously for the same reason: that `touch` is what would otherwise
+      // fire the daily checkpoint over the freshly emptied note.
       const authorId = sessions.get(docId)?.userId ?? null;
+      vaultShrunkAt.set(vaultId, Date.now());
       try {
         const { rows } = await db.query<{ id: string }>(
           "SELECT id FROM notes WHERE id = $1 AND vault_id = $2 AND deleted_at IS NULL",
@@ -350,6 +414,7 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       }
       sessions.clear();
       vaultChecked.clear();
+      vaultShrunkAt.clear();
       vaultNotices.clear();
       docNotices.clear();
     },
