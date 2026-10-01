@@ -7,9 +7,10 @@
    - a held bulk delete (the #221 banner's question, also asked here),
    - server `pre-shrink` captures (a note that lost most of its text),
    - this session's access changes,
-   - the sync failures Health lists under Needs attention.
+   - the sync failures Health lists under Needs attention,
+   - invitations that expired unaccepted (#268; the server records each once).
    Pure, so the merge and the de-duplication are tested without a DOM. */
-import type { ShrinkEvent, TrashItem } from "../lib/api";
+import type { InvitationExpiry, ShrinkEvent, TrashItem } from "../lib/api";
 import type { HealthFailures } from "../lib/health/model";
 import type { AccessEvent } from "../store";
 import type { TrashCopy } from "../lib/ipc";
@@ -24,7 +25,8 @@ export type ActivityRow =
   | { type: "held"; key: string; at: number; label: string; path: string; count: number; text: string }
   | { type: "shrunk"; key: string; at: number; label: string; path: string; event: ShrinkEvent; text: string }
   | { type: "access"; key: string; at: number; label: string; path: string; event: AccessEvent; text: string }
-  | { type: "failed"; key: string; at: number; label: string; path: string; failure: FailedEntry; text: string };
+  | { type: "failed"; key: string; at: number; label: string; path: string; failure: FailedEntry; text: string }
+  | { type: "invitation"; key: string; at: number; label: string; path: string; invitation: InvitationExpiry; text: string };
 
 /** One Needs-attention failure, flattened from `syncManager.syncFailures()`. */
 export interface FailedEntry {
@@ -73,6 +75,10 @@ export function heldText(count: number): string {
   return `${n(count)} ${count === 1 ? "note" : "notes"} vanished from disk at once`;
 }
 
+export function invitationExpiredText(e: Pick<InvitationExpiry, "email">): string {
+  return `Invitation to ${e.email} expired before it was accepted`;
+}
+
 export function accessText(e: AccessEvent): string {
   if (e.kind === "removed") return "Access to this note was removed";
   return `${n(e.count)} ${e.count === 1 ? "note" : "notes"} became available to you`;
@@ -87,6 +93,7 @@ export const ACTIVITY_HINT = {
   shrunk: "An edit left at most a fifth of this note. The server kept the text from before it.",
   access: "Someone changed who can see this. Only this app session's changes are listed.",
   failed: "Sync could not finish this item. It is also listed in Vault Health.",
+  invitation: "Nobody accepted this invitation before it expired. Resend sends a new link with a fresh expiry.",
 } as const;
 
 const copyId = (stamp: string, relPath: string) => `${stamp}/${relPath}`;
@@ -101,6 +108,7 @@ export function buildActivity(input: {
   access?: readonly AccessEvent[];
   /** Failures, each stamped with when this feed first saw it. */
   failures?: readonly (FailedEntry & { at: number })[];
+  invitations?: readonly InvitationExpiry[];
 }): ActivityRow[] {
   const rows: ActivityRow[] = [];
   const claimed = new Set<string>();
@@ -181,6 +189,18 @@ export function buildActivity(input: {
       path: f.path,
       failure: f,
       text: f.reason,
+    });
+  }
+  for (const inv of input.invitations ?? []) {
+    const at = Date.parse(inv.expiredAt);
+    rows.push({
+      type: "invitation",
+      key: `i:${inv.invitationId}`,
+      at: Number.isFinite(at) ? at : 0,
+      label: "Expired",
+      path: "",
+      invitation: inv,
+      text: invitationExpiredText(inv),
     });
   }
   // Newest first; ties by key so the order is stable across refreshes.

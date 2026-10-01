@@ -710,7 +710,9 @@ interface AppStore {
    *  RETURNS the invitation AND whether the email actually went out: a server
    *  that can't send, or a provider that refused, leaves the link as the only
    *  way the invitation ever reaches the person — so the UI must know. */
-  inviteMember: (email: string, role: "member" | "admin") => Promise<InviteResult>;
+  /** Invite into the active vault, or into `organizationId` when given (the
+   *  Activity feed's Resend names the vault the notice belongs to). */
+  inviteMember: (email: string, role: "member" | "admin", organizationId?: string) => Promise<InviteResult>;
   /** Re-send the sign-up confirmation email to the signed-in address. */
   resendVerificationEmail: () => Promise<void>;
   /**
@@ -3510,12 +3512,12 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  inviteMember: async (email, role) => {
-    const activeOrgId = get().session?.activeOrganizationId ?? undefined;
+  inviteMember: async (email, role, organizationId) => {
+    const orgId = organizationId ?? get().session?.activeOrganizationId ?? undefined;
     const invitation = await authManager.api.inviteMember({
       email,
       role,
-      organizationId: activeOrgId,
+      organizationId: orgId,
     });
     // Creating the row sends nothing by itself — the explicit send is what
     // lets us say "emailed" only when the provider actually took the message,

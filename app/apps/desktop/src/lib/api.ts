@@ -576,6 +576,17 @@ export interface ShrinkEventListing {
   afterIsCurrent: boolean;
 }
 
+/** An invitation that expired unaccepted, as the Activity feed lists it (#268). */
+export interface InvitationExpiry {
+  invitationId: string;
+  organizationId: string;
+  email: string;
+  role: string;
+  expiredAt: string;
+  inviterId: string;
+  inviterName: string | null;
+}
+
 export interface NoteVersionDetail extends NoteVersion {
   content: string;
 }
@@ -2493,6 +2504,18 @@ export class ApiClient {
       `/api/vaults/${encodeURIComponent(vaultId)}/shrink-events${qs ? `?${qs}` : ""}`,
     );
     return { items: data.items ?? [], truncated: !!data.truncated, afterIsCurrent: data.afterIsCurrent ?? true };
+  }
+
+  /**
+   * Invitations in this vault that expired unaccepted (#268): all of them for
+   * an owner/admin, only the caller's own otherwise. A Resend answers one.
+   */
+  async listInvitationExpiries(vaultId: string): Promise<InvitationExpiry[]> {
+    const { data } = await this.request<{ items?: InvitationExpiry[] }>(
+      "GET",
+      `/api/vaults/${encodeURIComponent(vaultId)}/invitation-expiries`,
+    );
+    return data.items ?? [];
   }
 
   /** One version *with* its markdown — the preview/revert payload. */

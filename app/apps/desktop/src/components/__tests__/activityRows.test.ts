@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ReconcileItem } from "../../lib/sync/reconcileReport";
-import { accessText, buildActivity, failureEntries, heldText, shrinkText } from "../activityRows";
+import {
+  accessText,
+  buildActivity,
+  failureEntries,
+  heldText,
+  invitationExpiredText,
+  shrinkText,
+} from "../activityRows";
 
 const S = "2026-09-26T10-00-00-000Z";
 const T = Date.parse("2026-09-26T10:00:00.000Z");
@@ -130,5 +137,23 @@ describe("activity feed: grants", () => {
     expect(rows[0]).toMatchObject({ type: "access", key: `a:g:${T}`, label: "Access", path: "" });
     expect(accessText(ev)).toBe("3 notes became available to you");
     expect(accessText({ ...ev, count: 1 })).toBe("1 note became available to you");
+  });
+});
+
+describe("activity feed: expired invitations (#268)", () => {
+  it("lists each as one Expired row, placed by when it expired", () => {
+    const inv = {
+      invitationId: "inv1",
+      organizationId: "org1",
+      email: "late@example.com",
+      role: "member",
+      expiredAt: new Date(T + 4000).toISOString(),
+      inviterId: "u1",
+      inviterName: "Olive",
+    };
+    const rows = buildActivity({ reconcile, trash, copies, invitations: [inv] });
+    expect(rows.map((r) => r.type)).toEqual(["reconcile", "invitation", "trash", "reconcile", "copy"]);
+    expect(rows[1]).toMatchObject({ key: "i:inv1", label: "Expired", path: "", at: T + 4000 });
+    expect(invitationExpiredText(inv)).toBe("Invitation to late@example.com expired before it was accepted");
   });
 });
