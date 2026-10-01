@@ -21,6 +21,12 @@ export interface ReconcileItem {
   newPath?: string;
   detail?: string;
   at: number;
+  /**
+   * Re-recorded from the last session's saved review on vault open, not
+   * something sync just did. The review and Activity list it; the banner never
+   * announces it again (it already did, the session it happened in).
+   */
+  seeded?: boolean;
 }
 
 export interface ReconcileListener {
@@ -43,14 +49,17 @@ function notify(): void {
 }
 
 export const reconcileReport: {
-  record(item: Omit<ReconcileItem, "at">): void;
+  record(item: Omit<ReconcileItem, "at" | "seeded">, opts?: { at?: number; seeded?: boolean }): void;
   items(): ReconcileItem[];
   drain(): ReconcileItem[];
   subscribe(cb: ReconcileListener): () => void;
   clear(): void;
 } = {
-  record(item) {
-    all.push({ ...item, at: Date.now() });
+  record(item, opts) {
+    // A seeded item keeps the time it HAPPENED: stamping it with now made the
+    // same rename look new (unread, bannered) on every launch.
+    const at = opts?.at && Number.isFinite(opts.at) && opts.at > 0 ? opts.at : Date.now();
+    all.push({ ...item, at, ...(opts?.seeded ? { seeded: true } : {}) });
     notify();
   },
   items() {

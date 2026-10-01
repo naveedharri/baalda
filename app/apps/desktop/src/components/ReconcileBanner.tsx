@@ -17,6 +17,11 @@ export const RECONCILE_BANNER_DEBOUNCE_MS = 600;
  *  chrome) must not re-announce what was dismissed. */
 let dismissedUpTo = 0;
 
+/** What the banner announces: this session's new items only. Items seeded from
+ *  the saved review were announced the session they happened in; raising them
+ *  again on every launch and vault switch is what made the banner unkillable. */
+const announce = (all: readonly ReconcileItem[]) => all.slice(dismissedUpTo).filter((it) => !it.seeded);
+
 
 /**
  * What sync did on the user's behalf when it reconnected: a note put back, a
@@ -28,16 +33,14 @@ let dismissedUpTo = 0;
  */
 export function ReconcileBanner() {
   useReviewPersistence();
-  const [items, setItems] = useState<ReconcileItem[]>(() =>
-    reconcileReport.items().slice(dismissedUpTo),
-  );
+  const [items, setItems] = useState<ReconcileItem[]>(() => announce(reconcileReport.items()));
   useEffect(() => {
     let timer: number | undefined;
     const unsubscribe = reconcileReport.subscribe((all) => {
       if (all.length < dismissedUpTo) dismissedUpTo = 0;
       window.clearTimeout(timer);
       timer = window.setTimeout(
-        () => setItems(all.slice(dismissedUpTo)),
+        () => setItems(announce(all)),
         RECONCILE_BANNER_DEBOUNCE_MS,
       );
     });

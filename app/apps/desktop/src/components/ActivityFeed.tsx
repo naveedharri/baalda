@@ -309,6 +309,7 @@ export function ActivityFeed() {
   const { rows, schedule, updating, activeFailures } = snap;
   const pending = usePendingReviewCount();
   const trash = { online: snap.trashOnline };
+  const [confirmClear, setConfirmClear] = useState(false);
 
   // Opening the panel on Activity refreshes (the host also schedules on the
   // tab switch; the debounce makes the two one fetch).
@@ -316,7 +317,7 @@ export function ActivityFeed() {
     schedule();
   }, [schedule]);
 
-  const showToolbar = pending > 0 || updating;
+  const showToolbar = pending > 0 || updating || rows.length > 0;
   return (
     <div className="activity-feed">
       {showToolbar && (
@@ -331,7 +332,31 @@ export function ActivityFeed() {
               Updating…
             </span>
           )}
+          {rows.length > 0 && (
+            <button
+              type="button"
+              className="secondary sm activity-clear"
+              onClick={() => setConfirmClear(true)}
+            >
+              Clear
+            </button>
+          )}
         </div>
+      )}
+      {confirmClear && (
+        <ConfirmDialog
+          title="Clear activity?"
+          confirmLabel="Clear"
+          tone="accent"
+          onConfirm={() => {
+            snap.clear();
+            setConfirmClear(false);
+          }}
+          onCancel={() => setConfirmClear(false)}
+        >
+          Everything listed here is hidden on this device, and changes waiting for review are marked
+          as skipped. No note, file or recovery copy is deleted, and anything new still shows up.
+        </ConfirmDialog>
       )}
       {!snap.trashOnline && snap.trashCached && (
         <p className="muted activity-note">Deleted notes are the last known list. Reconnect to restore.</p>
