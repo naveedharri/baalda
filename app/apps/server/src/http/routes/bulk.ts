@@ -211,7 +211,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
 
     let wrote = false;
     await withRegisterCtx(auth.vaultId, auth.userId, async (ctx) => {
-      // One `lower(path) = ANY($1)` read answers every adopt probe AND every
+      // One `vault_path_key(path) = ANY($1)` read answers every adopt probe AND every
       // parent lookup this batch is about to make. Misses are cached too — "no
       // folder here yet" is the answer for most of a fresh tree — and each
       // create writes through, so `a/b/c` still finds the `a/b` two items back.
@@ -561,8 +561,13 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       // What IS memoised is the resolver's INPUTS: the member role, the vault
       // baseline and each folder's ancestor chain are facts the whole request
       // shares, and they were 4 of the 7–8 queries every single doc paid for.
+      //
+      // `prefetch` loads the live docs' locations, chains and share rows in
+      // three reads up front. A doc in Trash is never prefetched — it resolves
+      // live through `syncPermission`'s `includeDeleted` branch, as before.
       const permission = new Map<string, string>();
       const resolverCache = createResolverCache();
+      await resolverCache.prefetch(pool, [...inVault]);
       await runPool(askedIds, config.backfillConcurrency, async (docId) => {
         permission.set(
           docId,
@@ -685,6 +690,7 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
     // deletes its local file and finds the note again on the next pull.
     const permission = new Map<string, string>();
     const resolverCache = createResolverCache();
+    await resolverCache.prefetch(pool, [...inVault]);
     await runPool(asked, config.backfillConcurrency, async (docId) => {
       permission.set(
         docId,

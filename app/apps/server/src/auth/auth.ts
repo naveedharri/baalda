@@ -10,6 +10,8 @@ import { announceMemberJoined } from "../sync/member-events.js";
 import { dispatchMail, emailEnabled } from "../email/mailer.js";
 import { verifyEmailEmail } from "../email/templates.js";
 import { clearThrottle } from "./signin-throttle.js";
+import { hasExpiryNotice } from "../invitations/expiries.js";
+import { invitationActivityChanged } from "../invitations/sweep.js";
 
 /**
  * Better Auth (spec 04 §1/§2).
@@ -249,6 +251,18 @@ export const auth = betterAuth({
               error: "member_limit_reached",
               limit,
             });
+          }
+        },
+        // A re-invite (Resend) answers an "expired unaccepted" Activity notice
+        // for that address (#268): tell open feeds so it drops without a poll.
+        // Best-effort; the invitation already exists, so never fail the call.
+        afterCreateInvitation: async (data) => {
+          try {
+            if (await hasExpiryNotice(data.organization.id, data.invitation.email)) {
+              invitationActivityChanged(data.organization.id);
+            }
+          } catch (err) {
+            console.error("[invitations] expiry notice check failed:", err);
           }
         },
         // A teammate accepted an invitation → announce to everyone live in the

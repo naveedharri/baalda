@@ -6,10 +6,12 @@
      row (those carry their copy's actions on the reconcile row itself),
    - a held bulk delete (the #221 banner's question, also asked here),
    - server `pre-shrink` captures (a note that lost most of its text),
+   - sync pauses the shrink burst brake put on a member (#252),
    - this session's access changes,
-   - the sync failures Health lists under Needs attention.
+   - the sync failures Health lists under Needs attention,
+   - invitations that expired unaccepted (#268; the server records each once).
    Pure, so the merge and the de-duplication are tested without a DOM. */
-import type { ShrinkEvent, TrashItem } from "../lib/api";
+import type { InvitationExpiry, ShrinkBrakeEvent, ShrinkEvent, TrashItem } from "../lib/api";
 import type { HealthFailures } from "../lib/health/model";
 import type { AccessEvent } from "../store";
 import type { TrashCopy } from "../lib/ipc";
@@ -23,8 +25,22 @@ export type ActivityRow =
   | { type: "copy"; key: string; at: number; label: string; path: string; copy: TrashCopy }
   | { type: "held"; key: string; at: number; label: string; path: string; count: number; text: string }
   | { type: "shrunk"; key: string; at: number; label: string; path: string; event: ShrinkEvent; text: string }
+  | {
+      type: "paused";
+      key: string;
+      at: number;
+      label: string;
+      path: string;
+      event: ShrinkBrakeEvent;
+      text: string;
+      /** The viewer is an owner/admin and the pause is still live. */
+      canRelease: boolean;
+      /** The pause is the viewer's own. */
+      own: boolean;
+    }
   | { type: "access"; key: string; at: number; label: string; path: string; event: AccessEvent; text: string }
-  | { type: "failed"; key: string; at: number; label: string; path: string; failure: FailedEntry; text: string };
+  | { type: "failed"; key: string; at: number; label: string; path: string; failure: FailedEntry; text: string }
+  | { type: "invitation"; key: string; at: number; label: string; path: string; invitation: InvitationExpiry; text: string };
 
 /** One Needs-attention failure, flattened from `syncManager.syncFailures()`. */
 export interface FailedEntry {
@@ -37,11 +53,13 @@ export interface FailedEntry {
 }
 
 /** Flatten the failures Health's Needs attention is built from. The held
- *  bulk delete's per-note entries are left out: the Held row asks that. */
+ *  bulk delete's per-note entries are left out: the Held row asks that. So
+ *  are notes a sync pause is holding: the Paused row says that (#252). */
 export function failureEntries(f: HealthFailures | null | undefined): FailedEntry[] {
   if (!f) return [];
   const out: FailedEntry[] = [];
   for (const c of f.content) {
+    if (c.kind === "shrink-held") continue;
     out.push({
       key: `fc:${c.docId}`,
       docId: c.docId,
@@ -73,6 +91,19 @@ export function heldText(count: number): string {
   return `${n(count)} ${count === 1 ? "note" : "notes"} vanished from disk at once`;
 }
 
+export function invitationExpiredText(e: Pick<InvitationExpiry, "email">): string {
+  return `Invitation to ${e.email} expired before it was accepted`;
+}
+
+/** "Sync paused for Sam · 12 notes emptied at once" ("Your sync was paused"
+ *  when it is the viewer's own). */
+export function pausedText(e: Pick<ShrinkBrakeEvent, "userName" | "noteCount">, own: boolean): string {
+  const notes = `${n(e.noteCount)} ${e.noteCount === 1 ? "note" : "notes"} emptied at once`;
+  if (own) return `Your sync was paused · ${notes}`;
+  const who = e.userName?.trim() ? e.userName.trim() : "a member";
+  return `Sync paused for ${who} · ${notes}`;
+}
+
 export function accessText(e: AccessEvent): string {
   if (e.kind === "removed") return "Access to this note was removed";
   return `${n(e.count)} ${e.count === 1 ? "note" : "notes"} became available to you`;
@@ -85,8 +116,13 @@ export const ACTIVITY_HINT = {
   copy: "Local text sync set aside on this device, in .context/trash. It never syncs.",
   held: "Many notes disappeared from the vault folder at once. Nothing was deleted for your team until you answer.",
   shrunk: "An edit left at most a fifth of this note. The server kept the text from before it.",
+  paused:
+    "Many notes were emptied at once from one account, so the server paused that account's sync. " +
+    "Every emptied note was saved as a version first. Their edits stay on their device and sync " +
+    "when the pause ends or an owner or admin releases it.",
   access: "Someone changed who can see this. Only this app session's changes are listed.",
   failed: "Sync could not finish this item. It is also listed in Vault Health.",
+  invitation: "Nobody accepted this invitation before it expired. Resend sends a new link with a fresh expiry.",
 } as const;
 
 const copyId = (stamp: string, relPath: string) => `${stamp}/${relPath}`;
@@ -98,9 +134,12 @@ export function buildActivity(input: {
   /** The held bulk delete, stamped with when this feed first saw it. */
   held?: { count: number; at: number } | null;
   shrinks?: readonly ShrinkEvent[];
+  /** Sync pauses (shrink brake holds) and whether the viewer may release them. */
+  brakes?: { items: readonly ShrinkBrakeEvent[]; canRelease: boolean; selfId: string | null } | null;
   access?: readonly AccessEvent[];
   /** Failures, each stamped with when this feed first saw it. */
   failures?: readonly (FailedEntry & { at: number })[];
+  invitations?: readonly InvitationExpiry[];
 }): ActivityRow[] {
   const rows: ActivityRow[] = [];
   const claimed = new Set<string>();
@@ -161,6 +200,21 @@ export function buildActivity(input: {
       text: shrinkText(e),
     });
   }
+  for (const e of input.brakes?.items ?? []) {
+    const at = Date.parse(e.engagedAt);
+    const own = input.brakes?.selfId != null && e.userId === input.brakes.selfId;
+    rows.push({
+      type: "paused",
+      key: `p:${e.id}`,
+      at: Number.isFinite(at) ? at : 0,
+      label: e.held ? "Paused" : "Resumed",
+      path: "",
+      event: e,
+      text: pausedText(e, own),
+      canRelease: input.brakes?.canRelease === true && e.held,
+      own,
+    });
+  }
   (input.access ?? []).forEach((e) => {
     rows.push({
       type: "access",
@@ -181,6 +235,18 @@ export function buildActivity(input: {
       path: f.path,
       failure: f,
       text: f.reason,
+    });
+  }
+  for (const inv of input.invitations ?? []) {
+    const at = Date.parse(inv.expiredAt);
+    rows.push({
+      type: "invitation",
+      key: `i:${inv.invitationId}`,
+      at: Number.isFinite(at) ? at : 0,
+      label: "Expired",
+      path: "",
+      invitation: inv,
+      text: invitationExpiredText(inv),
     });
   }
   // Newest first; ties by key so the order is stable across refreshes.

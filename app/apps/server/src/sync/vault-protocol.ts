@@ -208,6 +208,15 @@ export type ServerControl =
    * every authenticated connection; older clients ignore an unknown `t`.
    */
   | { t: "version-available"; version: string }
+  /**
+   * The shrink burst brake (#252) holds — or stopped holding — THIS user's
+   * content writes in this vault. Addressed to that user only. `held: true`
+   * carries when the hold lapses (`until`, ms epoch) and how many notes engaged
+   * it; `held: false` means it lifted (lapsed or released by an owner/admin).
+   * Deliberately NOT `rejected`/`readOnly`: the client keeps every local edit
+   * and only shows that sync is paused. Older clients ignore an unknown `t`.
+   */
+  | { t: "brake"; held: boolean; until?: number; count?: number }
   | { t: "err"; message: string };
 
 /** Client's post-hello presence frame: declares what note it's currently on.
@@ -420,6 +429,8 @@ export const PS_REJECTED = 0x08;
 export const PS_META_CHANGED = 0x09;
 /** Trash or shrink-event listings changed — see the `activity` frame. */
 export const PS_ACTIVITY_CHANGED = 0x0a;
+/** A user's shrink-brake hold engaged or lifted — see the `brake` frame. */
+export const PS_BRAKE = 0x0b;
 
 export function encodePubsubUpdate(docId: string, update: Uint8Array): Uint8Array {
   const body = frameDocPayload(docId, update);
@@ -501,6 +512,28 @@ export function encodePubsubRejected(userId: string, docId: string, reason: "rea
   return out;
 }
 
+/** A user's shrink-brake hold engaged (`held`, with `until` + `count`) or
+ *  lifted; addressed to `userId` only. */
+export function encodePubsubBrake(
+  userId: string,
+  held: boolean,
+  until?: number,
+  count?: number,
+): Uint8Array {
+  const body = enc.encode(
+    JSON.stringify({
+      userId,
+      held,
+      ...(held && until !== undefined ? { until } : {}),
+      ...(held && count !== undefined ? { count } : {}),
+    }),
+  );
+  const out = new Uint8Array(1 + body.length);
+  out[0] = PS_BRAKE;
+  out.set(body, 1);
+  return out;
+}
+
 /** Ask every connection in the vault to re-announce its presence — sent when a
  *  client joins so it learns who's already viewing what (stateless: no instance
  *  holds the whole roster, so newcomers pull it via a re-announce round). */
@@ -518,7 +551,8 @@ export type PubsubMessage =
   | { type: "presence"; presence: PresenceState }
   | { type: "presence-query" }
   | { type: "voice"; frame: Uint8Array; speakerId: string }
-  | { type: "rejected"; userId: string; docId: string; reason: "read_only" };
+  | { type: "rejected"; userId: string; docId: string; reason: "read_only" }
+  | { type: "brake"; userId: string; held: boolean; until?: number; count?: number };
 
 export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
   if (bytes.length < 1) return null;
@@ -580,6 +614,26 @@ export function decodePubsub(bytes: Uint8Array): PubsubMessage | null {
           return null;
         }
         return { type: "rejected", userId: p.userId, docId: p.docId, reason: "read_only" };
+      } catch {
+        return null;
+      }
+    }
+    case PS_BRAKE: {
+      try {
+        const p = JSON.parse(dec.decode(bytes.subarray(1))) as {
+          userId?: unknown;
+          held?: unknown;
+          until?: unknown;
+          count?: unknown;
+        };
+        if (typeof p.userId !== "string" || typeof p.held !== "boolean") return null;
+        return {
+          type: "brake",
+          userId: p.userId,
+          held: p.held,
+          ...(p.held && typeof p.until === "number" ? { until: p.until } : {}),
+          ...(p.held && typeof p.count === "number" ? { count: p.count } : {}),
+        };
       } catch {
         return null;
       }

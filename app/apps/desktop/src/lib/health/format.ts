@@ -156,6 +156,8 @@ export function kindLabel(kind: HealthIssueKind): string {
       return "Linked path";
     case "shared-file":
       return "Shared file";
+    case "sync-paused":
+      return "Sync paused";
   }
 }
 

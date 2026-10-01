@@ -244,7 +244,9 @@ export type HealthIssueKind =
   /** Symbolic links in the vault, which sync ignores (#216). */
   | "linked-paths"
   /** Two or more mapped notes resolve to one file on disk (#216). */
-  | "shared-file";
+  | "shared-file"
+  /** The server's shrink burst brake is pausing this account's writes (#252). */
+  | "sync-paused";
 
 export type HealthRemedy =
   | "retry"

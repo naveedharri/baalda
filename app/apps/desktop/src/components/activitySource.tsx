@@ -1,14 +1,21 @@
 /* The Activity feed's DATA half, mounted once for the whole app
    (`<ActivityHost />` in App.tsx) so the toolbar badge can count unread rows
    while the panel is closed. It owns the fetch schedule (debounced triggers,
-   the vault reaching "synced", the server's push that Trash / shrink listings
-   moved, window focus, and a long safety interval while the window is visible),
-   the per-vault notice log (`activityLog.ts`) and the read state
-   (`activityUnread.ts`). `ActivityFeed.tsx` only renders the snapshot. */
+   the vault reaching "synced", the server's push that Trash / shrink /
+   expired-invitation listings moved, window focus, and a long safety interval
+   while the window is visible), the per-vault notice log (`activityLog.ts`)
+   and the read state (`activityUnread.ts`). `ActivityFeed.tsx` only renders
+   the snapshot. */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore, type AccessEvent } from "../store";
 import { authManager } from "../lib/auth/authManager";
-import { ApiError, type ShrinkEvent, type TrashListing } from "../lib/api";
+import {
+  ApiError,
+  type InvitationExpiry,
+  type ShrinkBrakeListing,
+  type ShrinkEvent,
+  type TrashListing,
+} from "../lib/api";
 import type { HealthFailures } from "../lib/health/model";
 import { syncManager } from "../lib/sync/docSession";
 import { reconcileReport, type ReconcileItem, type ReconcileKind } from "../lib/sync/reconcileReport";
@@ -223,6 +230,104 @@ function useShrinks(nonce: number) {
   return { items: syncEnabled && vaultId ? items : NO_SHRINKS, busy };
 }
 
+/** Invitations in this vault that expired unaccepted (#268), on the same
+ *  schedule as Trash; the server's `activity` push announces a new one. Last
+ *  listing per vault id is kept for offline, like Trash. */
+const lastInvitations = new Map<string, InvitationExpiry[]>();
+const NO_INVITATIONS: InvitationExpiry[] = [];
+
+function useInvitationExpiries(nonce: number) {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const hasSession = useStore((s) => s.session != null);
+  const syncStatus = useStore((s) => s.vaultSyncStatus);
+  const vaultId = syncManager.registry.vaultId;
+  const onlineRef = useRef(hasSession && syncStatus === "synced");
+  onlineRef.current = hasSession && syncStatus === "synced";
+  const [items, setItems] = useState<InvitationExpiry[]>(() =>
+    vaultId ? (lastInvitations.get(vaultId) ?? NO_INVITATIONS) : NO_INVITATIONS,
+  );
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setItems(vaultId ? (lastInvitations.get(vaultId) ?? NO_INVITATIONS) : NO_INVITATIONS);
+  }, [vaultId]);
+  useEffect(() => {
+    if (!syncEnabled || !vaultId || !onlineRef.current) return;
+    let cancelled = false;
+    setBusy(true);
+    authManager.api.listInvitationExpiries(vaultId).then(
+      (list) => {
+        if (cancelled) return;
+        lastInvitations.set(vaultId, list);
+        setItems(list);
+        setBusy(false);
+      },
+      // An older server without the route (404) or a refusal: no Expired rows,
+      // and no error line; the rest of the feed is unaffected.
+      (e) => {
+        if (cancelled) return;
+        console.warn("[activity] invitation expiries unavailable", e);
+        setBusy(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+      setBusy(false);
+    };
+  }, [syncEnabled, vaultId, nonce]);
+  // Never a fresh `[]`: see useShrinks.
+  return { items: syncEnabled && vaultId ? items : NO_INVITATIONS, busy };
+}
+
+/** Sync pauses (shrink brake holds, #252) on the same schedule as the shrink
+ *  events, and refetched the same way: the server's `activity` push fires on
+ *  every engage and release. Owners/admins get the whole vault's (with
+ *  Release); anyone else only their own. */
+const lastBrakes = new Map<string, ShrinkBrakeListing>();
+const NO_BRAKES: ShrinkBrakeListing = { items: [], canRelease: false };
+
+function useBrakes(nonce: number) {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const hasSession = useStore((s) => s.session != null);
+  const syncStatus = useStore((s) => s.vaultSyncStatus);
+  // Our own pause starting or ending is news for this listing too.
+  const pauseSince = useStore((s) => s.syncPause?.since ?? null);
+  const vaultId = syncManager.registry.vaultId;
+  const onlineRef = useRef(hasSession && syncStatus === "synced");
+  onlineRef.current = hasSession && syncStatus === "synced";
+  const [listing, setListing] = useState<ShrinkBrakeListing>(() =>
+    vaultId ? (lastBrakes.get(vaultId) ?? NO_BRAKES) : NO_BRAKES,
+  );
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setListing(vaultId ? (lastBrakes.get(vaultId) ?? NO_BRAKES) : NO_BRAKES);
+  }, [vaultId]);
+  useEffect(() => {
+    if (!syncEnabled || !vaultId || !onlineRef.current) return;
+    let cancelled = false;
+    setBusy(true);
+    const since = new Date(Date.now() - SHRINK_DAYS * 86_400_000).toISOString();
+    authManager.api.listShrinkBrakes(vaultId, since).then(
+      (l) => {
+        if (cancelled) return;
+        lastBrakes.set(vaultId, l);
+        setListing(l);
+        setBusy(false);
+      },
+      // An older server without the route (404): no Paused rows, no error line.
+      (e) => {
+        if (cancelled) return;
+        console.warn("[activity] sync pauses unavailable", e);
+        setBusy(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+      setBusy(false);
+    };
+  }, [syncEnabled, vaultId, nonce, pauseSince]);
+  return { listing: syncEnabled && vaultId ? listing : NO_BRAKES, busy };
+}
+
 /** The failures Health's Needs attention reads, re-read on the same signals. */
 function useFailures(nonce: number): FailedEntry[] {
   const syncEnabled = useStore((s) => s.syncEnabled);
@@ -360,13 +465,16 @@ export function ActivityHost(): null {
   const trash = useTrash(nonce);
   const { copies, error: copiesError, busy: copiesBusy } = useCopies(nonce);
   const shrinks = useShrinks(nonce);
+  const invitations = useInvitationExpiries(nonce);
+  const brakes = useBrakes(nonce);
+  const selfId = useStore((s) => s.session?.user.id ?? null);
   const failures = useFailures(nonce);
   const pendingDelete = useStore((s) => s.structureNotice?.pendingDelete ?? null);
   const accessEvents = useStore((s) => s.accessEvents ?? NO_ACCESS);
   const vaultSyncStatus = useStore((s) => s.vaultSyncStatus);
   const onActivity = useStore((s) => s.rightPanel?.tab === "activity");
   const vaultId = syncManager.registry.vaultId ?? null;
-  const updating = useSlow(trash.busy || copiesBusy || shrinks.busy);
+  const updating = useSlow(trash.busy || copiesBusy || shrinks.busy || invitations.busy || brakes.busy);
 
   // ── The notice log: load per vault root, append as notices arrive. ──
   const [log, setLog] = useState<ActivityLogEntry[]>(() => (root ? loadLog(root) : []));
@@ -515,10 +623,12 @@ export function ActivityHost(): null {
       copies: copies ?? [],
       held: pendingDelete && heldAt != null ? { count: pendingDelete.count, at: heldAt } : null,
       shrinks: shrinks.items,
+      brakes: { items: brakes.listing.items, canRelease: brakes.listing.canRelease, selfId },
       access,
       failures: failed,
+      invitations: invitations.items,
     });
-  }, [log, reconcile, trash.listing, copies, pendingDelete, shrinks.items, failures, vaultId]);
+  }, [log, reconcile, trash.listing, copies, pendingDelete, shrinks.items, invitations.items, brakes.listing, selfId, failures, vaultId]);
 
   // ── Clear ──
   const [clearedAt, setClearedAt] = useState(() => (root ? loadClearedAt(root) : 0));

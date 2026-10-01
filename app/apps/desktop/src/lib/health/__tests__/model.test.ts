@@ -1189,3 +1189,44 @@ describe("Health and header agreement during regrant", () => {
     },
   );
 });
+
+describe("sync paused by the shrink burst brake (#252)", () => {
+  it("is ONE warn issue, never a failure per held note", () => {
+    const r = buildHealthReport(
+      input({
+        syncPause: { until: NOW + 20 * 60_000, count: 12 },
+        failures: {
+          registry: [],
+          content: [
+            { docId: "a", relPath: "a.md", reason: "Sync paused", kind: "shrink-held" },
+            { docId: "b", relPath: "b.md", reason: "Sync paused", kind: "shrink-held" },
+          ],
+          limitCode: null,
+        },
+      }),
+    );
+    const paused = r.issues.filter((i) => i.kind === "sync-paused");
+    expect(paused).toHaveLength(1);
+    expect(paused[0].severity).toBe("warn");
+    expect(paused[0].autoRetries).toBe(true);
+    expect(paused[0].why).toMatch(/12 notes were emptied at once/);
+    expect(paused[0].why).toMatch(/safe on this device/);
+    expect(paused[0].explanation.next).toMatch(/about 20 min/);
+    expect(paused[0].facts).toContainEqual({ label: "Notes waiting to sync", value: "2" });
+    expect(r.issues.some((i) => i.docId === "a" || i.docId === "b")).toBe(false);
+  });
+
+  it("shows from a batch refusal alone, and not at all when nothing is paused", () => {
+    const fromBatch = buildHealthReport(
+      input({
+        failures: {
+          registry: [],
+          content: [{ docId: "a", relPath: "a.md", reason: "Sync paused", kind: "shrink-held" }],
+          limitCode: null,
+        },
+      }),
+    );
+    expect(fromBatch.issues.map((i) => i.kind)).toEqual(["sync-paused"]);
+    expect(buildHealthReport(input()).issues.some((i) => i.kind === "sync-paused")).toBe(false);
+  });
+});

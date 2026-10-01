@@ -1260,6 +1260,13 @@ export class VaultRegistry {
     return this.fileByPath.get(relPath) ?? null;
   }
 
+  /** Every tree binary this device has a `files` id for — the binary half of
+   *  the evidence a folder moved outside the app is paired by
+   *  (`docSession.drainFolderMoves`). */
+  mappedFiles(): Array<{ fileId: string; relPath: string }> {
+    return [...this.fileByPath].map(([relPath, fileId]) => ({ fileId, relPath }));
+  }
+
   /**
    * Remember a registered tree binary and queue the config write.
    *

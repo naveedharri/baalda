@@ -70,6 +70,7 @@ import {
 import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
 import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
+import { SyncPauseTracker, type SyncPause } from "./syncPause";
 import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
@@ -150,9 +151,9 @@ function diskDeleteCap(mappedCount: number): number {
   return Math.max(5, Math.ceil(mappedCount * 0.2));
 }
 /**
- * The share of a vanished folder's notes that must reappear, byte-identical, at
- * the same sub-path under ONE new folder before the pair is treated as a folder
- * move (#221). High enough that an unrelated folder never qualifies; low enough
+ * The share of a vanished folder's notes (and tree binaries, #266) that must
+ * reappear, byte-identical, at the same sub-path under ONE new folder before
+ * the pair is treated as a folder move (#221). High enough that an unrelated folder never qualifies; low enough
  * that editing a handful of notes in the same breath as the move keeps it one.
  */
 const FOLDER_MOVE_MIN_RATIO = 0.8;
@@ -446,6 +447,30 @@ export class SyncManager implements InboundHost {
   /** UI subscribes here to refetch the Activity feed when the server says the
    *  vault's Trash / shrink listings may have moved (#260). */
   private onActivityChanged?: () => void;
+  /** UI subscribes here for "Sync paused" (the server's shrink burst brake,
+   *  #252). */
+  private onSyncPause?: (pause: SyncPause | null) => void;
+  /**
+   * This device's view of a shrink-brake hold on our own writes in this vault.
+   * A notice only: while it lasts, local edits stay exactly where they are, and
+   * when it lifts the notes it held are queued again like any other edit.
+   */
+  private readonly syncPause = new SyncPauseTracker({
+    onChange: (next, prev, reason) => {
+      try {
+        this.onSyncPause?.(next);
+      } catch (e) {
+        console.warn("[sync] pause listener threw", e);
+      }
+      if (next) {
+        if (!prev) this.note("warn", "sync-paused", "Sync paused: many notes were emptied at once");
+      } else if (prev && reason === "lifted") {
+        this.note("info", "sync-resumed", "Sync resumed");
+        const scope = this.scope;
+        if (scope?.isCurrent()) this.requeueShrinkHeld(scope);
+      }
+    },
+  });
   private attachments: AttachmentSync | null = null;
   /** Disk deletes for BINARIES — the blob mirror's own `drainDiskDeletes`
    *  (`binaryDeletes.ts`). Built and torn down beside the mirror it guards. */
@@ -615,6 +640,8 @@ export class SyncManager implements InboundHost {
   /** Unregistered paths that appeared as `tree` changes — possibly the new half
    *  of a folder move (path → seenAt). Pruned by age; verified at drain time. */
   private folderCandidates = new Map<string, number>();
+  /** {@link drainFolderMoves} is deciding: `goneFolders` was already taken. */
+  private pairingFolders = false;
   /**
    * The vault root folder is gone while the app is open (#221): renamed, moved
    * or unmounted. Latched until the vault is reopened (teardown clears it);
@@ -1463,6 +1490,38 @@ export class SyncManager implements InboundHost {
     this.onActivityChanged = cb;
   }
 
+  /** UI hook for the "Sync paused" notice (#252). Fires with the current
+   *  state at once, so a late subscriber is never stale. */
+  setSyncPauseListener(cb: ((pause: SyncPause | null) => void) | undefined): void {
+    this.onSyncPause = cb;
+    cb?.(this.syncPause.current());
+  }
+
+  /** The current shrink-brake pause on our writes in this vault, if any. */
+  syncPauseState(): SyncPause | null {
+    return this.syncPause.current();
+  }
+
+  /**
+   * The pause lifted: queue every note a batch push left `shrink-held` so its
+   * ops go up now, through the ordinary per-note drain — like {@link retryDoc}
+   * without the "user asked" note. Nothing local is touched: these docs were
+   * never pushed, so the drain pulls the server state first and merges.
+   */
+  private requeueShrinkHeld(scope: VaultScope): void {
+    let queued = 0;
+    for (const [docId, failure] of [...this.bulkFailures]) {
+      if (failure.kind !== "shrink-held") continue;
+      const relPath = this.registry.pathForDocId(docId) ?? failure.relPath;
+      this.bulkFailures.delete(docId);
+      this.invalidatedFailures.add(docId);
+      this.divergedDocs.add(docId);
+      this.localChanges.set(docId, relPath);
+      queued++;
+    }
+    if (queued > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+  }
+
   /** The server said Trash / shrink listings may have moved: an `activity`
    *  frame, or a structural `registry` frame (every soft delete is one). */
   private notifyActivityChanged(scope: VaultScope): void {
@@ -2063,7 +2122,13 @@ export class SyncManager implements InboundHost {
       // 0b. Folder moves (#221), BEFORE anything per-note: a registered folder
       //     that vanished paired with an unregistered one that appeared.
       if (goneFolders.length > 0 && folderCandidates.length > 0) {
-        const out = await this.drainFolderMoves(goneFolders, folderCandidates, scope);
+        this.pairingFolders = true;
+        let out: Awaited<ReturnType<SyncManager["drainFolderMoves"]>>;
+        try {
+          out = await this.drainFolderMoves(goneFolders, folderCandidates, scope);
+        } finally {
+          this.pairingFolders = false;
+        }
         if (!scope.isCurrent() || this.rootMissing) return;
         pending = pending.filter((p) => !out.movedFrom.some((f) => isUnder(p.relPath, f)));
         candidates = candidates.filter((c) => !out.movedTo.some((t) => isUnder(c, t)));
@@ -2511,12 +2576,17 @@ export class SyncManager implements InboundHost {
    *
    * The rule, per topmost gone folder G (a nested gone folder travels with its
    * parent) against each topmost appeared folder C:
-   *  - N = the mapped notes under G. With N = 0 there is no evidence, and G is
-   *    left to the pull exactly as before.
+   *  - N = the mapped notes under G, plus the registered tree binaries under it
+   *    whose bytes this device last agreed with the server on (`fileBases`,
+   *    #266). With N = 0 there is no evidence, and G is left to the pull
+   *    exactly as before.
    *  - a note PAIRS when `C/<its sub-path under G>` is a note on disk whose
    *    text hashes (sha256, the same `sha256Hex` the per-note `matchRename`
-   *    compares) equal to the doc's current text.
-   *  - pairs >= {@link FOLDER_MOVE_MIN_RATIO} x N => G moved to C: one
+   *    compares) equal to the doc's current text; a binary pairs when the file
+   *    at its sub-path hashes to that agreed base. A binary with no base is no
+   *    evidence either way and counts on neither side.
+   *  - pairs >= {@link FOLDER_MOVE_MIN_RATIO} x N — or, as before, the notes
+   *    alone reach the ratio of the notes — => G moved to C: one
    *    `registry.renamePath(G, C)` (`PATCH /folders/:id`, which keeps every doc
    *    id under it, exactly like a sidebar drag), then every mapped note that
    *    has a file at its sub-path is re-indexed under its KEPT doc id — the
@@ -2580,6 +2650,26 @@ export class SyncManager implements InboundHost {
     if (gone.length === 0 || cands.length === 0) return out;
 
     const mapped = this.registry.mappedNotes();
+    // Binaries with an agreed base only: that sha is the proof this device had
+    // these very bytes, the same proof the mirror's offline rename asks for.
+    const mappedFiles = (this.registry.mappedFiles?.() ?? []).flatMap((f) => {
+      const base = this.registry.getFileBase?.(f.fileId) ?? null;
+      return base ? [{ ...f, base }] : [];
+    });
+    /** Local binary sha by path, read once and only when a gone folder holds
+     *  binaries; `null` = the disk could not be listed (no binary evidence). */
+    let binaryShas: Map<string, string> | null | undefined;
+    const localBinaryShas = async (): Promise<Map<string, string> | null> => {
+      if (binaryShas !== undefined) return binaryShas;
+      try {
+        const list = await ipc.listBinaries(scope.vaultEpoch);
+        binaryShas = new Map(list.map((b) => [b.relPath, b.sha256]));
+      } catch (e) {
+        if (!ipc.isVaultMismatch(e)) console.warn("[sync] folder move: couldn't list binaries", e);
+        binaryShas = null;
+      }
+      return binaryShas;
+    };
     const docShas = new Map<string, string | null>();
     const docSha = async (docId: string, relPath: string): Promise<string | null> => {
       if (docShas.has(docId)) return docShas.get(docId) ?? null;
@@ -2602,13 +2692,25 @@ export class SyncManager implements InboundHost {
 
     for (const g of gone) {
       const under = mapped.filter((n) => isUnder(n.relPath, g));
-      if (under.length === 0) continue; // no evidence either way — the pull decides, as before
-      const need = Math.ceil(under.length * FOLDER_MOVE_MIN_RATIO);
-      let best: { to: string; matched: Set<string> } | null = null;
+      const filesUnder = mappedFiles.filter((f) => isUnder(f.relPath, g));
+      // no evidence either way — the pull decides, as before
+      if (under.length === 0 && filesUnder.length === 0) continue;
+      const shas = filesUnder.length > 0 ? await localBinaryShas() : null;
+      if (!scope.isCurrent()) return out;
+      const total = under.length + filesUnder.length;
+      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      // The notes-only rule this replaced still qualifies on its own, so adding
+      // binaries to the evidence can only ever turn a fallback into a move.
+      const needNotes = under.length > 0 ? Math.ceil(under.length * FOLDER_MOVE_MIN_RATIO) : Infinity;
+      let best: { to: string; matched: Set<string>; files: number; score: number } | null = null;
       for (const c of cands) {
         if (usedCands.has(c)) continue;
         const present = under.filter((n) => notesOnDisk.has(c + n.relPath.slice(g.length)));
-        if (present.length < need) continue; // cannot reach the ratio: no hashing at all
+        const filesPresent = shas
+          ? filesUnder.filter((f) => shas.has(c + f.relPath.slice(g.length)))
+          : [];
+        // cannot reach the ratio: no hashing at all
+        if (present.length < needNotes && present.length + filesPresent.length < need) continue;
         const matched = new Set<string>();
         for (const n of present) {
           const a = await docSha(n.docId, n.relPath);
@@ -2617,8 +2719,10 @@ export class SyncManager implements InboundHost {
           if (!scope.isCurrent()) return out;
           if (a != null && a === b) matched.add(n.docId);
         }
-        if (matched.size >= need && (!best || matched.size > best.matched.size)) {
-          best = { to: c, matched };
+        const files = filesPresent.filter((f) => shas!.get(c + f.relPath.slice(g.length)) === f.base).length;
+        const score = matched.size + files;
+        if ((matched.size >= needNotes || score >= need) && (!best || score > best.score)) {
+          best = { to: c, matched, files, score };
         }
       }
       if (!best) {
@@ -2632,6 +2736,9 @@ export class SyncManager implements InboundHost {
         continue;
       }
       usedCands.add(best.to);
+      console.info(
+        `[sync] ${g} → ${best.to}: ${best.files}/${filesUnder.length} binaries matched their agreed bytes`,
+      );
       if (await this.applyFolderMove(g, best.to, under, best.matched, notesOnDisk, scope)) {
         out.movedFrom.push(g);
         out.movedTo.push(best.to);
@@ -4453,6 +4560,9 @@ export class SyncManager implements InboundHost {
         this.divergedDocs.delete(docId); // a confirmed push carries any merged ops
         this.serverEmpty.delete(docId);
         this.serverBehind.delete(docId);
+        // The server took a content write from us: a pause only a batch
+        // refusal announced is over.
+        this.syncPause.writeAccepted();
       },
       markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
       // Never touch the open note: its editor session owns that doc's provider.
@@ -4596,6 +4706,9 @@ export class SyncManager implements InboundHost {
 
   /** One note the bulk engine could not get through. */
   private recordBulkFailure(f: UploadFailure): void {
+    // Held by the shrink burst brake (#252): say "Sync paused" once rather
+    // than letting the note read as a mystery failure.
+    if (f.kind === "shrink-held") this.syncPause.batchHeld();
     this.invalidatedFailures.delete(f.docId);
     this.bulkFailures.set(f.docId, f);
     if (f.permanent) this.permanentFailures.set(f.docId, f);
@@ -5092,6 +5205,8 @@ export class SyncManager implements InboundHost {
     }
     this.vaultStatus = "idle";
     this.onVaultStatus?.("idle");
+    // A pause is about our writes in the vault we are leaving.
+    this.syncPause.reset();
     // The timeline describes the vault we are leaving; keeping it would explain
     // the next vault's state with the previous one's history. The SyncLog object
     // itself survives, so a subscriber's unsubscribe stays valid (see the field).
@@ -5583,6 +5698,10 @@ export class SyncManager implements InboundHost {
       },
       // A new release exists (#269): run the normal update check soon.
       onVersionAvailable: (version) => hintUpdateAvailable(version),
+      // The shrink burst brake paused or resumed OUR writes here (#252).
+      onBrake: (state) => {
+        if (scope.isCurrent()) this.syncPause.channel(state);
+      },
       // The server fully covers these hello vectors: record them as acks.
       onServerCovered: (acks) => {
         if (!scope.isCurrent()) return;
@@ -5890,7 +6009,14 @@ export class SyncManager implements InboundHost {
       // A rename the delete queue could not settle (the server was unreachable
       // when its window closed) must not be registered as a new file meanwhile:
       // that is precisely how one file ends up with two `files` rows.
-      isRenamePending: () => this.binaryDeletes?.hasUnsettled() ?? false,
+      // A folder moved outside the app is the same hazard for every binary in
+      // it (#266): until the drain has paired it as ONE folder move, the files
+      // at the new path are not new files, and minting rows for them (or moving
+      // them one by one) is what re-created them under new ids.
+      isRenamePending: () =>
+        (this.binaryDeletes?.hasUnsettled() ?? false) ||
+        this.goneFolders.size > 0 ||
+        this.pairingFolders,
       // Extracted text: Rust already pulled the words out for local search, so
       // the server gets a copy as ranking fuel rather than re-parsing the file.
       fileText: (relPath) => ipc.getFileText(relPath),

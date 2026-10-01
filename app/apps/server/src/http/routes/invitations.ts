@@ -11,6 +11,8 @@ import {
   listPendingInvitationsFor,
   loadInvitation,
 } from "../../registry/invitations.js";
+import { InvitationListingError, listInvitationExpiries } from "../../invitations/expiries.js";
+import { redactAddresses } from "../../invitations/sweep.js";
 
 /**
  * Invitation read endpoints the desktop uses around Better Auth's own
@@ -36,6 +38,12 @@ import {
  *    runs after the row is created and swallows send errors, so the admin would
  *    see "Invitation emailed" for mail that never left. The desktop calls this
  *    right after invite-member and falls back to the copyable link on failure.
+ *
+ *  - GET /api/vaults/:vaultId/invitation-expiries (member) — the Activity
+ *    feed's "invitation expired unaccepted" notices (#268), recorded once by
+ *    the sweep (`invitations/sweep.ts`). Owners/admins see the vault's, anyone
+ *    else only the ones they sent. Resend is the desktop's ordinary
+ *    invite-member + send pair, which supersedes the notice.
  */
 export const invitationRoutes = new Hono();
 
@@ -81,13 +89,26 @@ invitationRoutes.post("/invitations/:id/send", async (c) => {
       }),
     );
   } catch (err) {
-    console.error(`[email] invitation ${inv.id} failed:`, err);
+    console.error(`[email] invitation ${inv.id} failed: ${redactAddresses(err)}`);
     return c.json(
       { error: "send_failed", message: `The mail provider refused the message: ${(err as Error).message}` },
       502,
     );
   }
   return c.json({ sent: true });
+});
+
+invitationRoutes.get("/vaults/:vaultId/invitation-expiries", async (c) => {
+  const session = await getSession(c);
+  if (!session) return c.json({ error: "Authentication required" }, 401);
+  const vaultId = c.req.param("vaultId");
+  if (!ID_RE.test(vaultId)) return c.json({ error: "Malformed vault id" }, 400);
+  try {
+    return c.json(await listInvitationExpiries(session.userId, vaultId));
+  } catch (err) {
+    if (err instanceof InvitationListingError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
 });
 
 invitationRoutes.get("/invitations/:id/preview", async (c) => {

@@ -31,6 +31,7 @@ import { createMcpRoutes } from "./routes/mcp.js";
 import { createRepairRoutes } from "./routes/repair.js";
 import { createVersionRoutes } from "./routes/versions.js";
 import { createTrashRoutes } from "./routes/trash.js";
+import { createShrinkBrakeRoutes } from "./routes/shrink-brake.js";
 import { createBillingRoutes } from "./routes/billing.js";
 import { PolarBillingProvider } from "../billing/polar.js";
 import type { BillingProvider } from "../billing/provider.js";
@@ -279,6 +280,7 @@ export function createApp(deps: AppDeps): Hono {
     }),
   );
   app.route("/api", createTrashRoutes({ onRegistryChanged: deps.onRegistryChanged }));
+  app.route("/api", createShrinkBrakeRoutes());
   app.route("/api", createRepairRoutes({ evictDoc: deps.evictDoc }));
   app.route("/api", createShareRoutes(deps));
   app.route("/api", publicLinkApiRoutes);

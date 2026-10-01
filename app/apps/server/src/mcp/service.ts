@@ -2,7 +2,7 @@ import { withNoteQuota, NoteQuotaError } from "../billing/note-quota.js";
 import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole, resolveResource } from "../permissions/lookup.js";
-import { effectivePermission, type Permission } from "../permissions/resolver.js";
+import { createResolverCache, effectivePermission, type Permission } from "../permissions/resolver.js";
 import { listReadableDocsInVault, vaultAccess } from "../permissions/vault-docs.js";
 import {
   canEditFolder,
@@ -306,7 +306,7 @@ export async function createFolder(
   // the right shape for a tool an LLM retries.
   const existing = await pool.query<{ id: string; name: string; path: string }>(
     `SELECT id, name, path FROM folders
-      WHERE vault_id = $1 AND lower(path) = lower($2)
+      WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2)
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [input.vaultId, storedPath],
   );
@@ -336,7 +336,7 @@ export async function createFolder(
     if ((err as { code?: string }).code === "23505") {
       const winner = await pool.query<{ id: string; name: string; path: string }>(
         `SELECT id, name, path FROM folders
-          WHERE vault_id = $1 AND lower(path) = lower($2)
+          WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2)
           ORDER BY created_at ASC, id ASC LIMIT 1`,
         [input.vaultId, storedPath],
       );
@@ -528,8 +528,13 @@ export async function listNotes(
     permission: Permission;
     updatedAt: string;
   }> = [];
+  // One request-scoped cache, prefetched for the whole listing: the same
+  // per-doc resolver, answered from three batch reads instead of ~8 queries
+  // per note (#263). See `permissions/resolver.ts ResolverCache`.
+  const resolverCache = createResolverCache();
+  await resolverCache.prefetch(pool, rows.map((r) => r.id));
   for (const r of rows) {
-    const permission = await effectivePermission(ctx.auth.userId, r.id);
+    const permission = await effectivePermission(ctx.auth.userId, r.id, pool, resolverCache);
     if (permission === "none") continue; // members only see what's shared with them
     out.push({
       docId: r.id,
@@ -625,7 +630,7 @@ export async function createNote(
     rel_path: string;
   }>(
     `SELECT id, title, folder_id, rel_path FROM notes
-      WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL
+      WHERE vault_id = $1 AND vault_path_key(rel_path) = vault_path_key($2) AND deleted_at IS NULL
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [input.vaultId, storedRelPath],
   );

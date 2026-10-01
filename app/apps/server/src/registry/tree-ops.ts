@@ -33,7 +33,8 @@ export function dirname(path: string): string {
 }
 
 /**
- * Do two vault-relative paths name the same item? Compared **case-insensitively**,
+ * Do two vault-relative paths name the same item? Compared **case-insensitively**
+ * and **Unicode-normalized** (see {@link pathKey}),
  * because most of our clients cannot tell them apart.
  *
  * macOS (APFS default) and Windows are case-INSENSITIVE, so `Projects/Community`
@@ -52,11 +53,22 @@ export function dirname(path: string): string {
  * costs a case-sensitive Linux vault the ability to keep `a.md` and `A.md` apart
  * and buys every other vault immunity from the fork.
  *
- * `toLowerCase()`, not `localeCompare`: it must agree exactly with the
- * `lower()`-based unique indexes in migration 023 for the backstop to hold.
+ * Unicode-normalized too (#259): macOS hands out names DECOMPOSED (NFD, `e` +
+ * U+0301) where Windows and Linux keep them COMPOSED (NFC, U+00E9). APFS opens
+ * both spellings as one file; byte-compared they are two paths, so a Windows
+ * client and a Mac client could register the same `Café.md` twice.
+ *
+ * `toLowerCase()`, not `localeCompare`: it must agree with the SQL key
+ * `vault_path_key()` (migration 043: `normalize(lower(p), NFC)`) behind the
+ * unique indexes for the backstop to hold. Same key as the desktop's
+ * `lib/pathIdentity.ts pathKey`. A KEY only — paths are stored exactly as sent.
  */
+export function pathKey(path: string): string {
+  return path.normalize("NFC").toLowerCase();
+}
+
 export function samePath(a: string, b: string): boolean {
-  return a.toLowerCase() === b.toLowerCase();
+  return a === b || pathKey(a) === pathKey(b);
 }
 
 /**
@@ -92,7 +104,7 @@ export async function findFolderByPath(
 ): Promise<FolderRow | null> {
   const { rows } = await db.query<FolderRow>(
     `SELECT id, vault_id, path, parent_id FROM folders
-      WHERE vault_id = $1 AND lower(path) = lower($2)
+      WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2)
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [vaultId, path],
   );
@@ -407,7 +419,7 @@ export async function moveFolder(
   // than as a bare 23505 from `folders_vault_path_ci_uq` (migration 023).
   if (!samePath(newPath, oldPath)) {
     const clash = await db.query(
-      "SELECT 1 FROM folders WHERE vault_id = $1 AND lower(path) = lower($2) AND id <> $3 LIMIT 1",
+      "SELECT 1 FROM folders WHERE vault_id = $1 AND vault_path_key(path) = vault_path_key($2) AND id <> $3 LIMIT 1",
       [folder.vault_id, newPath, folderId],
     );
     if ((clash.rowCount ?? 0) > 0) {
@@ -504,7 +516,7 @@ export async function moveNote(
     // indexes (`notes_live_path_uq` m021, `notes_live_path_ci_uq` m023) throw a
     // bare 23505.
     const clash = await db.query(
-      "SELECT 1 FROM notes WHERE vault_id = $1 AND lower(rel_path) = lower($2) AND deleted_at IS NULL AND id <> $3 LIMIT 1",
+      "SELECT 1 FROM notes WHERE vault_id = $1 AND vault_path_key(rel_path) = vault_path_key($2) AND deleted_at IS NULL AND id <> $3 LIMIT 1",
       [note.vault_id, relPath, docId],
     );
     if ((clash.rowCount ?? 0) > 0) throw new TreeOpError("A note already exists at that path");
